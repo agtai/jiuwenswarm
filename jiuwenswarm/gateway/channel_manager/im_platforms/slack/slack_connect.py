@@ -33,6 +33,12 @@ except ImportError:
 
 
 _LEADING_MENTION_RE = re.compile(r"^\s*<@[A-Z0-9]+>\s*", re.IGNORECASE)
+_HTTP_URL_RE = re.compile(r"https?://[^\s<>()|]+", re.IGNORECASE)
+_AUTO_LINK_DEFAULT_ANALYSIS_PROMPT = (
+    "Verify the evidence and analyze the main claims, methods, limitations, "
+    "reproducibility, conclusions, and confidence. Respond in English."
+)
+_DEFAULT_ACKNOWLEDGEMENT_TEXT = "Received. Analyzing…"
 _MAX_SLACK_TEXT_LENGTH = 4000
 _MAX_SEEN_EVENTS = 1024
 
@@ -46,8 +52,11 @@ class SlackChannelConfig:
     app_token: str = ""
     allow_from: list[str] = field(default_factory=list)
     allowed_channel_ids: list[str] = field(default_factory=list)
+    auto_link_channel_ids: list[str] = field(default_factory=list)
     default_channel_id: str = ""
     reply_in_thread: bool = True
+    acknowledge_requests: bool = False
+    acknowledgement_text: str = _DEFAULT_ACKNOWLEDGEMENT_TEXT
 
 
 class SlackChannel(BaseChannel):
@@ -154,14 +163,31 @@ class SlackChannel(BaseChannel):
     async def _handle_app_mention(
         self, event: dict[str, Any], body: dict[str, Any]
     ) -> None:
-        await self._handle_slack_event(event, body, is_dm=False)
+        await self._handle_slack_event(event, body, is_dm=False, trigger="mention")
 
     async def _handle_message_event(
         self, event: dict[str, Any], body: dict[str, Any]
     ) -> None:
-        if str(event.get("channel_type") or "") != "im":
+        if str(event.get("channel_type") or "") == "im":
+            await self._handle_slack_event(event, body, is_dm=True, trigger="dm")
             return
-        await self._handle_slack_event(event, body, is_dm=True)
+
+        channel_id = str(event.get("channel") or "").strip()
+        text = str(event.get("text") or "").strip()
+        if channel_id not in self.config.auto_link_channel_ids:
+            return
+        if not _HTTP_URL_RE.search(text):
+            return
+        # A leading bot mention is handled by app_mention. Ignoring it here
+        # avoids dispatching the same Slack message through two event types.
+        if _LEADING_MENTION_RE.match(text):
+            return
+        await self._handle_slack_event(
+            event,
+            body,
+            is_dm=False,
+            trigger="auto_link",
+        )
 
     async def _handle_slack_event(
         self,
@@ -169,6 +195,7 @@ class SlackChannel(BaseChannel):
         body: dict[str, Any],
         *,
         is_dm: bool,
+        trigger: str,
     ) -> None:
         if not self._running:
             return
@@ -181,21 +208,9 @@ class SlackChannel(BaseChannel):
         channel_id = str(event.get("channel") or "").strip()
         if not user_id or not channel_id or not self.is_allowed(user_id):
             return
-        if not is_dm and self.config.allowed_channel_ids:
+        if not is_dm and trigger != "auto_link" and self.config.allowed_channel_ids:
             if channel_id not in self.config.allowed_channel_ids:
                 return
-
-        event_id = str(
-            body.get("event_id") or event.get("client_msg_id") or event.get("ts") or ""
-        ).strip()
-        if event_id and not self._remember_event(event_id):
-            return
-
-        text = str(event.get("text") or "").strip()
-        if not is_dm:
-            text = _LEADING_MENTION_RE.sub("", text, count=1).strip()
-        if not text:
-            return
 
         team = body.get("team")
         team_id = str(
@@ -204,6 +219,26 @@ class SlackChannel(BaseChannel):
             or event.get("team")
             or ""
         ).strip()
+        event_id = str(
+            body.get("event_id") or event.get("client_msg_id") or event.get("ts") or ""
+        ).strip()
+        message_identity = str(
+            event.get("client_msg_id") or event.get("ts") or event_id
+        ).strip()
+        dedupe_key = ":".join(
+            part for part in (team_id, channel_id, message_identity) if part
+        )
+        if dedupe_key and not self._remember_event(dedupe_key):
+            return
+
+        text = str(event.get("text") or "").strip()
+        if not is_dm:
+            text = _LEADING_MENTION_RE.sub("", text, count=1).strip()
+        if trigger == "auto_link" and _AUTO_LINK_DEFAULT_ANALYSIS_PROMPT not in text:
+            text = f"{text}\n\n{_AUTO_LINK_DEFAULT_ANALYSIS_PROMPT}"
+        if not text:
+            return
+
         message_ts = str(event.get("ts") or "").strip()
         root_thread_ts = str(event.get("thread_ts") or message_ts).strip()
         reply_thread_ts = ""
@@ -217,6 +252,23 @@ class SlackChannel(BaseChannel):
         else:
             session_id = f"slack_{team_id or 'default'}_{channel_id}_{root_thread_ts}"
 
+        await self._acknowledge_request(channel_id, reply_thread_ts)
+
+        metadata = {
+            "user_id": user_id,
+            "slack_event_id": event_id,
+            "slack_team_id": team_id,
+            "slack_channel_id": channel_id,
+            "slack_channel_type": "im"
+            if is_dm
+            else str(event.get("channel_type") or "channel"),
+            "slack_user_id": user_id,
+            "slack_message_ts": message_ts,
+            "slack_thread_ts": reply_thread_ts,
+        }
+        if trigger == "auto_link":
+            metadata["slack_trigger"] = "auto_link"
+
         req = Message(
             id=event_id or f"slack-{int(time.time() * 1000)}",
             type="req",
@@ -229,18 +281,7 @@ class SlackChannel(BaseChannel):
             chat_id=channel_id,
             user_id=user_id,
             req_method=ReqMethod.CHAT_SEND,
-            metadata={
-                "user_id": user_id,
-                "slack_event_id": event_id,
-                "slack_team_id": team_id,
-                "slack_channel_id": channel_id,
-                "slack_channel_type": "im"
-                if is_dm
-                else str(event.get("channel_type") or "channel"),
-                "slack_user_id": user_id,
-                "slack_message_ts": message_ts,
-                "slack_thread_ts": reply_thread_ts,
-            },
+            metadata=metadata,
         )
 
         if self._on_message_cb is not None:
@@ -249,6 +290,22 @@ class SlackChannel(BaseChannel):
                 await result
         else:
             await self.bus.route_user_message(req)
+
+    async def _acknowledge_request(self, channel_id: str, thread_ts: str) -> None:
+        if not self.config.acknowledge_requests or self._client is None:
+            return
+
+        text = self.config.acknowledgement_text.strip()
+        if not text:
+            return
+
+        kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        try:
+            await self._client.chat_postMessage(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Slack acknowledgement failed: %s", exc)
 
     def _remember_event(self, event_id: str) -> bool:
         if event_id in self._seen_event_ids:
@@ -325,6 +382,7 @@ class SlackChannel(BaseChannel):
             extra={
                 "default_channel_id": self.config.default_channel_id,
                 "allowed_channel_ids": list(self.config.allowed_channel_ids),
+                "auto_link_channel_ids": list(self.config.auto_link_channel_ids),
                 "reply_in_thread": self.config.reply_in_thread,
             },
         )

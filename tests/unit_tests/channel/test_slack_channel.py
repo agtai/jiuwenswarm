@@ -118,6 +118,98 @@ async def test_direct_message_is_not_restricted_by_channel_allowlist() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_link_channel_processes_links_without_a_mention() -> None:
+    channel = SlackChannel(
+        SlackChannelConfig(
+            enabled=True,
+            allow_from=["U1"],
+            allowed_channel_ids=["C-MENTIONS"],
+            auto_link_channel_ids=["C-RESEARCH"],
+            reply_in_thread=True,
+        ),
+        RobotMessageRouter(),
+    )
+    channel._running = True
+    received: list[Message] = []
+    channel.on_message(received.append)
+
+    await channel._handle_message_event(
+        {
+            "type": "message",
+            "channel_type": "channel",
+            "channel": "C-RESEARCH",
+            "user": "U1",
+            "text": "plain text is ignored",
+            "ts": "1710000002.000100",
+        },
+        {"event_id": "EvAutoPlain", "team_id": "T1"},
+    )
+    await channel._handle_message_event(
+        {
+            "type": "message",
+            "channel_type": "channel",
+            "channel": "C-OTHER",
+            "user": "U1",
+            "text": "https://example.com/ignored",
+            "ts": "1710000002.000200",
+        },
+        {"event_id": "EvAutoOther", "team_id": "T1"},
+    )
+    await channel._handle_message_event(
+        {
+            "type": "message",
+            "channel_type": "channel",
+            "channel": "C-RESEARCH",
+            "user": "U1",
+            "text": "Please analyze <https://arxiv.org/abs/2401.00001|this paper>",
+            "ts": "1710000002.000300",
+        },
+        {"event_id": "EvAutoLink", "team_id": "T1"},
+    )
+
+    assert len(received) == 1
+    message = received[0]
+    assert message.params["content"] == (
+        "Please analyze <https://arxiv.org/abs/2401.00001|this paper>\n\n"
+        "Verify the evidence and analyze the main claims, methods, limitations, "
+        "reproducibility, conclusions, and confidence. Respond in English."
+    )
+    assert message.params["query"] == message.params["content"]
+    assert message.session_id == "slack_T1_C-RESEARCH_1710000002.000300"
+    assert message.metadata["slack_trigger"] == "auto_link"
+    assert message.metadata["slack_thread_ts"] == "1710000002.000300"
+
+
+@pytest.mark.asyncio
+async def test_auto_link_channel_ignores_leading_bot_mentions() -> None:
+    channel = SlackChannel(
+        SlackChannelConfig(
+            enabled=True,
+            auto_link_channel_ids=["C-RESEARCH"],
+        ),
+        RobotMessageRouter(),
+    )
+    channel._running = True
+    received: list[Message] = []
+    channel.on_message(received.append)
+
+    event = {
+        "type": "message",
+        "channel_type": "channel",
+        "channel": "C-RESEARCH",
+        "user": "U1",
+        "text": "<@B1> analyze https://example.com/paper",
+        "ts": "1710000002.000400",
+    }
+    await channel._handle_message_event(
+        event,
+        {"event_id": "EvAutoMention", "team_id": "T1"},
+    )
+
+    assert received == []
+
+
+@pytest.mark.asyncio
 async def test_event_filters_reject_bots_subtypes_users_and_channels() -> None:
     channel = SlackChannel(
         SlackChannelConfig(
@@ -163,6 +255,81 @@ class _FakeSlackClient:
 
     async def chat_postMessage(self, **kwargs: Any) -> None:
         self.calls.append(kwargs)
+
+
+@pytest.mark.asyncio
+async def test_acknowledgement_is_sent_once_before_agent_processing() -> None:
+    channel = SlackChannel(
+        SlackChannelConfig(
+            enabled=True,
+            allow_from=["U1"],
+            allowed_channel_ids=["C1"],
+            reply_in_thread=True,
+            acknowledge_requests=True,
+            acknowledgement_text="Received. Analyzing…",
+        ),
+        RobotMessageRouter(),
+    )
+    client = _FakeSlackClient()
+    channel._running = True
+    channel._client = client
+    calls_seen_by_agent: list[list[dict[str, Any]]] = []
+    channel.on_message(lambda _: calls_seen_by_agent.append(list(client.calls)))
+
+    event = {
+        "type": "app_mention",
+        "user": "U1",
+        "channel": "C1",
+        "channel_type": "channel",
+        "text": "<@B1> analyze this",
+        "ts": "1710000002.000500",
+    }
+    body = {"event_id": "EvAck", "team_id": "T1"}
+
+    await channel._handle_app_mention(event, body)
+    await channel._handle_app_mention(event, body)
+
+    expected_call = {
+        "channel": "C1",
+        "text": "Received. Analyzing…",
+        "thread_ts": "1710000002.000500",
+    }
+    assert client.calls == [expected_call]
+    assert calls_seen_by_agent == [[expected_call]]
+
+
+@pytest.mark.asyncio
+async def test_acknowledgement_failure_does_not_block_agent_processing() -> None:
+    class FailingSlackClient:
+        async def chat_postMessage(self, **kwargs: Any) -> None:
+            raise RuntimeError("Slack unavailable")
+
+    channel = SlackChannel(
+        SlackChannelConfig(
+            enabled=True,
+            allow_from=["U1"],
+            acknowledge_requests=True,
+        ),
+        RobotMessageRouter(),
+    )
+    channel._running = True
+    channel._client = FailingSlackClient()
+    received: list[Message] = []
+    channel.on_message(received.append)
+
+    await channel._handle_message_event(
+        {
+            "type": "message",
+            "channel_type": "im",
+            "channel": "D1",
+            "user": "U1",
+            "text": "analyze this",
+            "ts": "1710000002.000600",
+        },
+        {"event_id": "EvAckFailure", "team_id": "T1"},
+    )
+
+    assert len(received) == 1
 
 
 @pytest.mark.asyncio
