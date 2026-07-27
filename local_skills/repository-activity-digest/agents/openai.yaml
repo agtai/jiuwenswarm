@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repository Activity Digest"
+  short_description: "Build evidence-linked GitHub project intelligence"
+  default_prompt: "Use $repository-activity-digest to produce a 24-hour, 7-day, and 30-day technical intelligence report for this repository."
