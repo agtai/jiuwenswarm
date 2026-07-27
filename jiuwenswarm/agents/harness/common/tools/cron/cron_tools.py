@@ -356,6 +356,7 @@ class CronTools:
             timezone=str(normalized.get("timezone") or "Asia/Shanghai").strip() or "Asia/Shanghai",
             description=str(normalized.get("description") or ""),
             targets=targets_str,
+            post_as_root=bool(normalized.get("post_as_root", False)),
             enabled=bool(normalized.get("enabled", True)),
             wake_offset_seconds=normalized.get("wake_offset_seconds"),
             delete_after_run=normalized.get("delete_after_run"),
@@ -512,6 +513,8 @@ class CronTools:
             params["project_id"] = str(kwargs.get("project_id") or "").strip()
         if "work_mode" in kwargs and kwargs.get("work_mode") is not None:
             params["work_mode"] = str(kwargs.get("work_mode") or "").strip()
+        if "post_as_root" in kwargs:
+            params["post_as_root"] = bool(kwargs.get("post_as_root"))
         return await self.create_job(params)
 
     async def _update_job_tool(self, job_id: str, patch: dict[str, Any]) -> Any:
@@ -557,6 +560,13 @@ class CronTools:
                         "timezone": {"type": "string"},
                         "description": {"type": "string"},
                         "targets": {"type": "string"},
+                        "post_as_root": {
+                            "type": "boolean",
+                            "description": (
+                                "Post each scheduled result as a new top-level "
+                                "channel message instead of in the source thread."
+                            ),
+                        },
                         "enabled": {"type": "boolean"},
                         "wake_offset_seconds": {"type": "integer"},
                         "mode": {
@@ -603,7 +613,7 @@ class CronTools:
                 description=(
                     "Update an existing cron job. Pass job_id and a patch dict with fields to update "
                     "(name, enabled, cron_expr, timezone, description, wake_offset_seconds, "
-                    "targets, mode, model_name, project_dir, project_id)."
+                    "targets, post_as_root, mode, model_name, project_dir, project_id)."
                 ),
                 input_params={
                     "type": "object",
@@ -632,6 +642,13 @@ class CronTools:
                                     "enum": [e.value for e in CronTargetChannel],
                                     "description": (
                                         "推送频道：web/tui/feishu/dingtalk/whatsapp/wecom/xiaoyi/wechat"
+                                    ),
+                                },
+                                "post_as_root": {
+                                    "type": "boolean",
+                                    "description": (
+                                        "Post scheduled results as new top-level "
+                                        "channel messages instead of in the source thread."
                                     ),
                                 },
                                 "mode": {

@@ -235,7 +235,7 @@ class FakeMessageHandler:
         self.cancel_calls.append((msg, old_sid, kwargs))
 
 
-async def _create_one_job(store, name="job", targets="tui"):
+async def _create_one_job(store, name="job", targets="tui", **kwargs):
     """Convenience: create a single cron job via the store."""
     return await store.create_job(
         name=name,
@@ -243,6 +243,7 @@ async def _create_one_job(store, name="job", targets="tui"):
         timezone="Asia/Shanghai",
         description="reminder",
         targets=targets,
+        **kwargs,
     )
 
 
@@ -577,6 +578,48 @@ class TestHandleEventStoreValidation:
         assert msg.channel_id == "slack"
         assert msg.session_id is None
         assert _cron_published_content(msg) == "repository digest"
+
+    @pytest.mark.asyncio
+    async def test_slack_post_as_root_is_forwarded_in_metadata(self, tmp_path):
+        store = CronJobStore(path=tmp_path / "cron_jobs.json")
+        job = await _create_one_job(
+            store,
+            targets="slack",
+            post_as_root=True,
+            session_id="slack_T1_C1_1710000005.000600",
+        )
+
+        handler = FakeMessageHandler()
+        svc = _make_scheduler(store, handler)
+        await svc.reload()
+
+        run_id = f"{job.id}:1234"
+        svc.runs[run_id] = CronRunState(
+            run_id=run_id,
+            job_id=job.id,
+            wake_at_iso="2026-06-09T08:55:00+08:00",
+            push_at_iso="2026-06-09T09:00:00+08:00",
+            job_name=job.name,
+            targets=job.targets,
+            session_id=job.session_id,
+            chat_type=None,
+            timezone=job.timezone,
+            result_text="repository digest",
+        )
+
+        await svc.handle_event(
+            _Event(
+                at_ts=time.time(),
+                seq=1,
+                kind="push_update",
+                job_id=job.id,
+                run_id=run_id,
+            )
+        )
+
+        msg = handler.published[0]
+        assert msg.session_id == "slack_T1_C1_1710000005.000600"
+        assert msg.metadata["post_as_root"] is True
 
     @pytest.mark.asyncio
     async def test_wake_executes_normally_when_job_present(self, tmp_path):

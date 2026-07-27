@@ -233,6 +233,7 @@ class CronJobStore:
         timezone: str,
         description: str,
         targets: str,
+        post_as_root: bool = False,
         enabled: bool = True,
         wake_offset_seconds: int | None = None,
         session_id: str | None = None,
@@ -270,6 +271,7 @@ class CronJobStore:
             wake_offset_seconds=int(wake_offset_seconds) if wake_offset_seconds is not None else 0,
             description=str(description or ""),
             targets=str(targets or "").strip(),
+            post_as_root=bool(post_as_root),
             session_id=sid,
             created_at=now,
             updated_at=now,
@@ -335,6 +337,8 @@ class CronJobStore:
             updated = replace(updated, description=str(patch.get("description") or ""))
         if "targets" in patch:
             updated = replace(updated, targets=str(patch.get("targets") or "").strip())
+        if "post_as_root" in patch:
+            updated = replace(updated, post_as_root=bool(patch.get("post_as_root")))
         if "session_id" in patch:
             raw_sid = patch.get("session_id")
             new_sid = str(raw_sid).strip() if isinstance(raw_sid, str) and str(raw_sid).strip() else None

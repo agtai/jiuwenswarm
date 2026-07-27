@@ -486,6 +486,30 @@ async def test_send_falls_back_to_metadata_session_and_default_channel() -> None
 
 
 @pytest.mark.asyncio
+async def test_send_post_as_root_ignores_inherited_thread() -> None:
+    channel = SlackChannel(
+        SlackChannelConfig(enabled=True),
+        RobotMessageRouter(),
+    )
+    client = _FakeSlackClient()
+    channel._client = client
+    target = RoutingTarget(
+        intent="godview",
+        delivery=SlackDeliveryTarget(
+            target_channel_id="C1",
+            thread_ts="1710000005.000600",
+        ),
+    )
+
+    await channel.send(
+        _message(metadata={"post_as_root": True}),
+        routing_target=target,
+    )
+
+    assert client.calls == [{"channel": "C1", "text": "response"}]
+
+
+@pytest.mark.asyncio
 async def test_start_and_stop_socket_mode_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

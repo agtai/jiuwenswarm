@@ -371,17 +371,19 @@ class SlackChannel(BaseChannel):
         msg: Message,
         routing_target: RoutingTarget | None,
     ) -> tuple[str, str]:
+        metadata = msg.metadata or {}
+        post_as_root = bool(metadata.get("post_as_root"))
         delivery = routing_target.delivery if routing_target is not None else None
         if isinstance(delivery, SlackDeliveryTarget):
             channel_id = str(delivery.target_channel_id or "").strip()
             if channel_id:
-                return channel_id, str(delivery.thread_ts or "").strip()
+                thread_ts = "" if post_as_root else str(delivery.thread_ts or "").strip()
+                return channel_id, thread_ts
 
-        metadata = msg.metadata or {}
         channel_id = str(metadata.get("slack_channel_id") or "").strip()
         thread_ts = str(metadata.get("slack_thread_ts") or "").strip()
         if channel_id:
-            return channel_id, thread_ts
+            return channel_id, "" if post_as_root else thread_ts
 
         session_id = str(msg.session_id or "")
         if session_id.startswith("slack_"):
@@ -391,7 +393,7 @@ class SlackChannel(BaseChannel):
                 session_target = parts[3].strip()
                 if channel_id:
                     parsed_thread = session_target if "." in session_target else ""
-                    return channel_id, parsed_thread
+                    return channel_id, "" if post_as_root else parsed_thread
 
         return self.config.default_channel_id.strip(), ""
 

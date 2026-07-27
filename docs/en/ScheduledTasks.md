@@ -292,6 +292,8 @@ Currently supported channels:
 - `wecom` - WeCom (Enterprise WeChat)
 - `whatsapp` - WhatsApp
 - `telegram` - Telegram
+- `slack` - Slack; set `post_as_root: true` to publish recurring results as
+  new top-level channel messages instead of inheriting the source thread
 
 ---
 

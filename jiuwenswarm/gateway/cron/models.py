@@ -249,6 +249,9 @@ class CronJob:
     # Target channel ID to push results to (e.g. "web").
     # JSON 字段名仍然叫 targets，用字符串保存频道 ID，兼容旧数据。
     targets: str = ""
+    # Post scheduled results as a new channel message instead of inheriting
+    # the source conversation thread when the target channel supports threads.
+    post_as_root: bool = False
     # SessionMap 形态（如 feishu::chat_id::bot_id::...），仅 feishu_enterprise 投递用；由 AgentServer 上下文写入。
     session_id: str | None = None
     created_at: float | None = None
@@ -289,6 +292,8 @@ class CronJob:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.post_as_root:
+            d["post_as_root"] = True
         if self.session_id:
             d["session_id"] = self.session_id
         if self.chat_type:
@@ -372,6 +377,8 @@ class CronJob:
 
         targets_str = _normalize_targets_str(targets_str)
 
+        post_as_root = bool(data.get("post_as_root", False))
+
         sid_raw = data.get("session_id", None)
         job_session_id = str(sid_raw).strip() if isinstance(sid_raw, str) and str(sid_raw).strip() else None
 
@@ -425,6 +432,7 @@ class CronJob:
             wake_offset_seconds=wake_offset_seconds,
             description=description,
             targets=targets_str,
+            post_as_root=post_as_root,
             session_id=job_session_id,
             created_at=created_at_f,
             updated_at=updated_at_f,

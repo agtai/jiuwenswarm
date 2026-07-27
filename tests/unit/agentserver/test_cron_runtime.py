@@ -120,6 +120,23 @@ def test_extract_legacy_params_delivery_channel_takes_priority_over_targets() ->
     assert out["targets"] == "web"
 
 
+def test_extract_legacy_params_maps_delivery_post_as_root() -> None:
+    context = SimpleNamespace(
+        channel_id="slack",
+        session_id="slack_T1_C1_1710000000.000100",
+    )
+    payload = {
+        "schedule": {"kind": "cron", "expr": "0 8 * * *"},
+        "payload": {"kind": "agentTurn", "message": "daily report"},
+        "delivery": {"channel": "slack", "post_as_root": True},
+    }
+
+    out = _extract_legacy_params(payload, context=context, require_schedule=True)
+
+    assert out["targets"] == "slack"
+    assert out["post_as_root"] is True
+
+
 def test_extract_legacy_params_context_mode_takes_priority_over_payload() -> None:
     context = SimpleNamespace(
         channel_id="web",

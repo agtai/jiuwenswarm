@@ -379,7 +379,10 @@ channels:
 - Channels in `auto_link_channel_ids` automatically process member messages containing an HTTP/HTTPS link and reply in a thread; plain text is still ignored.
 - Set `auto_link_prompt` to add workflow-specific instructions; when empty, JiuwenSwarm forwards the original link message unchanged.
 - When `acknowledge_requests` is enabled, accepted mentions, direct messages, and automatic links receive an immediate confirmation before agent processing begins.
-- Cron jobs can set `targets` to `slack`; results are delivered to `default_channel_id`.
+- Cron jobs can set `targets` to `slack`. Jobs created from Slack inherit the
+  source channel and thread; set `post_as_root: true` (or
+  `delivery.post_as_root: true` through the unified cron interface) to publish
+  each scheduled result as a new top-level channel message.
 - Channel conversations are isolated by Slack thread, so separate threads do not share a JiuwenSwarm session.
 - The current integration sends final text replies and suppresses token-level `chat.delta` events to avoid channel noise and Slack rate limits.
 
@@ -415,7 +418,11 @@ Slack user IDs and channel IDs are available from the member profile and channel
 **A Slack cron job does not deliver its result**
 
 - Confirm the job's `targets` value is `slack`.
-- Configure `default_channel_id`, add the bot to that channel, and grant `chat:write`.
+- Confirm the bot belongs to the Slack channel captured in the job's
+  `session_id`. `default_channel_id` is only the fallback when no request
+  context is available.
+- To keep recurring reports out of the source thread, update the job with
+  `post_as_root: true`.
 
 ---
 

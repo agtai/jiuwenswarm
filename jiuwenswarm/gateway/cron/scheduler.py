@@ -709,6 +709,7 @@ class CronSchedulerService:
                 cron_expr="",
                 timezone=state.timezone or "Asia/Shanghai",
                 targets=state.targets or "",
+                post_as_root=store_job.post_as_root,
                 session_id=state.session_id,
                 chat_type=state.chat_type,
             )
@@ -1347,6 +1348,8 @@ class CronSchedulerService:
 
         if metadata is None:
             metadata = {}
+        if job.post_as_root:
+            metadata["post_as_root"] = True
         if channel_id == "dingtalk":
             # 若作业创建时绑定了 session_id（一般是 sender_id），补给钉钉单聊路由兜底。
             if routing_sid and not str(metadata.get("dingtalk_sender_id") or "").strip():
