@@ -34,7 +34,10 @@ activity.
 3. If the command fails, report the error and stop. If optional endpoints are
    incomplete, continue but carry every coverage warning into the evidence-gap
    section.
-4. Read [references/report-format.md](references/report-format.md).
+4. Read [references/report-format.md](references/report-format.md). When the
+   destination is Slack, also read
+   [references/slack-report-format.md](references/slack-report-format.md) and
+   follow its Slack-specific format instead of Markdown tables.
 5. Cluster related Issue, PR, Review, Commit, CI, Merge, Close, Reopen, Revert,
    and Release records into one change narrative instead of listing duplicates.
 6. Deep-read the 3-5 highest-impact clusters with available GitHub or web tools:
@@ -64,9 +67,14 @@ activity.
   architecture work so volume does not hide impact.
 - If no new activity matches, still report trend context and coverage briefly.
 - Do not present private roadmaps, user adoption, or offline decisions as known.
+- Return only the final report. Do not narrate tool calls, data collection,
+  intermediate reasoning, or report construction.
 
 ## Scheduled Use
 
 Create a JiuwenSwarm cron job with `targets: slack`. Put the repository, daily
 window, 30-day history, state-file path, audience, and this Skill name in the
-cron description. The Slack instance must configure `default_channel_id`.
+cron description. Preserve the originating Slack delivery channel in the job.
+For recurring channel reports, set `post_as_root: true`; the Slack report marker
+defined in `references/slack-report-format.md` then keeps the brief in the
+channel and places supporting detail in the brief's own thread.

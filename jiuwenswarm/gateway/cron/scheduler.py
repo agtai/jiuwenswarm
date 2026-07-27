@@ -1155,7 +1155,10 @@ class CronSchedulerService:
             return
 
         # Not ready: send placeholder
-        placeholder = f"{job.name} 正在执行中，结果稍后补发（push_at={state.push_at_iso}）"
+        placeholder = (
+            f"{job.name} is running. Results will be posted when ready "
+            f"(scheduled_at={state.push_at_iso})."
+        )
         await self._push_to_targets(job, state, text=placeholder, is_placeholder=True)
         state.placeholder_sent = True
 

@@ -61,6 +61,8 @@ import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
+const CRON_PLACEHOLDER_RE =
+  /正在执行中，结果稍后补发|is running\. Results will be posted when ready/;
 
 function streamDeltaBatchKey(sessionId: string, streamId: string): string {
   return `${sessionId}\u0000${streamId}`;
@@ -2215,7 +2217,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             typeof cronMeta?.run_id === 'string' ? cronMeta.run_id.trim() : '';
           const isCronPlaceholderContent =
             cronMeta?.is_placeholder === true ||
-            /正在执行中，结果稍后补发/.test(content) ||
+            CRON_PLACEHOLDER_RE.test(content) ||
             /^\[cron\].*正在执行中/.test(content);
 
           // 正式结果：替换同 run_id 的占位气泡，或最近的定时任务「正在执行中」占位
@@ -2230,7 +2232,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 const msg = messages[i];
                 if (msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
                 if (
-                  /正在执行中，结果稍后补发/.test(msg.content) ||
+                  CRON_PLACEHOLDER_RE.test(msg.content) ||
                   /^\[cron\].*正在执行中/.test(msg.content)
                 ) {
                   placeholderId = msg.id;

@@ -383,6 +383,11 @@ channels:
   source channel and thread; set `post_as_root: true` (or
   `delivery.post_as_root: true` through the unified cron interface) to publish
   each scheduled result as a new top-level channel message.
+- Long Slack-native reports can place
+  `<!-- jiuwenswarm:slack-thread-details -->` between a short brief and detailed
+  evidence. JiuwenSwarm posts the brief as a top-level message and the detail in
+  that brief's own thread. Without the marker, paragraph-aware splitting keeps
+  links and list items intact where possible.
 - Channel conversations are isolated by Slack thread, so separate threads do not share a JiuwenSwarm session.
 - The current integration sends final text replies and suppresses token-level `chat.delta` events to avoid channel noise and Slack rate limits.
 

@@ -1480,7 +1480,10 @@ class TestCronBroadcastText:
 
     @staticmethod
     def test_keeps_placeholder_unchanged_and_passes_through_cron_prefixed_status():
-        placeholder = "agent-core-commit-review 正在执行中，结果稍后补发（push_at=2026-01-01T09:00:00+08:00）"
+        placeholder = (
+            "agent-core-commit-review is running. Results will be posted when ready "
+            "(scheduled_at=2026-01-01T09:00:00+08:00)."
+        )
         assert _CronSchedulerTeamTestApi.format_cron_broadcast_text(
             job_name="agent-core-commit-review",
             text=placeholder,

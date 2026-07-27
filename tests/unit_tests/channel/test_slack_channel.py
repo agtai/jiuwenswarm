@@ -324,8 +324,9 @@ class _FakeSlackClient:
         self.calls: list[dict[str, Any]] = []
         self.auth_test_calls = 0
 
-    async def chat_postMessage(self, **kwargs: Any) -> None:
+    async def chat_postMessage(self, **kwargs: Any) -> dict[str, str]:
         self.calls.append(kwargs)
+        return {"ts": f"1710000099.{len(self.calls):06d}"}
 
     async def auth_test(self) -> dict[str, str]:
         self.auth_test_calls += 1
@@ -451,6 +452,99 @@ async def test_send_uses_routing_target_chunks_text_and_ignores_delta() -> None:
         "text": "x" * 100,
         "thread_ts": "1710000003.000400",
     }
+
+
+@pytest.mark.asyncio
+async def test_send_splits_slack_report_into_root_summary_and_own_thread() -> None:
+    channel = SlackChannel(SlackChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeSlackClient()
+    channel._client = client
+    content = (
+        "*Daily Intelligence*\n\n"
+        "Three concise findings."
+        "\n<!-- jiuwenswarm:slack-thread-details -->\n"
+        "*Trend Signals*\n"
+        + ("Detailed evidence. " * 300)
+    )
+
+    await channel.send(
+        _message(content=content, metadata={"post_as_root": True}),
+        routing_target=RoutingTarget(
+            intent="godview",
+            delivery=SlackDeliveryTarget(
+                target_channel_id="C-REPORT",
+                thread_ts="1710000003.000400",
+            ),
+        ),
+    )
+
+    assert client.calls[0] == {
+        "channel": "C-REPORT",
+        "text": "*Daily Intelligence*\n\nThree concise findings.",
+    }
+    assert len(client.calls) == 3
+    assert all(
+        call["thread_ts"] == "1710000099.000001" for call in client.calls[1:]
+    )
+    assert all(
+        "jiuwenswarm:slack-thread-details" not in call["text"]
+        for call in client.calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_send_keeps_structured_report_in_existing_thread() -> None:
+    channel = SlackChannel(SlackChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeSlackClient()
+    channel._client = client
+    content = (
+        "Summary\n"
+        "<!-- jiuwenswarm:slack-thread-details -->\n"
+        "Details"
+    )
+
+    await channel.send(
+        _message(content=content),
+        routing_target=RoutingTarget(
+            intent="godview",
+            delivery=SlackDeliveryTarget(
+                target_channel_id="C-REPORT",
+                thread_ts="1710000003.000400",
+            ),
+        ),
+    )
+
+    assert client.calls == [
+        {
+            "channel": "C-REPORT",
+            "text": "Summary\n\nDetails",
+            "thread_ts": "1710000003.000400",
+        }
+    ]
+
+
+def test_split_text_prefers_paragraph_boundaries() -> None:
+    first_paragraph = "a" * 2000
+    second_paragraph = "b" * 1900
+    final_paragraph = "c" * 500
+
+    chunks = SlackChannel._split_text(
+        f"{first_paragraph}\n\n{second_paragraph}\n\n{final_paragraph}"
+    )
+
+    assert chunks == [
+        f"{first_paragraph}\n\n{second_paragraph}",
+        final_paragraph,
+    ]
+
+
+def test_split_text_does_not_break_slack_link_near_limit() -> None:
+    prefix = "x" * 3950
+    slack_link = "<https://github.com/example/repo/issues/123|Issue #123>"
+
+    chunks = SlackChannel._split_text(f"{prefix}\n{slack_link}\nMore detail")
+
+    assert chunks == [prefix, f"{slack_link}\nMore detail"]
 
 
 @pytest.mark.asyncio

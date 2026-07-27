@@ -72,10 +72,13 @@ direct links. Label facts and any inference separately.
 
 ### 3. Trend Signals
 
-Use a compact table:
+For non-Slack destinations, use a compact table:
 
 | Theme | 24-hour change | 7-day trend | 30-day judgment | Evidence | Confidence |
 | --- | --- | --- | --- | --- | --- |
+
+For Slack, use the bullet format in `slack-report-format.md`; Slack does not
+render GitHub Markdown tables.
 
 Name principal participants and unresolved disagreement when relevant.
 
@@ -106,8 +109,12 @@ possibilities. Include confidence and basis for every inference.
 
 ### 7. Opportunities for Our Team
 
+For non-Slack destinations:
+
 | Opportunity | User value | Research value | Engineering effort | Risk | Team fit | Recommendation |
 | --- | --- | --- | --- | --- | --- | --- |
+
+For Slack, use the compact numbered format in `slack-report-format.md`.
 
 Explain whether each is a short contribution, systems project, research
 direction, or something to avoid.
@@ -135,3 +142,4 @@ designs, post-release outcomes, and users who stopped reporting problems.
   CI for significant clusters.
 - Preserve uncertainty when coverage metadata or primary evidence is missing.
 - Avoid a title recap and avoid repeating low-value fields.
+- Return only the final report; omit tool-use and analysis-process narration.

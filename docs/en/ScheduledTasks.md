@@ -355,7 +355,7 @@ All `targets` channels (`web`, `tui`, Feishu, DingTalk, WeCom, etc.) share the s
 |---|---|
 | **Successful completion** | `{agent output}` (no job-name prefix, no `[cron]` prefix) |
 | **Failure / timeout / no valid report** | Status text starting with `[cron]` (e.g. `[cron] job execution failed: …`), not wrapped with a job-name prefix |
-| **In-progress placeholder** | `{job name} 正在执行中，结果稍后补发（push_at=…）` |
+| **In-progress placeholder** | `{job name} is running. Results will be posted when ready (scheduled_at=…).` |
 
 Channel differences are mainly **routing**, not body format:
 

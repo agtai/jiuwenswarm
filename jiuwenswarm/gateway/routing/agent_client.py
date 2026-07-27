@@ -415,12 +415,14 @@ class WebSocketAgentServerClient(AgentServerClient):
                     raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
             except asyncio.TimeoutError as e:
                 logger.warning(
-                    "[WebSocketAgentServerClient] 非流式请求超时: request_id=%s timeout=%ss",
+                    "[WebSocketAgentServerClient] non-streaming request timed out: "
+                    "request_id=%s timeout=%ss",
                     rid,
                     _UNARY_REQUEST_TIMEOUT_SECONDS,
                 )
                 raise RuntimeError(
-                    f"AgentServer 非流式请求超时 (request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
+                    f"AgentServer non-streaming request timed out "
+                    f"(request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
                 ) from e
             resp = parse_agent_server_wire_unary(data)
             return resp

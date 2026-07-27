@@ -36,6 +36,7 @@ _HTTP_URL_RE = re.compile(r"https?://[^\s<>()|]+", re.IGNORECASE)
 _DEFAULT_ACKNOWLEDGEMENT_TEXT = "Received. Analyzing…"
 _MAX_SLACK_TEXT_LENGTH = 4000
 _MAX_SEEN_EVENTS = 1024
+_SLACK_THREAD_DETAILS_MARKER = "<!-- jiuwenswarm:slack-thread-details -->"
 
 
 @dataclass
@@ -149,15 +150,62 @@ class SlackChannel(BaseChannel):
             logger.warning("SlackChannel send skipped: missing target channel id")
             return
 
-        for chunk in self._split_text(content):
-            kwargs: dict[str, Any] = {"channel": channel_id, "text": chunk}
-            if thread_ts:
-                kwargs["thread_ts"] = thread_ts
-            try:
-                await self._client.chat_postMessage(**kwargs)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("SlackChannel send failed: %s", exc)
+        summary, details = self._extract_threaded_report(content)
+        if details and not thread_ts:
+            summary_chunks = self._split_text(summary)
+            if not summary_chunks:
                 return
+            sent, report_thread_ts = await self._post_text(
+                channel_id=channel_id,
+                text=summary_chunks[0],
+                thread_ts="",
+            )
+            if not sent:
+                return
+            detail_chunks = summary_chunks[1:] + self._split_text(details)
+            for chunk in detail_chunks:
+                sent, _ = await self._post_text(
+                    channel_id=channel_id,
+                    text=chunk,
+                    thread_ts=report_thread_ts,
+                )
+                if not sent:
+                    return
+            return
+
+        flattened = summary if not details else f"{summary}\n\n{details}"
+        for chunk in self._split_text(flattened):
+            sent, _ = await self._post_text(
+                channel_id=channel_id,
+                text=chunk,
+                thread_ts=thread_ts,
+            )
+            if not sent:
+                return
+
+    async def _post_text(
+        self,
+        *,
+        channel_id: str,
+        text: str,
+        thread_ts: str,
+    ) -> tuple[bool, str]:
+        kwargs: dict[str, Any] = {"channel": channel_id, "text": text}
+        if thread_ts:
+            kwargs["thread_ts"] = thread_ts
+        try:
+            response = await self._client.chat_postMessage(**kwargs)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SlackChannel send failed: %s", exc)
+            return False, ""
+
+        response_ts = ""
+        if response is not None:
+            try:
+                response_ts = str(response.get("ts") or "").strip()
+            except (AttributeError, TypeError):
+                response_ts = ""
+        return True, response_ts
 
     async def _handle_app_mention(
         self, event: dict[str, Any], body: dict[str, Any]
@@ -421,10 +469,49 @@ class SlackChannel(BaseChannel):
 
     @staticmethod
     def _split_text(content: str) -> list[str]:
-        return [
-            content[slice(index, index + _MAX_SLACK_TEXT_LENGTH)]
-            for index in range(0, len(content), _MAX_SLACK_TEXT_LENGTH)
-        ]
+        remaining = content.strip()
+        chunks: list[str] = []
+        while len(remaining) > _MAX_SLACK_TEXT_LENGTH:
+            split_at = SlackChannel._preferred_split_index(
+                remaining,
+                _MAX_SLACK_TEXT_LENGTH,
+            )
+            chunk = remaining[:split_at].rstrip()
+            if not chunk:
+                split_at = _MAX_SLACK_TEXT_LENGTH
+                chunk = remaining[:split_at]
+            chunks.append(chunk)
+            remaining = remaining[split_at:].lstrip()
+        if remaining:
+            chunks.append(remaining)
+        return chunks
+
+    @staticmethod
+    def _preferred_split_index(content: str, limit: int) -> int:
+        lower_bound = max(1, limit // 2)
+        for separator in ("\n\n", "\n", " "):
+            split_at = content.rfind(separator, lower_bound, limit + 1)
+            if split_at < 0:
+                continue
+
+            last_open = content.rfind("<", 0, split_at)
+            last_close = content.rfind(">", 0, split_at)
+            if last_open > last_close and last_open >= lower_bound:
+                split_at = last_open
+            if split_at > 0:
+                return split_at
+        return limit
+
+    @staticmethod
+    def _extract_threaded_report(content: str) -> tuple[str, str]:
+        if _SLACK_THREAD_DETAILS_MARKER not in content:
+            return content, ""
+        summary, details = content.split(_SLACK_THREAD_DETAILS_MARKER, 1)
+        summary = summary.strip()
+        details = details.replace(_SLACK_THREAD_DETAILS_MARKER, "").strip()
+        if not summary or not details:
+            return content.replace(_SLACK_THREAD_DETAILS_MARKER, "").strip(), ""
+        return summary, details
 
     def get_metadata(self) -> ChannelMetadata:
         return ChannelMetadata(
