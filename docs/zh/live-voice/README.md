@@ -28,6 +28,8 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 
 | 文件 | 作用 | 更新频率 |
 |---|---|---|
+| [HANDOFF.md](HANDOFF.md) | 当前可跨机器恢复的实现快照、量化进度、真实阻塞项和接手优先级 | 每个开发阶段或重要验证后更新 |
+| [E2E_RUNBOOK.md](E2E_RUNBOOK.md) | 固定环境、锁定依赖、启动服务和真实麦克风/Agent/Tool/TTS 验收步骤 | 环境或启动方式改变时更新 |
 | [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md) | 完整目标架构、P1/P2/P3 边界、模块和竞品证据；从用户提供的原始方案逐字节复制 | 低，重大架构变化时更新或新增版本 |
 | [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) | 两周 Demo 的真实范围、完整版区别、实施日程、验收和降级路径 | Demo 期间按范围变化更新 |
 | [DECISIONS.md](DECISIONS.md) | 已接受的关键决策及其原因，避免后续会话反复推翻已有结论 | 每次作出实质性取舍时更新 |
@@ -42,10 +44,12 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 ## 新 Codex 会话的阅读顺序
 
 1. 先读本文件，理解目标和文档关系。
-2. 读 [STATUS.md](STATUS.md)，确认实际进度和下一步。
-3. 读 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)，确认当前交付范围。
-4. 涉及架构、协议或长期边界时，再完整阅读 [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md)。
-5. 涉及取舍时读 [DECISIONS.md](DECISIONS.md)，不要只根据代码现状猜测意图。
+2. 读 [HANDOFF.md](HANDOFF.md)，恢复最后一次可交接快照和唯一主线。
+3. 读 [STATUS.md](STATUS.md)，确认实际进度和下一步。
+4. 读 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)，确认当前交付范围。
+5. 启动服务或做真实语音联调前读 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
+6. 涉及架构、协议或长期边界时，再完整阅读 [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md)。
+7. 涉及取舍时读 [DECISIONS.md](DECISIONS.md)，不要只根据代码现状猜测意图。
 
 ## 信息冲突时的优先级
 

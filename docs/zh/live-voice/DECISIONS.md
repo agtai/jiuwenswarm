@@ -131,3 +131,13 @@
 - 原因：当前 Gateway 会先取消并等待旧流，再发送 supplement ACK，WebSocket writer 又保持帧顺序，因此 ACK 可作为这一条 Demo 路径的短期边界。
 - 影响：该机制能保护当前演示路径，但不能处理 ACK 丢失、断线重放、多端并发或服务端跨生成乱序；失败和断开时只能清理本地隔离，不能据此宣称获得端到端一致性。
 - 重新评估条件：服务端提供 response/generation ID，并实现客户端与服务端共同执行的 fence、ACK 和恢复协议。
+
+## D-014 固定受控 Demo 环境，并区分 Demo 与生产阻塞项
+
+- 日期：2026-07-31
+- 状态：Accepted
+- 背景：Live Voice 同时依赖浏览器语音服务、权限、硬件、网络、模型 Provider 和多套前后端依赖；只固定源码不足以保证现场可复现。同时，生产级 response ID、全双工媒体等长期能力不应阻塞两周纵向验证。
+- 决策：Demo 固定 Windows/Chrome、`zh-CN`、默认麦克风、耳机、单用户、Agent 模式和稳定网络；Python 与 Node 依赖分别由 `uv.lock` 和 `package-lock.json` 恢复。真实麦克风 final、真实 `chat.tool_call/tool_result/final`、实际 TTS、10 Turn、10 次打断、20 分钟和连续 3 次脚本是 Demo 放行闸门。服务端 generation ID、全双工/AEC、Team、多语言、WebView2 和流式 TTS 是后续生产化工作，不是本轮阻塞项。
+- 原因：受控环境足以验证“语音驱动真实 Agent 并可打断”的核心产品命题；把兼容矩阵和正式一致性协议塞入两周会稀释验证目标，但跳过真实端到端又会让 Demo 失去证明力。
+- 影响：另一台机器必须按 `E2E_RUNBOOK.md` 重建依赖并重新验证机器私有状态。API key、Slack token、用户配置、浏览器 profile、`.venv` 和 `node_modules` 不进入 Git。
+- 重新评估条件：纵向 Demo 放行，开始 Alpha/生产化规划时。

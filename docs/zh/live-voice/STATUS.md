@@ -4,8 +4,13 @@
 - 工作分支：`hx/0731_live_voice_ux`
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 建立方案时的代码基线：`7b69fdeb`
+- 已推送实现基线：`f6f428be946298ada154448bc04adfcd661652d8`
 - 当前里程碑：两周纵向 Demo
 - 实现状态：核心前端链路已实现并通过自动化验证；真实“说话 → 后端 Agent/Tool → 朗读”端到端联调尚未完成
+
+跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动、固定环境和真实验收按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行。
+
+当前量化判断：代码实现约 **93%**，整体 Demo 约 **82%**，上台成熟度约 **65%–70%**。差距主要是固定演示机上的真实麦克风、Agent/Tool、TTS、打断和稳定性证据，不是再增加大量功能。
 
 ## 当前结论
 
@@ -56,8 +61,10 @@
 | 2026-07-31 | `liveVoiceCore`、消息朗读门控和 supplement quarantine 的纯逻辑测试 | **21/21 通过**（core 9 + message gate 7 + quarantine 5）；覆盖单周期唯一提交、partial 无副作用、FIFO、去重、epoch、新录音废弃已播完旧 epoch、迟到回调、错误恢复、完成消息及下一 user 边界筛选、session 隔离和 ACK 计数 |
 | 2026-07-31 | 全前端 TypeScript：`node node_modules/typescript/bin/tsc --noEmit` | 通过 |
 | 2026-07-31 | Vite production build：`node node_modules/vite/bin/vite.js build` | 通过 |
+| 2026-07-31 | 既有相关回归：stream delta、session creation、chat store/settle | **22/22 通过**（7 + 8 + 7） |
 | 2026-07-31 | Codex 内置浏览器，麦克风权限不可授予/被拒绝路径 | 页面显示可见的语音错误和文字降级，原文字输入仍可操作 |
 | 2026-07-31 | 本机 Chrome 手动进入 Live Voice，未提供语音后停止 | 成功进入 `listening`；停止后出现可见的 `no-speech` 错误，没有静默失败 |
+| 2026-07-31 | Chrome 状态与模式回归 | Listening、No speech detected、Retry、Exit 均正常；Cluster 禁用，切回 Agent 后恢复 |
 
 测试入口和可直接复制的命令见 [README.md](README.md)。
 
@@ -67,13 +74,14 @@
 - 因而也尚未验证 10 个真实语音 Turn、真实工具调用、真实 supplement 打断 10/10、20 分钟稳定性和延迟指标。
 - 当前只覆盖 Agent 模式；Team、多成员和 Team Leader 输出语义没有纳入 Demo。
 - supplement quarantine 依赖当前 WebSocket 帧有序和 `chat.interrupt_result` ACK；它没有 response ID，不能解决断线重放、多端并发或服务端跨生成乱序。
+- supplement quarantine 尚未覆盖所有迟到的 `chat.tool_call` / `chat.tool_update` UI 事件；通常不会恢复旧文字或声音，但真实打断测试中可能出现旧工具 UI，必须专项观察。
 - 未验证 Desktop/WebView2 的权限持久性，也未接入 Azure 等 Speech Provider fallback。
 - 可选的 `schedule.run/status/cancel` 后台任务 stretch **未实现**；继续保持可砍，不阻塞核心语音闭环。
 - 本轮仍是固定 Windows/Chrome、`zh-CN`、默认设备和耳机的 Demo，不是生产级全双工实时媒体。
 
 ## 下一步
 
-1. 启动并配置一个可真实调用工具的 JiuwenSwarm 后端，在 Chrome + 耳机 + 麦克风环境按 `TWO_WEEK_DEMO.md` 第 10 节跑完整验收脚本。
+1. 按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 固定依赖、配置和演示机，启动可真实调用工具的 JiuwenSwarm 后端，在 Chrome + 耳机 + 麦克风环境跑完整验收脚本。
 2. 用浏览器和后端日志核对每个语音周期只产生一个用户 Turn，partial 产生零副作用；分别验证空闲 `chat.send` 和处理中 `supplement`。
 3. 连续运行 10 个真实语音 Turn，并重复 10 次 speaking/thinking 中的确定性打断，记录静音延迟、final 提交延迟、首音延迟和任何迟到输出。
 4. 验证通过后再决定是否补 WebView2/Azure fallback；核心链路未稳定前不开始后台任务 stretch。

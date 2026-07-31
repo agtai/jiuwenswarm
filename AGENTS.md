@@ -5,9 +5,12 @@
 Before planning, implementing, reviewing, or testing Live Voice work, read these files in order:
 
 1. `docs/zh/live-voice/README.md`
-2. `docs/zh/live-voice/STATUS.md`
-3. `docs/zh/live-voice/TWO_WEEK_DEMO.md`
-4. `docs/zh/live-voice/DECISIONS.md`
+2. `docs/zh/live-voice/HANDOFF.md`
+3. `docs/zh/live-voice/STATUS.md`
+4. `docs/zh/live-voice/TWO_WEEK_DEMO.md`
+5. `docs/zh/live-voice/DECISIONS.md`
+
+Before starting services or running real microphone/Agent/tool validation, also read and follow `docs/zh/live-voice/E2E_RUNBOOK.md`.
 
 Read `docs/zh/live-voice/FULL_SOLUTION_2026-07-30.md` completely when the task affects long-term architecture, P1/P2/P3 boundaries, protocols, state ownership, cancellation, presented history, durability, or production acceptance.
 

@@ -318,6 +318,23 @@ speaking + 用户重新开麦
 
 这些是 Demo 的固定环境目标，不等同于完整版的跨环境 p95 服务承诺。
 
+### 11.1 放行闸门与固定环境
+
+“代码完成”不等于“可上台”。Demo 只有在固定演示机上同时满足以下条件才允许宣称完成：
+
+1. 浏览器收到后端 `connection.ack`。
+2. 真实麦克风产生中文 final，interim 不触发任何请求。
+3. final 只产生一个用户 Turn。
+4. 固定工具口令实际出现 `chat.tool_call`、`chat.tool_result`、`chat.final`。
+5. 完整回答实际朗读。
+6. 10 个连续语音 Turn 无重复提交。
+7. 10 次打断均立即静音，旧声音恢复 0 次。
+8. 20 分钟或 20 Turn 无需刷新。
+9. 主演示脚本连续成功 3 次。
+10. 失败后文字聊天仍正常。
+
+环境、依赖、配置、服务启动和证据模板统一见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。未通过的闸门是当前 Demo 阻塞项；Team、WebView2、多语言、全双工/AEC、流式 TTS 和生产级 generation fence 不属于本轮放行条件。
+
 ## 12. 绝不能为了赶进度而省略的内容
 
 - final transcript 才能触发 Agent 或工具；partial 只能展示。
