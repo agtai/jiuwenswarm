@@ -67,6 +67,11 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 
 ## 关键代码入口
 
+- Live Voice React 编排（识别、`chat.send` / `supplement`、完成消息朗读）：`jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts`
+- 可纯测试的状态机、TTS FIFO 和 `responseEpoch`：`jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceCore.ts`
+- 当前语音 Turn 的完成消息筛选：`jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceMessageGate.ts`
+- Demo 面板：`jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceDemoBar.tsx`
+- supplement ACK 前的旧输出隔离：`jiuwenswarm/channels/web/frontend/src/services/supplementOutputQuarantine.ts`
 - 浏览器 STT/TTS：`jiuwenswarm/channels/web/frontend/src/hooks/useSpeech.ts`
 - 现有语音输入骨架：`jiuwenswarm/channels/web/frontend/src/components/ChatPanel/InputArea.tsx`
 - Chat 发送、流式消息与中断：`jiuwenswarm/channels/web/frontend/src/hooks/useWebSocket.ts`
@@ -74,6 +79,27 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 - 浏览器/生成音频停止工具：`jiuwenswarm/channels/web/frontend/src/utils/tts.ts`
 - Gateway 中断处理：`jiuwenswarm/gateway/message_handler/message_handler.py`
 - 可选后台任务入口：`jiuwenswarm/server/agent_ws_server.py` 中的 `schedule.run/status/cancel`
+
+## 直接验证
+
+依赖已经安装后，在 `jiuwenswarm/channels/web/frontend` 目录执行。下面刻意使用本地可执行文件，不要求全局安装 TypeScript 或 Vite：
+
+```text
+node node_modules/typescript/bin/tsc --noEmit
+
+node node_modules/typescript/bin/tsc src/features/live-voice/liveVoiceCore.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/live-voice-core --skipLibCheck --noEmitOnError
+node --test tests/liveVoiceCore.test.mjs
+
+node node_modules/typescript/bin/tsc src/features/live-voice/liveVoiceMessageGate.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/live-voice-message-gate --skipLibCheck --noEmitOnError
+node --test tests/liveVoiceMessageGate.test.mjs
+
+node node_modules/typescript/bin/tsc src/services/supplementOutputQuarantine.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/supplement-output-quarantine --skipLibCheck --noEmitOnError
+node --test tests/supplementOutputQuarantine.test.mjs
+
+node node_modules/vite/bin/vite.js build
+```
+
+当前三组纯逻辑测试共 21 项。命令通过只能证明状态机、消息门控、隔离逻辑、类型和构建有效；真实麦克风、Speech Provider、后端 Agent/Tool 和扬声器仍需按 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) 的验收脚本联调。
 
 ## 分支
 

@@ -257,11 +257,13 @@ speaking + 用户重新开麦
 | 固定 Windows + Chrome/Edge | 真实麦克风、真实用户操作 | 跨平台兼容性 | 完整设备和权限层 |
 | 固定 `zh-CN` | 真实中文识别和朗读 | 多语言切换 | Speech Provider 能力协商 |
 | 默认麦克风、耳机 | 真实输入输出 | 扬声器回声、设备切换 | Audio Device & I/O、AEC |
+| 只在 Agent 模式启用 Live Voice | 单 Agent Session 中的真实 `chat.send` / `supplement`、Agent 和工具调用 | Team Leader、多成员并行输出应该由谁朗读，以及 Team 模式插话语义 | 建立统一 response ownership、Team 事件模型和可配置朗读策略后再开放 Team 模式 |
 | 固定约 1 秒停顿提交 | final 后真实调用 Agent | 自然语义结束判断 | VAD/EOT/Interaction Engine |
 | 浏览器 STT/TTS | 真实语音和真实回答 | 服务端流式媒体及 Provider 可替换性 | Speech Port + Realtime Media |
 | 整段或按句 TTS | 真实回答内容被朗读 | token/audio 级实时性 | streaming TTS 与播放队列 |
 | 重新开麦即打断 | 真实停止和真实 supplement | 完全免手操作和误打断恢复 | 持续采集、AEC、false-barge-in recovery |
 | 前端 `responseEpoch` | 演示路径中旧音频不会复活 | 跨端乱序和断线一致性 | response ID、generation fence、ACK |
+| supplement ACK 前前端 quarantine 旧输出 | 当前有序 WebSocket 路径中，真实 supplement 发出后旧 delta/final/reasoning/media 不进入消息和朗读，ACK 后替代回答恢复 | ACK 丢失、断线重放、多端并发、服务端跨生成乱序，以及任意模式的通用隔离 | 服务端分配 response/generation ID，客户端与服务端共同执行 fence，并定义可恢复 ACK 协议 |
 | 一个 `lastTaskId` | 指定任务的真实状态和取消 | 多任务消歧和通用控制 | Task Control Core |
 | 固定任务口令 | 真实任务接口 | 开放式任务意图理解 | Voice–Task Bridge 与确认策略 |
 

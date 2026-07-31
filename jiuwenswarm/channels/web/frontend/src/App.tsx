@@ -356,6 +356,11 @@ function AppContent() {
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
   const promotedFromNewSessionIdsRef = useRef(new Set<string>());
+  const newSessionPromotionSequenceRef = useRef(0);
+  const [newSessionPromotion, setNewSessionPromotion] = useState<{
+    targetSessionId: string;
+    sequence: number;
+  } | null>(null);
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
@@ -1651,6 +1656,11 @@ function AppContent() {
         useSessionStore.getState().clearSelectedSkills(NEW_CONVERSATION_ID);
         useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
         promotedFromNewSessionIdsRef.current.add(newSid);
+        newSessionPromotionSequenceRef.current += 1;
+        setNewSessionPromotion({
+          targetSessionId: newSid,
+          sequence: newSessionPromotionSequenceRef.current,
+        });
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
         setSessionId(newSid);
@@ -2192,6 +2202,7 @@ function AppContent() {
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
                       isProcessing={isProcessing}
+                      newSessionPromotion={newSessionPromotion}
                       onUserAnswer={handleUserAnswer}
                       onExportShare={handleExportShare}
                       isExportingShare={isExportingShare}

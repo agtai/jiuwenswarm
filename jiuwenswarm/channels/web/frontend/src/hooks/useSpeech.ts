@@ -81,6 +81,7 @@ export function useSpeechRecognition(
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recognitionGenerationRef = useRef(0);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualStopRef = useRef(false);
   const autoStopRef = useRef(false);
@@ -89,7 +90,7 @@ export function useSpeechRecognition(
   // 检查浏览器支持
   const isSupported =
     typeof window !== 'undefined' &&
-    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+    (typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function');
 
   const clearSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
@@ -98,17 +99,27 @@ export function useSpeechRecognition(
     }
   }, []);
 
-  const scheduleSilenceStop = useCallback(() => {
+  const scheduleSilenceStop = useCallback((recognition: SpeechRecognition, generation: number) => {
     if (silenceTimeoutMs <= 0) {
       return;
     }
     clearSilenceTimer();
     silenceTimerRef.current = setTimeout(() => {
       silenceTimerRef.current = null;
+      if (recognitionGenerationRef.current !== generation || recognitionRef.current !== recognition) {
+        return;
+      }
       autoStopRef.current = true;
-      recognitionRef.current?.stop();
+      try {
+        recognition.stop();
+      } catch (error) {
+        console.warn('Speech recognition auto-stop failed:', error);
+        recognitionRef.current = null;
+        setIsListening(false);
+        onEnd?.();
+      }
     }, silenceTimeoutMs);
-  }, [clearSilenceTimer, silenceTimeoutMs]);
+  }, [clearSilenceTimer, onEnd, silenceTimeoutMs]);
 
   const startListening = useCallback(() => {
     if (!isSupported) {
@@ -117,6 +128,17 @@ export function useSpeechRecognition(
     }
 
     clearSilenceTimer();
+    const previousRecognition = recognitionRef.current;
+    recognitionGenerationRef.current += 1;
+    recognitionRef.current = null;
+    if (previousRecognition) {
+      try {
+        previousRecognition.stop();
+      } catch {
+        // The previous instance may already be ending. Its callbacks are
+        // fenced by generation and cannot mutate the replacement capture.
+      }
+    }
     manualStopRef.current = false;
     autoStopRef.current = false;
 
@@ -125,9 +147,22 @@ export function useSpeechRecognition(
       window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionCtor) {
       onError?.(i18n.t('speech.recognitionUnsupported'));
+      onEnd?.();
       return;
     }
-    const recognition = new SpeechRecognitionCtor();
+    let recognition: SpeechRecognition;
+    try {
+      recognition = new SpeechRecognitionCtor();
+    } catch (error) {
+      console.error('Speech recognition initialization failed:', error);
+      setIsListening(false);
+      onError?.(i18n.t('speech.errors.recognitionGeneric', { error: 'initialization' }));
+      onEnd?.();
+      return;
+    }
+    const generation = recognitionGenerationRef.current;
+    const isCurrentRecognition = () =>
+      recognitionGenerationRef.current === generation && recognitionRef.current === recognition;
 
     // 使用自定义静默超时时，用 continuous=true 避免浏览器约 2s 就结束
     const useContinuous = continuous || silenceTimeoutMs > 0;
@@ -137,13 +172,15 @@ export function useSpeechRecognition(
     recognition.interimResults = interimResults;
 
     recognition.onstart = () => {
+      if (!isCurrentRecognition()) return;
       setIsListening(true);
       setTranscript('');
       setInterimTranscript('');
-      scheduleSilenceStop();
+      scheduleSilenceStop(recognition, generation);
     };
 
     recognition.onresult = (event) => {
+      if (!isCurrentRecognition()) return;
       let finalTranscript = '';
       let interim = '';
 
@@ -159,17 +196,18 @@ export function useSpeechRecognition(
       if (finalTranscript) {
         setTranscript((prev) => prev + finalTranscript);
         onResult?.(finalTranscript, true);
-        scheduleSilenceStop();
+        scheduleSilenceStop(recognition, generation);
       }
 
       setInterimTranscript(interim);
       if (interim) {
         onResult?.(interim, false);
-        scheduleSilenceStop();
+        scheduleSilenceStop(recognition, generation);
       }
     };
 
     recognition.onerror = (event) => {
+      if (!isCurrentRecognition()) return;
       console.error('Speech recognition error:', event.error);
       clearSilenceTimer();
       setIsListening(false);
@@ -185,51 +223,82 @@ export function useSpeechRecognition(
     };
 
     recognition.onend = () => {
+      if (!isCurrentRecognition()) return;
       clearSilenceTimer();
       if (manualStopRef.current) {
         manualStopRef.current = false;
+        recognitionRef.current = null;
         setIsListening(false);
         onEnd?.();
         return;
       }
       if (autoStopRef.current) {
         autoStopRef.current = false;
+        recognitionRef.current = null;
         setIsListening(false);
         onEnd?.();
         return;
       }
       if (useContinuousRef.current && restartWhen?.()) {
         try {
-          recognitionRef.current?.start();
+          recognition.start();
           return;
         } catch (error) {
           console.warn('Speech recognition restart failed:', error);
         }
       }
+      recognitionRef.current = null;
       setIsListening(false);
       onEnd?.();
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
+    try {
+      recognition.start();
+    } catch (error) {
+      if (isCurrentRecognition()) {
+        recognitionRef.current = null;
+      }
+      console.error('Speech recognition start failed:', error);
+      setIsListening(false);
+      onError?.(i18n.t('speech.errors.recognitionGeneric', { error: 'start' }));
+      onEnd?.();
+    }
   }, [isSupported, language, continuous, interimResults, silenceTimeoutMs, restartWhen, onResult, onError, onEnd, clearSilenceTimer]);
 
   const stopListening = useCallback(() => {
     clearSilenceTimer();
-    if (recognitionRef.current) {
+    const recognition = recognitionRef.current;
+    if (recognition) {
       manualStopRef.current = true;
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
+      try {
+        recognition.stop();
+      } catch (error) {
+        console.warn('Speech recognition stop failed:', error);
+        if (recognitionRef.current === recognition) {
+          recognitionRef.current = null;
+          recognitionGenerationRef.current += 1;
+          manualStopRef.current = false;
+          onEnd?.();
+        }
+      }
     }
     setIsListening(false);
-  }, [clearSilenceTimer]);
+  }, [clearSilenceTimer, onEnd]);
 
   // 组件卸载时清理
   useEffect(() => {
     return () => {
       clearSilenceTimer();
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+      recognitionGenerationRef.current += 1;
+      const recognition = recognitionRef.current;
+      recognitionRef.current = null;
+      if (recognition) {
+        try {
+          recognition.stop();
+        } catch {
+          // Unmount cleanup is best-effort and all callbacks are stale now.
+        }
       }
     };
   }, [clearSilenceTimer]);

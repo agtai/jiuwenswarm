@@ -2075,6 +2075,31 @@
     "unknownError": "未知错误",
     "errorPrefix": "错误: {{message}}"
   },
+  "liveVoice": {
+    "label": "Live Voice",
+    "experimental": "实验功能",
+    "enable": "开启 Live Voice",
+    "exit": "退出 Live Voice",
+    "unavailable": "Live Voice Demo 目前仅支持 Agent 模式和兼容的浏览器",
+    "interactionBlocked": "请先完成当前待确认问题或演进流程，再开启 Live Voice",
+    "transcriptPlaceholder": "说话内容会显示在这里",
+    "actions": {
+      "idle": "开始说话",
+      "listening": "结束并发送",
+      "thinking": "打断并说话",
+      "speaking": "打断并说话",
+      "interrupted": "继续说话",
+      "error": "重试"
+    },
+    "status": {
+      "idle": "已就绪",
+      "listening": "正在听你说话",
+      "thinking": "Agent 正在工作",
+      "speaking": "正在朗读回答",
+      "interrupted": "已打断，等待新要求",
+      "error": "语音功能出现问题"
+    }
+  },
   "speech": {
     "recognitionUnsupported": "浏览器不支持语音识别",
     "synthesisUnsupported": "浏览器不支持语音合成",

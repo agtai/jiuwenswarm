@@ -15,6 +15,7 @@ import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
+import { LiveVoiceDemoBar } from './LiveVoiceDemoBar';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -38,6 +39,8 @@ import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
+import { FEATURE_LIVE_VOICE_DEMO } from '../../featureFlags';
+import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 
 export interface ChatHistoryPagerProps {
   loadedPages: number;
@@ -65,6 +68,10 @@ interface ChatPanelProps {
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
+  newSessionPromotion?: {
+    targetSessionId: string;
+    sequence: number;
+  } | null;
   onUserAnswer: (requestId: string, answers: UserAnswer[], source?: string) => void;
   onExportShare?: () => void | Promise<void>;
   isExportingShare?: boolean;
@@ -657,6 +664,7 @@ export function ChatPanel({
   onCancel,
   onSwitchMode,
   isProcessing,
+  newSessionPromotion = null,
   onUserAnswer,
   onExportShare,
   isExportingShare = false,
@@ -683,6 +691,10 @@ export function ChatPanel({
   const activeSessionId = useChatStore((s) => s.activeSessionId);
   const messages = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.messages ?? []);
   const isThinking = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.isThinking ?? false);
+  const liveVoiceInteractionBlocked = useChatStore((s) => {
+    const runtime = s.runtimes[activeSessionId ?? ''];
+    return Boolean(runtime?.pendingQuestion || runtime?.evolutionStatus);
+  });
   const toolExecutionOrder = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.toolExecutionOrder ?? []);
   const contextCompressionRuntime = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionRuntime);
   const contextCompressionSummary = useChatStore((s) => s.runtimes[activeSessionId ?? '']?.contextCompressionSummary);
@@ -990,6 +1002,17 @@ export function ChatPanel({
     (text: string) => handleSendMessage(text),
     [handleSendMessage],
   );
+  const liveVoiceDemoProps = useLiveVoiceDemo({
+    activeSessionId,
+    messages,
+    isProcessing,
+    isThinking,
+    mode,
+    interactionBlocked: liveVoiceInteractionBlocked,
+    newSessionPromotion,
+    onSendMessage: handleSendMessage,
+    onInterrupt,
+  });
   return (
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
       {shouldShowChatHeader && (
@@ -1113,6 +1136,7 @@ export function ChatPanel({
                 <AgentActivityCard isProcessing={isProcessing} onSendTask={handleSendMessage} />
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
+                {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
                 <InputArea
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
@@ -1154,6 +1178,7 @@ export function ChatPanel({
               onClearGoal={onClearGoal}
             />
           )}
+          {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
           <InputArea
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}

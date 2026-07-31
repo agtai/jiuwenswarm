@@ -101,3 +101,33 @@
 - 原因：一个稳定的核心闭环比多个不可靠功能更能验证方向。
 - 影响：任务能力是明确可砍的 stretch。
 - 重新评估条件：核心验收提前通过。
+
+## D-011 当前 Live Voice Demo 只开放 Agent 模式
+
+- 日期：2026-07-31
+- 状态：Accepted
+- 背景：Team 模式同时存在 Team Leader、成员执行输出和不同的 interrupt 语义，不能安全地把“最新 assistant 消息”直接解释为唯一应该朗读的 Agent 回答。
+- 决策：本轮 UI 和控制器只在 `mode === 'agent'` 时允许启用 Live Voice；进入 Team 模式时显示不可用并退出、清理当前语音状态。
+- 原因：单 Agent 模式已经足以验证“语音驱动真实 Agent/Tool、朗读和 supplement”的核心假设；未经建模就开放 Team 会造成串读、重复朗读或错误打断。
+- 影响：Demo 通过不能证明 Team Live Voice 已完成。后续必须先定义 Team response ownership、成员输出的呈现/朗读规则和 Team 插话语义。
+- 重新评估条件：Team 事件模型与唯一可朗读 response 边界已明确，并有对应一致性测试。
+
+## D-012 Demo 只朗读 chatStore 中已经完成且属于当前语音 Turn 的消息
+
+- 日期：2026-07-31
+- 状态：Accepted
+- 背景：直接消费原始 `chat.delta` 或在 React 消息组件挂载时触发 TTS，容易因批处理、重写、重复渲染和迟到事件造成重复或串音。
+- 决策：Live Voice 以当前 final transcript 对应的用户消息为起点，只从 `chatStore` 选择其后的完整 assistant 消息；`isStreaming === true`、空消息、历史消息、已朗读消息都不进入 TTS。遇到下一条 user 消息即截止，后续文字 Turn 不归属于旧语音 Turn。
+- 原因：`chatStore` 是用户实际看到的消息事实，等待其完成再入 FIFO 可以用稳定消息 ID 去重，并让文字和语音共享同一条真实 Agent 路径。
+- 影响：本轮是“完整消息后朗读”，不能声称达到 token/audio 流式首音延迟；如果用户在语音 Turn 后发文字消息，其回答不会被误读成旧语音回答。
+- 重新评估条件：引入带 response ID 的正式 streaming TTS 与 presented-history 协议。
+
+## D-013 supplement ACK quarantine 是 Demo 隔离，不是生产 fence
+
+- 日期：2026-07-31
+- 状态：Accepted
+- 背景：当前前端收到的 `chat.delta` / `chat.final` 没有可可靠关联到生成代次的 response ID；supplement 发出后，旧生成的迟到输出可能继续进入消息和 TTS。
+- 决策：普通 Agent supplement 发出时，前端清除待刷新的旧 delta、封口旧流，并临时丢弃同 session 的 `chat.delta`、`chat.final`、`chat.reasoning` 和 `chat.media`；收到有序的 `chat.interrupt_result(intent=supplement)` ACK 后解除 quarantine。Team、evolution 和 pending question 特殊路径不套用该规则；连接关闭或重连时清空本地 barrier，避免丢失 ACK 后永久锁死。
+- 原因：当前 Gateway 会先取消并等待旧流，再发送 supplement ACK，WebSocket writer 又保持帧顺序，因此 ACK 可作为这一条 Demo 路径的短期边界。
+- 影响：该机制能保护当前演示路径，但不能处理 ACK 丢失、断线重放、多端并发或服务端跨生成乱序；失败和断开时只能清理本地隔离，不能据此宣称获得端到端一致性。
+- 重新评估条件：服务端提供 response/generation ID，并实现客户端与服务端共同执行的 fence、ACK 和恢复协议。

@@ -2074,6 +2074,31 @@
     "unknownError": "Unknown error",
     "errorPrefix": "Error: {{message}}"
   },
+  "liveVoice": {
+    "label": "Live Voice",
+    "experimental": "Experimental",
+    "enable": "Enable Live Voice",
+    "exit": "Exit Live Voice",
+    "unavailable": "The Live Voice demo currently requires Agent mode and a compatible browser",
+    "interactionBlocked": "Finish the pending question or evolution flow before enabling Live Voice",
+    "transcriptPlaceholder": "Your speech will appear here",
+    "actions": {
+      "idle": "Start speaking",
+      "listening": "Stop and send",
+      "thinking": "Interrupt and speak",
+      "speaking": "Interrupt and speak",
+      "interrupted": "Continue speaking",
+      "error": "Retry"
+    },
+    "status": {
+      "idle": "Ready",
+      "listening": "Listening",
+      "thinking": "Agent is working",
+      "speaking": "Reading the response",
+      "interrupted": "Interrupted, waiting for your update",
+      "error": "Voice is unavailable"
+    }
+  },
   "speech": {
     "recognitionUnsupported": "Speech recognition is not supported by this browser",
     "synthesisUnsupported": "Speech synthesis is not supported by this browser",

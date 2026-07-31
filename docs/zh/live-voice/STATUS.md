@@ -4,81 +4,85 @@
 - 工作分支：`hx/0731_live_voice_ux`
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 建立方案时的代码基线：`7b69fdeb`
-- 当前里程碑：D0 Prototype / 两周纵向 Demo
-- 实现状态：尚未开始；完整方案、Demo 方案和接续机制已经固化到仓库
+- 当前里程碑：两周纵向 Demo
+- 实现状态：核心前端链路已实现并通过自动化验证；真实“说话 → 后端 Agent/Tool → 朗读”端到端联调尚未完成
 
-## 当前目标
+## 当前结论
 
-先完成一条真实的 Live Voice 纵向链路：用户通过语音调用现有 JiuwenSwarm Agent 和工具，听到真实结果，并能在 Agent 工作或朗读时打断、补充和纠正。
+本轮已经把 Live Voice 从方案推进到可运行的前端 Demo 原型：有独立入口和状态 UI，浏览器识别得到的 **final** 文本会复用现有 `chat.send` / `supplement` 调用真实 Chat/Agent 链路，`chatStore` 中完成的 Agent 消息会进入浏览器 TTS FIFO，打断或退出会用本地 `responseEpoch` 立即废弃旧声音。
 
-当前目标不是只做听写/朗读，也不是在两周内完成生产级实时媒体和通用 Task Control。
+这说明核心流程已经在代码层接通，并且关键的“只提交一次、partial 无副作用、旧声音不复活、文字仍可用”等约束可以自动化验证。它还不能证明真实中文语音、目标后端 Agent/Tool、网络和扬声器组合在演示机上已经完整跑通；本轮自动化环境没有可注入的麦克风音频，也没有启动需要外部模型 Provider 的后端链路。
 
-## 已完成
+## 已实现
 
-- 完整目标方案已保存为 `FULL_SOLUTION_2026-07-30.md`。
-- 两周 Demo 的范围、与完整版区别、Hardcode、日程和验收已保存为 `TWO_WEEK_DEMO.md`。
-- 已建立 `DECISIONS.md`，记录关键取舍。
-- 已确认仓库可复用能力：
-  - `useSpeech.ts` 已有 Browser STT/TTS；
-  - `InputArea.tsx` 已有部分语音输入和自动提交骨架，但 UI/指针交互被注释；
-  - `useWebSocket.ts` 已有 `chat.send`、`supplement` 和流式回复；
-  - `stopAllTts()` 可立即停止本地声音；
-  - Gateway 的 supplement 路径可取消旧生成并接收新要求；
-  - `schedule.run/status/cancel` 可作为可选的受限后台任务演示。
-- 已确认当前服务端 `tts.synthesize` 没有注册，Demo 主线不依赖它。
+### Live Voice 入口和状态
 
-## 正在进行
+- 在 ChatPanel 增加带 feature flag 的 `LiveVoiceDemoBar`，支持进入、退出、主要操作以及 `idle`、`listening`、`thinking`、`speaking`、`interrupted`、`error` 状态展示。
+- 显示 interim 字幕、已提交文本、不可用原因和可见错误；Live Voice 失败时不隐藏、不破坏原文字输入框。
+- 当前只允许 **Agent 模式**启用。Team 模式会显示不可用并退出 Live Voice，避免把多成员/Leader 输出错误地当成单一回答朗读。
 
-目前没有代码实现正在进行。下一次会话应从 D1 真机语音 Spike 开始。
+### 语音到真实 Agent 路径
 
-## 下一步
+- 复用 `useSpeechRecognition`，固定 `zh-CN`、浏览器 Web Speech 和约 1.2 秒静音窗口。
+- interim 只更新字幕，不发送消息；一个识别周期只接受一次完整 final。
+- 空闲时 final 调用现有 `chat.send`；已有 Agent 请求处理中重新开麦，final 调用现有 `supplement`。没有伪造 Agent 答案或工具结果。
+- SpeechRecognition 实例按代次隔离；旧实例迟到的 `onend` / `onresult` 不能污染重试或新录音。
+- 新会话从特殊 `new` session 晋升为真实 session 时，通过一次性 promotion signal 保留当前语音 Turn；切换到其他既有 session 时退出并清理 Live Voice。
+- 当前存在待确认问题或演进流程时禁止进入/继续 Live Voice，避免把 Gateway 的排队语义误当成普通 supplement 取消语义。
 
-1. 在目标 Windows 演示机上测试 Chrome、Edge、WebView2 的麦克风权限、`zh-CN` SpeechRecognition、中文 SpeechSynthesis 和停止延迟。
-2. 当天决定正式演示入口：Desktop/WebView2、Web 浏览器，或单一云 Speech Provider fallback。
-3. 实现带 feature flag 的最小 `LiveVoiceDemo` UI 和状态机。
-4. 打通 final transcript → 真实 `chat.send` → Agent/Tool → 回答 → 自动朗读。
+### Agent 回答朗读与打断
 
-详细排期和退出条件见 `TWO_WEEK_DEMO.md`。
+- 只朗读已经由 `chatStore` 落地、位于当前语音用户消息之后且下一条 user 消息之前、`isStreaming !== true` 的完整 assistant 消息；不直接朗读原始 WebSocket delta，也不朗读历史消息或后续文字 Turn 的回答。
+- 浏览器 SpeechSynthesis 通过小型 FIFO 顺序播放，按消息 ID 去重，并在播放前清理不适合朗读的文本。
+- 每次 final、打断、退出和错误都会推进本地 `responseEpoch`；旧队列及旧播放器回调无法改变新 Turn 状态或恢复旧声音。
+- thinking / speaking 时点击主要操作会先本地停播，再重新开始识别；识别 final 后走 `supplement`。
 
-## 当前未开始
+### supplement 输出隔离
 
-- Live Voice UI、功能开关和状态机。
-- final transcript 的唯一提交与重复保护。
-- Agent 回复自动朗读和 TTS 队列。
-- 本地 `responseEpoch`。
-- 插话及 supplement 接线。
-- 真机权限、错误和稳定性验证。
-- 可选后台任务体验。
+- 普通 Agent supplement 发出时建立短期前端 quarantine：先清除尚未刷新的旧 delta、封口旧 assistant 流，再丢弃同一 session 的 `chat.delta`、`chat.final`、`chat.reasoning` 和 `chat.media`。
+- 收到有序的 `chat.interrupt_result(intent=supplement)` ACK 后解除隔离，让替代回答正常进入 `chatStore` 和 TTS。
+- 请求失败、断开连接或 Hook 清理时会释放隔离。该机制只保护当前有序 WebSocket 的 Demo 路径，不是服务端 response ID / generation fence。
 
-## 已知风险
+### 错误和文字降级
 
-- Web Speech API 在目标 WebView2 中的实际支持和权限持久性尚未真机确认。
-- Windows Desktop 启动流程可能清理 WebView storage，导致麦克风权限反复申请。
-- 浏览器 TTS 播放时继续监听可能产生自回声；Demo 预设使用耳机。
-- 当前 `useSpeechSynthesis.speak()` 每次调用会先取消上一次播放，不能直接对每个 token 调用；需要整段朗读或小型句子 FIFO。
-- Agent 流式 delta、final 和 supplement 之间的迟到输出需要本地 epoch 防护。
-
-## 开放问题
-
-- D1 实测后，演示默认使用 Desktop 还是浏览器？
-- Browser Speech 是否稳定到足以作为主 Demo，还是需要 Azure Speech fallback？
-- D4 先整段朗读还是直接做句子 FIFO？默认策略是先整段，稳定后升级。
-- D7 是否提前通过，从而允许增加后台任务 stretch？
+- 识别不支持、合成不支持、麦克风权限拒绝、无语音、识别失败和播放失败都有可见状态或不可用说明。
+- 错误后可以重试或退出；原有文字聊天入口始终保留。
+- 浏览器全局 TTS 停止事件会同步使 Live Voice 的当前朗读失效，避免文字发送等既有操作后声音继续播放。
 
 ## 验证记录
 
 | 日期 | 验证 | 结果 |
 |---|---|---|
-| 2026-07-31 | 只读检查现有 STT/TTS、Chat、supplement、TTS handler 和 schedule 接口 | 确认可以复用；尚未运行真机语音 E2E |
+| 2026-07-31 | `liveVoiceCore`、消息朗读门控和 supplement quarantine 的纯逻辑测试 | **21/21 通过**（core 9 + message gate 7 + quarantine 5）；覆盖单周期唯一提交、partial 无副作用、FIFO、去重、epoch、新录音废弃已播完旧 epoch、迟到回调、错误恢复、完成消息及下一 user 边界筛选、session 隔离和 ACK 计数 |
+| 2026-07-31 | 全前端 TypeScript：`node node_modules/typescript/bin/tsc --noEmit` | 通过 |
+| 2026-07-31 | Vite production build：`node node_modules/vite/bin/vite.js build` | 通过 |
+| 2026-07-31 | Codex 内置浏览器，麦克风权限不可授予/被拒绝路径 | 页面显示可见的语音错误和文字降级，原文字输入仍可操作 |
+| 2026-07-31 | 本机 Chrome 手动进入 Live Voice，未提供语音后停止 | 成功进入 `listening`；停止后出现可见的 `no-speech` 错误，没有静默失败 |
 
-后续每次验证应记录：运行环境、命令或操作步骤、结果、失败原因和关联提交。
+测试入口和可直接复制的命令见 [README.md](README.md)。
+
+## 尚未完成与不能宣称的内容
+
+- **尚未完成真实语音到 Agent 的 E2E**：还没有启动本机 AgentServer/WebChannel/Gateway 并允许外部模型 Provider 调用，再用真实麦克风说中文观察 `final → chat.send/supplement → Agent/Tool → chatStore 完成消息 → 扬声器朗读` 全链路。当前配置与依赖静态检查通过，但自动化没有可注入的麦克风音频；启动整套服务还会连接已启用的 Slack channel，因此本轮没有擅自启动并产生额外外部连接。
+- 因而也尚未验证 10 个真实语音 Turn、真实工具调用、真实 supplement 打断 10/10、20 分钟稳定性和延迟指标。
+- 当前只覆盖 Agent 模式；Team、多成员和 Team Leader 输出语义没有纳入 Demo。
+- supplement quarantine 依赖当前 WebSocket 帧有序和 `chat.interrupt_result` ACK；它没有 response ID，不能解决断线重放、多端并发或服务端跨生成乱序。
+- 未验证 Desktop/WebView2 的权限持久性，也未接入 Azure 等 Speech Provider fallback。
+- 可选的 `schedule.run/status/cancel` 后台任务 stretch **未实现**；继续保持可砍，不阻塞核心语音闭环。
+- 本轮仍是固定 Windows/Chrome、`zh-CN`、默认设备和耳机的 Demo，不是生产级全双工实时媒体。
+
+## 下一步
+
+1. 启动并配置一个可真实调用工具的 JiuwenSwarm 后端，在 Chrome + 耳机 + 麦克风环境按 `TWO_WEEK_DEMO.md` 第 10 节跑完整验收脚本。
+2. 用浏览器和后端日志核对每个语音周期只产生一个用户 Turn，partial 产生零副作用；分别验证空闲 `chat.send` 和处理中 `supplement`。
+3. 连续运行 10 个真实语音 Turn，并重复 10 次 speaking/thinking 中的确定性打断，记录静音延迟、final 提交延迟、首音延迟和任何迟到输出。
+4. 验证通过后再决定是否补 WebView2/Azure fallback；核心链路未稳定前不开始后台任务 stretch。
 
 ## 接手者注意事项
 
-- 开始工作前先执行 `git status --short --branch`，确认位于 `hx/0731_live_voice_ux` 且没有混入其他功能的未提交修改。
-- 不要把另一 worktree 或其他分支的修改带入本分支。
-- 不要先实现 WebRTC、完整媒体协议或 Task Core；先完成 D1–D4 的真实 Agent 语音闭环。
+- 开始工作前执行 `git status --short --branch`，确认位于 `hx/0731_live_voice_ux` 且没有混入其他分支修改。
+- Demo 的关键实现入口是 `useLiveVoiceDemo.ts`；纯状态、TTS FIFO 和 epoch 在 `liveVoiceCore.ts`，完成消息筛选在 `liveVoiceMessageGate.ts`，旧 supplement 输出隔离在 `supplementOutputQuarantine.ts`。
 - partial transcript 绝不能触发 Agent、Tool 或 Task。
-- 插话时必须先本地停止声音，再处理服务端取消或补充。
-- 任何新增 shortcut 都必须更新 `TWO_WEEK_DEMO.md` 的 Shortcut Ledger。
-- 完成实质性工作后，在同一提交或紧邻提交中更新本文件并推送远端。
+- 插话或退出必须先本地停播；不要把 ACK quarantine 或本地 epoch 描述成生产一致性协议。
+- 真实 E2E 通过前，不要把“代码路径已接通”写成“语音 Agent Demo 已完整验收”。
+- 任何新增 shortcut 都必须同步更新 `TWO_WEEK_DEMO.md` 的 Shortcut Ledger。

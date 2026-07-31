@@ -46,6 +46,10 @@ import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
 import {
+  createSupplementOutputQuarantine,
+  shouldBeginSupplementOutputQuarantine,
+} from '../services/supplementOutputQuarantine';
+import {
   fetchTtsAudio,
   playAudioBase64,
   sanitizeTtsText,
@@ -835,6 +839,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   if (streamDeltaBatcherRef.current === null) {
     streamDeltaBatcherRef.current = createStreamDeltaBatcher();
   }
+  const supplementOutputQuarantineRef = useRef<
+    ReturnType<typeof createSupplementOutputQuarantine> | null
+  >(null);
+  if (supplementOutputQuarantineRef.current === null) {
+    supplementOutputQuarantineRef.current = createSupplementOutputQuarantine();
+  }
 
   // Stores: 仅保留全局 action（A 类，不需要 sessionId）
   const {
@@ -862,6 +872,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const streamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
     if (!streamId) return;
     streamDeltaBatcherRef.current?.flush(streamDeltaBatchKey(sessionId, streamId));
+  }, []);
+
+  const clearPendingStreamDelta = useCallback((sessionId: string) => {
+    const streamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
+    if (!streamId) return;
+    streamDeltaBatcherRef.current?.clear(streamDeltaBatchKey(sessionId, streamId));
   }, []);
 
   const handleTtsPlayback = useCallback(
@@ -920,6 +936,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 断开连接
   const disconnect = useCallback(() => {
+    supplementOutputQuarantineRef.current?.clearAll();
     webClient.disconnect();
   }, []);
 
@@ -1544,7 +1561,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       options?: { newInput?: string }
     ) => {
       const newInput = options?.newInput;
+      const chatRuntime = useChatStore.getState().getRuntime(sessionId);
+      const evolutionStatus = chatRuntime?.evolutionStatus?.status;
+      const shouldQuarantineSupplementOutput = shouldBeginSupplementOutputQuarantine({
+        intent,
+        newInput,
+        mode: useSessionStore.getState().getRuntime(sessionId)?.mode,
+        evolutionStatus,
+        hasPendingQuestion: Boolean(chatRuntime?.pendingQuestion),
+      });
       if (intent === 'supplement' && newInput) {
+        if (shouldQuarantineSupplementOutput) {
+          supplementOutputQuarantineRef.current?.begin(sessionId);
+        }
         resetContextCompressionTurn(sessionId);
         userInputVersionRef.current += 1;
         stopAllTts();
@@ -1557,6 +1586,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           content: newInput,
           timestamp: new Date().toISOString(),
         });
+        if (shouldQuarantineSupplementOutput) {
+          // The user message is the local turn boundary. Discard a delta that is
+          // still waiting in the 16 ms batch and seal the old assistant bubble;
+          // subsequent old output is quarantined until supplement ACK.
+          clearPendingStreamDelta(sessionId);
+          useChatStore.getState().stopStreaming(sessionId);
+        }
       }
       try {
         const params: Record<string, unknown> = {
@@ -1578,6 +1614,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         await request('chat.interrupt', params);
       } catch (error) {
+        if (shouldQuarantineSupplementOutput) {
+          supplementOutputQuarantineRef.current?.release(sessionId);
+        }
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
         onErrorRef.current?.(webError.message || t('network.interruptFailed'));
@@ -1585,6 +1624,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     },
     [
       closeActiveTeamLeaderMessages,
+      clearPendingStreamDelta,
       request,
       resetContextCompressionTurn,
       setConnectionStats,
@@ -2011,8 +2051,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         handleConnectionAck(payload);
       }),
       webClient.on('chat.delta', ({ payload }) => {
-          const sessionId = resolveEventSessionId(payload);
-          if (!sessionId) return;
+        const outputSessionId = getPayloadSessionId(payload);
+        if (
+          outputSessionId &&
+          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.delta')
+        ) {
+          return;
+        }
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
 
         // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
         if (!useChatStore.getState().getRuntime(sessionId)?.isProcessing && !useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
@@ -2094,15 +2141,29 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         if (!currentStreamId || !content) return;
         const streamId = currentStreamId;
-        streamDeltaBatcherRef.current?.enqueue(streamDeltaBatchKey(sessionId, streamId), content, batchedContent => {
-          const chatStore = useChatStore.getState();
-          if (chatStore.getRuntime(sessionId)?.currentStreamId !== streamId) {
-            return;
+        streamDeltaBatcherRef.current?.enqueue(
+          streamDeltaBatchKey(sessionId, streamId),
+          content,
+          batchedContent => {
+            if (supplementOutputQuarantineRef.current?.shouldDrop(sessionId, 'chat.delta')) {
+              return;
+            }
+            const chatStore = useChatStore.getState();
+            if (chatStore.getRuntime(sessionId)?.currentStreamId !== streamId) {
+              return;
+            }
+            chatStore.appendStreamContent(sessionId, batchedContent);
           }
-          chatStore.appendStreamContent(sessionId, batchedContent);
-        });
+        );
       }),
       webClient.on('chat.reasoning', ({ payload }) => {
+        const outputSessionId = getPayloadSessionId(payload);
+        if (
+          outputSessionId &&
+          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.reasoning')
+        ) {
+          return;
+        }
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
 
@@ -2121,6 +2182,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('chat.final', ({ payload }) => {
+        const outputSessionId = getPayloadSessionId(payload);
+        if (
+          outputSessionId &&
+          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.final')
+        ) {
+          return;
+        }
         if (shouldDropDuplicatedEvent('chat.final', payload)) return;
 
         const cronMeta = payload.cron as Record<string, unknown> | undefined;
@@ -2575,6 +2643,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
       }),
       webClient.on('chat.media', ({ payload }) => {
+        const outputSessionId = getPayloadSessionId(payload);
+        if (
+          outputSessionId &&
+          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.media')
+        ) {
+          return;
+        }
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         const mediaPayload = payload as {
@@ -3149,10 +3224,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.interrupt_result', payload)) return;
+        const resultPayload = payload as unknown as InterruptResultPayload;
+        if (resultPayload.intent === 'supplement') {
+          supplementOutputQuarantineRef.current?.release(sessionId);
+        }
         // 切换模式时忽略中断结果
         if (useChatStore.getState().getRuntime(sessionId)?.switchingMode) return;
         flushPendingStreamDelta(sessionId);
-        const resultPayload = payload as unknown as InterruptResultPayload;
         useChatStore.getState().setInterruptResult(sessionId, resultPayload);
         // has_active_task 为 false 表示没有活跃任务（任务已完成）
         const hasActiveTask = resultPayload.has_active_task !== false;
@@ -3683,6 +3761,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
     return () => {
       streamDeltaBatcherRef.current?.flushAll();
+      supplementOutputQuarantineRef.current?.clearAll();
       unsubs.forEach((fn) => fn());
     };
   }, [
@@ -3803,6 +3882,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       });
       if (!connected && (state === 'reconnecting' || state === 'closed')) {
         streamDeltaBatcherRef.current?.flushAll();
+        // A supplement RPC may resolve before its asynchronous interrupt ACK.
+        // If the socket drops between those frames, that ACK is gone; keeping
+        // the Demo quarantine would otherwise discard every response forever
+        // after reconnect. Response IDs are still required for true recovery.
+        supplementOutputQuarantineRef.current?.clearAll();
         onDisconnectRef.current?.();
       }
       // 断线恢复（false -> true 跳变）：真实环境联调方案 B.8——对"曾经查到过目标"的会话主动
