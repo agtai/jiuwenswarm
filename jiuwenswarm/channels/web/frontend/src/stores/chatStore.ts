@@ -22,6 +22,7 @@ import {
   ContextCompressionRuntime,
   ContextCompressionSummary,
   TodoItem,
+  MediaItem,
 } from '../types';
 import { useTodoStore } from './todoStore';
 import {
@@ -71,6 +72,8 @@ interface TaskItem {
   id: string;
   content: string;
   timestamp: number;
+  /** Persisted attachments (images/documents, incl. PDF); dispatched with the message when the queued task is sent */
+  mediaItems?: MediaItem[];
 }
 
 export interface HistoryPagerMeta {
@@ -247,7 +250,7 @@ interface ChatState {
   clearMessages: (sessionId: string) => void;
   clearCurrentTurnData: (sessionId: string, requestId?: string) => void;
   prependMessages: (sessionId: string, olderFirst: Message[]) => void;
-  addToTaskQueue: (sessionId: string, content: string) => void;
+  addToTaskQueue: (sessionId: string, content: string, mediaItems?: MediaItem[]) => void;
   clearTaskQueue: (sessionId: string) => void;
   removeFromTaskQueue: (sessionId: string, id: string) => void;
   reorderTaskQueue: (sessionId: string, fromIndex: number, toIndex: number) => void;
@@ -1415,7 +1418,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     });
   },
 
-  addToTaskQueue: (sessionId, content) => {
+  addToTaskQueue: (sessionId, content, mediaItems) => {
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
@@ -1430,6 +1433,7 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
                 id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
                 content,
                 timestamp: Date.now(),
+                ...(mediaItems && mediaItems.length > 0 ? { mediaItems } : {}),
               },
             ],
           },
