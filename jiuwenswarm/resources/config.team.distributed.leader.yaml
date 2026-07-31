@@ -417,6 +417,9 @@ channels:
     allow_from: []
     allowed_channel_ids: []
     auto_link_channel_ids: []
+    # Use ["*"] to allow history digests in every accessible Slack conversation.
+    # Empty disables history digests.
+    history_digest_channel_ids: []
     auto_link_prompt: ""
     default_channel_id:
     reply_in_thread: true

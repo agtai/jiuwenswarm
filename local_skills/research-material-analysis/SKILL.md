@@ -25,7 +25,7 @@ Retrieve source text with the bundled safe fetcher, then separate extraction, ve
 3. If retrieval fails, explain what was unavailable and stop or request an accessible source.
 4. Read [references/analysis-rubric.md](references/analysis-rubric.md) and analyze the extracted source.
 5. Perform a second verification pass: map each major conclusion to source evidence and downgrade unsupported claims.
-6. Read [references/output-format.md](references/output-format.md) and write the response in the user's language.
+6. Read [references/output-format.md](references/output-format.md) and write the final response in English by default. Use another language only when the user explicitly requests it.
 7. Reply in the originating Slack thread.
 
 ## Verification Levels

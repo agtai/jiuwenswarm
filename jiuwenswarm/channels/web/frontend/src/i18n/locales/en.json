@@ -639,6 +639,7 @@
       "slackUserIds": "One Slack user ID per line (empty allows all users)",
       "slackChannelIds": "One Slack channel ID per line (empty allows all channels)",
       "slackAutoLinkChannelIds": "One Slack channel ID per line for automatic link processing (empty disables it)",
+      "slackHistoryDigestChannelIds": "One allowed Slack conversation ID per line; use * for all accessible conversations (empty disables history digests)",
       "slackAutoLinkPrompt": "Optional instructions appended to automatically processed link messages",
       "slackAcknowledgementText": "Message sent immediately before agent processing",
       "allowFrom": "One chatid/userid per line (comma-separated is also supported)"

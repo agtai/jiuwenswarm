@@ -759,6 +759,10 @@ channels:
     # Channel IDs where link messages trigger the bot without an @mention.
     # Empty disables automatic link processing.
     auto_link_channel_ids: []
+    # Channel IDs allowed to expose bulk history to the Slack digest tool.
+    # Use ["*"] to allow every Slack conversation the bot can access.
+    # Empty disables history digests.
+    history_digest_channel_ids: []
     # Optional instructions appended to automatically processed link messages.
     auto_link_prompt: ""
     # Optional fallback channel for messages without request metadata.

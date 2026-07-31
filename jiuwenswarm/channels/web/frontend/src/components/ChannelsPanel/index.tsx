@@ -167,6 +167,7 @@ type SlackConfig = {
   allow_from: string[];
   allowed_channel_ids: string[];
   auto_link_channel_ids: string[];
+  history_digest_channel_ids: string[];
   auto_link_prompt: string;
   default_channel_id: string;
   reply_in_thread: boolean;
@@ -181,6 +182,7 @@ type SlackDraft = {
   allow_from: string;
   allowed_channel_ids: string;
   auto_link_channel_ids: string;
+  history_digest_channel_ids: string;
   auto_link_prompt: string;
   default_channel_id: string;
   reply_in_thread: boolean;
@@ -299,6 +301,7 @@ const DEFAULT_SLACK_CONF: SlackConfig = {
   allow_from: [],
   allowed_channel_ids: [],
   auto_link_channel_ids: [],
+  history_digest_channel_ids: [],
   auto_link_prompt: '',
   default_channel_id: '',
   reply_in_thread: true,
@@ -748,6 +751,7 @@ function normalizeSlackConfig(input: unknown): SlackConfig {
     allow_from: normalizeList(data.allow_from),
     allowed_channel_ids: normalizeList(data.allowed_channel_ids),
     auto_link_channel_ids: normalizeList(data.auto_link_channel_ids),
+    history_digest_channel_ids: normalizeList(data.history_digest_channel_ids),
     auto_link_prompt: String(data.auto_link_prompt ?? '').trim(),
     default_channel_id: String(data.default_channel_id ?? '').trim(),
     reply_in_thread: data.reply_in_thread === undefined ? true : Boolean(data.reply_in_thread),
@@ -766,6 +770,7 @@ function draftFromSlackConfig(conf: SlackConfig): SlackDraft {
     allow_from: conf.allow_from.join('\n'),
     allowed_channel_ids: conf.allowed_channel_ids.join('\n'),
     auto_link_channel_ids: conf.auto_link_channel_ids.join('\n'),
+    history_digest_channel_ids: conf.history_digest_channel_ids.join('\n'),
     auto_link_prompt: conf.auto_link_prompt,
     default_channel_id: conf.default_channel_id,
     reply_in_thread: conf.reply_in_thread,
@@ -782,6 +787,7 @@ function buildSlackPayload(draft: SlackDraft): Record<string, unknown> {
     allow_from: normalizeAllowFromText(draft.allow_from),
     allowed_channel_ids: normalizeAllowFromText(draft.allowed_channel_ids),
     auto_link_channel_ids: normalizeAllowFromText(draft.auto_link_channel_ids),
+    history_digest_channel_ids: normalizeAllowFromText(draft.history_digest_channel_ids),
     auto_link_prompt: draft.auto_link_prompt.trim(),
     default_channel_id: draft.default_channel_id.trim(),
     reply_in_thread: draft.reply_in_thread,
@@ -1378,6 +1384,8 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
         normalizeAllowFromText(slackDraft.allowed_channel_ids).join('\n') ||
       normalizeAllowFromText(baseDraft.auto_link_channel_ids).join('\n') !==
         normalizeAllowFromText(slackDraft.auto_link_channel_ids).join('\n') ||
+      normalizeAllowFromText(baseDraft.history_digest_channel_ids).join('\n') !==
+        normalizeAllowFromText(slackDraft.history_digest_channel_ids).join('\n') ||
       baseDraft.auto_link_prompt !== slackDraft.auto_link_prompt ||
       baseDraft.default_channel_id !== slackDraft.default_channel_id ||
       baseDraft.reply_in_thread !== slackDraft.reply_in_thread ||
@@ -3248,6 +3256,20 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                     value={slackDraft.auto_link_channel_ids}
                                     onChange={(e) => handleSlackFieldChange('auto_link_channel_ids', e.target.value)}
                                     placeholder={t('channels.placeholders.slackAutoLinkChannelIds')}
+                                    rows={4}
+                                    className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                  />
+                                </td>
+                              </tr>
+                              <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">
+                                  history_digest_channel_ids
+                                </td>
+                                <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                  <textarea
+                                    value={slackDraft.history_digest_channel_ids}
+                                    onChange={(e) => handleSlackFieldChange('history_digest_channel_ids', e.target.value)}
+                                    placeholder={t('channels.placeholders.slackHistoryDigestChannelIds')}
                                     rows={4}
                                     className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
                                   />

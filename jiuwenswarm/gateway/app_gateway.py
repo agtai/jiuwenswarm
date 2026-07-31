@@ -2293,6 +2293,9 @@ async def _run(
                         allow_from=slack_conf.get("allow_from") or [],
                         allowed_channel_ids=slack_conf.get("allowed_channel_ids") or [],
                         auto_link_channel_ids=slack_conf.get("auto_link_channel_ids") or [],
+                        history_digest_channel_ids=(
+                            slack_conf.get("history_digest_channel_ids") or []
+                        ),
                         auto_link_prompt=str(
                             slack_conf.get("auto_link_prompt") or ""
                         ).strip(),

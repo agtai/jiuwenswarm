@@ -47,8 +47,8 @@ activity.
 7. Compare the exact 24-hour, 7-day, and 30-day windows. Weight maintainer
    involvement, code depth, core-module impact, discussion intensity,
    persistence, merge status, and user impact—not raw item count alone.
-8. Produce the report in the user's requested language with direct evidence
-   links.
+8. Produce the final report in English by default with direct evidence links.
+   Use another language only when the user explicitly requests it.
 
 ## Rules
 

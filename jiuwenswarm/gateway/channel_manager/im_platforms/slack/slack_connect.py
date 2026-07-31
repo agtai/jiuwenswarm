@@ -49,6 +49,7 @@ class SlackChannelConfig:
     allow_from: list[str] = field(default_factory=list)
     allowed_channel_ids: list[str] = field(default_factory=list)
     auto_link_channel_ids: list[str] = field(default_factory=list)
+    history_digest_channel_ids: list[str] = field(default_factory=list)
     auto_link_prompt: str = ""
     default_channel_id: str = ""
     reply_in_thread: bool = True
@@ -315,6 +316,10 @@ class SlackChannel(BaseChannel):
             "slack_user_id": user_id,
             "slack_message_ts": message_ts,
             "slack_thread_ts": reply_thread_ts,
+            "slack_history_digest_allowed": (
+                "*" in self.config.history_digest_channel_ids
+                or channel_id in self.config.history_digest_channel_ids
+            ),
         }
         if trigger == "auto_link":
             metadata["slack_trigger"] = "auto_link"
@@ -521,6 +526,9 @@ class SlackChannel(BaseChannel):
                 "default_channel_id": self.config.default_channel_id,
                 "allowed_channel_ids": list(self.config.allowed_channel_ids),
                 "auto_link_channel_ids": list(self.config.auto_link_channel_ids),
+                "history_digest_channel_ids": list(
+                    self.config.history_digest_channel_ids
+                ),
                 "auto_link_prompt": self.config.auto_link_prompt,
                 "reply_in_thread": self.config.reply_in_thread,
             },

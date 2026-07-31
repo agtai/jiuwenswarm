@@ -223,6 +223,7 @@ from jiuwenswarm.agents.harness.common.tools import (
     is_skill_retrieval_enabled,
     SymphonyToolkit,
 )
+from jiuwenswarm.agents.harness.common.tools.slack_history import SlackHistoryToolkit
 from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
     SkillRetrievalPromptRail,
 )
@@ -341,6 +342,22 @@ class _RuntimeCronContextTokens:
 def get_runtime_tool_session_id() -> str | None:
     """Session id bound for the current agent tool invocation (ContextVar)."""
     return _CRON_TOOL_SESSION_ID.get()
+
+
+def _filter_slack_history_request_metadata(
+    channel_id: str,
+    metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Return trusted Slack history metadata or fail closed."""
+    if str(channel_id or "").strip().lower() != "slack":
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+    slack_channel_id = str(metadata.get("slack_channel_id") or "").strip()
+    if not slack_channel_id or metadata.get("slack_history_digest_allowed") is not True:
+        return {}
+    return dict(metadata)
+
 
 logger = logging.getLogger(__name__)
 
@@ -889,6 +906,8 @@ class JiuWenSwarmDeepAdapter:
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
         self._send_file_toolkit: SendFileToolkit | None = None
+        self._slack_history_toolkit: SlackHistoryToolkit | None = None
+        self._slack_history_tools: list[Any] = []
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -5100,6 +5119,45 @@ class JiuWenSwarmDeepAdapter:
                     channel_id=channel_for_tool,
                     metadata=metadata_for_tool,
                 )
+
+        # Slack history is deliberately scoped to the current Slack request.
+        # The channel comes from trusted transport metadata rather than a model
+        # argument, so the tool cannot be used to read an arbitrary channel.
+        slack_history_enabled = bool(self._get_slack_history_request_metadata())
+        slack_history_tool_name = "get_current_slack_channel_history"
+
+        if not slack_history_enabled:
+            # Once registered, keep the ability stable across concurrent
+            # transports. The request-context provider fails closed for
+            # non-Slack and non-allowlisted requests at invocation time.
+            return
+
+        if self._slack_history_toolkit is None:
+            self._slack_history_toolkit = SlackHistoryToolkit(
+                metadata_provider=self._get_slack_history_request_metadata,
+            )
+            self._slack_history_tools = self._slack_history_toolkit.get_tools()
+            for history_tool in self._slack_history_tools:
+                Runner.resource_mgr.add_tool(history_tool)
+                self._instance.ability_manager.add(history_tool.card)
+        else:
+            # The toolkit reads request metadata from the session-scoped context
+            # proxy at invocation time. It therefore survives the DeepAgent
+            # worker boundary without accepting a model-supplied channel id.
+            registered_names = {
+                getattr(existing, "name", "")
+                for existing in (self._instance.ability_manager.list() or [])
+            }
+            if slack_history_tool_name not in registered_names:
+                for history_tool in self._slack_history_tools:
+                    self._instance.ability_manager.add(history_tool.card)
+
+    def _get_slack_history_request_metadata(self) -> dict[str, Any]:
+        """Read trusted Slack metadata across the DeepAgent worker boundary."""
+        return _filter_slack_history_request_metadata(
+            self._runtime_cron_tool_context.channel_id,
+            self._runtime_cron_tool_context.metadata,
+        )
 
     def _refresh_acp_runtime_tools(
         self,

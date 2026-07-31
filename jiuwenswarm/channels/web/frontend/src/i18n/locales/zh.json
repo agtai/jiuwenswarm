@@ -639,6 +639,7 @@
       "slackUserIds": "每行一个 Slack 用户 ID（留空允许所有用户）",
       "slackChannelIds": "每行一个 Slack 频道 ID（留空允许所有频道）",
       "slackAutoLinkChannelIds": "每行一个自动处理链接的 Slack 频道 ID（留空关闭）",
+      "slackHistoryDigestChannelIds": "每行一个允许使用历史摘要的 Slack 会话 ID；填写 * 允许所有可访问会话（留空关闭）",
       "slackAutoLinkPrompt": "可选：附加到自动处理链接消息后的任务说明",
       "slackAcknowledgementText": "Agent 开始处理前立即发送的确认消息",
       "allowFrom": "每行一个 chatid/userid（也支持逗号分隔）"

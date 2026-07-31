@@ -47,6 +47,7 @@ async def test_app_mention_creates_thread_scoped_message_and_deduplicates() -> N
             enabled=True,
             allow_from=["U1"],
             allowed_channel_ids=["C1"],
+            history_digest_channel_ids=["C1"],
             reply_in_thread=True,
         ),
         RobotMessageRouter(),
@@ -87,7 +88,44 @@ async def test_app_mention_creates_thread_scoped_message_and_deduplicates() -> N
         "slack_user_id": "U1",
         "slack_message_ts": "1710000000.000100",
         "slack_thread_ts": "1710000000.000100",
+        "slack_history_digest_allowed": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_history_digest_wildcard_allows_any_channel() -> None:
+    channel = SlackChannel(
+        SlackChannelConfig(
+            enabled=True,
+            allow_from=["U1"],
+            allowed_channel_ids=[],
+            history_digest_channel_ids=["*"],
+        ),
+        RobotMessageRouter(),
+    )
+    channel._running = True
+    received: list[Message] = []
+    channel.on_message(received.append)
+
+    await channel._handle_app_mention(
+        {
+            "type": "app_mention",
+            "user": "U1",
+            "channel": "C-ANY",
+            "channel_type": "channel",
+            "text": "<@U-BOT> summarize this channel",
+            "ts": "1710000000.000200",
+        },
+        {
+            "event_id": "EvWildcard",
+            "team_id": "T1",
+            "authorizations": [{"user_id": "U-BOT", "is_bot": True}],
+        },
+    )
+
+    assert len(received) == 1
+    assert received[0].metadata["slack_channel_id"] == "C-ANY"
+    assert received[0].metadata["slack_history_digest_allowed"] is True
 
 
 @pytest.mark.asyncio
@@ -119,6 +157,7 @@ async def test_direct_message_is_not_restricted_by_channel_allowlist() -> None:
     assert len(received) == 1
     assert received[0].session_id == "slack_T1_D1_U1"
     assert received[0].metadata["slack_thread_ts"] == ""
+    assert received[0].metadata["slack_history_digest_allowed"] is False
 
 
 @pytest.mark.asyncio

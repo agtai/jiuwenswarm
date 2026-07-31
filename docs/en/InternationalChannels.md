@@ -326,12 +326,15 @@ JiuwenSwarm connects to Slack through the asynchronous Slack Bolt Socket Mode ad
    - `chat:write`
    - `app_mentions:read`
    - `im:history`
-   - To process links automatically in selected channels, also add `channels:history`
+   - Add `channels:history` to process links automatically or summarize history in public channels
+   - Add `users:read` (recommended) to show member names instead of Slack user IDs in channel digests
+   - Add `groups:history` only if channel digests must also work in private channels
 5. Under **Event Subscriptions**, subscribe to these Bot Events:
    - `app_mention`
    - `message.im`
    - To process links automatically in selected channels, also subscribe to `message.channels`
-6. Install the app to the workspace and save the generated `xoxb-...` Bot Token.
+   - On-demand channel digests do not require an additional event subscription; `app_mention` triggers them
+6. Install the app to the workspace and save the generated `xoxb-...` Bot Token. Reinstall the app after adding or changing any OAuth scope.
 7. Add the bot to every Slack channel where it should respond.
 
 > Treat both `xoxb-...` and `xapp-...` tokens as secrets. Never commit them or print them in logs.
@@ -350,6 +353,7 @@ channels:
     allow_from: []
     allowed_channel_ids: []
     auto_link_channel_ids: []
+    history_digest_channel_ids: []  # Use ["*"] for all accessible conversations.
     auto_link_prompt: ""
     default_channel_id:
     reply_in_thread: true
@@ -365,6 +369,7 @@ channels:
 | `allow_from` | Allow-list of Slack user IDs; empty allows all users | `[]` |
 | `allowed_channel_ids` | Channel IDs allowed to mention the bot; empty allows all channels and does not restrict DMs | `[]` |
 | `auto_link_channel_ids` | Channel IDs where link messages trigger the bot without a mention; empty disables the feature | `[]` |
+| `history_digest_channel_ids` | Conversation IDs allowed to expose bulk history to the digest tool; `['*']` allows every conversation the bot can access, while empty disables channel digests | `[]` |
 | `auto_link_prompt` | Optional instructions appended to automatically processed link messages | empty |
 | `default_channel_id` | Fallback channel for outbound messages without request context | empty |
 | `reply_in_thread` | Reply in the thread containing the triggering channel message | `true` |
@@ -376,6 +381,21 @@ channels:
 
 - In a channel, send `@bot your message`. JiuwenSwarm processes it and replies in the message thread by default.
 - Send the bot a direct message without mentioning it.
+- Add the current conversation ID to `history_digest_channel_ids`, or configure `['*']` to opt in every Slack conversation the bot can access, then ask for a high-signal digest of the current channel and all of its thread replies, for example:
+
+  ```text
+  @JiuwenSwarm Summarize the decisions, technical findings, blockers, action items, and useful links from this channel over the past 7 days. Include all thread replies and cite the source messages.
+  ```
+
+  For all accessible history:
+
+  ```text
+  @JiuwenSwarm Review all accessible history in this channel, including all thread replies. Organize the high-signal information and distinguish facts, inferences, and recommendations.
+  ```
+
+  The bot always derives the current channel from the request and returns the digest in that request's thread. It never accepts a channel ID from the prompt. "All" means history still retained by Slack that the bot can access, subject to built-in message, API, size, and 90-second scan limits. The digest reports partial coverage when retention, permissions, limits, or API failures prevent a complete scan. The bot must be a member of the channel; private channels additionally require `groups:history`.
+
+  Channel history selected for the digest is sent to the configured model provider. Only add conversations whose members and data policies permit that processing. The explicit `['*']` wildcard opts in every conversation the bot can access; an empty `history_digest_channel_ids` list keeps bulk history access disabled.
 - Channels in `auto_link_channel_ids` automatically process member messages containing an HTTP/HTTPS link and reply in a thread; plain text is still ignored.
 - Set `auto_link_prompt` to add workflow-specific instructions; when empty, JiuwenSwarm forwards the original link message unchanged.
 - When `acknowledge_requests` is enabled, accepted mentions, direct messages, and automatic links receive an immediate confirmation before agent processing begins.
@@ -419,6 +439,14 @@ Slack user IDs and channel IDs are available from the member profile and channel
 - Confirm the app has `channels:history` and subscribes to `message.channels`.
 - Confirm the message is from a human, contains an HTTP/HTTPS link, and the sender passes `allow_from`.
 - Reinstall the app after changing scopes or event subscriptions.
+
+**A channel digest is empty, shows user IDs, or reports partial coverage**
+
+- Confirm the bot is a member of the channel and has `channels:history`; use `groups:history` for a private channel.
+- Confirm the current conversation ID is listed in `history_digest_channel_ids`, or use `['*']` to allow every conversation the bot can access; an empty list disables this capability.
+- Add the recommended `users:read` scope to resolve member names, then reinstall the app.
+- Slack retention settings and JiuwenSwarm safety limits can make an all-history result partial; check the coverage note in the digest.
+- A channel digest only reads the channel where the request was made. It does not use a channel ID supplied in the prompt.
 
 **A Slack cron job does not deliver its result**
 

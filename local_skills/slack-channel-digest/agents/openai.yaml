@@ -1,0 +1,4 @@
+interface:
+  display_name: "Slack Channel Digest"
+  short_description: "Summarize high-signal Slack channel history"
+  default_prompt: "Use $slack-channel-digest to review the last 7 days of this Slack channel, including all thread replies."
