@@ -65,7 +65,7 @@
 - 识别 final 会在固定静默后自动提交，当前没有“先确认/编辑识别文字再提交”的正式步骤；技术词误识别会直接影响 Agent 请求。
 - 前端能停止旧声音并隔离多类旧 UI 输出，但服务端 supplement ACK 早于 cancel/replacement 完成；已经发生的工具副作用没有生产级 generation fence。
 - Desktop/WebView2、Team、多语言、移动端、设备切换、热插拔、断线恢复和跨重启恢复尚未验证。
-- 没有完成稳定 `task_id`、多任务查询/取消、持久进度和恢复，因此不要展示通用语音后台任务控制。
+- V0 主展示不包含后台任务。Post-V0 已有一个默认关闭、单 Session 内存态的受限 AutoHarness 路径，但尚未做真实副作用 E2E；在 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 的独立受控验收通过前，不要展示，更不能称为通用语音 Task Control。
 
 ## 3. Demo 与最终版的区别
 
@@ -79,7 +79,7 @@
 | 回答朗读 | 浏览器 TTS，完整文本按句分片 | 服务端流式 TTS、音频分片、背压、播放确认和正式发音词典 |
 | 打断与历史 | 本地先静音，前端 epoch/owner/quarantine 防止主要路径串音 | 客户端与服务端共享 response ID、cancel ACK、generation fence 和 presented history；明确区分“只停声音、取消回答、取消当前工作、取消后台任务”，插话不误取消无关工作 |
 | Agent 工作 | 单 Agent Session，复用当前 Chat/Tool 链 | 非阻塞 Agent Bridge、结构化工作进度、慢工具与前台语音互不冻结 |
-| 后台任务 | 主 Demo 不包含 | P3α 先提供稳定 `task_id`、create/get/list/status/cancel/events 和 D0：语音/Session 断开后，只要应用与 Executor 仍存活，任务继续；进程重启后只协调并报告真实状态，不承诺续跑。完整 P3 再增加补充输入、修改、调优先级、暂停/恢复，以及按 Executor 能力提供 checkpoint 恢复或副作用协调；歧义和破坏性操作需要澄清/确认 |
+| 后台任务 | V0 主 Demo 不包含；Post-V0 可选切片固定 side-effecting AutoHarness、确认口令、真实 task card/target、稳定 command ID、同-key retry、strict exact-key reconciliation 和 owner+project scope；投影仍只在当前页面/Session，尚无持续 monitor | P3α 先提供幂等 create、稳定 `task_id`、get/list/status/cancel/events、每任务不可变上下文和 D0：语音/Session 断开后，只要应用与 Executor 仍存活，任务继续；进程重启后只协调并报告真实状态，不承诺续跑。完整 P3 再增加补充输入、修改、调优先级、暂停/恢复，以及按 Executor 能力提供 checkpoint 恢复或副作用协调；歧义和破坏性操作需要澄清/确认 |
 | 故障处理 | 可见错误、Retry、退出回文字聊天 | 自动重连、状态恢复、重复抑制、故障注入和量化服务指标 |
 
 当前 Demo 像一条已经真实跑通的单车道；最终版是在相同方向上增加多车道、护栏、监控、备用路线和全天候运行能力。Demo 验证“值得做、走得通、效果是否成立”，最终版解决“能否安全、稳定、普遍地使用”。
@@ -212,6 +212,8 @@ Turn 3 朗读完成并出现 Listening 后，立即点击退出 Live Voice。确
 4. 声音应立即停止，麦克风关闭，文字聊天仍可用。
 
 这只证明本地 stop/cleanup，不等于生产级语音插话。
+
+另一个独立 Post-V0 加分项是受限 Task Demo，但只有真实 AutoHarness E2E 已按运行手册通过、目标环境可丢弃或已备份、且观众已经看到常驻副作用披露时才允许追加。推荐最短流程是：先核对面板显示的绝对项目 target、来源 Session/Channel 和 fixed pipeline；再说不带“确认”的启动口令证明零请求确认边界，然后确认启动并展示真实 task ID，随后查询真实状态；取消会阻止后续执行但不能撤销已有代码修改。后端已有每任务进程内 context、per-path single-process 幂等 ledger 和 owner+project scope；Live Voice client 已为一次 committed mutation 固定 command ID，run 结果不明时先以同 key retry 和 strict exact-key list reconciliation 恢复唯一且 identity/target 全匹配的真实记录，无法证明时才保持 `mutation-unknown`。当前仍没有跨刷新持久 command journal、持续 task monitor、跨进程一致性/exactly-once 或重启后的 Agent context 恢复。因此不要在主演示仓库或无法打开后台任务列表核对的环境运行；刷新后立即到后台列表核对，切 Session/target 后不在新上下文重试未决命令，任何 identity 不明都不得由前端换新 key 盲重试。
 
 真正的 supplement 插话只在同一机器已经完成 10 次专项验收后展示。候选口令是：
 

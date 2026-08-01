@@ -153,6 +153,58 @@ npm run dev
 
 打开 `http://localhost:5173`。确认浏览器连接成功并在开发者工具 WebSocket 帧中看到 `connection.ack`。在 UI 中选择或创建指向当前仓库目录的 code project，进入 Agent 模式。
 
+V0 验收必须使用默认配置。启动前显式清除两个 Post-V0 开关，避免把增量行为误算进 V0 Gate：
+
+```powershell
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH -ErrorAction SilentlyContinue
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
+```
+
+恢复新开发后，单独验证稳定句预读时才在启动 Vite 的同一终端设置：
+
+```powershell
+$env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH = 'true'
+npm run dev
+```
+
+该开关只启用 chatStore 稳定句预读，不等于启用 token/audio streaming TTS。首次验证时关闭 cron、proactive response 和其他可能向同一 Session 注入 assistant 输出的来源；当前服务端事件没有 response/generation provenance，并发输出可能归错 Turn。若 processing 已停止、预读队列已经 drain 但权威 `chat.final` 一直缺失，当前实现等待 10 秒后废弃该 epoch 并显示可 Retry 错误；不得把 provisional 当作 final，也不得补播或重放未确认文本。开关开启时，speaking 可能与 Agent processing 重叠；打断样本必须按新 final 到达时的实际 processing 状态分类，不再预设 speaking 都是普通 `chat.send`。验证结束后清除该变量。
+
+### 7.1 受限 Task Demo：只在独立受控环境验证
+
+这个切片默认关闭，也不属于 V0 验收。先关闭稳定句开关，再单独启用：
+
+```powershell
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH -ErrorAction SilentlyContinue
+$env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO = 'true'
+npm run dev
+```
+
+**安全警告：这不是只读“查看仓库”。** 确认启动或替换会真实调用 AutoHarness `schedule.run`，固定使用有代码副作用的 `extended_evolve_pipeline`，可能生成或修改本地 Harness 代码包。取消只能阻止尚未发生的后续执行，不能撤销已有修改；Live Voice 的“打断并说话”或退出只停止本地语音反馈，不会取消 `schedule.run` 或已创建任务。只允许在单一 Session、可丢弃或已备份的目标环境验证，并先在页面常驻披露中向验收者说明这些边界。
+
+任务口令只接受 committed final；partial/interim 必须保持零请求。启动和替换继续要求显式“确认”，但为适配真实 ASR，目标前可使用 `：`、`:`、`，`、`,`、空格或口述“冒号”，固定命令末尾可带 `。！？!?`。推荐流程：
+
+| 语音 | 预期行为 |
+|---|---|
+| `启动后台演进任务，<目标>` | 只要求明确确认，零任务请求 |
+| `确认启动后台演进任务，<目标>` | 真实 `schedule.run`，页面显示来源返回的真实 task ID/状态 |
+| `检查后台任务进度` 或 `检查后台演进任务进度` | 对最后可见真实 task ID 调用 `schedule.status` |
+| `取消后台演进任务` | 只要求确认，零取消请求 |
+| `确认取消后台演进任务` | 对最后可见真实 task ID 调用 `schedule.cancel` |
+| `替换后台演进任务，<目标>` | 只要求确认，零任务请求 |
+| `确认替换后台演进任务，<目标>` | 先确认取消 A，再创建不同真实 ID 的 successor B |
+
+必须先进入已经保存的真实 Session；`session_id=new` 时不会发任务请求。capture 期间若切换 Session，本次口令也必须以零请求失效。不要使用过于通用的“检查进度”，它会继续走普通 Chat/Agent，不属于任务口令。
+
+如果 `schedule.run` 超时、断线、payload 无效或缺少 task ID，前端会用同一稳定 command ID 查询服务端 scoped exact-key list，并只接受 namespace、key、query、pipeline 和冻结 target 全部严格匹配且无业务错误的记录；对账不能证明结果时才进入 `mutation-unknown`，且 status/cancel 不会退回操作旧 predecessor。后端对 list/status/cancel/logs/delete 强制校验创建 owner 与项目 target，任务也冻结进程内 Agent context 并返回项目/来源 provenance。command journal、最后可见任务和 latch 仍只在当前页面/Session 内存中，刷新后的自动恢复尚未实现。执行前必须核对界面显示的绝对项目 target；真实有副作用 E2E 仍应在单用户、可丢弃或已备份环境进行，因为跨进程一致性、exactly-once、外部副作用 reconciliation 和重启后的 Agent context 恢复尚未完成。
+
+验证结束后执行：
+
+```powershell
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
+```
+
+真实任务测试必须保存脱敏的 task ID、原始状态、请求顺序和目标环境说明；不能用 UI 反馈代替后台事实。
+
 ## 8. 先做文字工具冒烟，再做语音
 
 先用文字发送一个强制使用真实终端工具、结果可核对的请求：
@@ -270,4 +322,4 @@ ASR 误识别样本：
 - 退出 Live Voice，确认麦克风和声音均停止。
 - 停止 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
-- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步，提交并推送；不要只在对话里报告结果。
+- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步。Post-V0 正常提交并推送；V0 验收必须在 `2c700934...` 的独立 checkout/worktree 中完成，验收证据和后续开发事实分别提交，不得混为同一放行结论。

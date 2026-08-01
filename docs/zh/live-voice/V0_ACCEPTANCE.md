@@ -51,25 +51,34 @@ V0 验证的是：这条真实链路能否在受控环境中重复成立，用�
 
 ## 4. Gate 0：候选版本与环境身份
 
+D-030 已结束 D-022 的临时 dirty/stash 窗口。运行本 Gate 时，不要回退或 stash 当前 Post-V0 开发分支；应从 `2c700934aa0024a7ab229644bf15934e9e8170e7` 新建独立 detached checkout/worktree，确认该验收目录工作区干净，并清除 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 与 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO`。只有这个独立目录才是本文要验收的 V0 Candidate；当前累计分支上的任务、稳定句预读和后续 foundation 提交不得混入 V0 证据。
+
+验收流程以**累计开发分支上的最新版本文**为准；`2c700934` detached 目录中的同名文件只是 Candidate 当时固化的历史副本，不负责描述 D-030 之后的验收隔离方式。所有构建、服务启动和真机命令都在 detached V0 目录执行，验收证据则回写累计开发分支。
+
 在启动服务前记录：
 
 ```powershell
 git status --short --branch
+git status --porcelain
 git rev-parse HEAD
-git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
 git branch --show-current
 git rev-parse --short=8 HEAD
 git log -1 --pretty=format:%s
+git fetch agtai
+git merge-base --is-ancestor 2c700934aa0024a7ab229644bf15934e9e8170e7 agtai/hx/0731_live_voice_ux
+$LASTEXITCODE
 ```
 
 通过条件：
 
-- 当前分支是 `hx/0731_live_voice_ux`；
-- 工作区干净；
-- 本地与 `agtai/hx/0731_live_voice_ux` 的差异为 `0 0`；
+- `HEAD` 精确等于 `2c700934aa0024a7ab229644bf15934e9e8170e7`；
+- `git branch --show-current` 输出为空，确认这是 detached V0 验收目录，而不是累计开发分支；
+- `git status --porcelain` 输出为空；
+- `git merge-base --is-ancestor ...` 返回 0，确认共享累计分支仍包含该不可变 Candidate；远端分支可以已经包含后续 Post-V0 提交，不要求与 V0 `HEAD` 的差异为 `0 0`；
 - 全部结果记录在同一个 candidate SHA 下；
 - Windows、Chrome、Node、Python、模型标签、`zh-CN`、麦克风、耳机和网络标签已经记录；
 - 单用户、单 Chrome 标签页、Agent 模式，没有待确认问题、演进流程或无关后台 Agent 任务；
+- 两个 Post-V0 feature flag 均未设置；
 - 模型配置只验证存在和可用，不把 API key、完整 API base 或用户配置写入证据。
 
 新机器必须从 `uv.lock` 和 `package-lock.json` 重建依赖，禁止复制其他机器的 `.venv` 或 `node_modules`。详细命令和私有配置边界见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
@@ -283,26 +292,35 @@ git status --porcelain
 uv sync --python 3.12.9 --frozen
 Set-Location jiuwenswarm\channels\web\frontend
 npm ci
+Set-Location ..\..\..\..
+
+$expectedV0Sha = '2c700934aa0024a7ab229644bf15934e9e8170e7'
+$v0AcceptanceDir = Join-Path (Split-Path -Parent (Get-Location)) 'live-voice-v0-acceptance'
+git worktree add --detach $v0AcceptanceDir $expectedV0Sha
+git -C $v0AcceptanceDir rev-parse HEAD
+git -C $v0AcceptanceDir status --porcelain
+git merge-base --is-ancestor $expectedV0Sha agtai/hx/0731_live_voice_ux
+$LASTEXITCODE
 ```
 
-预期：本地与远端差异 `0 0`、工作区为空、依赖只从 lockfile 重建。然后运行 Gate 1 自动化。
+预期：累计开发分支与远端差异 `0 0`、工作区为空，可以仅依赖 Git 和 lockfile 恢复最新代码与项目事实；独立 V0 目录的 `HEAD` 精确等于 `2c700934...`、工作区为空，并且该 SHA 仍是累计远端的祖先。累计分支的 Foundation 自动化在累计分支目录执行；本文 Gate 1 以及后续 V0 服务和真机验收只在 detached V0 目录按其 lockfile 独立重建依赖后执行，不能复制累计目录的 `.venv` 或 `node_modules`。
 
 ### 10.2 无旧对话的 Codex 理解测试
 
 打开全新的 Codex session，只提供刚 pull 的仓库，不提供旧聊天，发送：
 
 ```text
-请先读取根 AGENTS.md，以及 docs/zh/live-voice/README.md、HANDOFF.md、STATUS.md、TWO_WEEK_DEMO.md、V0_ACCEPTANCE.md、DECISIONS.md。在不启动服务和不修改文件的情况下，说明：当前版本阶段；已经真实证明和只通过自动化的内容；V0 放行条件；三类打断的真实路由；下一项开发任务；禁止提前做的内容；哪些机器私有条件无法从 Git 恢复。
+请先读取根 AGENTS.md，并按其中顺序阅读 docs/zh/live-voice/README.md、HANDOFF.md、STATUS.md、TWO_WEEK_DEMO.md、POST_V0_DELIVERY_ROADMAP.md、POST_V0_STASH_HANDOFF.md、V0_ACCEPTANCE.md、DECISIONS.md。在不启动服务和不修改文件的情况下，说明：当前累计分支与不可变 V0 Candidate 的关系；已经真实证明和只通过自动化的内容；V0 放行条件；三类打断的真实路由；下一项开发任务；禁止提前做的内容；哪些机器私有条件无法从 Git 恢复。
 ```
 
 正确回答至少必须包含：
 
-- 当前是已提交、已推送的 V0 Candidate，不是 V0 Released；
-- 真实主链只在固定环境贯通一次；自动化是 47/47 和 22/22；
+- 共享累计分支同时保存不可变的 `2c700934` V0 Candidate 和后续已提交、已推送的 Post-V0 Task Foundation；V0 仍不是 Released；
+- 真实主链只在固定环境贯通一次；47/47 和 22/22 是 V0 Candidate 的历史自动化，最新 Foundation 的自动化必须与 `STATUS.md` / `HANDOFF.md` 分开报告；
 - 尚缺连续 10 Turn、分阶段 10 次打断、soak 和主演示连续 3 次；
 - processing 中 final 才走 supplement；只剩 TTS 时先停声再走普通 `chat.send`；
 - Web Speech 技术词误识别，以及 supplement ACK 不等于旧 Agent/工具已确定停止；
-- 下一步先执行本文验收，不是 Team、后台任务、全双工或新架构；
+- 当前 V0 验收工作只在 detached `2c700934` 目录继续执行，不在该目录开发新功能；累计开发分支的下一窄切片是 D-031 poll-backed 非阻塞任务监控，不扩成 Team、真全双工、完整 TaskEvent/P3 或生产架构；
 - key、完整 API base、浏览器权限、默认设备和网络状态不能从 Git 恢复。
 
 ### 10.3 私有配置边界

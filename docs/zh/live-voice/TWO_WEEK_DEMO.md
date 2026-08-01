@@ -68,18 +68,21 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 
 ### 2.5 可选：语音控制一个真实后台任务
 
-只有核心语音闭环在第 7 天前稳定，才增加下面的受限场景：
+该能力不属于 V0 Released Gate；Post-V0 Task Foundation 已实现一个默认关闭的受限切片，并已完成 foundation review 与统一复跑，仍待受控真人 E2E。V0 稍后从 `2c700934` 的独立 checkout/worktree 验收，不再要求先 stash/freeze 才能继续本切片。它固定使用真实、有代码副作用的 AutoHarness `extended_evolve_pipeline`，不是只读“检查仓库”。
 
-```text
-“放到后台：检查当前仓库”
-→ 调用现有 schedule.run
-→ 得到真实 task_id
-→ 用户继续语音对话
-→ “检查后台任务进度”调用 schedule.status
-→ “取消后台任务”调用 schedule.cancel
-```
+| 口令 | 当前行为 |
+|---|---|
+| `启动后台演进任务，<目标>` | 只要求确认，零任务请求 |
+| `确认启动后台演进任务，<目标>` | 调用真实 `schedule.run`，保存来源返回的 task ID/状态 |
+| `检查后台任务进度` / `检查后台演进任务进度` | 对最后可见真实 ID 调用 `schedule.status` |
+| `取消后台演进任务` | 只要求确认，零取消请求 |
+| `确认取消后台演进任务` | 对最后可见真实 ID 调用 `schedule.cancel` |
+| `替换后台演进任务，<目标>` | 只要求确认，零任务请求 |
+| `确认替换后台演进任务，<目标>` | 先确认取消 A，再创建不同真实 ID 的 successor B |
 
-这里可以把口令和“最近一个任务”写死，但任务 ID、执行状态和取消结果必须来自真实接口。它只验证语音控制后台工作的产品感觉，不代表通用 Task Control 已经完成。
+为适配真实 ASR，启动/替换目标前允许 `：`、`:`、`，`、`,`、空格或口述“冒号”，固定命令末尾允许 `。！？!?`；高特异前缀和显式“确认”仍不可省略。普通“检查进度”不属于任务命令，会继续交给 Agent。
+
+页面必须在执行前常驻显示 executor、pipeline、代码副作用、取消边界和真实 execution target/provenance。task ID、执行状态和取消结果来自真实接口；每次 committed mutation 固定 command ID，run 结果不明时只使用同 key 重试和严格 exact-key list 对账，允许 pending 在往返期间自然漂移到后续真实状态。无法唯一证明 identity/target 时继续 fail closed。服务端对 list/status/cancel/logs/delete 强制 owner + project scope，TaskStore 幂等只覆盖同一进程、同一 JSON store 路径；真实任务卡和未决 mutation 仍是当前页面/Session 投影。它只验证语音控制后台工作的产品感觉，不代表持久 command journal、持续异步 monitor、通用 Task Control、跨进程 exactly-once、D1/D2 或重启恢复已经完成。
 
 ## 3. Demo 版与完整版的区别
 
@@ -94,7 +97,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 | 旧回答隔离 | 前端递增 epoch，清空旧播放队列 | 客户端与服务端共同使用 response ID、fence 和 ACK | 新旧回答不会在主要演示路径中串音 |
 | 音频传输 | 浏览器本地 STT/TTS；Agent 仍走现有文字 WebSocket | 独立实时音频链路、二进制帧、背压和重连 | 产品体验，而不是媒体基础设施能力 |
 | 设备和平台 | 固定 Windows、Chrome/Edge、中文、默认设备和耳机 | 多设备、多平台、多语言、设备切换 | 固定目标环境能否成立 |
-| 后台任务 | 可选，只支持一个最近任务和固定口令 | 多任务、稳定 ID、持久状态、恢复、审批和精确寻址 | 语音控制后台工作的价值，不验证完整耐久性 |
+| 后台任务 | Post-V0 默认关闭；固定副作用 pipeline、确认口令、真实 target/provenance、每任务进程内 context、per-path single-process JSON 幂等、服务端 scope、稳定 command ID、严格 exact-key 对账和真实任务卡 | 持久 command journal、持续事件回流、多任务、跨进程 exactly-once、D1/D2、可恢复执行上下文、审批和精确寻址 | 语音控制后台工作的价值，并验证 identity/target/scope/reconciliation 地基；不验证完整耐久性或重启恢复 |
 | 异常恢复 | 明确报错并回退文字聊天 | 自动重连、状态恢复、重复抑制、跨重启恢复 | 降级是否可理解，不验证生产可靠性 |
 | 质量验证 | 固定机器的短时脚本和 20 分钟稳定性 | 大样本 p95、长时 soak、故障注入和多环境矩阵 | 是否值得进入下一阶段工程化 |
 
@@ -231,12 +234,13 @@ speaking + 用户重新开麦
 - 权限、识别或播放失败时显示原因并退回文字聊天。
 - 关闭功能开关后，原文字聊天无回归。
 
-### 7.2 有余量才做
+### 7.2 Post-V0 当前检查点
 
-- 根据标点分句，在整段回答完成前开始朗读。
-- 戴耳机时持续监听，实现自然开口打断。
-- 单一 `schedule.run/status/cancel` 后台任务场景。
-- 任务完成时进行一次简短语音通知。
+- 稳定句预读已在独立 feature flag 下实现：只预读有 lookahead 的稳定完整句，并与权威 `chat.final` 对账；仍待真人听感和并发源隔离验收。
+- 受限 `schedule.run/status/cancel` 后台任务路径已在独立 feature flag 下实现；仍待受控副作用环境的真实 E2E。
+- Task Foundation 已完成审阅和最终统一验证，并由后端提交 `3da101cf`、前端提交 `42e76d30` 落地：服务端 owner + project scope、per-path single-process JSON 幂等、前端 stable command ID、strict exact-key reconciliation、pending drift 安全和真实 task card 均已补齐；最终确认 Python **226/226**、前端 **155/155**、相关回归 **24/24**、`tsc --noEmit` 与 Vite **4494 modules**。代码与本文档已纳入本批 Git 交付，跨机器从共享分支恢复；下一切片为 D-031。
+- 两者默认关闭，不能计入 `2c700934` 的 V0 Gate；不同时开启做首轮验收。
+- 戴耳机持续自然开口打断、poll-backed 任务异步监控和 TaskEvent 主动通知仍未实现；下一窄切片按 D-031 先完成轮询回流，本轮到此停止。
 
 ### 7.3 本轮明确不做
 
@@ -263,12 +267,17 @@ speaking + 用户重新开麦
 | 固定静默窗口：初始 8 秒、有结果后 2.2 秒 | final 后真实调用 Agent；Chrome 实例早退时在同一 capture 内续启并合并尾段 | 自然语义结束判断、跨 Provider 一致性、技术词准确率 | VAD/EOT/Interaction Engine 与正式 Streaming STT；Web Speech 不稳时按闸门切单一 Provider |
 | 浏览器 STT/TTS | 真实语音和真实回答；2026-08-01 已在固定 Chrome/Jabra 环境贯通一次 | 服务端流式媒体及 Provider 可替换性 | Speech Port + Realtime Media |
 | 完整消息后分片 TTS | 完整真实回答先清洗，再以约 220–300 字按句末优先 FIFO 朗读，不受普通 TTS 500 字默认截断 | token/audio 级实时性、服务端背压和播放确认 | streaming TTS、统一播放队列与 presented history |
+| feature flag 下的稳定句预读 | 只观察已进入 chatStore 的单一追加式 assistant stream；有下一句 lookahead 后提前朗读完整句，final 只补未播 suffix；processing 停止后若权威 final 缺失，队列 drain 再等 10 秒即报错并允许 Retry，不把 provisional 当 final | token/audio streaming、播放确认；stream rewrite 后只能停声并以页面文字为准；缺少服务端 generation provenance | P2 response/generation fence + streaming TTS + presented history |
 | 技术标识符只在朗读副本中可听化 | 页面保留 Agent 原文；路径、分支、斜杠、下划线、缩写和数字可实际听到 | 通用发音词典、SSML、多语言发音质量 | 正式 TTS Provider 的 SSML/lexicon 与按语言归一化 |
 | 重新开麦即打断 | 始终真实停止本地声音；processing 中的 final 走真实 supplement，只剩 TTS 时走普通下一 Turn | 完全免手操作、误打断恢复，以及服务端 stop-speaking/cancel-response/cancel-work 的精确区分 | 持续采集、AEC、false-barge-in recovery 与统一 response lifecycle |
 | 前端 `responseEpoch` + 进程内 TTS owner/revision | 演示路径中旧 FIFO、迟到回调、旧服务端 TTS 响应和历史消息手动朗读不会与 Live Voice 双播 | 跨 tab、跨端、断线和服务端乱序一致性 | response ID、generation fence、统一 TTS ownership、ACK |
 | supplement ACK 前前端 quarantine 旧输出 | 当前有序 WebSocket 路径中，旧 delta/final/reasoning/media/tool_call/tool_update 不进入消息或朗读，并暂存旧流的 `processing=false` | ACK 实际早于 AgentServer cancel/replacement 完成；`chat.tool_result`、真实副作用、ACK 丢失、断线重放和多端并发无法 fence | 服务端分配 response/generation ID，cancel/replacement 与 ACK 定义明确顺序，客户端与服务端共同执行可恢复 fence |
-| 一个 `lastTaskId` | 指定任务的真实状态和取消 | 多任务消歧和通用控制 | Task Control Core |
-| 固定任务口令 | 真实任务接口 | 开放式任务意图理解 | Voice–Task Bridge 与确认策略 |
+| 当前页面/Session 的真实 task card projection | 显示 task ID、command ID、原始状态、恢复来源、target/provenance 和冲突；capture 切 Session 时零请求 fence | 刷新后持续恢复、多个任务、多端投影与主动事件回流 | Task Control Core 的 list/get/events + 持久投影、monitor 与 reconciliation |
+| 高特异固定任务口令 | committed final 后才解析；支持受控 ASR 分隔符/句末标点；启动、替换、取消必须显式确认；普通语音不拦截 | 开放式任务意图理解、歧义消解和策略化确认 | Voice–Task Bridge 与确认策略 |
+| 受限 AutoHarness 后台任务 adapter | 明确选择 side-effecting `extended_evolve_pipeline` 时，可真实生成/修改本地 Harness package 并查询/取消同一 `task_id`；当前 chat 的可信绝对 project target、来源和每任务进程内 Agent/context 已固定并显示 | 通用只读任务、完整 P3α；context 不能跨重启恢复，尚无完整 model/provider/config/permission 快照和生产授权 | 独立 Task Control Core + 通用 D0 Executor + 可持久恢复的每任务执行上下文；Demo 触发前必须常驻披露副作用并确认 |
+| A→B 使用 cancel + successor create | A 的取消和 B 的创建都是真实命令，两个 task ID 和继任关系可见 | 在同一运行任务上原地 update/provide-input | 完整 P3 update/provide-input、checkpoint 和 reconciliation |
+| mutation 内稳定 command ID + exact-key reconciliation | run 超时/断线/无效 payload 时先 scoped exact-key list，必要时只用同 key 重放；只接受唯一且 identity/target 全匹配的真实记录，pending drift 不丢真值；否则继续 `mutation-unknown` | command journal、task card 和未决 mutation 不跨刷新；没有持续 monitor；后端只保证 per-path single-process JSON 幂等 | 持久 command journal、TaskEvent subscription、跨进程唯一约束与可恢复 task projection |
+| schedule 单任务取消/删除串行化 | 单进程中快速终态、并发 cancel/cancel、cancel/delete、删除前 claim fence 和 history 幂等按真实状态收敛 | 多进程 CAS、原子 claim；JSON store 在 shutdown/二次取消下仍可能迟到覆盖 | 正式 Task Control event store、条件更新、reconciliation 和故障注入 |
 
 原则：可以写死环境和选择，不能写死 Agent 的回答、工具结果或成功状态。
 
@@ -372,12 +381,12 @@ speaking + 用户重新开麦
 | 版本 | 对上一版的主要增量 | 到达状态 |
 |---|---|---|
 | V0 | 本文的真实 Speech → Agent → Tool → Speech 核心旅程 | Vertical Slice Candidate；本文 Gate 通过后 Released/冻结 |
-| V1 / P1 | Conversation Runtime、response/generation ownership、取消与 presented history 基础 | Product Alpha |
-| V2 / P2 | 正式 Speech Port、实时媒体、流式 STT/TTS、背压、重连、自然插话/AEC | Realtime Alpha；最大的可感知实时语音跃迁 |
-| V3α / P3α | 最小 Task Control：create/get/list/status/cancel/events 与 D0 | Task Alpha；不宣称能在运行中把任务 A 改为 B |
+| V1 Foundation Alpha | P1 Speech Port + P2 最小 response/generation ownership、取消与 presented history 基础 | 正式接口和一致性地基 |
+| V2 Realtime Alpha | P2 Conversation Runtime、Realtime Media、流式 STT/TTS、背压、重连、自然插话/AEC | 最大的可感知实时语音跃迁 |
+| V3α Task Alpha | P3α 最小 Task Control：create/get/list/status/cancel/events 与 D0 | 不宣称能在运行中把任务 A 改为 B |
 | V3 | 完整 P1 + P2 + P3，包括 update/provide-input、恢复和副作用协调 | Full Capability Beta，极大接近正式能力 |
 | RC / Production | 安全、可靠性、兼容矩阵、故障注入、可观测、运维与发布闸门 | 生产放行 |
 
 共享事件契约、ownership 和安全边界冻结后，P1/P2/P3 的部分实现可以并行，以缩短总时间；版本验收仍按能力依赖累计。V3 不是自动等于生产版，仍必须经过 RC hardening。
 
-两周 V0 的任务是回答“这个体验值不值得继续做、最痛的问题在哪里”，不是提前替完整版回答所有工程问题。
+V0 的任务仍是回答“核心体验值不值得继续做、最痛的问题在哪里”。V0 Candidate 之后新增的两周最大能力目标见 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：覆盖所有能力类别，但不伪装已经回答全部生产工程问题。

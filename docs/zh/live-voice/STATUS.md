@@ -4,13 +4,15 @@
 - 工作分支：`hx/0731_live_voice_ux`
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 建立方案时的代码基线：`7b69fdeb`
-- V0 核心实现提交：`346f802a`；本次路线/验收文档更新前的已推送快照：`21139d84fab3be88bbb89f7bfa25df6913b193b5`
-- 当前里程碑：两周 V0 Vertical Slice Candidate
+- V0 核心实现提交：`346f802a`；当前已推送 V0 Candidate 恢复点：`2c700934aa0024a7ab229644bf15934e9e8170e7`
+- 当前里程碑：不可变 V0 Vertical Slice Candidate + Post-V0 Task Foundation 收尾
 - 实现状态：真实“麦克风 → Agent → Terminal Tool → 完整回答 → 浏览器 TTS → 自动回听”主链已在固定 Windows/Chrome 环境成功跑通一次；[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 已定义完整 Gate，但稳定性、分阶段打断和跨环境放行尚未执行完
 
 跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动和固定环境按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行；V0 是否放行以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准。
 
-当前量化判断：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。提升来自真实麦克风、真实 Agent/Tool、完整 TTS 和自动回听首次贯通，以及 47 项 Live Voice 自动化全部通过；尚未完成连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示，因此不能称为 Demo 已放行。
+当前开发遵循 D-030 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`2c700934aa0024a7ab229644bf15934e9e8170e7` 固定为未放行 V0 Candidate；stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份。Post-V0 foundation 恢复正常的 review → commit → push 流程；稍后从 `2c700934` 的独立 checkout/worktree 执行 V0 Gate，不再反复 stash 当前开发分支。
+
+对 **`2c700934` V0 Candidate baseline** 的量化判断仍是：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。这些数字来自 V0 的真实麦克风/Agent/Tool/TTS 首次贯通和当时的 47 项 Live Voice 自动化，不包含后续 Post-V0 foundation。连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示尚未完成，因此 V0 仍不能称为已放行；Post-V0 的完成度也不能用 V0 的百分比替代。
 
 ## 当前结论
 
@@ -18,7 +20,7 @@
 
 这次成功证明了受控 Demo 的主链和感知效果，但只是一次主链证据，不等于稳定性放行。之后又成功进入两轮回听，说明循环可以继续；同时 Web Speech 把 `git` 识别为“地图”或“史记”，暴露出中文技术词准确率风险。真实 supplement 打断、speaking 本地停声、工具副作用隔离和长时运行仍需专项验证。
 
-已接受新的累计路线：不另建覆盖全部功能的模拟 UX 原型；V0 之后依次推进 V1/P1 Product Alpha、V2/P2 Realtime Alpha、V3α/P3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening。各版保留前版能力并用正式实现替换 shortcut；共享契约冻结后可部分并行。详细见 `DECISIONS.md` 的 D-018。
+已接受新的累计路线：不另建覆盖全部功能的模拟 UX 原型；Post-V0 两周让 P1/P2/P3、Context、Progress、Failure/Degradation、Observability 等能力类别都有真实纵向路径或明确标注的替代。版本命名修正为 V1 Foundation Alpha、V2 Realtime Alpha、V3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening。详细见 `DECISIONS.md` 的 D-018、D-020 和 D-021。
 
 ## 本轮实现与修复
 
@@ -45,9 +47,26 @@
 
 这些仍是 Demo 级本地防线。Gateway 的 supplement ACK 目前早于 AgentServer cancel 和 replacement 入队完成，真实工具副作用也没有 generation fence；前端隔离不能证明旧副作用已取消。
 
+### 当前 Post-V0 foundation
+
+- 新增最小 Live Voice contract/conformance schema，自动拒绝非法 identity、cancel scope、未 committed 的副作用意图、无来源进度和缺少 terminal outcome 的事件；它是后续 P1/P2/P3 共用测试地基，不代表正式协议已经全部接线。
+- WebChannel 对全部 schedule/issue 方法采用单一 AgentServer 转发所有权，不再由本地 handler 抢先返回 `unknown method`；AutoHarness 的 run/cancel/delete 状态和同任务竞态也按真实 store 状态收敛。
+- 新增保守稳定句预读：只消费 chatStore 中唯一、追加式的 assistant stream，以权威 `chat.final` 标记做 final suffix 对账。`VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 只有精确设置为 `true` 才启用，默认关闭，因而 Post-V0 代码存在时也不会静默改变 V0 默认行为。
+- processing 已停止、临时朗读已 drain、同 epoch 权威 final 仍缺失时，稳定句路径只启动一次 10 秒 grace period；到期废弃该 epoch 并显示 Retry，不把 provisional 当 final、不补造或重播文本。final/mismatch、processing 恢复、capture/Session/退出生命周期都会隔离旧 timer。
+- 新增受限 Voice–Task Bridge、Web request client 和真实任务卡。`VITE_FEATURE_LIVE_VOICE_TASK_DEMO` 默认关闭；开启后，面板会在用户说任何任务口令前常驻披露 AutoHarness、固定 `extended_evolve_pipeline`、代码副作用和取消边界，并显示真实 task ID、command ID、状态、恢复来源、target/provenance 和冲突信息。
+- 任务只接受 committed final 的受控中文语法；启动、取消和替换必须显式确认。启动/替换目标允许 `：`、`:`、`，`、`,`、空格或口述“冒号”作为分隔符，并容忍句末标点。普通语音不被拦截，继续进入真实 Chat/Agent。
+- 任务 capture 记录开始时的 session；final 到达前若 session 已切换，本次副作用命令被拒绝。`new` 或空 session 也不发任务请求。界面只展示真实 `task_id`、后端原始状态和来源，不生成假状态。
+- 每次 committed create/replace mutation 只生成一个稳定 command ID；首次 `schedule.run` 结果不明时先按 owner/namespace/exact key 执行严格 `schedule.list` 对账，必要时只用**同一个 key**重放。只有 task ID、query、pipeline、namespace、key 和 execution target 全部一致且结果唯一时才恢复真实任务；冲突、多个结果或仍不可证明时继续 fail closed，不会用新 key 盲目创建。
+- exact-key 对账不假设任务仍停在 `pending`：请求往返期间即使后端已进入 `running/success/failed/cancelled`，前端仍保留并显示该真实状态；这解决 pending drift，不把旧 pending 快照覆盖后端真值。
+- 当前 command ID 只保证同一次 Bridge mutation 及其同-key retry/reconciliation 稳定，不是跨刷新持久 command journal。`lastVisibleTask`、未决 mutation 和任务卡投影仍是当前页面/Session 内存；刷新、切 Session 后还没有持续 monitor 或通用多任务恢复。
+- schedule 执行已经改为每任务固定独立的进程内 Agent/context，不再在执行时借用 singleton 可变 `_agent`；并发 Session 分离，周期任务保留自己的 context，一次性终态、取消、删除和 service stop 会释放。进程重启后缺少旧 context 的任务会诚实失败，不借用新 Agent。
+- 任务持久化并返回 `execution_target`：`project_dir`、`project_id`、`origin_session_id`、`origin_channel_id`。前端只接受当前 persisted Session 对应的可信绝对项目路径；capture 期间 session/target/bridge 任一变化都会零请求失效，UI 显示真实 target/provenance，遗留字段显示 unknown。
+- 后端 `schedule.run` 已支持由服务端派生 owner scope 约束的 `origin_namespace` + `idempotency_key`。同一进程内、同一 JSON store 路径的 TaskStore 实例共享锁与持久 `create_commands` ledger/intent fingerprint：同意图重放返回同一 ID 且只触发一次，冲突返回 `IDEMPOTENCY_CONFLICT`，删除保留 tombstone，JSON reload 后仍可恢复。这是 **per-path single-process** 保证，不是跨进程事务或 exactly-once。
+- `schedule.list/status/cancel/logs/delete` 均由服务端从可信 request 派生 owner scope 和 project execution target 后校验；外部请求缺失、无效或不匹配时 fail closed，不能靠客户端伪造 scope 读取、取消或删除另一来源任务。显式内部兼容路径不等于对外放宽授权。
+
 ## 验证记录
 
-### 自动化和静态检查
+### `2c700934` V0 baseline 自动化
 
 | 日期 | 验证 | 结果 |
 |---|---|---|
@@ -56,6 +75,21 @@
 | 2026-08-01 | 全前端 TypeScript | `tsc --noEmit` 通过 |
 | 2026-08-01 | Vite production build | 通过，**4490 modules** |
 | 2026-08-01 | Python 与工作树检查 | `ruff`、`git diff --check` 通过 |
+
+上表是稍后从独立 checkout/worktree 验收的 V0 baseline 历史结果，不能冒充当前 Post-V0 foundation 的验证结果。
+
+### 当前 Post-V0 foundation 自动化和构建
+
+| 验证 | 本轮最终实跑结果 |
+|---|---|
+| Live Voice 前端精确测试 | **155/155 通过**：覆盖 V0 core/lifecycle/TTS/gate/quarantine、streaming speech、task bridge/client/adapter 与 foundation reconciliation |
+| chatStore marker 与相关前端回归 | **24/24 通过**：authoritative-final marker 3、historical settle 6、stream delta 7、session creation 8 |
+| 全前端 TypeScript | `tsc --noEmit` 通过 |
+| Vite production build | 通过，**4494 modules transformed**；仅有 caniuse 数据过期和大 chunk 警告 |
+| Python 统一精确回归 | **226/226 通过**：contract、schedule TaskStore/service、AgentServer request、Web handler |
+| 工作树检查 | foundation 合并点的 `git diff --check` 已通过；精确历史与基线 lint 说明见 stash 交接单 |
+
+以上 **226/226、155/155、24/24、TypeScript 和 4494 modules** 是 foundation review 修复合入后的最终统一结果，不是子任务数字相加。后端 `3da101cf`、前端 `42e76d30` 已落地；精确历史和边界见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。
 
 ### 固定环境真实 E2E
 
@@ -77,15 +111,20 @@
 - Web Speech 对中文句子中的英文技术词准确率不稳定，需要继续真机测试口令、说法和必要的 Provider fallback。
 - Desktop/WebView2、Team、多语言、全双工/AEC、断线恢复和服务端 streaming TTS 未验证，也不属于本轮已经完成的能力。
 - 当前固定演示环境可用不等于跨环境兼容；模型、Chrome Speech 服务、麦克风权限和网络仍是机器私有条件。
+- 稳定句预读还没有服务端 response/generation ID；并发 cron/proactive 响应或迟到旧 `chat.final` 仍可能被归到错误 Turn。10 秒 timeout 只避免永久 thinking，不能证明响应归属或恢复 provisional 文本。
+- 当前 FIFO 只能证明文本已规划或已入队，不能证明用户实际听到；正式版仍需 playback ACK/cursor 和 presented history。
+- schedule 的本轮修复解决了同一进程、同一 JSON store 路径内的主要 run/cancel/delete 竞态与幂等创建，但没有跨进程事务、唯一执行所有权、exactly-once 或生产级 crash recovery。多个进程共享同一 store、D1/D2 durability 和外部副作用 reconciliation 仍是正式版风险。
+- Task Demo 使用真实且有副作用的 AutoHarness。Live Voice 的打断、退出或 session 切换不会自动取消已经发出的 `schedule.run`，确认取消也不能撤销已经产生的代码修改。
+- task-scoped Agent/context 和 project/origin provenance 已解决“并发任务借用最后一个 `_agent`”及目标猜测问题，但 context 仍只在进程内；重启不能恢复旧 Agent，持久 target 也不包含完整 model/provider/config/permission 快照。
+- owner + project scope、稳定 command ID、同-key retry 与严格 exact-key reconciliation 已经补齐 foundation 门槛，但它们不构成跨进程 CAS、唯一执行 owner、crash transaction、exactly-once、D1/D2 或外部副作用 reconciliation。
+- 前台目前仍会把任务反馈作为当前语音交互的一次结果处理；还没有“派发后立即继续监听、后台独立轮询、终态异步回流”的 task monitor。刷新恢复、多个任务、主动事件推送、重放/unread 和通用 Task Control 也未完成。
 
 ## 下一步
 
-1. 以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为唯一放行清单，先固定 candidate SHA、干净工作区和环境身份，复跑自动化与文字 Tool smoke。
-2. 在相同固定环境完成 10 个准确语音 Turn；记录每轮识别文本、唯一提交、Agent/Tool 结果、TTS 和自动回听状态，专项统计技术词误识别。
-3. 完成 thinking 3 次、tool 4 次真实 supplement 和 speaking 3 次本地停声/普通发送；核对实际路由、静音、旧 tool UI、`chat.tool_result`、warning、副作用和旧声音恢复。
-4. 完成 20 分钟或 20 Turn soak，并把主演示脚本连续跑通 3 次；失败必须保留复现时间线，不用成功录像替代失败记录。
-5. 在新的独立环境按 lockfile 重建依赖，并用全新 Codex session 完成无旧对话理解测试；机器私有模型配置和麦克风权限仍从受控渠道注入。
-6. V0 Gate 全部通过后才标记 Released/冻结并进入 V1/P1；核心稳定前不开始 Team、后台任务 stretch 或全双工新架构。
+1. 下一实现切片按 D-031 建立 **poll-backed 异步任务监控**：任务派发后前台立即恢复 Live Voice，任务状态在独立投影中轮询更新，终态结果异步回流到真实 task card；安全空档最多播报一次简短终态，绝不抢占麦克风或 Agent TTS。
+2. 该切片保持窄范围：不把 task 状态写进 chatStore，不伪造 chat processing，不做完整 TaskEvent push/replay、通用多任务 NLU、跨进程 exactly-once 或 D1/D2。
+3. 用户稍后验收 V0 时，从 `2c700934` 新建独立 checkout/worktree，清除 Post-V0 flags 并执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)；当前开发分支和 stash 备份不参与这次隔离。
+4. 随后按 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) 推进 response/generation lifecycle、P1 Speech Port、P2 Realtime、P3α/完整 P3，最后进入 RC。
 
 ## 接手者注意事项
 
