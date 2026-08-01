@@ -73,6 +73,8 @@ export interface Message {
   toolResult?: ToolResult;
   // 是否正在流式输出
   isStreaming?: boolean;
+  /** Set only when an authoritative chat.final event lands this message. */
+  isResponseFinal?: boolean;
   usageSummary?: UsageSummary;
   // Harness message flag for special styling
   isHarnessMessage?: boolean;
@@ -96,9 +98,9 @@ export interface ToolCall {
   id: string;
   name: string;
   arguments: Record<string, unknown>;
-  description?: string;  // 操作描述，如 "创建 3 个任务"
-  formatted_args?: string;  // 格式化参数摘要
-  display_name?: string;  // 后端下发的可读展示名，前端优先直接展示
+  description?: string; // 操作描述，如 "创建 3 个任务"
+  formatted_args?: string; // 格式化参数摘要
+  display_name?: string; // 后端下发的可读展示名，前端优先直接展示
   memberName?: string;
 }
 
@@ -107,7 +109,7 @@ export interface ToolResult {
   result: string;
   success: boolean;
   toolCallId?: string;
-  summary?: string;  // 结果摘要
+  summary?: string; // 结果摘要
   // agentic search（symphony 技能检索）下发的技能树路径，用于内联回放路径流转
   skillTree?: SkillTreePath;
   beamSearch?: BeamSearchProgress;

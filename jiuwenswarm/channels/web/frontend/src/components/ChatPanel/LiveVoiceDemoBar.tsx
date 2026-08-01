@@ -1,7 +1,10 @@
 import { useId } from 'react';
 import { AlertCircle, LoaderCircle, Mic, Square, Volume2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
+import type { LiveVoiceTaskActivity } from '../../features/live-voice/liveVoiceTaskAdapter';
 import './LiveVoiceDemoBar.css';
+
+export type { LiveVoiceTaskActivity } from '../../features/live-voice/liveVoiceTaskAdapter';
 
 export type LiveVoiceVisualState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted' | 'error';
 
@@ -13,6 +16,9 @@ export interface LiveVoiceDemoBarProps {
   committedTranscript?: string;
   errorMessage?: string;
   unavailableMessage?: string;
+  /** Always-visible warning shown before any task command can dispatch. */
+  taskSafetyDisclosure?: string;
+  taskActivity?: LiveVoiceTaskActivity | null;
   onEnable: () => void;
   onExit: () => void;
   onPrimaryAction: () => void;
@@ -46,6 +52,8 @@ export function LiveVoiceDemoBar({
   committedTranscript = '',
   errorMessage = '',
   unavailableMessage,
+  taskSafetyDisclosure,
+  taskActivity = null,
   onEnable,
   onExit,
   onPrimaryAction,
@@ -88,10 +96,11 @@ export function LiveVoiceDemoBar({
   const transcriptKind = visibleError ? 'error' : interim ? 'interim' : committed ? 'committed' : 'placeholder';
   const statusLabel = t(`liveVoice.status.${status}`);
   const primaryActionLabel = t(`liveVoice.actions.${status}`);
+  const hasTaskPanel = Boolean(taskSafetyDisclosure || taskActivity);
 
   return (
     <section
-      className={`live-voice-demo live-voice-demo--active live-voice-demo--${status}`}
+      className={`live-voice-demo live-voice-demo--active live-voice-demo--${status}${hasTaskPanel ? ' live-voice-demo--with-task' : ''}`}
       aria-label={t('liveVoice.label')}
       data-state={status}
       data-testid="live-voice-demo"
@@ -116,6 +125,86 @@ export function LiveVoiceDemoBar({
         >
           {transcript}
         </div>
+
+        {(taskSafetyDisclosure || taskActivity) && (
+          <div className="live-voice-demo__task" data-level={taskActivity?.level ?? 'warning'} role={taskActivity?.level === 'error' ? 'alert' : 'status'}>
+            {taskSafetyDisclosure && (
+              <span className="live-voice-demo__task-safety" role="note">
+                <strong>{t('liveVoice.task.safetyTitle')}</strong>
+                {taskSafetyDisclosure}
+              </span>
+            )}
+            {taskActivity && (
+              <>
+                <span className="live-voice-demo__task-title">{taskActivity.title}</span>
+                <span className="live-voice-demo__task-detail">{taskActivity.detail}</span>
+                {taskActivity.commandId && (
+                  <span className="live-voice-demo__task-fact">
+                    {t('liveVoice.task.commandId')}: <code>{taskActivity.commandId}</code>
+                  </span>
+                )}
+                {taskActivity.predecessorTaskId && (
+                  <span className="live-voice-demo__task-fact">
+                    {t('liveVoice.task.predecessorTaskId')}: <code>{taskActivity.predecessorTaskId}</code>
+                  </span>
+                )}
+                {taskActivity.successorTaskId && (
+                  <span className="live-voice-demo__task-fact">
+                    {t('liveVoice.task.successorTaskId')}: <code>{taskActivity.successorTaskId}</code>
+                  </span>
+                )}
+                {taskActivity.conflictingTaskId && (
+                  <span className="live-voice-demo__task-fact">
+                    {t('liveVoice.task.conflictingTaskId')}: <code>{taskActivity.conflictingTaskId}</code>
+                  </span>
+                )}
+                {taskActivity.record && (
+                  <>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.recordRole')}: <code>{t(`liveVoice.task.roles.${taskActivity.record.role}`)}</code>
+                    </span>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.taskId')}: <code>{taskActivity.record.taskId}</code>
+                    </span>
+                    {taskActivity.record.commandId && taskActivity.record.commandId !== taskActivity.commandId && (
+                      <span className="live-voice-demo__task-fact">
+                        {t('liveVoice.task.taskCommandId')}: <code>{taskActivity.record.commandId}</code>
+                      </span>
+                    )}
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.status')}: <code>{taskActivity.record.status}</code>
+                    </span>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.source')}: <code>{taskActivity.record.source}</code>
+                    </span>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.resultSource')}: <code>{taskActivity.record.resultSource}</code>
+                    </span>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.recoveryStatus')}: <code>{taskActivity.record.recoveryStatus}</code>
+                    </span>
+                    <span
+                      className="live-voice-demo__task-fact"
+                      title={taskActivity.record.executionTarget.projectDir ?? t('liveVoice.task.unknown')}
+                    >
+                      {t('liveVoice.task.projectDir')}: <code>{taskActivity.record.executionTarget.projectDir ?? t('liveVoice.task.unknown')}</code>
+                    </span>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.projectId')}: <code>{taskActivity.record.executionTarget.projectId ?? t('liveVoice.task.unknown')}</code>
+                    </span>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.originSessionId')}: <code>{taskActivity.record.executionTarget.originSessionId ?? t('liveVoice.task.unknown')}</code>
+                    </span>
+                    <span className="live-voice-demo__task-fact">
+                      {t('liveVoice.task.originChannelId')}: <code>{taskActivity.record.executionTarget.originChannelId ?? t('liveVoice.task.unknown')}</code>
+                    </span>
+                  </>
+                )}
+                {taskActivity.disclosure && <span className="live-voice-demo__task-disclosure">{taskActivity.disclosure}</span>}
+              </>
+            )}
+          </div>
+        )}
 
         <div className="live-voice-demo__actions">
           <button

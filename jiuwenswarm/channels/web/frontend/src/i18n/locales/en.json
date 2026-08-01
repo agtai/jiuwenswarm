@@ -281,7 +281,7 @@
       "placeholder": "Select Model"
     },
     "configLockedHistory": "Session has messages — create a new session to change config",
-    "modeSwitchDisabledProcessing":"This conversation is running. Start a new conversation to choose another mode",
+    "modeSwitchDisabledProcessing": "This conversation is running. Start a new conversation to choose another mode",
     "modeSwitchTitle": "Switch Mode",
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
     "skills": "Skills",
@@ -1012,7 +1012,10 @@
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
       "other": { "label": "Other Settings", "hint": "Unclassified extended parameters" },
-      "proactive": { "label": "Proactive Recommendation", "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel" }
+      "proactive": {
+        "label": "Proactive Recommendation",
+        "hint": "Automatically analyze user needs and proactively offer suggestions; adjust the schedule in the Cron panel"
+      }
     },
     "booleanLabels": {
       "evolutionAutoScan": "Auto-detect evolution signals",
@@ -2081,7 +2084,43 @@
     "exit": "Exit Live Voice",
     "unavailable": "The Live Voice demo currently requires Agent mode and a compatible browser",
     "interactionBlocked": "Finish the pending question or evolution flow before enabling Live Voice",
+    "streamingRevisionFallback": "The final response was revised. Preview speech stopped; use the text on screen.",
+    "streamingFinalTimeout": "No final response confirmation arrived. Preview stopped; retry or use the text on screen.",
     "transcriptPlaceholder": "Your speech will appear here",
+    "task": {
+      "commandId": "Command ID",
+      "taskCommandId": "Record command ID",
+      "predecessorTaskId": "Predecessor task ID",
+      "successorTaskId": "Successor task ID",
+      "conflictingTaskId": "Conflicting task ID (not successor)",
+      "recordRole": "Record role",
+      "roles": {
+        "current": "Current task",
+        "predecessor": "Predecessor",
+        "successor": "Successor",
+        "conflict": "Conflicting record"
+      },
+      "taskId": "Task ID",
+      "status": "Observed status",
+      "source": "Status source",
+      "resultSource": "Result source",
+      "recoveryStatus": "Recovery status",
+      "projectDir": "Target project path",
+      "projectId": "Target project ID",
+      "originSessionId": "Origin session ID",
+      "originChannelId": "Origin channel ID",
+      "unknown": "unknown",
+      "safetyTitle": "Real side effects:",
+      "safetyDisclosure": "Executor AutoHarness; fixed extended_evolve_pipeline; generates or modifies local Harness packages. Live Voice interrupt/exit only stops voice feedback and does not abort schedule.run or an existing task. Cancellation requires the explicit confirmed command and an observed real task ID, and cannot undo changes that already happened. Switching session or project isolates an unresolved command; only returning to its original context can resume reconciliation. Refreshing still loses voice-side task memory, so use the background task list afterward.",
+      "contextIsolatedTitle": "Task command isolated",
+      "contextIsolated": "Command {{commandId}} still has an unverified request or result, but the session or project context changed. To prevent duplicate side effects, other contexts will not retry it. Return to the original session and project to continue reconciliation.",
+      "isolatedResult": "This result belongs to the isolated original context and was not merged into the current context: {{detail}}",
+      "sessionChanged": "The session changed during this voice capture. No task was dispatched, preventing side effects in the wrong session.",
+      "executionTargetChanged": "The persisted session's project target changed during this voice capture. No task was dispatched, preventing side effects in the wrong project.",
+      "requiresSession": "Task commands require an existing saved session. No task was dispatched.",
+      "requiresExecutionTarget": "The saved session has no verifiable absolute project path. The task gateway was not called, preventing execution in an unknown directory.",
+      "unavailable": "The task gateway is unavailable. No task was dispatched."
+    },
     "actions": {
       "idle": "Start speaking",
       "listening": "Stop and send",

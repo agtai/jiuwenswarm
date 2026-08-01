@@ -90,6 +90,153 @@ test('processing resolves the boundary but releases no assistant messages', () =
 
   assert.equal(result.userBoundaryId, 'user-current');
   assert.deepEqual(result.speakableMessages, []);
+  assert.equal(result.streamingCandidate, null);
+});
+
+test('processing exposes one streaming assistant candidate without making it final-speakable', () => {
+  const messages = [
+    message('user-current', 'user', 'voice request'),
+    message('assistant-streaming', 'assistant', '第一句已经完成。第二句正在生成', { isStreaming: true }),
+  ];
+
+  const result = selectLiveVoiceResponseMessages({
+    messages,
+    voiceTranscript: 'voice request',
+    isProcessing: true,
+    spokenMessageIds: new Set(),
+  });
+
+  assert.deepEqual(result.speakableMessages, []);
+  assert.equal(result.streamingCandidate?.id, 'assistant-streaming');
+});
+
+test('multiple assistant messages conservatively disable streaming preview', () => {
+  const messages = [
+    message('user-current', 'user', 'voice request'),
+    message('assistant-first', 'assistant', '第一段', { isStreaming: false }),
+    message('assistant-streaming', 'assistant', '第二段仍在生成', { isStreaming: true }),
+  ];
+
+  const result = selectLiveVoiceResponseMessages({
+    messages,
+    voiceTranscript: 'voice request',
+    isProcessing: true,
+    spokenMessageIds: new Set(),
+  });
+
+  assert.equal(result.streamingCandidate, null);
+});
+
+test('a complete planner-owned final remains observable after it was spoken', () => {
+  const messages = [
+    message('user-current', 'user', 'voice request'),
+    message('assistant-owned', 'assistant', '修订后的完整回答', {
+      isStreaming: false,
+    }),
+  ];
+
+  const result = selectLiveVoiceResponseMessages({
+    messages,
+    voiceTranscript: 'voice request',
+    isProcessing: false,
+    spokenMessageIds: new Set(['assistant-owned']),
+    plannerMessageId: 'assistant-owned',
+  });
+
+  assert.equal(result.plannerFinalObservation?.content, '修订后的完整回答');
+  assert.deepEqual(result.speakableMessages, []);
+});
+
+test('a planner-owned final can be reconciled before processing becomes idle', () => {
+  const messages = [message('user-current', 'user', 'voice request'), message('assistant-owned', 'assistant', '完整回答', { isStreaming: false })];
+
+  const result = selectLiveVoiceResponseMessages({
+    messages,
+    voiceTranscript: 'voice request',
+    isProcessing: true,
+    spokenMessageIds: new Set(),
+    plannerMessageId: 'assistant-owned',
+  });
+
+  assert.equal(result.plannerFinalObservation?.id, 'assistant-owned');
+  assert.deepEqual(result.speakableMessages, []);
+});
+
+test('authoritative mode ignores stopStreaming-only content until chat.final marks it', () => {
+  const user = message('user-current', 'user', 'voice request');
+  const stoppedOnly = message('assistant-current', 'assistant', 'stream stopped but final is pending', { isStreaming: false });
+
+  const beforeFinal = selectLiveVoiceResponseMessages({
+    messages: [user, stoppedOnly],
+    voiceTranscript: 'voice request',
+    isProcessing: false,
+    spokenMessageIds: new Set(),
+    requireAuthoritativeFinal: true,
+  });
+  assert.deepEqual(beforeFinal.speakableMessages, []);
+  assert.equal(beforeFinal.finalAssistantMessageCount, 0);
+
+  const afterFinal = selectLiveVoiceResponseMessages({
+    messages: [user, { ...stoppedOnly, isResponseFinal: true }],
+    voiceTranscript: 'voice request',
+    isProcessing: false,
+    spokenMessageIds: new Set(),
+    requireAuthoritativeFinal: true,
+  });
+  assert.deepEqual(
+    afterFinal.speakableMessages.map(item => item.id),
+    ['assistant-current']
+  );
+  assert.equal(afterFinal.finalAssistantMessageCount, 1);
+});
+
+test('a planner-owned final plus a later segment remains a two-message turn', () => {
+  const result = selectLiveVoiceResponseMessages({
+    messages: [
+      message('user-current', 'user', 'voice request'),
+      message('assistant-a', 'assistant', 'segment A', {
+        isStreaming: false,
+        isResponseFinal: true,
+      }),
+      message('assistant-b', 'assistant', 'segment B', {
+        isStreaming: false,
+        isResponseFinal: true,
+      }),
+    ],
+    voiceTranscript: 'voice request',
+    isProcessing: false,
+    spokenMessageIds: new Set(['assistant-a']),
+    plannerMessageId: 'assistant-a',
+    requireAuthoritativeFinal: true,
+  });
+
+  assert.equal(result.plannerFinalObservation?.id, 'assistant-a');
+  assert.deepEqual(
+    result.speakableMessages.map(item => item.id),
+    ['assistant-b']
+  );
+  assert.equal(result.finalAssistantMessageCount, 2);
+});
+
+test('an authoritative empty planner-owned final is still observable', () => {
+  const result = selectLiveVoiceResponseMessages({
+    messages: [
+      message('user-current', 'user', 'voice request'),
+      message('assistant-owned', 'assistant', '', {
+        isStreaming: false,
+        isResponseFinal: true,
+      }),
+    ],
+    voiceTranscript: 'voice request',
+    isProcessing: false,
+    spokenMessageIds: new Set(),
+    plannerMessageId: 'assistant-owned',
+    requireAuthoritativeFinal: true,
+  });
+
+  assert.equal(result.plannerFinalObservation?.id, 'assistant-owned');
+  assert.equal(result.finalAssistantMessageCount, 1);
+  assert.deepEqual(result.speakableMessages, []);
 });
 
 test('filters historical, non-assistant, streaming, empty, and already spoken messages while preserving order', () => {
