@@ -3,21 +3,23 @@
 - 快照日期：2026-08-01
 - 开发分支：`hx/0731_live_voice_ux`
 - 共享远端：`agtai`（`https://github.com/agtai/jiuwenswarm.git`）
-- 本轮开发前已推送交接基线：`48a9fe4c571c98aabbf93688727ec8823f6d0c00`
-- 当前目标：把已经真实贯通一次的纵向主链推进到可重复、可打断、可连续运行的 Demo 放行状态
+- V0 核心实现提交：`346f802a`；本次路线/验收文档更新前的已推送快照：`21139d84fab3be88bbb89f7bfa25df6913b193b5`
+- 权威恢复点：pull 后的 `agtai/hx/0731_live_voice_ux` 分支 tip；预期本地/远端差异 `0 0`、工作区干净
+- 当前阶段：V0 Candidate 已提交并推送，但完整真机 Gate 尚未通过，因此还不是 V0 Released / 已冻结
+- 当前目标：执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)，把已真实贯通一次的纵向主链推进到可重复、可打断、可连续运行的 V0 放行状态
 
 ## 接手后先做什么
 
 1. `git fetch agtai`，切换并更新 `hx/0731_live_voice_ux`。
-2. 依次阅读 [README.md](README.md)、本文件、[STATUS.md](STATUS.md)、[TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) 和 [DECISIONS.md](DECISIONS.md)。
+2. 依次阅读 [README.md](README.md)、本文件、[STATUS.md](STATUS.md)、[TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)、[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 和 [DECISIONS.md](DECISIONS.md)。
 3. 准备演示机时严格执行 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)，新机器必须从 lockfile 重建依赖，不复制 `.venv` 或 `node_modules`。
-4. 当前第一优先级是 10 Turn、10 次 supplement 打断、20 分钟和连续 3 次脚本，不是继续添加 Team、后台任务或新架构。
+4. 当前第一优先级是连续 10 Turn、分阶段 10 次打断、soak、连续 3 次主演示和冷环境恢复，不是继续添加 Team、后台任务或新架构。
 
 本目录是 Git 中的接续入口。不要依赖旧对话、未提交文件或某台机器的 `.codex` / `.agent` 目录恢复项目事实。
 
 ## 当前已经能做什么
 
-- Live Voice 只在 Agent 模式开放；final transcript 复用真实 `chat.send` / `supplement`，interim 只有显示副作用。
+- Live Voice 只在 Agent 模式开放；final transcript 在 Agent processing 时复用真实 `supplement`，空闲或只剩 TTS 时复用普通 `chat.send`，interim 只有显示副作用。
 - Web Speech 的浏览器实例自然结束不会直接结束用户 Turn；约 4 秒早退可以在同一逻辑 capture 中续启并合并尾段，手动停止不会被 retry 复活。
 - 初始静默窗口固定 8 秒，有识别结果后的结束语音窗口为 2.2 秒。
 - `new` session promotion 分两次渲染时会保留 Live Voice；普通 session 切换仍退出并清理。
@@ -52,7 +54,7 @@
 ## 仍未完成：当前唯一主线
 
 - 10 个准确语音 Turn，重复提交为 0。
-- thinking/tool/speaking 中合计 10 次确定性 supplement 打断；旧声音恢复 0 次，并检查旧工具 UI 和副作用。
+- 10 次用户可感知打断：thinking 3 次、tool 4 次必须走真实 supplement；speaking 3 次必须立即停声并恰好走一次普通 `chat.send`。三类分别记数，旧声音恢复 0 次，并检查旧工具 UI、迟到 result、warning 和副作用。
 - 连续 20 分钟或 20 Turn 无需刷新。
 - 主演示脚本连续成功 3 次。
 - 在独立环境从 `uv.lock` / `package-lock.json` 重建并复测，不依赖主仓 `.venv`。
@@ -79,6 +81,10 @@
 
 前端现在可以隐藏更多旧 UI 事件并保持 processing 状态，但 Gateway 的 supplement ACK 仍早于 AgentServer cancel/replacement 完成。`chat.tool_result` 与真实工具副作用没有 generation ID，旧副作用无法由前端可靠撤销或归属。真实 10 次打断必须专项观察，不能把 ACK 解释成“旧 Agent 和工具已确定停止”。
 
+### speaking 打断不是 supplement
+
+当前回答只有在 Agent 完成后才进入浏览器 TTS。因此 speaking 时重新开麦会立即停止本地声音，但新 final 通常发生在 `processing=false`，实际是普通 `chat.send`。它能验证“停声并修改下一轮”，不能证明服务端 Agent cancel。验收必须按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 分开记录。
+
 ### 固定环境仍有机器私有状态
 
 模型配置、浏览器权限、Chrome Speech 服务、硬件和网络不会进入 Git。本轮复用主仓 `.venv` 也只是临时便利；跨机器必须按运行手册重建并重新验收。
@@ -88,6 +94,7 @@
 - 不要另写语音专用 Agent 协议、发送 partial transcript、写死 Agent 答案或工具结果。
 - 不要把本地 epoch、quarantine、TTS owner/revision 描述成生产 generation fence。
 - 不要在稳定性闸门通过前实现 Team、后台任务 stretch、多语言、WebView2 或全双工媒体。
+- 不要另建一套覆盖全部功能、依赖模拟状态或 hardcode 结果的 UX 原型；V1/V2/V3 在同一真实工程路径上累计替换 V0 shortcut。
 - 不要提交 API key、Slack token、用户配置、浏览器 profile、`.venv`、`node_modules` 或本机绝对路径。
 
 ## 每次继续工作后的交接要求

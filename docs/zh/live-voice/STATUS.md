@@ -4,19 +4,21 @@
 - 工作分支：`hx/0731_live_voice_ux`
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 建立方案时的代码基线：`7b69fdeb`
-- 本轮开发前已推送交接基线：`48a9fe4c571c98aabbf93688727ec8823f6d0c00`
-- 当前里程碑：两周纵向 Demo
-- 实现状态：真实“麦克风 → Agent → Terminal Tool → 完整回答 → 浏览器 TTS → 自动回听”主链已在固定 Windows/Chrome 环境成功跑通一次；稳定性和打断放行闸门尚未完成
+- V0 核心实现提交：`346f802a`；本次路线/验收文档更新前的已推送快照：`21139d84fab3be88bbb89f7bfa25df6913b193b5`
+- 当前里程碑：两周 V0 Vertical Slice Candidate
+- 实现状态：真实“麦克风 → Agent → Terminal Tool → 完整回答 → 浏览器 TTS → 自动回听”主链已在固定 Windows/Chrome 环境成功跑通一次；[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 已定义完整 Gate，但稳定性、分阶段打断和跨环境放行尚未执行完
 
-跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动、固定环境和真实验收按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行。
+跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动和固定环境按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行；V0 是否放行以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准。
 
-当前量化判断：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。提升来自真实麦克风、真实 Agent/Tool、完整 TTS 和自动回听首次贯通，以及 47 项 Live Voice 自动化全部通过；尚未完成 10 Turn、10 次打断、20 分钟和连续 3 次脚本，因此不能称为 Demo 已放行。
+当前量化判断：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。提升来自真实麦克风、真实 Agent/Tool、完整 TTS 和自动回听首次贯通，以及 47 项 Live Voice 自动化全部通过；尚未完成连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示，因此不能称为 Demo 已放行。
 
 ## 当前结论
 
 核心产品命题已从“代码路径推断可行”推进到“固定真机上实际成立”：用户说出“调用终端查看当前分支”，Chrome 产生完整 final，新会话 promotion 没有让 Live Voice 退出，Agent 真实调用 `git branch --show-current`，工具返回 `hx/0731_live_voice_ux`，完整回答从 Jabra 耳机朗读，随后自动回到 Listening。用户确认斜杠、数字和下划线组成的分支名也完整听到。
 
-这次成功证明了受控 Demo 的主链和感知效果，但只是一次主链证据，不等于稳定性放行。之后又成功进入两轮回听，说明循环可以继续；同时 Web Speech 把 `git` 识别为“地图”或“史记”，暴露出中文技术词准确率风险。真实 supplement 打断、工具副作用隔离和长时运行仍需专项验证。
+这次成功证明了受控 Demo 的主链和感知效果，但只是一次主链证据，不等于稳定性放行。之后又成功进入两轮回听，说明循环可以继续；同时 Web Speech 把 `git` 识别为“地图”或“史记”，暴露出中文技术词准确率风险。真实 supplement 打断、speaking 本地停声、工具副作用隔离和长时运行仍需专项验证。
+
+已接受新的累计路线：不另建覆盖全部功能的模拟 UX 原型；V0 之后依次推进 V1/P1 Product Alpha、V2/P2 Realtime Alpha、V3α/P3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening。各版保留前版能力并用正式实现替换 shortcut；共享契约冻结后可部分并行。详细见 `DECISIONS.md` 的 D-018。
 
 ## 本轮实现与修复
 
@@ -68,8 +70,9 @@
 
 ## 尚未完成与不能宣称的内容
 
-- 尚未完成连续 10 个准确语音 Turn、10 次 thinking/speaking 中的确定性 supplement 打断、20 分钟或 20 Turn 稳定性，以及主演示脚本连续成功 3 次。
-- 尚未测量并通过 10 次打断的本地静音延迟和旧声音恢复 0 次；本轮主链没有证明真实 supplement 的 cancel/replacement 顺序可靠。
+- 尚未完成连续 10 个准确语音 Turn、分阶段 10 次用户可感知打断、20 分钟或 20 Turn 稳定性，以及主演示脚本连续成功 3 次。
+- 10 次打断必须拆分：thinking 3 次和 tool 4 次验证真实 `supplement`；speaking 3 次验证立即停声后普通 `chat.send`。当前没有任何一组可以写成已通过，也不能把 speaking 样本计入 supplement。
+- 尚未测量并通过 speaking 本地静音目标 `<300ms` 和全部样本旧声音恢复 0 次；本轮主链没有证明真实 supplement 的 cancel/replacement 顺序可靠。
 - supplement P1 协议风险仍在：ACK 早于 AgentServer cancel/replacement 完成；`chat.tool_result` 和真实工具副作用缺少 generation ID，前端不能可靠 fence。
 - Web Speech 对中文句子中的英文技术词准确率不稳定，需要继续真机测试口令、说法和必要的 Provider fallback。
 - Desktop/WebView2、Team、多语言、全双工/AEC、断线恢复和服务端 streaming TTS 未验证，也不属于本轮已经完成的能力。
@@ -77,11 +80,12 @@
 
 ## 下一步
 
-1. 在相同固定环境完成 10 个准确语音 Turn；记录每轮识别文本、唯一提交、Agent/Tool 结果、TTS 和自动回听状态，专项统计 `git` 等技术词误识别。
-2. 在 thinking、tool 和 speaking 阶段各做确定性 supplement 打断，总计 10 次；核对本地静音、旧 tool UI、`chat.tool_result`、副作用和旧声音是否恢复。
-3. 完成 20 分钟或 20 Turn soak，并把主演示脚本连续跑通 3 次；失败必须保留复现时间线，不用成功录像替代失败记录。
-4. 在新的独立环境按 `uv.lock` 和 `package-lock.json` 重建依赖，消除临时复用主仓 `.venv` 的机器耦合。
-5. Demo 闸门通过后，再决定 Web Speech 技术词准确率是否需要 Azure Speech 等单一 Provider fallback；核心稳定前不开始后台任务 stretch。
+1. 以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为唯一放行清单，先固定 candidate SHA、干净工作区和环境身份，复跑自动化与文字 Tool smoke。
+2. 在相同固定环境完成 10 个准确语音 Turn；记录每轮识别文本、唯一提交、Agent/Tool 结果、TTS 和自动回听状态，专项统计技术词误识别。
+3. 完成 thinking 3 次、tool 4 次真实 supplement 和 speaking 3 次本地停声/普通发送；核对实际路由、静音、旧 tool UI、`chat.tool_result`、warning、副作用和旧声音恢复。
+4. 完成 20 分钟或 20 Turn soak，并把主演示脚本连续跑通 3 次；失败必须保留复现时间线，不用成功录像替代失败记录。
+5. 在新的独立环境按 lockfile 重建依赖，并用全新 Codex session 完成无旧对话理解测试；机器私有模型配置和麦克风权限仍从受控渠道注入。
+6. V0 Gate 全部通过后才标记 Released/冻结并进入 V1/P1；核心稳定前不开始 Team、后台任务 stretch 或全双工新架构。
 
 ## 接手者注意事项
 
@@ -89,4 +93,5 @@
 - 真实环境、服务拓扑、无密钥配置和时序证据见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
 - partial/interim transcript 绝不能触发 Agent、Tool 或 Task；浏览器重启只能延续同一个逻辑 capture。
 - 插话或退出必须先本地停播；不要把 ACK quarantine、TTS ownership 或本地 epoch 描述成生产一致性协议。
-- 真实主链已通过一次，但完整放行闸门未通过；不得写成“Live Voice Demo 已完成”。
+- processing 中 final 才是 supplement；只剩 TTS 时是停声后的普通下一 Turn，不得混用验收计数。
+- 真实主链已通过一次，但完整放行闸门未通过；只能称为 V0 Candidate，不得写成“Live Voice Demo 已完成/已冻结”。

@@ -22,7 +22,20 @@ Live Voice 不是单纯的“语音转文字 + 文字朗读”。最终产品还
 → 用户打断、补充并继续
 ```
 
-Demo 先验证产品流程和体验是否成立；完整方案描述验证通过后需要建设的生产级能力。两者不是互相替代，而是“先走通，再扩宽和加固”。
+V0 先验证产品流程和体验是否成立；之后沿同一条真实工程路线逐步替换临时实现。两者不是互相替代，而是“先走通，再扩宽和加固”。不会另建一套覆盖所有功能、但与正式实现脱节的模拟 UX 原型。
+
+当前累计版本路线是：
+
+| 版本 | 主要增量 | 定位 |
+|---|---|---|
+| V0 | 两周核心体验纵向切片 | 核心旅程完整，不要求所有最终功能完整 |
+| V1 | P1 Conversation Runtime / 一致性基础 | Product Alpha |
+| V2 | P2 Realtime Media、流式语音与自然插话 | Realtime Alpha，也是最明显的实时语音体验跃迁 |
+| V3α | P3α 最小 Task Control 与 D0 | Task Alpha，只覆盖 create/get/list/status/cancel/events |
+| V3 | 完整 P1 + P2 + P3 能力 | Full Capability Beta，接近正式能力但仍未生产放行 |
+| RC / Production | 可靠性、安全、兼容、可观测和运营加固 | 正式发布 |
+
+版本能力累计保留；共享协议和 ownership 边界冻结后，P1/P2/P3 的部分工程可以并行。后台任务的 A→B 更新需要完整 P3 的 update/provide-input，或显式 cancel/create；不能把 P3α 的状态查询冒充任务更新。
 
 ## 文档地图
 
@@ -30,6 +43,7 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 |---|---|---|
 | [HANDOFF.md](HANDOFF.md) | 当前可跨机器恢复的实现快照、量化进度、真实阻塞项和接手优先级 | 每个开发阶段或重要验证后更新 |
 | [E2E_RUNBOOK.md](E2E_RUNBOOK.md) | 固定环境、锁定依赖、启动服务和真实麦克风/Agent/Tool/TTS 验收步骤 | 环境或启动方式改变时更新 |
+| [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) | V0 放行 Gate、固定语料、分阶段打断口径、证据模板和跨机器冷启动测试 | 验收口径或结果变化时更新 |
 | [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) | 当前能做/不能做、与最终版差异，以及成功率优先的三轮现场展示脚本 | 展示能力、环境或已知风险变化时更新 |
 | [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md) | 完整目标架构、P1/P2/P3 边界、模块和竞品证据；从用户提供的原始方案逐字节复制 | 低，重大架构变化时更新或新增版本 |
 | [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) | 两周 Demo 的真实范围、完整版区别、实施日程、验收和降级路径 | Demo 期间按范围变化更新 |
@@ -48,18 +62,22 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 2. 读 [HANDOFF.md](HANDOFF.md)，恢复最后一次可交接快照和唯一主线。
 3. 读 [STATUS.md](STATUS.md)，确认实际进度和下一步。
 4. 读 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)，确认当前交付范围。
-5. 准备现场展示时读 [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md)。
-6. 启动服务或做真实语音联调前读 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
-7. 涉及架构、协议或长期边界时，再完整阅读 [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md)。
-8. 涉及取舍时读 [DECISIONS.md](DECISIONS.md)，不要只根据代码现状猜测意图。
+5. 读 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)，确认候选版与已放行版的区别、当前验收 Gate 和证据口径。
+6. 读 [DECISIONS.md](DECISIONS.md)，不要只根据代码现状猜测意图。
+7. 准备现场展示时读 [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md)。
+8. 启动服务或做真实语音联调前读 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
+9. 涉及架构、协议或长期边界时，再完整阅读 [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md)。
 
 ## 信息冲突时的优先级
 
+产品范围和目标冲突时：
+
 1. 用户在当前任务中的最新明确要求。
 2. `DECISIONS.md` 中状态为 `Accepted` 的较新决策。
-3. `TWO_WEEK_DEMO.md` 的当前 Demo 范围。
+3. `TWO_WEEK_DEMO.md` 的当前 V0 范围。
 4. `FULL_SOLUTION_2026-07-30.md` 的长期目标。
-5. 现有代码只能证明“目前怎么实现”，不能单独决定产品最终应该是什么样。
+
+运行事实冲突时，以实际 Git 和证据为准：远端分支/commit 和干净状态 → 较新的 `STATUS.md` → 较新的 `HANDOFF.md`。环境与启动步骤以 `E2E_RUNBOOK.md` 为准，V0 放行以 `V0_ACCEPTANCE.md` 为准，现场操作以 `DEMO_SHOWCASE.md` 为准。现有代码只能证明“目前怎么实现”，不能单独决定产品最终应该是什么样。
 
 如果代码和方案不同，应在 `STATUS.md` 记录差距，不要静默把当前实现当作最终设计。
 
@@ -117,7 +135,7 @@ uv run ruff check jiuwenswarm/gateway/message_handler/message_handler.py
 git diff --check
 ```
 
-截至 2026-08-01，七组 Live Voice 纯逻辑测试共 **47/47**（9 + 6 + 10 + 7 + 6 + 7 + 2），相关既有回归 **22/22**，全前端 TypeScript、Vite build（4490 modules）、Python `ruff` 和 `git diff --check` 已通过。固定 Windows/Chrome 环境也已真实贯通一次“麦克风 → Agent → Terminal Tool → 完整 TTS → 自动回听”；这仍不能替代 10 Turn、10 次打断、20 分钟和连续 3 次脚本的放行验收，详见 [STATUS.md](STATUS.md) 与 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
+截至 2026-08-01，七组 Live Voice 纯逻辑测试共 **47/47**（9 + 6 + 10 + 7 + 6 + 7 + 2），相关既有回归 **22/22**，全前端 TypeScript、Vite build（4490 modules）、Python `ruff` 和 `git diff --check` 已通过。固定 Windows/Chrome 环境也已真实贯通一次“麦克风 → Agent → Terminal Tool → 完整 TTS → 自动回听”；这仍不能替代连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示的放行验收，详见 [STATUS.md](STATUS.md) 与 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。
 
 ## 分支
 

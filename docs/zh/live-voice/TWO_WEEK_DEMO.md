@@ -1,4 +1,4 @@
-# JiuwenSwarm Live Voice：两周纵向 Demo 方案
+# JiuwenSwarm Live Voice：V0 两周纵向 Demo 方案
 
 - 日期：2026-07-31
 - 最近实测更新：2026-08-01
@@ -6,6 +6,7 @@
 - 人力假设：1 人，约 10 个工作日，可使用 Codex 辅助开发
 - 交付名称：Live Voice UX / Vertical Slice Demo
 - 交付性质：验证产品流程和感知效果，不宣称达到生产 Alpha
+- 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；当前为 Candidate，验收通过后才冻结
 
 ## 1. 先说结论
 
@@ -22,7 +23,7 @@
 → Agent 根据新要求继续工作
 ```
 
-这条链路的起点、Agent 处理和最终结果都是真实的。Demo 简化的是语音底层、设备范围、异常恢复和通用任务管理，不是伪造回答或跳过 Agent。
+这条链路的起点、Agent 处理和最终结果都是真实的。V0 简化的是语音底层、设备范围、异常恢复和通用任务管理，不是伪造回答或跳过 Agent，也不是另建一套覆盖全部功能的模拟 UX。
 
 可以把两者理解为：
 
@@ -53,7 +54,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 
 > 停，不要分析前端，只看 Gateway。
 
-系统要立即停止本地朗读，并将最终识别出的新要求通过现有 `supplement` 中断路径交给 Agent。旧回答的迟到文本和音频不能在新回答开始后复活。
+系统始终要先立即停止本地朗读。最终识别文字到达时，如果 Agent 仍在 processing，新要求通过现有 `supplement` 中断路径提交；如果 Agent 已完成、只剩浏览器 TTS 在朗读，新要求作为普通 `chat.send` 下一 Turn 提交。两者都能让用户纠正方向，但只有前者证明真实 Agent supplement。旧回答的迟到文本和音频不能在新回答开始后复活。
 
 ### 2.4 状态让用户知道系统正在做什么
 
@@ -89,7 +90,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 | 连续上下文 | 完成，复用现有 Session | 完成，并有更严格的会话事实和播放历史 | 多轮语音协作是否自然 |
 | 判断用户说完 | 固定停顿时间或显式结束 | 声音、语义和上下文共同判断 | 固定规则下的交互节奏是否可接受 |
 | 朗读回答 | 浏览器整段朗读；稳定后按完整句子排队 | 服务端流式 TTS、音频分片、背压和播放确认 | Agent 回答被听到时是否清楚、简洁、及时 |
-| 插话 | 重新开麦/点击即可确定性打断；耳机下尝试自然开口 | 持续监听、回声消除、误打断恢复、精确历史修复 | 用户是否需要打断，以及 `supplement` 语义是否正确 |
+| 插话 | 重新开麦/点击立即停声；processing 中 final 走 supplement，只剩 TTS 时走普通下一 Turn | 持续监听、回声消除、误打断恢复，并明确区分停声、取消回答、取消工作 | 用户是否需要处理中纠正与朗读中止，以及两种路由是否可理解 |
 | 旧回答隔离 | 前端递增 epoch，清空旧播放队列 | 客户端与服务端共同使用 response ID、fence 和 ACK | 新旧回答不会在主要演示路径中串音 |
 | 音频传输 | 浏览器本地 STT/TTS；Agent 仍走现有文字 WebSocket | 独立实时音频链路、二进制帧、背压和重连 | 产品体验，而不是媒体基础设施能力 |
 | 设备和平台 | 固定 Windows、Chrome/Edge、中文、默认设备和耳机 | 多设备、多平台、多语言、设备切换 | 固定目标环境能否成立 |
@@ -225,7 +226,7 @@ speaking + 用户重新开麦
 - Agent 能真实调用现有工具，并展示真实执行结果。
 - Agent 回答自动朗读。
 - 重新开麦或点击打断时立即本地停止声音。
-- 打断后的新要求进入现有 `supplement`。
+- 打断后的新要求按 final 时状态路由：processing 中进入现有 `supplement`；只剩 TTS 时进入普通 `chat.send`。
 - 旧 TTS 队列和迟到回调不能在新回答中恢复。
 - 权限、识别或播放失败时显示原因并退回文字聊天。
 - 关闭功能开关后，原文字聊天无回归。
@@ -263,7 +264,7 @@ speaking + 用户重新开麦
 | 浏览器 STT/TTS | 真实语音和真实回答；2026-08-01 已在固定 Chrome/Jabra 环境贯通一次 | 服务端流式媒体及 Provider 可替换性 | Speech Port + Realtime Media |
 | 完整消息后分片 TTS | 完整真实回答先清洗，再以约 220–300 字按句末优先 FIFO 朗读，不受普通 TTS 500 字默认截断 | token/audio 级实时性、服务端背压和播放确认 | streaming TTS、统一播放队列与 presented history |
 | 技术标识符只在朗读副本中可听化 | 页面保留 Agent 原文；路径、分支、斜杠、下划线、缩写和数字可实际听到 | 通用发音词典、SSML、多语言发音质量 | 正式 TTS Provider 的 SSML/lexicon 与按语言归一化 |
-| 重新开麦即打断 | 真实停止和真实 supplement | 完全免手操作和误打断恢复 | 持续采集、AEC、false-barge-in recovery |
+| 重新开麦即打断 | 始终真实停止本地声音；processing 中的 final 走真实 supplement，只剩 TTS 时走普通下一 Turn | 完全免手操作、误打断恢复，以及服务端 stop-speaking/cancel-response/cancel-work 的精确区分 | 持续采集、AEC、false-barge-in recovery 与统一 response lifecycle |
 | 前端 `responseEpoch` + 进程内 TTS owner/revision | 演示路径中旧 FIFO、迟到回调、旧服务端 TTS 响应和历史消息手动朗读不会与 Live Voice 双播 | 跨 tab、跨端、断线和服务端乱序一致性 | response ID、generation fence、统一 TTS ownership、ACK |
 | supplement ACK 前前端 quarantine 旧输出 | 当前有序 WebSocket 路径中，旧 delta/final/reasoning/media/tool_call/tool_update 不进入消息或朗读，并暂存旧流的 `processing=false` | ACK 实际早于 AgentServer cancel/replacement 完成；`chat.tool_result`、真实副作用、ACK 丢失、断线重放和多端并发无法 fence | 服务端分配 response/generation ID，cancel/replacement 与 ACK 定义明确顺序，客户端与服务端共同执行可恢复 fence |
 | 一个 `lastTaskId` | 指定任务的真实状态和取消 | 多任务消歧和通用控制 | Task Control Core |
@@ -280,7 +281,7 @@ speaking + 用户重新开麦
 | D3 | final → `chat.send`；处理中 final → `supplement`；增加重复提交保护 | 连续说 10 句，每句只产生一个用户 Turn，partial 副作用为 0 |
 | D4 | Agent final 自动朗读、文本清洗、thinking/speaking 状态切换 | 完成“说一句 → Agent/Tool → 真实回答 → 自动朗读”闭环 |
 | D5 | TTS FIFO、按句播放（若稳定）、`responseEpoch` 和退出清理 | 打断后旧音频不会恢复；分句不稳则退回整段朗读 |
-| D6 | 确定性插话：重新开麦立即静音，final 走 supplement；耳机下尝试自然开口 | 点击/重新开麦打断 10/10；自然打断不足则保留显式路径 |
+| D6 | 确定性插话：重新开麦立即静音；processing 中 final 走 supplement，只剩 TTS 时走普通下一 Turn；耳机下尝试自然开口 | 分阶段打断 10/10，并分别记录 7 次真实 supplement 与 3 次 speaking 停声/普通发送 |
 | D7 | 权限拒绝、识别错误、网络错误、会话切换、文字回归和 20 分钟运行 | 核心 Demo 稳定；未通过则砍掉全部后台任务增强 |
 | D8 | 可选：固定口令调用 `schedule.run`，记录一个真实 `task_id`，显示状态卡 | 不影响语音主链；否则删除此增强 |
 | D9 | 可选：`schedule.status/cancel`；或全部用于修复主链；完整脚本彩排 | 主脚本连续成功 3 次，代码冻结 |
@@ -299,8 +300,8 @@ speaking + 用户重新开麦
 5. final 后只生成一条用户消息；Agent 真实调用工具并返回实际结果。
 6. 系统自动朗读 Agent 结果。
 7. 说：“继续分析最主要的三个架构问题。”
-8. Agent 分析或朗读期间重新开麦，说：“停，只分析 Live Voice 相关代码。”
-9. 旧朗读立即停止，新要求只提交一次；Agent 按新方向继续，旧声音不再恢复。
+8. Agent 分析期间重新开麦，说：“停，只分析 Live Voice 相关代码。”；验收时确认 final 到达时仍在 processing，并实际走 `supplement`。
+9. 另在朗读期间重新开麦；旧朗读立即停止，新要求只提交一次并走普通 `chat.send`，旧声音不再恢复。
 10. 说：“把结论整理成三点。”验证上下文延续。
 11. 朗读期间退出 Live Voice，麦克风和声音同时停止，文字聊天仍可使用。
 12. 拒绝麦克风权限或模拟识别失败，界面明确报错并提供文字降级。
@@ -320,6 +321,8 @@ speaking + 用户重新开麦
 
 这些是 Demo 的固定环境目标，不等同于完整版的跨环境 p95 服务承诺。
 
+正式执行步骤、固定语料、分阶段打断矩阵、证据模板和跨机器冷启动验证统一见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。本节只保留范围级判据；结果冲突时以验收手册中的实际路由证据为准。
+
 ### 11.1 放行闸门与固定环境
 
 “代码完成”不等于“可上台”。Demo 只有在固定演示机上同时满足以下条件才允许宣称完成：
@@ -330,12 +333,12 @@ speaking + 用户重新开麦
 4. 固定工具口令实际出现 `chat.tool_call`、`chat.tool_result`、`chat.final`。
 5. 完整回答实际朗读。
 6. 10 个连续语音 Turn 无重复提交。
-7. 10 次打断均立即静音，旧声音恢复 0 次。
+7. 分阶段 10 次打断均通过：3 次 thinking + 4 次 tool 有真实 supplement 证据，3 次 speaking 立即静音并只走一次普通 `chat.send`；旧声音恢复 0 次。
 8. 20 分钟或 20 Turn 无需刷新。
 9. 主演示脚本连续成功 3 次。
 10. 失败后文字聊天仍正常。
 
-环境、依赖、配置、服务启动和证据模板统一见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。未通过的闸门是当前 Demo 阻塞项；Team、WebView2、多语言、全双工/AEC、流式 TTS 和生产级 generation fence 不属于本轮放行条件。
+环境、依赖、配置和服务启动见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)；放行步骤和证据模板见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。未通过的闸门是当前 V0 阻塞项；Team、WebView2、多语言、全双工/AEC、流式 TTS 和生产级 generation fence 不属于本轮放行条件。
 
 ## 12. 绝不能为了赶进度而省略的内容
 
@@ -364,12 +367,17 @@ speaking + 用户重新开麦
 
 ## 14. Demo 之后如何演进
 
-Demo 完成后不要直接把临时代码宣布为架构，而是根据实测结果依次工程化：
+只保留一条累计工程路线：每个版本包含前一版本已验证能力，并逐步用正式模块替换 V0 shortcut；不另建覆盖所有功能、主要依赖模拟状态或 hardcode 结果的独立 UX 原型。
 
-1. 稳定 STT/TTS 和设备权限，确定首个正式 Provider。
-2. 建立 Conversation Runtime 和服务端 response/generation fence。
-3. 建设真正的实时媒体链路、背压和重连。
-4. 实现持续监听、自然插话、回声处理和 presented history。
-5. 再建设通用 Task Control、多个任务、恢复和副作用协调。
+| 版本 | 对上一版的主要增量 | 到达状态 |
+|---|---|---|
+| V0 | 本文的真实 Speech → Agent → Tool → Speech 核心旅程 | Vertical Slice Candidate；本文 Gate 通过后 Released/冻结 |
+| V1 / P1 | Conversation Runtime、response/generation ownership、取消与 presented history 基础 | Product Alpha |
+| V2 / P2 | 正式 Speech Port、实时媒体、流式 STT/TTS、背压、重连、自然插话/AEC | Realtime Alpha；最大的可感知实时语音跃迁 |
+| V3α / P3α | 最小 Task Control：create/get/list/status/cancel/events 与 D0 | Task Alpha；不宣称能在运行中把任务 A 改为 B |
+| V3 | 完整 P1 + P2 + P3，包括 update/provide-input、恢复和副作用协调 | Full Capability Beta，极大接近正式能力 |
+| RC / Production | 安全、可靠性、兼容矩阵、故障注入、可观测、运维与发布闸门 | 生产放行 |
 
-两周 Demo 的任务是回答“这个体验值不值得继续做、最痛的问题在哪里”，不是提前替完整版回答所有工程问题。
+共享事件契约、ownership 和安全边界冻结后，P1/P2/P3 的部分实现可以并行，以缩短总时间；版本验收仍按能力依赖累计。V3 不是自动等于生产版，仍必须经过 RC hardening。
+
+两周 V0 的任务是回答“这个体验值不值得继续做、最痛的问题在哪里”，不是提前替完整版回答所有工程问题。

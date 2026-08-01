@@ -55,7 +55,7 @@
 ## D-006 Demo 的插话采用确定性路径
 
 - 日期：2026-07-31
-- 状态：Accepted
+- 状态：Superseded（final 路由部分由 D-019 取代；显式重新开麦和立即本地停播仍保留）
 - 背景：免手插话需要持续采集、回声消除、误触发恢复和更完整的状态管理。
 - 决策：必做路径是“重新开麦或点击 → 立即本地停播 → final transcript → supplement”；耳机环境的自然开口插话为增强项。
 - 原因：确定性路径已能验证用户是否需要打断和修改 Agent，同时显著降低两周风险。
@@ -171,3 +171,23 @@
 - 原因：2026-08-01 真机中用户确认完整听到分支名中的斜杠、数字和下划线；纯逻辑测试同时保证普通中英文不被无差别改写、长回答不丢失且片段可无损拼接。
 - 影响：当前仍是完整消息到达后的浏览器分片朗读，不是 token/audio streaming TTS；朗读副本为了可听性可以与页面标点形式不同，但语义和显示事实不能被改写。
 - 重新评估条件：引入正式 TTS Provider、SSML/发音词典、流式音频和播放确认。
+
+## D-018 只保留一条累计演进路线，不另建全功能模拟 UX 原型
+
+- 日期：2026-08-01
+- 状态：Accepted
+- 背景：V0 可以用临时实现快速打通主流程，但若再建立一套覆盖全部功能、主要依赖 hardcode 或模拟状态的独立 UX/Vision 原型，会形成第二套事实来源，消耗两周时间，并可能展示正式工程无法继承的效果。
+- 决策：两周产出定义为 V0 Vertical Slice Demo——核心体验旅程完整，但不要求所有最终功能完整。之后在同一条真实工程路径上累计演进为 V1/P1 Product Alpha、V2/P2 Realtime Alpha、V3α/P3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening；不单独建设“覆盖所有功能但都不正式”的模拟 UX 版本。每个新版本包含前一版本已验证的能力，并用正式模块逐步替换 Demo shortcut。
+- 原因：纵向切片更早暴露真实 Agent、工具、取消、音频和状态耦合；累计替换避免 Demo 与生产效果来自两套机制。V2 引入实时媒体、流式语音和自然插话，是最明显的实时语音感知跃迁。
+- 影响：共享事件契约、response ownership 和状态边界冻结后，P1/P2/P3 的部分工程可以并行，但版本放行仍按依赖顺序累计。P3α 只包含 create/get/list/status/cancel/events 与 D0；正在运行的后台任务从 A 改为 B，需要完整 P3 的 update/provide-input，或显式 cancel/create，不能用状态查询冒充更新。V3 只有在 P1/P2/完整 P3 都是真实实现时才接近正式版，并仍需 RC 的可靠性、安全、兼容性和运营加固。
+- 重新评估条件：真实验证证明某个阶段边界无法独立验收，或正式实现必须改变共享协议顺序。
+
+## D-019 V0 按 final 时的 processing 状态区分 supplement 与朗读中止
+
+- 日期：2026-08-01
+- 状态：Accepted
+- 背景：当前 TTS 只朗读已经完成的 assistant 消息；此时 Agent 通常已经不再 processing。旧文档把 thinking、tool 和 speaking 中的“打断”都称为 supplement，会把本地停声后的普通下一轮误报成 Agent 中断成功。
+- 决策：重新开麦始终先停止本地 TTS。新 final 到达时若 `processing=true`，通过 `chat.interrupt(intent=supplement)` 提交；若 `processing=false`，通过普通 `chat.send` 提交。V0 验收保留 10 次用户可感知打断，固定为 3 次 thinking、4 次 tool 和 3 次 speaking：前 7 次必须有真实 supplement 路由证据，后 3 次必须验证本地停声后恰好一次普通 `chat.send`。分别报告 `true_supplement_pass_count` 和 `speaking_playback_stop_pass_count`，不得写成“10 次 supplement”。
+- 原因：这与当前代码和用户实际感知一致，也能分别验证处理中纠正与朗读中止，而不夸大服务端 cancel 能力。
+- 影响：thinking/tool 时开麦但 final 前 processing 已结束的样本必须重分类，不能计入 supplement；Gateway ACK 仍不代表旧 Agent/工具已确定停止，V0 只使用可核对的只读工具并记录迟到 result、warning 和副作用。
+- 重新评估条件：P1/P2 建立统一 response/generation lifecycle、流式 TTS 和显式的 stop-speaking / cancel-response / cancel-work 语义。

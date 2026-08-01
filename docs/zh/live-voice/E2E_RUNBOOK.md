@@ -2,6 +2,8 @@
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
+本文是环境、依赖、服务启动和健康检查的权威入口。V0 的固定语料、分阶段打断、放行 Gate 和证据汇总以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准；现场展示话术以 [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) 为准。
+
 ## 1. 为什么必须固定环境
 
 Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、外部模型 Provider、网络、后端配置和前后端依赖。只固定源码不能保证另一台机器得到相同结果。
@@ -74,6 +76,8 @@ Set-Location ..\..\..\..
 ## 4. 本机配置检查
 
 后端需要一个可用的默认模型配置，至少包括非空的 API base、API key、model name 和 client/provider。只检查“是否存在/是否可用”，不要把值贴到日志、文档或 commit 中。
+
+推荐从 Web UI 的 **Settings → Configuration → Model Configuration** 注入或选择默认模型；高级用户也可以使用机器私有的用户工作区 `config/config.yaml` / `.env`。验收只在 UI 中确认必填项非空或已掩码，并通过下一节的文字 Tool smoke 验证实际可用；不要让终端、Codex 或截图打印完整配置。任一必填项缺失时停止外部模型和真实语音验收，从受控渠道补齐后再继续。
 
 还要检查：
 
@@ -178,10 +182,10 @@ project.create（首次注册时）
 4. interim 期间消息列表不能新增用户消息；final 后只能新增一条。
 5. 核对真实 `chat.tool_call`、`chat.tool_result`、`chat.final`。
 6. 完整回答必须从耳机实际朗读。
-7. thinking 或 speaking 时重新开麦，说：“停，只分析 Live Voice 相关代码。”
-8. 旧声音应立即停止；新要求只提交一次；旧声音不能恢复。
-9. 重复到 10 个语音 Turn、10 次打断，并持续 20 分钟或 20 Turn。
-10. 完整执行 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) 第 10 节脚本，连续成功 3 次。
+7. thinking/tool 时重新开麦并在新 final 到达时确认 Agent 仍在 processing；该样本必须真实走 `chat.interrupt(intent=supplement)`。
+8. speaking 时重新开麦；旧声音应立即停止且不能恢复，但 Agent 已完成时新 final 应作为一次普通 `chat.send`，不能冒充 supplement。
+9. 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 完成连续 10 Turn、3 次 thinking supplement、4 次 tool supplement、3 次 speaking 停声/普通发送，以及 20 分钟或 20 Turn soak。
+10. 完整执行 [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) 的主演示脚本，连续成功 3 次。
 
 同时观察：ACK 前的旧 `chat.tool_call` / `chat.tool_update` 和短暂 `processing=false` 当前已有前端隔离，但 `chat.tool_result` 与工具真实副作用没有 generation fence。打断后必须核对旧工具结果、实际副作用和 Gateway cancel warning，不能只看 UI 是否隐藏。
 
@@ -219,7 +223,7 @@ project.create（首次注册时）
 
 已证明：文字工具 smoke、真实麦克风 final、`new` session promotion、真实 Agent/Terminal Tool、完整技术标识符 TTS、自动回听和约 8 秒初始静默窗口在这一组固定环境中可以成立。
 
-未证明：10 个准确语音 Turn、10 次 supplement 打断、旧副作用 fence、20 分钟或 20 Turn、主演示脚本连续 3 次、Desktop/WebView2 或任何生产可靠性指标。
+未证明：10 个准确语音 Turn、7 次 processing supplement、3 次 speaking 停声/普通发送、旧副作用 fence、20 分钟或 20 Turn、主演示脚本连续 3 次、Desktop/WebView2 或任何生产可靠性指标。
 
 ## 11. 证据记录模板
 
@@ -246,8 +250,13 @@ tool_call/tool_result/final：通过 / 失败
 实际 TTS：通过 / 失败
 技术标识符完整听到：通过 / 失败
 8 秒初始静默阈值：通过 / 失败
-10 Turn 重复提交：
+10 Turn 通过数 / 重复提交：
+thinking supplement：__ / 3
+tool supplement：__ / 4
+speaking playback stop + chat.send：__ / 3
 10 次打断旧声音恢复次数：
+实际路由证据缺失次数：
+迟到 tool_result / cancel warning / 可观察副作用：
 20 分钟或 20 Turn：
 完整脚本连续成功次数：
 ASR 误识别样本：
@@ -261,4 +270,4 @@ ASR 误识别样本：
 - 退出 Live Voice，确认麦克风和声音均停止。
 - 停止 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
-- 更新 [STATUS.md](STATUS.md) 中的通过项、失败项和下一步，提交并推送；不要只在对话里报告结果。
+- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步，提交并推送；不要只在对话里报告结果。
