@@ -23,9 +23,12 @@ The immutable validation baseline is the V0 vertical-slice candidate at the SHA 
 
 At the start of a resumed Live Voice task, run `git status --short --branch`, `git rev-parse HEAD`, and compare the local branch with its upstream. If a handoff snapshot and Git disagree, treat the pulled remote branch as the implementation fact, report the mismatch, and update the handoff instead of silently using stale text.
 
+Every Live Voice module or logical slice must follow D-032 and the mandatory test-closure gate in section 3.1 of `docs/zh/live-voice/POST_V0_DELIVERY_ROADMAP.md`. Before semantic implementation, re-read the relevant solution, current stage, module contract/decisions, and existing tests, then record the module definition, test inventory, why each test exists, and the complete scenario matrix in `docs/zh/live-voice/STATUS.md`. After implementation, repeat that review against the actual diff and final tests. Positive business scenarios must succeed; negative business scenarios must be rejected or fail closed, with forbidden side effects explicitly asserted as zero, while the test process itself passes. Test counts or line coverage alone never prove module closure. Missing coverage or an unexplained `N/A` means the slice is `PARTIAL` or `BLOCKED`, not `CLOSED`.
+
 After material Live Voice work:
 
 - update `docs/zh/live-voice/STATUS.md` with progress, verification, known issues, and the next concrete actions;
+- update the D-032 pre/post review, test inventory, scenario-to-test mapping, exact tested SHA, commands, and remaining gaps for every affected module;
 - update `docs/zh/live-voice/DECISIONS.md` when scope or a technical choice changes;
 - update the Shortcut Ledger in `TWO_WEEK_DEMO.md` when adding or removing a temporary limitation;
 - normally commit and push the documentation with the related code so another machine can resume from Git alone; D-030 ended D-022's temporary pre-V0 stash window, so keep `2c700934` as the immutable unreleased V0 Candidate and commit later Post-V0 work without relabeling it as V0 evidence.

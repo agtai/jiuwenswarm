@@ -51,7 +51,7 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 | [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) | 当前能做/不能做、与最终版差异，以及成功率优先的三轮现场展示脚本 | 展示能力、环境或已知风险变化时更新 |
 | [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md) | 完整目标架构、P1/P2/P3 边界、模块和竞品证据；从用户提供的原始方案逐字节复制 | 低，重大架构变化时更新或新增版本 |
 | [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) | 两周 Demo 的真实范围、完整版区别、实施日程、验收和降级路径 | Demo 期间按范围变化更新 |
-| [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) | V0 之后两周“全能力类别覆盖”与正式交付的双目标优先级、当前 foundation 和下一切片 | Post-V0 开发期间持续更新 |
+| [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) | V0 之后的双目标优先级、当前切片，以及 D-032 模块测试闭环的唯一详细规范和模板 | Post-V0 开发期间持续更新 |
 | [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md) | 已 apply stash 的历史内容、备份 SHA、foundation 增量、验证证据和灾难恢复边界；正常续作不重复 apply | stash 状态或恢复保险变化时更新 |
 | [DECISIONS.md](DECISIONS.md) | 已接受的关键决策及其原因，避免后续会话反复推翻已有结论 | 每次作出实质性取舍时更新 |
 | [STATUS.md](STATUS.md) | 当前进度、已验证内容、阻塞和下一步 | 每次实质性工作结束前更新 |
@@ -68,7 +68,7 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 2. 读 [HANDOFF.md](HANDOFF.md)，恢复最后一次可交接快照和唯一主线。
 3. 读 [STATUS.md](STATUS.md)，确认实际进度和下一步。
 4. 读 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)，确认 V0 原始范围和 shortcut。
-5. 读 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)，确认当前两周最大能力目标、已完成 foundation 和下一切片。
+5. 读 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)，确认当前两周目标、下一切片，并在开发任何模块前执行 D-032/§3.1 的测试闭环前置回顾。
 6. 读 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)，理解 stash 已 apply 的历史和额外恢复保险；当前分支已有 foundation 时不要重复 apply。
 7. 读 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)，确认候选版与已放行版的区别、当前验收 Gate 和证据口径。
 8. 读 [DECISIONS.md](DECISIONS.md)，不要只根据代码现状猜测意图。
@@ -89,9 +89,12 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 
 如果代码和方案不同，应在 `STATUS.md` 记录差距，不要静默把当前实现当作最终设计。
 
+模块测试闭环的原则以 `DECISIONS.md` 的 D-032 为准，详细执行和模板只以 `POST_V0_DELIVERY_ROADMAP.md` §3.1 为准，当前切片的实际 inventory、场景、tested SHA、结果和 gap 以 `STATUS.md` 为准；V0 是否放行仍只以 `V0_ACCEPTANCE.md` 为准。
+
 ## 每次工作结束前
 
 - 更新 `STATUS.md`：完成了什么、验证结果、已知问题和下一步。
+- 对每个受影响模块完成 D-032 开发后回顾，在 `STATUS.md` 更新 test inventory、每项 test 的 why、scenario 覆盖、exact tested SHA、精确命令、结果和 gap；未满足闭环 Gate 时如实标记 `PARTIAL` 或 `BLOCKED`。
 - 如果改变了范围或技术选择，更新 `DECISIONS.md`。
 - 如果引入了新的临时简化，在 `TWO_WEEK_DEMO.md` 的 Shortcut Ledger 中记录替换计划。
 - 按 D-030 正常审阅、提交并推送 Post-V0 代码与文档；仅保存在本地、stash 或对话中的信息无法跨机器恢复。V0 验收使用 `2c700934` 的独立 checkout/worktree，不通过反复 stash 当前开发分支实现。
@@ -126,6 +129,8 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 ## 直接验证
 
 依赖已经安装后，在 `jiuwenswarm/channels/web/frontend` 目录执行。下面刻意使用本地可执行文件，不要求全局安装 TypeScript 或 Vite：
+
+这些命令只保存 Foundation 的已知回归基线，不是以后所有模块的固定充分条件。每个新切片必须先按 D-032/路线 §3.1 审阅相关 tests、补齐完整场景矩阵，再根据实际影响增加 targeted、相邻回归、跨层 integration/E2E 和人工证据；不得把下面的历史总数当作模块闭环证明。
 
 ```text
 node node_modules/typescript/bin/tsc --noEmit

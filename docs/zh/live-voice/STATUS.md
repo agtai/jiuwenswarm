@@ -1,16 +1,16 @@
 # Live Voice 当前状态
 
-- 最后更新：2026-08-01
+- 最后更新：2026-08-02
 - 工作分支：`hx/0731_live_voice_ux`
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 建立方案时的代码基线：`7b69fdeb`
 - V0 核心实现提交：`346f802a`；当前已推送 V0 Candidate 恢复点：`2c700934aa0024a7ab229644bf15934e9e8170e7`
-- 当前里程碑：不可变 V0 Vertical Slice Candidate + Post-V0 Task Foundation 收尾
+- 当前里程碑：不可变 V0 Vertical Slice Candidate 独立验证 + Post-V0 Task Foundation + D-032 模块测试闭环 Gate
 - 实现状态：真实“麦克风 → Agent → Terminal Tool → 完整回答 → 浏览器 TTS → 自动回听”主链已在固定 Windows/Chrome 环境成功跑通一次；[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 已定义完整 Gate，但稳定性、分阶段打断和跨环境放行尚未执行完
 
 跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动和固定环境按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行；V0 是否放行以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准。
 
-当前开发遵循 D-030 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`2c700934aa0024a7ab229644bf15934e9e8170e7` 固定为未放行 V0 Candidate；stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份。Post-V0 foundation 恢复正常的 review → commit → push 流程；稍后从 `2c700934` 的独立 checkout/worktree 执行 V0 Gate，不再反复 stash 当前开发分支。
+当前开发遵循 D-030、D-032 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`2c700934aa0024a7ab229644bf15934e9e8170e7` 固定为未放行 V0 Candidate；stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份。Post-V0 继续正常 review → commit → push；每个模块从 D-031 起必须执行开发前/开发后双回顾和完整场景测试 Gate。V0 从 `2c700934` 的独立 checkout/worktree 执行，不反复 stash 当前开发分支。
 
 对 **`2c700934` V0 Candidate baseline** 的量化判断仍是：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。这些数字来自 V0 的真实麦克风/Agent/Tool/TTS 首次贯通和当时的 47 项 Live Voice 自动化，不包含后续 Post-V0 foundation。连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示尚未完成，因此 V0 仍不能称为已放行；Post-V0 的完成度也不能用 V0 的百分比替代。
 
@@ -21,6 +21,7 @@
 这次成功证明了受控 Demo 的主链和感知效果，但只是一次主链证据，不等于稳定性放行。之后又成功进入两轮回听，说明循环可以继续；同时 Web Speech 把 `git` 识别为“地图”或“史记”，暴露出中文技术词准确率风险。真实 supplement 打断、speaking 本地停声、工具副作用隔离和长时运行仍需专项验证。
 
 已接受新的累计路线：不另建覆盖全部功能的模拟 UX 原型；Post-V0 两周让 P1/P2/P3、Context、Progress、Failure/Degradation、Observability 等能力类别都有真实纵向路径或明确标注的替代。版本命名修正为 V1 Foundation Alpha、V2 Realtime Alpha、V3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening。详细见 `DECISIONS.md` 的 D-018、D-020 和 D-021。
+已接受 D-032：模块不能再凭测试总数或行覆盖率宣称闭环。开发前必须从方案、当前阶段和模块契约建立 test inventory 与完整场景矩阵；开发后必须结合实际 diff 再审，回答“有哪些 tests、为什么这样设计、覆盖了哪些场景、是否完全满足当前模块定义”。正例业务动作必须成功；反例业务动作必须被拒绝/失败且禁止副作用为 0，对应测试进程本身仍应通过。详细唯一规范见路线文档 §3.1。
 
 ## 本轮实现与修复
 
@@ -91,6 +92,13 @@
 
 以上 **226/226、155/155、24/24、TypeScript 和 4494 modules** 是 foundation review 修复合入后的最终统一结果，不是子任务数字相加。后端 `3da101cf`、前端 `42e76d30` 已落地；精确历史和边界见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。
 
+### D-032 模块测试闭环状态
+
+- 规则状态：`Accepted`，详细规范和模板已写入 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) §3.1；第一个强制应用切片是 D-031。
+- Foundation 证据分类：`HISTORICAL`；D-032 closure assessment：`NOT_ASSESSED`。这不是 §3.1.5 之外的新 closure 状态。`226/155/24/4494` 继续证明对应最终 suites、TypeScript 和 build 当时通过，但当时没有按 D-032 保存开发前/开发后双回顾，不能追认为 `CLOSED`。
+- 当前证据缺口：尚无权威的“模块定义/风险 → scenario ID → 具体 test/evidence”清单；现有记录也没有单独证明 React hook/UI/WebSocket 等真实接线层已覆盖所有相关 effect 顺序、重复渲染、卸载、flag 接线和旧闭包风险。这里记录的是未证明，不能用测试总数推断为已覆盖。
+- 处理规则：已有模块下一次被修改、被依赖来关闭新切片，或进入版本 Gate 前，按受影响范围补齐。D-031 开码前必须先完成 monitor 的前置 inventory 和 P/N/B/S/T/C/R/I/F/K/X 矩阵；没有该记录不得开始语义实现。
+
 ### 固定环境真实 E2E
 
 - 环境：Windows、Chrome `150.0.7871.187`、Jabra EVOLVE 30 II、`zh-CN`、Node.js `24.14.0`、Python `3.12.9`、模型标签 `deepseek-v4-flash`。
@@ -119,11 +127,17 @@
 - owner + project scope、稳定 command ID、同-key retry 与严格 exact-key reconciliation 已经补齐 foundation 门槛，但它们不构成跨进程 CAS、唯一执行 owner、crash transaction、exactly-once、D1/D2 或外部副作用 reconciliation。
 - 前台目前仍会把任务反馈作为当前语音交互的一次结果处理；还没有“派发后立即继续监听、后台独立轮询、终态异步回流”的 task monitor。刷新恢复、多个任务、主动事件推送、重放/unread 和通用 Task Control 也未完成。
 
-## 下一步
+## 下一步（两条隔离轨道）
 
-1. 下一实现切片按 D-031 建立 **poll-backed 异步任务监控**：任务派发后前台立即恢复 Live Voice，任务状态在独立投影中轮询更新，终态结果异步回流到真实 task card；安全空档最多播报一次简短终态，绝不抢占麦克风或 Agent TTS。
-2. 该切片保持窄范围：不把 task 状态写进 chatStore，不伪造 chat processing，不做完整 TaskEvent push/replay、通用多任务 NLU、跨进程 exactly-once 或 D1/D2。
-3. 用户稍后验收 V0 时，从 `2c700934` 新建独立 checkout/worktree，清除 Post-V0 flags 并执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)；当前开发分支和 stash 备份不参与这次隔离。
+### V0 独立验收轨
+
+1. 继续从 detached `2c700934` 独立目录执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)，清除 Post-V0 flags；累计开发分支、Foundation 和 stash 备份不混入 V0 证据。该轨道可由用户独立执行，不改变下一开发切片。
+
+### Post-V0 开发轨
+
+1. 下一开发切片仍是 D-031；写语义代码前先按 D-032/路线 §3.1 在本文件建立 module definition、现有/新增 test inventory、每项 test 的 why 和完整场景矩阵，并先 commit/push 前置 checkpoint。
+2. 前置 Gate 完成后建立 **poll-backed 异步任务监控**：任务派发后前台立即恢复 Live Voice，独立投影轮询真实状态，终态异步回流到真实 task card；安全空档最多播报一次简短终态。
+3. D-031 保持窄范围：不写 chatStore、不伪造 chat processing、不抢占麦克风/Agent TTS，不扩成完整 TaskEvent push/replay、通用多任务 NLU、跨进程 exactly-once 或 D1/D2；实现后完成 D-032 后置回顾才能标记闭环。
 4. 随后按 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) 推进 response/generation lifecycle、P1 Speech Port、P2 Realtime、P3α/完整 P3，最后进入 RC。
 
 ## 接手者注意事项

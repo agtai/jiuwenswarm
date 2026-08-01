@@ -1,8 +1,9 @@
 # Live Voice：V0 之后的两周全能力 Demo 与正式交付路线
 
-> 更新日期：2026-08-01
+> 更新日期：2026-08-02
 > V0 不可变基线：`2c700934aa0024a7ab229644bf15934e9e8170e7`（Candidate，未放行）
 > 状态：Task Foundation 已完成 review 与统一验证，并由后端 `3da101cf`、前端 `42e76d30` 落地；代码与文档已纳入本批 Git 交付
+> 模块闭环：从 D-031 起强制执行 D-032 的开发前/开发后双回顾与完整场景测试 Gate
 
 ## 1. 两个目标同时成立
 
@@ -31,6 +32,106 @@
 2. 是否直接成为正式版基础，而不是一次性假 UX；
 3. 当前能否无需麦克风、耳机和人工判断，用纯逻辑、fake adapter 或故障注入自动验证；
 4. 是否先消除错误取消、假进度、任务副作用或旧输出复活等安全风险。
+
+## 3.1 每个模块的强制测试闭环（D-032）
+
+本节是所有 Live Voice 模块和逻辑切片的唯一详细测试闭环规范。“模块”按一个可独立说明契约、状态、ownership 和副作用边界的逻辑单元划分，不按文件数量划分。规则从 D-031 起强制执行；Foundation 的既有 `226/155/24/4494` 仍是有效历史回归结果，但不能倒写成已经完成本规则要求的双回顾。
+
+“覆盖所有场景”指：基于完整方案、当前版本阶段、当前模块定义、已接受决策、上下游契约和实际 diff，可以识别出的全部必需行为与风险均进入矩阵。它不等于无限组合穷举，也不等于行覆盖率 100%。无法自动化、当前明确不支持或确实不适用的场景仍必须列出，分别绑定人工/E2E 证据、后续替代计划或有依据的 `N/A`；不得静默遗漏后宣称闭环。
+
+### 3.1.1 开发前回顾：先理解，再设计 tests
+
+任何语义实现开始前，必须完成并在 [STATUS.md](STATUS.md) 留下前置记录：
+
+1. 重读本目录的方案入口、当前 `HANDOFF/STATUS`、当前阶段路线、相关 Accepted decisions；涉及长期架构、P1/P2/P3、协议、ownership、取消、持久化或生产边界时，完整重读 `FULL_SOLUTION_2026-07-30.md`。
+2. 阅读当前模块代码、所有相关现有 tests 和上下游接线，不能只根据计划标题或当前实现猜模块定义。
+3. 写清模块定义：阶段/版本、目标、非目标、输入与输出、状态与允许/禁止转换、事实源、identity/ownership/scope、外部副作用、时序/重试/取消/恢复、feature flag/fallback、上下游依赖、Demo shortcut 与正式接替者。
+4. 建立 test inventory：列出已有和计划新增的具体 suite/test case、测试层级、每项为什么存在、它证明哪条行为或风险、覆盖哪些 scenario ID，以及当前缺口。不能只记录测试总数。
+5. 先完成场景矩阵和 oracle，再写语义代码。Bug 修复应先有能在旧行为上失败的回归测试；纯重构应先建立 characterization。无法做到时必须记录原因和替代证据。
+6. 前置记录必须在任何语义实现开始前作为独立文档 checkpoint commit/push，使机器故障、新会话或跨机器恢复也不会丢失模块理解和测试设计；不能只留在对话、本机草稿或尚未提交的 worktree。
+
+### 3.1.2 强制场景矩阵
+
+| 维度 | 必须回答的问题 |
+|---|---|
+| `P` 正向正确 | 每个合法输入、状态和用户旅程是否得到正确输出、状态、provenance 与预期副作用；需要 exactly-once/at-most-once 时次数是否准确 |
+| `N` 反向拒绝 | 缺失、非法、歧义、未授权、冲突、过期或当前状态不允许的动作是否明确失败、拒绝或 no-op，并且所有禁止副作用为 0 |
+| `B` 边界与数据形态 | 空值、临界值、超长、Unicode/标点、畸形类型、缺字段、旧格式、损坏或部分数据如何处理 |
+| `S` 状态与生命周期 | 所有允许和禁止的状态转换、terminal 不可逆、退出/卸载、错误恢复、事实源优先级是否正确 |
+| `T` 时序与事件顺序 | 重复、乱序、迟到、超时、ACK/final/processing 顺序互换、旧 callback/promise 是否被 fence |
+| `C` 并发、重试与幂等 | 并发 create/retry/cancel/delete/claim、同 key 重放、竞态收敛、调用次数和身份是否正确 |
+| `R` 恢复与持久化 | reload/reconnect/restart、响应丢失、部分失败、未知结果 reconciliation、旧 context 缺失时是否诚实恢复或失败 |
+| `I` 隔离与权限 | session/channel/project/task/target/response/generation/owner 跨域时是否 fail closed，且不泄露存在性或读取/修改他域数据 |
+| `F` flag、能力与降级 | feature flag on/off、capability 缺失、fallback、unsupported/unknown 和文字降级是否真实，关闭时是否零新增副作用 |
+| `K` 协议与持久格式兼容 | client/server 版本组合、schema/envelope、correlation 与单一响应所有权、未知/新增字段、序列化 round-trip、旧持久数据迁移/默认值、升级/降级策略是否明确且可验证 |
+| `X` 跨模块与真实路径 | Adapter、WebSocket、hook/UI、Agent/Tool、存储、设备或 Provider 每个新增接线不变量是否都有对应 integration 证据，包括适用的正例、反例、stale 和 flag-off；一个 happy-path E2E 不能替代这些证据，且必要人工证据不能被单测替代 |
+
+`P` 与 `N` 对每个新增或改变的不变量都是必填项；其他维度只可在确实不适用时填写有理由的 `N/A`。每个场景必须写清前置状态、输入/事件、期望输出和状态、允许的副作用、明确禁止的结果，以及对应自动化 test 或人工证据。
+
+“错误场景必须错误”描述的是**业务行为**：系统应被拒绝、进入明确 error/conflict/unknown/unsupported，或安全 no-op；相应 pytest/npm test 本身仍应 PASS。反向测试不能只断言抛异常，还要按模块断言敏感操作没有发生，例如没有 Agent/Task/TTS/timer 调用，没有第二个任务，没有 store/history/ledger 修改，没有 progress/log 越权读取，没有旧声音/旧消息/旧任务卡复活，也没有泄露其他 scope 下对象是否存在。
+后端/协议/持久化场景至少用 spy/counter 和 store before/after snapshot 证明拒绝路径零调用、零写入；用同路径多实例、reload、tombstone、损坏/截断数据和写入失败验证恢复边界；协议 test 断言精确 error code、response envelope、correlation/identity 和只响应一次，不能只断言“有 error”。
+
+并发和时序测试优先使用 fake clock、deferred promise、barrier/event 或 fault injection，避免依靠 `sleep` 和偶然调度得到假绿。
+
+### 3.1.3 Test inventory 最小字段
+
+| Test / suite | 层级 | Why：对应行为或风险 | Scenario IDs | Oracle 与禁止结果 | 当前状态 |
+|---|---|---|---|---|---|
+| 具体测试标题或参数化组 | pure/unit、contract/conformance、adapter/integration、E2E/manual | 为什么这样设计；防哪个 bug/风险 | `P-...`、`N-...` 等 | 成功/拒绝、状态、副作用次数 | existing/new/changed/gap |
+
+同一场景不要求在所有层级重复，但必须在能证明该风险的最低层和必要的真实接线层留下证据。纯函数全绿不能替代 React hook/UI/WebSocket、协议、存储或真实副作用路径；真机录屏也不能替代可重复的状态机、错误和竞态自动化。
+
+### 3.1.4 开发后回顾：按实际 diff 重新证明
+
+实现完成后、宣称模块闭环前，必须再次阅读相关方案、阶段定义、模块代码和全部相关 tests，并完成：
+
+1. 逐项检查实际 diff 新增或改变的分支、状态、调用顺序和副作用，把开发中发现的新风险补回模块定义、inventory 和矩阵。
+2. 逐项回答“有哪些 tests、为什么这样设计、覆盖哪些场景、什么错误实现会让它失败”；删除、放宽断言或更新 snapshot 必须有模块定义变化作为理由，不能为了变绿。
+3. 确认每个场景都有 `scenario → test/evidence` 映射；必要场景没有证据时保留 gap，不得用总测试数或行覆盖率代替。
+4. 先跑目标模块，再跑相邻回归、跨层 contract/integration、类型检查、lint 和 build；对最终 candidate 执行 `git diff --check <baseline_sha>..<candidate_sha>`。涉及真实设备、Agent/Tool、外部 Provider 或副作用时执行相应 E2E/人工 Gate。
+5. tested evidence 的固定顺序是：前置回顾文档 checkpoint → 提交全部 code/tests/fixtures/config/schema/migration/lockfile 等行为输入形成 candidate commit → 确认这些路径相对 HEAD 无未提交差异并记录 `git rev-parse HEAD`、`git status --short` → 在该 commit 上统一复跑 → 用后续 evidence-only 文档 commit 在 `STATUS.md` 记录精确命令、环境、exit code、结果和 `tested_sha`。任何 amend、新的代码/test commit 或行为输入变化都会使受影响闭环失效并必须重审/重测。
+6. 反向场景必须验证 fail-closed 与禁止副作用为 0；重试、重复、迟到和并发场景必须验证 identity、次数与最终状态，不以“没有崩溃”冒充正确。
+7. 记录 flaky、未自动化场景、人工观察、当前阶段明确不支持项和正式版替换计划。需要反复重跑才能偶然通过的测试视为未闭环。
+8. `HANDOFF.md` 只摘要当前模块状态、tested SHA 和 `STATUS.md` 证据位置；规则本身不在多个文件重复定义。
+
+### 3.1.5 闭环状态
+
+- `CLOSED`：开发前与开发后两次回顾均有记录；当前模块定义中的全部必需行为/风险都有场景映射；正例成功，反例 fail-closed 且零禁止副作用；必要的跨模块和真实路径证据已完成；最终测试在包含全部行为输入且相关路径干净的 immutable candidate SHA 上执行，本切片的目标模块、相邻回归与 required commands 全部 exit 0，且没有未解释 flaky 或必需 gap。额外的更宽仓检查若存在既有 baseline failure，必须在修改前以相同命令记录，并以前后相同命令对比证明本 diff 没有新增，不能靠重跑偶然绿或静默忽略。
+- `PARTIAL`：实现可以继续集成或演示，但场景、接线、E2E/人工证据或恢复/兼容矩阵仍有缺口。不得对外写“模块已闭环/已完成”，也不得仅凭它通过版本 Gate。
+- `BLOCKED`：必需行为或证据因已确认的外部条件无法继续；记录阻塞条件、已完成证据和恢复入口，不能用 unsupported 或 mock success 隐藏。
+
+已有模块不会因为新规则而被写成“从未实现”，但既有测试数量只能作为历史回归证据。已有模块下一次被修改、被依赖来关闭新切片，或进入 V1/V2/V3/RC Gate 前，必须补齐其受影响范围的闭环记录。
+
+### 3.1.6 `STATUS.md` 记录模板
+
+```markdown
+### Module test closure: <module / slice>
+- stage / decision / requirement sources:
+- code scope and upstream/downstream:
+- baseline SHA / candidate tested SHA / environment / clean-status evidence:
+- pre-review: DONE | MISSING
+- post-review: DONE | MISSING
+- closure: CLOSED | PARTIAL | BLOCKED
+
+#### Module definition and non-goals
+...
+
+#### Test inventory
+| Test / suite | Level | Why | Scenario IDs | Oracle / forbidden outcome | Actual result / evidence | Status |
+
+#### Scenario matrix
+| ID | P/N/B/S/T/C/R/I/F/K/X | Preconditions and action | Expected/forbidden outcome | Test or evidence | Result/N/A reason |
+
+#### Commands and exact results
+...
+
+#### Remaining gaps, manual evidence and replacement plan
+...
+```
+
+### 3.1.7 D-031 的首次强制应用
+
+D-031 编码前必须先在 `STATUS.md` 建立上述前置记录，至少覆盖：派发后前台立即恢复；同一任务最多一个 in-flight poll；fake-time 轮询与 1/2/5/10 秒退避；断线暂停和重连 reconcile；task/session/target/monitor generation 改变后的迟到 promise；terminal/deleted/flag-off/unmount 停止；任务卡保留真实终态；只在安全空档最多播报一次；始终不写 chatStore message、不修改 chat processing、不抢占麦克风或 Agent TTS；scope/业务/transport 错误和零/多条 reconciliation 必须 fail closed；当前/旧 schedule response、缺失/新增字段、非法 envelope 与 adapter 兼容策略必须有测试或有理由的 `N/A`。还必须包含 hook/UI/WebSocket 接线层的正例、反例、stale 和 flag-off 证据，不能只靠 monitor 纯函数单测；A→B successor 监控 A、B 还是两者也必须先明确，不能无意扩成通用多任务 monitor。
 
 ## 4. 剩余工作优先级
 

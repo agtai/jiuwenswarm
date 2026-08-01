@@ -1,18 +1,18 @@
 # Live Voice 跨机器交接快照
 
-- 快照日期：2026-08-01
+- 快照日期：2026-08-02
 - 开发分支：`hx/0731_live_voice_ux`
 - 共享远端：`agtai`（`https://github.com/agtai/jiuwenswarm.git`）
 - V0 核心实现提交：`346f802a`；当前已推送 V0 Candidate 恢复点：`2c700934aa0024a7ab229644bf15934e9e8170e7`
 - 权威 V0 恢复点：`2c700934`；它永久保持未放行 Candidate，不随 Post-V0 累计提交移动
 - 当前阶段：V0 Candidate 已提交并推送，但完整真机 Gate 尚未通过，因此还不是 V0 Released / 已冻结
 - stash 状态：`7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply，原 stash 只作为额外备份保留；当前分支不要重复 apply/pop/drop
-- 当前状态：Task Foundation 已完成 review、统一复跑和代码提交（后端 `3da101cf`、前端 `42e76d30`）；下一实现切片是 D-031 的 poll-backed 非阻塞任务监控。用户稍后从 `2c700934` 的独立 checkout/worktree 验收 V0
+- 当前状态：Task Foundation 代码和历史回归已落地（后端 `3da101cf`、前端 `42e76d30`）；D-032 模块测试闭环 Gate 已接受，D-031 必须先完成开发前场景/test 回顾再编码。V0 继续从 `2c700934` 的独立 detached checkout/worktree 验收
 
 ## 接手后先做什么
 
 1. `git fetch agtai`，切换并更新 `hx/0731_live_voice_ux`。
-2. 依次阅读 [README.md](README.md)、本文件、[STATUS.md](STATUS.md)、[TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)、[POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)、[POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)、[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 和 [DECISIONS.md](DECISIONS.md)。
+2. 依次阅读 [README.md](README.md)、本文件、[STATUS.md](STATUS.md)、[TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)、[POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)、[POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)、[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 和 [DECISIONS.md](DECISIONS.md)；开发模块前必须执行 D-032 与路线 §3.1。
 3. 准备演示机时严格执行 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)，新机器必须从 lockfile 重建依赖，不复制 `.venv` 或 `node_modules`。
 4. 核对 `git status --short --branch`、HEAD 和 upstream。D-030 已恢复正常 commit/push：不要为了验收 V0 把当前开发分支重新 stash，也不要重复 apply `7f4c...`。需要 V0 Gate 时，从精确 SHA `2c700934...` 创建独立 checkout/worktree，避免把 V0 证据与 Post-V0 混在同一运行目录。
 
@@ -69,6 +69,12 @@
 - foundation 合并点的 `git diff --check` 已通过；历史 lint 说明见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。
 
 以上 **226/226、155/155、24/24、TypeScript 和 4494 modules** 是 review 修复合入后的最终统一结果，不是子任务数字相加；后端 `3da101cf`、前端 `42e76d30` 已落地。自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。
+
+### D-032 模块测试闭环摘要
+
+- Foundation 的上述数字是由交接提交 `01df6de0` 记录、对应包含后端 `3da101cf` 与前端 `42e76d30` 的最终代码树的历史回归证据；当时没有保存 D-032 要求的开发前/开发后双回顾和完整 `scenario → test/evidence` 映射，不能仅凭数量追认模块已经按 D-032 `CLOSED`。
+- D-031 是首个强制应用切片：开发前在 [STATUS.md](STATUS.md) 建立 module definition、test inventory、每项 test 的 why 与完整场景矩阵；开发后绑定 exact tested SHA 复审、复跑并记录 gap。详细规则只见 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) §3.1。
+- HANDOFF 以后只保留 closure 状态、tested SHA 和 STATUS 证据入口，不复制详细 inventory。缺少正例、反例零副作用、竞态/恢复/隔离、flag-off 或必要真实接线证据时，只能写 `PARTIAL`/`BLOCKED`。
 
 ### 真实固定环境
 
@@ -140,6 +146,7 @@
 ## 每次继续工作后的交接要求
 
 - 更新 [STATUS.md](STATUS.md) 的真实结果、失败、时序和下一步。
+- 对每个受影响模块摘要 D-032 closure 状态、exact tested SHA、前后回顾是否完成及 [STATUS.md](STATUS.md) 证据入口；不能用测试数量替代场景闭环，存在必需 gap 时写 `PARTIAL` 或 `BLOCKED`。
 - 技术选择变化时更新 [DECISIONS.md](DECISIONS.md)；新增临时简化时更新 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) 的 Shortcut Ledger。
 - 按 D-030 正常提交并推送到 `agtai/hx/0731_live_voice_ux`；不再保留“V0 验收前不 commit/push”的例外。未提交 worktree 和 stash 都是机器本地状态，不能作为跨机器交接方式。
 

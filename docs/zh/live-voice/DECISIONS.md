@@ -313,3 +313,14 @@
 - 原因：这一窄切片最大化两周展示价值，同时复用已经完成的 identity、scope、reconciliation 和 task card；它能真实验证“前台不被后台冻结”和“结果异步回流”，又不会把聊天消息、TTS 或假进度作为任务真值。
 - 影响：本切片仍不是服务端 TaskEvent push/replay、跨设备 unread、多任务自然语言消歧、update/provide-input/pause/resume/reprioritize、跨进程 exactly-once、D1/D2 或完整 P3。后续正式 Task Control 可以用事件订阅与持久 projection 替换轮询，而不改变 task identity、scope、UI 投影和播报仲裁边界。
 - 重新评估条件：`schedule.status/list` 无法在受控负载下提供可靠真值，或正式 TaskEvent 订阅在同一时间窗口内可直接复用而不扩大完整 P3 范围。
+
+## D-032 每个模块必须以开发前/开发后双回顾和完整场景 tests 闭环
+
+- 日期：2026-08-02
+- 状态：Accepted（从 D-031 起强制执行；不改变 V0 Candidate 的独立放行 Gate）
+- 背景：现有 Foundation 的 Python `226/226`、Live Voice `155/155`、相关回归 `24/24` 能证明对应 suites 在当时最终代码上通过，但测试数量、行覆盖率或纯函数测试无法单独证明模块定义中的所有行为、拒绝路径、竞态、恢复和真实接线均已覆盖。若 tests 只是跟随当前实现编写，还可能把错误行为固化成“预期”。
+- 决策：每个模块或逻辑切片在语义开发前、实现完成后各做一次正式回顾。两次都必须重新理解完整方案、当前阶段、模块契约/非目标、上下游、现有 tests 和实际风险，并维护 test inventory、每项 test 的设计原因以及 `scenario → test/evidence` 矩阵。每个改变的不变量必须同时有正向正确场景和反向拒绝场景；反向业务动作必须明确失败、拒绝或安全 no-op，并断言所有禁止副作用为 0，而测试进程本身应 PASS。边界、状态、时序、重复/乱序、并发/重试、恢复、scope/权限、feature flag/降级、协议/持久格式兼容和真实跨模块路径按适用性覆盖；`N/A` 必须说明理由。详细执行规范和记录模板以 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) §3.1 为唯一权威。
+- 决策：只有双回顾齐全、全部必需场景有证据、最终命令在包含全部 code/test 行为输入且相关路径干净的 immutable candidate SHA 上通过、必要 E2E/人工观察完成且无未解释 flaky/必需 gap 时，模块才可标记 `CLOSED`；否则只能是 `PARTIAL` 或 `BLOCKED`。任何后续 code/test/input 变化都会使受影响闭环失效。现有 Foundation 结果保留为历史回归证据，但不能倒写成已经走过 D-032；已有模块在再次修改、作为新切片闭环依赖或进入版本 Gate 前补齐受影响范围。
+- 原因：这迫使测试从项目方案和模块定义出发，既证明“应该成功的确实成功”，也证明“不应发生的确实被阻止且没有副作用”，并让新机器或新 Codex 会话能够从 Git 恢复每项测试为何存在、覆盖了什么和还缺什么。
+- 影响：D-031 是第一个强制应用切片，编码前先在 `STATUS.md` 固定 monitor 的状态/时序/错误/竞态/flag-off/接线矩阵；编码后在 exact tested SHA 上重审并统一验证。`STATUS.md` 保存详细证据，`HANDOFF.md` 只摘要状态和入口。`V0_ACCEPTANCE.md` 继续独立负责 `2c700934` 的真机 Release Gate，不将 Post-V0 流程倒灌进 V0 证据。
+- 重新评估条件：模块边界或交付流程发生重大变化时可以调整模板字段，但不得取消正反例成对证明、反向零副作用、两次回顾、场景可追溯和 immutable tested evidence 这些原则。
