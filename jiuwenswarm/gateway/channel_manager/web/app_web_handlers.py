@@ -737,6 +737,22 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "agents.enable",
     "agents.disable",
     "agents.tools_list",
+    # Schedule and issue task management are handled exclusively by AgentServer.
+    # Keep them out of the local-handler fallback so the forwarded Agent response
+    # remains the single response for the request id.
+    "schedule.check_config",
+    "schedule.update_config",
+    "schedule.create",
+    "schedule.run",
+    "schedule.list",
+    "schedule.status",
+    "schedule.logs",
+    "schedule.cancel",
+    "schedule.delete",
+    "issue.watch_once",
+    "issue.state.list",
+    "issue.matrix",
+    "issue.delete",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）

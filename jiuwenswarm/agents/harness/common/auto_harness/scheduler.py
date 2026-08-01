@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
 from openjiuwen.core.foundation.llm import Model
 
-from .run_log_status import has_terminal_session_event
+from .run_log_status import TERMINAL_STATUSES, has_terminal_session_event
 
 if TYPE_CHECKING:
     from .service import AutoHarnessService
@@ -48,6 +48,7 @@ class Scheduler:
         self._task_store = task_store
         self._loop_task: Optional[asyncio.Task] = None
         self._running_executions: dict[str, asyncio.Task] = {}
+        self._cancellation_tasks: dict[str, asyncio.Task[bool]] = {}
         self._model_cache: dict[str, Model] = {}
         self._default_model: Optional[Model] = None
 
@@ -153,6 +154,28 @@ class Scheduler:
         logger.info("[Scheduler] Stopped")
 
     async def cancel_execution(self, task_id: str) -> bool:
+        """Cancel one task through a shared, task-scoped cancellation operation."""
+        cancellation_task = self._cancellation_tasks.get(task_id)
+        if cancellation_task is None:
+            cancellation_task = asyncio.create_task(self._cancel_execution_once(task_id))
+            self._cancellation_tasks[task_id] = cancellation_task
+            cancellation_task.add_done_callback(
+                lambda completed, current_task_id=task_id: self._discard_cancellation_task(
+                    current_task_id,
+                    completed,
+                )
+            )
+        return await asyncio.shield(cancellation_task)
+
+    def _discard_cancellation_task(
+        self,
+        task_id: str,
+        cancellation_task: asyncio.Task[bool],
+    ) -> None:
+        if self._cancellation_tasks.get(task_id) is cancellation_task:
+            self._cancellation_tasks.pop(task_id, None)
+
+    async def _cancel_execution_once(self, task_id: str) -> bool:
         """Cancel a running execution for a task.
 
         Returns:
@@ -164,6 +187,9 @@ class Scheduler:
 
         # Get current execution_id to build session_id
         task_data = self._task_store.get_task(task_id)
+        task_status = str(task_data.get("status") or "") if task_data else ""
+        if task_status in TERMINAL_STATUSES:
+            return False
         execution_id = task_data.get("current_execution_id") if task_data else None
         started_at_str = None
         log_path_str = None
@@ -193,8 +219,26 @@ class Scheduler:
         except asyncio.CancelledError:
             logger.info("[Scheduler] CancelledError caught for task %s", task_id)
 
-        # Remove from running dict (before adding execution record to avoid race)
-        self._running_executions.pop(task_id, None)
+        # Do not remove a newer execution that may have reused the task ID.
+        if self._running_executions.get(task_id) is exec_task:
+            self._running_executions.pop(task_id, None)
+
+        # The execution coroutine normally records its own terminal state in
+        # ``finally``. Preserve a real success/failure if it won the race with
+        # cancellation, and avoid appending a duplicate cancelled record.
+        latest_task = self._task_store.get_task(task_id)
+        latest_status = str(latest_task.get("status") or "") if latest_task else ""
+        if latest_status in TERMINAL_STATUSES:
+            return latest_status == "cancelled"
+
+        if execution_id and latest_task:
+            for record in reversed(latest_task.get("execution_history", [])):
+                if record.get("execution_id") != execution_id:
+                    continue
+                record_status = str(record.get("status") or "")
+                if record_status in TERMINAL_STATUSES:
+                    return record_status == "cancelled"
+                break
 
         # Record execution history if we have execution_id
         # (This ensures history is recorded even if _execute_scheduled_task's finally block didn't run)
@@ -232,6 +276,11 @@ class Scheduler:
 
         logger.info("[Scheduler] Cancelled execution for task: %s", task_id)
         return True
+
+    def is_execution_active(self, task_id: str) -> bool:
+        """Return whether the scheduler has claimed a live execution task."""
+        exec_task = self._running_executions.get(task_id)
+        return exec_task is not None and not exec_task.done()
 
     async def trigger_immediate(self, task_id: str) -> bool:
         """Trigger immediate execution of a pending task.
@@ -289,16 +338,85 @@ class Scheduler:
     async def _execute_scheduled_task(self, task: dict[str, Any]) -> None:
         """Execute a single scheduled task run.
 
-        Uses the agent already set on the service (set by request handler before execution).
+        Uses the immutable process-local context bound when the task was created.
         """
         task_id = task.get("task_id")
+        if not task_id:
+            logger.warning("[Scheduler] Invalid task data: %s", task)
+            return
+
+        # A delete/cancel request may have won after the scheduler listed this
+        # pending task but before this coroutine actually started.
+        current_task = self._task_store.get_task(task_id)
+        if current_task is None or current_task.get("status") != "pending":
+            logger.info(
+                "[Scheduler] Skipping stale task claim: %s, status=%s",
+                task_id,
+                current_task.get("status") if current_task else "missing",
+            )
+            current_execution = asyncio.current_task()
+            if self._running_executions.get(task_id) is current_execution:
+                self._running_executions.pop(task_id, None)
+            if current_task is None or str(current_task.get("status") or "") in TERMINAL_STATUSES:
+                release_execution_context = getattr(
+                    self._service,
+                    "release_scheduled_task_execution_context",
+                    None,
+                )
+                if callable(release_execution_context):
+                    release_execution_context(task_id)
+            return
+        task = current_task
+
         query = task.get("query")
         interval_hours = task.get("interval_hours", 4)
         model_name = task.get("model_name")
         pipeline = task.get("pipeline")  # Pipeline preference from task
-
-        if not task_id or not query:
+        if not isinstance(query, str) or not query.strip():
             logger.warning("[Scheduler] Invalid task data: %s", task)
+            current_execution = asyncio.current_task()
+            if self._running_executions.get(task_id) is current_execution:
+                self._running_executions.pop(task_id, None)
+            await self._task_store.update_task(task_id, {
+                "status": "failed",
+                "current_execution_id": None,
+                "last_error": "任务内容不能为空",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+            release_execution_context = getattr(
+                self._service,
+                "release_scheduled_task_execution_context",
+                None,
+            )
+            if callable(release_execution_context):
+                release_execution_context(task_id)
+            return
+
+        get_execution_context = getattr(
+            self._service,
+            "get_scheduled_task_execution_context",
+            None,
+        )
+        execution_context = (
+            get_execution_context(task_id)
+            if callable(get_execution_context)
+            else None
+        )
+        if execution_context is None:
+            logger.error(
+                "[Scheduler] Task %s has no process-local execution context; "
+                "refusing mutable Agent fallback",
+                task_id,
+            )
+            current_execution = asyncio.current_task()
+            if self._running_executions.get(task_id) is current_execution:
+                self._running_executions.pop(task_id, None)
+            await self._task_store.update_task(task_id, {
+                "status": "failed",
+                "current_execution_id": None,
+                "last_error": "任务执行上下文不可用；服务重启后请重新创建任务",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
             return
 
         execution_id = f"exec_{uuid.uuid4().hex[:8]}"
@@ -316,11 +434,10 @@ class Scheduler:
         error_msg = ""
 
         try:
-            # Agent should already be set on service by the request handler
-            # (similar to how _handle_command_compact works)
             logger.info(
-                "[Scheduler] Using agent from service for task %s: %s",
-                task_id, self._service._agent is not None
+                "[Scheduler] Using task-bound agent for task %s: %s",
+                task_id,
+                execution_context.agent is not None,
             )
 
             # Build request for execution
@@ -354,10 +471,17 @@ class Scheduler:
                 task_id, model is not None, model_name
             )
 
-            # Execute via service.run() - service already has agent set
-            # Auto-accept interactions: scheduled runs have no interactive channel
+            # Execute with the task-scoped binding. Scheduled runs have no
+            # interactive channel, so interactions are auto-accepted.
             async for chunk in self._service.run(
-                request, session_id, execution_id, query=query, model=model, auto_accept=True
+                request,
+                session_id,
+                execution_id,
+                query=query,
+                model=model,
+                auto_accept=True,
+                execution_agent=execution_context.agent,
+                stream_event_rail=execution_context.stream_event_rail,
             ):
                 if chunk.payload:
                     # Skip context compression events - not needed in logs
@@ -451,6 +575,15 @@ class Scheduler:
                     "status": "cancelled",
                     "current_execution_id": None,
                 })
+
+            if task.get("is_one_time", False) or final_status == "cancelled":
+                release_execution_context = getattr(
+                    self._service,
+                    "release_scheduled_task_execution_context",
+                    None,
+                )
+                if callable(release_execution_context):
+                    release_execution_context(task_id)
 
             # Remove from running dict
             self._running_executions.pop(task_id, None)

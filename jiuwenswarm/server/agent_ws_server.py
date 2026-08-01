@@ -13,7 +13,7 @@ import os
 import shutil
 import sys
 from pathlib import Path
-from typing import Any, ClassVar, Optional
+from typing import Any, Callable, ClassVar, Optional
 from weakref import WeakValueDictionary
 
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
@@ -435,6 +435,51 @@ def resolve_request_project_dir(request: AgentRequest) -> str | None:
         if isinstance(first, str) and first.strip():
             return first.strip()
     return None
+
+
+def _build_schedule_execution_target(
+    request: AgentRequest,
+    resolved_project_dir: str | None,
+) -> dict[str, str | None]:
+    """Capture stable, non-secret provenance for a schedule task."""
+    params = request.params or {}
+    metadata = request.metadata or {}
+    project_id = params.get("project_id")
+    if not (isinstance(project_id, str) and project_id.strip()):
+        project_id = metadata.get("project_id") if isinstance(metadata, dict) else None
+    return {
+        "project_dir": resolved_project_dir,
+        "project_id": project_id.strip() if isinstance(project_id, str) else None,
+        "origin_session_id": (
+            request.session_id.strip()
+            if isinstance(request.session_id, str) and request.session_id.strip()
+            else None
+        ),
+        "origin_channel_id": (
+            request.channel_id.strip()
+            if isinstance(request.channel_id, str) and request.channel_id.strip()
+            else None
+        ),
+    }
+
+
+def _build_schedule_owner_scope(request: AgentRequest) -> dict[str, str]:
+    """Derive an idempotency/list owner scope only from trusted request fields."""
+    metadata = request.metadata if isinstance(request.metadata, dict) else {}
+    app_id = metadata.get("app_id")
+    return {
+        "channel_id": (
+            request.channel_id.strip()
+            if isinstance(request.channel_id, str) and request.channel_id.strip()
+            else ""
+        ),
+        "session_id": (
+            request.session_id.strip()
+            if isinstance(request.session_id, str) and request.session_id.strip()
+            else ""
+        ),
+        "app_id": app_id.strip() if isinstance(app_id, str) else "",
+    }
 
 
 def _sync_chat_request_metadata(
@@ -1136,6 +1181,24 @@ class AgentWebSocketServer:
             unpin = getattr(self._agent_manager, "unpin_agent", None)
             if callable(unpin):
                 unpin(previous)
+
+    def _pin_scheduler_task_agent(self, agent: Any) -> Callable[[], None]:
+        """Pin one facade until its task-scoped execution context is released."""
+        pin = getattr(self._agent_manager, "pin_agent", None)
+        if callable(pin):
+            pin(agent)
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            unpin = getattr(self._agent_manager, "unpin_agent", None)
+            if callable(unpin):
+                unpin(agent)
+
+        return release
 
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
@@ -8081,6 +8144,10 @@ class AgentWebSocketServer:
             "[AgentServer] schedule.%s request received: request_id=%s channel_id=%s",
             action, request.request_id, request.channel_id,
         )
+        task_context_release: Optional[Callable[[], None]] = None
+        execution_agent: Any = None
+        execution_target: Optional[dict[str, str | None]] = None
+        owner_scope = _build_schedule_owner_scope(request)
         try:
             # Lazy initialization: create scheduler service on first request
             if self._scheduler_service is None:
@@ -8092,24 +8159,41 @@ class AgentWebSocketServer:
             params = request.params or {}
             payload: dict[str, Any] = {}
 
-            # For actions that need agent: get agent and set on service (similar to _handle_command_compact)
-            needs_agent = action in ("create", "run", "cancel", "delete", "issue_watch_once")
+            # Mutating task creation captures an immutable task-scoped Agent;
+            # issue-watch keeps the legacy service-level ownership for now.
+            needs_agent = action in ("create", "run", "issue_watch_once")
             if needs_agent:
                 mode, sub_mode = _apply_resolved_mode_to_request(request)
                 agent_mode = "agent" if mode == "auto_harness" else mode
+                resolved_project_dir = resolve_request_project_dir(request)
                 agent = await self._agent_manager.get_agent(
                     channel_id=request.channel_id or "tui",
                     mode=agent_mode,
-                    project_dir=resolve_request_project_dir(request),
+                    project_dir=resolved_project_dir,
                     sub_mode=sub_mode
 
                 )
                 if agent is None:
                     raise ValueError("Failed to get agent for schedule request")
-                # Set agent on service (service will use it for execution)
-                self._scheduler_service.update_agent_instance(agent)
-                self._set_scheduler_agent(agent)
-                logger.info("[AgentServer] Set agent for schedule action %s: %s", action, agent is not None)
+                if action in ("create", "run"):
+                    execution_agent = agent.get_instance()
+                    execution_target = _build_schedule_execution_target(
+                        request,
+                        resolved_project_dir,
+                    )
+                    task_context_release = self._pin_scheduler_task_agent(agent)
+                    logger.info(
+                        "[AgentServer] Captured task-scoped agent for schedule action %s",
+                        action,
+                    )
+                else:
+                    self._scheduler_service.update_agent_instance(agent)
+                    self._set_scheduler_agent(agent)
+                    logger.info(
+                        "[AgentServer] Set agent for schedule action %s: %s",
+                        action,
+                        agent is not None,
+                    )
 
             if action == "check_config":
                 payload = self._scheduler_service.check_schedule_config()
@@ -8127,25 +8211,62 @@ class AgentWebSocketServer:
                 # Resolve model from jiuwenswarm config
                 model = self._resolve_model(model_name)
                 payload = await self._scheduler_service.create_scheduled_task(
-                    query, interval_hours, run_immediately, model, pipeline
+                    query,
+                    interval_hours,
+                    run_immediately,
+                    model,
+                    pipeline,
+                    execution_agent=execution_agent,
+                    context_release=task_context_release,
+                    execution_target=execution_target,
+                    owner_scope=owner_scope,
                 )
 
             elif action == "run":
                 query = params.get("query", "")
                 model_name = params.get("model_name")
                 pipeline = params.get("pipeline")  # Pipeline preference
+                origin_namespace = params.get("origin_namespace")
+                idempotency_key = params.get("idempotency_key")
                 # Resolve model from jiuwenswarm config
                 model = self._resolve_model(model_name)
-                payload = await self._scheduler_service.run_task(query, model, pipeline)
+                payload = await self._scheduler_service.run_task(
+                    query,
+                    model,
+                    pipeline,
+                    execution_agent=execution_agent,
+                    context_release=task_context_release,
+                    execution_target=execution_target,
+                    owner_scope=owner_scope,
+                    origin_namespace=origin_namespace,
+                    idempotency_key=idempotency_key,
+                    model_intent=model_name,
+                )
 
             elif action == "list":
-                tasks = await self._scheduler_service.list_scheduled_tasks()
+                requester_execution_target = _build_schedule_execution_target(
+                    request,
+                    resolve_request_project_dir(request),
+                )
+                tasks = await self._scheduler_service.list_scheduled_tasks(
+                    owner_scope=owner_scope,
+                    requester_execution_target=requester_execution_target,
+                    origin_namespace=params.get("origin_namespace"),
+                    idempotency_key=params.get("idempotency_key"),
+                )
                 payload = {"tasks": tasks}
 
             elif action == "status":
                 task_id = params.get("task_id", "")
-                task = await self._scheduler_service.get_scheduled_task_status(task_id)
-                payload = task if task else {"error": "任务不存在", "task_id": task_id}
+                requester_execution_target = _build_schedule_execution_target(
+                    request,
+                    resolve_request_project_dir(request),
+                )
+                payload = await self._scheduler_service.get_scheduled_task_status(
+                    task_id,
+                    requester_owner_scope=owner_scope,
+                    requester_execution_target=requester_execution_target,
+                )
 
             elif action == "logs":
                 task_id = params.get("task_id", "")
@@ -8153,17 +8274,43 @@ class AgentWebSocketServer:
                 history_index = params.get("history_index", -1)
                 offset = params.get("offset", 0)
                 limit = params.get("limit", 500)
+                requester_execution_target = _build_schedule_execution_target(
+                    request,
+                    resolve_request_project_dir(request),
+                )
                 payload = await self._scheduler_service.get_scheduled_task_logs(
-                    task_id, log_type, history_index, offset, limit
+                    task_id,
+                    log_type,
+                    history_index,
+                    offset,
+                    limit,
+                    requester_owner_scope=owner_scope,
+                    requester_execution_target=requester_execution_target,
                 )
 
             elif action == "cancel":
                 task_id = params.get("task_id", "")
-                payload = await self._scheduler_service.cancel_scheduled_task(task_id)
+                requester_execution_target = _build_schedule_execution_target(
+                    request,
+                    resolve_request_project_dir(request),
+                )
+                payload = await self._scheduler_service.cancel_scheduled_task(
+                    task_id,
+                    requester_owner_scope=owner_scope,
+                    requester_execution_target=requester_execution_target,
+                )
 
             elif action == "delete":
                 task_id = params.get("task_id", "")
-                payload = await self._scheduler_service.delete_scheduled_task(task_id)
+                requester_execution_target = _build_schedule_execution_target(
+                    request,
+                    resolve_request_project_dir(request),
+                )
+                payload = await self._scheduler_service.delete_scheduled_task(
+                    task_id,
+                    requester_owner_scope=owner_scope,
+                    requester_execution_target=requester_execution_target,
+                )
 
             elif action == "issue_watch_once":
                 model_name = params.get("model_name")
@@ -8182,6 +8329,11 @@ class AgentWebSocketServer:
             else:
                 payload = {"error": f"未知的调度操作: {action}"}
 
+            if action in ("create", "run") and "task_id" not in payload:
+                if task_context_release is not None:
+                    task_context_release()
+            task_context_release = None
+
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -8193,6 +8345,8 @@ class AgentWebSocketServer:
                 action, resp.request_id, resp.channel_id, resp.ok, list(payload.keys())[:10],
             )
         except Exception as exc:
+            if task_context_release is not None:
+                task_context_release()
             logger.exception("[AgentServer] schedule.%s failed: %s", action, exc)
             resp = AgentResponse(
                 request_id=request.request_id,
