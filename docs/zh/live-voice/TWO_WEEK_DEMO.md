@@ -1,6 +1,7 @@
 # JiuwenSwarm Live Voice：两周纵向 Demo 方案
 
 - 日期：2026-07-31
+- 最近实测更新：2026-08-01
 - 目标分支：`hx/0731_live_voice_ux`
 - 人力假设：1 人，约 10 个工作日，可使用 Codex 辅助开发
 - 交付名称：Live Voice UX / Vertical Slice Demo
@@ -258,12 +259,13 @@ speaking + 用户重新开麦
 | 固定 `zh-CN` | 真实中文识别和朗读 | 多语言切换 | Speech Provider 能力协商 |
 | 默认麦克风、耳机 | 真实输入输出 | 扬声器回声、设备切换 | Audio Device & I/O、AEC |
 | 只在 Agent 模式启用 Live Voice | 单 Agent Session 中的真实 `chat.send` / `supplement`、Agent 和工具调用 | Team Leader、多成员并行输出应该由谁朗读，以及 Team 模式插话语义 | 建立统一 response ownership、Team 事件模型和可配置朗读策略后再开放 Team 模式 |
-| 固定约 1 秒停顿提交 | final 后真实调用 Agent | 自然语义结束判断 | VAD/EOT/Interaction Engine |
-| 浏览器 STT/TTS | 真实语音和真实回答 | 服务端流式媒体及 Provider 可替换性 | Speech Port + Realtime Media |
-| 整段或按句 TTS | 真实回答内容被朗读 | token/audio 级实时性 | streaming TTS 与播放队列 |
+| 固定静默窗口：初始 8 秒、有结果后 2.2 秒 | final 后真实调用 Agent；Chrome 实例早退时在同一 capture 内续启并合并尾段 | 自然语义结束判断、跨 Provider 一致性、技术词准确率 | VAD/EOT/Interaction Engine 与正式 Streaming STT；Web Speech 不稳时按闸门切单一 Provider |
+| 浏览器 STT/TTS | 真实语音和真实回答；2026-08-01 已在固定 Chrome/Jabra 环境贯通一次 | 服务端流式媒体及 Provider 可替换性 | Speech Port + Realtime Media |
+| 完整消息后分片 TTS | 完整真实回答先清洗，再以约 220–300 字按句末优先 FIFO 朗读，不受普通 TTS 500 字默认截断 | token/audio 级实时性、服务端背压和播放确认 | streaming TTS、统一播放队列与 presented history |
+| 技术标识符只在朗读副本中可听化 | 页面保留 Agent 原文；路径、分支、斜杠、下划线、缩写和数字可实际听到 | 通用发音词典、SSML、多语言发音质量 | 正式 TTS Provider 的 SSML/lexicon 与按语言归一化 |
 | 重新开麦即打断 | 真实停止和真实 supplement | 完全免手操作和误打断恢复 | 持续采集、AEC、false-barge-in recovery |
-| 前端 `responseEpoch` | 演示路径中旧音频不会复活 | 跨端乱序和断线一致性 | response ID、generation fence、ACK |
-| supplement ACK 前前端 quarantine 旧输出 | 当前有序 WebSocket 路径中，真实 supplement 发出后旧 delta/final/reasoning/media 不进入消息和朗读，ACK 后替代回答恢复 | ACK 丢失、断线重放、多端并发、服务端跨生成乱序，以及任意模式的通用隔离 | 服务端分配 response/generation ID，客户端与服务端共同执行 fence，并定义可恢复 ACK 协议 |
+| 前端 `responseEpoch` + 进程内 TTS owner/revision | 演示路径中旧 FIFO、迟到回调、旧服务端 TTS 响应和历史消息手动朗读不会与 Live Voice 双播 | 跨 tab、跨端、断线和服务端乱序一致性 | response ID、generation fence、统一 TTS ownership、ACK |
+| supplement ACK 前前端 quarantine 旧输出 | 当前有序 WebSocket 路径中，旧 delta/final/reasoning/media/tool_call/tool_update 不进入消息或朗读，并暂存旧流的 `processing=false` | ACK 实际早于 AgentServer cancel/replacement 完成；`chat.tool_result`、真实副作用、ACK 丢失、断线重放和多端并发无法 fence | 服务端分配 response/generation ID，cancel/replacement 与 ACK 定义明确顺序，客户端与服务端共同执行可恢复 fence |
 | 一个 `lastTaskId` | 指定任务的真实状态和取消 | 多任务消歧和通用控制 | Task Control Core |
 | 固定任务口令 | 真实任务接口 | 开放式任务意图理解 | Voice–Task Bridge 与确认策略 |
 

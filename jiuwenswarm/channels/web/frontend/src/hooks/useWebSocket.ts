@@ -69,6 +69,10 @@ import {
   mergeFileDownloadItems,
 } from '../utils/fileDownloadDedup';
 import {
+  beginServerTtsOutput,
+  canCompleteServerTtsOutput,
+} from '../utils/ttsOutputOwnership';
+import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
   normalizeToolUpdatePayload,
@@ -882,6 +886,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   const handleTtsPlayback = useCallback(
     (sessionId: string, messageId: string, content: string) => {
+      const outputTicket = beginServerTtsOutput();
+      if (outputTicket === null) {
+        return;
+      }
       const sanitized = sanitizeTtsText(content);
       if (!sanitized || sanitized.startsWith('[任务已中断]')) {
         return;
@@ -899,7 +907,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           sanitized,
           ttsSessionId && ttsSessionId !== 'new' ? ttsSessionId : undefined
         );
-        if (!response?.success || !response.audio_base64) {
+        if (
+          !response?.success ||
+          !response.audio_base64 ||
+          !canCompleteServerTtsOutput(outputTicket)
+        ) {
           return;
         }
 
@@ -1615,7 +1627,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await request('chat.interrupt', params);
       } catch (error) {
         if (shouldQuarantineSupplementOutput) {
-          supplementOutputQuarantineRef.current?.release(sessionId);
+          const heldProcessingStop =
+            supplementOutputQuarantineRef.current?.release(sessionId) ?? false;
+          if (heldProcessingStop) {
+            // The interrupt request failed after the old stream had already
+            // published processing=false. Replay that held terminal edge now;
+            // otherwise the UI (and Live Voice) could remain thinking forever.
+            const chatStore = useChatStore.getState();
+            chatStore.setProcessing(sessionId, false);
+            chatStore.setThinking(sessionId, false);
+            chatStore.clearSubtasks(sessionId);
+            chatStore.stopStreaming(sessionId);
+            const sessionPatch: Partial<Session> = {
+              is_processing: false,
+              updated_at: new Date().toISOString(),
+            };
+            updateSession(sessionId, sessionPatch);
+            useWorkspaceStore.getState().patchSession(sessionId, sessionPatch);
+          }
         }
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -1629,6 +1658,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       resetContextCompressionTurn,
       setConnectionStats,
       t,
+      updateSession,
     ]
   );
 
@@ -2759,6 +2789,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
+        if (supplementOutputQuarantineRef.current?.shouldDrop(sessionId, 'chat.tool_call')) return;
         // 页面刷新后，如果收到活跃事件但 isProcessing=false，自动恢复执行状态
         if (!useChatStore.getState().getRuntime(sessionId)?.isProcessing && !useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) {
           useChatStore.getState().setProcessing(sessionId, true);
@@ -2819,6 +2850,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.tool_update', ({ payload }) => {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
+        if (supplementOutputQuarantineRef.current?.shouldDrop(sessionId, 'chat.tool_update')) return;
         const update = normalizeToolUpdatePayload(payload);
         if (!update.toolCallId || !update.beamSearch) return;
         useChatStore.getState().updateToolProgress(sessionId, update.toolCallId, {
@@ -2973,6 +3005,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 加载历史消息时忽略处理状态更新
         if (useChatStore.getState().getRuntime(sessionId)?.isLoadingHistory) return;
         const isProcessingNow = Boolean(payload.is_processing);
+        if (supplementOutputQuarantineRef.current?.shouldHoldProcessing(sessionId, isProcessingNow)) {
+          return;
+        }
         // 后端确认 processing=true 时清除本地发送标记——新任务已由后端接管
         if (isProcessingNow) {
           localSendPendingRef.current.delete(sessionId);

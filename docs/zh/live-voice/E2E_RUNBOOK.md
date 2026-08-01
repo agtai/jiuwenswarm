@@ -23,6 +23,19 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 - 中文 `zh-CN`、默认麦克风、耳机、单用户、单浏览器窗口、稳定网络。
 - 网络必须同时能访问模型 Provider 和浏览器 Web Speech 所需服务。
 
+2026-08-01 首次真实贯通使用的已知可用组合：
+
+| 项 | 实测值 |
+|---|---|
+| 浏览器 | Chrome `150.0.7871.187` |
+| 音频设备 | Jabra EVOLVE 30 II |
+| 语言 | `zh-CN` |
+| Node.js | `24.14.0` |
+| Python | `3.12.9` |
+| 模型标签 | `deepseek-v4-flash` |
+
+这组值是当前证据基线，不是兼容性承诺。模型 key/base、浏览器 profile、Windows 用户目录和其他机器私有配置不得写入 Git。
+
 这不是正式兼容性矩阵；它是受控 Demo 的可复现范围。
 
 ## 3. 获取代码与固定依赖
@@ -55,6 +68,8 @@ Set-Location ..\..\..\..
 ```
 
 不要复制另一台机器的 `.venv` 或 `node_modules`；它们不是跨机器交接物。
+
+2026-08-01 的首次 E2E 为了快速验证，临时复用了同一机器主仓已经存在的 Python `.venv`。这只能证明该机器组合可运行，不能作为恢复步骤；新机器和最终彩排环境仍必须执行上面的 `uv sync --frozen`，并重新跑完整验收。
 
 ## 4. 本机配置检查
 
@@ -168,9 +183,45 @@ project.create（首次注册时）
 9. 重复到 10 个语音 Turn、10 次打断，并持续 20 分钟或 20 Turn。
 10. 完整执行 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) 第 10 节脚本，连续成功 3 次。
 
-同时观察：打断后是否仍显示迟到的旧 `chat.tool_call` / `chat.tool_update` UI。若出现，按 [HANDOFF.md](HANDOFF.md) 的已知风险处理。
+同时观察：ACK 前的旧 `chat.tool_call` / `chat.tool_update` 和短暂 `processing=false` 当前已有前端隔离，但 `chat.tool_result` 与工具真实副作用没有 generation fence。打断后必须核对旧工具结果、实际副作用和 Gateway cancel warning，不能只看 UI 是否隐藏。
 
-## 10. 证据记录模板
+## 10. 2026-08-01 首次真实贯通记录
+
+### 环境与前置检查
+
+- Windows、Chrome `150.0.7871.187`、Jabra EVOLVE 30 II、`zh-CN`、Node.js `24.14.0`、Python `3.12.9`、模型标签 `deepseek-v4-flash`。
+- 文字强制 Terminal Tool smoke 成功，确认 Agent、项目、模型和真实工具链可用。
+- Python 本轮临时复用主仓 `.venv`；未将该目录或任何配置写入 Git。
+- 测试时 `HEAD` 为交接基线 `48a9fe4c571c98aabbf93688727ec8823f6d0c00`，工作区包含本轮候选修复，因此本记录不是对旧基线的通过声明。提交后可用 `git log -1 --format=%H -- docs/zh/live-voice/E2E_RUNBOOK.md` 定位包含本记录和实现的首个可恢复快照。
+
+### 主链时间线
+
+口令为“调用终端查看当前分支”。浏览器完整识别该句；final 只提交一个逻辑 Turn，新会话从 `new` promotion 到真实 session 时 Live Voice 保持激活。
+
+| 相对时间 | 观察 |
+|---:|---|
+| `T+1.050s` | 进入 Agent working |
+| 处理中 | 真实 Terminal Tool 执行 `git branch --show-current` |
+| 处理中 | 工具结果为 `hx/0731_live_voice_ux` |
+| `T+7.420s` | Agent 完成 |
+| `T+8.922s` | 进入浏览器 TTS |
+| `T+17.215s` | 完整朗读结束，自动回到 Listening |
+
+用户确认完整听到分支名中的斜杠、数字和下划线。页面仍显示原始回答，只有 TTS 副本进行了技术标识符朗读化。
+
+### 静默与连续回听
+
+- 初始静默测试的 `T+` 基准是点击 Retry 后开始的 UI 轮询，不是 Recognition `onstart` 的仪器时间；`T+7.293s` 仍为 Listening，`T+7.816s` 显示 `no-speech`，与约 8 秒的配置窗口一致。Chrome 更早的自然结束没有提前终止逻辑 capture。
+- 自动回听又接收了 2 个 follow-up，证明 TTS 后回 Listening 的循环能继续。
+- 两轮中 Web Speech 将 `git` 识别为“地图”或“史记”。因此它们是循环证据，不计入“准确 10 Turn”，并记录为中文技术词准确率风险。
+
+### 本记录能和不能证明什么
+
+已证明：文字工具 smoke、真实麦克风 final、`new` session promotion、真实 Agent/Terminal Tool、完整技术标识符 TTS、自动回听和约 8 秒初始静默窗口在这一组固定环境中可以成立。
+
+未证明：10 个准确语音 Turn、10 次 supplement 打断、旧副作用 fence、20 分钟或 20 Turn、主演示脚本连续 3 次、Desktop/WebView2 或任何生产可靠性指标。
+
+## 11. 证据记录模板
 
 只记录非敏感信息：
 
@@ -190,18 +241,22 @@ Chrome 麦克风权限：允许 / 拒绝
 connection.ack：通过 / 失败
 文字 tool smoke：通过 / 失败
 真实语音 final：通过 / 失败
+new session promotion 保持：通过 / 失败
 tool_call/tool_result/final：通过 / 失败
 实际 TTS：通过 / 失败
+技术标识符完整听到：通过 / 失败
+8 秒初始静默阈值：通过 / 失败
 10 Turn 重复提交：
 10 次打断旧声音恢复次数：
 20 分钟或 20 Turn：
 完整脚本连续成功次数：
+ASR 误识别样本：
 已知问题与复现步骤：
 ```
 
 截图和脱敏日志可以作为本机验收证据，但提交前必须确认不包含密钥、用户目录、私人对话或其他敏感信息。
 
-## 11. 结束与恢复
+## 12. 结束与恢复
 
 - 退出 Live Voice，确认麦克风和声音均停止。
 - 停止 Vite、Gateway 和 AgentServer 进程。

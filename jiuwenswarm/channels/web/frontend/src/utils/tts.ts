@@ -4,6 +4,13 @@
 
 import { webRequest } from '../services/webClient';
 
+export {
+  makeLiveVoiceTextSpeakable,
+  sanitizeLiveVoiceTtsText,
+  sanitizeTtsText,
+  splitLiveVoiceTtsText,
+} from './ttsText';
+
 interface TtsResponse {
   success: boolean;
   audio_base64?: string;
@@ -12,48 +19,6 @@ interface TtsResponse {
 }
 
 const TTS_STOP_EVENT = 'jiuwen-tts-stop';
-const CODE_BLOCK_RE = /```[\s\S]*?```/g;
-const INLINE_CODE_RE = /`[^`]+`/g;
-const MEDIA_BRACE_RE = /MEDIA:\{[^}]*\}/gi;
-const MEDIA_SIMPLE_RE = /MEDIA:\S+/gi;
-const URL_RE = /https?:\/\/\S+/g;
-const WWW_RE = /www\.\S+/g;
-const WIN_PATH_RE = /[A-Za-z]:\\[^\s]+/g;
-const UNIX_PATH_RE = /(?:~|\/)(?:[^\s/]+\/)+[^\s/]*/g;
-const QUOTE_BRACE_RE = /['"{}]/g;
-const MULTI_NEWLINE_RE = /\n+/g;
-const MULTI_PUNCT_RE = /。{2,}/g;
-const MULTI_SPACE_RE = /\s{2,}/g;
-const TRIM_EDGE_RE = /^[\s。:：]+|[\s。:：]+$/g;
-
-export function sanitizeTtsText(
-  input: string,
-  maxLength = 500
-): string {
-  if (!input) {
-    return '';
-  }
-
-  const sanitized = input
-    .replace(CODE_BLOCK_RE, '代码块已省略')
-    .replace(INLINE_CODE_RE, '')
-    .replace(MEDIA_BRACE_RE, '')
-    .replace(MEDIA_SIMPLE_RE, '')
-    .replace(URL_RE, '')
-    .replace(WWW_RE, '')
-    .replace(WIN_PATH_RE, '')
-    .replace(UNIX_PATH_RE, '')
-    .replace(QUOTE_BRACE_RE, '')
-    .replace(MULTI_NEWLINE_RE, '。')
-    .replace(MULTI_PUNCT_RE, '。')
-    .replace(MULTI_SPACE_RE, ' ')
-    .replace(TRIM_EDGE_RE, '')
-    .slice(0, maxLength)
-    .trim();
-
-  return sanitized;
-}
-
 // 全局音频实例，用于打断控制
 let globalAudio: HTMLAudioElement | null = null;
 

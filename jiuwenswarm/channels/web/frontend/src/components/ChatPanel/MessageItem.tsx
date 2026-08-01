@@ -31,6 +31,7 @@ import { GoalCompletedCard } from '../GoalBar/GoalCompletedCard';
 import { isGoalCompletedContent } from '../GoalBar/goalCompletedMessage';
 import { a2uiContentToText } from '../../features/a2ui/a2uiContent';
 import { formatTimestamp, onTtsStop, sanitizeTtsText } from '../../utils';
+import { isLiveVoiceTtsOutputOwned } from '../../utils/ttsOutputOwnership';
 import { useSpeechSynthesis } from '../../hooks';
 import clsx from 'clsx';
 import { MarkdownRenderer } from '../../components/MarkdownRenderer';
@@ -291,6 +292,11 @@ export const MessageItem = memo(function MessageItem({
   }, [audioBase64, audioMime, stopGeneratedAudio]);
 
   const handleSpeak = useCallback(() => {
+    // Live Voice owns the audible output while active. Its activation also
+    // dispatches the global stop event above, so historical message playback
+    // cannot overlap the live response in either direction.
+    if (isLiveVoiceTtsOutputOwned()) return;
+
     if (audioBase64) {
       if (isAudioPlaying) {
         stopGeneratedAudio();

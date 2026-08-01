@@ -73,14 +73,18 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 
 - Live Voice React 编排（识别、`chat.send` / `supplement`、完成消息朗读）：`jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts`
 - 可纯测试的状态机、TTS FIFO 和 `responseEpoch`：`jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceCore.ts`
+- 新会话 promotion 与无声回答恢复判定：`jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTurnLifecycle.ts`
 - 当前语音 Turn 的完成消息筛选：`jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceMessageGate.ts`
 - Demo 面板：`jiuwenswarm/channels/web/frontend/src/components/ChatPanel/LiveVoiceDemoBar.tsx`
 - supplement ACK 前的旧输出隔离：`jiuwenswarm/channels/web/frontend/src/services/supplementOutputQuarantine.ts`
 - 浏览器 STT/TTS：`jiuwenswarm/channels/web/frontend/src/hooks/useSpeech.ts`
+- 浏览器识别实例重启、尾段合并与 no-speech 判定：`jiuwenswarm/channels/web/frontend/src/hooks/speechRecognitionLifecycle.ts`
 - 现有语音输入骨架：`jiuwenswarm/channels/web/frontend/src/components/ChatPanel/InputArea.tsx`
 - Chat 发送、流式消息与中断：`jiuwenswarm/channels/web/frontend/src/hooks/useWebSocket.ts`
 - Chat 主面板：`jiuwenswarm/channels/web/frontend/src/components/ChatPanel/index.tsx`
 - 浏览器/生成音频停止工具：`jiuwenswarm/channels/web/frontend/src/utils/tts.ts`
+- Live Voice 全文清洗、技术标识符朗读化与 TTS 分片：`jiuwenswarm/channels/web/frontend/src/utils/ttsText.ts`
+- 浏览器 TTS 与服务端 TTS 的进程内 owner/revision：`jiuwenswarm/channels/web/frontend/src/utils/ttsOutputOwnership.ts`
 - Gateway 中断处理：`jiuwenswarm/gateway/message_handler/message_handler.py`
 - 可选后台任务入口：`jiuwenswarm/server/agent_ws_server.py` 中的 `schedule.run/status/cancel`
 
@@ -91,19 +95,27 @@ Demo 先验证产品流程和体验是否成立；完整方案描述验证通过
 ```text
 node node_modules/typescript/bin/tsc --noEmit
 
-node node_modules/typescript/bin/tsc src/features/live-voice/liveVoiceCore.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/live-voice-core --skipLibCheck --noEmitOnError
-node --test tests/liveVoiceCore.test.mjs
+npm run test:live-voice-core
+npm run test:live-voice-turn-lifecycle
+npm run test:live-voice-tts-text
+npm run test:live-voice-message-gate
+npm run test:supplement-output-quarantine
+npm run test:speech-recognition-lifecycle
+npm run test:tts-output-ownership
 
-node node_modules/typescript/bin/tsc src/features/live-voice/liveVoiceMessageGate.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/live-voice-message-gate --skipLibCheck --noEmitOnError
-node --test tests/liveVoiceMessageGate.test.mjs
-
-node node_modules/typescript/bin/tsc src/services/supplementOutputQuarantine.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/supplement-output-quarantine --skipLibCheck --noEmitOnError
-node --test tests/supplementOutputQuarantine.test.mjs
+npm run test:stream-delta-batcher
+npm run test:create-conversation-session
+npm run test:chat-store-streaming
+npm run test:settle-historical-tool-executions
 
 node node_modules/vite/bin/vite.js build
+
+cd ../../../..
+uv run ruff check jiuwenswarm/gateway/message_handler/message_handler.py
+git diff --check
 ```
 
-当前三组纯逻辑测试共 21 项。命令通过只能证明状态机、消息门控、隔离逻辑、类型和构建有效；真实麦克风、Speech Provider、后端 Agent/Tool 和扬声器仍需按 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) 的验收脚本联调。
+截至 2026-08-01，七组 Live Voice 纯逻辑测试共 **47/47**（9 + 6 + 10 + 7 + 6 + 7 + 2），相关既有回归 **22/22**，全前端 TypeScript、Vite build（4490 modules）、Python `ruff` 和 `git diff --check` 已通过。固定 Windows/Chrome 环境也已真实贯通一次“麦克风 → Agent → Terminal Tool → 完整 TTS → 自动回听”；这仍不能替代 10 Turn、10 次打断、20 分钟和连续 3 次脚本的放行验收，详见 [STATUS.md](STATUS.md) 与 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
 
 ## 分支
 

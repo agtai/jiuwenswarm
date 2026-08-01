@@ -6,7 +6,14 @@ import {
   shouldBeginSupplementOutputQuarantine,
 } from '../node_modules/.cache/supplement-output-quarantine/services/supplementOutputQuarantine.js';
 
-const quarantinedEvents = ['chat.delta', 'chat.final', 'chat.reasoning', 'chat.media'];
+const quarantinedEvents = [
+  'chat.delta',
+  'chat.final',
+  'chat.reasoning',
+  'chat.media',
+  'chat.tool_call',
+  'chat.tool_update',
+];
 
 test('starts only for the normal Agent supplement path', () => {
   assert.equal(
@@ -75,10 +82,14 @@ test('drops response output only while the session awaits supplement acknowledge
   }
   assert.equal(quarantine.shouldDrop('session-1', 'chat.processing_status'), false);
   assert.equal(quarantine.shouldDrop('session-1', 'chat.interrupt_result'), false);
+  assert.equal(quarantine.shouldDrop('session-1', 'chat.tool_result'), false);
+  assert.equal(quarantine.shouldHoldProcessing('session-1', false), true);
+  assert.equal(quarantine.shouldHoldProcessing('session-1', true), false);
 
-  quarantine.release('session-1');
+  assert.equal(quarantine.release('session-1'), true);
 
   assert.equal(quarantine.isActive('session-1'), false);
+  assert.equal(quarantine.shouldHoldProcessing('session-1', false), false);
   for (const eventName of quarantinedEvents) {
     assert.equal(quarantine.shouldDrop('session-1', eventName), false);
   }
@@ -102,11 +113,24 @@ test('requires one acknowledgement for every overlapping supplement', () => {
   quarantine.begin('session-1');
   quarantine.begin('session-1');
 
-  quarantine.release('session-1');
+  assert.equal(quarantine.release('session-1'), false);
   assert.equal(quarantine.shouldDrop('session-1', 'chat.delta'), true);
 
-  quarantine.release('session-1');
+  assert.equal(quarantine.release('session-1'), false);
   assert.equal(quarantine.shouldDrop('session-1', 'chat.delta'), false);
+});
+
+test('returns a held stop only when the final barrier is released', () => {
+  const quarantine = createSupplementOutputQuarantine();
+
+  quarantine.begin('session-1');
+  quarantine.begin('session-1');
+  assert.equal(quarantine.shouldHoldProcessing('session-1', false), true);
+
+  assert.equal(quarantine.release('session-1'), false);
+  assert.equal(quarantine.isActive('session-1'), true);
+  assert.equal(quarantine.release('session-1'), true);
+  assert.equal(quarantine.isActive('session-1'), false);
 });
 
 test('clear and clearAll release failed or abandoned barriers', () => {

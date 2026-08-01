@@ -124,12 +124,12 @@
 
 ## D-013 supplement ACK quarantine 是 Demo 隔离，不是生产 fence
 
-- 日期：2026-07-31
+- 日期：2026-07-31；2026-08-01 补充真实 E2E 后的边界
 - 状态：Accepted
 - 背景：当前前端收到的 `chat.delta` / `chat.final` 没有可可靠关联到生成代次的 response ID；supplement 发出后，旧生成的迟到输出可能继续进入消息和 TTS。
-- 决策：普通 Agent supplement 发出时，前端清除待刷新的旧 delta、封口旧流，并临时丢弃同 session 的 `chat.delta`、`chat.final`、`chat.reasoning` 和 `chat.media`；收到有序的 `chat.interrupt_result(intent=supplement)` ACK 后解除 quarantine。Team、evolution 和 pending question 特殊路径不套用该规则；连接关闭或重连时清空本地 barrier，避免丢失 ACK 后永久锁死。
-- 原因：当前 Gateway 会先取消并等待旧流，再发送 supplement ACK，WebSocket writer 又保持帧顺序，因此 ACK 可作为这一条 Demo 路径的短期边界。
-- 影响：该机制能保护当前演示路径，但不能处理 ACK 丢失、断线重放、多端并发或服务端跨生成乱序；失败和断开时只能清理本地隔离，不能据此宣称获得端到端一致性。
+- 决策：普通 Agent supplement 发出时，前端清除待刷新的旧 delta、封口旧流，并临时丢弃同 session 的 `chat.delta`、`chat.final`、`chat.reasoning`、`chat.media`、`chat.tool_call` 和 `chat.tool_update`；旧流关闭产生的 `processing=false` 在 barrier 内暂存。收到有序的 `chat.interrupt_result(intent=supplement)` ACK 后解除 quarantine。Team、evolution 和 pending question 特殊路径不套用该规则；请求失败、连接关闭或重连时清理本地 barrier，并在需要时恢复被暂存的停止边缘。
+- 原因：WebSocket writer 的帧顺序使 ACK 可以作为“旧前端输出隔离结束”的 Demo 边界，但 2026-08-01 代码复核确认 Gateway 会在 AgentServer cancel 和 replacement 完成前发送 ACK。ACK 只开放客户端可见输出，不证明旧 Agent、工具或副作用已停止。
+- 影响：该机制能降低演示路径中的旧文字、工具 UI 和错误 processing 边缘复活，但不能安全丢弃所有 `chat.tool_result`，也不能处理真实工具副作用、ACK 丢失、断线重放、多端并发或服务端跨生成乱序。不得据此宣称获得端到端一致性。
 - 重新评估条件：服务端提供 response/generation ID，并实现客户端与服务端共同执行的 fence、ACK 和恢复协议。
 
 ## D-014 固定受控 Demo 环境，并区分 Demo 与生产阻塞项
@@ -141,3 +141,33 @@
 - 原因：受控环境足以验证“语音驱动真实 Agent 并可打断”的核心产品命题；把兼容矩阵和正式一致性协议塞入两周会稀释验证目标，但跳过真实端到端又会让 Demo 失去证明力。
 - 影响：另一台机器必须按 `E2E_RUNBOOK.md` 重建依赖并重新验证机器私有状态。API key、Slack token、用户配置、浏览器 profile、`.venv` 和 `node_modules` 不进入 Git。
 - 重新评估条件：纵向 Demo 放行，开始 Alpha/生产化规划时。
+
+## D-015 浏览器识别实例边界不等于用户语音 Turn 边界
+
+- 日期：2026-08-01
+- 状态：Accepted
+- 背景：Chrome 可能在用户已经说出部分内容后约 4 秒自然结束 SpeechRecognition，也可能在初始静默期提前报告 `no-speech`。直接把每次 `onend` 当成 Turn 结束会截断尾段或迫使用户抢话；无条件重启又会让 manual stop 复活。
+- 决策：Live Voice 维护独立的逻辑 capture。浏览器实例自然结束且已有结果时，可在相同 capture 内续启并合并 final/interim 尾段；初始静默窗口固定 8 秒，有结果后的结束语音窗口为 2.2 秒；manual stop、自动 stop 和终止错误禁止 retry。最终仍由 core 保证一个 capture 最多提交一次。
+- 原因：受控真机中该路径成功完整识别“调用终端查看当前分支”，同时精确静默测试在 8 秒阈值前保持 Listening。
+- 影响：这是 Browser Speech 的 Demo 适配，不是 Provider-neutral VAD/EOT。技术词识别准确率仍由浏览器 Speech 服务决定，`git` 已出现“地图/史记”误识别。
+- 重新评估条件：切换正式 Speech Provider，或建立统一 Streaming STT/VAD/EOT 协议。
+
+## D-016 Live Voice 启用期间取得唯一可听输出所有权
+
+- 日期：2026-08-01
+- 状态：Accepted
+- 背景：Live Voice 使用浏览器 SpeechSynthesis，旧聊天路径仍可能异步调用服务端 `tts.synthesize`，历史消息也有独立的手动朗读入口。仅在服务端请求开始时检查模式不足以阻止较早请求返回后双重播放；React 重渲染也可能产生交叠 owner。
+- 决策：Live Voice 启用时取得进程内 TTS owner token，并通过全局 stop 终止已有浏览器或生成音频；服务端 TTS 在请求前取得 revision ticket，并在音频返回后再次验证；历史消息手动朗读在开始播放前检查同一 owner。任一 Live Voice owner 存在时不启动其他已知 TTS 路径；owner 获取前已在途的旧响应即使之后释放 owner 也永久失效。多个 token 必须全部释放后才能恢复服务端路径。
+- 原因：该机制以很小范围保证当前单浏览器 Demo 只有一个可听输出源，并能纯逻辑验证旧异步响应不会复活。
+- 影响：Live Voice 激活时点击历史消息朗读不会启动播放。owner/revision 只存在当前前端进程，不提供跨 tab、跨设备、断线或服务端播放一致性，不能替代正式 response/generation ownership。
+- 重新评估条件：建设正式 Conversation Runtime、统一 TTS 播放器和 presented-history 协议。
+
+## D-017 显示文本保持原样，Live Voice 使用完整且可朗读化的副本
+
+- 日期：2026-08-01
+- 状态：Accepted
+- 背景：普通 TTS 的历史默认会在 500 字截断并省略路径/行内代码；`zh-CN` 系统音色又可能跳过 `hx/0731_live_voice_ux` 一类斜杠、下划线和连续字母数字。直接改 chatStore 内容会破坏用户看到的真实 Agent 回答。
+- 决策：普通 `sanitizeTtsText` 的 500 字默认和既有行为保持不变。Live Voice 从完整 assistant 消息生成独立朗读副本：保留需要听到的路径和行内代码，去除显示用 Markdown，把技术分隔符转成可听词并拼读短缩写/数字；随后以约 220–300 字按句末优先分片，key 为 `${message.id}:${chunkIndex}`，全部进入同一 `responseEpoch` FIFO。
+- 原因：2026-08-01 真机中用户确认完整听到分支名中的斜杠、数字和下划线；纯逻辑测试同时保证普通中英文不被无差别改写、长回答不丢失且片段可无损拼接。
+- 影响：当前仍是完整消息到达后的浏览器分片朗读，不是 token/audio streaming TTS；朗读副本为了可听性可以与页面标点形式不同，但语义和显示事实不能被改写。
+- 重新评估条件：引入正式 TTS Provider、SSML/发音词典、流式音频和播放确认。

@@ -1,19 +1,35 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSpeechRecognition } from '../../hooks/useSpeech';
+import {
+  combinedSpeechRecognitionTranscript,
+  mergeSpeechRecognitionTranscript,
+} from '../../hooks/speechRecognitionLifecycle';
 import type { AgentMode, Message } from '../../types';
-import { onTtsStop, sanitizeTtsText, stopAllTts } from '../../utils/tts';
+import {
+  onTtsStop,
+  sanitizeLiveVoiceTtsText,
+  splitLiveVoiceTtsText,
+  stopAllTts,
+} from '../../utils/tts';
+import { acquireLiveVoiceTtsOutputOwnership } from '../../utils/ttsOutputOwnership';
 import type { LiveVoiceDemoBarProps } from '../../components/ChatPanel/LiveVoiceDemoBar';
 import { createLiveVoiceCore, type LiveVoiceCore, type LiveVoiceSnapshot, type LiveVoiceSpeechPlayer } from './liveVoiceCore';
 import { selectLiveVoiceResponseMessages } from './liveVoiceMessageGate';
+import {
+  resolveLiveVoiceSessionTransition,
+  shouldResumeAfterSilentResponse,
+} from './liveVoiceTurnLifecycle';
 
 const DEMO_LANGUAGE = 'zh-CN';
-const DEMO_SILENCE_TIMEOUT_MS = 1200;
+const DEMO_END_OF_SPEECH_TIMEOUT_MS = 2200;
+const DEMO_INITIAL_SILENCE_TIMEOUT_MS = 8000;
 
 interface VoiceTurn {
   transcript: string;
   responseEpoch: number;
   userBoundaryId: string | null;
+  responseObserved: boolean;
 }
 
 export interface UseLiveVoiceDemoOptions {
@@ -149,6 +165,7 @@ export function useLiveVoiceDemo({
   const previousSessionIdRef = useRef(activeSessionId);
   const lastHandledPromotionSequenceRef = useRef(newSessionPromotion?.sequence ?? 0);
   const finalChunksRef = useRef('');
+  const interimChunkRef = useRef('');
   const recognitionFailedRef = useRef(false);
   const recognitionCaptureOpenRef = useRef(false);
   const retryCaptureAfterRecognitionEndRef = useRef(false);
@@ -160,6 +177,7 @@ export function useLiveVoiceDemo({
   const resumeListeningAfterSpeechRef = useRef(false);
   const ignoreNextGlobalTtsStopRef = useRef(false);
   const coreSubscriptionRef = useRef<(() => void) | null>(null);
+  const releaseTtsOutputOwnershipRef = useRef<(() => void) | null>(null);
 
   activeRef.current = active;
   processingRef.current = isProcessing;
@@ -171,14 +189,31 @@ export function useLiveVoiceDemo({
     stopAllTts();
   }, []);
 
+  const acquireTtsOutputOwnership = useCallback(() => {
+    if (releaseTtsOutputOwnershipRef.current === null) {
+      releaseTtsOutputOwnershipRef.current = acquireLiveVoiceTtsOutputOwnership();
+    }
+  }, []);
+
+  const releaseTtsOutputOwnership = useCallback(() => {
+    releaseTtsOutputOwnershipRef.current?.();
+    releaseTtsOutputOwnershipRef.current = null;
+  }, []);
+
   const handleRecognitionResult = useCallback(
     (transcript: string, isFinal: boolean) => {
       if (!activeRef.current) return;
-      if (isFinal) {
-        finalChunksRef.current += transcript;
-        return;
-      }
-      core.setInterimTranscript(transcript);
+      const nextTranscript = mergeSpeechRecognitionTranscript(
+        {
+          finalTranscript: finalChunksRef.current,
+          interimTranscript: interimChunkRef.current,
+        },
+        transcript,
+        isFinal,
+      );
+      finalChunksRef.current = nextTranscript.finalTranscript;
+      interimChunkRef.current = nextTranscript.interimTranscript;
+      core.setInterimTranscript(combinedSpeechRecognitionTranscript(nextTranscript));
     },
     [core]
   );
@@ -188,6 +223,7 @@ export function useLiveVoiceDemo({
       if (!activeRef.current || recognitionFailedRef.current) return;
       recognitionFailedRef.current = true;
       finalChunksRef.current = '';
+      interimChunkRef.current = '';
       resumeListeningAfterSpeechRef.current = false;
       core.fail('speech-recognition', message);
     },
@@ -201,6 +237,7 @@ export function useLiveVoiceDemo({
       recognitionFailedRef.current = false;
       retryCaptureAfterRecognitionEndRef.current = false;
       finalChunksRef.current = '';
+      interimChunkRef.current = '';
       return;
     }
     if (!captureWasOpen) return;
@@ -217,12 +254,20 @@ export function useLiveVoiceDemo({
     }
     if (interactionBlockedRef.current) {
       finalChunksRef.current = '';
+      interimChunkRef.current = '';
       core.fail('interaction-blocked', t('liveVoice.interactionBlocked'));
       return;
     }
 
-    const finalTranscript = finalChunksRef.current;
+    // `stop()` normally promotes the last interim segment to final, but some
+    // Chromium builds end without doing so. Preserve that last visible segment
+    // as a fallback while still committing this logical capture only once.
+    const finalTranscript = combinedSpeechRecognitionTranscript({
+      finalTranscript: finalChunksRef.current,
+      interimTranscript: interimChunkRef.current,
+    });
     finalChunksRef.current = '';
+    interimChunkRef.current = '';
     const committed = core.commitFinalTranscript(finalTranscript);
     if (!committed.accepted) {
       if (committed.reason === 'empty') {
@@ -235,6 +280,7 @@ export function useLiveVoiceDemo({
       transcript: committed.transcript,
       responseEpoch: committed.responseEpoch,
       userBoundaryId: null,
+      responseObserved: false,
     };
     resumeListeningAfterSpeechRef.current = false;
 
@@ -254,6 +300,14 @@ export function useLiveVoiceDemo({
     }
   }, [core, onInterrupt, onSendMessage, t]);
 
+  const shouldContinueRecognitionTail = useCallback(
+    () =>
+      activeRef.current &&
+      recognitionCaptureOpenRef.current &&
+      !recognitionFailedRef.current,
+    []
+  );
+
   const {
     startListening,
     stopListening,
@@ -262,7 +316,9 @@ export function useLiveVoiceDemo({
     language: DEMO_LANGUAGE,
     continuous: true,
     interimResults: true,
-    silenceTimeoutMs: DEMO_SILENCE_TIMEOUT_MS,
+    silenceTimeoutMs: DEMO_END_OF_SPEECH_TIMEOUT_MS,
+    initialSilenceTimeoutMs: DEMO_INITIAL_SILENCE_TIMEOUT_MS,
+    restartWhen: shouldContinueRecognitionTail,
     onResult: handleRecognitionResult,
     onError: handleRecognitionError,
     onEnd: handleRecognitionEnd,
@@ -284,6 +340,7 @@ export function useLiveVoiceDemo({
     // from being spoken over the microphone while the user is talking.
     voiceTurnRef.current = null;
     finalChunksRef.current = '';
+    interimChunkRef.current = '';
     resumeListeningAfterSpeechRef.current = false;
     core.beginListening();
     recognitionCaptureOpenRef.current = true;
@@ -311,7 +368,9 @@ export function useLiveVoiceDemo({
   const exitLiveVoice = useCallback(() => {
     activeRef.current = false;
     setActive(false);
+    releaseTtsOutputOwnership();
     finalChunksRef.current = '';
+    interimChunkRef.current = '';
     recognitionCaptureOpenRef.current = false;
     recognitionFailedRef.current = false;
     retryCaptureAfterRecognitionEndRef.current = false;
@@ -322,10 +381,11 @@ export function useLiveVoiceDemo({
     safelyStopListening();
     core.exit();
     stopEveryVoiceOutput();
-  }, [core, safelyStopListening, stopEveryVoiceOutput]);
+  }, [core, releaseTtsOutputOwnership, safelyStopListening, stopEveryVoiceOutput]);
 
   const enableLiveVoice = useCallback(() => {
     if (!available || activeRef.current) return;
+    acquireTtsOutputOwnership();
     activeRef.current = true;
     setActive(true);
     spokenMessageIdsRef.current = new Set(messages.filter(message => message.role === 'assistant').map(message => message.id));
@@ -334,11 +394,12 @@ export function useLiveVoiceDemo({
     core.exit();
     stopEveryVoiceOutput();
     finalChunksRef.current = '';
+    interimChunkRef.current = '';
     recognitionFailedRef.current = false;
     recognitionCaptureOpenRef.current = false;
     retryCaptureAfterRecognitionEndRef.current = false;
     beginCaptureRef.current();
-  }, [available, core, messages, stopEveryVoiceOutput]);
+  }, [acquireTtsOutputOwnership, available, core, messages, stopEveryVoiceOutput]);
 
   const handlePrimaryAction = useCallback(() => {
     switch (core.getSnapshot().status) {
@@ -377,7 +438,10 @@ export function useLiveVoiceDemo({
     return () => {
       const shouldStopAllTts = activeRef.current;
       activeRef.current = false;
+      releaseTtsOutputOwnershipRef.current?.();
+      releaseTtsOutputOwnershipRef.current = null;
       finalChunksRef.current = '';
+      interimChunkRef.current = '';
       recognitionCaptureOpenRef.current = false;
       recognitionFailedRef.current = false;
       retryCaptureAfterRecognitionEndRef.current = false;
@@ -418,35 +482,36 @@ export function useLiveVoiceDemo({
     const previousSessionId = previousSessionIdRef.current;
     previousSessionIdRef.current = activeSessionId;
     const promotionSequence = newSessionPromotion?.sequence ?? 0;
-    const hasFreshPromotion = promotionSequence > lastHandledPromotionSequenceRef.current;
-    if (hasFreshPromotion) {
-      // Consume every signal exactly once, including signals observed while
-      // Live Voice is inactive, so it can never authorize a later navigation.
-      lastHandledPromotionSequenceRef.current = promotionSequence;
-    }
-    if (!activeRef.current || previousSessionId === activeSessionId) return;
+    const transition = resolveLiveVoiceSessionTransition({
+      active: activeRef.current,
+      previousSessionId,
+      activeSessionId,
+      promotionSequence,
+      promotionTargetSessionId: newSessionPromotion?.targetSessionId ?? null,
+      lastHandledPromotionSequence: lastHandledPromotionSequenceRef.current,
+    });
+    lastHandledPromotionSequenceRef.current = transition.nextHandledPromotionSequence;
 
     // Creating the first real session promotes the special `new` runtime. It
     // is the same voice turn and must keep listening/thinking across the move.
-    if (
-      previousSessionId === 'new' &&
-      activeSessionId &&
-      activeSessionId !== 'new' &&
-      hasFreshPromotion &&
-      newSessionPromotion?.targetSessionId === activeSessionId
-    ) {
+    if (transition.action === 'preserve') {
       const pendingSupplement = pendingSupplementAfterPromotionRef.current;
       pendingSupplementAfterPromotionRef.current = null;
       if (pendingSupplement) onInterrupt(pendingSupplement);
       return;
     }
-    exitLiveVoice();
+    if (transition.action === 'exit') {
+      exitLiveVoice();
+    }
   }, [activeSessionId, exitLiveVoice, newSessionPromotion, onInterrupt]);
 
   useEffect(() => {
     if (!active || !voiceTurnRef.current) return;
     const turn = voiceTurnRef.current;
     const responseInProgress = isProcessing || isThinking;
+    if (responseInProgress) {
+      turn.responseObserved = true;
+    }
     const selection = selectLiveVoiceResponseMessages({
       messages,
       voiceTranscript: turn.transcript,
@@ -455,6 +520,9 @@ export function useLiveVoiceDemo({
       spokenMessageIds: spokenMessageIdsRef.current,
     });
     turn.userBoundaryId = selection.userBoundaryId;
+    if (selection.speakableMessages.length > 0) {
+      turn.responseObserved = true;
+    }
 
     if (selection.userBoundaryId && hasUserMessageAfterBoundary(messages, selection.userBoundaryId)) {
       // A later typed message owns the conversation from this point. Stop the
@@ -476,16 +544,23 @@ export function useLiveVoiceDemo({
       // the same final twice. Rejections are intentionally not retried unless
       // they belong to a later, newly committed response epoch.
       spokenMessageIdsRef.current.add(message.id);
-      const text = sanitizeTtsText(message.content);
-      if (!text) continue;
-      const queued = core.enqueueSpeech(text, turn.responseEpoch, message.id);
-      if (queued.accepted) {
-        resumeListeningAfterSpeechRef.current = true;
+      const text = sanitizeLiveVoiceTtsText(message.content);
+      for (const [chunkIndex, chunk] of splitLiveVoiceTtsText(text).entries()) {
+        const queued = core.enqueueSpeech(chunk, turn.responseEpoch, `${message.id}:${chunkIndex}`);
+        if (queued.accepted) {
+          resumeListeningAfterSpeechRef.current = true;
+        }
       }
     }
 
     const latestSnapshot = core.getSnapshot();
-    if (!responseInProgress && selection.userBoundaryId && latestSnapshot.status === 'thinking' && latestSnapshot.pendingSpeechCount === 0) {
+    if (shouldResumeAfterSilentResponse({
+      responseObserved: turn.responseObserved,
+      responseInProgress,
+      hasUserBoundary: Boolean(selection.userBoundaryId),
+      isThinking: latestSnapshot.status === 'thinking',
+      pendingSpeechCount: latestSnapshot.pendingSpeechCount,
+    })) {
       // A real response may contain only tool/media content, or sanitization
       // may intentionally remove everything. With no error and no playable
       // text, continue the voice loop instead of remaining stuck in thinking.
