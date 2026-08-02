@@ -1,7 +1,7 @@
 # Live Voice：V0 之后的两周全能力 Demo 与正式交付路线
 
 > 更新日期：2026-08-02
-> V0 不可变基线：`2c700934aa0024a7ab229644bf15934e9e8170e7`（Candidate，未放行）
+> V0 Released / 已冻结：`ee2896a4afb186e693c720476b6de10797e66f72`；Gate 0–6 全部 PASS，父 `d4c3e32a` 保留为 Gate 3 Attempt 1 FAIL 历史；证据见 [evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)
 > 状态：Task Foundation 已由后端 `3da101cf`、前端 `42e76d30` 落地；D-031 尚未编码，必须先通过 D-032 开发前 checkpoint
 > 模块闭环：从 D-031 起强制执行 D-032 的开发前/开发后双回顾与完整场景测试 Gate
 
@@ -18,10 +18,10 @@
 
 ## 2. V0 不可变基线与正常交付边界
 
-- V0 Candidate 恢复点永久固定为 `2c700934aa0024a7ab229644bf15934e9e8170e7`。它尚未通过 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)，所以只能称 Candidate，不能称 Released/frozen。
+- `d4c3e32a` 保留为 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL 的可恢复历史，不能 Released。D-037 baseline `ee2896a4` 已按 D-038 完成 Gate 0–6 并冻结；后续只为复现 Release 或调查回归建立 detached worktree。
 - D-022 的临时隔离已完成：stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply，原 stash 只作为额外备份保留。当前分支已有这些改动时，不得再次 apply/pop/drop。
 - D-030 恢复常规 Git 流程：Post-V0 按逻辑切片 review、统一验证、commit、push；Foundation 代码已由后端 `3da101cf`、前端 `42e76d30` 落地，相关文档已纳入本批 Git 交付。跨机器只依赖共享分支和本目录文档，不依赖单机 stash。
-- 用户稍后验收 V0 时，从精确 SHA 创建独立 checkout/worktree，清除 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 和 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO` 后执行完整 Gate。不要为了回到旧基线反复 stash、reset 或改写当前开发分支。
+- 复现 V0 Release 或调查回归时，从精确 SHA 创建独立 checkout/worktree，清除 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 和 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO` 后执行完整 Gate。不要为了回到旧基线反复 stash、reset 或改写当前开发分支。
 - Gate 失败不得写 Released；Gate 通过后只把验收证据合回累计分支，Post-V0 foundation 不得混入 V0 能力证据。
 
 ## 3. 排序方法
@@ -41,7 +41,7 @@
 
 ### 3.1.1 开发前回顾：先理解，再设计 tests
 
-任何语义实现开始前，必须完成并在 [STATUS.md](STATUS.md) 留下前置记录：
+任何语义实现开始前，必须完成并在 [STATUS.md](../STATUS.md) 留下前置记录：
 
 1. 重读本目录的方案入口、当前 `HANDOFF/STATUS`、当前阶段路线、相关 Accepted decisions；涉及长期架构、P1/P2/P3、协议、ownership、取消、持久化或生产边界时，完整重读 `FULL_SOLUTION_2026-07-30.md`。
 2. 阅读当前模块代码、所有相关现有 tests 和上下游接线，不能只根据计划标题或当前实现猜模块定义。
@@ -92,7 +92,7 @@
 5. tested evidence 的固定顺序是：前置回顾文档 checkpoint → 提交全部 code/tests/fixtures/config/schema/migration/lockfile 等行为输入形成 candidate commit → 确认这些路径相对 HEAD 无未提交差异并记录 `git rev-parse HEAD`、`git status --short` → 在该 commit 上统一复跑 → 用后续 evidence-only 文档 commit 在 `STATUS.md` 记录精确命令、环境、exit code、结果和 `tested_sha`。任何 amend、新的代码/test commit 或行为输入变化都会使受影响闭环失效并必须重审/重测。
 6. 反向场景必须验证 fail-closed 与禁止副作用为 0；重试、重复、迟到和并发场景必须验证 identity、次数与最终状态，不以“没有崩溃”冒充正确。
 7. 记录 flaky、未自动化场景、人工观察、当前阶段明确不支持项和正式版替换计划。需要反复重跑才能偶然通过的测试视为未闭环。
-8. `HANDOFF.md` 只摘要当前模块状态、tested SHA 和 `STATUS.md` 证据位置；规则本身不在多个文件重复定义。
+8. 当前模块状态、tested SHA 和证据位置只写入 `STATUS.md`；`README.md` 只负责路由，规则本身不在多个文件重复定义。
 
 ### 3.1.5 闭环状态
 
@@ -145,7 +145,7 @@ D-031 编码前必须先在 `STATUS.md` 建立上述前置记录，至少覆盖�
 | P0-4 | PARTIAL | 真实 P3α 任务纵向切片 | final committed 固定口令 → 真 `task_id` → status/events/cancel；只显示来源真实的状态 | Task Control Core、Executor Port、D0 durability | 大部分是 |
 | P0-5 | PARTIAL | Voice–Task Bridge 与任务卡 | 仅解析显式 create/status/cancel；破坏性操作确认；A→B 首版显示为 cancel A + create successor B | 完整 intent resolution、update/provide-input、多任务消歧 | 是；语音后验 |
 | P0-6 | PARTIAL | WorkProgress 时间线与能力披露 | 显示真实 accepted/running/blocked/decision_required/terminal；缺失信息写 `unknown`，不猜百分比 | Agent Bridge、Task events、observability | 是 |
-| P1-1 | PARTIAL | Speech Recognition/Synthesis Port + Browser Adapter | 当前 Browser Speech 是真实 fallback，固定 `zh-CN`、Chrome 和耳机 | Provider-neutral batch/streaming STT/TTS | 大部分是；设备后验 |
+| P1-1 | PARTIAL | Speech Recognition/Synthesis Port + Browser Adapter | 当前 Browser Speech 是真实 fallback，固定 `zh-CN`、Chrome 和耳机；V0 已保存 ASR fidelity gap | Provider-neutral batch/streaming STT/TTS、hypothesis/provenance、领域候选重排和关键语义安全门 | 大部分是；设备/Provider 后验 |
 | P1-2 | PARTIAL | InteractionEngine Port + Cascade 策略 | 固定 EOT、自动回听、显式点击插话；working notice 只来自真实状态 | VAD/EOT、自然 barge-in、Native Engine adapter | 逻辑是；体验后验 |
 | P1-3 | NOT STARTED | Realtime Media contract + loopback/fault injection | 现场仍诚实使用 Browser Speech；开发实验室验证 ACK、背压、乱序和有界队列 | 正式双向音频 transport | 是；真媒体后验 |
 | P1-4 | PARTIAL | 最小 ContextRef | 真正传递当前仓库、分支、版本和权限范围；不声称已连接 IDE/浏览器 | 跨 IDE/文件/浏览器/通信 Context adapters | 是 |
@@ -225,6 +225,18 @@ D-031 尚未编码；开始前必须先提交 D-032 开发前 checkpoint。该�
 6. **安全范围**：现有 owner/project 校验只用于单用户 Demo 的请求一致性；Web 身份来自客户端字段，不是生产授权。D-031 不扩大此边界，生产版需认证会话和服务端派生身份/项目 registry。
 
 以上六项及对应正反 tests 未写入 `STATUS.md` 的 scenario matrix 并提交前，不进入 D-031 代码实现。
+
+### 7.4 P1 Speech fidelity 的正式 checkpoint（D-039）
+
+D-039 不改变 D-031 的当前排序，也不把一次文档决策写成 Provider 已落地。共享 Contract Gate 后，P1 Speech Port 的第一个 D-032 pre-review 至少要冻结以下内容：
+
+1. **Hypothesis contract**：final transcript、alternatives/confidence（Provider 支持时）、provider、locale、timing、capability、fallback provenance，以及 partial/final/cancel 的有序语义。Browser Speech、专用本地/云端 ASR 和未来 Native Audio Engine 都只能实现该 Port，不能各自旁路 Agent/Tool Runtime。
+2. **领域解析但不静默篡改**：从当前仓库、分支、路径、文件、工具名/schema 和 Session 上下文建立动态词表；候选重排和确定性同音规则必须保留原始 hypothesis、修订原因和置信来源。没有 provenance 的文本替换不能称为识别质量提升。
+3. **Critical-token gate**：否定词、数字、日期、SHA、路径、分支和有副作用动词低置信度或候选冲突时请求澄清；副作用动作保持显式确认。partial/interim/unconfirmed 对 Agent、Tool、Task 的派发数必须为 0，错误工具派发也必须为 0。
+4. **固定语料与指标**：用 V0 已出现的 `未/为`、中文同音字、英文技术词、目录名、数字/日期/SHA/路径组合建立可重放语料；同时覆盖安静/噪声、近场/远场、短停顿、改口和 fallback。除 CER/WER 外记录 critical semantic error rate、first-pass task success、clarification rate、speech-end→commit p50/p95、重复提交与 Provider degradation。原始音频的采集、保存和回放必须显式获得同意并有删除路径。
+5. **分层结论**：专用 ASR 模型属于 Speech Adapter，不等于让端到端语音大模型接管 Agent。完全无模型只适合封闭关键词语法，不能作为开放式 Live Voice 目标；Native Audio Engine 可以参加相同语料 A/B，但在有证据前不能宣称全面优于模块化 Cascade，也不能绕过文字降级和安全闸门。
+
+P1-1 只有在上述 contract、fake/provider conformance、固定语料正反矩阵、fallback/隐私/错误路径和真实设备后验全部按 D-032 闭环后，才可从 `PARTIAL` 改为 `CLOSED`。现有 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 是不可变方案快照，继续提供 P1 batch/streaming Port、CER/WER、延迟和 partial 副作用目标；D-039 补充 critical semantic 与可审计 hypothesis，不回写该快照。
 
 ## 8. 版本命名纠正
 

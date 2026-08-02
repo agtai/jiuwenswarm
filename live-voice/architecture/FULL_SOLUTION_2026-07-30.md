@@ -112,12 +112,12 @@ P3α 只交付 D0。`provide_input/update/pause/resume/reprioritize`、自动重
 
 | 判断 | 可复核代码或测试 |
 |---|---|
-| 已有 Browser STT/TTS Hook | [`useSpeech.ts`](jiuwenswarm/channels/web/frontend/src/hooks/useSpeech.ts) 包含 `SpeechRecognition/webkitSpeechRecognition` 与 `speechSynthesis` |
-| Web 语音输入尚未形成默认体验 | [`InputArea.tsx`](jiuwenswarm/channels/web/frontend/src/components/ChatPanel/InputArea.tsx) 中 `startListening`、pointer handlers 和 microphone JSX 仍被注释 |
-| 助手消息已支持手动 TTS，自动朗读默认关闭 | [`MessageItem.tsx`](jiuwenswarm/channels/web/frontend/src/components/ChatPanel/MessageItem.tsx) 使用 TTS，`autoSpeak=false` |
-| 已有文字流式 E2A 与 Session History | [`models.py`](jiuwenswarm/common/e2a/models.py)、[`adapters.py`](jiuwenswarm/common/e2a/adapters.py) 和 [`session_history.py`](jiuwenswarm/server/runtime/session/session_history.py) |
-| 已有 session-scoped interrupt 与 steer/follow-up 原语 | [`interface.py`](jiuwenswarm/server/runtime/agent_adapter/interface.py)、[`interface_deep.py`](jiuwenswarm/server/runtime/agent_adapter/interface_deep.py) 及 [`test_interface_interrupts.py`](tests/unit_tests/agentserver/test_interface_interrupts.py) |
-| 已有 Agent/Harness、Team 与任务工具基础 | [`team_manager.py`](jiuwenswarm/agents/harness/team/team_manager.py) 和 [`task_tools.py`](jiuwenswarm/agents/harness/common/tools/task_tools.py)；这些并不等于统一 P3 Task Control Plane |
+| 已有 Browser STT/TTS Hook | [`useSpeech.ts`](../../jiuwenswarm/channels/web/frontend/src/hooks/useSpeech.ts) 包含 `SpeechRecognition/webkitSpeechRecognition` 与 `speechSynthesis` |
+| Web 语音输入尚未形成默认体验 | [`InputArea.tsx`](../../jiuwenswarm/channels/web/frontend/src/components/ChatPanel/InputArea.tsx) 中 `startListening`、pointer handlers 和 microphone JSX 仍被注释 |
+| 助手消息已支持手动 TTS，自动朗读默认关闭 | [`MessageItem.tsx`](../../jiuwenswarm/channels/web/frontend/src/components/ChatPanel/MessageItem.tsx) 使用 TTS，`autoSpeak=false` |
+| 已有文字流式 E2A 与 Session History | [`models.py`](../../jiuwenswarm/common/e2a/models.py)、[`adapters.py`](../../jiuwenswarm/common/e2a/adapters.py) 和 [`session_history.py`](../../jiuwenswarm/server/runtime/session/session_history.py) |
+| 已有 session-scoped interrupt 与 steer/follow-up 原语 | [`interface.py`](../../jiuwenswarm/server/runtime/agent_adapter/interface.py)、[`interface_deep.py`](../../jiuwenswarm/server/runtime/agent_adapter/interface_deep.py) 及 [`test_interface_interrupts.py`](../../tests/unit_tests/agentserver/test_interface_interrupts.py) |
+| 已有 Agent/Harness、Team 与任务工具基础 | [`team_manager.py`](../../jiuwenswarm/agents/harness/team/team_manager.py) 和 [`task_tools.py`](../../jiuwenswarm/agents/harness/common/tools/task_tools.py)；这些并不等于统一 P3 Task Control Plane |
 
 ## 4. 架构演进与技术策略
 

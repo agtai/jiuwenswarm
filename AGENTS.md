@@ -1,34 +1,28 @@
 # Repository agent guidance
 
-## Live Voice tasks
+## Mandatory Git approval gate
 
-Before planning, implementing, reviewing, or testing Live Voice work, read the current-state set in this order:
+Do not create, amend, squash, rebase, cherry-pick, merge, or otherwise produce a Git commit without the user's explicit approval for the exact intended scope and proposed commit message. Do not push, force-push, delete, or otherwise update a remote ref without separate explicit approval for that exact remote operation. Earlier approval does not carry over to later Git operations.
 
-1. `docs/zh/live-voice/README.md`
-2. `docs/zh/live-voice/STATUS.md`
-3. `docs/zh/live-voice/HANDOFF.md`
-4. `docs/zh/live-voice/DECISIONS.md`
-5. `docs/zh/live-voice/POST_V0_DELIVERY_ROADMAP.md`
-6. `docs/zh/live-voice/TWO_WEEK_DEMO.md`
+Before requesting commit approval, leave changes uncommitted and show the relevant status plus a concise diff/test summary and exclusions. Before requesting push approval, state the exact remote, branch, commits, and whether the push is normal or rewrites history. If approval is missing or ambiguous, stop before the Git operation.
 
-For V0 validation, also read `docs/zh/live-voice/V0_ACCEPTANCE.md`, `docs/zh/live-voice/E2E_RUNBOOK.md`, and `docs/zh/live-voice/DEMO_SHOWCASE.md`, and run them against the detached V0 candidate specified there. Before any other service start or real microphone/Agent/tool validation, read and follow `docs/zh/live-voice/E2E_RUNBOOK.md`.
+## Live Voice bootstrap
 
-Read `docs/zh/live-voice/POST_V0_STASH_HANDOFF.md` only for historical forensics or disaster recovery. A fresh clone is not expected to contain its machine-local stash, and normal development must never reconstruct, apply, pop, or drop that stash. Read `docs/zh/live-voice/FULL_SOLUTION_2026-07-30.md` completely when the task affects long-term architecture, P1/P2/P3 boundaries, protocols, state ownership, cancellation, presented history, durability, or production acceptance; it is a dated immutable source snapshot, not the current task list.
+For every Live Voice task, first read:
 
-The immutable validation baseline is the V0 vertical-slice candidate at the SHA recorded in `STATUS.md`; V0 remains unreleased until `V0_ACCEPTANCE.md` passes. D-030 ended the temporary stash boundary: develop, review, commit, and push Post-V0 work normally, then validate V0 later from a separate checkout/worktree at the immutable SHA. The next accepted slice is the poll-backed non-blocking task monitor in D-031; do not silently expand that slice into full P3. Apply D-033/D-034: current Web owner/project scope is single-user request consistency, not authentication; D-031 only promises same-page reconnect recovery, not full-page reload, and must preserve real terminal/error fields without inventing outcomes. The Demo must send final speech transcripts to the real JiuwenSwarm Agent and tools; it is not an ASR/TTS-only showcase. Do not present Demo shortcuts as production-complete capabilities.
+1. `live-voice/README.md` — lightweight router and authority map.
+2. `live-voice/STATUS.md` — the only mutable current-state source.
 
-At the start of a resumed Live Voice task, run `git status --short --branch`, `git rev-parse HEAD`, and compare the local branch with its upstream. If a handoff snapshot and Git disagree, treat the pulled remote branch as the implementation fact, report the mismatch, and update the handoff instead of silently using stale text.
+Then read only the files routed for the task. Do not load every full document for ordinary module work. Documentation-structure or documentation-update work must also read `live-voice/DOCUMENTATION_RULES.md`.
 
-On a fresh clone, use the clone/bootstrap commands in `docs/zh/live-voice/README.md`. Source, decisions, tests, and continuation state come from Git; model credentials, user configuration, project registration, browser permission, audio-device selection, and network availability do not. Do not claim full runtime parity until those private conditions have been re-established and the relevant E2E gate has passed.
+At resume, verify Git before trusting prose: run `git status --short --branch`, `git rev-parse HEAD`, and compare the checked-out branch with its upstream. If Git and `STATUS.md` disagree, Git is the implementation fact; report and repair the documentation rather than silently following stale text.
 
-Every Live Voice module or logical slice must follow D-032 and the mandatory test-closure gate in section 3.1 of `docs/zh/live-voice/POST_V0_DELIVERY_ROADMAP.md`. Before semantic implementation, re-read the relevant solution, current stage, module contract/decisions, and existing tests, then record the module definition, test inventory, why each test exists, and the complete scenario matrix in `docs/zh/live-voice/STATUS.md`. After implementation, repeat that review against the actual diff and final tests. Positive business scenarios must succeed; negative business scenarios must be rejected or fail closed, with forbidden side effects explicitly asserted as zero, while the test process itself passes. Test counts or line coverage alone never prove module closure. Missing coverage or an unexplained `N/A` means the slice is `PARTIAL` or `BLOCKED`, not `CLOSED`.
+The Demo must submit committed final speech text to the real JiuwenSwarm Agent and tools. It is not an ASR/TTS-only showcase, and shortcuts must never be described as production-complete capabilities. Credentials, model/provider configuration, project registration, browser permissions, audio-device selection, runtime data, and network availability are machine-private and are not restored by Git.
 
-After material Live Voice work:
+## Module and test closure
 
-- update `docs/zh/live-voice/STATUS.md` with progress, verification, known issues, and the next concrete actions;
-- update the D-032 pre/post review, test inventory, scenario-to-test mapping, exact tested SHA, commands, and remaining gaps for every affected module;
-- update `docs/zh/live-voice/DECISIONS.md` when scope or a technical choice changes;
-- update the Shortcut Ledger in `TWO_WEEK_DEMO.md` when adding or removing a temporary limitation;
-- normally commit and push the documentation with the related code so another machine can resume from Git alone; D-030 ended D-022's temporary pre-V0 stash window, so keep `2c700934` as the immutable unreleased V0 Candidate and commit later Post-V0 work without relabeling it as V0 evidence.
+Every Live Voice module or logical slice follows D-032 and `live-voice/roadmap/POST_V0_DELIVERY_ROADMAP.md` section 3.1. Before semantic implementation, reread the relevant design, current stage, decisions, module contract, and existing tests; record the module definition, test inventory, why each test exists, and the complete scenario matrix in `live-voice/STATUS.md`. After implementation, repeat the review against the actual diff and final tests.
 
-User instructions and newer accepted decisions take precedence. If code and documents disagree, record the gap instead of silently treating the current code as the intended final design.
+Positive business scenarios must succeed. Negative scenarios must be rejected or fail closed, and forbidden side effects must be asserted as zero while the test process itself passes. Test counts or line coverage alone do not prove closure. Missing coverage or unexplained `N/A` leaves the slice `PARTIAL` or `BLOCKED`, not `CLOSED`.
+
+User instructions and newer accepted decisions take precedence. If code and documents disagree, record the gap instead of treating current code as the intended final design.

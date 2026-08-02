@@ -1,11 +1,12 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
 - 最近恢复审计：2026-08-02
-- 适用共享分支：`hx/0731_live_voice_ux`；V0 Gate 单独使用 detached `2c700934`
+- 适用共享分支：`hx/0803_live_voice`；`d4c3e32a` 在 Gate 3 FAIL，`ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6 并标记 `V0 Released / 已冻结`
+- 最终脱敏证据：[evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)；本文仍是以后重建相同受控环境的操作手册
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
-本文是环境、依赖、服务启动和健康检查的权威入口。V0 的固定语料、分阶段打断、放行 Gate 和证据汇总以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准；现场展示话术以 [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) 为准。
+本文是环境、依赖、服务启动和健康检查的权威入口。V0 的固定语料、分阶段打断、放行 Gate 和证据汇总以 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md) 为准；现场展示话术以 [DEMO_SHOWCASE.md](../demo/DEMO_SHOWCASE.md) 为准。
 
 ## 1. 为什么必须固定环境
 
@@ -28,7 +29,7 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 - 中文 `zh-CN`、默认麦克风、耳机、单用户、单浏览器窗口、稳定网络。
 - 网络必须同时能访问模型 Provider 和浏览器 Web Speech 所需服务；首次依赖恢复还要访问 Python/Node 包源。
 
-仓库通过 `pyproject.toml` 约束 Python 范围、通过 lockfile 固定依赖，但目前没有 `.python-version`、`.nvmrc`、Volta 或 `engines` 来自动安装精确运行时，也没有固定 `uv`/npm 自身版本。新机器需要先人工安装 Python `3.12.9`、Node `24.14.0` 和 `uv`；可参考 [安装指南](../安装指南.md) 与 [Quickstart](../Quickstart.md)，然后以本节的精确版本检查作为 Gate。lockfile 固定的是依赖集合，不是操作系统、Chrome 或硬件。
+仓库通过 `pyproject.toml` 约束 Python 范围、通过 lockfile 固定依赖，但目前没有 `.python-version`、`.nvmrc`、Volta 或 `engines` 来自动安装精确运行时，也没有固定 `uv`/npm 自身版本。新机器需要先人工安装 Python `3.12.9`、Node `24.14.0` 和 `uv`；可参考 [安装指南](../../docs/zh/安装指南.md) 与 [Quickstart](../../docs/zh/Quickstart.md)，然后以本节的精确版本检查作为 Gate。lockfile 固定的是依赖集合，不是操作系统、Chrome 或硬件。
 
 2026-08-01 首次真实贯通使用的已知可用组合：
 
@@ -49,15 +50,15 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 
 ```powershell
 $env:GIT_LFS_SKIP_SMUDGE = '1'
-git clone --origin agtai --branch hx/0731_live_voice_ux --single-branch https://github.com/agtai/jiuwenswarm.git
+git clone --origin agtai --branch hx/0803_live_voice --single-branch https://github.com/agtai/jiuwenswarm.git
 Set-Location jiuwenswarm
-git pull --ff-only agtai hx/0731_live_voice_ux
+git pull --ff-only agtai hx/0803_live_voice
 git status --short --branch
 git status --porcelain
-git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
+git rev-list --left-right --count HEAD...agtai/hx/0803_live_voice
 ```
 
-`GIT_LFS_SKIP_SMUDGE=1` 当前是必要绕过：agtai 的 LFS 端点缺少与 Live Voice 无关的 `docs/assets/videos/compression.mp4`，普通 checkout 会收到 404。跳过该媒体不影响 Live Voice 源码、文档、tests、依赖或运行；在对象补传前不要执行全仓 `git lfs pull`。如果仓库已经由其他方式 clone，确保本地 `hx/0731_live_voice_ux` 跟踪正确的 `agtai`/`origin` 分支并 `pull --ff-only`。验收前记录 `git rev-parse HEAD`，upstream 差异必须 `0 0`，工作区不得有意外修改。
+`GIT_LFS_SKIP_SMUDGE=1` 当前是必要绕过：agtai 的 LFS 端点缺少与 Live Voice 无关的 `docs/assets/videos/compression.mp4`，普通 checkout 会收到 404。跳过该媒体不影响 Live Voice 源码、文档、tests、依赖或运行；在对象补传前不要执行全仓 `git lfs pull`。如果仓库已经由其他方式 clone，确保本地 `hx/0803_live_voice` 跟踪正确的 `agtai`/`origin` 分支并 `pull --ff-only`。验收前记录 `git rev-parse HEAD`，upstream 差异必须 `0 0`，工作区不得有意外修改。
 Python 依赖以根目录 `uv.lock` 为准：
 
 ```powershell
@@ -318,8 +319,8 @@ project.create（首次注册时）
 6. 完整回答必须从耳机实际朗读。
 7. thinking/tool 时重新开麦并在新 final 到达时确认 Agent 仍在 processing；该样本必须真实走 `chat.interrupt(intent=supplement)`。
 8. speaking 时重新开麦；旧声音应立即停止且不能恢复，但 Agent 已完成时新 final 应作为一次普通 `chat.send`，不能冒充 supplement。
-9. 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 完成连续 10 Turn、3 次 thinking supplement、4 次 tool supplement、3 次 speaking 停声/普通发送，以及 20 分钟或 20 Turn soak。
-10. 完整执行 [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) 的主演示脚本，连续成功 3 次。
+9. 按 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md) 完成连续 10 Turn、3 次 thinking supplement、4 次 tool supplement、3 次 speaking 停声/普通发送，以及 20 分钟或 20 Turn soak。
+10. 完整执行 [DEMO_SHOWCASE.md](../demo/DEMO_SHOWCASE.md) 的主演示脚本，连续成功 3 次。
 
 同时观察：ACK 前的旧 `chat.tool_call` / `chat.tool_update` 和短暂 `processing=false` 当前已有前端隔离，但 `chat.tool_result` 与工具真实副作用没有 generation fence。打断后必须核对旧工具结果、实际副作用和 Gateway cancel warning，不能只看 UI 是否隐藏。
 
@@ -330,7 +331,7 @@ project.create（首次注册时）
 - Windows、Chrome `150.0.7871.187`、Jabra EVOLVE 30 II、`zh-CN`、Node.js `24.14.0`、Python `3.12.9`、模型标签 `deepseek-v4-flash`。
 - 文字强制 Terminal Tool smoke 成功，确认 Agent、项目、模型和真实工具链可用。
 - Python 本轮临时复用主仓 `.venv`；未将该目录或任何配置写入 Git。
-- 测试时 `HEAD` 为交接基线 `48a9fe4c571c98aabbf93688727ec8823f6d0c00`，工作区包含本轮候选修复，因此本记录不是对旧基线的通过声明。提交后可用 `git log -1 --format=%H -- docs/zh/live-voice/E2E_RUNBOOK.md` 定位包含本记录和实现的首个可恢复快照。
+- 测试时 `HEAD` 为交接基线 `48a9fe4c571c98aabbf93688727ec8823f6d0c00`，工作区包含本轮候选修复，因此本记录不是对旧基线的通过声明。提交后可用 `git log -1 --format=%H -- live-voice/runbooks/E2E_RUNBOOK.md` 定位包含本记录和实现的首个可恢复快照。
 
 ### 主链时间线
 
@@ -358,6 +359,28 @@ project.create（首次注册时）
 已证明：文字工具 smoke、真实麦克风 final、`new` session promotion、真实 Agent/Terminal Tool、完整技术标识符 TTS、自动回听和约 8 秒初始静默窗口在这一组固定环境中可以成立。
 
 未证明：10 个准确语音 Turn、7 次 processing supplement、3 次 speaking 停声/普通发送、旧副作用 fence、20 分钟或 20 Turn、主演示脚本连续 3 次、Desktop/WebView2 或任何生产可靠性指标。
+
+### 2026-08-02 V0 Gate 1 候选切换记录
+
+- Attempt 1 在旧候选 `2c700934...` 上真实完成 `chat.send → chat.tool_call → chat.tool_result → chat.final`，Terminal Tool 返回 `2c700934,1`。
+- dirty count `1` 的根因是 JiuwenSwarm runtime 在仓库根写入旧候选未忽略的 `.agent_history/`；因此该次 attempt 为 **FAIL**，不能计作 Gate 1 PASS。
+- 新候选 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的父提交为 `2c700934...`，唯一变化是 `.gitignore` 新增三行忽略 runtime file operation logs。
+- 新候选 checkout 恢复 clean 后，Gate 0 已 PASS；Gate 1 固定自动化、TypeScript、build、Ruff、`git diff --check` 和真实文字工具 smoke 已全部 PASS。
+- 新的真实工具链返回 `d4c3e32a,0`，Gate 2 也 PASS；但 Gate 3 Attempt 1 随后 FAIL，`d4c3e32a` 仅保留为失败历史。后续语音 Gate 必须等待 D-037 新 Candidate，不能从旧 Turn 4 续算。
+
+### 2026-08-02 V0 Gate 2 语音样本
+
+- final transcript 为“廖永终端查看当前提交编号前八位并统计未提交文件数量只回答编号和数量”；Web Speech 将“调用”误识别成“廖永”。
+- 本次唯一一次 `chat.send → chat.tool_call → chat.tool_result → chat.final` 返回真实 `d4c3e32a 0`，候选工作区仍 clean；用户确认完整听到“d4c3e32a 0”。
+- 该转写偏差记录为 ASR fidelity 和关键动词鲁棒性风险，后续必须继续处理，但当前 Agent 已正确执行工具任务链，不把它单独列为任务链阻塞。
+- 用户确认完整回答只播一次。虽未即时观察 `Listening`，但无 Retry/再次说话，随后页面显示“未检测到语音”；这是自动重新进入识别并经历静默超时的强间接证据，与 TTS 后自动回听一致。结合唯一 send/tool/result/final、`new` Session 和 dirty=`0`，Gate 2 记 **PASS**，但没有直接状态时间线截图。
+
+### 2026-08-02 V0 Gate 3 Attempt 1：Turn 3 FAIL
+
+- Turn 1/2 正常；Turn 3 ASR 将“年月日”识别成“念月日”，Agent 选择 `git log -1 --format=%ad --date=format:'%m月%d日'`。
+- Git for Windows `2.47.1.windows.2` 可在 Agent 外稳定复现该非 ASCII 日期 format OOM；`--date=short`/ASCII 对照立即成功。单个异常 Git 子进程曾达到约 8.5 GB Working Set / 49 GB Private Memory。
+- 同一 request 记录 11 次 tool call、10 次相同失败 result、0 个 Turn 3 final；第 11 次在途时由 `chat.interrupt(intent=cancel)` 终止。候选 dirty=`0`，资源恢复，Agent 服务以同一隔离数据目录重启。
+- CircuitBreaker 默认关闭且默认错误阈值过晚。本 attempt 记 **FAIL**；先建立带低阈值确定性失败熔断的新 Candidate，再从新 Session Turn 1 重跑。日期口令改成 `YYYY-MM-DD` 只隔离平台缺陷，不证明生产工具资源保护完成。
 
 ## 11. 证据记录模板
 
@@ -405,4 +428,4 @@ ASR 误识别样本：
 - 停止 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
 - 记录本次使用的 `JIUWENSWARM_DATA_DIR` 标签，停止所有引用它的进程后执行 `Remove-Item Env:JIUWENSWARM_DATA_DIR -ErrorAction SilentlyContinue`；不要自动删除证据目录。
-- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步。Post-V0 正常提交并推送；V0 验收必须在 `2c700934...` 的独立 checkout/worktree 中完成，验收证据和后续开发事实分别提交，不得混为同一放行结论。
+- 按 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md) 保存脱敏验收结果，只在 [STATUS.md](../STATUS.md) 更新通过项、失败项和下一步，并按根 `AGENTS.md` 对每次 commit 和 push 分别取得明确批准；`ee2896a4` 已冻结，后续只在独立 checkout/worktree 中复现或调查回归，`d4c3e32a` 只作失败历史，Release 证据和后续开发事实分别提交，不得混为同一能力结论。

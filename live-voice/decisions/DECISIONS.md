@@ -319,7 +319,7 @@
 - 日期：2026-08-02
 - 状态：Accepted（从 D-031 起强制执行；不改变 V0 Candidate 的独立放行 Gate）
 - 背景：现有 Foundation 的 Python `226/226`、Live Voice `155/155`、相关回归 `24/24` 能证明对应 suites 在当时最终代码上通过；155 与 24 两组有 9 项重叠且 Git 未保存 JUnit 产物。测试数量、行覆盖率或纯函数测试无法单独证明模块定义中的所有行为、拒绝路径、竞态、恢复和真实接线均已覆盖。若 tests 只是跟随当前实现编写，还可能把错误行为固化成“预期”。
-- 决策：每个模块或逻辑切片在语义开发前、实现完成后各做一次正式回顾。两次都必须重新理解完整方案、当前阶段、模块契约/非目标、上下游、现有 tests 和实际风险，并维护 test inventory、每项 test 的设计原因以及 `scenario → test/evidence` 矩阵。每个改变的不变量必须同时有正向正确场景和反向拒绝场景；反向业务动作必须明确失败、拒绝或安全 no-op，并断言所有禁止副作用为 0，而测试进程本身应 PASS。边界、状态、时序、重复/乱序、并发/重试、恢复、scope/权限、feature flag/降级、协议/持久格式兼容和真实跨模块路径按适用性覆盖；`N/A` 必须说明理由。详细执行规范和记录模板以 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) §3.1 为唯一权威。
+- 决策：每个模块或逻辑切片在语义开发前、实现完成后各做一次正式回顾。两次都必须重新理解完整方案、当前阶段、模块契约/非目标、上下游、现有 tests 和实际风险，并维护 test inventory、每项 test 的设计原因以及 `scenario → test/evidence` 矩阵。每个改变的不变量必须同时有正向正确场景和反向拒绝场景；反向业务动作必须明确失败、拒绝或安全 no-op，并断言所有禁止副作用为 0，而测试进程本身应 PASS。边界、状态、时序、重复/乱序、并发/重试、恢复、scope/权限、feature flag/降级、协议/持久格式兼容和真实跨模块路径按适用性覆盖；`N/A` 必须说明理由。详细执行规范和记录模板以 [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md) §3.1 为唯一权威。
 - 决策：只有双回顾齐全、全部必需场景有证据、最终命令在包含全部 code/test 行为输入且相关路径干净的 immutable candidate SHA 上通过、必要 E2E/人工观察完成且无未解释 flaky/必需 gap 时，模块才可标记 `CLOSED`；否则只能是 `PARTIAL` 或 `BLOCKED`。任何后续 code/test/input 变化都会使受影响闭环失效。现有 Foundation 结果保留为历史回归证据，但不能倒写成已经走过 D-032；已有模块在再次修改、作为新切片闭环依赖或进入版本 Gate 前补齐受影响范围。
 - 原因：这迫使测试从项目方案和模块定义出发，既证明“应该成功的确实成功”，也证明“不应发生的确实被阻止且没有副作用”，并让新机器或新 Codex 会话能够从 Git 恢复每项测试为何存在、覆盖了什么和还缺什么。
 - 影响：D-031 是第一个强制应用切片，编码前先在 `STATUS.md` 固定 monitor 的状态/时序/错误/竞态/flag-off/接线矩阵；编码后在 exact tested SHA 上重审并统一验证。`STATUS.md` 保存详细证据，`HANDOFF.md` 只摘要状态和入口。`V0_ACCEPTANCE.md` 继续独立负责 `2c700934` 的真机 Release Gate，不将 Post-V0 流程倒灌进 V0 证据。
@@ -345,3 +345,65 @@
 - 原因：这是不扩大为完整 P3 的最窄诚实边界，同时让 D-031 的正向、反向、竞态和恢复测试有确定预期。
 - 影响：D-031 代码开始前，以上语义必须进入 `STATUS.md` 的 D-032 pre-review inventory/matrix 并形成 checkpoint commit；当前文档决策不表示实现已完成。
 - 重新评估条件：持久 command journal、TaskEvent store/subscription 或版本化 WorkProgress contract 提前落地。
+
+> D-035 was intentionally left unused; historical decision IDs are not renumbered.
+
+## D-036 用干净运行时边界的新提交取代旧 V0 Candidate
+
+- 日期：2026-08-02
+- 状态：Accepted（取代 D-022/D-030/D-032 中仅把 `2c700934` 作为当前 V0 Candidate/放行目标的部分；这些决策的历史正文、stash 历史、独立验收轨、测试闭环和 Post-V0 正常提交边界保留原文）
+- 背景：Gate 1 Attempt 1 在 detached `2c700934aa0024a7ab229644bf15934e9e8170e7` 上真实完成 `chat.send → chat.tool_call → chat.tool_result → chat.final`，但 Agent/Terminal Tool 返回 `2c700934,1`。JiuwenSwarm runtime 在仓库根生成旧候选未忽略的 `.agent_history/`，使工作区从 clean 变为 dirty；该 attempt 必须判定 FAIL，不能因 Agent/Tool 链真实完成而计作 PASS。
+- 决策：新 V0 Candidate 固定为 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b`。它的父提交是 `2c700934...`，唯一 diff 是 `.gitignore` 新增三行以忽略 JiuwenSwarm runtime file operation logs 的 `.agent_history/`；不包含 Post-V0 foundation 或功能变化。所有当前 Gate、展示、冷 clone 和新会话期望统一使用短 SHA `d4c3e32a` 与 dirty count `0`。旧 attempt 的 `2c700934,1` 作为失败证据永久保留，不得改写成通过。
+- 验证：新候选 checkout 已恢复 clean；Gate 0 已 PASS；Gate 1 固定自动化、TypeScript、Vite build、Ruff、`git diff --check` 与真实文字 Agent/Terminal Tool smoke 已全部 PASS，真实链路返回 `d4c3e32a,0` 且结束后仍 clean。Gate 2–6 尚未因此自动通过。
+- 原因：V0 的工具 smoke 本身会运行 JiuwenSwarm；如果正常运行必然污染 Git 工作区，则“真实 Agent/Tool + 工作区 count 0”的验收 oracle 无法在同一候选上成立。将机器运行日志显式排除在源码工作树之外，是最小且可审查的修复，不改变 Live Voice 行为。
+- 影响：`2c700934` 仍是新候选的直接父提交和 Attempt 1 历史身份，但不再是当前放行候选。V0 继续在独立 detached `d4c3e32a` checkout、独立 `JIUWENSWARM_DATA_DIR` 和清除 Post-V0 flags 的环境中执行；只有 Gate 0–6 全部 PASS 后才可标记 Released / 已冻结。累计 Post-V0 分支、Foundation、stash 与 V0 证据继续隔离。
+- 重新评估条件：新候选再次因仓库内运行时产物或其他可复现缺陷无法保持干净，或完整 Gate 发现必须改变 V0 行为而不仅是运行边界。
+
+## D-037 Gate 3 重复确定性失败必须先建立新 Candidate
+
+- 日期：2026-08-02
+- 状态：Accepted（V0 blocker 的最小安全修复；不扩成完整 P3）
+- 背景：Gate 3 Attempt 1 的 Turn 3 触发 Git for Windows 非 ASCII 日期格式 OOM；同一用户 Turn 只有一次 `chat.send`，但模型在每个错误结果后重新选择同一 bash 命令，形成 11 次 tool call / 10 次相同失败。现有 CircuitBreaker 默认关闭且阈值过晚。
+- 决策：`d4c3e32a` 保留为 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL 的历史 Candidate，不能 Released。必须从该 SHA 建立新 Candidate：在同一 invoke 内，对同 tool name、去 metadata 后同参数、同完整失败签名且 `has_error=true` 的**顺序**重试，第 3 次完成后只 force-finish 一次；默认启用并支持显式关闭/阈值配置。失败签名必须覆盖结构化 nested data 与异常路径，不能复用会丢字段的普通结果哈希。
+- 决策：Gate 3 日期语料同时改成明确 `YYYY-MM-DD` 的跨平台安全 oracle，但改题不是 guard 的替代品。代码/tests/config 形成新 immutable SHA 后重跑 Gate 0/1；真人 Gate 3 前按用户要求停止，让用户先调整模型配置。
+- 非目标与缺口：本切片不修 Git、不提供任意子进程硬内存/CPU/超时沙箱、不追溯取消同一模型响应中已经并行发出的工具调用，也不降低全局 `max_iterations`。这些是正式交付前继续闭环的资源治理项。
+- 原因：重复执行已知高资源失败不增加 Live Voice 证据；低阈值精确熔断能解决本次被证明的放大器，同时把更宽的生产安全缺口如实保留。
+- 影响：实现前必须按 D-032 提交并推送 `STATUS.md` 的模块定义、test inventory 和 P/N/B/S/T/C/R/I/F/K/X 矩阵；实现后再做完整回顾、immutable candidate 复跑和证据提交。Gate 3–6 不得由本决策自动通过。
+- 重新评估条件：项目提供经过验证的进程级资源硬限制和并行批次取消，或上游 Agent/Tool contract 改变顺序回调与 force-finish 语义。
+
+## D-038 放行 `ee2896a4`，并保留 ASR/模型偏差为非阻塞证据
+
+- 日期：2026-08-02
+- 状态：Accepted（V0 Release 验收决策；不改变生产边界）
+- 背景：detached `ee2896a4afb186e693c720476b6de10797e66f72` 已在从零建立的隔离环境中完成 Gate 0–6。严格的首次 transcript/格式样本仍暴露“未/为”、技术词、目录名和只回答格式偏差；同时，真实工具事实、打断路由、唯一 TTS、自动回听、降级、soak 和连续主演示均满足受控 V0 核心旅程。
+- 决策：将 `ee2896a4` 标记为 `V0 Released / 已冻结`。Gate 3 本次按 owner 明确接受的任务级口径判定：10 个固定只读目标必须最终 10/10 来自真实工具，每个目标最多允许两次语音重试；首次 transcript、错误结果和重试次数必须保留，不能改写成首轮准确率 100%。“只回答 X”的多余措辞和 `YYYYMMDD`/`YYYY-MM-DD` 差异单列为模型遵循问题，只要受控复核的核心工具事实和最终目标正确，不阻塞本次 V0。
+- 决策：Gate 4 tool-stage 的等待由 8 秒延长为 60 秒，以稳定命中真实工具执行窗口；动作保持只读，打断仍必须有 `chat.interrupt(intent=supplement)`、Gateway 取消/替代时间线、零旧 UI/TTS 污染和零副作用。Gate 6 接受本次 Codex task 自身的从零环境、全新 detached worktree、lockfile 依赖、全新数据目录和完整实链作为等效恢复证据，不再机械复制到第二个 task；该等效关系必须在证据中显式写出。
+- 影响：早期 `2c700934` Gate 1 FAIL 与 `d4c3e32a` Gate 3 FAIL 永久保留；它们不被最终 PASS 覆盖。V0 Released 只冻结 `ee2896a4` 的受控纵向 Demo，不宣称 ASR 准确率、模型格式遵循、生产 cancellation fence、带副作用工具取消、跨环境兼容、全双工或完整 P3 已解决。后续累计分支继续 V1 Foundation Alpha / D-031，不把 Post-V0 代码算进 V0。
+- 证据：[evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)。
+- 重新评估条件：发现证据与 candidate 身份不一致、真实工具结果被伪造、候选无法从 Git 恢复，或任何 Gate 的零污染/零副作用结论被新的可复现证据推翻。
+
+## D-039 Speech Port 负责可替换识别，Native Audio Engine 不成为第二控制平面
+
+- 日期：2026-08-02
+- 状态：Accepted（Post-V0 P1 架构与验收方向；实现未开始，不改变 D-031 当前优先级）
+- 背景：V0 的真实语音验收稳定打通 Browser Speech、文字 Agent、Terminal Tool、最终回答、TTS 和自动回听，同时反复出现 `未/为`、中文同音字、英文技术词、目录名和数字格式偏差。当前 Web Adapter 固定 `zh-CN`、只采用第一候选并把合并后的 final 自动提交；它证明了纵向价值，但不能代表正式 ASR fidelity。一个否定词错误对工具意图的风险远高于普通字符错误。
+- 比较事实：OpenAI 当前公开的原生实时音频模型名为 [`gpt-realtime`](https://developers.openai.com/api/docs/models/gpt-realtime)，可直接消费/生成音频；其可选 input transcription 仍是独立异步 ASR，只应视为输入内容指引，并不保证精确等于原生模型实际听到的内容，见 [Realtime API](https://platform.openai.com/docs/api-reference/realtime)。因此 Native Engine 能提升语气、时延和自然轮转，却不自动提供 JiuwenSwarm 工具链需要的可审计文字契约。
+- 决策：继续坚持 D-004 的文字 Agent/Tool 主链。P1 建立 provider-neutral Speech Recognition/Synthesis Port；Browser Speech 是 fallback，专用本地或云端 ASR 是可替换 Adapter，未来 Native Audio Engine 也只能作为声明 capability 的可选 Adapter。任何 Adapter 都不得绕过 committed final、权限/确认、Runtime identity、cancel/fence、工具 schema 和真实结果。
+- 决策：Recognition Port 的正式结果至少携带 final transcript、alternatives/confidence（Provider 支持时）、provider、locale、timing、capability 与 fallback provenance。项目领域解析器可以用仓库/分支/路径/工具 schema/当前上下文动态词表和确定性混淆规则重排候选；不能把低置信度纠错静默伪装成原始 transcript。
+- 决策：否定词、数字、日期、SHA、路径、分支以及删除/提交/推送/覆盖/重置等有副作用动词是 critical tokens。高置信度只读 Turn 可以直交；关键候选不一致或低置信度时必须澄清；副作用动作继续显式确认并 fail closed。partial、interim、未确认候选对 Agent、Tool 和 Task 的副作用必须为 0。
+- 决策：正式对比以任务结果而非“模仿某个竞品”放行。除 CER/WER 外，必须记录 critical semantic error rate、first-pass task success、clarification rate、错误工具派发数、speech-end→commit p95、重复提交和 fallback 一致性。V0 的真实错词类型形成固定回归语料；原始音频只在明确同意的隐私边界内保存和回放。
+- 原因：模块化方案不应宣称在情绪、韵律、重叠语音和开放式自然对话上普遍超过原生音频模型；它的可胜维度是代码/任务领域的精确实体、工具安全、可审计性、Provider 可替换和本地化。把 Native Engine 也收进同一 Port，可保留未来体验升级而不分裂 Agent/Tool 权威。
+- 影响：D-031 仍是当前下一切片。共享 Contract Gate 后，P1 Speech Port 可按 D-032 独立建立 pre-review、provider fake/conformance、固定语料、正反/降级/隐私场景和 exact-SHA 后置闭环；D-039 不表示任何新 Provider 已选择或质量目标已经达成。
+- 重新评估条件：固定语料 A/B 证明单一 Native Engine 在关键语义、工具安全、延迟、隐私和成本的综合指标上持续占优，或 Speech/Runtime contract 改变到可安全合并控制平面；即使重新评估，真实工具权限和副作用确认也不能由音频模型隐式替代。
+
+## D-040 Live Voice 文档采用根目录知识库、单一状态源和按任务渐进阅读
+
+- 日期：2026-08-03
+- 状态：Accepted（取代 D-001 的旧 `docs/zh/live-voice/` 位置，并取代 D-032 中继续维护独立 `HANDOFF.md` 的操作方式；历史正文保留）
+- 背景：完整文档保证信息不丢失，但把 README、STATUS、HANDOFF、决策、路线和完整方案同时列为每次必读会显著增加恢复成本，并让当前 SHA、里程碑和下一任务在多处重复后发生矛盾。
+- 决策：Live Voice 知识库统一放在仓库根 `live-voice/`。根 `AGENTS.md` 只保存 Git 审批、最小 bootstrap 和模块测试闭环等跨任务不变量；`README.md` 是轻量路由；`STATUS.md` 是当前分支、里程碑、已验证事实、缺口和下一切片的唯一可变权威；完整方案、决策、路线、验收、runbook、展示、证据和 archive 按目录保留。
+- 决策：文档深度（简要/完整）与读取策略（必读/涉及才读）是正交分类。每个 Live Voice 任务只强制读取根 AGENTS、README、STATUS；普通模块再读相关源码/tests/路线/决策，架构或协议任务才完整读取方案，验收任务才读取验收/runbook/showcase/evidence，文档任务必须读取 `DOCUMENTATION_RULES.md`。
+- 决策：删除重复的 `HANDOFF.md`。可变事实只在 STATUS 更新；README 不复制状态；决策只记录选择与理由；不可变 evidence/方案不被事后改写；archive 明确不能覆盖当前状态。移动文档时必须统一修复链接并验证 `docs/zh/live-voice/` 无 tracked 副本。
+- 原因：新机器和新 Codex 可以用很小的必读集恢复正确方向，需要细节时仍能进入完整记录；单一权威避免简要版与完整版各自维护同一状态而漂移。
+- 影响：旧决策中的历史路径、旧分支和当时状态仍作为历史事实保留，但当前操作必须以根 AGENTS、`live-voice/README.md`、`live-voice/STATUS.md` 和 `DOCUMENTATION_RULES.md` 为准。文档同步不构成自动 commit/push 授权。
+- 重新评估条件：仓库出现可自动生成并可靠校验的文档索引/状态投影，或根知识库影响上游文档发布流程。

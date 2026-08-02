@@ -1,14 +1,17 @@
+> Archive / historical plan. It preserves the V0 shortcut ledger and two-week design context; current progress and next work live only in [STATUS.md](../STATUS.md).
+
 # JiuwenSwarm Live Voice：V0 两周纵向 Demo 方案
 
 - 日期：2026-07-31
-- 最近实测更新：2026-08-01
+- 最近实测更新：2026-08-02
 - 文档恢复审计：2026-08-02
 - 目标分支：`hx/0731_live_voice_ux`
 - 人力假设：1 人，约 10 个工作日，可使用 Codex 辅助开发
 - 交付名称：Live Voice UX / Vertical Slice Demo
 - 交付性质：验证产品流程和感知效果，不宣称达到生产 Alpha
-- 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；当前为 Candidate，验收通过后才冻结
-- 生命周期说明：D1–D10 是 2026-07-31 的原始排期快照，不是当前待办；当前事实和下一步以 [STATUS.md](STATUS.md) 为准
+- 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6，状态为 `V0 Released / 已冻结`
+- 候选历史：父候选 `2c700934` 的 Gate 1 Attempt 1 因 runtime 生成 `.agent_history/`、实际返回 dirty=`1` 而 FAIL；`d4c3e32a` 修正 clean 边界后又在 Gate 3 FAIL；两次失败均保留，最终证据见 [evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)
+- 生命周期说明：D1–D10 是 2026-07-31 的原始排期快照，不是当前待办；当前事实和下一步以 [STATUS.md](../STATUS.md) 为准
 
 ## 1. 先说结论
 
@@ -70,7 +73,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 
 ### 2.5 可选：语音控制一个真实后台任务
 
-该能力不属于 V0 Released Gate；Post-V0 Task Foundation 已实现一个默认关闭的受限切片，并已完成 foundation review 与统一复跑，仍待受控真人 E2E。V0 稍后从 `2c700934` 的独立 checkout/worktree 验收，不再要求先 stash/freeze 才能继续本切片。它固定使用真实、有代码副作用的 AutoHarness `extended_evolve_pipeline`，不是只读“检查仓库”。
+该能力不属于 V0 Released Gate；Post-V0 Task Foundation 已实现一个默认关闭的受限切片，并已完成 foundation review 与统一复跑，仍待受控真人 E2E。D-037 baseline 已冻结为 `ee2896a4`，以后只在该 SHA 的独立轨复现 V0 或调查回归。Task Demo 固定使用真实、有代码副作用的 AutoHarness `extended_evolve_pipeline`，不是只读“检查仓库”。
 
 | 口令 | 当前行为 |
 |---|---|
@@ -92,7 +95,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 |---|---|---|---|
 | 语音发起 Agent 请求 | 完成，最终识别文字进入现有 `chat.send` | 完成，并支持更多平台、语言和连接方式 | 用户能否自然地用语音驱动 Agent |
 | Agent 调用工具 | 完成，复用现有真实 Agent/Tool 链 | 完成，并补齐统一进度、权限和可恢复语义 | 语音是否适合驱动真实工作，而不只是聊天 |
-| 连续上下文 | 代码路径已实现并复用现有 Session；尚未通过 V0 Release/E2E 连续多轮 Gate | 完成，并有更严格的会话事实和播放历史 | 多轮语音协作是否自然 |
+| 连续上下文 | D-038 口径下的连续任务与 21m58s 同 Session soak 已通过；ASR 首轮 fidelity 仍单列 | 完成，并有更严格的会话事实和播放历史 | 多轮语音协作是否自然 |
 | 判断用户说完 | 固定停顿时间或显式结束 | 声音、语义和上下文共同判断 | 固定规则下的交互节奏是否可接受 |
 | 朗读回答 | 浏览器整段朗读；稳定后按完整句子排队 | 服务端流式 TTS、音频分片、背压和播放确认 | Agent 回答被听到时是否清楚、简洁、及时 |
 | 插话 | 重新开麦/点击立即停声；processing 中 final 走 supplement，只剩 TTS 时走普通下一 Turn | 持续监听、回声消除、误打断恢复，并明确区分停声、取消回答、取消工作 | 用户是否需要处理中纠正与朗读中止，以及两种路由是否可理解 |
@@ -241,7 +244,7 @@ speaking + 用户重新开麦
 - 稳定句预读已在独立 feature flag 下实现：只预读有 lookahead 的稳定完整句，并与权威 `chat.final` 对账；仍待真人听感和并发源隔离验收。
 - 受限 `schedule.run/status/cancel` 后台任务路径已在独立 feature flag 下实现；仍待受控副作用环境的真实 E2E。
 - Task Foundation 已完成审阅和当时的统一验证，并由后端提交 `3da101cf`、前端提交 `42e76d30` 落地：request owner + project 一致性 scope、per-path single-process JSON 幂等、前端 stable command ID、strict exact-key reconciliation、pending drift 安全和真实 task card 均已补齐；历史命令报告 Python **226/226**、前端 **155/155**、相关回归 **24/24**、`tsc --noEmit` 与 Vite **4494 modules**。其中 155 与 24 两组有 9 项重叠，数字不可相加；Git 保存命令与结果记录，但未保存 JUnit 产物，不能把记录写成新机器已复跑的证明。
-- 两者默认关闭，不能计入 `2c700934` 的 V0 Gate；不同时开启做首轮验收。
+- 两者默认关闭，不能计入 `d4c3e32a` 的 V0 Gate；不同时开启做首轮验收。
 - 戴耳机持续自然开口打断、poll-backed 任务异步监控和 TaskEvent 主动通知仍未实现。当前下一窄切片是 D-031，但编码前必须先完成 D-032 开发前回顾、test inventory 与正反场景矩阵 checkpoint。
 
 ### 7.3 V0 明确不做
@@ -298,7 +301,7 @@ speaking + 用户重新开麦
 | D9 | 可选：`schedule.status/cancel`；或全部用于修复主链；完整脚本彩排 | 主脚本连续成功 3 次，代码冻结 |
 | D10 | 只修缺陷，整理日志和已知限制，准备现场环境、文字降级和录屏 | 现场脚本与降级脚本分别成功两遍，不再加功能 |
 
-历史排期纪律是：6 天完成真实主链，1 天稳定，2 天可砍增强，1 天冻结。实际进展与后续切片不得从本表推断，应读取 [STATUS.md](STATUS.md) 和 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)。
+历史排期纪律是：6 天完成真实主链，1 天稳定，2 天可砍增强，1 天冻结。实际进展与后续切片不得从本表推断，应读取 [STATUS.md](../STATUS.md) 和 [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md)。
 
 ## 10. 验收脚本
 
@@ -332,7 +335,7 @@ speaking + 用户重新开麦
 
 这些是 Demo 的固定环境目标，不等同于完整版的跨环境 p95 服务承诺。
 
-正式执行步骤、固定语料、分阶段打断矩阵、证据模板和跨机器冷启动验证统一见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。本节只保留范围级判据；结果冲突时以验收手册中的实际路由证据为准。
+正式执行步骤、固定语料、分阶段打断矩阵、证据模板和跨机器冷启动验证统一见 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md)。本节只保留范围级判据；结果冲突时以验收手册中的实际路由证据为准。
 
 ### 11.1 放行闸门与固定环境
 
@@ -349,7 +352,7 @@ speaking + 用户重新开麦
 9. 主演示脚本连续成功 3 次。
 10. 失败后文字聊天仍正常。
 
-环境、依赖、配置和服务启动见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)；放行步骤和证据模板见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。未通过的闸门是当前 V0 阻塞项；Team、WebView2、多语言、全双工/AEC、流式 TTS 和生产级 generation fence 不属于本轮放行条件。
+环境、依赖、配置和服务启动见 [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md)；放行步骤和证据模板见 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md)。`ee2896a4` 已按 D-038 通过本轮 Gate 0–6 并冻结；未来复现或回归时，任一已通过 Gate 失败才构成 V0 回归阻塞。Team、WebView2、多语言、全双工/AEC、流式 TTS 和生产级 generation fence 不属于本轮放行条件。
 
 ## 12. 绝不能为了赶进度而省略的内容
 
@@ -391,4 +394,4 @@ speaking + 用户重新开麦
 
 共享事件契约、ownership 和安全边界冻结后，P1/P2/P3 的部分实现可以并行，以缩短总时间；版本验收仍按能力依赖累计。V3 不是自动等于生产版，仍必须经过 RC hardening。
 
-V0 的任务仍是回答“核心体验值不值得继续做、最痛的问题在哪里”。V0 Candidate 之后新增的两周最大能力目标见 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：覆盖所有能力类别，但不伪装已经回答全部生产工程问题。
+V0 的任务仍是回答“核心体验值不值得继续做、最痛的问题在哪里”。V0 Candidate 之后新增的两周最大能力目标见 [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md)：覆盖所有能力类别，但不伪装已经回答全部生产工程问题。

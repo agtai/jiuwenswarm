@@ -1,6 +1,8 @@
+> Archive / forensic record. Do not reconstruct, apply, pop, or drop the historical machine-local stash during normal recovery; use [STATUS.md](../STATUS.md).
+
 # Post-V0 stash 历史与恢复保险交接单
 
-> **仅供历史取证/灾难恢复。** 第 3–7 节记录的是 2026-08-01 foundation 收尾快照，不是当前执行计划；普通新机器和新 Codex 只读取共享 Git，并以 [STATUS.md](STATUS.md) 的当前下一步为准。
+> **仅供历史取证/灾难恢复。** 第 3–7 节记录的是 2026-08-01 foundation 收尾快照，不是当前执行计划；普通新机器和新 Codex 只读取共享 Git，并以 [STATUS.md](../STATUS.md) 的当前下一步为准。
 
 - 快照日期：2026-08-01
 - 工作分支：`hx/0731_live_voice_ux`
@@ -136,7 +138,7 @@ Python 与前端测试是在最终三项实现汇合后统一执行，不是把�
 
 ## 6. 后续顺序
 
-1. 2026-08-01 快照选择的下一实现切片是 D-031 poll-backed task monitor；当前仍是该切片，但必须先完成 D-032 开发前回顾、test inventory 与场景矩阵，具体执行权威见 [STATUS.md](STATUS.md)。
+1. 2026-08-01 快照选择的下一实现切片是 D-031 poll-backed task monitor；当前仍是该切片，但必须先完成 D-032 开发前回顾、test inventory 与场景矩阵，具体执行权威见 [STATUS.md](../STATUS.md)。
 2. 保持两个 feature flag 默认关闭；单独开启稳定句预读做 final/rewrite/timeout/Session E2E，在可丢弃或已备份的独立项目开启 Task Demo 做真实 create/status/cancel/replace E2E。
 3. V0 验收始终从 `2c700934` 的独立 checkout/worktree 执行，不操作累计分支或 `7f4c...` stash；Post-V0 开发可按 D-030 在隔离轨并行推进。
 
