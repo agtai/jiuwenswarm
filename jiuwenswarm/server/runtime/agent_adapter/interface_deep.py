@@ -3939,12 +3939,20 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
             return None
 
-    def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
+    def _build_circuit_breaker_rail(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> CircuitBreakerRail | None:
         try:
-            guard_cfg = (get_config() or {}).get("execution_guard") or {}
+            effective_config = get_config() if config_base is None else config_base
+            guard_cfg = (effective_config or {}).get("execution_guard") or {}
             cb_cfg = guard_cfg.get("circuit_breaker") or {}
-            if cb_cfg.get("enabled", False) is not True:
-                logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail disabled by config")
+            legacy_enabled = cb_cfg.get("enabled", False) is True
+            repeated_failure_enabled = cb_cfg.get("repeated_failure_enabled", True) is True
+            if not legacy_enabled and not repeated_failure_enabled:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] CircuitBreakerRail guards disabled by config"
+                )
                 return None
             defaults = CircuitBreakerConfig()
             config = CircuitBreakerConfig(
@@ -3955,6 +3963,11 @@ class JiuWenSwarmDeepAdapter:
                 ),
                 unknown_tool_threshold=cb_cfg.get(
                     "unknown_tool_threshold", defaults.unknown_tool_threshold
+                ),
+                legacy_detectors_enabled=legacy_enabled,
+                repeated_failure_enabled=repeated_failure_enabled,
+                repeated_failure_threshold=cb_cfg.get(
+                    "repeated_failure_threshold", defaults.repeated_failure_threshold
                 ),
             )
             rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
@@ -4064,7 +4077,11 @@ class JiuWenSwarmDeepAdapter:
                 self._build_llm_retry_rail,
                 {"config_base": config_base},
             ),
-            _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
+            _RailBuildInfo(
+                "_circuit_breaker_rail",
+                self._build_circuit_breaker_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
             _RailBuildInfo(

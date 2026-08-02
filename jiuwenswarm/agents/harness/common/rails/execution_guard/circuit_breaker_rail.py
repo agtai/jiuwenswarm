@@ -3,6 +3,7 @@
 """CircuitBreakerRail - Agent 循环检测断路器.
 
 检测类型:
+  - repeated_failure:    同参数、同失败的顺序重试 (CRITICAL≥3)
   - generic_repeat:      相同工具+参数重复 (WARNING≥10)
   - unknown_tool_repeat: 错误工具连续调用 (CRITICAL≥10)
   - global_breaker:      工具无进展兜底中断 (CRITICAL≥30)
@@ -17,7 +18,9 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence, Set
+from dataclasses import asdict, dataclass, field, is_dataclass
+from enum import Enum
 from typing import Any
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
@@ -32,6 +35,14 @@ class CircuitBreakerConfig:
     critical_threshold: int = 20
     global_breaker_threshold: int = 30
     unknown_tool_threshold: int = 10
+    legacy_detectors_enabled: bool = True
+    repeated_failure_enabled: bool = True
+    repeated_failure_threshold: int = 3
+
+    def __post_init__(self) -> None:
+        threshold = self.repeated_failure_threshold
+        if isinstance(threshold, bool) or not isinstance(threshold, int) or threshold < 1:
+            raise ValueError("repeated_failure_threshold must be a positive integer")
 
     @property
     def history_size(self) -> int:
@@ -51,12 +62,19 @@ _invoke_sid: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _MESSAGES: dict[str, dict[str, str]] = {
     "cn": {
         "global_circuit_breaker": "全局断路器: {tool_name} 连续 {count} 次无进展",
+        "repeated_deterministic_failure": (
+            "工具 {tool_name} 以相同参数连续失败 {count} 次，已停止本轮重复执行"
+        ),
         "unknown_tool_repeat": "未知工具 {tool_name} 连续调用 {count} 次，停止重试",
         "ping_pong_critical": "Ping-Pong 循环: {count} 轮交替无进展，阻断",
         "ping_pong_warning": "Ping-Pong 警告: {count} 轮交替无进展",
         "generic_repeat": "工具 {tool_name} 已重复调用 {count} 次，请检查是否有效",
     },
     "en": {
+        "repeated_deterministic_failure": (
+            "Tool {tool_name} failed {count} consecutive times with the same "
+            "arguments and result; stopping this retry loop"
+        ),
         "global_circuit_breaker": (
             "Circuit breaker: {tool_name} made no progress for {count} consecutive calls"
         ),
@@ -264,11 +282,24 @@ class PingPongResult:
     no_progress: bool = False
 
 
+@dataclass
+class _RepeatedFailureState:
+    """State owned by one callback ``ctx.extra`` / one agent invoke."""
+
+    session_id: str = "default"
+    tail_key: tuple[str, str, str] | None = None
+    tail_count: int = 0
+    tripped: bool = False
+    closed: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
 class CircuitBreakerRail(DeepAgentRail):
     priority: int = 95
 
     _SID_KEY = "__jiuwenswarm_cb_session_id__"
     _STREAM_SID_KEY = "__jiuwenswarm_session_id__"
+    _REPEATED_FAILURE_STATE_KEY = "__jiuwenswarm_cb_repeated_failure_state__"
 
     def __init__(
         self,
@@ -279,6 +310,7 @@ class CircuitBreakerRail(DeepAgentRail):
         self._config = config or CircuitBreakerConfig()
         self._histories: dict[str, list[ToolCallRecord]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._repeated_states: dict[str, dict[int, _RepeatedFailureState]] = {}
         self._language = _normalize_language(language)
 
     def set_language(self, language: str) -> None:
@@ -288,6 +320,34 @@ class CircuitBreakerRail(DeepAgentRail):
     def cleanup_session(self, session_id: str = "") -> None:
         """Remove per-session history and lock for *session_id*."""
         sid = session_id or "default"
+        states = self._repeated_states.pop(sid, {})
+        for state in states.values():
+            self._close_repeated_state(state)
+        self._histories.pop(sid, None)
+        self._locks.pop(sid, None)
+
+    def _register_repeated_state(self, state: _RepeatedFailureState) -> None:
+        bucket = self._repeated_states.setdefault(state.session_id, {})
+        bucket[id(state)] = state
+
+    def _unregister_repeated_state(self, state: _RepeatedFailureState) -> None:
+        bucket = self._repeated_states.get(state.session_id)
+        if bucket is not None:
+            bucket.pop(id(state), None)
+            if not bucket:
+                self._repeated_states.pop(state.session_id, None)
+        self._close_repeated_state(state)
+
+    @staticmethod
+    def _close_repeated_state(state: _RepeatedFailureState) -> None:
+        """Make an invoke state inert and release all retained failure data."""
+        state.closed = True
+        state.tail_key = None
+        state.tail_count = 0
+        state.tripped = False
+
+    def _cleanup_legacy_session(self, sid: str) -> None:
+        """Clean legacy state without closing other same-session invokes."""
         self._histories.pop(sid, None)
         self._locks.pop(sid, None)
 
@@ -343,16 +403,32 @@ class CircuitBreakerRail(DeepAgentRail):
         raw_conv_id = ctx.inputs.conversation_id or ""
         sid = raw_conv_id or "default"
         ctx.extra[self._SID_KEY] = sid
-        _invoke_sid.set(sid)
-        self._histories[sid] = []
+
+        previous = ctx.extra.pop(self._REPEATED_FAILURE_STATE_KEY, None)
+        if isinstance(previous, _RepeatedFailureState):
+            self._unregister_repeated_state(previous)
+        if self._config.repeated_failure_enabled:
+            state = _RepeatedFailureState(session_id=sid)
+            ctx.extra[self._REPEATED_FAILURE_STATE_KEY] = state
+            self._register_repeated_state(state)
+
+        if self._config.legacy_detectors_enabled:
+            _invoke_sid.set(sid)
+            self._histories[sid] = []
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
-        sid = _invoke_sid.get()
-        if isinstance(sid, str) and sid:
-            self.cleanup_session(sid)
-        _invoke_sid.set(None)
+        state = ctx.extra.pop(self._REPEATED_FAILURE_STATE_KEY, None)
+        if isinstance(state, _RepeatedFailureState):
+            self._unregister_repeated_state(state)
+        if self._config.legacy_detectors_enabled:
+            sid = _invoke_sid.get()
+            if isinstance(sid, str) and sid:
+                self._cleanup_legacy_session(sid)
+            _invoke_sid.set(None)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        if not self._config.legacy_detectors_enabled:
+            return
         sid = self._resolve_sid(ctx)
         ctx.extra[self._SID_KEY] = sid
 
@@ -368,12 +444,35 @@ class CircuitBreakerRail(DeepAgentRail):
         if not tool_name:
             return
 
-        sid = self._resolve_sid(ctx)
         args_hash = self._hash_args(tool_name, tool_args)
-        result_hash = self._hash_outcome(tool_result)
         has_error = ToolResultErrorDetector.infer_record_has_error(
             tool_result, ctx,
         )
+
+        if self._config.repeated_failure_enabled:
+            repeated_result, already_tripped = await self._record_repeated_failure(
+                ctx=ctx,
+                tool_name=tool_name,
+                args_hash=args_hash,
+                tool_result=tool_result,
+                has_error=has_error,
+            )
+            if repeated_result.stuck:
+                message = self._format_message(repeated_result)
+                logger.error("[CircuitBreaker] %s", message)
+                ctx.request_force_finish({
+                    "output": message,
+                    "result_type": "answer",
+                })
+                return
+            if already_tripped:
+                return
+
+        if not self._config.legacy_detectors_enabled:
+            return
+
+        sid = self._resolve_sid(ctx)
+        result_hash = self._hash_outcome(tool_result)
 
         async with self._get_lock(sid):
             history = self._get_history(sid)
@@ -397,6 +496,69 @@ class CircuitBreakerRail(DeepAgentRail):
                 })
             elif result.stuck and result.level == "warning":
                 logger.warning("[CircuitBreaker] %s", self._format_message(result))
+
+    async def _record_repeated_failure(
+        self,
+        *,
+        ctx: AgentCallbackContext,
+        tool_name: str,
+        args_hash: str,
+        tool_result: Any,
+        has_error: bool,
+    ) -> tuple[DetectionResult, bool]:
+        """Record the sequential failure tail for exactly one invoke.
+
+        OpenJiuwen tool callbacks share the parent invoke's ``ctx.extra``
+        dict. Keeping the state and lock there isolates overlapping invokes,
+        including two invokes with the same conversation ID.
+        """
+        state = ctx.extra.get(self._REPEATED_FAILURE_STATE_KEY)
+        if not isinstance(state, _RepeatedFailureState):
+            sid = ctx.extra.get(self._SID_KEY, "default")
+            if not isinstance(sid, str) or not sid:
+                sid = "default"
+            state = _RepeatedFailureState(session_id=sid)
+            ctx.extra[self._REPEATED_FAILURE_STATE_KEY] = state
+            self._register_repeated_state(state)
+
+        if state.closed:
+            return DetectionResult(stuck=False), True
+
+        failure_hash = (
+            self._hash_failure_outcome(tool_result, ctx)
+            if has_error
+            else None
+        )
+        async with state.lock:
+            if state.closed:
+                return DetectionResult(stuck=False), True
+            if state.tripped:
+                return DetectionResult(stuck=False), True
+
+            if not has_error or failure_hash is None:
+                state.tail_key = None
+                state.tail_count = 0
+                return DetectionResult(stuck=False), False
+
+            tail_key = (tool_name, args_hash, failure_hash)
+            if state.tail_key == tail_key:
+                state.tail_count += 1
+            else:
+                state.tail_key = tail_key
+                state.tail_count = 1
+
+            if state.tail_count < self._config.repeated_failure_threshold:
+                return DetectionResult(stuck=False), False
+
+            state.tripped = True
+            return DetectionResult(
+                stuck=True,
+                level="critical",
+                detector="repeated_deterministic_failure",
+                count=state.tail_count,
+                msg_key="repeated_deterministic_failure",
+                tool_name=tool_name,
+            ), False
 
     # ------------------------------------------------------------------
     # _detect: 四种检测器按优先级依次检查
@@ -449,6 +611,15 @@ class CircuitBreakerRail(DeepAgentRail):
     @staticmethod
     def _canonicalize_args_for_hash(tool_name: str, params: Any) -> Any:
         """Strip tool-specific metadata keys before args hashing."""
+        if isinstance(params, str):
+            text = params.strip()
+            if text.startswith("{") or text.startswith("["):
+                try:
+                    params = json.loads(text)
+                except (TypeError, ValueError):
+                    return text
+            else:
+                return text
         if not isinstance(params, dict):
             return params
         excluded = _METADATA_ONLY_TOP_LEVEL.get(tool_name, frozenset())
@@ -462,8 +633,155 @@ class CircuitBreakerRail(DeepAgentRail):
             CircuitBreakerRail._canonicalize_args_for_hash(tool_name, params),
             sort_keys=True,
             default=str,
+            separators=(",", ":"),
         )
         return hashlib.sha256(f"{tool_name}:{canonical}".encode()).hexdigest()
+
+    def _hash_failure_outcome(
+        self,
+        result: Any,
+        ctx: AgentCallbackContext,
+    ) -> str:
+        """Hash the complete structured failure without lossy field selection."""
+        if result is None:
+            tool_msg = getattr(ctx.inputs, "tool_msg", None)
+            payload: Any = {
+                "exception": self._canonicalize_exception(ctx.exception),
+                "tool_message": self._canonicalize_failure_value(
+                    getattr(tool_msg, "content", None)
+                ),
+            }
+        else:
+            payload = {
+                "tool_result": self._canonicalize_failure_value(result),
+            }
+            if ctx.exception is not None:
+                payload["exception"] = self._canonicalize_exception(ctx.exception)
+
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _canonicalize_exception(
+        cls,
+        exception: BaseException | None,
+        *,
+        depth: int = 0,
+    ) -> Any:
+        """Return a stable exception signature, excluding attempt identifiers."""
+        if exception is None:
+            return None
+        payload: dict[str, Any] = {
+            "type": f"{type(exception).__module__}.{type(exception).__qualname__}",
+            "message": str(exception),
+        }
+        tool_message = getattr(exception, "tool_message", None)
+        if tool_message is not None:
+            payload["tool_message"] = cls._canonicalize_failure_value(
+                getattr(tool_message, "content", None)
+            )
+        cause = exception.__cause__ or exception.__context__
+        if cause is not None and cause is not exception and depth < 4:
+            payload["cause"] = cls._canonicalize_exception(cause, depth=depth + 1)
+        return payload
+
+    @classmethod
+    def _canonicalize_failure_value(
+        cls,
+        value: Any,
+        *,
+        _seen: set[int] | None = None,
+    ) -> Any:
+        """Convert arbitrary structured output into deterministic JSON data.
+
+        This preserves every available field (including nested status, result
+        type, and exit-code data) while making ToolOutput, dict, and JSON-string
+        representations compare consistently.
+        """
+        if value is None or isinstance(value, (bool, int, str)):
+            if isinstance(value, str):
+                text = value.strip()
+                if text.startswith(("{", "[")):
+                    try:
+                        value = json.loads(text)
+                    except (TypeError, ValueError):
+                        return value
+                    return cls._canonicalize_failure_value(value, _seen=_seen)
+            return value
+        if isinstance(value, float):
+            if value != value:
+                return {"__float__": "nan"}
+            if value == float("inf"):
+                return {"__float__": "inf"}
+            if value == float("-inf"):
+                return {"__float__": "-inf"}
+            return value
+        if isinstance(value, bytes):
+            return {"__bytes_hex__": value.hex()}
+        if isinstance(value, Enum):
+            return cls._canonicalize_failure_value(value.value, _seen=_seen)
+
+        seen = _seen if _seen is not None else set()
+        value_id = id(value)
+        if value_id in seen:
+            return {"__cycle__": f"{type(value).__module__}.{type(value).__qualname__}"}
+        seen.add(value_id)
+        try:
+            model_dump = getattr(value, "model_dump", None)
+            if callable(model_dump):
+                try:
+                    dumped = model_dump(mode="json")
+                except TypeError:
+                    dumped = model_dump()
+                return cls._canonicalize_failure_value(dumped, _seen=seen)
+            if is_dataclass(value) and not isinstance(value, type):
+                return cls._canonicalize_failure_value(asdict(value), _seen=seen)
+            if isinstance(value, Mapping):
+                pairs = [
+                    [
+                        cls._canonicalize_failure_value(key, _seen=seen),
+                        cls._canonicalize_failure_value(item, _seen=seen),
+                    ]
+                    for key, item in value.items()
+                ]
+                pairs.sort(
+                    key=lambda pair: json.dumps(
+                        pair[0], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    )
+                )
+                return {"__mapping__": pairs}
+            if isinstance(value, Set):
+                items = [
+                    cls._canonicalize_failure_value(item, _seen=seen)
+                    for item in value
+                ]
+                items.sort(
+                    key=lambda item: json.dumps(
+                        item, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                    )
+                )
+                return {"__set__": items}
+            if isinstance(value, Sequence):
+                return [
+                    cls._canonicalize_failure_value(item, _seen=seen)
+                    for item in value
+                ]
+            attrs = getattr(value, "__dict__", None)
+            if isinstance(attrs, dict):
+                public_attrs = {
+                    key: item for key, item in attrs.items() if not key.startswith("_")
+                }
+                if public_attrs:
+                    return cls._canonicalize_failure_value(public_attrs, _seen=seen)
+            # Default repr/str commonly embeds ``0x...`` object addresses.
+            return {"__type__": f"{type(value).__module__}.{type(value).__qualname__}"}
+        finally:
+            seen.discard(value_id)
 
     def _hash_outcome(self, result: Any) -> str | None:
         if result is None:
