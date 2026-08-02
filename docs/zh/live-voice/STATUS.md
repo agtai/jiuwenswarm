@@ -51,6 +51,16 @@
 已接受新的累计路线：不另建覆盖全部功能的模拟 UX 原型；Post-V0 两周让 P1/P2/P3、Context、Progress、Failure/Degradation、Observability 等能力类别都有真实纵向路径或明确标注的替代。版本命名修正为 V1 Foundation Alpha、V2 Realtime Alpha、V3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening。详细见 `DECISIONS.md` 的 D-018、D-020 和 D-021。
 已接受 D-032：模块不能再凭测试总数或行覆盖率宣称闭环。开发前必须从方案、当前阶段和模块契约建立 test inventory 与完整场景矩阵；开发后必须结合实际 diff 再审，回答“有哪些 tests、为什么这样设计、覆盖了哪些场景、是否完全满足当前模块定义”。正例业务动作必须成功；反例业务动作必须被拒绝/失败且禁止副作用为 0，对应测试进程本身仍应通过。详细唯一规范见路线文档 §3.1。
 
+## Post-V0 ASR fidelity 结论（D-039）
+
+- V0 已证明 `microphone → Browser Speech → final text → Agent → Terminal Tool → chat.final → Browser TTS → listening` 主链可用，也稳定暴露了真正的下一问题：`未/为`、中文同音字、`git`/PowerShell/Markdown、目录名和数字格式的首轮识别不可靠。一个字符的普通 CER 误差可能改变否定、数量或工具动作，因此不能只用平均 CER/WER 判断安全性。
+- 当前 Browser Adapter 固定 `zh-CN`，只消费浏览器第一候选 `result[0].transcript`，没有统一 alternatives/confidence/provider provenance、项目词表、工具 schema 重排或关键语义确认；2.2 秒 EOT 解决 Turn 结束，不解决词义 fidelity。Browser Speech 继续作为真实 fallback，但不再被当作正式识别质量上限。
+- “不使用端到端原生语音大模型”是可行目标；“开放式语音识别完全不使用任何模型”不是可行目标。正式方向是可替换的专用 ASR Adapter + 确定性领域解析/安全门 + 现有文字 Agent/Tool Runtime。Native Audio Engine 以后可以作为同一 Port 的可选 Adapter，不能绕过 committed-final、权限、确认、cancel/fence 和工具结果真值。
+- P1 Speech Port 必须输出可追踪的 final hypothesis、候选/置信信息、provider/locale/timing/capability；项目词表从仓库、分支、路径、工具名/schema 和当前上下文动态构建。低置信度的否定词、数字、日期、SHA、路径、分支和有副作用动词不得静默猜测：只读高置信度 Turn 可直接提交，歧义 Turn 请求确认，副作用动作继续显式确认并 fail closed；partial/unconfirmed 对 Agent、Tool、Task 的副作用始终为 0。
+- 评价重点新增 critical semantic error rate、首轮任务成功率、澄清率、错误工具派发数、speech-end→commit p95、重复提交和 Provider fallback 一致性；CER/WER 仍保留但不单独决定放行。固定语料应复用本次 V0 真实错误类型，并只在用户明确同意后保存/回放原始音频。
+- 当前状态是 **架构决策 Accepted、实现未开始**。它不抢占 D-031 的当前下一切片；进入 P1 Speech Port 语义实现前仍必须按 D-032 建立独立 module definition、test inventory、scenario matrix 和 exact-SHA 前后闭环。
+
+
 ## 本轮实现与修复
 
 ### 语音识别和 Turn 生命周期
@@ -240,7 +250,8 @@
 1. 下一开发切片仍是 D-031；写语义代码前先按 D-032/路线 §3.1 在本文件建立 module definition、现有/新增 test inventory、每项 test 的 why 和完整场景矩阵，并先 commit/push 前置 checkpoint。
 2. 前置 Gate 完成后建立 **poll-backed 异步任务监控**：任务派发后前台立即恢复 Live Voice，独立投影轮询真实状态，终态异步回流到真实 task card；安全空档最多播报一次简短终态。
 3. D-031 保持窄范围：只承诺同页断线重连，整页刷新在持久 command journal 前明确 unsupported；A→B 监控 B、保留 A 终态；合法 envelope、匹配的 task ID/status/target/provenance 是必需事实，只有可选 progress/last_error 缺失时写 unknown；不写 chatStore、不伪造 chat processing、不抢占麦克风/Agent TTS，也不扩成完整 TaskEvent push/replay、通用多任务 NLU、跨进程 exactly-once 或 D1/D2。实现后完成 D-032 后置回顾才能标记闭环。
-4. 随后按 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) 推进 response/generation lifecycle、P1 Speech Port、P2 Realtime、P3α/完整 P3，最后进入 RC。
+4. D-031 后按 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) 推进 response/generation lifecycle 与 P1 Speech Port。P1 的第一个 checkpoint 按 D-039 先冻结 hypothesis/provenance contract、V0 fidelity 语料、关键语义安全门和评价指标，再选择本地/云端专用 ASR Adapter；不得直接把 Browser Speech 误差字典写成无 provenance 的静默替换。
+5. 随后推进 P2 Realtime、P3α/完整 P3，最后进入 RC；Native Audio Engine 只作为可选 Adapter 评测，不成为绕过现有 Agent/Tool Runtime 的第二控制平面。
 
 ## 接手者注意事项
 

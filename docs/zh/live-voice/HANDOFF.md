@@ -123,22 +123,24 @@
 - 任何语义实现前，先按 D-032 在 `STATUS.md` 完成 module definition、现有/计划 test inventory、每项 test 的 why 和 P/N/B/S/T/C/R/I/F/K/X 场景矩阵，并独立 commit/push 前置 checkpoint。
 - 前置 Gate 之前可以审阅方案、代码、tests 和设计矩阵；不得顺势实现完整 P3、TaskEvent push/replay、跨进程 exactly-once 或 D1/D2。
 - D-031 首版只承诺同页断线重连，不承诺整页刷新恢复；A→B 监控 B 并保留 A 终态；合法 envelope、匹配的 task ID/status/target/provenance 是必需事实，只有可选 progress/last_error 缺失时写 unknown。完整边界见 D-033/D-034 与路线 §7.3。
+- D-039 已接受 P1 Speech fidelity 方向，但没有选择或实现新 Provider：Browser Speech 保留为 fallback；专用 ASR 与未来 Native Audio Engine 都必须进入同一 Speech Port，输出可审计 hypothesis/provenance，并受关键语义确认、文字 Agent/Tool 权限和 Runtime fence 约束。它不抢占 D-031；开始 P1 代码前同样必须单独走 D-032 checkpoint。
 
 ## 量化进度口径
 
-| 维度 | 完成度 | 含义 |
-|---|---:|---|
-| 代码实现 | 约 97% | 主链、识别生命周期、分片朗读、TTS 单一所有权、Demo 隔离和自动化基本完成 |
-| 整体 Demo | 约 90% | 真实 Speech → Agent → Tool → Speech 已成功一次，重复性与打断闸门未完成 |
-| 上台成熟度 | 约 78% | 固定环境和首条时序证据已建立，仍缺 10 Turn、10 次打断、soak 和连续彩排 |
+| 维度 | 状态 | 含义 |
+|---|---|---|
+| V0 受控纵向切片 | `RELEASED / FROZEN` | detached `ee2896a4` 已完成 Gate 0–6；10 Turn、10 次分阶段打断、21m58s soak、降级和主演示 3/3 均有证据 |
+| Post-V0 Foundation | `PARTIAL` | Task Foundation、稳定句预读和受限 Bridge 已落地；D-031 monitor、正式 response/generation lifecycle 和 P1 Speech Port 尚未闭环 |
+| ASR fidelity | `PARTIAL / KNOWN GAP` | Browser Speech 可完成主链，但技术词、否定词、数字和目录名首轮准确率不足；D-039 只接受改进架构，未证明新质量 |
+| Production readiness | `NOT RELEASED` | 正式 cancellation fence、streaming media、设备/AEC、跨 Provider/SLO、完整 P3、安全、隐私和跨进程一致性仍未完成 |
 
-这些数字是项目判断，不是测试覆盖率；后续真实失败必须如实下调。
+以上状态按各自 scope 记录，不能把 V0 Released 外推为完整产品 Released，也不能用 Post-V0 代码总量替代 D-032 模块闭环。
 
 ## 当前最重要的已知风险
 
 ### Web Speech 技术词准确率
 
-中文句子中的 `git` 在连续回听中被误识别为“地图”或“史记”。主链没有断，但请求语义会偏移。先用固定口令和真机样本量化；若仍不稳定，再按既有 Day 1/Day 2 闸门评估单一 Speech Provider fallback。
+V0 已观察到 `未/为`、中文同音字、`git`/PowerShell/Markdown、目录名和数字格式偏差。当前 Adapter 固定 `zh-CN`、只取第一候选；EOT 修复不能提高词义 fidelity。按 D-039，下一正式方向不是继续堆无 provenance 的错词替换，而是 Speech Port + 可追踪 alternatives/confidence/provider provenance + 项目动态词表/工具 schema 重排 + critical-token 确认。Browser Speech 保留 fallback；专用 ASR 或 Native Audio Engine 必须用同一固定语料 A/B，并且 partial/unconfirmed/错误候选的工具派发为 0。
 
 ### supplement 仍不是端到端 fence
 

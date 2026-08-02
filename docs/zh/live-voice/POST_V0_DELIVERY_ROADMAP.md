@@ -145,7 +145,7 @@ D-031 编码前必须先在 `STATUS.md` 建立上述前置记录，至少覆盖�
 | P0-4 | PARTIAL | 真实 P3α 任务纵向切片 | final committed 固定口令 → 真 `task_id` → status/events/cancel；只显示来源真实的状态 | Task Control Core、Executor Port、D0 durability | 大部分是 |
 | P0-5 | PARTIAL | Voice–Task Bridge 与任务卡 | 仅解析显式 create/status/cancel；破坏性操作确认；A→B 首版显示为 cancel A + create successor B | 完整 intent resolution、update/provide-input、多任务消歧 | 是；语音后验 |
 | P0-6 | PARTIAL | WorkProgress 时间线与能力披露 | 显示真实 accepted/running/blocked/decision_required/terminal；缺失信息写 `unknown`，不猜百分比 | Agent Bridge、Task events、observability | 是 |
-| P1-1 | PARTIAL | Speech Recognition/Synthesis Port + Browser Adapter | 当前 Browser Speech 是真实 fallback，固定 `zh-CN`、Chrome 和耳机 | Provider-neutral batch/streaming STT/TTS | 大部分是；设备后验 |
+| P1-1 | PARTIAL | Speech Recognition/Synthesis Port + Browser Adapter | 当前 Browser Speech 是真实 fallback，固定 `zh-CN`、Chrome 和耳机；V0 已保存 ASR fidelity gap | Provider-neutral batch/streaming STT/TTS、hypothesis/provenance、领域候选重排和关键语义安全门 | 大部分是；设备/Provider 后验 |
 | P1-2 | PARTIAL | InteractionEngine Port + Cascade 策略 | 固定 EOT、自动回听、显式点击插话；working notice 只来自真实状态 | VAD/EOT、自然 barge-in、Native Engine adapter | 逻辑是；体验后验 |
 | P1-3 | NOT STARTED | Realtime Media contract + loopback/fault injection | 现场仍诚实使用 Browser Speech；开发实验室验证 ACK、背压、乱序和有界队列 | 正式双向音频 transport | 是；真媒体后验 |
 | P1-4 | PARTIAL | 最小 ContextRef | 真正传递当前仓库、分支、版本和权限范围；不声称已连接 IDE/浏览器 | 跨 IDE/文件/浏览器/通信 Context adapters | 是 |
@@ -225,6 +225,18 @@ D-031 尚未编码；开始前必须先提交 D-032 开发前 checkpoint。该�
 6. **安全范围**：现有 owner/project 校验只用于单用户 Demo 的请求一致性；Web 身份来自客户端字段，不是生产授权。D-031 不扩大此边界，生产版需认证会话和服务端派生身份/项目 registry。
 
 以上六项及对应正反 tests 未写入 `STATUS.md` 的 scenario matrix 并提交前，不进入 D-031 代码实现。
+
+### 7.4 P1 Speech fidelity 的正式 checkpoint（D-039）
+
+D-039 不改变 D-031 的当前排序，也不把一次文档决策写成 Provider 已落地。共享 Contract Gate 后，P1 Speech Port 的第一个 D-032 pre-review 至少要冻结以下内容：
+
+1. **Hypothesis contract**：final transcript、alternatives/confidence（Provider 支持时）、provider、locale、timing、capability、fallback provenance，以及 partial/final/cancel 的有序语义。Browser Speech、专用本地/云端 ASR 和未来 Native Audio Engine 都只能实现该 Port，不能各自旁路 Agent/Tool Runtime。
+2. **领域解析但不静默篡改**：从当前仓库、分支、路径、文件、工具名/schema 和 Session 上下文建立动态词表；候选重排和确定性同音规则必须保留原始 hypothesis、修订原因和置信来源。没有 provenance 的文本替换不能称为识别质量提升。
+3. **Critical-token gate**：否定词、数字、日期、SHA、路径、分支和有副作用动词低置信度或候选冲突时请求澄清；副作用动作保持显式确认。partial/interim/unconfirmed 对 Agent、Tool、Task 的派发数必须为 0，错误工具派发也必须为 0。
+4. **固定语料与指标**：用 V0 已出现的 `未/为`、中文同音字、英文技术词、目录名、数字/日期/SHA/路径组合建立可重放语料；同时覆盖安静/噪声、近场/远场、短停顿、改口和 fallback。除 CER/WER 外记录 critical semantic error rate、first-pass task success、clarification rate、speech-end→commit p50/p95、重复提交与 Provider degradation。原始音频的采集、保存和回放必须显式获得同意并有删除路径。
+5. **分层结论**：专用 ASR 模型属于 Speech Adapter，不等于让端到端语音大模型接管 Agent。完全无模型只适合封闭关键词语法，不能作为开放式 Live Voice 目标；Native Audio Engine 可以参加相同语料 A/B，但在有证据前不能宣称全面优于模块化 Cascade，也不能绕过文字降级和安全闸门。
+
+P1-1 只有在上述 contract、fake/provider conformance、固定语料正反矩阵、fallback/隐私/错误路径和真实设备后验全部按 D-032 闭环后，才可从 `PARTIAL` 改为 `CLOSED`。现有 [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md) 是不可变方案快照，继续提供 P1 batch/streaming Port、CER/WER、延迟和 partial 副作用目标；D-039 补充 critical semantic 与可审计 hypothesis，不回写该快照。
 
 ## 8. 版本命名纠正
 
