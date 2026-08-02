@@ -80,7 +80,6 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 | 当前路线 | [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) | Post-V0 优先级、D-031，以及 D-032 唯一详细测试闭环规范/模板 | Post-V0 规划和每个模块开发前后 |
 | V0 范围 | [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) | V0 定义、shortcut ledger；D1–D10 日程是历史原始计划 | 判断 V0 shortcut 或修改 V0 边界时 |
 | V0 Gate | [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) | `d4c3e32a` 失败历史、D-037 新 Candidate 的 Release Gate、detached-safe 语料和证据模板 | 只在 V0 验收轨使用 |
-| 故障复盘 | [GIT_DATE_FORMAT_OOM_INCIDENT_2026-08-02.md](GIT_DATE_FORMAT_OOM_INCIDENT_2026-08-02.md) | Gate 3 Git 日期格式 OOM、重复失败放大、责任边界、当前修复与生产资源保护缺口 | 调查 D-037、工具资源治理或类似重复失败前 |
 | 运行操作 | [E2E_RUNBOOK.md](E2E_RUNBOOK.md) | 依赖、私有状态边界、隔离数据目录、启动、健康和真实 E2E | 启动任何服务或做真机验证前 |
 | 展示操作 | [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) | detached V0 候选的成功率优先展示脚本和退场方案 | 彩排/演示前 |
 | 历史证据 | [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md) | D-022/D-030 stash 历史、Foundation 取证和本机灾难恢复说明 | 普通续作不读；仅取证/灾难恢复 |

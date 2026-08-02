@@ -132,7 +132,6 @@
 - 同一 request 产生 11 次 tool call、10 次相同失败结果且没有 Turn 3 final；第 11 次在途时由 `chat.interrupt(intent=cancel)` 终止。单个异常 Git 子进程一度约占 8.5 GB Working Set / 49 GB Private Memory；进程退出后资源恢复，候选工作区保持 clean。
 - 现有 `CircuitBreakerRail` 在默认和验收配置中关闭；默认连续错误阈值 10 对单次高资源失败也过晚。判定：Gate 3 Attempt 1 **FAIL**，`d4c3e32a` 不能按现有 Gate Released。
 - 下一步不是从 Turn 4 续算，也不是只改题做绿：先按 D-037 建立带低阈值确定性失败熔断的新 Candidate；日期语料同时改为明确的 `YYYY-MM-DD` 安全 oracle。修复后另建 Session 从 Turn 1 重跑。
-- 完整事故链、已确认事实与源码推断边界、分层责任、当前 hotfix 和正式版子进程资源治理缺口见 [GIT_DATE_FORMAT_OOM_INCIDENT_2026-08-02.md](GIT_DATE_FORMAT_OOM_INCIDENT_2026-08-02.md)。
 
 ### Module test closure: repeated deterministic tool failure guard（开发前 checkpoint）
 
