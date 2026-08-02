@@ -1,7 +1,8 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
 - 最近恢复审计：2026-08-02
-- 适用共享分支：`hx/0731_live_voice_ux`；`d4c3e32a` 在 Gate 3 FAIL，后续 V0 Gate 只使用 D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72`
+- 适用共享分支：`hx/0731_live_voice_ux`；`d4c3e32a` 在 Gate 3 FAIL，D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6 并标记 `V0 Released / 已冻结`
+- 最终脱敏证据：[evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)；本文仍是以后重建相同受控环境的操作手册
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
@@ -427,4 +428,4 @@ ASR 误识别样本：
 - 停止 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
 - 记录本次使用的 `JIUWENSWARM_DATA_DIR` 标签，停止所有引用它的进程后执行 `Remove-Item Env:JIUWENSWARM_DATA_DIR -ErrorAction SilentlyContinue`；不要自动删除证据目录。
-- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步。Post-V0 正常提交并推送；下一轮 V0 验收必须在已写回文档的 D-037 新 Candidate 独立 checkout/worktree 中完成，`d4c3e32a` 只作失败历史，验收证据和后续开发事实分别提交，不得混为同一放行结论。
+- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步。Post-V0 正常提交并推送；`ee2896a4` 已冻结，后续只在独立 checkout/worktree 中复现或调查回归，`d4c3e32a` 只作失败历史，Release 证据和后续开发事实分别提交，不得混为同一能力结论。

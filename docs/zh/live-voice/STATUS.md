@@ -5,15 +5,15 @@
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 原始完整方案的代码证据快照：`69c026a6613279964146d317e164cf32c6900285`
 - Live Voice 实现分支基线：`7b69fdeb`
-- V0 核心实现提交：`346f802a`；`d4c3e32a` 保留为 Gate 3 失败历史；D-037 新 Candidate=`ee2896a4afb186e693c720476b6de10797e66f72`，累计合并提交=`52ee3c67b4c5afd175aa413f5053085fce179dbd`
-- 当前里程碑：D-037 相同确定性工具失败熔断的新 V0 Candidate + Post-V0 Task Foundation + D-032 模块测试闭环 Gate
-- 实现状态：D-037 hotfix 已实现并完成 focused tests **20/20**、adapter test **1/1**、配置接线冒烟、Ruff/py_compile/diff-check；完整 Gate 0/1 尚未重跑，本轮按用户要求在 Gate 3 前停止
+- V0 核心实现提交：`346f802a`；`d4c3e32a` 保留为 Gate 3 失败历史；D-037 Released baseline=`ee2896a4afb186e693c720476b6de10797e66f72`，累计合并提交=`52ee3c67b4c5afd175aa413f5053085fce179dbd`
+- 当前里程碑：`V0 Released / 已冻结` + Post-V0 Task Foundation + D-032 模块测试闭环 Gate
+- 实现状态：`ee2896a4` 已完成 Gate 0–6；D-037 hotfix focused tests **20/20**、adapter **1/1** 与最终验收证据均已保存
 
 跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动和固定环境按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行；V0 是否放行以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准。
 
 当前开发遵循 D-030、D-032、D-036、D-037 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`d4c3e32a` 保留为 Gate 3 失败历史；新不可变 Candidate `ee2896a4` 已建立并合入累计分支。stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份；Post-V0 继续正常 review → commit → push。
 
-对 **`d4c3e32a` 失败候选所代表的 V0 baseline** 的量化判断仍是：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。Gate 0–2 PASS 证明主链，但 Gate 3 真实失败说明这些比例不等于放行；新 Candidate 修复并完成连续 10 Turn、分阶段打断、soak 和主演示前，V0 仍不能称为已冻结。
+`d4c3e32a` 的量化判断只保留为失败候选历史。`ee2896a4` 已完成连续任务、分阶段打断、soak、降级、主演示和从零恢复，按 D-038 标记 `V0 Released / 已冻结`；这只放行受控纵向 Demo，不把 ASR、模型格式遵循或生产取消一致性写成已完成。
 
 ## 2026-08-02 文档与跨机器恢复审计
 
@@ -38,15 +38,15 @@
 | 运行自动化 tests/build | `READY_WITH_SETUP` | 安装文档指定运行时，联网执行 `uv sync --frozen` / `npm ci` |
 | 真实文字 Agent/Tool | `EXTERNAL_REQUIRED` | 私有模型配置、项目注册、服务和网络 |
 | 真实 Live Voice | `EXTERNAL_REQUIRED` | 以上条件 + Chrome 权限、Web Speech、麦克风/耳机和人工观察 |
-| V0 Released / 已冻结 | `NOT_YET` | D-037 新 Candidate 建立后 Gate 0–6 全部 PASS 并提交脱敏证据 |
+| V0 Released / 已冻结 | `PASS`；baseline=`ee2896a4` | 运行时私有条件仍不能由 Git 单独恢复；脱敏证据已提交 |
 
-结论是：**代码、方案、决策、阶段、测试设计规则和下一任务可以仅靠 Git 无旧聊天接续；真实运行环境不能也不应靠 Git“完美复制”。** 私有状态补齐前仍可推进 D-031 前置回顾、纯逻辑/fake-time 和 hook/UI/WebSocket integration tests；不能宣称跨机器真实语音等效或 V0 已放行。
+结论是：**代码、方案、决策、阶段、测试设计规则和下一任务可以仅靠 Git 无旧聊天接续；真实运行环境不能也不应靠 Git“完美复制”。** 本次从零环境补齐私有条件后已完成 V0 放行；新机器仍需重新注入模型、project、浏览器权限、设备和网络，不能仅凭 pull 宣称实时效果等效。
 
 ## 当前结论
 
-核心产品命题已从“代码路径推断可行”推进到“固定真机上实际成立”：用户说出“调用终端查看当前分支”，Chrome 产生完整 final，新会话 promotion 没有让 Live Voice 退出，Agent 真实调用 `git branch --show-current`，工具返回 `hx/0731_live_voice_ux`，完整回答从 Jabra 耳机朗读，随后自动回到 Listening。用户确认斜杠、数字和下划线组成的分支名也完整听到。
+核心产品命题已从“一次主链成立”推进到受控 V0 可重复放行：detached `ee2896a4` 的真实麦克风、Agent、Terminal Tool、TTS、自动回听、thinking/tool supplement、speaking 停声、失败降级、21m58s soak 和主演示连续 3 次均通过。
 
-这次成功证明了受控 Demo 的主链和感知效果，但只是一次主链证据，不等于稳定性放行。之后又成功进入两轮回听，说明循环可以继续；同时 Web Speech 把 `git` 识别为“地图”或“史记”，暴露出中文技术词准确率风险。真实 supplement 打断、speaking 本地停声、工具副作用隔离和长时运行仍需专项验证。
+完整结果见 [evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)。ASR 技术词/否定词 fidelity、模型“只回答”格式遵循和生产 cancellation fence 仍是明确 gap；D-038 只把它们从本次受控 V0 blocker 中分离，没有宣称问题已解决。
 
 已接受新的累计路线：不另建覆盖全部功能的模拟 UX 原型；Post-V0 两周让 P1/P2/P3、Context、Progress、Failure/Degradation、Observability 等能力类别都有真实纵向路径或明确标注的替代。版本命名修正为 V1 Foundation Alpha、V2 Realtime Alpha、V3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening。详细见 `DECISIONS.md` 的 D-018、D-020 和 D-021。
 已接受 D-032：模块不能再凭测试总数或行覆盖率宣称闭环。开发前必须从方案、当前阶段和模块契约建立 test inventory 与完整场景矩阵；开发后必须结合实际 diff 再审，回答“有哪些 tests、为什么这样设计、覆盖了哪些场景、是否完全满足当前模块定义”。正例业务动作必须成功；反例业务动作必须被拒绝/失败且禁止副作用为 0，对应测试进程本身仍应通过。详细唯一规范见路线文档 §3.1。
@@ -116,7 +116,7 @@
 - 判定：该 attempt 必须记为 **FAIL**；即使工具主链真实完成，也不得计入 Gate 1 PASS。
 - 修复候选：`d4c3e32aa34a4d26b346cdf0396788d39930cd6b`，父提交为 `2c700934...`，只在 `.gitignore` 新增三行以忽略 JiuwenSwarm runtime file operation logs。
 - 新候选结果：Gate 0 PASS；Gate 1 固定自动化/构建和同一真实文字工具 smoke 全部 PASS，真实链路返回 `d4c3e32a,0`，结束后候选 checkout 仍 clean。
-- 后续：Gate 2 的独立证据见下一节；Gate 3 Attempt 1 已失败，当前转入 D-037 开发前 checkpoint 和新 Candidate，不能继续旧会话的 Gate 3–6。
+- 当时的后续：Gate 2 独立证据见下一节；Gate 3 Attempt 1 失败后转入 D-037 checkpoint 和新 Candidate，没有继续旧会话。最终 `ee2896a4` 的 Release 结果见本文顶部和独立证据。
 
 ### 2026-08-02 Gate 2：PASS，保留 ASR fidelity observation
 
@@ -217,30 +217,23 @@
 - 初始静默测试的 UI 轮询从点击 Retry 后计时，而不是从 Recognition `onstart` 精确计时；`T+7.293s` 仍为 Listening，`T+7.816s` 进入可见 `no-speech`，与约 8 秒的配置窗口一致，也没有被 Chrome 更早的自然结束误伤。
 - 自动回听又接收了 2 个 follow-up，证明循环继续；但 Web Speech 把 `git` 误识别为“地图”或“史记”，尚不能据此记为 3 个准确语音 Turn。
 
-## 尚未完成与不能宣称的内容
+## V0 已通过与仍不能宣称的内容
 
-- 尚未完成连续 10 个准确语音 Turn、分阶段 10 次用户可感知打断、20 分钟或 20 Turn 稳定性，以及主演示脚本连续成功 3 次。
-- 10 次打断必须拆分：thinking 3 次和 tool 4 次验证真实 `supplement`；speaking 3 次验证立即停声后普通 `chat.send`。当前没有任何一组可以写成已通过，也不能把 speaking 样本计入 supplement。
-- 尚未测量并通过 speaking 本地静音目标 `<300ms` 和全部样本旧声音恢复 0 次；本轮主链没有证明真实 supplement 的 cancel/replacement 顺序可靠。
-- supplement P1 协议风险仍在：ACK 早于 AgentServer cancel/replacement 完成；`chat.tool_result` 和真实工具副作用缺少 generation ID，前端不能可靠 fence。
-- Web Speech 对中文句子中的英文技术词准确率不稳定，需要继续真机测试口令、说法和必要的 Provider fallback。
-- Desktop/WebView2、Team、多语言、全双工/AEC、断线恢复和服务端 streaming TTS 未验证，也不属于本轮已经完成的能力。
-- 当前固定演示环境可用不等于跨环境兼容；模型、Chrome Speech 服务、麦克风权限和网络仍是机器私有条件。默认 %USERPROFILE%\.jiuwenswarm 还保存 project/session/task/config/log/memory，验收必须用独立 JIUWENSWARM_DATA_DIR。
-- agtai 当前缺少 docs/assets/videos/compression.mp4 的 Git LFS 对象；普通 clone smudge 会 404。Live Voice 使用 GIT_LFS_SKIP_SMUDGE=1 可完整恢复相关源码/文档/测试，但整个仓库的全部 LFS 媒体仍未做到无缺口恢复。
-- 稳定句预读还没有服务端 response/generation ID；并发 cron/proactive 响应或迟到旧 `chat.final` 仍可能被归到错误 Turn。10 秒 timeout 只避免永久 thinking，不能证明响应归属或恢复 provisional 文本。
-- 当前 FIFO 只能证明文本已规划或已入队，不能证明用户实际听到；正式版仍需 playback ACK/cursor 和 presented history。
-- schedule 的本轮修复解决了同一进程、同一 JSON store 路径内的主要 run/cancel/delete 竞态与幂等创建，但没有跨进程事务、唯一执行所有权、exactly-once 或生产级 crash recovery。多个进程共享同一 store、D1/D2 durability 和外部副作用 reconciliation 仍是正式版风险。
-- Task Demo 使用真实且有副作用的 AutoHarness。Live Voice 的打断、退出或 session 切换不会自动取消已经发出的 `schedule.run`，确认取消也不能撤销已经产生的代码修改。
-- task-scoped Agent/context 和 project/origin provenance 已解决“并发任务借用最后一个 `_agent`”及目标猜测问题，但 context 仍只在进程内；重启不能恢复旧 Agent，持久 target 也不包含完整 model/provider/config/permission 快照。
-- 单用户 request owner + project 一致性 scope（非生产鉴权）、稳定 command ID、同-key retry 与严格 exact-key reconciliation 已经补齐 foundation 门槛，但它们不构成跨进程 CAS、唯一执行 owner、crash transaction、exactly-once、D1/D2 或外部副作用 reconciliation。
-- 前台目前仍会把任务反馈作为当前语音交互的一次结果处理；还没有“派发后立即继续监听、后台独立轮询、终态异步回流”的 task monitor。刷新恢复、多个任务、主动事件推送、重放/unread 和通用 Task Control 也未完成。
-- 当前共有 6 条 user-visible 文案错误暗示已有跨刷新恢复列表：`liveVoiceTaskBridge.ts` 的 4 条 `mutation-unknown` 提示，以及 `i18n/locales/zh.json`、`en.json` 各 1 条常驻 safety disclosure；Web 实际没有可按原 owner/project/command identity 跨刷新恢复的 AutoHarness 列表。`agent_ws_server.py` 的 owner-scope docstring 也仍沿用 `trusted request fields` 旧术语。它们是已知代码/文案债，不改变 D-033/D-034 的权威语义；D-031 开码时必须用 tests 把 6 条提示统一改成“保留后端 TaskStore/日志证据、停止 mutation、由受控诊断核对”，并把 docstring 改成 request-provided/server-observed，而不是假装已有恢复 UI 或可信身份。
+- `ee2896a4` 已完成 Gate 0–6；10 个任务、10 次分阶段打断、21m58s soak、失败降级和主演示 3/3 的发布证据已保存。
+- ASR 对中文同音字、否定词和英文技术词仍不稳定；D-038 允许有限语音重试并分离首轮 fidelity，不代表准确率问题已解决。
+- 模型偶尔违反“只回答 X”或选择不同日期格式；真实工具事实正确不等于格式遵循完美。
+- supplement ACK、前端 epoch/quarantine 和本轮 Gateway 取消时间线不是生产 generation fence；带副作用工具、硬资源限制、并行批次取消和跨进程一致性仍未完成。
+- Desktop/WebView2、Team、多语言、全双工/AEC、服务端 streaming STT/TTS、正式 playback ACK/presented history 和跨重启恢复未由 V0 放行。
+- 固定演示环境可用不等于跨环境兼容；模型、Chrome Speech、麦克风权限、设备和网络仍是机器私有条件。
+- agtai 缺失的非 Live Voice LFS 视频对象仍需 `GIT_LFS_SKIP_SMUDGE=1` 绕过。
+- Post-V0 schedule/task foundation 仍不具备跨进程 CAS、唯一执行 owner、exactly-once、D1/D2 或外部副作用 reconciliation。
+- D-031 poll-backed 异步任务监控尚未实现，既有 6 条跨刷新暗示文案和 owner-scope docstring 债仍按 D-033/D-034 处理。
 
 ## 下一步（两条隔离轨道）
 
-### V0 独立验收轨
+### V0 已冻结轨
 
-1. D-037 Candidate `ee2896a4` 已建立并通过 focused tests；本轮在 Gate 3 前停止并关闭服务，让用户调整模型配置。之后在 detached `ee2896a4` 先补 Gate 0/1，再从全新 Session 重跑 Gate 3；不从失败 Turn 4 续算。
+1. `ee2896a4` 已按 D-038 完成 Gate 0–6 并冻结；以后仅在重新验证或发现可复现回归时从该 immutable SHA 建立独立 worktree，不在 candidate 上继续开发。
 
 ### Post-V0 开发轨
 
@@ -256,4 +249,4 @@
 - partial/interim transcript 绝不能触发 Agent、Tool 或 Task；浏览器重启只能延续同一个逻辑 capture。
 - 插话或退出必须先本地停播；不要把 ACK quarantine、TTS ownership 或本地 epoch 描述成生产一致性协议。
 - processing 中 final 才是 supplement；只剩 TTS 时是停声后的普通下一 Turn，不得混用验收计数。
-- 真实主链已通过一次，但完整放行闸门未通过；只能称为 V0 Candidate，不得写成“Live Voice Demo 已完成/已冻结”。
+- V0 Released 事实只绑定 `ee2896a4` 和最终证据；累计分支后续提交属于 Post-V0，不得倒灌进 V0 能力口径。

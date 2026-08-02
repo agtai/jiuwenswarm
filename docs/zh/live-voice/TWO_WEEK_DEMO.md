@@ -1,14 +1,14 @@
 # JiuwenSwarm Live Voice：V0 两周纵向 Demo 方案
 
 - 日期：2026-07-31
-- 最近实测更新：2026-08-01
+- 最近实测更新：2026-08-02
 - 文档恢复审计：2026-08-02
 - 目标分支：`hx/0731_live_voice_ux`
 - 人力假设：1 人，约 10 个工作日，可使用 Codex 辅助开发
 - 交付名称：Live Voice UX / Vertical Slice Demo
 - 交付性质：验证产品流程和感知效果，不宣称达到生产 Alpha
-- 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；`d4c3e32a` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；D-037 Candidate `ee2896a4` 已修复重复失败放大器并通过 focused tests，完整 Gate 0/1 与 Gate 3–6 待续
-- 候选历史：父候选 `2c700934` 的 Gate 1 Attempt 1 因 runtime 生成未忽略 `.agent_history/`、实际返回 `2c700934,1` 而 FAIL；新候选仅增加 `.gitignore` 三行，当前真实期望为 `d4c3e32a,0`
+- 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6，状态为 `V0 Released / 已冻结`
+- 候选历史：父候选 `2c700934` 的 Gate 1 Attempt 1 因 runtime 生成 `.agent_history/`、实际返回 dirty=`1` 而 FAIL；`d4c3e32a` 修正 clean 边界后又在 Gate 3 FAIL；两次失败均保留，最终证据见 [evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)
 - 生命周期说明：D1–D10 是 2026-07-31 的原始排期快照，不是当前待办；当前事实和下一步以 [STATUS.md](STATUS.md) 为准
 
 ## 1. 先说结论
@@ -71,7 +71,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 
 ### 2.5 可选：语音控制一个真实后台任务
 
-该能力不属于 V0 Released Gate；Post-V0 Task Foundation 已实现一个默认关闭的受限切片，并已完成 foundation review 与统一复跑，仍待受控真人 E2E。D-037 Candidate 已固定为 `ee2896a4`，后续 V0 只在该 SHA 的独立验收轨继续。它固定使用真实、有代码副作用的 AutoHarness `extended_evolve_pipeline`，不是只读“检查仓库”。
+该能力不属于 V0 Released Gate；Post-V0 Task Foundation 已实现一个默认关闭的受限切片，并已完成 foundation review 与统一复跑，仍待受控真人 E2E。D-037 baseline 已冻结为 `ee2896a4`，以后只在该 SHA 的独立轨复现 V0 或调查回归。Task Demo 固定使用真实、有代码副作用的 AutoHarness `extended_evolve_pipeline`，不是只读“检查仓库”。
 
 | 口令 | 当前行为 |
 |---|---|
@@ -93,7 +93,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 |---|---|---|---|
 | 语音发起 Agent 请求 | 完成，最终识别文字进入现有 `chat.send` | 完成，并支持更多平台、语言和连接方式 | 用户能否自然地用语音驱动 Agent |
 | Agent 调用工具 | 完成，复用现有真实 Agent/Tool 链 | 完成，并补齐统一进度、权限和可恢复语义 | 语音是否适合驱动真实工作，而不只是聊天 |
-| 连续上下文 | 代码路径已实现并复用现有 Session；尚未通过 V0 Release/E2E 连续多轮 Gate | 完成，并有更严格的会话事实和播放历史 | 多轮语音协作是否自然 |
+| 连续上下文 | D-038 口径下的连续任务与 21m58s 同 Session soak 已通过；ASR 首轮 fidelity 仍单列 | 完成，并有更严格的会话事实和播放历史 | 多轮语音协作是否自然 |
 | 判断用户说完 | 固定停顿时间或显式结束 | 声音、语义和上下文共同判断 | 固定规则下的交互节奏是否可接受 |
 | 朗读回答 | 浏览器整段朗读；稳定后按完整句子排队 | 服务端流式 TTS、音频分片、背压和播放确认 | Agent 回答被听到时是否清楚、简洁、及时 |
 | 插话 | 重新开麦/点击立即停声；processing 中 final 走 supplement，只剩 TTS 时走普通下一 Turn | 持续监听、回声消除、误打断恢复，并明确区分停声、取消回答、取消工作 | 用户是否需要处理中纠正与朗读中止，以及两种路由是否可理解 |

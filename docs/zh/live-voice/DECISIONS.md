@@ -368,3 +368,14 @@
 - 原因：重复执行已知高资源失败不增加 Live Voice 证据；低阈值精确熔断能解决本次被证明的放大器，同时把更宽的生产安全缺口如实保留。
 - 影响：实现前必须按 D-032 提交并推送 `STATUS.md` 的模块定义、test inventory 和 P/N/B/S/T/C/R/I/F/K/X 矩阵；实现后再做完整回顾、immutable candidate 复跑和证据提交。Gate 3–6 不得由本决策自动通过。
 - 重新评估条件：项目提供经过验证的进程级资源硬限制和并行批次取消，或上游 Agent/Tool contract 改变顺序回调与 force-finish 语义。
+
+## D-038 放行 `ee2896a4`，并保留 ASR/模型偏差为非阻塞证据
+
+- 日期：2026-08-02
+- 状态：Accepted（V0 Release 验收决策；不改变生产边界）
+- 背景：detached `ee2896a4afb186e693c720476b6de10797e66f72` 已在从零建立的隔离环境中完成 Gate 0–6。严格的首次 transcript/格式样本仍暴露“未/为”、技术词、目录名和只回答格式偏差；同时，真实工具事实、打断路由、唯一 TTS、自动回听、降级、soak 和连续主演示均满足受控 V0 核心旅程。
+- 决策：将 `ee2896a4` 标记为 `V0 Released / 已冻结`。Gate 3 本次按 owner 明确接受的任务级口径判定：10 个固定只读目标必须最终 10/10 来自真实工具，每个目标最多允许两次语音重试；首次 transcript、错误结果和重试次数必须保留，不能改写成首轮准确率 100%。“只回答 X”的多余措辞和 `YYYYMMDD`/`YYYY-MM-DD` 差异单列为模型遵循问题，只要受控复核的核心工具事实和最终目标正确，不阻塞本次 V0。
+- 决策：Gate 4 tool-stage 的等待由 8 秒延长为 60 秒，以稳定命中真实工具执行窗口；动作保持只读，打断仍必须有 `chat.interrupt(intent=supplement)`、Gateway 取消/替代时间线、零旧 UI/TTS 污染和零副作用。Gate 6 接受本次 Codex task 自身的从零环境、全新 detached worktree、lockfile 依赖、全新数据目录和完整实链作为等效恢复证据，不再机械复制到第二个 task；该等效关系必须在证据中显式写出。
+- 影响：早期 `2c700934` Gate 1 FAIL 与 `d4c3e32a` Gate 3 FAIL 永久保留；它们不被最终 PASS 覆盖。V0 Released 只冻结 `ee2896a4` 的受控纵向 Demo，不宣称 ASR 准确率、模型格式遵循、生产 cancellation fence、带副作用工具取消、跨环境兼容、全双工或完整 P3 已解决。后续累计分支继续 V1 Foundation Alpha / D-031，不把 Post-V0 代码算进 V0。
+- 证据：[evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)。
+- 重新评估条件：发现证据与 candidate 身份不一致、真实工具结果被伪造、候选无法从 Git 恢复，或任何 Gate 的零污染/零副作用结论被新的可复现证据推翻。

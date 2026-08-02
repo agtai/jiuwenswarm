@@ -2,8 +2,8 @@
 
 本文负责现场展示话术和失败退场，不替代 V0 放行验收。完整 Gate、固定语料和证据模板见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。
 
-- 最近已执行候选：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；它只保留为历史失败基线
-- 当前 V0 放行执行目标：D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72`；focused tests 已通过，但完整 Gate 0/1 尚未重跑，在此之前禁止继续彩排、展示或真人 Gate 3
+- 历史失败候选：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；它只保留为历史失败基线
+- 当前 V0 Released / 已冻结：`ee2896a4afb186e693c720476b6de10797e66f72`；Gate 0–6 全部 PASS，脱敏证据见 [evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)
 - 候选历史：旧 `2c700934...` 的 Gate 1 Attempt 1 虽真实完成 Agent/Terminal Tool 主链，但 runtime 生成未忽略 `.agent_history/`，结果为 `2c700934,1`，因此 FAIL；`d4c3e32a` 的真实工具结果为 `d4c3e32a,0`，随后仍在 Gate 3 FAIL
 - 展示目标：用 60–90 秒证明“真实语音能够连续驱动真实 Agent 和 Terminal Tool，读取演示机的确切代码快照，并把真实结果完整读回来”
 - 展示口径：纵向 Demo，不宣称生产级全双工或稳定性放行
@@ -35,9 +35,9 @@
 - 朗读结束后自动回到 Listening，后续循环可以继续；
 - 约 8 秒的初始静默窗口没有被 Chrome 更早的自然结束提前截断。
 
-后续两次自动回听证明“同一 Session 的循环还能继续”，但其中 `git` 被识别成“地图”或“史记”，因此准确多轮和上下文继承尚未通过真机 Gate，正是本展示脚本需要继续验证的内容。
+后续最终验收已完成连续任务、分阶段打断、21m58s soak 和主演示连续 3 次；同一 Session 的循环与上下文在受控 V0 范围内通过。Web Speech 仍真实出现 `git` 被识别成“地图/史记”和“未/为”等偏差，作为 ASR fidelity 已知问题保留，不宣称首轮识别准确率 100%。
 
-### 已实现并通过自动化，但仍需真机专项验收
+### 已实现并通过 V0 受控真机验收
 
 当前代码还具备：
 
@@ -52,13 +52,13 @@
 - 进入、退出或新 Turn 会停止旧语音并使迟到 TTS 回调失效；Live Voice 激活时也会阻止其他已知 TTS 路径双播。
 - 权限、识别或播放失败时显示错误，可 Retry 或退出回文字聊天。
 
-打断/补充的代码路径已经存在：重新开麦会先停止本地朗读；如果 Agent 仍在 processing，新 final 走现有 `supplement`，如果 Agent 已完成、只剩 TTS 在播放，新 final 走普通 `chat.send`。真实 Agent cancel/replacement 尚未完成 10 次端到端验收，因此不放入成功率优先的主演示路径。
+打断/补充的代码路径已经完成 V0 的 10 次端到端验收：重新开麦会先停止本地朗读；如果 Agent 仍在 processing，新 final 走现有 `supplement`，如果 Agent 已完成、只剩 TTS 在播放，新 final 走普通 `chat.send`。这仍是确定性受控路径，不等于生产 generation fence 或带副作用工具取消保证；成功率优先的主演示可以继续使用更短的主链脚本。
 
 ## 2. 当前还不能做什么
 
 以下内容不能在台上描述成“已经完成”或“已经稳定”：
 
-- 尚未通过连续 10 个准确语音 Turn、分阶段 10 次用户可感知打断、20 分钟或 20 Turn soak、主演示脚本连续成功 3 次。
+- 已通过 D-038 口径下的 10 个固定语音任务、分阶段 10 次用户可感知打断、21m58s soak 和主演示脚本连续成功 3 次；这些只证明受控 V0，不是生产稳定性或 ASR 首轮准确率承诺。
 - Web Speech 对中文句子中的英文技术词不稳定，真实出现过把 `git` 识别成“地图”或“史记”。
 - 不是生产级持续双向音频。当前主要是“听一轮 → Agent 工作 → 读一轮 → 再听”，不是边听、边生成、边说的全双工媒体流。
 - 不是自然免手插话。主链依靠重新开麦或点击进行确定性控制，没有正式 AEC、误打断恢复和扬声器回声基线。
@@ -167,7 +167,7 @@
 
 - interim 字幕可见，final 后只出现一条用户消息；
 - UI 进入 Agent is working/Agent 正在工作，而不是立即给出预设答案；
-- 出现真实 Terminal Tool 调用，结果为当前 D-037 新 Candidate 的短 SHA；
+- 出现真实 Terminal Tool 调用，结果为当前 D-037 Released baseline 的短 SHA；
 - 页面显示原始编号；
 - TTS 完整读出八位技术标识符；
 - 朗读结束后自动回到 Listening。

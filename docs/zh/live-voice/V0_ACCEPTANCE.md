@@ -2,10 +2,10 @@
 
 - 版本：V0 / Vertical Slice Demo
 - 验收文档所在累计分支：`hx/0731_live_voice_ux`
-- 最近已执行目标：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b`（Gate 0–2 PASS、Gate 3 Attempt 1 FAIL，仅保留为历史）
-- 下一验收目标：D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72`；focused hotfix tests 已 PASS，完整 Gate 0/1 尚未重跑，之后不得直接跳到 Gate 3
-- 最近更新：2026-08-02（Gate 0–2 PASS；Gate 3 Attempt 1 FAIL）
-- 状态：V0 未 Released；Gate 3 须在新候选上从 Turn 1 重跑，Gate 4–6 尚未执行
+- 历史失败：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL，永久保留
+- 最终验收目标：D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72`
+- 最近更新：2026-08-02（Gate 0–6 全部 PASS）
+- 状态：`V0 Released / 已冻结`；脱敏证据见 [evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)，验收口径决定见 D-038
 
 ## 1. V0 到底是什么
 
@@ -22,7 +22,7 @@ V0 是“两周核心体验纵向切片”：核心用户旅程完整，但不�
 → 用户可以在处理中补充，或在朗读时停声并继续
 ```
 
-当前代码和文档已经形成可恢复的 **V0 Candidate**。只有本文所有 V0 放行 Gate 都通过并留下证据后，才可以写成 **V0 Released / 已冻结**。已有 commit 证明“候选版本已经保存”，不等于“已经通过验收”。
+当前代码和文档已经形成可恢复的 V0 纵向切片。`ee2896a4` 已按本文 Gate 0–6 和 D-038 的显式验收口径通过并留下证据，因此状态是 **V0 Released / 已冻结**。这不改变一般规则：只有 candidate commit 而没有完整 Gate 证据时，仍只能称为 Candidate。
 
 V0 验证的是：这条真实链路能否在受控环境中重复成立，用户是否能感受到语音驱动 Agent、连续协作和及时纠正的价值。它不证明生产级全双工、跨设备稳定、带副作用工具的可靠取消或服务端一致性。
 
@@ -386,7 +386,7 @@ $env:JIUWENSWARM_DATA_DIR  # 记录并在每个新的 AgentServer/Gateway/Web/Vi
 - 尚缺连续 10 Turn、分阶段 10 次打断、soak 和主演示连续 3 次；
 - processing 中 final 才走 supplement；只剩 TTS 时先停声再走普通 `chat.send`；
 - Web Speech 技术词误识别，以及 supplement ACK 不等于旧 Agent/工具已确定停止；
-- 当前 V0 验收只从 detached `ee2896a4` 恢复；先补 Gate 0/1，再从全新 Session 重跑 Gate 3。该窄切片不扩成 Team、真全双工、完整 TaskEvent/P3 或生产架构；
+- 当前 V0 Released baseline 是 detached `ee2896a4`；Gate 0–6 与 D-038 证据已提交。复现或回归只从该 SHA 开始，该窄切片不扩成 Team、真全双工、完整 TaskEvent/P3 或生产架构；
 - D-031 编码前必须先提交 D-032 开发前回顾、test inventory 与正反场景矩阵；当前 Web owner/project scope 只约束单用户 Demo 请求一致性，不是生产鉴权；`JIUWENSWARM_DATA_DIR` 必须隔离；key、完整 API base、浏览器权限、默认设备和网络状态不能从 Git 恢复。
 
 ### 10.3 私有配置边界
@@ -455,6 +455,19 @@ cold_environment_recovery: PASS / FAIL / NOT RUN
 ```
 
 ## 12. 最终放行规则
+
+
+### 12.1 2026-08-02 最终放行结果
+
+- immutable candidate：`ee2896a4afb186e693c720476b6de10797e66f72`
+- Gate 0–6：全部 `PASS`
+- Gate 3：按 D-038 的任务级最终正确性与 ASR fidelity 分离口径放行，原始偏差和重试未删除
+- Gate 4：thinking 3/3、tool 4/4、speaking 3/3；旧声音恢复、重复提交、迟到污染和副作用均为 0
+- Gate 5：21m58s soak、失败降级、主演示 3/3
+- Gate 6：接受同一全新 Codex task 从零搭建环境和完整实链的等效恢复证据
+- 证据：[evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)
+
+早期 `2c700934` 与 `d4c3e32a` 的失败记录继续有效；最终放行没有覆盖或改写历史失败。V0 冻结的是受控纵向 Demo，不是生产级全双工、ASR 准确率、模型格式遵循或取消一致性承诺。
 
 只有 Gate 0–6 全部为 `PASS`，才能：
 

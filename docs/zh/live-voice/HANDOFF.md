@@ -3,9 +3,9 @@
 - 快照日期：2026-08-02
 - 开发分支：`hx/0731_live_voice_ux`
 - 共享远端：`agtai`（`https://github.com/agtai/jiuwenswarm.git`）
-- V0 核心实现提交：`346f802a`；失败历史 `d4c3e32a` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；D-037 新 Candidate=`ee2896a4afb186e693c720476b6de10797e66f72`
-- 当前权威事实：`ee2896a4` 已加入相同确定性失败保护，focused hotfix tests **20/20** 与接线冒烟 PASS；完整 Gate 0/1 尚未重跑，不能 Released
-- 当前阶段：本轮在真人 Gate 3 前停止并关闭服务，等待用户调整模型配置；之后 detached `ee2896a4` 从 Gate 0/1 和全新 Session 继续
+- V0 核心实现提交：`346f802a`；失败历史 `d4c3e32a` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；D-037 Released baseline=`ee2896a4afb186e693c720476b6de10797e66f72`
+- 当前权威事实：`ee2896a4` 已完成 Gate 0–6，状态为 `V0 Released / 已冻结`；脱敏证据见 [evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)
+- 当前阶段：V0 验收轨关闭；累计分支继续 Post-V0 `V1 Foundation Alpha`，下一切片仍是 D-031，编码前先走 D-032 checkpoint
 - stash 状态：`7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply；它只在创建它的原机器上作为额外保险存在。新 clone 没有该 stash 是正常且正确的，任何机器都不要重复 apply/pop/drop
 - 当前状态：Task Foundation 已落地；D-037 在第 3 次同工具/同参数/同完整失败后只 force-finish 一次，focused tests 覆盖成功、误触发、边界、隔离和清理；进程硬资源限制与同批工具取消仍是正式版 gap
 - 文档恢复基线：`7d76e9d9bd8796dd92a27034cfdbd8903e1adf53` 已推送，并通过 agtai 的 LFS-safe fresh-clone、干净状态、`0/0` divergence、V0 祖先、文档入口及 lockfile 结构冒烟；这是 Git/交接可恢复证据，不代表私有配置、依赖安装或真实语音已在新机器验收
@@ -15,7 +15,7 @@
 1. 按 [README.md](README.md#新机器五分钟恢复) 使用 `GIT_LFS_SKIP_SMUDGE=1` clone 正确分支；当前 agtai LFS 缺少一个与 Live Voice 无关的视频对象，普通 smudge 会让 checkout 失败。
 2. 执行 `git pull --ff-only`、`git status --porcelain`、`git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux` 和 V0 祖先检查。必须是干净工作区、差异 `0 0`、`ee2896a4` 仍为祖先。
 3. 按 [README.md](README.md#新-codex-会话的阅读顺序) 读取当前事实集。普通续作不读取 stash 交接单来执行操作；只有历史取证/灾难恢复才打开它。
-4. 选择轨道：V0 验收只在 detached `ee2896a4` + 独立 `JIUWENSWARM_DATA_DIR` 中继续；先补 Gate 0/1，再从全新 Session 重跑 Gate 3。Post-V0 开发只在累计分支进行。
+4. 选择轨道：V0 已冻结；只有复现 Release 或调查回归时才使用 detached `ee2896a4` + 独立 `JIUWENSWARM_DATA_DIR`。Post-V0 开发只在累计分支进行。
 5. 需要构建或运行时从 `uv.lock` / `package-lock.json` 重建依赖，不复制 `.venv` 或 `node_modules`；需要真实 Agent/语音时再从受控渠道补齐私有配置、项目注册、浏览器权限和设备。
 
 本目录是 Git 中的接续入口。不要依赖旧对话、未提交文件、某台机器的 `.codex` / `.agent` 目录或本机 stash 恢复项目事实。Task Foundation 已由 `3da101cf`、`42e76d30` 和后续文档提交进入共享分支；新机器只认 fetch/pull 后的 Git 事实。
@@ -29,11 +29,11 @@
 | Codex 继续 D-031 前置设计与自动化开发 | `READY`；先执行 D-032 | 是，安装依赖后可运行测试 |
 | 模型、用户配置、project/session/task 数据 | `EXTERNAL_REQUIRED` | 否 |
 | Chrome 权限、Web Speech、麦克风/耳机、网络 | `EXTERNAL_REQUIRED` | 否 |
-| V0 Released / 跨机器真机等效 | `NOT_YET`；Gate 0–6 尚未全部通过 | 否，必须重新注入私有条件并人工验收 |
+| V0 Released / 受控环境真机等效 | `PASS`；baseline=`ee2896a4` | Release 事实可由 Git 恢复；实际真机仍需重新注入私有条件 |
 
 因此“无旧对话继续开发”可以做到；“pull 后无需任何机器配置就得到相同真实语音效果”做不到，也不应通过提交密钥、用户数据或浏览器 profile 来伪造。
 
-## `d4c3e32a` V0 baseline 已经能做什么
+## V0 实现与失败候选历史
 
 - Live Voice 只在 Agent 模式开放；final transcript 在 Agent processing 时复用真实 `supplement`，空闲或只剩 TTS 时复用普通 `chat.send`，interim 只有显示副作用。
 - Web Speech 的浏览器实例自然结束不会直接结束用户 Turn；约 4 秒早退可以在同一逻辑 capture 中续启并合并尾段，手动停止不会被 retry 复活。
@@ -108,17 +108,14 @@
 
 详细非敏感证据和启动方式见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
 
-## 仍未完成：两条隔离轨道
+## 两条隔离轨道
 
-### V0 独立验收轨
+### V0 已冻结轨
 
-- 10 个准确、detached-safe 的语音 Turn，重复提交为 0。
-- 10 次用户可感知打断：thinking 3 次、tool 4 次必须走真实 supplement；speaking 3 次必须立即停声并恰好走一次普通 `chat.send`。三类分别记数，旧声音恢复 0 次，并检查旧工具 UI、迟到 result、warning 和副作用。
-- 连续 20 分钟或 20 Turn 无需刷新。
-- detached V0 主展示脚本连续成功 3 次。
-- 在独立环境从 `uv.lock` / `package-lock.json` 重建并复测，不依赖主仓 `.venv`；使用隔离的 `JIUWENSWARM_DATA_DIR`，不得借用累计开发 Session/Task 状态。
-
-任何一项未通过，都不能写成“V0 已 Released / 已冻结”。当前真实主链成功一次是关键进展，但不是放行替代品。
+- immutable baseline：`ee2896a4afb186e693c720476b6de10797e66f72`。
+- Gate 0–6 全部 PASS；真实主链、10 个任务、10 次分阶段打断、21m58s soak、降级和主演示 3/3 均已记录。
+- D-038 明确保留 ASR 首轮 fidelity、模型格式遵循和生产取消 fence 为非阻塞 gap。
+- 以后只为重现 Release 或调查回归建立 detached worktree；任何新功能都进入累计 Post-V0 分支。
 
 ### Post-V0 开发轨
 
@@ -179,9 +176,9 @@
 - 技术选择变化时更新 [DECISIONS.md](DECISIONS.md)；新增临时简化时更新 [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) 的 Shortcut Ledger。
 - 按 D-030 正常提交并推送到 `agtai/hx/0731_live_voice_ux`；不再保留“V0 验收前不 commit/push”的例外。未提交 worktree 和 stash 都是机器本地状态，不能作为跨机器交接方式。
 
-## 用户介入后的 V0 独立验收流程
+## V0 Released baseline 的独立复现流程
 
-不要改写、stash 或 reset 当前 Post-V0 开发分支。确认 D-037 Candidate 和证据文档已 commit/push 后，从下面固定的不可变 SHA 创建独立 checkout/worktree：
+不要改写、stash 或 reset 当前 Post-V0 开发分支。需要复现 V0 Release 或调查回归时，从下面固定的不可变 SHA 创建独立 checkout/worktree：
 
 ```powershell
 git status --short --branch
@@ -199,6 +196,6 @@ $env:JIUWENSWARM_DATA_DIR  # 记录并在每个新后端终端重新设置
 
 上例目录名和数据目录可按机器调整，但都必须是明确的绝对隔离路径。只在新代码目录确认 `HEAD=$newV0Sha`、工作区干净；在隔离数据目录重新初始化并从受控渠道配置模型/project，清除两个 Post-V0 环境变量后执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。不要复用累计开发的 Session、Task 或 code-project 绝对路径。如果 Gate 失败，不得写 `Released` 或冻结；失败证据回写当前开发分支的文档，不在 detached 验收目录继续产品开发。
 
-只有 V0 Gate 全部通过后，才在当前累计分支合并验收证据并明确标记 Released/freeze；不得把 Post-V0 foundation 代码算进 V0 证据。当前 foundation 已可从共享分支完整重建；原 stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已经 apply，仅作为本机额外保险保留，正常开发和 V0 验收都不要重复 apply/pop/drop，是否删除由用户明确决定。
+V0 Gate 已全部通过，Release/freeze 事实和脱敏证据保存在累计分支文档中；Post-V0 foundation 仍不得算进 V0 证据。当前 foundation 已可从共享分支完整重建；原 stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已经 apply，仅作为本机额外保险保留，正常开发和 V0 复现都不要重复 apply/pop/drop，是否删除由用户明确决定。
 
 stash 不随 Git 远端同步。跨机器恢复只认已经 push 的分支提交和本目录文档；新机器执行 fetch、切换分支、`pull --ff-only`，不需要也不应尝试取得本机 stash。

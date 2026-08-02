@@ -4,8 +4,8 @@
 
 - 本次文档总审计：2026-08-02
 - 共享开发分支：`hx/0731_live_voice_ux`，跟踪 `agtai/hx/0731_live_voice_ux`
-- 当前 D-037 V0 Candidate：`ee2896a4afb186e693c720476b6de10797e66f72`（父=`d4c3e32a`）；focused hotfix tests **20/20** 与配置接线冒烟 PASS，完整 Gate 0/1 尚未重跑，V0 未 Released
-- 当前动作：本轮在重跑 Gate 3 前停止并关闭验收服务，等待用户调整模型配置；之后只从 detached `ee2896a4` 的全新 Session 先完成 Gate 0/1，再重跑 Gate 3
+- V0 Released / 已冻结：`ee2896a4afb186e693c720476b6de10797e66f72`（父=`d4c3e32a`）；Gate 0–6 全部 PASS，证据见 [evidence/V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md)
+- 当前动作：V0 验收轨已关闭；累计分支继续 Post-V0 `V1 Foundation Alpha`，下一窄切片仍是先执行 D-032 checkpoint 的 D-031 poll-backed 非阻塞任务监控
 
 ## 新机器五分钟恢复
 
@@ -65,7 +65,7 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 
 版本能力累计保留；共享协议和 ownership 边界冻结后，P1/P2/P3 的部分工程可以并行。后台任务的 A→B 更新需要完整 P3 的 update/provide-input，或显式 cancel/create；不能把 P3α 的状态查询冒充任务更新。
 
-`d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 保留为精确失败恢复点：其父 `2c700934...` 因 `.agent_history/` 污染在 Gate 1 FAIL；它自身的 Gate 0–2 PASS，但 Gate 3 Turn 3 暴露 Git for Windows 非 ASCII 日期格式 OOM 和重复确定性失败放大器，因此不能 Released。D-037 最小熔断 Candidate 已建立为 `ee2896a4afb186e693c720476b6de10797e66f72`；旧 stash 只保留为本机备份，新机器只认共享 Git。
+`d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 保留为精确失败恢复点：其父 `2c700934...` 因 `.agent_history/` 污染在 Gate 1 FAIL；它自身的 Gate 0–2 PASS，但 Gate 3 Turn 3 暴露 Git for Windows 非 ASCII 日期格式 OOM 和重复确定性失败放大器，因此不能 Released。D-037 最小熔断 baseline `ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6 并冻结；旧 stash 只保留为本机备份，新机器只认共享 Git。
 
 当前 foundation 已把任务边界推进到：服务端对 `schedule.list/status/cancel/logs/delete` 执行单用户 request owner + project 一致性 scope（Web 身份来自请求，不是生产鉴权）；同一进程、同一 JSON store 路径用共享锁和 ledger 保证 create command 幂等；前端为一次 committed mutation 固定 command ID，只接受严格 exact-key 对账，允许任务在请求期间从 pending 漂移到后续真实状态，并显示真实 task card。它仍不提供跨进程一致性、exactly-once、D1/D2 或持续后台结果监控。稳定句与任务分别由 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH=true`、`VITE_FEATURE_LIVE_VOICE_TASK_DEMO=true` 开启，二者默认关闭。
 
@@ -135,7 +135,7 @@ Windows `core.autocrlf=true` checkout 会把 LF 变为 CRLF，因此直接对工
 - 对每个受影响模块完成 D-032 开发后回顾，在 `STATUS.md` 更新 test inventory、每项 test 的 why、scenario 覆盖、exact tested SHA、精确命令、结果和 gap；未满足闭环 Gate 时如实标记 `PARTIAL` 或 `BLOCKED`。
 - 如果改变了范围或技术选择，更新 `DECISIONS.md`。
 - 如果引入了新的临时简化，在 `TWO_WEEK_DEMO.md` 的 Shortcut Ledger 中记录替换计划。
-- 按 D-030 正常审阅、提交并推送 Post-V0 代码与文档；仅保存在本地、stash 或对话中的信息无法跨机器恢复。D-037 修复以 `d4c3e32a` 为基线建立新 Candidate，后续 V0 验收只使用新 SHA 的独立 checkout/worktree，不通过反复 stash 当前开发分支实现。
+- 按 D-030 正常审阅、提交并推送 Post-V0 代码与文档；仅保存在本地、stash 或对话中的信息无法跨机器恢复。V0 已冻结为 `ee2896a4`；后续复现或回归调查只使用该 SHA 的独立 checkout/worktree，不通过反复 stash 当前开发分支实现。
 - 不在文档中写入密钥、访问令牌、本机临时目录或仅某台机器可用的绝对路径。
 
 ## 关键代码入口
@@ -202,7 +202,7 @@ git diff --check
 
 上述 Ruff 命令只检查本批 Foundation 的十个 Python 代码/测试路径；`E402` 与 `E712` 的忽略仅用于保留这些文件中不属于本 diff 的既有基线问题，出处与复核口径见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)，不能扩展成全仓 lint 豁免。
 
-`d4c3e32a` V0 Candidate 继承父提交 `2c700934` 的 Live Voice 代码；七组 Live Voice 纯逻辑 **47/47**、相关回归 **22/22**、TypeScript、Vite build、Ruff 和 diff-check 已在新候选 Gate 1 通过，固定 Windows/Chrome 环境也曾真实贯通一次“麦克风 → Agent → Terminal Tool → 完整 TTS → 自动回听”。2026-08-02 Gate 1 Attempt 1 虽然真实走完 `chat.send → chat.tool_call → chat.tool_result → chat.final`，但返回 `2c700934,1`，因运行时生成 `.agent_history/` 导致工作区不干净，不能计为 PASS；修复后的新候选再次走完真实主链并返回 `d4c3e32a,0`，当前 Gate 0–2 已 PASS。上述证据仍不能替代连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示的 V0 放行验收。
+历史 `d4c3e32a` Candidate 继承父提交 `2c700934` 的 Live Voice 代码；七组 Live Voice 纯逻辑 **47/47**、相关回归 **22/22**、TypeScript、Vite build、Ruff 和 diff-check 曾在其 Gate 1 通过。`2c700934` 的第一次真实文字主链因 `.agent_history/` 使 dirty=`1` 而 FAIL，`d4c3e32a` 又在 Gate 3 因确定性工具失败重复放大而 FAIL；两者都作为历史保留。D-037 Candidate `ee2896a4` 修复该放大器后，从独立环境完成 Gate 0–6、连续任务、分阶段打断、soak、降级和连续 3 次主演示，现已 `V0 Released / 已冻结`；完整证据和非阻塞偏差见 [最终验收记录](evidence/V0_20260802_ee2896a4.md)。
 
 foundation review 修复合入时的历史确认结果是：Live Voice 前端精确测试 **155/155**，chatStore marker 与相关回归 **24/24**，`tsc --noEmit` 通过，Vite build **4494 modules transformed**；Python contract + TaskStore/service + AgentServer schedule request + Web handler 统一精确回归 **226/226**。155 与 24 两组有 9 项重叠，不能相加；Git 保存测试代码、命令和结果记录，但未保存 JUnit 产物，新机器只有实际复跑后才能声称本机通过。后端 `3da101cf`、前端 `42e76d30` 已落地；自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。详细能力和边界见 [STATUS.md](STATUS.md)、[HANDOFF.md](HANDOFF.md) 与 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。
 
