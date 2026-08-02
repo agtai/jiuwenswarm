@@ -1,7 +1,7 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
 - 最近恢复审计：2026-08-02
-- 适用共享分支：`hx/0731_live_voice_ux`；V0 Gate 单独使用 detached `2c700934`
+- 适用共享分支：`hx/0731_live_voice_ux`；最近完成的 detached `d4c3e32a` 在 Gate 3 FAIL，后续 V0 Gate 只使用 D-037 新 Candidate（SHA=`TBD`）
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
@@ -359,6 +359,28 @@ project.create（首次注册时）
 
 未证明：10 个准确语音 Turn、7 次 processing supplement、3 次 speaking 停声/普通发送、旧副作用 fence、20 分钟或 20 Turn、主演示脚本连续 3 次、Desktop/WebView2 或任何生产可靠性指标。
 
+### 2026-08-02 V0 Gate 1 候选切换记录
+
+- Attempt 1 在旧候选 `2c700934...` 上真实完成 `chat.send → chat.tool_call → chat.tool_result → chat.final`，Terminal Tool 返回 `2c700934,1`。
+- dirty count `1` 的根因是 JiuwenSwarm runtime 在仓库根写入旧候选未忽略的 `.agent_history/`；因此该次 attempt 为 **FAIL**，不能计作 Gate 1 PASS。
+- 新候选 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的父提交为 `2c700934...`，唯一变化是 `.gitignore` 新增三行忽略 runtime file operation logs。
+- 新候选 checkout 恢复 clean 后，Gate 0 已 PASS；Gate 1 固定自动化、TypeScript、build、Ruff、`git diff --check` 和真实文字工具 smoke 已全部 PASS。
+- 新的真实工具链返回 `d4c3e32a,0`，Gate 2 也 PASS；但 Gate 3 Attempt 1 随后 FAIL，`d4c3e32a` 仅保留为失败历史。后续语音 Gate 必须等待 D-037 新 Candidate，不能从旧 Turn 4 续算。
+
+### 2026-08-02 V0 Gate 2 语音样本
+
+- final transcript 为“廖永终端查看当前提交编号前八位并统计未提交文件数量只回答编号和数量”；Web Speech 将“调用”误识别成“廖永”。
+- 本次唯一一次 `chat.send → chat.tool_call → chat.tool_result → chat.final` 返回真实 `d4c3e32a 0`，候选工作区仍 clean；用户确认完整听到“d4c3e32a 0”。
+- 该转写偏差记录为 ASR fidelity 和关键动词鲁棒性风险，后续必须继续处理，但当前 Agent 已正确执行工具任务链，不把它单独列为任务链阻塞。
+- 用户确认完整回答只播一次。虽未即时观察 `Listening`，但无 Retry/再次说话，随后页面显示“未检测到语音”；这是自动重新进入识别并经历静默超时的强间接证据，与 TTS 后自动回听一致。结合唯一 send/tool/result/final、`new` Session 和 dirty=`0`，Gate 2 记 **PASS**，但没有直接状态时间线截图。
+
+### 2026-08-02 V0 Gate 3 Attempt 1：Turn 3 FAIL
+
+- Turn 1/2 正常；Turn 3 ASR 将“年月日”识别成“念月日”，Agent 选择 `git log -1 --format=%ad --date=format:'%m月%d日'`。
+- Git for Windows `2.47.1.windows.2` 可在 Agent 外稳定复现该非 ASCII 日期 format OOM；`--date=short`/ASCII 对照立即成功。单个异常 Git 子进程曾达到约 8.5 GB Working Set / 49 GB Private Memory。
+- 同一 request 记录 11 次 tool call、10 次相同失败 result、0 个 Turn 3 final；第 11 次在途时由 `chat.interrupt(intent=cancel)` 终止。候选 dirty=`0`，资源恢复，Agent 服务以同一隔离数据目录重启。
+- CircuitBreaker 默认关闭且默认错误阈值过晚。本 attempt 记 **FAIL**；先建立带低阈值确定性失败熔断的新 Candidate，再从新 Session Turn 1 重跑。日期口令改成 `YYYY-MM-DD` 只隔离平台缺陷，不证明生产工具资源保护完成。
+
 ## 11. 证据记录模板
 
 只记录非敏感信息：
@@ -405,4 +427,4 @@ ASR 误识别样本：
 - 停止 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
 - 记录本次使用的 `JIUWENSWARM_DATA_DIR` 标签，停止所有引用它的进程后执行 `Remove-Item Env:JIUWENSWARM_DATA_DIR -ErrorAction SilentlyContinue`；不要自动删除证据目录。
-- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步。Post-V0 正常提交并推送；V0 验收必须在 `2c700934...` 的独立 checkout/worktree 中完成，验收证据和后续开发事实分别提交，不得混为同一放行结论。
+- 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步。Post-V0 正常提交并推送；下一轮 V0 验收必须在已写回文档的 D-037 新 Candidate 独立 checkout/worktree 中完成，`d4c3e32a` 只作失败历史，验收证据和后续开发事实分别提交，不得混为同一放行结论。

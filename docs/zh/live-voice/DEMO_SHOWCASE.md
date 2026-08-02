@@ -2,7 +2,9 @@
 
 本文负责现场展示话术和失败退场，不替代 V0 放行验收。完整 Gate、固定语料和证据模板见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。
 
-- 当前 V0 放行执行目标：detached `2c700934aa0024a7ab229644bf15934e9e8170e7`；累计分支只用于继续开发
+- 最近已执行候选：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；它只保留为历史失败基线
+- 当前 V0 放行执行目标：D-037 修复后的新 Candidate，SHA=`TBD`；SHA 和自动 Gate 0/1 结果写回前，禁止继续彩排、展示或真人 Gate 3
+- 候选历史：旧 `2c700934...` 的 Gate 1 Attempt 1 虽真实完成 Agent/Terminal Tool 主链，但 runtime 生成未忽略 `.agent_history/`，结果为 `2c700934,1`，因此 FAIL；`d4c3e32a` 的真实工具结果为 `d4c3e32a,0`，随后仍在 Gate 3 FAIL
 - 展示目标：用 60–90 秒证明“真实语音能够连续驱动真实 Agent 和 Terminal Tool，读取演示机的确切代码快照，并把真实结果完整读回来”
 - 展示口径：纵向 Demo，不宣称生产级全双工或稳定性放行
 - 环境与启动细节：[E2E_RUNBOOK.md](E2E_RUNBOOK.md)
@@ -112,7 +114,7 @@
 - Chrome `150.0.7871.187` 或已经完成同等验收的固定版本；
 - Jabra EVOLVE 30 II 或已经完成同等验收的有线耳机和麦克风；
 - `zh-CN`、Agent 模式、单一浏览器标签页；
-- detached `2c700934aa0024a7ab229644bf15934e9e8170e7`，`git branch --show-current` 为空，工作区干净；
+- detached D-037 新 Candidate（SHA 已在权威文档写回），`git branch --show-current` 为空，工作区干净；不得用历史失败的 `d4c3e32a` 继续放行；
 - 模型、项目注册、Gateway、AgentServer 和 Terminal Tool 已预热。
 
 如果观众需要听到声音，首选“有线耳机 + 会议软件共享系统音频”，并提前在同一会议中验证。不要上台后临时切换输入/输出设备。线下扬声器只有在同一房间连续彩排通过后才使用，因为当前 Demo 没有生产级 AEC。
@@ -132,7 +134,7 @@
    @(git status --porcelain).Count
    ```
 
-   第一条输出必须为空，证明处于 detached V0 候选；短编号必须为 `2c700934`，未提交文件数量必须为 `0`。
+   第一条输出必须为空，证明处于 detached V0 候选；短编号必须等于权威文档记录的 D-037 新 Candidate 短 SHA，未提交文件数量必须为 `0`。
 3. 用文字先发送：
 
    > 必须调用终端查看当前提交编号前八位，并统计未提交文件数量，不要根据上下文猜测，只返回编号和数量。
@@ -165,7 +167,7 @@
 
 - interim 字幕可见，final 后只出现一条用户消息；
 - UI 进入 Agent is working/Agent 正在工作，而不是立即给出预设答案；
-- 出现真实 Terminal Tool 调用，结果为 `2c700934`；
+- 出现真实 Terminal Tool 调用，结果为当前 D-037 新 Candidate 的短 SHA；
 - 页面显示原始编号；
 - TTS 完整读出八位技术标识符；
 - 朗读结束后自动回到 Listening。
@@ -192,7 +194,7 @@
 
 成功判据：
 
-- Agent 正确引用前两轮的 `2c700934` 和 `0`；
+- Agent 正确引用前两轮的当前 Candidate 短 SHA 和 `0`；
 - 回答只有一句并完整朗读；
 - 没有重复提交、串入历史回答或双播。
 

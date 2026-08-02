@@ -5,27 +5,27 @@
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 原始完整方案的代码证据快照：`69c026a6613279964146d317e164cf32c6900285`
 - Live Voice 实现分支基线：`7b69fdeb`
-- V0 核心实现提交：`346f802a`；当前已推送 V0 Candidate 恢复点：`2c700934aa0024a7ab229644bf15934e9e8170e7`
-- 当前里程碑：不可变 V0 Vertical Slice Candidate 独立验证 + Post-V0 Task Foundation + D-032 模块测试闭环 Gate
-- 实现状态：真实“麦克风 → Agent → Terminal Tool → 完整回答 → 浏览器 TTS → 自动回听”主链已在固定 Windows/Chrome 环境成功跑通一次；[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 已定义完整 Gate，但稳定性、分阶段打断和跨环境放行尚未执行完
+- V0 核心实现提交：`346f802a`；最近已推送候选 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 已完成 Gate 0–2，但在 Gate 3 Attempt 1 FAIL，现作为失败历史；修复后的新 Candidate SHA=`TBD`
+- 当前里程碑：D-037 相同确定性工具失败熔断的新 V0 Candidate + Post-V0 Task Foundation + D-032 模块测试闭环 Gate
+- 实现状态：真实语音主链和 Gate 2 已在固定 Windows/Chrome 环境通过；Gate 3 Turn 3 暴露 Windows Git OOM 与重复失败放大器，先修复并重建候选，随后才继续稳定性、打断和跨环境放行
 
 跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动和固定环境按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行；V0 是否放行以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准。
 
-当前开发遵循 D-030、D-032 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`2c700934aa0024a7ab229644bf15934e9e8170e7` 固定为未放行 V0 Candidate；stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份。Post-V0 继续正常 review → commit → push；每个模块从 D-031 起必须执行开发前/开发后双回顾和完整场景测试 Gate。V0 从 `2c700934` 的独立 checkout/worktree 执行，不反复 stash 当前开发分支。
+当前开发遵循 D-030、D-032、D-036、D-037 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`d4c3e32a` 保留为 Gate 3 失败候选历史；当前先在其独立 worktree 实现并验证重复确定性失败熔断，再形成新不可变 Candidate。stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份；Post-V0 继续正常 review → commit → push。
 
-对 **`2c700934` V0 Candidate baseline** 的量化判断仍是：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。这些数字来自 V0 的真实麦克风/Agent/Tool/TTS 首次贯通和当时的 47 项 Live Voice 自动化，不包含后续 Post-V0 foundation。连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示尚未完成，因此 V0 仍不能称为已放行；Post-V0 的完成度也不能用 V0 的百分比替代。
+对 **`d4c3e32a` 失败候选所代表的 V0 baseline** 的量化判断仍是：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。Gate 0–2 PASS 证明主链，但 Gate 3 真实失败说明这些比例不等于放行；新 Candidate 修复并完成连续 10 Turn、分阶段打断、soak 和主演示前，V0 仍不能称为已冻结。
 
 ## 2026-08-02 文档与跨机器恢复审计
 
 本轮已逐份审阅根 `AGENTS.md` 和本目录 11 份 Markdown，并与 Git 历史、实际 scripts/lockfiles、feature flags、服务端口、用户数据目录和 V0 detached 工作方式交叉核对。文档职责已重新分为：当前事实、当前交接、有效决策/路线、V0 操作、运行操作、历史证据和不可变架构源。
 
-可恢复的文档内容基线是 `7d76e9d9bd8796dd92a27034cfdbd8903e1adf53`（`docs(live-voice): make handoff reproducible`），已推送到 `agtai/hx/0731_live_voice_ux`。随后从 agtai 空目录、`GIT_LFS_SKIP_SMUDGE=1` 全新 clone 实测：HEAD/branch/upstream 正确，ahead/behind=`0/0`，工作区干净，`2c700934` 祖先检查返回 `0`；本目录 11 份 Markdown、根 `AGENTS.md`、两份 lockfile 和全部关键入口存在。`package-lock.json` 由 Node JSON parser 解析为 lockfile v3，`uv.lock` 由 Python `tomllib` 解析通过，缺失媒体按预期保留 LFS pointer。
+可恢复的文档内容基线是 `7d76e9d9bd8796dd92a27034cfdbd8903e1adf53`（`docs(live-voice): make handoff reproducible`），已推送到 `agtai/hx/0731_live_voice_ux`。随后从 agtai 空目录、`GIT_LFS_SKIP_SMUDGE=1` 全新 clone 实测：HEAD/branch/upstream 正确，ahead/behind=`0/0`，工作区干净，当时的 `2c700934` 祖先检查返回 `0`；本目录 11 份 Markdown、根 `AGENTS.md`、两份 lockfile 和全部关键入口存在。`package-lock.json` 由 Node JSON parser 解析为 lockfile v3，`uv.lock` 由 Python `tomllib` 解析通过，缺失媒体按预期保留 LFS pointer。D-036 建立新候选后已再次确认 `d4c3e32a` 是 `agtai/hx/0731_live_voice_ux` 的祖先。
 
 文档机械证据：96 个普通相对链接无断链，Markdown 表格、代码围栏、标题与 HANDOFF 的两个 README 锚点均通过；不可变完整方案 LF 规范化 SHA-256 仍为 `0294909A79B258194B7B454CF336F164ECF998211E87DC26B453580171EEE3AA`。全部 PowerShell fenced blocks 语法通过，数据目录 guard 已在 Windows PowerShell 5.1 用真实绝对目录执行成功。此次只验证了 Git/文档/lockfile 可恢复性，没有把依赖下载、模型配置、浏览器权限、真实设备或真人 E2E 伪装成已在新 clone 通过。
 
 已修正的关键执行问题：
 
-- V0 Gate 1 不再引用不断前进的 Post-V0 README 命令，而是在验收手册中固定 `2c700934` 实际存在的 47/47、22/22、TypeScript、build、Ruff 和 diff-check 命令。
+- V0 Gate 1 不再引用不断前进的 Post-V0 README 命令，而是在验收手册中固定 `d4c3e32a` 实际存在的 47/47、22/22、TypeScript、build、Ruff 和 diff-check 命令。
 - V0 的主链、10 Turn、打断和主演示不再要求 detached HEAD 拥有分支/upstream；语料改为 candidate SHA、提交信息、干净状态和其他 detached-safe 真实仓库事实。
 - 新 clone 明确使用 `GIT_LFS_SKIP_SMUDGE=1`；agtai 当前缺少一个与 Live Voice 无关的 12 MB 文档视频 LFS 对象，跳过它不影响 Live Voice 续作。
 - V0 和累计开发使用独立的绝对 `JIUWENSWARM_DATA_DIR`，避免默认用户工作区中的 project/session/task/config/log/memory 交叉污染。
@@ -38,7 +38,7 @@
 | 运行自动化 tests/build | `READY_WITH_SETUP` | 安装文档指定运行时，联网执行 `uv sync --frozen` / `npm ci` |
 | 真实文字 Agent/Tool | `EXTERNAL_REQUIRED` | 私有模型配置、项目注册、服务和网络 |
 | 真实 Live Voice | `EXTERNAL_REQUIRED` | 以上条件 + Chrome 权限、Web Speech、麦克风/耳机和人工观察 |
-| V0 Released / 已冻结 | `NOT_YET` | detached `2c700934` 的 Gate 0–6 全部 PASS 并提交脱敏证据 |
+| V0 Released / 已冻结 | `NOT_YET` | D-037 新 Candidate 建立后 Gate 0–6 全部 PASS 并提交脱敏证据 |
 
 结论是：**代码、方案、决策、阶段、测试设计规则和下一任务可以仅靠 Git 无旧聊天接续；真实运行环境不能也不应靠 Git“完美复制”。** 私有状态补齐前仍可推进 D-031 前置回顾、纯逻辑/fake-time 和 hook/UI/WebSocket integration tests；不能宣称跨机器真实语音等效或 V0 已放行。
 
@@ -95,7 +95,7 @@
 
 ## 验证记录
 
-### `2c700934` V0 baseline 自动化
+### `d4c3e32a` V0 baseline 自动化
 
 | 日期 | 验证 | 结果 |
 |---|---|---|
@@ -105,7 +105,83 @@
 | 2026-08-01 | Vite production build | 通过，**4490 modules** |
 | 2026-08-01 | Python 与工作树检查 | `ruff`、`git diff --check` 通过 |
 
-上表是稍后从独立 checkout/worktree 验收的 V0 baseline 历史结果，不能冒充当前 Post-V0 foundation 的验证结果。
+新候选继承父提交的全部 V0 实现，唯一变化是 `.gitignore` 增加 `.agent_history/`；上表对应的 Gate 1 自动化、TypeScript、build、Ruff 和 diff-check 已在 `d4c3e32a` 重新执行并 PASS，不能冒充当前 Post-V0 foundation 的验证结果。
+
+### 2026-08-02 Gate 1 Attempt 1：FAIL，不计通过
+
+- 执行身份：当时的 detached `HEAD=2c700934aa0024a7ab229644bf15934e9e8170e7`。
+- 真实链路：文字请求真实完成 `chat.send → chat.tool_call → chat.tool_result → chat.final`，不是预设答案。
+- Agent/Terminal Tool 实际返回：`2c700934,1`，而 Gate 1 要求候选 SHA 与干净工作区计数一致。
+- 失败根因：JiuwenSwarm runtime 在仓库根生成未被旧候选忽略的 `.agent_history/`，使 `git status --porcelain` 计数从 `0` 变为 `1`。
+- 判定：该 attempt 必须记为 **FAIL**；即使工具主链真实完成，也不得计入 Gate 1 PASS。
+- 修复候选：`d4c3e32aa34a4d26b346cdf0396788d39930cd6b`，父提交为 `2c700934...`，只在 `.gitignore` 新增三行以忽略 JiuwenSwarm runtime file operation logs。
+- 新候选结果：Gate 0 PASS；Gate 1 固定自动化/构建和同一真实文字工具 smoke 全部 PASS，真实链路返回 `d4c3e32a,0`，结束后候选 checkout 仍 clean。
+- 后续：Gate 2 的独立证据见下一节；Gate 3 Attempt 1 已失败，当前转入 D-037 开发前 checkpoint 和新 Candidate，不能继续旧会话的 Gate 3–6。
+
+### 2026-08-02 Gate 2：PASS，保留 ASR fidelity observation
+
+- 真实麦克风 final transcript 为“廖永终端查看当前提交编号前八位并统计未提交文件数量只回答编号和数量”；Web Speech 将关键动词“调用”误识别成“廖永”。
+- 尽管存在该 ASR fidelity 偏差，本次只产生一次 `chat.send`，随后唯一一次完成 `chat.tool_call → chat.tool_result → chat.final`；真实工具结果和最终回答均为 `d4c3e32a 0`，候选工作区保持 clean。
+- 用户确认完整听到“d4c3e32a 0”。该样本证明错误转写下当前 Agent 仍正确理解并执行了任务链；它是后续必须处理的 ASR 鲁棒性与关键动词风险，不作为当前任务链功能阻塞。
+- 用户确认回答完整且只播一次。页面没有被即时观察到 `Listening`，但没有 Retry 或再次说话，随后显示“未检测到语音”；这是自动重新进入识别并经历静默超时的强间接证据，与 TTS 后自动回听一致。结合唯一 send/tool/result/final、`new` Session、dirty=`0`，Gate 2 记为 **PASS**，但不把它写成直接截获的状态时间线。
+
+### 2026-08-02 Gate 3 Attempt 1：Turn 3 FAIL
+
+- Turn 1、Turn 2 分别正确回答 `d4c3e32a` 和 `fix(live-voice): keep V0 agent runs git-clean`；Turn 3 的 ASR 把“年月日”识别成“念月日”。
+- Agent 选择的 `git log -1 --format=%ad --date=format:'%m月%d日'` 在 Git for Windows `2.47.1.windows.2` 上可脱离 Agent 稳定复现 `fatal: Out of memory, realloc failed`；`--date=short` 与 ASCII 日期格式立即成功，因此不是仓库大小或普通物理内存不足。
+- 同一 request 产生 11 次 tool call、10 次相同失败结果且没有 Turn 3 final；第 11 次在途时由 `chat.interrupt(intent=cancel)` 终止。单个异常 Git 子进程一度约占 8.5 GB Working Set / 49 GB Private Memory；进程退出后资源恢复，候选工作区保持 clean。
+- 现有 `CircuitBreakerRail` 在默认和验收配置中关闭；默认连续错误阈值 10 对单次高资源失败也过晚。判定：Gate 3 Attempt 1 **FAIL**，`d4c3e32a` 不能按现有 Gate Released。
+- 下一步不是从 Turn 4 续算，也不是只改题做绿：先按 D-037 建立带低阈值确定性失败熔断的新 Candidate；日期语料同时改为明确的 `YYYY-MM-DD` 安全 oracle。修复后另建 Session 从 Turn 1 重跑。
+
+### Module test closure: repeated deterministic tool failure guard（开发前 checkpoint）
+
+- stage / decision / requirement sources：V0 Gate 3 blocker；D-032、D-037、[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) §7。
+- code scope and upstream/downstream：`circuit_breaker_rail.py` 的 invoke 内记录/检测/force-finish；`interface_deep.py` 配置接线；`resources/config.yaml` 默认值；Agent tool loop 与 processing/final 是上下游。
+- baseline SHA / candidate tested SHA / environment / clean-status evidence：baseline=`d4c3e32aa34a4d26b346cdf0396788d39930cd6b`、detached worktree clean；candidate=`TBD`；Windows / Python 3.12.9。新代码尚未开始。
+- pre-review：`DONE`；post-review：`MISSING`；closure：`PARTIAL`。
+
+#### Module definition and non-goals
+
+- 目标：在同一 invoke 内，顺序出现同一 tool name、去 metadata 后同一参数、同一完整失败签名的确定性失败时，前两次保留给 Agent 自恢复，第 3 次完成后只 force-finish 一次，使顺序重试不能执行第 4 次。
+- 失败签名必须保留结构化 `success/error/status/result_type/exit code/nested data`；`tool_result=None` 的抛异常路径使用异常类型/消息或 tool message 形成稳定签名。不能直接复用会丢嵌套字段的现有普通 result hash。
+- 事实源和生命周期：历史只属于当前 invoke；`before_invoke` 清零、`after_invoke` 清理；不同 conversation/session 隔离。disabled 时必须零新增行为；配置阈值必须精确生效。
+- 非目标：修复 Git for Windows、实现任意进程硬内存/CPU/超时沙箱、完整 P3、降低全局 `max_iterations`、把不同命令的普通错误都当成同一失败。after-tool rail 只保证顺序重试；同一模型响应已并行发出的调用不能追溯取消，作为明确 gap。
+
+#### Test inventory
+
+| Test / suite | 层级 | Why / scenario IDs | Oracle 与禁止结果 | 当前状态 |
+|---|---|---|---|---|
+| 新增 repeated-failure rail 精确测试 | pure/unit | `P-RF-01/02`、`N-RF-01/02/03`、`B-RF-01/02` | 前两次不熔断；第 3 次恰好 force-finish 一次；description 变化仍同参数；不同命令/结果、成功重复、失败→成功→失败不得熔断 | planned |
+| ToolOutput/dict/JSON/exception 参数化 | unit | `B-RF-03` | 本次 `success=False ... error=...`、nested data、exit code 与异常形成正确签名；不同 nested error 不得假阳性 | planned |
+| invoke lifecycle / isolation | unit | `S-RF-01/02`、`T-RF-01`、`C-RF-01`、`I-RF-01`、`R-RF-01` | reset、cleanup、A/B 隔离、迟到旧状态不污染新 invoke；顺序第 4 次为 0 | planned |
+| adapter/config default | adapter/contract | `F-RF-01/02`、`K-RF-01` | enabled/disabled/自定义 threshold 精确接线；默认启用且旧缺字段有确定默认 | planned |
+| scripted Agent + fake tool | integration | `X-RF-01` | 模型计划第 4 次相同失败时真实 executor count=3、单一安全终态、processing=false；正常多工具链和 interrupt 不回归 | planned |
+
+#### Scenario matrix
+
+| ID | 维度 | 前置与动作 | 预期 / 明确禁止 | Test / evidence |
+|---|---|---|---|---|
+| P-RF-01 | P | 同 invoke 连续 3 次同工具/参数/失败 | 第 3 次 critical、force-finish=1；禁止顺序第 4 次 | unit + integration |
+| P-RF-02 | P/B | description 不同，其余命令和失败相同 | metadata 不影响参数身份 | unit |
+| N-RF-01 | N | 同 bash 但 command 不同 | 不熔断；禁止按工具名误杀 | unit |
+| N-RF-02 | N/B | 同命令但失败内容/嵌套 data 不同 | 不熔断；禁止因丢字段假阳性 | unit |
+| N-RF-03 | N | 成功重复或失败→成功→失败 | 不熔断 | unit |
+| B-RF-01 | B | repr/dict/JSON/exit code/exception | 等价失败稳定签名；不同失败可区分 | parameterized unit |
+| S-RF-01 | S/R | before/after invoke 与异常清理 | 新 invoke 为空；无 history/lock/tripped 泄漏 | unit |
+| T-RF-01 | T | 第 3 次 after-tool 后模型尝试继续 | 顺序第 4 次 executor=0；并行同批限制记录为 gap | integration |
+| C-RF-01 | C/I | conversation A/B 交错 | 互不累计、互不 force-finish | unit |
+| F-RF-01 | F | guard disabled | 行为与旧版一致、零 force-finish | unit/adapter |
+| F-RF-02 | F/K | enabled + 自定义阈值 / 旧配置缺字段 | 阈值精确；默认策略可预测 | config/adapter |
+| X-RF-01 | X | scripted model、fake tool、Gateway processing | executor=3、单一终态、processing=false；正常工具/interrupt 回归通过 | integration/regression |
+
+#### Commands and exact results
+
+- 本 checkpoint 只固定开发前定义、inventory 和 oracle；尚无 candidate 或通过结果。实现后必须先跑目标 rail/config/adapter tests，再跑 AgentServer、interrupt、Live Voice 相关回归、Ruff、diff-check，并在 immutable candidate SHA 上统一复跑。
+
+#### Remaining gaps, manual evidence and replacement plan
+
+- 单进程硬资源限制和同一模型响应的并行工具批次不由本切片解决；进入正式交付前必须继续实现和测试。Gate 3 日期语料改成 `YYYY-MM-DD` 只隔离已知 Git 平台缺陷，不替代熔断。
+- 同 conversation 的真正重叠 invoke 若 SDK 不提供稳定 invoke identity，必须在实现后评估为已覆盖或明确 gap；不得用不同 conversation 的测试冒充。
 
 ### 当前 Post-V0 foundation 自动化和构建
 
@@ -161,7 +237,7 @@
 
 ### V0 独立验收轨
 
-1. 继续从 detached `2c700934` 独立目录执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)，清除 Post-V0 flags；累计开发分支、Foundation 和 stash 备份不混入 V0 证据。该轨道可由用户独立执行，不改变下一开发切片。
+1. 先在 detached `d4c3e32a` 独立目录完成 D-037 熔断、tests 和新 Candidate；重跑 Gate 0/1 后停止，让用户调整模型配置。之后只从新 Candidate 的全新 Session 重跑 Gate 3，不从失败 Turn 4 续算；累计 Foundation 和 stash 不混入 PASS 证据。
 
 ### Post-V0 开发轨
 

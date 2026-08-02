@@ -3,19 +3,19 @@
 - 快照日期：2026-08-02
 - 开发分支：`hx/0731_live_voice_ux`
 - 共享远端：`agtai`（`https://github.com/agtai/jiuwenswarm.git`）
-- V0 核心实现提交：`346f802a`；当前已推送 V0 Candidate 恢复点：`2c700934aa0024a7ab229644bf15934e9e8170e7`
-- 权威 V0 恢复点：`2c700934`；SHA/恢复点永久固定且不随 Post-V0 累计提交移动；当前仍是 Candidate，只有 Gate 0–6 全部 PASS 后同一 SHA 的状态才可改为 Released / 已冻结
-- 当前阶段：V0 Candidate 已提交并推送，但完整真机 Gate 尚未通过，因此还不是 V0 Released / 已冻结
+- V0 核心实现提交：`346f802a`；最近候选 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；新 Candidate SHA=`TBD`
+- 当前权威事实：`d4c3e32a` 是失败候选历史，不再是待继续放行的目标；D-037 要求先加入相同确定性失败熔断并建立新 SHA
+- 当前阶段：完成 D-032 开发前 checkpoint → 实现/测试熔断 → 建立新 Candidate → 自动化 Gate 0/1；在真人 Gate 3 前停止，等待用户调整模型配置
 - stash 状态：`7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply；它只在创建它的原机器上作为额外保险存在。新 clone 没有该 stash 是正常且正确的，任何机器都不要重复 apply/pop/drop
-- 当前状态：Task Foundation 代码和历史回归已落地（后端 `3da101cf`、前端 `42e76d30`）；D-032 模块测试闭环 Gate 已接受，D-031 必须先完成开发前场景/test 回顾再编码。V0 继续从 `2c700934` 的独立 detached checkout/worktree 验收
+- 当前状态：Task Foundation 已落地；V0 Gate 3 的 Windows Git OOM 被模型放大为 11 次 tool call / 10 次失败，已取消且工作区 clean。实现范围和完整 test matrix 见 STATUS 的 D-037 checkpoint
 - 文档恢复基线：`7d76e9d9bd8796dd92a27034cfdbd8903e1adf53` 已推送，并通过 agtai 的 LFS-safe fresh-clone、干净状态、`0/0` divergence、V0 祖先、文档入口及 lockfile 结构冒烟；这是 Git/交接可恢复证据，不代表私有配置、依赖安装或真实语音已在新机器验收
 
 ## 接手后先做什么
 
 1. 按 [README.md](README.md#新机器五分钟恢复) 使用 `GIT_LFS_SKIP_SMUDGE=1` clone 正确分支；当前 agtai LFS 缺少一个与 Live Voice 无关的视频对象，普通 smudge 会让 checkout 失败。
-2. 执行 `git pull --ff-only`、`git status --porcelain`、`git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux` 和 V0 祖先检查。必须是干净工作区、差异 `0 0`、`2c700934` 仍为祖先。
+2. 执行 `git pull --ff-only`、`git status --porcelain`、`git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux` 和 V0 祖先检查。必须是干净工作区、差异 `0 0`、`d4c3e32a` 仍为祖先。
 3. 按 [README.md](README.md#新-codex-会话的阅读顺序) 读取当前事实集。普通续作不读取 stash 交接单来执行操作；只有历史取证/灾难恢复才打开它。
-4. 选择轨道：V0 验收只在 detached `2c700934` + 独立 `JIUWENSWARM_DATA_DIR` 中执行；Post-V0 开发只在累计分支进行，D-031 必须先提交 D-032 开发前 test closure checkpoint。
+4. 选择轨道：D-037 修复从 detached `d4c3e32a` 基线建立新 Candidate；在新 SHA 和自动 Gate 0/1 写回前不继续真人 V0 Gate。之后只在 detached 新 Candidate + 独立 `JIUWENSWARM_DATA_DIR` 中验收；Post-V0 开发只在累计分支进行。
 5. 需要构建或运行时从 `uv.lock` / `package-lock.json` 重建依赖，不复制 `.venv` 或 `node_modules`；需要真实 Agent/语音时再从受控渠道补齐私有配置、项目注册、浏览器权限和设备。
 
 本目录是 Git 中的接续入口。不要依赖旧对话、未提交文件、某台机器的 `.codex` / `.agent` 目录或本机 stash 恢复项目事实。Task Foundation 已由 `3da101cf`、`42e76d30` 和后续文档提交进入共享分支；新机器只认 fetch/pull 后的 Git 事实。
@@ -33,7 +33,7 @@
 
 因此“无旧对话继续开发”可以做到；“pull 后无需任何机器配置就得到相同真实语音效果”做不到，也不应通过提交密钥、用户数据或浏览器 profile 来伪造。
 
-## `2c700934` V0 baseline 已经能做什么
+## `d4c3e32a` V0 baseline 已经能做什么
 
 - Live Voice 只在 Agent 模式开放；final transcript 在 Agent processing 时复用真实 `supplement`，空闲或只剩 TTS 时复用普通 `chat.send`，interim 只有显示副作用。
 - Web Speech 的浏览器实例自然结束不会直接结束用户 Turn；约 4 秒早退可以在同一逻辑 capture 中续启并合并尾段，手动停止不会被 retry 复活。
@@ -67,13 +67,17 @@
 
 ## 2026-08-01 已完成的验证
 
-### `2c700934` V0 baseline 自动化
+### `d4c3e32a` V0 baseline 自动化
 
 - Live Voice 纯逻辑：**47/47**（core 9、turn lifecycle 6、TTS 10、message gate 7、quarantine 6、speech lifecycle 7、TTS owner 2）。
 - 相关既有回归：**22/22**（stream delta 7、session creation 8、chat store/settle 7）。
 - 全前端 TypeScript、Vite production build（4490 modules）、Python `ruff` 和 `git diff --check` 通过。
 
-上述 47/47、22/22 和 4490 modules 是 V0 baseline 的历史验收前记录。
+上述 47/47、22/22 和 4490 modules 是父提交和新候选共享 V0 实现的历史验收前记录；相关固定自动化、TypeScript、build、Ruff 和 diff-check 已在 `d4c3e32a` 重新执行并 PASS。
+
+### 2026-08-02 Gate 1 Attempt 1
+
+父候选 `2c700934` 因未忽略 `.agent_history/` 在 Gate 1 FAIL；`d4c3e32a` 修正工作区边界后 Gate 0/1 与 Gate 2 PASS，但 Gate 3 Turn 3 又因 Windows Git OOM 和相同失败重复执行而 FAIL。两次 attempt 都永久保留；当前执行 D-037 新 Candidate，不继续旧 Gate 3 会话。
 
 ### 当前 Post-V0 foundation 自动化
 
@@ -177,14 +181,16 @@
 
 ## 用户介入后的 V0 独立验收流程
 
-不要改写、stash 或 reset 当前 Post-V0 开发分支。先确认 foundation 已 commit/push，再从不可变 SHA 创建一个独立 checkout/worktree：
+不要改写、stash 或 reset 当前 Post-V0 开发分支。先确认 D-037 新 Candidate 和证据文档已 commit/push，再从该不可变 SHA 创建独立 checkout/worktree；下面的 `TBD` 保护会阻止误用历史失败候选：
 
 ```powershell
 git status --short --branch
 git rev-parse HEAD
 git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
 $env:GIT_LFS_SKIP_SMUDGE = '1'  # 必须在执行 worktree add 的当前终端重设
-git worktree add --detach ..\live-voice-v0-acceptance 2c700934aa0024a7ab229644bf15934e9e8170e7
+$newV0Sha = 'TBD'
+if ($newV0Sha -eq 'TBD') { throw 'D-037 new Candidate has not been recorded yet' }
+git worktree add --detach ..\live-voice-v0-acceptance $newV0Sha
 $v0DataDir = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent (Get-Location)) ('jiuwenswarm-data-live-voice-v0-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))))
 if (Test-Path -LiteralPath $v0DataDir) { throw "Refusing to reuse V0 data dir: $v0DataDir" }
 New-Item -ItemType Directory -Path $v0DataDir -ErrorAction Stop | Out-Null
@@ -192,7 +198,7 @@ $env:JIUWENSWARM_DATA_DIR = (Resolve-Path -LiteralPath $v0DataDir).Path
 $env:JIUWENSWARM_DATA_DIR  # 记录并在每个新后端终端重新设置
 ```
 
-上例目录名和数据目录可按机器调整，但都必须是明确的绝对隔离路径。只在新代码目录确认 `HEAD=2c700934...`、工作区干净；在隔离数据目录重新初始化并从受控渠道配置模型/project，清除两个 Post-V0 环境变量后执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。不要复用累计开发的 Session、Task 或 code-project 绝对路径。如果 Gate 失败，不得写 `Released` 或冻结；失败证据回写当前开发分支的文档，不在 detached 验收目录继续产品开发。
+上例目录名和数据目录可按机器调整，但都必须是明确的绝对隔离路径。只在新代码目录确认 `HEAD=$newV0Sha`、工作区干净；在隔离数据目录重新初始化并从受控渠道配置模型/project，清除两个 Post-V0 环境变量后执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。不要复用累计开发的 Session、Task 或 code-project 绝对路径。如果 Gate 失败，不得写 `Released` 或冻结；失败证据回写当前开发分支的文档，不在 detached 验收目录继续产品开发。
 
 只有 V0 Gate 全部通过后，才在当前累计分支合并验收证据并明确标记 Released/freeze；不得把 Post-V0 foundation 代码算进 V0 证据。当前 foundation 已可从共享分支完整重建；原 stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已经 apply，仅作为本机额外保险保留，正常开发和 V0 验收都不要重复 apply/pop/drop，是否删除由用户明确决定。
 

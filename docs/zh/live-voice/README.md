@@ -4,8 +4,8 @@
 
 - 本次文档总审计：2026-08-02
 - 共享开发分支：`hx/0731_live_voice_ux`，跟踪 `agtai/hx/0731_live_voice_ux`
-- 不可变 V0 Candidate：`2c700934aa0024a7ab229644bf15934e9e8170e7`，仍未 Released / 冻结
-- 当前 Post-V0：Task Foundation 已落地；D-032 已生效；D-031 只能先完成开发前 test closure checkpoint，之后才能写语义代码
+- 最近 V0 Candidate：`d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL，现保留为失败历史；D-037 新 Candidate SHA=`TBD`
+- 当前动作：先按 D-032 checkpoint 实现/测试相同确定性工具失败熔断并建立新 Candidate；真人重跑 Gate 3 前停止，让用户调整模型配置
 
 ## 新机器五分钟恢复
 
@@ -20,7 +20,7 @@ git status --short --branch
 git status --porcelain
 git rev-parse HEAD
 git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
-git merge-base --is-ancestor 2c700934aa0024a7ab229644bf15934e9e8170e7 HEAD
+git merge-base --is-ancestor d4c3e32aa34a4d26b346cdf0396788d39930cd6b HEAD
 $LASTEXITCODE
 ```
 
@@ -65,7 +65,7 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 
 版本能力累计保留；共享协议和 ownership 边界冻结后，P1/P2/P3 的部分工程可以并行。后台任务的 A→B 更新需要完整 P3 的 update/provide-input，或显式 cancel/create；不能把 P3α 的状态查询冒充任务更新。
 
-`2c700934aa0024a7ab229644bf15934e9e8170e7` 的 SHA/精确恢复点永久保留；当前状态仍是**尚未放行**的 V0 Candidate，只有完整 V0 Gate 通过后同一 SHA 才能标记 Released / 已冻结。D-022 的临时 dirty 窗口已经由 D-030 结束：stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已经 apply，原 stash 只作为额外备份保留；Post-V0 foundation 按正常 Git 流程审阅、commit、push，稍后从 `2c700934` 的独立 checkout/worktree 验收 V0，不再反复 stash 当前开发分支。新机器应从共享分支 pull 已推送事实，不能再次 apply 这份本机 stash。
+`d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 保留为精确失败恢复点：其父 `2c700934...` 因 `.agent_history/` 污染在 Gate 1 FAIL；它自身的 Gate 0–2 PASS，但 Gate 3 Turn 3 暴露 Git for Windows 非 ASCII 日期格式 OOM 和重复确定性失败放大器，因此不能 Released。当前从该 SHA 做 D-037 最小熔断并建立新 Candidate；旧 stash 只保留为本机备份，新机器只认共享 Git。
 
 当前 foundation 已把任务边界推进到：服务端对 `schedule.list/status/cancel/logs/delete` 执行单用户 request owner + project 一致性 scope（Web 身份来自请求，不是生产鉴权）；同一进程、同一 JSON store 路径用共享锁和 ledger 保证 create command 幂等；前端为一次 committed mutation 固定 command ID，只接受严格 exact-key 对账，允许任务在请求期间从 pending 漂移到后续真实状态，并显示真实 task card。它仍不提供跨进程一致性、exactly-once、D1/D2 或持续后台结果监控。稳定句与任务分别由 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH=true`、`VITE_FEATURE_LIVE_VOICE_TASK_DEMO=true` 开启，二者默认关闭。
 
@@ -79,7 +79,7 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 | 有效决策 | [DECISIONS.md](DECISIONS.md) | D-001 起的 Accepted/Superseded 取舍 | 做范围或技术选择前；新取舍追加，不静默改历史 |
 | 当前路线 | [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) | Post-V0 优先级、D-031，以及 D-032 唯一详细测试闭环规范/模板 | Post-V0 规划和每个模块开发前后 |
 | V0 范围 | [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md) | V0 定义、shortcut ledger；D1–D10 日程是历史原始计划 | 判断 V0 shortcut 或修改 V0 边界时 |
-| V0 Gate | [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) | detached `2c700934` 的 Release Gate、detached-safe 语料和证据模板 | 只在 V0 验收轨使用 |
+| V0 Gate | [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) | `d4c3e32a` 失败历史、D-037 新 Candidate 的 Release Gate、detached-safe 语料和证据模板 | 只在 V0 验收轨使用 |
 | 运行操作 | [E2E_RUNBOOK.md](E2E_RUNBOOK.md) | 依赖、私有状态边界、隔离数据目录、启动、健康和真实 E2E | 启动任何服务或做真机验证前 |
 | 展示操作 | [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) | detached V0 候选的成功率优先展示脚本和退场方案 | 彩排/演示前 |
 | 历史证据 | [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md) | D-022/D-030 stash 历史、Foundation 取证和本机灾难恢复说明 | 普通续作不读；仅取证/灾难恢复 |
@@ -100,7 +100,7 @@ Windows `core.autocrlf=true` checkout 会把 LF 变为 CRLF，因此直接对工
 1. 本文件：恢复目标、文档权威和不可恢复边界。
 2. [STATUS.md](STATUS.md)：确认 Git 对应的实际进度、证据和下一步。
 3. [HANDOFF.md](HANDOFF.md)：执行接手检查，确认没有沿用旧聊天或本机 stash。
-4. [DECISIONS.md](DECISIONS.md)：至少读 D-018～D-034 和当前任务涉及的更早决策。
+4. [DECISIONS.md](DECISIONS.md)：至少读 D-018～D-036 和当前任务涉及的更早决策。
 5. [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：读当前优先级；开发模块前执行 D-032/§3.1。
 6. [TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)：确认 V0 shortcut 和正式替换边界。
 
@@ -111,7 +111,7 @@ Windows `core.autocrlf=true` checkout 会把 LF 变为 CRLF，因此直接对工
 - 改长期架构、P1/P2/P3、协议、ownership、取消、持久化或生产 Gate：完整读不可变 [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md)。
 - 只有调查历史 Foundation/stash 或本机灾难恢复时才读 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)；普通新 clone 不需要它执行任何 stash 操作。
 
-新 Session 在修改文件前应能准确复述：共享分支与 `2c700934` 的关系、V0 为何尚未 Released、Foundation 能做/不能做什么、D-031 是下一窄切片、D-032 为什么阻止直接编码、D-033/D-034 的鉴权与同页恢复边界，以及哪些私有运行条件不能从 Git 恢复。答不出来时继续阅读，不开始实现。
+新 Session 在修改文件前应能准确复述：共享分支与 `2c700934 → d4c3e32a → D-037 新 Candidate(TBD)` 的关系；两次失败分别证明了什么；为什么 Gate 3 不能只改题做绿；D-032 checkpoint/test matrix；Foundation、D-033/D-034 和私有运行条件边界。答不出来时继续阅读，不开始实现。
 
 ## 信息冲突时的优先级
 
@@ -135,7 +135,7 @@ Windows `core.autocrlf=true` checkout 会把 LF 变为 CRLF，因此直接对工
 - 对每个受影响模块完成 D-032 开发后回顾，在 `STATUS.md` 更新 test inventory、每项 test 的 why、scenario 覆盖、exact tested SHA、精确命令、结果和 gap；未满足闭环 Gate 时如实标记 `PARTIAL` 或 `BLOCKED`。
 - 如果改变了范围或技术选择，更新 `DECISIONS.md`。
 - 如果引入了新的临时简化，在 `TWO_WEEK_DEMO.md` 的 Shortcut Ledger 中记录替换计划。
-- 按 D-030 正常审阅、提交并推送 Post-V0 代码与文档；仅保存在本地、stash 或对话中的信息无法跨机器恢复。V0 验收使用 `2c700934` 的独立 checkout/worktree，不通过反复 stash 当前开发分支实现。
+- 按 D-030 正常审阅、提交并推送 Post-V0 代码与文档；仅保存在本地、stash 或对话中的信息无法跨机器恢复。D-037 修复以 `d4c3e32a` 为基线建立新 Candidate，后续 V0 验收只使用新 SHA 的独立 checkout/worktree，不通过反复 stash 当前开发分支实现。
 - 不在文档中写入密钥、访问令牌、本机临时目录或仅某台机器可用的绝对路径。
 
 ## 关键代码入口
@@ -202,7 +202,7 @@ git diff --check
 
 上述 Ruff 命令只检查本批 Foundation 的十个 Python 代码/测试路径；`E402` 与 `E712` 的忽略仅用于保留这些文件中不属于本 diff 的既有基线问题，出处与复核口径见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)，不能扩展成全仓 lint 豁免。
 
-`2c700934` V0 baseline 的历史结果是七组 Live Voice 纯逻辑 **47/47**、相关回归 **22/22** 和 Vite build 4490 modules；固定 Windows/Chrome 环境真实贯通一次“麦克风 → Agent → Terminal Tool → 完整 TTS → 自动回听”。这些仍不能替代连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示的 V0 放行验收。
+`d4c3e32a` V0 Candidate 继承父提交 `2c700934` 的 Live Voice 代码；七组 Live Voice 纯逻辑 **47/47**、相关回归 **22/22**、TypeScript、Vite build、Ruff 和 diff-check 已在新候选 Gate 1 通过，固定 Windows/Chrome 环境也曾真实贯通一次“麦克风 → Agent → Terminal Tool → 完整 TTS → 自动回听”。2026-08-02 Gate 1 Attempt 1 虽然真实走完 `chat.send → chat.tool_call → chat.tool_result → chat.final`，但返回 `2c700934,1`，因运行时生成 `.agent_history/` 导致工作区不干净，不能计为 PASS；修复后的新候选再次走完真实主链并返回 `d4c3e32a,0`，当前 Gate 0–2 已 PASS。上述证据仍不能替代连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示的 V0 放行验收。
 
 foundation review 修复合入时的历史确认结果是：Live Voice 前端精确测试 **155/155**，chatStore marker 与相关回归 **24/24**，`tsc --noEmit` 通过，Vite build **4494 modules transformed**；Python contract + TaskStore/service + AgentServer schedule request + Web handler 统一精确回归 **226/226**。155 与 24 两组有 9 项重叠，不能相加；Git 保存测试代码、命令和结果记录，但未保存 JUnit 产物，新机器只有实际复跑后才能声称本机通过。后端 `3da101cf`、前端 `42e76d30` 已落地；自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。详细能力和边界见 [STATUS.md](STATUS.md)、[HANDOFF.md](HANDOFF.md) 与 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。
 

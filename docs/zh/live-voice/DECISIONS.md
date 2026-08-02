@@ -345,3 +345,26 @@
 - 原因：这是不扩大为完整 P3 的最窄诚实边界，同时让 D-031 的正向、反向、竞态和恢复测试有确定预期。
 - 影响：D-031 代码开始前，以上语义必须进入 `STATUS.md` 的 D-032 pre-review inventory/matrix 并形成 checkpoint commit；当前文档决策不表示实现已完成。
 - 重新评估条件：持久 command journal、TaskEvent store/subscription 或版本化 WorkProgress contract 提前落地。
+
+## D-036 用干净运行时边界的新提交取代旧 V0 Candidate
+
+- 日期：2026-08-02
+- 状态：Accepted（取代 D-022/D-030/D-032 中仅把 `2c700934` 作为当前 V0 Candidate/放行目标的部分；这些决策的历史正文、stash 历史、独立验收轨、测试闭环和 Post-V0 正常提交边界保留原文）
+- 背景：Gate 1 Attempt 1 在 detached `2c700934aa0024a7ab229644bf15934e9e8170e7` 上真实完成 `chat.send → chat.tool_call → chat.tool_result → chat.final`，但 Agent/Terminal Tool 返回 `2c700934,1`。JiuwenSwarm runtime 在仓库根生成旧候选未忽略的 `.agent_history/`，使工作区从 clean 变为 dirty；该 attempt 必须判定 FAIL，不能因 Agent/Tool 链真实完成而计作 PASS。
+- 决策：新 V0 Candidate 固定为 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b`。它的父提交是 `2c700934...`，唯一 diff 是 `.gitignore` 新增三行以忽略 JiuwenSwarm runtime file operation logs 的 `.agent_history/`；不包含 Post-V0 foundation 或功能变化。所有当前 Gate、展示、冷 clone 和新会话期望统一使用短 SHA `d4c3e32a` 与 dirty count `0`。旧 attempt 的 `2c700934,1` 作为失败证据永久保留，不得改写成通过。
+- 验证：新候选 checkout 已恢复 clean；Gate 0 已 PASS；Gate 1 固定自动化、TypeScript、Vite build、Ruff、`git diff --check` 与真实文字 Agent/Terminal Tool smoke 已全部 PASS，真实链路返回 `d4c3e32a,0` 且结束后仍 clean。Gate 2–6 尚未因此自动通过。
+- 原因：V0 的工具 smoke 本身会运行 JiuwenSwarm；如果正常运行必然污染 Git 工作区，则“真实 Agent/Tool + 工作区 count 0”的验收 oracle 无法在同一候选上成立。将机器运行日志显式排除在源码工作树之外，是最小且可审查的修复，不改变 Live Voice 行为。
+- 影响：`2c700934` 仍是新候选的直接父提交和 Attempt 1 历史身份，但不再是当前放行候选。V0 继续在独立 detached `d4c3e32a` checkout、独立 `JIUWENSWARM_DATA_DIR` 和清除 Post-V0 flags 的环境中执行；只有 Gate 0–6 全部 PASS 后才可标记 Released / 已冻结。累计 Post-V0 分支、Foundation、stash 与 V0 证据继续隔离。
+- 重新评估条件：新候选再次因仓库内运行时产物或其他可复现缺陷无法保持干净，或完整 Gate 发现必须改变 V0 行为而不仅是运行边界。
+
+## D-037 Gate 3 重复确定性失败必须先建立新 Candidate
+
+- 日期：2026-08-02
+- 状态：Accepted（V0 blocker 的最小安全修复；不扩成完整 P3）
+- 背景：Gate 3 Attempt 1 的 Turn 3 触发 Git for Windows 非 ASCII 日期格式 OOM；同一用户 Turn 只有一次 `chat.send`，但模型在每个错误结果后重新选择同一 bash 命令，形成 11 次 tool call / 10 次相同失败。现有 CircuitBreaker 默认关闭且阈值过晚。
+- 决策：`d4c3e32a` 保留为 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL 的历史 Candidate，不能 Released。必须从该 SHA 建立新 Candidate：在同一 invoke 内，对同 tool name、去 metadata 后同参数、同完整失败签名且 `has_error=true` 的**顺序**重试，第 3 次完成后只 force-finish 一次；默认启用并支持显式关闭/阈值配置。失败签名必须覆盖结构化 nested data 与异常路径，不能复用会丢字段的普通结果哈希。
+- 决策：Gate 3 日期语料同时改成明确 `YYYY-MM-DD` 的跨平台安全 oracle，但改题不是 guard 的替代品。代码/tests/config 形成新 immutable SHA 后重跑 Gate 0/1；真人 Gate 3 前按用户要求停止，让用户先调整模型配置。
+- 非目标与缺口：本切片不修 Git、不提供任意子进程硬内存/CPU/超时沙箱、不追溯取消同一模型响应中已经并行发出的工具调用，也不降低全局 `max_iterations`。这些是正式交付前继续闭环的资源治理项。
+- 原因：重复执行已知高资源失败不增加 Live Voice 证据；低阈值精确熔断能解决本次被证明的放大器，同时把更宽的生产安全缺口如实保留。
+- 影响：实现前必须按 D-032 提交并推送 `STATUS.md` 的模块定义、test inventory 和 P/N/B/S/T/C/R/I/F/K/X 矩阵；实现后再做完整回顾、immutable candidate 复跑和证据提交。Gate 3–6 不得由本决策自动通过。
+- 重新评估条件：项目提供经过验证的进程级资源硬限制和并行批次取消，或上游 Agent/Tool contract 改变顺序回调与 force-finish 语义。
