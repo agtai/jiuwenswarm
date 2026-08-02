@@ -32,23 +32,11 @@ import {
   GoalAction,
   Message,
 } from '../types';
-import {
-  ensureSessionRuntimes,
-  useChatStore,
-  useTodoStore,
-  useGoalStore,
-  useSessionStore,
-  useHarnessStore,
-  useWorkspaceStore,
-  useCronStore,
-} from '../stores';
+import { ensureSessionRuntimes, useChatStore, useTodoStore, useGoalStore, useSessionStore, useHarnessStore, useWorkspaceStore, useCronStore } from '../stores';
 import { normalizeTaskEvent } from '../stores/teamTaskNormalize';
 import { webClient, requestGoalAction, sendGoalStreamCommand } from '../services/webClient';
 import { createStreamDeltaBatcher } from '../services/streamDeltaBatcher';
-import {
-  createSupplementOutputQuarantine,
-  shouldBeginSupplementOutputQuarantine,
-} from '../services/supplementOutputQuarantine';
+import { createSupplementOutputQuarantine, shouldBeginSupplementOutputQuarantine } from '../services/supplementOutputQuarantine';
 import {
   fetchTtsAudio,
   playAudioBase64,
@@ -64,24 +52,13 @@ import {
   parseTimestampToMs,
   timestampMsToIso,
 } from '../utils';
-import {
-  findOverlappingFileExecutionEvent,
-  mergeFileDownloadItems,
-} from '../utils/fileDownloadDedup';
-import {
-  beginServerTtsOutput,
-  canCompleteServerTtsOutput,
-} from '../utils/ttsOutputOwnership';
-import {
-  normalizeToolCallPayload,
-  normalizeToolResultPayload,
-  normalizeToolUpdatePayload,
-} from '../features/tool-events/toolEventNormalizer';
-import {
-  findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn,
-} from '../features/teamLeaderMessages';
+import { findOverlappingFileExecutionEvent, mergeFileDownloadItems } from '../utils/fileDownloadDedup';
+import { beginServerTtsOutput, canCompleteServerTtsOutput } from '../utils/ttsOutputOwnership';
+import { normalizeToolCallPayload, normalizeToolResultPayload, normalizeToolUpdatePayload } from '../features/tool-events/toolEventNormalizer';
+import { findActiveTeamLeaderMessage as findActiveTeamLeaderMessageInTurn } from '../features/teamLeaderMessages';
 import { buildGoalCompletedContent } from '../components/GoalBar/goalCompletedMessage';
 import { stripUploadDocumentBlocks } from '../utils/documentMessage';
+import { FEATURE_LIVE_VOICE_STREAMING_SPEECH } from '../featureFlags';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -147,8 +124,8 @@ function scheduleAfterTurnSettles(sessionId: string, run: () => void): void {
     run();
   };
   const unsubscribe = useChatStore.subscribe(
-    (state) => state.runtimes[sessionId]?.isProcessing ?? false,
-    (isProcessing) => {
+    state => state.runtimes[sessionId]?.isProcessing ?? false,
+    isProcessing => {
       if (!isProcessing) finish();
     }
   );
@@ -172,12 +149,7 @@ function scheduleAfterTurnSettles(sessionId: string, run: () => void): void {
  *    也没有这两个字段），如果直接落库会让 GoalBar 从"有后端计时"退回旧的 fallback 计时口径，
  *    暂停后又开始跳字。这里同一个 goal_id 下如果新数据缺这两个字段、旧数据有，就沿用旧值。
  */
-function applyIncomingGoal(
-  sessionId: string,
-  goal: GoalRecord | null,
-  hideTimerMap: Map<string, number>,
-  lastGoalEventAtMap?: Map<string, number>
-): void {
+function applyIncomingGoal(sessionId: string, goal: GoalRecord | null, hideTimerMap: Map<string, number>, lastGoalEventAtMap?: Map<string, number>): void {
   const goalStore = useGoalStore.getState();
   // 任何一次成功落地（不管是 get 的响应，还是 goal.snapshot/goal.updated 事件）都说明查询链路
   // 是通的，把"多次 get 失败"攒出来的 unknown 态收敛回 ok——见 goalStore.ts queryStatus 注释。
@@ -206,16 +178,11 @@ function applyIncomingGoal(
   // 避免一元 RPC 的不完整快照把 GoalBar 计时打回旧口径。active_started_at 跟着 status 走——
   // 非 active 直接钉死 null（不管新数据有没有带），active 且新数据没带时才沿用旧值。
   const prevGoalForTiming = goalStore.runtimes[sessionId]?.goal;
-  if (
-    goal.time_used_seconds === undefined &&
-    prevGoalForTiming?.goal_id === goal.goal_id &&
-    prevGoalForTiming.time_used_seconds !== undefined
-  ) {
+  if (goal.time_used_seconds === undefined && prevGoalForTiming?.goal_id === goal.goal_id && prevGoalForTiming.time_used_seconds !== undefined) {
     goal = {
       ...goal,
       time_used_seconds: prevGoalForTiming.time_used_seconds,
-      active_started_at:
-        goal.status === 'active' ? (goal.active_started_at ?? prevGoalForTiming.active_started_at ?? null) : null,
+      active_started_at: goal.status === 'active' ? (goal.active_started_at ?? prevGoalForTiming.active_started_at ?? null) : null,
     };
   }
 
@@ -332,7 +299,7 @@ async function performGoalGet(
         useGoalStore.getState().setPendingAction(sessionId, null);
         return;
       }
-      await new Promise((resolve) => window.setTimeout(resolve, GOAL_GET_RETRY_DELAYS_MS[attempt]));
+      await new Promise(resolve => window.setTimeout(resolve, GOAL_GET_RETRY_DELAYS_MS[attempt]));
     }
   }
 }
@@ -346,12 +313,12 @@ async function performGoalGet(
 export function mergePersistedGoalCompletionMessages(sessionId: string, messages: Message[]): Message[] {
   const persisted = useGoalStore.getState().getCompletedGoalMessagesForSession(sessionId);
   if (persisted.length === 0) return messages;
-  const existingIds = new Set(messages.map((m) => m.id));
-  const missing = persisted.filter((record) => !existingIds.has(record.id));
+  const existingIds = new Set(messages.map(m => m.id));
+  const missing = persisted.filter(record => !existingIds.has(record.id));
   if (missing.length === 0) return messages;
   const merged: Message[] = [
     ...messages,
-    ...missing.map((record) => ({
+    ...missing.map(record => ({
       id: record.id,
       role: 'assistant' as const,
       content: record.content,
@@ -373,7 +340,7 @@ export function stampGoalObjectiveMessages(sessionId: string, messages: Message[
   if (objectiveTexts.length === 0) return messages;
   const objectiveTextSet = new Set(objectiveTexts);
   let changed = false;
-  const stamped = messages.map((message) => {
+  const stamped = messages.map(message => {
     if (message.role !== 'user' || message.isGoalObjectiveMessage) return message;
     if (!objectiveTextSet.has(message.content)) return message;
     changed = true;
@@ -404,9 +371,7 @@ function pickString(...values: unknown[]) {
 function resolveInterruptResumeMode(sessionId: string): AgentMode {
   const sessionStore = useSessionStore.getState();
   const session =
-    sessionStore.currentSession?.session_id === sessionId
-      ? sessionStore.currentSession
-      : sessionStore.sessions.find((item) => item.session_id === sessionId);
+    sessionStore.currentSession?.session_id === sessionId ? sessionStore.currentSession : sessionStore.sessions.find(item => item.session_id === sessionId);
   if (session?.team_name?.trim()) return 'team';
   return normalizeAgentMode(sessionStore.runtimes[sessionId]?.mode);
 }
@@ -465,11 +430,7 @@ function getShutdownMemberFromToolCall(toolCall: ToolCall): string | undefined {
   if (toolCall.name !== 'shutdown_member') {
     return undefined;
   }
-  return pickString(
-    toolCall.arguments.member_name,
-    toolCall.arguments.member_id,
-    toolCall.arguments.name
-  );
+  return pickString(toolCall.arguments.member_name, toolCall.arguments.member_id, toolCall.arguments.name);
 }
 
 function getShutdownMemberFromToolResult(toolResult: ToolResult): string | undefined {
@@ -507,38 +468,20 @@ interface UseWebSocketOptions {
 interface UseWebSocketReturn {
   isConnected: boolean;
   connectionState: WebConnectionState;
-  request: <T = unknown>(
-    method: string,
-    params?: Record<string, unknown>,
-    options?: WebRequestOptions
-  ) => Promise<T>;
+  request: <T = unknown>(method: string, params?: Record<string, unknown>, options?: WebRequestOptions) => Promise<T>;
   persistMedia: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   persistDocuments: (content: string, sessionId: string, mediaItems: MediaItem[]) => Promise<PersistMediaResponse>;
   sendMessage: (content: string, sessionId: string, mediaItems?: MediaItem[]) => Promise<boolean>;
   sendStructuredChatContent: (content: unknown, sessionId: string) => Promise<void>;
-  interrupt: (
-    sessionId: string,
-    intent: InterruptIntent,
-    options?: { newInput?: string }
-  ) => Promise<void>;
+  interrupt: (sessionId: string, intent: InterruptIntent, options?: { newInput?: string }) => Promise<void>;
   pause: (sessionId: string) => Promise<void>;
   cancel: (sessionId: string) => Promise<void>;
   supplement: (sessionId: string, newInput: string) => Promise<void>;
   resume: (sessionId: string) => Promise<void>;
   switchMode: (sessionId: string, mode: AgentMode) => Promise<void>;
   disconnect: () => void;
-  sendUserAnswer: (
-    sessionId: string,
-    requestId: string,
-    answers: UserAnswer[],
-    source?: string
-  ) => Promise<void>;
-  respondActivate: (
-    sessionId: string,
-    interactionId: string,
-    action: 'accept' | 'reject',
-    feedback?: string
-  ) => Promise<void>;
+  sendUserAnswer: (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => Promise<void>;
+  respondActivate: (sessionId: string, interactionId: string, action: 'accept' | 'reject', feedback?: string) => Promise<void>;
   setGoalObjective: (sessionId: string, objective: string) => Promise<void>;
   pauseGoal: (sessionId: string) => Promise<void>;
   resumeGoal: (sessionId: string) => Promise<void>;
@@ -574,7 +517,7 @@ function toPersistedMediaRecord(item: MediaItem): Record<string, unknown> {
 }
 
 function slimPersistedMediaRecords(items: Record<string, unknown>[]): Record<string, unknown>[] {
-  return items.map((item) => ({
+  return items.map(item => ({
     type: item.type,
     filename: item.filename,
     mime_type: item.mime_type ?? item.mimeType,
@@ -585,10 +528,10 @@ function slimPersistedMediaRecords(items: Record<string, unknown>[]): Record<str
 
 function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unknown> {
   const files: Record<string, unknown> = {};
-  const images = mediaItems.filter((item) => item.type === 'image');
-  const documents = mediaItems.filter((item) => item.type === 'document');
+  const images = mediaItems.filter(item => item.type === 'image');
+  const documents = mediaItems.filter(item => item.type === 'document');
   if (images.length) {
-    files.uploaded_images = images.map((item) => ({
+    files.uploaded_images = images.map(item => ({
       filename: item.filename,
       path: item.path,
       mime_type: getMediaMimeType(item),
@@ -596,7 +539,7 @@ function buildPersistedMediaFiles(mediaItems: MediaItem[]): Record<string, unkno
     }));
   }
   if (documents.length) {
-    files.uploaded_documents = documents.map((item) => ({
+    files.uploaded_documents = documents.map(item => ({
       filename: item.filename,
       path: item.path,
       mime_type: getMediaMimeType(item),
@@ -610,9 +553,7 @@ function getSessionWorkContext(sessionId: string): Record<string, unknown> {
   const sessionStore = useSessionStore.getState();
   const workspaceStore = useWorkspaceStore.getState();
   const session =
-    sessionStore.currentSession?.session_id === sessionId
-      ? sessionStore.currentSession
-      : sessionStore.sessions.find((item) => item.session_id === sessionId);
+    sessionStore.currentSession?.session_id === sessionId ? sessionStore.currentSession : sessionStore.sessions.find(item => item.session_id === sessionId);
   const selectedProject = workspaceStore.selectedProject;
   const projectId = session?.project_id || selectedProject?.project_id || '';
   const projectDir = session?.project_dir || selectedProject?.project_dir || '';
@@ -649,10 +590,7 @@ function normalizeAgentMode(rawMode: unknown): AgentMode {
 function unsupportedEvolutionModeMessage(content: string, mode: AgentMode): string | null {
   const trimmed = content.trim();
   const isEvolutionCommand =
-    trimmed === '/evolve' ||
-    trimmed.startsWith('/evolve ') ||
-    trimmed === '/evolve_simplify' ||
-    trimmed.startsWith('/evolve_simplify ');
+    trimmed === '/evolve' || trimmed.startsWith('/evolve ') || trimmed === '/evolve_simplify' || trimmed.startsWith('/evolve_simplify ');
   if (!isEvolutionCommand || mode === 'agent' || mode === 'team') {
     return null;
   }
@@ -693,7 +631,7 @@ function eventTimestampMs(payload: Record<string, unknown>): number {
 
 function stableEventId(...parts: unknown[]): string {
   return parts
-    .map((part) => String(part ?? '').trim())
+    .map(part => String(part ?? '').trim())
     .filter(Boolean)
     .join(':')
     .replace(/[^a-zA-Z0-9:_-]+/g, '-')
@@ -731,20 +669,17 @@ function upsertHumanShareCommandFromEvent(
   }
   const teamName = getAgentRefId(payload) || 'unknown';
   const sessionRef = `team_${teamName}_session_${sessionId}`;
-  useSessionStore.getState().upsertTeamHumanShareCommand(
+  useSessionStore.getState().upsertTeamHumanShareCommand(sessionId, {
+    memberName: event.member_id,
+    displayName: event.name,
     sessionId,
-    {
-      memberName: event.member_id,
-      displayName: event.name,
-      sessionId,
-      teamName,
-      sessionRef,
-      joinCommand: `/join ${sessionRef} as ${event.member_id}`,
-      exitCommand: `/exit ${sessionRef}`,
-      status: 'pending',
-      updatedAt: event.timestamp || Date.now(),
-    },
-  );
+    teamName,
+    sessionRef,
+    joinCommand: `/join ${sessionRef} as ${event.member_id}`,
+    exitCommand: `/exit ${sessionRef}`,
+    status: 'pending',
+    updatedAt: event.timestamp || Date.now(),
+  });
 }
 
 function stringifyCompact(value: unknown): string {
@@ -771,27 +706,15 @@ function stringifyPayloadForDedup(payload: Record<string, unknown>): string {
 }
 
 function makeEventDedupKey(eventName: string, payload: Record<string, unknown>): string {
-  const payloadSessionId =
-    typeof payload.session_id === 'string' ? payload.session_id : '';
-  const payloadEventType =
-    typeof payload.event_type === 'string' ? payload.event_type : '';
+  const payloadSessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
+  const payloadEventType = typeof payload.event_type === 'string' ? payload.event_type : '';
   const payloadSnapshot = stringifyPayloadForDedup(payload);
   return `${eventName}::${payloadSessionId}::${payloadEventType}::${payloadSnapshot}`;
 }
 
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const { t } = useTranslation();
-  const {
-    provider,
-    apiKey,
-    apiBase,
-    model,
-    projectDir,
-    onConnect,
-    onDisconnect,
-    onError,
-    onConfigChanged,
-  } = options;
+  const { provider, apiKey, apiBase, model, projectDir, onConnect, onDisconnect, onError, onConfigChanged } = options;
 
   // 同步更新 ref，避免竞态条件
   // 必须在渲染阶段同步更新，否则 effect 执行之前收到的事件会被错误过滤
@@ -800,8 +723,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   // 立即同步更新，不等待 effect
 
   const [isConnected, setIsConnected] = useState(false);
-  const [connectionState, setConnectionState] =
-    useState<WebConnectionState>('idle');
+  const [connectionState, setConnectionState] = useState<WebConnectionState>('idle');
   const lastConnectSignatureRef = useRef<string>('');
   const onConnectRef = useRef(onConnect);
   const onDisconnectRef = useRef(onDisconnect);
@@ -818,9 +740,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const clearedTeamPanelSessionRef = useRef<Set<string>>(new Set());
   const teamMemberOutputEventRef = useRef<Map<string, string>>(new Map());
   const eventDedupDroppedRef = useRef<Record<string, number>>({});
-  const symphonyStatusTargetRef = useRef<Map<string, { messageId: string; baseContent: string }>>(
-    new Map()
-  );
+  const symphonyStatusTargetRef = useRef<Map<string, { messageId: string; baseContent: string }>>(new Map());
   // goal_id -> 本地"完成后自动隐藏"定时器句柄，见 applyIncomingGoal
   const goalCompletedHideTimerRef = useRef<Map<string, number>>(new Map());
   /** session_id -> 最近一次成功落地 goal.snapshot/goal.updated 的时间戳，供 1 分钟无更新兜底巡检用 */
@@ -829,23 +749,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const lastGoalGetAttemptAtRef = useRef<Map<string, number>>(new Map());
   const wasConnectedRef = useRef(false);
   const contextCompressionSummaryRef = useRef<Map<string, ContextCompressionSummary>>(new Map());
-  const pendingContextCompressionStartRef =
-    useRef<Map<string, PendingContextCompressionStart>>(new Map());
-  const pendingTeamMemberContextCompressionStartRef =
-    useRef<Map<string, PendingContextCompressionStart>>(new Map());
+  const pendingContextCompressionStartRef = useRef<Map<string, PendingContextCompressionStart>>(new Map());
+  const pendingTeamMemberContextCompressionStartRef = useRef<Map<string, PendingContextCompressionStart>>(new Map());
   const heldContextUsageSessionsRef = useRef<Set<string>>(new Set());
-  const pendingContextUsageRef = useRef<Map<string, {
-    rate: number;
-    beforeCompressed: number | null;
-    afterCompressed: number | null;
-  }>>(new Map());
+  const pendingContextUsageRef = useRef<
+    Map<
+      string,
+      {
+        rate: number;
+        beforeCompressed: number | null;
+        afterCompressed: number | null;
+      }
+    >
+  >(new Map());
   const streamDeltaBatcherRef = useRef<ReturnType<typeof createStreamDeltaBatcher> | null>(null);
   if (streamDeltaBatcherRef.current === null) {
     streamDeltaBatcherRef.current = createStreamDeltaBatcher();
   }
-  const supplementOutputQuarantineRef = useRef<
-    ReturnType<typeof createSupplementOutputQuarantine> | null
-  >(null);
+  const supplementOutputQuarantineRef = useRef<ReturnType<typeof createSupplementOutputQuarantine> | null>(null);
   if (supplementOutputQuarantineRef.current === null) {
     supplementOutputQuarantineRef.current = createSupplementOutputQuarantine();
   }
@@ -862,15 +783,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     clearAllTeamMemberContextCompressionStatus,
   } = useSessionStore();
 
-  const resolveEventSessionId = useCallback(
-    (payload: Record<string, unknown>): string | null => {
-      const payloadSessionId = getPayloadSessionId(payload);
-      if (!payloadSessionId) return null;
-      ensureSessionRuntimes(payloadSessionId);
-      return payloadSessionId;
-    },
-    []
-  );
+  const resolveEventSessionId = useCallback((payload: Record<string, unknown>): string | null => {
+    const payloadSessionId = getPayloadSessionId(payload);
+    if (!payloadSessionId) return null;
+    ensureSessionRuntimes(payloadSessionId);
+    return payloadSessionId;
+  }, []);
 
   const flushPendingStreamDelta = useCallback((sessionId: string) => {
     const streamId = useChatStore.getState().getRuntime(sessionId)?.currentStreamId;
@@ -884,54 +802,44 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     streamDeltaBatcherRef.current?.clear(streamDeltaBatchKey(sessionId, streamId));
   }, []);
 
-  const handleTtsPlayback = useCallback(
-    (sessionId: string, messageId: string, content: string) => {
-      const outputTicket = beginServerTtsOutput();
-      if (outputTicket === null) {
+  const handleTtsPlayback = useCallback((sessionId: string, messageId: string, content: string) => {
+    const outputTicket = beginServerTtsOutput();
+    if (outputTicket === null) {
+      return;
+    }
+    const sanitized = sanitizeTtsText(content);
+    if (!sanitized || sanitized.startsWith('[任务已中断]')) {
+      return;
+    }
+
+    const existing = useChatStore
+      .getState()
+      .getRuntime(sessionId)
+      ?.messages.find(msg => msg.id === messageId);
+    if (existing?.audioBase64) {
+      return;
+    }
+
+    void (async () => {
+      const versionAtStart = userInputVersionRef.current;
+      const ttsSessionId = sessionId;
+      const response = await fetchTtsAudio(sanitized, ttsSessionId && ttsSessionId !== 'new' ? ttsSessionId : undefined);
+      if (!response?.success || !response.audio_base64 || !canCompleteServerTtsOutput(outputTicket)) {
         return;
       }
-      const sanitized = sanitizeTtsText(content);
-      if (!sanitized || sanitized.startsWith('[任务已中断]')) {
+
+      useChatStore.getState().updateMessage(sessionId, messageId, {
+        audioBase64: response.audio_base64,
+        audioMime: response.audio_mime,
+      });
+
+      if (versionAtStart !== userInputVersionRef.current) {
         return;
       }
 
-      const existing = useChatStore.getState().getRuntime(sessionId)?.messages.find((msg) => msg.id === messageId);
-      if (existing?.audioBase64) {
-        return;
-      }
-
-      void (async () => {
-        const versionAtStart = userInputVersionRef.current;
-        const ttsSessionId = sessionId;
-        const response = await fetchTtsAudio(
-          sanitized,
-          ttsSessionId && ttsSessionId !== 'new' ? ttsSessionId : undefined
-        );
-        if (
-          !response?.success ||
-          !response.audio_base64 ||
-          !canCompleteServerTtsOutput(outputTicket)
-        ) {
-          return;
-        }
-
-        useChatStore.getState().updateMessage(sessionId, messageId, {
-          audioBase64: response.audio_base64,
-          audioMime: response.audio_mime,
-        });
-
-        if (versionAtStart !== userInputVersionRef.current) {
-          return;
-        }
-
-        await playAudioBase64(
-          response.audio_base64,
-          response.audio_mime || 'audio/mpeg'
-        );
-      })();
-    },
-    []
-  );
+      await playAudioBase64(response.audio_base64, response.audio_mime || 'audio/mpeg');
+    })();
+  }, []);
 
   const handleConnectionAck = useCallback(
     (payload: Record<string, unknown>) => {
@@ -952,16 +860,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     webClient.disconnect();
   }, []);
 
-  const request = useCallback(
-    async <T = unknown>(
-      method: string,
-      params?: Record<string, unknown>,
-      requestOptions?: WebRequestOptions
-    ): Promise<T> => {
-      return webClient.request<T>(method, params, requestOptions);
-    },
-    []
-  );
+  const request = useCallback(async <T = unknown>(method: string, params?: Record<string, unknown>, requestOptions?: WebRequestOptions): Promise<T> => {
+    return webClient.request<T>(method, params, requestOptions);
+  }, []);
 
   const findActiveTeamLeaderMessage = useCallback((sessionId: string) => {
     const messages = useChatStore.getState().getRuntime(sessionId)?.messages ?? [];
@@ -985,18 +886,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     }
   }, []);
 
-  const getTeamMemberContextCompressionKey = useCallback(
-    (sessionId: string, memberId: string) => `${sessionId}\u0000${memberId}`,
-    []
-  );
+  const getTeamMemberContextCompressionKey = useCallback((sessionId: string, memberId: string) => `${sessionId}\u0000${memberId}`, []);
 
-  const clearPendingTeamMemberContextCompressionStart = useCallback((sessionId: string, memberId: string) => {
-    const key = getTeamMemberContextCompressionKey(sessionId, memberId);
-    const pending = pendingTeamMemberContextCompressionStartRef.current.get(key);
-    if (!pending) return;
-    clearTimeout(pending.timer);
-    pendingTeamMemberContextCompressionStartRef.current.delete(key);
-  }, [getTeamMemberContextCompressionKey]);
+  const clearPendingTeamMemberContextCompressionStart = useCallback(
+    (sessionId: string, memberId: string) => {
+      const key = getTeamMemberContextCompressionKey(sessionId, memberId);
+      const pending = pendingTeamMemberContextCompressionStartRef.current.get(key);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      pendingTeamMemberContextCompressionStartRef.current.delete(key);
+    },
+    [getTeamMemberContextCompressionKey]
+  );
 
   const clearAllPendingTeamMemberContextCompressionStarts = useCallback(() => {
     for (const pending of pendingTeamMemberContextCompressionStartRef.current.values()) {
@@ -1005,31 +906,34 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     pendingTeamMemberContextCompressionStartRef.current.clear();
   }, []);
 
-  const resetContextCompressionTurn = useCallback((sessionId: string) => {
-    clearPendingContextCompressionStart(sessionId);
-    contextCompressionSummaryRef.current.delete(sessionId);
-    useChatStore.getState().setContextCompressionStatus(sessionId, undefined);
-  }, [clearPendingContextCompressionStart]);
-
-  const finishContextCompressionTurn = useCallback((sessionId: string) => {
-    clearPendingContextCompressionStart(sessionId);
-    const summary = contextCompressionSummaryRef.current.get(sessionId);
-    useChatStore.getState().setContextCompressionStatus(sessionId, undefined, summary && summary.count > 0 ? summary : undefined);
-  }, [clearPendingContextCompressionStart]);
-
-  const buildContextCompressionRuntimeState = useCallback(
-    (payload: ContextCompressionStatePayload): Omit<ContextCompressionRuntime, 'status'> | null => {
-      const summary = payload.summary?.trim() || '';
-      if (!summary) return null;
-      return {
-        summary,
-        operationId: payload.operation_id?.trim() || '',
-        phase: payload.phase?.trim() || undefined,
-        processor: payload.processor?.trim() || undefined,
-      };
+  const resetContextCompressionTurn = useCallback(
+    (sessionId: string) => {
+      clearPendingContextCompressionStart(sessionId);
+      contextCompressionSummaryRef.current.delete(sessionId);
+      useChatStore.getState().setContextCompressionStatus(sessionId, undefined);
     },
-    []
+    [clearPendingContextCompressionStart]
   );
+
+  const finishContextCompressionTurn = useCallback(
+    (sessionId: string) => {
+      clearPendingContextCompressionStart(sessionId);
+      const summary = contextCompressionSummaryRef.current.get(sessionId);
+      useChatStore.getState().setContextCompressionStatus(sessionId, undefined, summary && summary.count > 0 ? summary : undefined);
+    },
+    [clearPendingContextCompressionStart]
+  );
+
+  const buildContextCompressionRuntimeState = useCallback((payload: ContextCompressionStatePayload): Omit<ContextCompressionRuntime, 'status'> | null => {
+    const summary = payload.summary?.trim() || '';
+    if (!summary) return null;
+    return {
+      summary,
+      operationId: payload.operation_id?.trim() || '',
+      phase: payload.phase?.trim() || undefined,
+      processor: payload.processor?.trim() || undefined,
+    };
+  }, []);
 
   const handleContextCompressionState = useCallback(
     (sessionId: string, payload: ContextCompressionStatePayload) => {
@@ -1106,7 +1010,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     const existingMember = useSessionStore
       .getState()
       .getRuntime(sessionId)
-      ?.teamMembers.find((member) => member.member_id === candidate);
+      ?.teamMembers.find(member => member.member_id === candidate);
     return existingMember?.member_id || null;
   }, []);
 
@@ -1118,16 +1022,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       if (status === 'completed') {
         clearPendingTeamMemberContextCompressionStart(sessionId, memberId);
-        const current =
-          useSessionStore.getState().getRuntime(sessionId)?.teamMemberContextCompression[memberId]?.summary;
+        const current = useSessionStore.getState().getRuntime(sessionId)?.teamMemberContextCompression[memberId]?.summary;
         const nextSummary = {
           count: (current?.count || 0) + 1,
           summaries: [...(current?.summaries || []), runtimeState.summary],
         };
-        setTeamMemberContextCompressionStatus(sessionId, memberId, {
-          ...runtimeState,
-          status: 'completed',
-        }, nextSummary);
+        setTeamMemberContextCompressionStatus(
+          sessionId,
+          memberId,
+          {
+            ...runtimeState,
+            status: 'completed',
+          },
+          nextSummary
+        );
         return;
       }
 
@@ -1185,7 +1093,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   useEffect(() => {
     return () => {
-      pendingContextCompressionStartRef.current.forEach((pending) => {
+      pendingContextCompressionStartRef.current.forEach(pending => {
         clearTimeout(pending.timer);
       });
       pendingContextCompressionStartRef.current.clear();
@@ -1201,7 +1109,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         media_items: mediaItems as unknown as Record<string, unknown>[],
       });
     },
-    [request],
+    [request]
   );
 
   const persistDocuments = useCallback(
@@ -1210,14 +1118,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         session_id: sessionId,
         content,
         parse: true,
-        documents: mediaItems.map((item) => ({
+        documents: mediaItems.map(item => ({
           filename: item.filename,
           mime_type: getMediaMimeType(item),
           base64_data: item.base64_data || item.base64Data,
         })),
       });
     },
-    [request],
+    [request]
   );
 
   // Goal（持续目标）控制：get/set/pause/resume/clear 共用一套 loading + 错误处理。
@@ -1280,7 +1188,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             // 再补——不管是被这次 set 自己的事件清的，还是用户切走后又发起了别的操作。
             if (useGoalStore.getState().runtimes[sessionId]?.pendingAction !== 'set') return;
             void requestGoalAction({ sessionId, action: 'get', mode })
-              .then((goal) => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current))
+              .then(goal => applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current))
               .catch(() => {
                 // 静默失败：这只是收敛用的兜底 get，真正的状态最终仍由 goal.updated 事件驱动。
               });
@@ -1323,10 +1231,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     [t]
   );
 
-  const setGoalObjective = useCallback(
-    (sessionId: string, objective: string) => goalAction(sessionId, 'set', objective),
-    [goalAction]
-  );
+  const setGoalObjective = useCallback((sessionId: string, objective: string) => goalAction(sessionId, 'set', objective), [goalAction]);
   const pauseGoal = useCallback((sessionId: string) => goalAction(sessionId, 'pause'), [goalAction]);
   const resumeGoal = useCallback((sessionId: string) => goalAction(sessionId, 'resume'), [goalAction]);
   const clearGoal = useCallback((sessionId: string) => goalAction(sessionId, 'clear'), [goalAction]);
@@ -1358,7 +1263,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const isInitialUserMessage = !useChatStore
         .getState()
         .getRuntime(sessionId)
-        ?.messages.some((message) => message.role === 'user');
+        ?.messages.some(message => message.role === 'user');
       if (isInitialUserMessage) {
         heldContextUsageSessionsRef.current.add(sessionId);
         pendingContextUsageRef.current.delete(sessionId);
@@ -1424,8 +1329,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             outgoingMediaItems = mediaItems.map(toPersistedMediaRecord);
             outgoingFiles = buildPersistedMediaFiles(mediaItems);
           } else {
-            const imageItems = mediaItems.filter((item) => item.type !== 'document');
-            const documentItems = mediaItems.filter((item) => item.type === 'document');
+            const imageItems = mediaItems.filter(item => item.type !== 'document');
+            const documentItems = mediaItems.filter(item => item.type === 'document');
             const mergedItems: Record<string, unknown>[] = [];
             const mergedFiles: Record<string, unknown> = {};
             if (imageItems.length) {
@@ -1483,15 +1388,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         return false;
       }
     },
-    [
-      persistDocuments,
-      persistMedia,
-      request,
-      resetContextCompressionTurn,
-      setContextCompressionStats,
-      setConnectionStats,
-      t,
-    ]
+    [persistDocuments, persistMedia, request, resetContextCompressionTurn, setContextCompressionStats, setConnectionStats, t]
   );
 
   const sendStructuredChatContent = useCallback(
@@ -1567,11 +1464,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 统一中断接口 - pause/cancel/supplement/resume
   const interrupt = useCallback(
-    async (
-      sessionId: string,
-      intent: InterruptIntent,
-      options?: { newInput?: string }
-    ) => {
+    async (sessionId: string, intent: InterruptIntent, options?: { newInput?: string }) => {
       const newInput = options?.newInput;
       const chatRuntime = useChatStore.getState().getRuntime(sessionId);
       const evolutionStatus = chatRuntime?.evolutionStatus?.status;
@@ -1627,8 +1520,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await request('chat.interrupt', params);
       } catch (error) {
         if (shouldQuarantineSupplementOutput) {
-          const heldProcessingStop =
-            supplementOutputQuarantineRef.current?.release(sessionId) ?? false;
+          const heldProcessingStop = supplementOutputQuarantineRef.current?.release(sessionId) ?? false;
           if (heldProcessingStop) {
             // The interrupt request failed after the old stream had already
             // published processing=false. Replay that held terminal edge now;
@@ -1651,15 +1543,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         onErrorRef.current?.(webError.message || t('network.interruptFailed'));
       }
     },
-    [
-      closeActiveTeamLeaderMessages,
-      clearPendingStreamDelta,
-      request,
-      resetContextCompressionTurn,
-      setConnectionStats,
-      t,
-      updateSession,
-    ]
+    [closeActiveTeamLeaderMessages, clearPendingStreamDelta, request, resetContextCompressionTurn, setConnectionStats, t, updateSession]
   );
 
   // 暂停 - 显式暂停当前任务
@@ -1760,18 +1644,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const pendingQuestion = useChatStore.getState().getRuntime(sessionId)?.pendingQuestion;
         const pendingMatches = pendingQuestion?.request_id === requestId;
         const effectiveSource = source ?? (pendingMatches ? pendingQuestion?.source : undefined);
-        const approvalSchema =
-          pendingMatches
-            ? pendingQuestion?.approvalSchema
-            : undefined;
-        const evolutionMeta =
-          pendingMatches
-            ? pendingQuestion.evolutionMeta
-            : undefined;
-        const evolutionMetaPayload =
-          evolutionMeta && typeof evolutionMeta === 'object'
-            ? { evolution_meta: evolutionMeta }
-            : {};
+        const approvalSchema = pendingMatches ? pendingQuestion?.approvalSchema : undefined;
+        const evolutionMeta = pendingMatches ? pendingQuestion.evolutionMeta : undefined;
+        const evolutionMetaPayload = evolutionMeta && typeof evolutionMeta === 'object' ? { evolution_meta: evolutionMeta } : {};
         const approvalSchemaPayload = approvalSchema ? { approval_schema: approvalSchema } : {};
         const sourcePayload = effectiveSource ? { source: effectiveSource } : {};
         const structuredPlanPayload =
@@ -1782,10 +1657,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 plan_language: pendingQuestion.planLanguage ?? 'cn',
               }
             : {};
-        const approvalTransport =
-          evolutionMeta && typeof evolutionMeta.approval_transport === 'string'
-            ? evolutionMeta.approval_transport
-            : undefined;
+        const approvalTransport = evolutionMeta && typeof evolutionMeta.approval_transport === 'string' ? evolutionMeta.approval_transport : undefined;
         // 如果是需要走 interrupt/interact 的确认，发送 chat.send
         if (
           effectiveSource === 'permission_interrupt' ||
@@ -1870,14 +1742,17 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     [request, setConnectionStats]
   );
 
-  const revealPendingContextUsage = useCallback((sessionId: string) => {
-    heldContextUsageSessionsRef.current.delete(sessionId);
-    const pending = pendingContextUsageRef.current.get(sessionId);
-    pendingContextUsageRef.current.delete(sessionId);
-    if (pending) {
-      setContextCompressionStats(sessionId, pending);
-    }
-  }, [setContextCompressionStats]);
+  const revealPendingContextUsage = useCallback(
+    (sessionId: string) => {
+      heldContextUsageSessionsRef.current.delete(sessionId);
+      const pending = pendingContextUsageRef.current.get(sessionId);
+      pendingContextUsageRef.current.delete(sessionId);
+      if (pending) {
+        setContextCompressionStats(sessionId, pending);
+      }
+    },
+    [setContextCompressionStats]
+  );
 
   // 会话切换时不再重置上下文压缩信息，保持本地存储的状态
   // useEffect(() => {
@@ -1891,38 +1766,35 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     onConfigChangedRef.current = onConfigChanged;
   }, [onConfigChanged, onConnect, onDisconnect, onError]);
 
-  const shouldDropDuplicatedEvent = useCallback(
-    (eventName: string, payload: Record<string, unknown>): boolean => {
-      const now = Date.now();
-      const dedupKey = makeEventDedupKey(eventName, payload);
-      const recent = recentEventRef.current;
-      const lastSeen = recent.get(dedupKey);
-      recent.set(dedupKey, now);
+  const shouldDropDuplicatedEvent = useCallback((eventName: string, payload: Record<string, unknown>): boolean => {
+    const now = Date.now();
+    const dedupKey = makeEventDedupKey(eventName, payload);
+    const recent = recentEventRef.current;
+    const lastSeen = recent.get(dedupKey);
+    recent.set(dedupKey, now);
 
-      // 控制 map 大小，避免长期运行后无限增长
-      if (recent.size > 400) {
-        for (const [key, ts] of recent) {
-          if (now - ts > EVENT_DEDUP_WINDOW_MS * 6) {
-            recent.delete(key);
-          }
+    // 控制 map 大小，避免长期运行后无限增长
+    if (recent.size > 400) {
+      for (const [key, ts] of recent) {
+        if (now - ts > EVENT_DEDUP_WINDOW_MS * 6) {
+          recent.delete(key);
         }
       }
+    }
 
-      const dropped = lastSeen != null && now - lastSeen <= EVENT_DEDUP_WINDOW_MS;
-      if (dropped && import.meta.env.DEV) {
-        const nextCount = (eventDedupDroppedRef.current[eventName] || 0) + 1;
-        eventDedupDroppedRef.current[eventName] = nextCount;
-        if (nextCount === 1 || nextCount % 10 === 0) {
-          console.debug('[ws][metrics] eventDedupDropped', {
-            eventName,
-            count: nextCount,
-          });
-        }
+    const dropped = lastSeen != null && now - lastSeen <= EVENT_DEDUP_WINDOW_MS;
+    if (dropped && import.meta.env.DEV) {
+      const nextCount = (eventDedupDroppedRef.current[eventName] || 0) + 1;
+      eventDedupDroppedRef.current[eventName] = nextCount;
+      if (nextCount === 1 || nextCount % 10 === 0) {
+        console.debug('[ws][metrics] eventDedupDropped', {
+          eventName,
+          count: nextCount,
+        });
       }
-      return dropped;
-    },
-    []
-  );
+    }
+    return dropped;
+  }, []);
 
   const clearThinkingForVisibleOutput = useCallback((sessionId: string) => {
     const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
@@ -1945,21 +1817,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       return true;
     }
     const payloadRequestId = getPayloadRequestId(payload);
-    return Boolean(
-      payloadRequestId &&
-      activeRequestIdRef.current &&
-      payloadRequestId === activeRequestIdRef.current
-    );
+    return Boolean(payloadRequestId && activeRequestIdRef.current && payloadRequestId === activeRequestIdRef.current);
   }, []);
 
   const getTeamMemberOutputKey = useCallback(
-    (payload: Record<string, unknown>, memberId: string): string => stableEventId(
-      'member-output-key',
-      getPayloadSessionId(payload),
-      memberId,
-      payload.rid,
-      payload.request_id
-    ),
+    (payload: Record<string, unknown>, memberId: string): string =>
+      stableEventId('member-output-key', getPayloadSessionId(payload), memberId, payload.rid, payload.request_id),
     []
   );
 
@@ -1970,14 +1833,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       if (existing) {
         return existing;
       }
-      const id = stableEventId(
-        'member-output',
-        getPayloadSessionId(payload),
-        memberId,
-        payload.rid,
-        payload.request_id,
-        Date.now()
-      );
+      const id = stableEventId('member-output', getPayloadSessionId(payload), memberId, payload.rid, payload.request_id, Date.now());
       teamMemberOutputEventRef.current.set(key, id);
       return id;
     },
@@ -2003,7 +1859,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
       const id = getOrCreateTeamMemberOutputEventId(payload, memberId);
       const existingContent =
-        useSessionStore.getState().getRuntime(sessionId)?.teamMemberExecutionEvents.find((event) => event.id === id)?.content || '';
+        useSessionStore
+          .getState()
+          .getRuntime(sessionId)
+          ?.teamMemberExecutionEvents.find(event => event.id === id)?.content || '';
       useSessionStore.getState().addTeamMemberExecutionEvent(sessionId, {
         id,
         member_id: memberId,
@@ -2028,9 +1887,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const sessionStore = useSessionStore.getState();
       const runtime = sessionStore.getRuntime(sessionId);
       const currentMembers = runtime?.teamMembers ?? [];
-      const nextMembers = currentMembers.filter(
-        (member) => member.member_id !== normalizedMemberId
-      );
+      const nextMembers = currentMembers.filter(member => member.member_id !== normalizedMemberId);
       if (nextMembers.length === currentMembers.length) {
         return;
       }
@@ -2063,11 +1920,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
      */
     const applyGoalSnapshot = (payload: Record<string, unknown>) => {
       const goal = (payload.goal ?? null) as GoalRecord | null;
-      const sessionId =
-        getPayloadSessionId(payload) ||
-        goal?.session_id ||
-        useChatStore.getState().activeSessionId ||
-        undefined;
+      const sessionId = getPayloadSessionId(payload) || goal?.session_id || useChatStore.getState().activeSessionId || undefined;
       if (!sessionId) return;
       ensureSessionRuntimes(sessionId);
       applyIncomingGoal(sessionId, goal, goalCompletedHideTimerRef.current, lastGoalEventAtRef.current);
@@ -2082,10 +1935,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.delta', ({ payload }) => {
         const outputSessionId = getPayloadSessionId(payload);
-        if (
-          outputSessionId &&
-          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.delta')
-        ) {
+        if (outputSessionId && supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.delta')) {
           return;
         }
         const sessionId = resolveEventSessionId(payload);
@@ -2097,9 +1947,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
 
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
-        const content = unescapeLiteralNewlines(
-          typeof payload.content === 'string' ? payload.content : ''
-        );
+        const content = unescapeLiteralNewlines(typeof payload.content === 'string' ? payload.content : '');
 
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) {
           const memberId = getTeamPayloadMemberName(payload);
@@ -2171,27 +2019,20 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         if (!currentStreamId || !content) return;
         const streamId = currentStreamId;
-        streamDeltaBatcherRef.current?.enqueue(
-          streamDeltaBatchKey(sessionId, streamId),
-          content,
-          batchedContent => {
-            if (supplementOutputQuarantineRef.current?.shouldDrop(sessionId, 'chat.delta')) {
-              return;
-            }
-            const chatStore = useChatStore.getState();
-            if (chatStore.getRuntime(sessionId)?.currentStreamId !== streamId) {
-              return;
-            }
-            chatStore.appendStreamContent(sessionId, batchedContent);
+        streamDeltaBatcherRef.current?.enqueue(streamDeltaBatchKey(sessionId, streamId), content, batchedContent => {
+          if (supplementOutputQuarantineRef.current?.shouldDrop(sessionId, 'chat.delta')) {
+            return;
           }
-        );
+          const chatStore = useChatStore.getState();
+          if (chatStore.getRuntime(sessionId)?.currentStreamId !== streamId) {
+            return;
+          }
+          chatStore.appendStreamContent(sessionId, batchedContent);
+        });
       }),
       webClient.on('chat.reasoning', ({ payload }) => {
         const outputSessionId = getPayloadSessionId(payload);
-        if (
-          outputSessionId &&
-          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.reasoning')
-        ) {
+        if (outputSessionId && supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.reasoning')) {
           return;
         }
         const sessionId = resolveEventSessionId(payload);
@@ -2203,8 +2044,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setProcessing(sessionId, true);
         }
 
-        const reasoningContent =
-          typeof payload.content === 'string' ? payload.content : '';
+        const reasoningContent = typeof payload.content === 'string' ? payload.content : '';
         if (reasoningContent) {
           useChatStore.getState().appendReasoning(sessionId, reasoningContent, {
             atMs: eventTimestampMs(payload),
@@ -2213,10 +2053,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.final', ({ payload }) => {
         const outputSessionId = getPayloadSessionId(payload);
-        if (
-          outputSessionId &&
-          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.final')
-        ) {
+        if (outputSessionId && supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.final')) {
           return;
         }
         if (shouldDropDuplicatedEvent('chat.final', payload)) return;
@@ -2240,7 +2077,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const cronStatus = typeof cronMeta.status === 'string' ? cronMeta.status.trim() : '';
           const isPlaceholder = typeof cronMeta.is_placeholder === 'boolean' ? cronMeta.is_placeholder : false;
           if (cronJobId && cronStatus !== 'running') {
-            const cronJob = useCronStore.getState().jobs.find((j) => j.id === cronJobId);
+            const cronJob = useCronStore.getState().jobs.find(j => j.id === cronJobId);
             const cronProjectId = cronJob?.project_id || 'default';
             void useCronStore.getState().loadCronSessions(cronProjectId, cronJobId);
           }
@@ -2255,10 +2092,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // 优先使用 cronMeta.exec_session_id 路由到定时任务专属会话。
         // 若后端未提供 exec_session_id，用 job_id 查 lastRunSessionId（"立即执行"时存入）。
         if (!sessionId && cronMeta) {
-          const execSessionId =
-            typeof cronMeta.exec_session_id === 'string'
-              ? (cronMeta.exec_session_id as string).trim()
-              : '';
+          const execSessionId = typeof cronMeta.exec_session_id === 'string' ? (cronMeta.exec_session_id as string).trim() : '';
           if (execSessionId) {
             sessionId = execSessionId;
             ensureSessionRuntimes(sessionId);
@@ -2278,27 +2112,21 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         const memberAction = pickString(payload.member_action);
         const actionMemberName = pickString(payload.member_name);
-        if (
-          actionMemberName &&
-          (memberAction === 'joined' || memberAction === 'left')
-        ) {
+        if (actionMemberName && (memberAction === 'joined' || memberAction === 'left')) {
           // 使用 upsert（若 spawned 事件尚未到达则创建占位，后续 spawned 事件会补全 teamName/sessionRef 等字段）
-          useSessionStore.getState().upsertTeamHumanShareCommand(
+          useSessionStore.getState().upsertTeamHumanShareCommand(sessionId, {
+            memberName: actionMemberName,
+            displayName: pickString(payload.display_name),
             sessionId,
-            {
-              memberName: actionMemberName,
-              displayName: pickString(payload.display_name),
-              sessionId,
-              teamName: '',
-              sessionRef: '',
-              joinCommand: '',
-              exitCommand: '',
-              status: memberAction === 'joined' ? 'joined' : 'left',
-              sourceChannel: pickString(payload.source_channel),
-              userId: pickString(payload.user_id),
-              updatedAt: Date.now(),
-            },
-          );
+            teamName: '',
+            sessionRef: '',
+            joinCommand: '',
+            exitCommand: '',
+            status: memberAction === 'joined' ? 'joined' : 'left',
+            sourceChannel: pickString(payload.source_channel),
+            userId: pickString(payload.user_id),
+            updatedAt: Date.now(),
+          });
           const content = normalizeFinalContent(payload);
           if (content) {
             useChatStore.getState().addMessage(sessionId, {
@@ -2335,10 +2163,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
-        const teamLeaderMessageToFinalize =
-          currentMode === 'team' && content
-            ? findActiveTeamLeaderMessage(sessionId)
-            : undefined;
+        const teamLeaderMessageToFinalize = currentMode === 'team' && content ? findActiveTeamLeaderMessage(sessionId) : undefined;
         // Defensive: chat.final is the definitive end-of-response marker.
         // The primary state change is driven by chat.processing_status
         // (is_processing=false), but if that frame is lost the UI would be stuck
@@ -2354,8 +2179,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             // 不能关 isProcessing、不能排空任务队列、不能清 thinking/subtasks，否则会误发下一条
             // 排队消息、或短暂闪一下"空闲"。气泡本身的收尾（下面 stopStreaming）不受影响，
             // 该收尾还是收尾。见 Goal持续目标Web前端对接4.md「普通问答与 Goal 续跑：前端气泡收尾」。
-            const goalStillActive =
-              useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
+            const goalStillActive = useGoalStore.getState().runtimes[sessionId]?.goal?.status === 'active';
             if (!goalStillActive) {
               useChatStore.getState().setProcessing(sessionId, false);
               // 正常情况下排空由 chat.processing_status(false) 负责；这里是它丢帧时的兜底
@@ -2437,6 +2261,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
 
+        // Defer the authoritative marker until every synchronous content
+        // rewrite/collapse below has landed. The one store transaction then
+        // exposes the complete turn to Live Voice without an intermediate
+        // provisional-final render.
+        if (FEATURE_LIVE_VOICE_STREAMING_SPEECH) {
+          queueMicrotask(() => {
+            useChatStore.getState().markAssistantTurnFinal(sessionId);
+          });
+        }
         const runtime = useChatStore.getState().getRuntime(sessionId);
         const currentStreamId = runtime?.currentStreamId;
         const messages = runtime?.messages ?? [];
@@ -2448,13 +2281,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const proactiveType = typeof payload.proactive_type === 'string' ? payload.proactive_type : '';
 
         const streamId = currentStreamId;
-        const preferredSegmentId =
-          finalAction.type === 'patch_segment' ? finalAction.segmentId : undefined;
+        const preferredSegmentId = finalAction.type === 'patch_segment' ? finalAction.segmentId : undefined;
 
         if (assistantStreamSplit && content) {
           const cronMetaEarly = payload.cron as Record<string, unknown> | undefined;
-          const cronRunIdEarly =
-            typeof cronMetaEarly?.run_id === 'string' ? cronMetaEarly.run_id.trim() : '';
+          const cronRunIdEarly = typeof cronMetaEarly?.run_id === 'string' ? cronMetaEarly.run_id.trim() : '';
           if (!cronRunIdEarly && !cronMetaEarly && !isProactiveRecommendation) {
             if (streamId) {
               useChatStore.getState().stopStreaming(sessionId);
@@ -2473,11 +2304,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               return;
             }
             if (finalAction.type !== 'append') {
-              const rewriteId = findAssistantSegmentIdForFinal(
-                messages,
-                content,
-                preferredSegmentId || streamId
-              );
+              const rewriteId = findAssistantSegmentIdForFinal(messages, content, preferredSegmentId || streamId);
               if (rewriteId) {
                 useChatStore.getState().updateMessage(sessionId, rewriteId, {
                   content,
@@ -2497,7 +2324,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().updateMessage(sessionId, streamId, {
             ...(content ? { content } : {}),
             isStreaming: false,
-            ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
+            ...(isProactiveRecommendation
+              ? {
+                  isProactiveRecommendation,
+                  ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
+                }
+              : {}),
           });
           useChatStore.getState().stopStreaming(sessionId);
           if (content && !content.includes('MEDIA:')) {
@@ -2506,14 +2338,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
         if (streamId && assistantStreamSplit && content) {
-          const streamedMsg = messages.find((m) => m.id === streamId);
+          const streamedMsg = messages.find(m => m.id === streamId);
           const streamedContent = typeof streamedMsg?.content === 'string' ? streamedMsg.content : '';
           const nextContent = resolveStreamFinalContent(streamedContent, content, true);
           if (nextContent !== undefined) {
             useChatStore.getState().updateMessage(sessionId, streamId, {
               content: nextContent,
               isStreaming: false,
-              ...(isProactiveRecommendation ? { isProactiveRecommendation, ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}) } : {}),
+              ...(isProactiveRecommendation
+                ? {
+                    isProactiveRecommendation,
+                    ...(proactiveType ? { proactiveType: proactiveType as 'skill_recommend' | 'task_reminder' | 'need_exploration' } : {}),
+                  }
+                : {}),
             });
             useChatStore.getState().stopStreaming(sessionId);
             if (!nextContent.includes('MEDIA:')) {
@@ -2521,39 +2358,38 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
             return;
           }
-          useChatStore.getState().updateMessage(sessionId, streamId, { isStreaming: false });
+          useChatStore.getState().updateMessage(sessionId, streamId, {
+            isStreaming: false,
+          });
           useChatStore.getState().stopStreaming(sessionId);
         }
         if (content) {
           const cronMeta = payload.cron as Record<string, unknown> | undefined;
-          const cronRunId =
-            typeof cronMeta?.run_id === 'string' ? cronMeta.run_id.trim() : '';
+          const cronRunId = typeof cronMeta?.run_id === 'string' ? cronMeta.run_id.trim() : '';
           const isCronPlaceholderContent =
-            cronMeta?.is_placeholder === true ||
-            /正在执行中，结果稍后补发/.test(content) ||
-            /^\[cron\].*正在执行中/.test(content);
+            cronMeta?.is_placeholder === true || /正在执行中，结果稍后补发/.test(content) || /^\[cron\].*正在执行中/.test(content);
 
           if (!isCronPlaceholderContent) {
             let placeholderId: string | null = null;
             if (cronRunId) {
-              const byRun = messages.find((m) => m.id === `cron-placeholder-${cronRunId}`);
+              const byRun = messages.find(m => m.id === `cron-placeholder-${cronRunId}`);
               if (byRun) placeholderId = byRun.id;
             }
             if (!placeholderId) {
               for (let i = messages.length - 1; i >= 0; i -= 1) {
                 const msg = messages[i];
                 if (msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
-                if (
-                  /正在执行中，结果稍后补发/.test(msg.content) ||
-                  /^\[cron\].*正在执行中/.test(msg.content)
-                ) {
+                if (/正在执行中，结果稍后补发/.test(msg.content) || /^\[cron\].*正在执行中/.test(msg.content)) {
                   placeholderId = msg.id;
                   break;
                 }
               }
             }
             if (placeholderId) {
-              useChatStore.getState().updateMessage(sessionId, placeholderId, { content, isStreaming: false });
+              useChatStore.getState().updateMessage(sessionId, placeholderId, {
+                content,
+                isStreaming: false,
+              });
               if (!content.includes('MEDIA:')) {
                 handleTtsPlayback(sessionId, placeholderId, content);
               }
@@ -2568,12 +2404,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                 ? `cron-final-${cronRunId}`
                 : `msg-${Date.now()}`;
 
-          const existing = messages.find((m) => m.id === messageId);
+          const existing = messages.find(m => m.id === messageId);
           if (existing) {
             if (existing.content === content) {
+              useChatStore.getState().updateMessage(sessionId, messageId, {
+                isStreaming: false,
+              });
               return;
             }
-            useChatStore.getState().updateMessage(sessionId, messageId, { content, isStreaming: false });
+            useChatStore.getState().updateMessage(sessionId, messageId, {
+              content,
+              isStreaming: false,
+            });
             if (!content.includes('MEDIA:')) {
               handleTtsPlayback(sessionId, messageId, content);
             }
@@ -2593,8 +2435,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
             const shownConcat = messages
               .slice(turnStart)
-              .filter((m) => m.role === 'assistant' && typeof m.content === 'string')
-              .map((m) => m.content as string)
+              .filter(m => m.role === 'assistant' && typeof m.content === 'string')
+              .map(m => m.content as string)
               .join('');
 
             let remainder: string;
@@ -2609,11 +2451,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             }
 
             if (!remainder.trim()) {
-              const rewriteId = findAssistantSegmentIdForFinal(
-                messages,
-                content,
-                preferredSegmentId || streamId
-              );
+              const rewriteId = findAssistantSegmentIdForFinal(messages, content, preferredSegmentId || streamId);
               if (rewriteId) {
                 useChatStore.getState().updateMessage(sessionId, rewriteId, {
                   content,
@@ -2640,11 +2478,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             return;
           }
 
-          const rewriteId = findAssistantSegmentIdForFinal(
-            messages,
-            content,
-            preferredSegmentId || streamId
-          );
+          const rewriteId = findAssistantSegmentIdForFinal(messages, content, preferredSegmentId || streamId);
           if (rewriteId) {
             useChatStore.getState().updateMessage(sessionId, rewriteId, {
               content,
@@ -2657,6 +2491,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           const last = messages[messages.length - 1];
           if (last?.role === 'assistant' && last.content === content) {
+            useChatStore.getState().updateMessage(sessionId, last.id, {
+              isStreaming: false,
+            });
             return;
           }
           useChatStore.getState().addMessage(sessionId, {
@@ -2674,10 +2511,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.media', ({ payload }) => {
         const outputSessionId = getPayloadSessionId(payload);
-        if (
-          outputSessionId &&
-          supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.media')
-        ) {
+        if (outputSessionId && supplementOutputQuarantineRef.current?.shouldDrop(outputSessionId, 'chat.media')) {
           return;
         }
         const sessionId = resolveEventSessionId(payload);
@@ -2689,9 +2523,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const runtime = useChatStore.getState().getRuntime(sessionId);
         const currentStreamId = runtime?.currentStreamId;
         const messages = runtime?.messages ?? [];
-        const targetId =
-          currentStreamId ??
-          [...messages].reverse().find((msg) => msg.role === 'assistant')?.id;
+        const targetId = currentStreamId ?? [...messages].reverse().find(msg => msg.role === 'assistant')?.id;
         if (!targetId) {
           return;
         }
@@ -2711,10 +2543,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         };
         if (currentStreamId && streamDeltaBatcherRef.current) {
-          streamDeltaBatcherRef.current.flushBefore(
-            streamDeltaBatchKey(sessionId, currentStreamId),
-            applyMediaUpdate
-          );
+          streamDeltaBatcherRef.current.flushBefore(streamDeltaBatchKey(sessionId, currentStreamId), applyMediaUpdate);
         } else {
           applyMediaUpdate();
         }
@@ -2729,7 +2558,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           const memberId = getTeamPayloadMemberName(payload);
           if (memberId) {
             const timestamp = eventTimestampMs(payload);
-            const mappedFiles = files.map((file) => ({
+            const mappedFiles = files.map(file => ({
               name: file.name,
               size: file.size,
               mime_type: file.mime_type,
@@ -2741,25 +2570,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             const existingFileEvent = findOverlappingFileExecutionEvent(
               runtime?.teamMemberExecutionEvents,
               mappedFiles,
-              (event) => event.member_id === memberId && event.kind === 'file'
+              event => event.member_id === memberId && event.kind === 'file'
             );
             if (existingFileEvent) {
               const mergedFiles = mergeFileDownloadItems(existingFileEvent.files, mappedFiles);
               useSessionStore.getState().addTeamMemberExecutionEvent(sessionId, {
                 ...existingFileEvent,
                 timestamp,
-                content: mergedFiles.map((file) => file.name).join('\n'),
+                content: mergedFiles.map(file => file.name).join('\n'),
                 files: mergedFiles,
               });
               return;
             }
             useSessionStore.getState().addTeamMemberExecutionEvent(sessionId, {
-              id: stableEventId('file', payload.session_id, memberId, timestamp, files.map((file) => file.name).join(',')),
+              id: stableEventId('file', payload.session_id, memberId, timestamp, files.map(file => file.name).join(',')),
               member_id: memberId,
               kind: 'file',
               timestamp,
               title: t('team.process.execution.sentFile'),
-              content: files.map((file) => file.name).join('\n'),
+              content: files.map(file => file.name).join('\n'),
               files: mappedFiles,
             });
           }
@@ -2871,9 +2700,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         // member from the frontend panel.
         const shutdownMemberId = getShutdownMemberFromToolResult(toolResult);
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) {
-          const memberId =
-            getTeamPayloadMemberName(payload) ||
-            (toolResult.toolCallId ? teamToolCallMemberRef.current.get(toolResult.toolCallId) : undefined);
+          const memberId = getTeamPayloadMemberName(payload) || (toolResult.toolCallId ? teamToolCallMemberRef.current.get(toolResult.toolCallId) : undefined);
           if (memberId) {
             const timestamp = eventTimestampMs(payload);
             useSessionStore.getState().addTeamMemberExecutionEvent(sessionId, {
@@ -2891,10 +2718,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             if (toolResult.toolCallId) {
               shutdownMemberToolCallRef.current.delete(toolResult.toolCallId);
             }
-            applyTeamMemberShutdown(
-              shutdownMemberId,
-              activeSessionId
-            );
+            applyTeamMemberShutdown(shutdownMemberId, activeSessionId);
           }
           return;
         }
@@ -2902,10 +2726,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (toolResult.toolCallId) {
             shutdownMemberToolCallRef.current.delete(toolResult.toolCallId);
           }
-          applyTeamMemberShutdown(
-            shutdownMemberId,
-            activeSessionId
-          );
+          applyTeamMemberShutdown(shutdownMemberId, activeSessionId);
         }
         useChatStore.getState().addToolResult(sessionId, toolResult, {
           updatedAt: normalizeEventTimestampIso(payload.timestamp),
@@ -2945,16 +2766,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!sessionId) return;
         const currentMode = useSessionStore.getState().getRuntime(sessionId)?.mode;
         if (isHiddenTeamTeammateMessagePayload(currentMode ?? 'agent', payload)) return;
-        const rate =
-          typeof payload.rate === 'number' ? payload.rate : 0;
-        const contextMax =
-          typeof payload.context_max === 'number' && Number.isFinite(payload.context_max)
-            ? payload.context_max
-            : null;
-        const tokensUsed =
-          typeof payload.tokens_used === 'number' && Number.isFinite(payload.tokens_used)
-            ? payload.tokens_used
-            : null;
+        const rate = typeof payload.rate === 'number' ? payload.rate : 0;
+        const contextMax = typeof payload.context_max === 'number' && Number.isFinite(payload.context_max) ? payload.context_max : null;
+        const tokensUsed = typeof payload.tokens_used === 'number' && Number.isFinite(payload.tokens_used) ? payload.tokens_used : null;
         const stats = { rate, beforeCompressed: contextMax, afterCompressed: tokensUsed };
         if (heldContextUsageSessionsRef.current.has(sessionId)) {
           pendingContextUsageRef.current.set(sessionId, stats);
@@ -2973,22 +2787,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           tokens_used: tokensUsed,
         });
       }),
-      webClient.on<ContextCompressionStatePayload>(
-        'context.compression_state',
-        ({ payload }) => {
-          const sessionId = resolveEventSessionId(payload);
-          if (!sessionId) return;
-          const memberId = findExistingTeamMemberId(sessionId, payload.member_name);
-          if (memberId) {
-            handleTeamMemberContextCompressionState(sessionId, payload, memberId);
-            return;
-          }
-          handleContextCompressionState(sessionId, payload);
+      webClient.on<ContextCompressionStatePayload>('context.compression_state', ({ payload }) => {
+        const sessionId = resolveEventSessionId(payload);
+        if (!sessionId) return;
+        const memberId = findExistingTeamMemberId(sessionId, payload.member_name);
+        if (memberId) {
+          handleTeamMemberContextCompressionState(sessionId, payload, memberId);
+          return;
         }
-      ),
+        handleContextCompressionState(sessionId, payload);
+      }),
       webClient.on('session.updated', ({ payload }) => {
-        const sessionId =
-          typeof payload.session_id === 'string' ? payload.session_id : '';
+        const sessionId = typeof payload.session_id === 'string' ? payload.session_id : '';
         if (!sessionId) return;
         updateSession(sessionId, payload as Partial<Session>);
         useWorkspaceStore.getState().patchSession(sessionId, payload as Partial<Session>);
@@ -3049,13 +2859,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           if (skipAutoDrain) {
             localSendPendingRef.current.delete(sessionId);
           }
-          if (
-            !skipAutoDrain &&
-            currentMode === 'agent' &&
-            !resumeAlreadyCompleted &&
-            !queuePaused &&
-            taskQueue.length > 0
-          ) {
+          if (!skipAutoDrain && currentMode === 'agent' && !resumeAlreadyCompleted && !queuePaused && taskQueue.length > 0) {
             // 智能执行/单Agent模式下，自动处理队列中的下一个任务
             const nextTask = taskQueue[0];
             if (nextTask && sendMessageRef.current) {
@@ -3081,20 +2885,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const messageId = `symphony-status-${operationId}`;
         const status = typeof payload.status === 'string' ? payload.status : '';
         const detail = typeof payload.detail === 'string' ? payload.detail.trim() : '';
-        const displayContent =
-          status === 'failed' && detail && !content.includes(detail)
-            ? `${content}\n${detail}`
-            : content;
+        const displayContent = status === 'failed' && detail && !content.includes(detail) ? `${content}\n${detail}` : content;
         const chatState = useChatStore.getState();
         const messages = chatState.getRuntime(sessionId)?.messages ?? [];
         const cachedTarget = symphonyStatusTargetRef.current.get(operationId);
         const targetMessage = cachedTarget
-          ? messages.find((message) => message.id === cachedTarget.messageId)
-          : [...messages].reverse().find(
-            (message) =>
-              message.role === 'assistant' ||
-              (message.role === 'system' && message.id?.startsWith('team-leader-'))
-          );
+          ? messages.find(message => message.id === cachedTarget.messageId)
+          : [...messages].reverse().find(message => message.role === 'assistant' || (message.role === 'system' && message.id?.startsWith('team-leader-')));
         if (targetMessage) {
           const target = cachedTarget || {
             messageId: targetMessage.id,
@@ -3108,7 +2905,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           });
           return;
         }
-        const existing = messages.find((message) => message.id === messageId);
+        const existing = messages.find(message => message.id === messageId);
         if (existing) {
           chatState.updateMessage(sessionId, messageId, {
             content: displayContent,
@@ -3139,7 +2936,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const requestId = getPayloadRequestId(payload) || `${Date.now()}`;
         const messageId = `notice-${noticeType}-${requestId}`;
         const chatState = useChatStore.getState();
-        const existing = chatState.getRuntime(sessionId)?.messages.find((message) => message.id === messageId);
+        const existing = chatState.getRuntime(sessionId)?.messages.find(message => message.id === messageId);
         if (existing) {
           chatState.updateMessage(sessionId, messageId, {
             content,
@@ -3155,9 +2952,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }),
       webClient.on('config.changed', ({ payload }) => {
-        const updatedKeys = Array.isArray(payload?.updated_keys)
-          ? payload.updated_keys.filter((key): key is string => typeof key === 'string')
-          : undefined;
+        const updatedKeys = Array.isArray(payload?.updated_keys) ? payload.updated_keys.filter((key): key is string => typeof key === 'string') : undefined;
         onConfigChangedRef.current?.(updatedKeys);
       }),
       webClient.on('task.global_running', ({ payload }) => {
@@ -3168,8 +2963,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!sessionId) return;
         if (shouldDropDuplicatedEvent('chat.error', payload)) return;
         useChatStore.getState().setThinking(sessionId, false);
-        const errorMsg =
-          typeof payload.error === 'string' ? payload.error : t('network.unknownError');
+        const errorMsg = typeof payload.error === 'string' ? payload.error : t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (errorMsg.includes('invalid page_idx or session history not found')) {
           useChatStore.getState().setLoadingHistory(sessionId, false);
@@ -3189,29 +2983,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
 
-        const alertMsg =
-          typeof payload.message === 'string'
-            ? payload.message
-            : '安全警告';
+        const alertMsg = typeof payload.message === 'string' ? payload.message : '安全警告';
 
-        window.dispatchEvent(new CustomEvent('security-alert', {
-          detail: {
-            message: alertMsg,
-            message_id: payload.message_id || '',
-            tool_call_id: payload.tool_call_id || '',
-            alert_type: payload.alert_type || 'security',
-            tool_name: payload.tool_name || '',
-          }
-        }));
+        window.dispatchEvent(
+          new CustomEvent('security-alert', {
+            detail: {
+              message: alertMsg,
+              message_id: payload.message_id || '',
+              tool_call_id: payload.tool_call_id || '',
+              alert_type: payload.alert_type || 'security',
+              tool_name: payload.tool_name || '',
+            },
+          })
+        );
       }),
       webClient.on('chat.retract', (event: WsEvent) => {
         const sessionId = resolveEventSessionId(event.payload);
         if (!sessionId) return;
 
-        const retractMsg =
-          typeof event.payload.message === 'string'
-            ? event.payload.message
-            : '内容已因安全原因撤回';
+        const retractMsg = typeof event.payload.message === 'string' ? event.payload.message : '内容已因安全原因撤回';
 
         const runtime = useChatStore.getState().getRuntime(sessionId);
         const currentStreamId = runtime?.currentStreamId;
@@ -3339,22 +3129,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
               ? (questionPayload._evolution_meta as Record<string, unknown>)
               : undefined;
         const questions = Array.isArray(questionPayload.questions) ? questionPayload.questions : [];
-        const approvalSchema =
-          typeof questionPayload.approval_schema === 'string'
-            ? questionPayload.approval_schema
-            : undefined;
-        const planApprovalKind =
-          typeof questionPayload.plan_approval_kind === 'string'
-            ? questionPayload.plan_approval_kind
-            : undefined;
-        const planContent =
-          typeof questionPayload.plan_content === 'string'
-            ? questionPayload.plan_content
-            : undefined;
-        const planLanguage =
-          questionPayload.plan_language === 'cn' || questionPayload.plan_language === 'en'
-            ? questionPayload.plan_language
-            : undefined;
+        const approvalSchema = typeof questionPayload.approval_schema === 'string' ? questionPayload.approval_schema : undefined;
+        const planApprovalKind = typeof questionPayload.plan_approval_kind === 'string' ? questionPayload.plan_approval_kind : undefined;
+        const planContent = typeof questionPayload.plan_content === 'string' ? questionPayload.plan_content : undefined;
+        const planLanguage = questionPayload.plan_language === 'cn' || questionPayload.plan_language === 'en' ? questionPayload.plan_language : undefined;
         const normalizedPayload: AskUserQuestionPayload = {
           request_id: typeof questionPayload.request_id === 'string' ? questionPayload.request_id : '',
           source: typeof questionPayload.source === 'string' ? questionPayload.source : undefined,
@@ -3372,8 +3150,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const sessionId = resolveEventSessionId(payload);
         if (!sessionId) return;
         clearThinkingForVisibleOutput(sessionId);
-        const description =
-          typeof payload.description === 'string' ? payload.description : '';
+        const description = typeof payload.description === 'string' ? payload.description : '';
         const result = typeof payload.result === 'string' ? payload.result : '';
         // 创建工具调用对象
         const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -3389,9 +3166,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         useChatStore.getState().addToolCall(sessionId, sessionToolCall);
         // 组合 description 和 result 作为完整结果
-        const fullResult = description
-          ? `描述: ${description}\n\n结果: ${result}`
-          : result;
+        const fullResult = description ? `描述: ${description}\n\n结果: ${result}` : result;
         const sessionResult: ToolResult = {
           toolName: 'session',
           result: fullResult,
@@ -3408,8 +3183,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
         clearThinkingForVisibleOutput(sessionId);
-        const description =
-          typeof payload.description === 'string' ? payload.description : '';
+        const description = typeof payload.description === 'string' ? payload.description : '';
         const result = typeof payload.result === 'string' ? payload.result : '';
         // 创建工具调用对象
         const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -3425,9 +3199,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         useChatStore.getState().addToolCall(sessionId, sessionToolCall);
         // 组合 description 和 result 作为完整结果
-        const fullResult = description
-          ? `描述: ${description}\n\n结果: ${result}`
-          : result;
+        const fullResult = description ? `描述: ${description}\n\n结果: ${result}` : result;
         const sessionResult: ToolResult = {
           toolName: 'session',
           result: fullResult,
@@ -3568,16 +3340,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           } else if (activeSessionId && clearedTeamPanelSessionRef.current.has(activeSessionId)) {
             return;
           } else if (e.type === 'team.member.status_changed' && e.member_id && e.new_status) {
-            useSessionStore.getState().updateTeamMemberStatus(
-              sessionId,
-              e.member_id,
-              e.new_status,
-              e.timestamp
-            );
+            useSessionStore.getState().updateTeamMemberStatus(sessionId, e.member_id, e.new_status, e.timestamp);
           } else if (e.type === 'team.member.execution_changed' && e.member_id) {
-            const existingMember = useSessionStore.getState().getRuntime(sessionId)?.teamMembers.some(
-              (member) => member.member_id === e.member_id
-            );
+            const existingMember = useSessionStore
+              .getState()
+              .getRuntime(sessionId)
+              ?.teamMembers.some(member => member.member_id === e.member_id);
             if (existingMember) {
               useSessionStore.getState().addTeamMember(sessionId, {
                 id: `member-${Date.now()}`,
@@ -3656,7 +3424,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
         // Mark stage as running (skip pipeline start message which has stages array)
         if (stage && !rawStages) {
-          const existingStage = useHarnessStore.getState().getRuntime(sessionId)?.stageResults.find(s => s.stage === stage);
+          const existingStage = useHarnessStore
+            .getState()
+            .getRuntime(sessionId)
+            ?.stageResults.find(s => s.stage === stage);
           if (existingStage?.status !== 'running') {
             useHarnessStore.getState().updateStageResult(sessionId, { stage, status: 'running', messages: [], metrics: {} });
           }
@@ -3676,10 +3447,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const stage = typeof payload.stage === 'string' ? payload.stage : '';
         const status = typeof payload.status === 'string' ? payload.status : 'success';
         const error = typeof payload.error === 'string' ? payload.error : undefined;
-        const messages = Array.isArray(payload.messages) ? payload.messages.filter((m) => typeof m === 'string') : [];
-        const metrics = typeof payload.metrics === 'object' && payload.metrics !== null && !Array.isArray(payload.metrics)
-          ? payload.metrics as Record<string, unknown>
-          : {};
+        const messages = Array.isArray(payload.messages) ? payload.messages.filter(m => typeof m === 'string') : [];
+        const metrics =
+          typeof payload.metrics === 'object' && payload.metrics !== null && !Array.isArray(payload.metrics)
+            ? (payload.metrics as Record<string, unknown>)
+            : {};
         const scope = typeof payload.scope === 'string' ? payload.scope : '';
         const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
         const extensionStage = typeof payload.extension_stage === 'string' ? payload.extension_stage : '';
@@ -3726,8 +3498,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         const configPath = typeof payload.config_path === 'string' ? payload.config_path : '';
         const runtimeExtensions = Array.isArray(payload.runtime_extensions)
           ? payload.runtime_extensions
-              .filter((item) => typeof item === 'object' && item !== null)
-              .map((item) => {
+              .filter(item => typeof item === 'object' && item !== null)
+              .map(item => {
                 const obj = item as Record<string, unknown>;
                 return {
                   extensionName: typeof obj.extension_name === 'string' ? obj.extension_name : '',
@@ -3735,14 +3507,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
                   configPath: typeof obj.config_path === 'string' ? obj.config_path : '',
                 };
               })
-              .filter((item) => item.extensionName && item.runtimePath)
+              .filter(item => item.extensionName && item.runtimePath)
           : [];
-        const verifyReport = typeof payload.verify_report === 'object' && payload.verify_report !== null && !Array.isArray(payload.verify_report)
-          ? payload.verify_report as Record<string, unknown>
-          : {};
-        const componentsSummary = typeof payload.components_summary === 'object' && payload.components_summary !== null && !Array.isArray(payload.components_summary)
-          ? payload.components_summary as Record<string, unknown>
-          : {};
+        const verifyReport =
+          typeof payload.verify_report === 'object' && payload.verify_report !== null && !Array.isArray(payload.verify_report)
+            ? (payload.verify_report as Record<string, unknown>)
+            : {};
+        const componentsSummary =
+          typeof payload.components_summary === 'object' && payload.components_summary !== null && !Array.isArray(payload.components_summary)
+            ? (payload.components_summary as Record<string, unknown>)
+            : {};
 
         useHarnessStore.getState().setExtensionReady(sessionId, {
           extensionName,
@@ -3773,14 +3547,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         useChatStore.getState().setPendingQuestion(sessionId, {
           request_id: interactionId,
           source: 'activate_confirm',
-          questions: [{
-            header: '扩展激活确认',
-            question: `是否激活扩展 **${extensionName}**？`,
-            options: options.map((opt: string) => ({
-              label: opt === 'accept' ? '激活' : opt === 'reject' ? '拒绝' : opt,
-              description: '',
-            })),
-          }],
+          questions: [
+            {
+              header: '扩展激活确认',
+              question: `是否激活扩展 **${extensionName}**？`,
+              options: options.map((opt: string) => ({
+                label: opt === 'accept' ? '激活' : opt === 'reject' ? '拒绝' : opt,
+                description: '',
+              })),
+            },
+          ],
         });
       }),
       webClient.on('harness.session_finished', ({ payload }) => {
@@ -3797,7 +3573,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     return () => {
       streamDeltaBatcherRef.current?.flushAll();
       supplementOutputQuarantineRef.current?.clearAll();
-      unsubs.forEach((fn) => fn());
+      unsubs.forEach(fn => fn());
     };
   }, [
     appendTeamMemberOutputDelta,
@@ -3856,14 +3632,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     };
 
     void runConnect();
-  }, [
-    apiBase,
-    apiKey,
-    model,
-    projectDir,
-    provider,
-    setConnectionStats,
-  ]);
+  }, [apiBase, apiKey, model, projectDir, provider, setConnectionStats]);
 
   useEffect(() => {
     return () => {
@@ -3875,11 +3644,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // setContextCompressionStats(null);
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
-  }, [
-    setContextCompressionStats,
-    setConnectionStats,
-    setConnected,
-  ]);
+  }, [setContextCompressionStats, setConnectionStats, setConnected]);
 
   useEffect(() => {
     const connectOptions: WebConnectOptions = {
@@ -3891,7 +3656,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     };
     const reconnectByDebugToggle = () => {
       void webClient.disconnect('debug mode toggled').then(() => {
-        void webClient.connect(connectOptions).catch((error) => {
+        void webClient.connect(connectOptions).catch(error => {
           const webError = error as WebError;
           setConnectionStats({ lastError: webError.message });
           onErrorRef.current?.(webError.message || 'WebSocket reconnect error');
@@ -3905,7 +3670,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   }, [apiBase, apiKey, model, projectDir, provider, setConnectionStats]);
 
   useEffect(() => {
-    const unsub = webClient.onStateChange((state) => {
+    const unsub = webClient.onStateChange(state => {
       setConnectionState(state);
       const connected = state === 'ready';
       setIsConnected(connected);

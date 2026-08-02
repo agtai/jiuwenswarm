@@ -1,25 +1,39 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSpeechRecognition } from '../../hooks/useSpeech';
-import {
-  combinedSpeechRecognitionTranscript,
-  mergeSpeechRecognitionTranscript,
-} from '../../hooks/speechRecognitionLifecycle';
+import { combinedSpeechRecognitionTranscript, mergeSpeechRecognitionTranscript } from '../../hooks/speechRecognitionLifecycle';
 import type { AgentMode, Message } from '../../types';
-import {
-  onTtsStop,
-  sanitizeLiveVoiceTtsText,
-  splitLiveVoiceTtsText,
-  stopAllTts,
-} from '../../utils/tts';
+import { onTtsStop, sanitizeLiveVoiceTtsText, splitLiveVoiceTtsText, stopAllTts } from '../../utils/tts';
 import { acquireLiveVoiceTtsOutputOwnership } from '../../utils/ttsOutputOwnership';
 import type { LiveVoiceDemoBarProps } from '../../components/ChatPanel/LiveVoiceDemoBar';
+import { FEATURE_LIVE_VOICE_STREAMING_SPEECH, FEATURE_LIVE_VOICE_TASK_DEMO } from '../../featureFlags';
 import { createLiveVoiceCore, type LiveVoiceCore, type LiveVoiceSnapshot, type LiveVoiceSpeechPlayer } from './liveVoiceCore';
 import { selectLiveVoiceResponseMessages } from './liveVoiceMessageGate';
+import { advanceLiveVoiceStreamingSpeech, createLiveVoiceStreamingSpeechState } from './liveVoiceStreamingSpeech';
 import {
+  LIVE_VOICE_STREAMING_FINAL_TIMEOUT_MS,
   resolveLiveVoiceSessionTransition,
+  resolveLiveVoiceTurnOriginatingSessionId,
+  selectLiveVoicePostSpeechAction,
+  selectLiveVoiceStreamingFinalTimeoutAction,
   shouldResumeAfterSilentResponse,
 } from './liveVoiceTurnLifecycle';
+import { LiveVoiceTaskBridge } from './liveVoiceTaskBridge';
+import {
+  isLiveVoiceTaskResultCurrentContext,
+  projectLiveVoiceTaskActivity,
+  selectLiveVoiceTaskContextInvalidation,
+  selectLiveVoiceTaskFeedbackDrainAction,
+  selectLiveVoiceTaskSafetyDisclosure,
+  selectLiveVoiceTaskTranscriptRoute,
+  type LiveVoiceTaskActivity,
+} from './liveVoiceTaskAdapter';
+import {
+  createLiveVoiceTaskGateway,
+  liveVoiceTaskExecutionContextKey,
+  type LiveVoiceTaskExecutionContext,
+  type LiveVoiceTaskRequest,
+} from './liveVoiceTaskClient';
 
 const DEMO_LANGUAGE = 'zh-CN';
 const DEMO_END_OF_SPEECH_TIMEOUT_MS = 2200;
@@ -28,8 +42,27 @@ const DEMO_INITIAL_SILENCE_TIMEOUT_MS = 8000;
 interface VoiceTurn {
   transcript: string;
   responseEpoch: number;
+  originatingSessionId: string | null;
   userBoundaryId: string | null;
   responseObserved: boolean;
+}
+
+interface TaskBridgeHolder {
+  sessionId: string;
+  executionTargetKey: string;
+  request: LiveVoiceTaskRequest;
+  bridge: LiveVoiceTaskBridge;
+}
+
+interface IsolatedTaskBridge {
+  holder: TaskBridgeHolder;
+  commandId: string | null;
+}
+
+interface StreamingFinalTimeoutRegistration {
+  responseEpoch: number;
+  originatingSessionId: string;
+  timeoutId: ReturnType<typeof setTimeout>;
 }
 
 export interface UseLiveVoiceDemoOptions {
@@ -45,6 +78,8 @@ export interface UseLiveVoiceDemoOptions {
   } | null;
   onSendMessage: (content: string) => void;
   onInterrupt: (newInput?: string) => void;
+  taskRequest?: LiveVoiceTaskRequest;
+  taskExecutionContext?: LiveVoiceTaskExecutionContext | null;
 }
 
 function browserSpeechSynthesisAvailable(): boolean {
@@ -135,8 +170,9 @@ function hasUserMessageAfterBoundary(messages: readonly Message[], userBoundaryI
  *
  * Speech recognition only updates local subtitles until one complete capture
  * cycle ends. The accepted final transcript is then sent through the existing
- * chat.send/supplement callbacks. TTS consumes only completed messages already
- * accepted into chatStore, never raw WebSocket output.
+ * chat.send/supplement callbacks. TTS consumes only message snapshots already
+ * accepted into chatStore, never raw WebSocket output. The optional Post-V0
+ * sentence preview remains behind a separate feature flag.
  */
 export function useLiveVoiceDemo({
   activeSessionId,
@@ -148,6 +184,8 @@ export function useLiveVoiceDemo({
   newSessionPromotion,
   onSendMessage,
   onInterrupt,
+  taskRequest,
+  taskExecutionContext = null,
 }: UseLiveVoiceDemoOptions): LiveVoiceDemoBarProps {
   const { t } = useTranslation();
   const coreRef = useRef<LiveVoiceCore | null>(null);
@@ -158,8 +196,10 @@ export function useLiveVoiceDemo({
 
   const [active, setActive] = useState(false);
   const [snapshot, setSnapshot] = useState<LiveVoiceSnapshot>(() => core.getSnapshot());
+  const [taskActivity, setTaskActivity] = useState<LiveVoiceTaskActivity | null>(null);
   const activeRef = useRef(active);
   const processingRef = useRef(isProcessing);
+  const responseInProgressRef = useRef(isProcessing || isThinking);
   const interactionBlockedRef = useRef(interactionBlocked);
   const sessionIdRef = useRef(activeSessionId);
   const previousSessionIdRef = useRef(activeSessionId);
@@ -168,21 +208,42 @@ export function useLiveVoiceDemo({
   const interimChunkRef = useRef('');
   const recognitionFailedRef = useRef(false);
   const recognitionCaptureOpenRef = useRef(false);
+  const recognitionCaptureSessionIdRef = useRef<string | null>(null);
+  const recognitionCaptureExecutionTargetKeyRef = useRef<string | null>(null);
   const retryCaptureAfterRecognitionEndRef = useRef(false);
   const beginCaptureRef = useRef<() => void>(() => {});
   const safelyStopListeningRef = useRef<() => void>(() => {});
   const pendingSupplementAfterPromotionRef = useRef<string | null>(null);
   const voiceTurnRef = useRef<VoiceTurn | null>(null);
   const spokenMessageIdsRef = useRef<Set<string>>(new Set());
+  const streamingSpeechStateRef = useRef(createLiveVoiceStreamingSpeechState());
+  const streamingFinalTimeoutRef = useRef<StreamingFinalTimeoutRegistration | null>(null);
   const resumeListeningAfterSpeechRef = useRef(false);
+  const taskFeedbackOwnsResumeRef = useRef(false);
   const ignoreNextGlobalTtsStopRef = useRef(false);
   const coreSubscriptionRef = useRef<(() => void) | null>(null);
   const releaseTtsOutputOwnershipRef = useRef<(() => void) | null>(null);
+  const taskBridgeRef = useRef<TaskBridgeHolder | null>(null);
+  const isolatedTaskBridgeRef = useRef<IsolatedTaskBridge | null>(null);
+  const taskExecutionContextRef = useRef(taskExecutionContext);
+  const taskExecutionTargetKey = liveVoiceTaskExecutionContextKey(taskExecutionContext);
+  const taskExecutionTargetKeyRef = useRef(taskExecutionTargetKey);
 
   activeRef.current = active;
   processingRef.current = isProcessing;
+  responseInProgressRef.current = isProcessing || isThinking;
   interactionBlockedRef.current = interactionBlocked;
   sessionIdRef.current = activeSessionId;
+  taskExecutionContextRef.current = taskExecutionContext;
+  taskExecutionTargetKeyRef.current = taskExecutionTargetKey;
+
+  const clearStreamingFinalTimeout = useCallback(() => {
+    const registration = streamingFinalTimeoutRef.current;
+    streamingFinalTimeoutRef.current = null;
+    if (registration) {
+      clearTimeout(registration.timeoutId);
+    }
+  }, []);
 
   const stopEveryVoiceOutput = useCallback(() => {
     ignoreNextGlobalTtsStopRef.current = true;
@@ -200,6 +261,143 @@ export function useLiveVoiceDemo({
     releaseTtsOutputOwnershipRef.current = null;
   }, []);
 
+  const enqueueTaskFeedback = useCallback(
+    (text: string, responseEpoch: number, captureKey: string) => {
+      const speakable = sanitizeLiveVoiceTtsText(text);
+      for (const [chunkIndex, chunk] of splitLiveVoiceTtsText(speakable).entries()) {
+        const queued = core.enqueueSpeech(chunk, responseEpoch, `task-feedback:${captureKey}:${chunkIndex}`);
+        if (queued.accepted) {
+          resumeListeningAfterSpeechRef.current = true;
+          taskFeedbackOwnsResumeRef.current = true;
+        }
+      }
+    },
+    [core]
+  );
+
+  const getTaskBridge = useCallback(
+    (sessionId: string, executionContext: LiveVoiceTaskExecutionContext): LiveVoiceTaskBridge | null => {
+      if (!taskRequest) return null;
+      const executionTargetKey = liveVoiceTaskExecutionContextKey(executionContext);
+      if (!executionTargetKey) return null;
+      const current = taskBridgeRef.current;
+      if (current?.sessionId === sessionId && current.executionTargetKey === executionTargetKey && current.request === taskRequest) {
+        return current.bridge;
+      }
+      const bridge = new LiveVoiceTaskBridge(
+        createLiveVoiceTaskGateway({ request: taskRequest, sessionId, executionContext })
+      );
+      taskBridgeRef.current = { sessionId, executionTargetKey, request: taskRequest, bridge };
+      return bridge;
+    },
+    [taskRequest]
+  );
+
+  const handleCommittedTaskCommand = useCallback(
+    async (transcript: string, captureId: number, responseEpoch: number) => {
+      const sessionId = sessionIdRef.current?.trim() ?? '';
+      const executionContext = taskExecutionContextRef.current;
+      const executionTargetKey = liveVoiceTaskExecutionContextKey(executionContext);
+      const captureKey = `${sessionId || 'no-session'}:${captureId}:${responseEpoch}`;
+      if (!sessionId || sessionId === 'new') {
+        const detail = t('liveVoice.task.requiresSession');
+        setTaskActivity({
+          level: 'warning',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        enqueueTaskFeedback(detail, responseEpoch, captureKey);
+        return;
+      }
+
+      if (!executionContext || !executionTargetKey) {
+        const detail = t('liveVoice.task.requiresExecutionTarget');
+        setTaskActivity({
+          level: 'error',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        enqueueTaskFeedback(detail, responseEpoch, captureKey);
+        return;
+      }
+
+      const isolated = isolatedTaskBridgeRef.current;
+      if (isolated) {
+        const canRestore =
+          isolated.holder.sessionId === sessionId &&
+          isolated.holder.executionTargetKey === executionTargetKey &&
+          isolated.holder.request === taskRequest;
+        if (canRestore) {
+          taskBridgeRef.current = isolated.holder;
+          isolatedTaskBridgeRef.current = null;
+        } else {
+          const detail = t('liveVoice.task.contextIsolated', {
+            commandId: isolated.commandId ?? t('liveVoice.task.unknown'),
+          });
+          setTaskActivity({
+            level: 'error',
+            title: t('liveVoice.task.contextIsolatedTitle'),
+            detail,
+            commandId: isolated.commandId ?? undefined,
+          });
+          enqueueTaskFeedback(detail, responseEpoch, captureKey);
+          return;
+        }
+      }
+
+      const bridge = getTaskBridge(sessionId, executionContext);
+      if (!bridge) {
+        const detail = t('liveVoice.task.unavailable');
+        setTaskActivity({
+          level: 'error',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        enqueueTaskFeedback(detail, responseEpoch, captureKey);
+        return;
+      }
+
+      const result = await bridge.handle({
+        captureKey,
+        text: transcript,
+        transcriptKind: 'final',
+        committed: true,
+      });
+      if (
+        !isLiveVoiceTaskResultCurrentContext(
+          sessionId,
+          sessionIdRef.current,
+          bridge,
+          taskBridgeRef.current?.bridge ?? null,
+          executionTargetKey,
+          taskExecutionTargetKeyRef.current
+        )
+      ) {
+        const isolatedResult = isolatedTaskBridgeRef.current;
+        if (isolatedResult?.holder.bridge === bridge) {
+          const activity = projectLiveVoiceTaskActivity(result);
+          if (activity) {
+            setTaskActivity({
+              ...activity,
+              level: activity.level === 'error' ? 'error' : 'warning',
+              title: t('liveVoice.task.contextIsolatedTitle'),
+              detail: t('liveVoice.task.isolatedResult', { detail: activity.detail }),
+            });
+          }
+        }
+        return;
+      }
+      const nextActivity = projectLiveVoiceTaskActivity(result);
+      if (nextActivity) {
+        setTaskActivity(nextActivity);
+      }
+      if (result.feedback?.speakableText) {
+        enqueueTaskFeedback(result.feedback.speakableText, responseEpoch, captureKey);
+      }
+    },
+    [enqueueTaskFeedback, getTaskBridge, t]
+  );
+
   const handleRecognitionResult = useCallback(
     (transcript: string, isFinal: boolean) => {
       if (!activeRef.current) return;
@@ -209,7 +407,7 @@ export function useLiveVoiceDemo({
           interimTranscript: interimChunkRef.current,
         },
         transcript,
-        isFinal,
+        isFinal
       );
       finalChunksRef.current = nextTranscript.finalTranscript;
       interimChunkRef.current = nextTranscript.interimTranscript;
@@ -232,7 +430,11 @@ export function useLiveVoiceDemo({
 
   const handleRecognitionEnd = useCallback(() => {
     const captureWasOpen = recognitionCaptureOpenRef.current;
+    const captureSessionId = recognitionCaptureSessionIdRef.current;
     recognitionCaptureOpenRef.current = false;
+    recognitionCaptureSessionIdRef.current = null;
+    const captureExecutionTargetKey = recognitionCaptureExecutionTargetKeyRef.current;
+    recognitionCaptureExecutionTargetKeyRef.current = null;
     if (!activeRef.current) {
       recognitionFailedRef.current = false;
       retryCaptureAfterRecognitionEndRef.current = false;
@@ -279,10 +481,63 @@ export function useLiveVoiceDemo({
     voiceTurnRef.current = {
       transcript: committed.transcript,
       responseEpoch: committed.responseEpoch,
+      originatingSessionId: sessionIdRef.current,
       userBoundaryId: null,
       responseObserved: false,
     };
     resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
+
+    const taskTranscriptRoute = selectLiveVoiceTaskTranscriptRoute({
+      taskDemoEnabled: FEATURE_LIVE_VOICE_TASK_DEMO,
+      transcript: committed.transcript,
+      captureSessionId,
+      currentSessionId: sessionIdRef.current,
+      captureExecutionTargetKey,
+      currentExecutionTargetKey: taskExecutionTargetKeyRef.current,
+    });
+    if (taskTranscriptRoute !== 'chat') {
+      if (taskTranscriptRoute === 'session-changed') {
+        const detail = t('liveVoice.task.sessionChanged');
+        setTaskActivity({
+          level: 'warning',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        voiceTurnRef.current = null;
+        core.fail('task-session-changed', detail);
+        return;
+      }
+      if (taskTranscriptRoute === 'execution-target-changed') {
+        const detail = t('liveVoice.task.executionTargetChanged');
+        setTaskActivity({
+          level: 'warning',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        voiceTurnRef.current = null;
+        core.fail('task-execution-target-changed', detail);
+        return;
+      }
+      if (taskTranscriptRoute === 'requires-execution-target') {
+        const detail = t('liveVoice.task.requiresExecutionTarget');
+        setTaskActivity({
+          level: 'error',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        voiceTurnRef.current = null;
+        core.fail('task-execution-target-missing', detail);
+        return;
+      }
+      pendingSupplementAfterPromotionRef.current = null;
+      // Task commands do not create a chat user boundary. Keep the chatStore
+      // response selector out of this turn so an older identical transcript
+      // cannot be mistaken for the current command's response.
+      voiceTurnRef.current = null;
+      void handleCommittedTaskCommand(committed.transcript, committed.captureId, committed.responseEpoch);
+      return;
+    }
 
     // Decide at commit time, not capture start: the Agent may start or finish
     // while the user is still speaking.
@@ -298,15 +553,9 @@ export function useLiveVoiceDemo({
       pendingSupplementAfterPromotionRef.current = null;
       onSendMessage(committed.transcript);
     }
-  }, [core, onInterrupt, onSendMessage, t]);
+  }, [core, handleCommittedTaskCommand, onInterrupt, onSendMessage, t]);
 
-  const shouldContinueRecognitionTail = useCallback(
-    () =>
-      activeRef.current &&
-      recognitionCaptureOpenRef.current &&
-      !recognitionFailedRef.current,
-    []
-  );
+  const shouldContinueRecognitionTail = useCallback(() => activeRef.current && recognitionCaptureOpenRef.current && !recognitionFailedRef.current, []);
 
   const {
     startListening,
@@ -338,20 +587,27 @@ export function useLiveVoiceDemo({
     // Once a new capture starts, no later message can still belong to the
     // previous voice turn. This also prevents proactive/late assistant output
     // from being spoken over the microphone while the user is talking.
+    clearStreamingFinalTimeout();
     voiceTurnRef.current = null;
+    streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
     finalChunksRef.current = '';
     interimChunkRef.current = '';
     resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
     core.beginListening();
     recognitionCaptureOpenRef.current = true;
+    recognitionCaptureSessionIdRef.current = sessionIdRef.current;
+    recognitionCaptureExecutionTargetKeyRef.current = taskExecutionTargetKeyRef.current;
     try {
       startListening();
     } catch (error) {
       recognitionCaptureOpenRef.current = false;
+      recognitionCaptureSessionIdRef.current = null;
+      recognitionCaptureExecutionTargetKeyRef.current = null;
       const message = error instanceof Error && error.message ? error.message : t('speech.errors.recognitionGeneric', { error: 'start-failed' });
       core.fail('speech-recognition-start', message);
     }
-  }, [available, core, startListening, t]);
+  }, [available, clearStreamingFinalTimeout, core, startListening, t]);
   beginCaptureRef.current = beginCapture;
 
   const safelyStopListening = useCallback(() => {
@@ -361,6 +617,8 @@ export function useLiveVoiceDemo({
       // Some Chromium builds throw when stop() races an already-ended
       // recognition instance. The local capture is invalidated regardless.
       recognitionCaptureOpenRef.current = false;
+      recognitionCaptureSessionIdRef.current = null;
+      recognitionCaptureExecutionTargetKeyRef.current = null;
     }
   }, [stopListening]);
   safelyStopListeningRef.current = safelyStopListening;
@@ -372,16 +630,21 @@ export function useLiveVoiceDemo({
     finalChunksRef.current = '';
     interimChunkRef.current = '';
     recognitionCaptureOpenRef.current = false;
+    recognitionCaptureSessionIdRef.current = null;
+    recognitionCaptureExecutionTargetKeyRef.current = null;
     recognitionFailedRef.current = false;
     retryCaptureAfterRecognitionEndRef.current = false;
     pendingSupplementAfterPromotionRef.current = null;
+    clearStreamingFinalTimeout();
     voiceTurnRef.current = null;
+    streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
     resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
     spokenMessageIdsRef.current.clear();
     safelyStopListening();
     core.exit();
     stopEveryVoiceOutput();
-  }, [core, releaseTtsOutputOwnership, safelyStopListening, stopEveryVoiceOutput]);
+  }, [clearStreamingFinalTimeout, core, releaseTtsOutputOwnership, safelyStopListening, stopEveryVoiceOutput]);
 
   const enableLiveVoice = useCallback(() => {
     if (!available || activeRef.current) return;
@@ -389,7 +652,9 @@ export function useLiveVoiceDemo({
     activeRef.current = true;
     setActive(true);
     spokenMessageIdsRef.current = new Set(messages.filter(message => message.role === 'assistant').map(message => message.id));
+    clearStreamingFinalTimeout();
     voiceTurnRef.current = null;
+    streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
     pendingSupplementAfterPromotionRef.current = null;
     core.exit();
     stopEveryVoiceOutput();
@@ -397,9 +662,11 @@ export function useLiveVoiceDemo({
     interimChunkRef.current = '';
     recognitionFailedRef.current = false;
     recognitionCaptureOpenRef.current = false;
+    recognitionCaptureSessionIdRef.current = null;
+    recognitionCaptureExecutionTargetKeyRef.current = null;
     retryCaptureAfterRecognitionEndRef.current = false;
     beginCaptureRef.current();
-  }, [acquireTtsOutputOwnership, available, core, messages, stopEveryVoiceOutput]);
+  }, [acquireTtsOutputOwnership, available, clearStreamingFinalTimeout, core, messages, stopEveryVoiceOutput]);
 
   const handlePrimaryAction = useCallback(() => {
     switch (core.getSnapshot().status) {
@@ -434,6 +701,41 @@ export function useLiveVoiceDemo({
     };
   }, [core]);
 
+  useEffect(() => {
+    const current = taskBridgeRef.current;
+    if (
+      current &&
+      (current.sessionId !== activeSessionId || current.executionTargetKey !== taskExecutionTargetKey || current.request !== taskRequest)
+    ) {
+      const invalidation = selectLiveVoiceTaskContextInvalidation(current.bridge.getSnapshot());
+      taskBridgeRef.current = null;
+      if (invalidation.action === 'isolate') {
+        isolatedTaskBridgeRef.current = {
+          holder: current,
+          commandId: invalidation.commandId,
+        };
+        const detail = t('liveVoice.task.contextIsolated', {
+          commandId: invalidation.commandId ?? t('liveVoice.task.unknown'),
+        });
+        setTaskActivity({
+          level: 'error',
+          title: t('liveVoice.task.contextIsolatedTitle'),
+          detail,
+          commandId: invalidation.commandId ?? undefined,
+        });
+        clearStreamingFinalTimeout();
+        voiceTurnRef.current = null;
+        resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+        if (activeRef.current) {
+          core.fail('task-context-isolated', detail);
+        }
+      } else {
+        setTaskActivity(null);
+      }
+    }
+  }, [activeSessionId, clearStreamingFinalTimeout, core, t, taskExecutionTargetKey, taskRequest]);
+
   useLayoutEffect(() => {
     return () => {
       const shouldStopAllTts = activeRef.current;
@@ -443,11 +745,16 @@ export function useLiveVoiceDemo({
       finalChunksRef.current = '';
       interimChunkRef.current = '';
       recognitionCaptureOpenRef.current = false;
+      recognitionCaptureSessionIdRef.current = null;
+      recognitionCaptureExecutionTargetKeyRef.current = null;
       recognitionFailedRef.current = false;
       retryCaptureAfterRecognitionEndRef.current = false;
       pendingSupplementAfterPromotionRef.current = null;
+      clearStreamingFinalTimeout();
       voiceTurnRef.current = null;
+      streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
       resumeListeningAfterSpeechRef.current = false;
+      taskFeedbackOwnsResumeRef.current = false;
       coreSubscriptionRef.current?.();
       coreSubscriptionRef.current = null;
       safelyStopListeningRef.current();
@@ -457,7 +764,7 @@ export function useLiveVoiceDemo({
       // no-op, while stopAllTts also clears generated HTMLAudio playback.
       if (shouldStopAllTts) stopAllTts();
     };
-  }, [core]);
+  }, [clearStreamingFinalTimeout, core]);
 
   useEffect(() => {
     return onTtsStop(() => {
@@ -468,10 +775,13 @@ export function useLiveVoiceDemo({
       const currentSnapshot = core.getSnapshot();
       if (activeRef.current && (currentSnapshot.status === 'speaking' || currentSnapshot.activeSpeechKey !== null || currentSnapshot.pendingSpeechCount > 0)) {
         resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+        clearStreamingFinalTimeout();
+        streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
         core.interrupt();
       }
     });
-  }, [core]);
+  }, [clearStreamingFinalTimeout, core]);
 
   useEffect(() => {
     if (!active || available) return;
@@ -495,6 +805,15 @@ export function useLiveVoiceDemo({
     // Creating the first real session promotes the special `new` runtime. It
     // is the same voice turn and must keep listening/thinking across the move.
     if (transition.action === 'preserve') {
+      const currentTurn = voiceTurnRef.current;
+      if (currentTurn) {
+        currentTurn.originatingSessionId = resolveLiveVoiceTurnOriginatingSessionId({
+          originatingSessionId: currentTurn.originatingSessionId,
+          previousSessionId,
+          activeSessionId,
+          transitionAction: transition.action,
+        });
+      }
       const pendingSupplement = pendingSupplementAfterPromotionRef.current;
       pendingSupplementAfterPromotionRef.current = null;
       if (pendingSupplement) onInterrupt(pendingSupplement);
@@ -518,9 +837,14 @@ export function useLiveVoiceDemo({
       knownUserBoundaryId: turn.userBoundaryId,
       isProcessing: responseInProgress,
       spokenMessageIds: spokenMessageIdsRef.current,
+      plannerMessageId:
+        FEATURE_LIVE_VOICE_STREAMING_SPEECH && streamingSpeechStateRef.current.responseEpoch === turn.responseEpoch
+          ? streamingSpeechStateRef.current.messageId
+          : null,
+      requireAuthoritativeFinal: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
     });
     turn.userBoundaryId = selection.userBoundaryId;
-    if (selection.speakableMessages.length > 0) {
+    if (selection.speakableMessages.length > 0 || selection.streamingCandidate || selection.plannerFinalObservation) {
       turn.responseObserved = true;
     }
 
@@ -539,11 +863,95 @@ export function useLiveVoiceDemo({
       }
     }
 
+    if (FEATURE_LIVE_VOICE_STREAMING_SPEECH && selection.plannerFinalObservation) {
+      const message = selection.plannerFinalObservation;
+      const previousStreamingState = streamingSpeechStateRef.current;
+      const planned = advanceLiveVoiceStreamingSpeech(previousStreamingState, {
+        responseEpoch: turn.responseEpoch,
+        messageId: message.id,
+        rawContent: message.content,
+        phase: 'final',
+      });
+      streamingSpeechStateRef.current = planned.state;
+      spokenMessageIdsRef.current.add(message.id);
+      if (planned.outcome === 'mismatch') {
+        if (previousStreamingState.mode !== 'mismatch') {
+          resumeListeningAfterSpeechRef.current = false;
+          core.fail('streaming-speech-revision', t('liveVoice.streamingRevisionFallback'));
+        }
+        return;
+      }
+      for (const emission of planned.emissions) {
+        const queued = core.enqueueSpeech(emission.text, emission.responseEpoch, emission.key);
+        if (queued.accepted) {
+          resumeListeningAfterSpeechRef.current = true;
+        }
+      }
+    }
+
+    if (FEATURE_LIVE_VOICE_STREAMING_SPEECH && selection.streamingCandidate) {
+      const previousStreamingState = streamingSpeechStateRef.current;
+      const planned = advanceLiveVoiceStreamingSpeech(previousStreamingState, {
+        responseEpoch: turn.responseEpoch,
+        messageId: selection.streamingCandidate.id,
+        rawContent: selection.streamingCandidate.content,
+        phase: 'streaming',
+      });
+      streamingSpeechStateRef.current = planned.state;
+      if (planned.outcome === 'mismatch') {
+        if (previousStreamingState.mode !== 'mismatch') {
+          resumeListeningAfterSpeechRef.current = false;
+          core.fail('streaming-speech-revision', t('liveVoice.streamingRevisionFallback'));
+        }
+        return;
+      }
+      for (const emission of planned.emissions) {
+        const queued = core.enqueueSpeech(emission.text, emission.responseEpoch, emission.key);
+        if (queued.accepted) {
+          resumeListeningAfterSpeechRef.current = true;
+        }
+      }
+    }
+
     for (const message of selection.speakableMessages) {
       // Mark before enqueue so a synchronous store/render update cannot queue
       // the same final twice. Rejections are intentionally not retried unless
       // they belong to a later, newly committed response epoch.
       spokenMessageIdsRef.current.add(message.id);
+
+      if (FEATURE_LIVE_VOICE_STREAMING_SPEECH) {
+        const previousStreamingState = streamingSpeechStateRef.current;
+        // A chat.final collapse may replace the streaming message with a new
+        // ID inside the same response epoch. Always let the planner reconcile
+        // a single final message: before early speech it can safely fall back
+        // to final-only; after early speech it must stop on the ID mismatch
+        // instead of replaying the whole final through the legacy path.
+        if (selection.finalAssistantMessageCount === 1) {
+          const planned = advanceLiveVoiceStreamingSpeech(previousStreamingState, {
+            responseEpoch: turn.responseEpoch,
+            messageId: message.id,
+            rawContent: message.content,
+            phase: 'final',
+          });
+          streamingSpeechStateRef.current = planned.state;
+          if (planned.outcome === 'mismatch') {
+            spokenMessageIdsRef.current.delete(message.id);
+            if (previousStreamingState.mode !== 'mismatch') {
+              resumeListeningAfterSpeechRef.current = false;
+              core.fail('streaming-speech-revision', t('liveVoice.streamingRevisionFallback'));
+            }
+            return;
+          }
+          for (const emission of planned.emissions) {
+            const queued = core.enqueueSpeech(emission.text, emission.responseEpoch, emission.key);
+            if (queued.accepted) {
+              resumeListeningAfterSpeechRef.current = true;
+            }
+          }
+          continue;
+        }
+      }
+
       const text = sanitizeLiveVoiceTtsText(message.content);
       for (const [chunkIndex, chunk] of splitLiveVoiceTtsText(text).entries()) {
         const queued = core.enqueueSpeech(chunk, turn.responseEpoch, `${message.id}:${chunkIndex}`);
@@ -554,26 +962,163 @@ export function useLiveVoiceDemo({
     }
 
     const latestSnapshot = core.getSnapshot();
-    if (shouldResumeAfterSilentResponse({
-      responseObserved: turn.responseObserved,
+    const latestStreamingPlan = streamingSpeechStateRef.current;
+    const currentSessionId = sessionIdRef.current;
+    const finalTimeoutAction = selectLiveVoiceStreamingFinalTimeoutAction({
+      streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+      liveVoiceActive: activeRef.current,
       responseInProgress,
-      hasUserBoundary: Boolean(selection.userBoundaryId),
-      isThinking: latestSnapshot.status === 'thinking',
+      responseObserved: turn.responseObserved,
+      originatingSessionId: turn.originatingSessionId,
+      activeSessionId: currentSessionId,
+      currentTurnResponseEpoch: turn.responseEpoch,
+      plannerResponseEpoch: latestStreamingPlan.responseEpoch,
+      plannerMessageId: latestStreamingPlan.messageId,
+      plannerMode: latestStreamingPlan.mode,
+      status: latestSnapshot.status,
       pendingSpeechCount: latestSnapshot.pendingSpeechCount,
-    })) {
+      activeSpeechKey: latestSnapshot.activeSpeechKey,
+      timeoutExpired: false,
+    });
+    if (
+      turn.originatingSessionId === currentSessionId &&
+      finalTimeoutAction !== 'wait' &&
+      shouldResumeAfterSilentResponse({
+        responseObserved: turn.responseObserved,
+        responseInProgress,
+        hasUserBoundary: Boolean(selection.userBoundaryId),
+        isThinking: latestSnapshot.status === 'thinking',
+        pendingSpeechCount: latestSnapshot.pendingSpeechCount,
+      })
+    ) {
       // A real response may contain only tool/media content, or sanitization
       // may intentionally remove everything. With no error and no playable
       // text, continue the voice loop instead of remaining stuck in thinking.
       beginCapture();
     }
-  }, [active, beginCapture, core, exitLiveVoice, isProcessing, isThinking, messages]);
+  }, [active, beginCapture, core, exitLiveVoice, isProcessing, isThinking, messages, t]);
 
   useEffect(() => {
-    if (!active || isProcessing || isThinking) return;
-    if (snapshot.status !== 'idle' || !resumeListeningAfterSpeechRef.current) return;
+    const currentSnapshot = core.getSnapshot();
+    const currentTurn = voiceTurnRef.current;
+    const currentPlan = streamingSpeechStateRef.current;
+    const currentSessionId = activeSessionId;
+    const action = selectLiveVoiceStreamingFinalTimeoutAction({
+      streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+      liveVoiceActive: active,
+      responseInProgress: isProcessing || isThinking,
+      responseObserved: currentTurn?.responseObserved ?? false,
+      originatingSessionId: currentTurn?.originatingSessionId ?? null,
+      activeSessionId: currentSessionId,
+      currentTurnResponseEpoch: currentTurn?.responseEpoch ?? null,
+      plannerResponseEpoch: currentPlan.responseEpoch,
+      plannerMessageId: currentPlan.messageId,
+      plannerMode: currentPlan.mode,
+      status: currentSnapshot.status,
+      pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+      activeSpeechKey: currentSnapshot.activeSpeechKey,
+      timeoutExpired: false,
+    });
+
+    if (action !== 'wait' || currentTurn === null) {
+      clearStreamingFinalTimeout();
+      return;
+    }
+    if (
+      streamingFinalTimeoutRef.current?.responseEpoch === currentTurn.responseEpoch &&
+      streamingFinalTimeoutRef.current.originatingSessionId === currentTurn.originatingSessionId
+    ) {
+      return;
+    }
+    if (currentTurn.originatingSessionId === null) {
+      clearStreamingFinalTimeout();
+      return;
+    }
+
+    clearStreamingFinalTimeout();
+    let registration: StreamingFinalTimeoutRegistration;
+    registration = {
+      responseEpoch: currentTurn.responseEpoch,
+      originatingSessionId: currentTurn.originatingSessionId,
+      timeoutId: setTimeout(() => {
+        if (streamingFinalTimeoutRef.current !== registration) return;
+        streamingFinalTimeoutRef.current = null;
+
+        const latestSnapshot = core.getSnapshot();
+        const latestTurn = voiceTurnRef.current;
+        const latestPlan = streamingSpeechStateRef.current;
+        const expiredAction = selectLiveVoiceStreamingFinalTimeoutAction({
+          streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+          liveVoiceActive: activeRef.current,
+          responseInProgress: responseInProgressRef.current,
+          responseObserved: latestTurn?.responseObserved ?? false,
+          originatingSessionId: latestTurn?.originatingSessionId ?? null,
+          activeSessionId: sessionIdRef.current,
+          currentTurnResponseEpoch: latestTurn?.responseEpoch ?? null,
+          plannerResponseEpoch: latestPlan.responseEpoch,
+          plannerMessageId: latestPlan.messageId,
+          plannerMode: latestPlan.mode,
+          status: latestSnapshot.status,
+          pendingSpeechCount: latestSnapshot.pendingSpeechCount,
+          activeSpeechKey: latestSnapshot.activeSpeechKey,
+          timeoutExpired: true,
+        });
+        if (latestTurn?.originatingSessionId !== registration.originatingSessionId) return;
+        if (expiredAction !== 'recover') return;
+
+        // Missing chat.final is not permission to speak provisional content as
+        // final. Invalidate this epoch and expose a retryable error instead.
+        voiceTurnRef.current = null;
+        streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
+        resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+        core.fail('streaming-final-timeout', t('liveVoice.streamingFinalTimeout'));
+      }, LIVE_VOICE_STREAMING_FINAL_TIMEOUT_MS),
+    };
+    streamingFinalTimeoutRef.current = registration;
+  }, [active, activeSessionId, clearStreamingFinalTimeout, core, isProcessing, isThinking, messages, snapshot.activeSpeechKey, snapshot.pendingSpeechCount, snapshot.status, t]);
+
+  useEffect(() => {
+    if (!active) return;
+    const currentSnapshot = core.getSnapshot();
+    const currentTurn = voiceTurnRef.current;
+    const currentStreamingPlan = streamingSpeechStateRef.current;
+    const taskFeedbackAction = selectLiveVoiceTaskFeedbackDrainAction({
+      taskFeedbackOwnsResume: taskFeedbackOwnsResumeRef.current,
+      resumeRequested: resumeListeningAfterSpeechRef.current,
+      responseInProgress: isProcessing || isThinking,
+      status: currentSnapshot.status,
+      pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+      activeSpeechKey: currentSnapshot.activeSpeechKey,
+    });
+    if (taskFeedbackAction === 'begin-capture') {
+      resumeListeningAfterSpeechRef.current = false;
+      taskFeedbackOwnsResumeRef.current = false;
+      beginCapture();
+      return;
+    }
+    const action = selectLiveVoicePostSpeechAction({
+      streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+      responseInProgress: isProcessing || isThinking,
+      responseObserved: currentTurn?.responseObserved ?? false,
+      currentTurnResponseEpoch: currentTurn?.responseEpoch ?? null,
+      plannerResponseEpoch: currentStreamingPlan.responseEpoch,
+      plannerMessageId: currentStreamingPlan.messageId,
+      plannerMode: currentStreamingPlan.mode,
+      status: currentSnapshot.status,
+      pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+      activeSpeechKey: currentSnapshot.activeSpeechKey,
+      resumeRequested: resumeListeningAfterSpeechRef.current,
+    });
+    if (action === 'mark-thinking' && currentTurn) {
+      core.markThinking(currentTurn.responseEpoch);
+      return;
+    }
+    if (action !== 'begin-capture') return;
     resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
     beginCapture();
-  }, [active, beginCapture, isProcessing, isThinking, snapshot.status]);
+  }, [active, beginCapture, core, isProcessing, isThinking, snapshot.activeSpeechKey, snapshot.pendingSpeechCount, snapshot.status]);
 
   let unavailableMessage = '';
   if (mode !== 'agent') {
@@ -594,6 +1139,8 @@ export function useLiveVoiceDemo({
     committedTranscript: snapshot.finalTranscript,
     errorMessage: snapshot.error?.message ?? '',
     unavailableMessage,
+    taskSafetyDisclosure: selectLiveVoiceTaskSafetyDisclosure(FEATURE_LIVE_VOICE_TASK_DEMO, t('liveVoice.task.safetyDisclosure')),
+    taskActivity,
     onEnable: enableLiveVoice,
     onExit: exitLiveVoice,
     onPrimaryAction: handlePrimaryAction,
