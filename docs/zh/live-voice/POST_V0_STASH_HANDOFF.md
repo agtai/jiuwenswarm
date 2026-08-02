@@ -1,5 +1,7 @@
 # Post-V0 stash 历史与恢复保险交接单
 
+> **仅供历史取证/灾难恢复。** 第 3–7 节记录的是 2026-08-01 foundation 收尾快照，不是当前执行计划；普通新机器和新 Codex 只读取共享 Git，并以 [STATUS.md](STATUS.md) 的当前下一步为准。
+
 - 快照日期：2026-08-01
 - 工作分支：`hx/0731_live_voice_ux`
 - V0 Candidate 不可变基线：`2c700934aa0024a7ab229644bf15934e9e8170e7`（未放行）
@@ -8,7 +10,7 @@
 - stash commit：`7f4cfd2eedfb3a177b94f69417143fba441f3671`
 - 状态：**已经 apply，原 stash 保留为额外备份**；D-030 已结束 D-022 的临时“不 commit、不 push”窗口
 
-当前 Post-V0 worktree 已包含这份 stash 的内容以及其后的 foundation 收尾；后端 `3da101cf`、前端 `42e76d30` 已落地，相关文档已纳入本批 Git 交付。正常开发、新机器恢复和 V0 验收都**不要重复 apply/pop/drop**。跨机器事实来自正常 commit/push 后的共享分支；本机 stash 只是远端可重建前后的额外保险。
+共享累计分支已包含这份 stash 的内容以及其后的 foundation 收尾；后端 `3da101cf`、前端 `42e76d30` 已落地，相关文档已纳入本批 Git 交付。正常开发、新机器恢复和 V0 验收都**不要重复 apply/pop/drop**。跨机器事实来自正常 commit/push 后的共享分支；本机 stash 只是远端可重建前后的额外保险。
 
 ## 1. 正常继续开发与灾难恢复边界
 
@@ -53,7 +55,7 @@ VITE_FEATURE_LIVE_VOICE_TASK_DEMO=true
 - committed final 的固定中文口令可真实调用 AutoHarness，取得真实 task ID/status/cancel，并以 cancel A + create successor B 表示替换。
 - 固定使用有代码副作用的 `extended_evolve_pipeline`；界面常驻披露执行器、副作用和取消不能撤销既有修改。
 - session、target 和 bridge identity 全链 fence；capture 期间任一身份改变都拒绝副作用命令。
-- 没有可信的绝对当前项目路径时 fail closed，零 gateway 请求；run/status/cancel 都携带冻结的 `project_dir`/`project_id`。
+- 无法从当前 persisted Session 与精确注册项目解析绝对项目路径时 fail closed，零 gateway 请求；run/status/cancel 都携带冻结的 `project_dir`/`project_id`。这只证明正常客户端的一致性约束，不证明请求身份不可伪造。
 - UI 显示项目路径、项目 ID、来源 Session、来源 Channel 和来源方法；遗留任务缺字段时显示 unknown，不猜测。
 
 ### 3.4 每任务执行上下文与 provenance
@@ -65,14 +67,14 @@ VITE_FEATURE_LIVE_VOICE_TASK_DEMO=true
 
 ### 3.5 后端创建幂等
 
-- `schedule.run` 可接收 `origin_namespace` 与 `idempotency_key`；真正 owner scope 由服务端根据 channel/session/可用 app identity 派生。
+- `schedule.run` 可接收 `origin_namespace` 与 `idempotency_key`；owner scope 由服务端根据 Web request 的 channel/session/可用 app identity 字段派生；它只提供单用户请求一致性，不证明字段已认证。
 - 同一进程、同一 JSON store 路径的 TaskStore 实例共享锁，原子执行 get-or-create，并在 JSON 中保存 `create_commands` ledger、标准化 intent fingerprint 和删除 tombstone。
 - 同 scope、同 key、同 intent 重放返回同一个 task ID，且只触发一次；同 key 不同 intent 返回 `IDEMPOTENCY_CONFLICT` 和 `existing_task_id`，不返回新的 `task_id`。
 - JSON reload 后仍可重放；冲突或 replay 时释放本次候选 Agent pin/context。`schedule.list` 支持 scope/namespace/key 的精确筛选；不带幂等字段的旧调用保持原行为。
 
 ### 3.6 apply 后完成的 Task Foundation
 
-- `schedule.list/status/cancel/logs/delete` 由 AgentServer 从可信 request 派生 owner scope 与 project execution target；外部缺失、无效或不匹配时 fail closed，并在日志读取、scheduler cancel、store mutation、context release 前拒绝越权。显式内部兼容 sentinel 不向外部客户端开放绕过能力。
+- `schedule.list/status/cancel/logs/delete` 由 AgentServer 从 Web request 字段派生 owner scope 与 project execution target；必需 `channel_id/session_id` 缺失或非法、完整 owner scope 不一致，或请求 target 与 stored target 中已知的 `project_dir/project_id` 不一致时 fail closed；`app_id` 可空，遗留 unknown project 字段不猜测。拒绝发生在日志读取、scheduler cancel、store mutation、context release 前。由于 Web 身份仍由请求提供，这不是抵御恶意伪造的鉴权边界；显式内部兼容 sentinel 也不应对外暴露。
 - Live Voice 每次 committed create/replace 生成一个稳定 command ID；首次 run、同-key retry 和 scoped exact-key list 始终复用这个 ID，绝不以新 key 盲目重试。
 - exact-key list 只接受唯一且 task ID、query、pipeline、namespace、key、target 全部一致的记录。任务在请求期间从 pending 进入 running/terminal 是合法真实状态，不因 pending drift 被错误拒绝或覆盖。
 - 页面显示真实 task card：task ID、command ID、后端原始状态、recovery/result source、execution target/provenance、predecessor 与冲突信息。它仍是当前页面/Session 投影，不是跨刷新 durable journal。
@@ -115,7 +117,7 @@ Python 与前端测试是在最终三项实现汇合后统一执行，不是把�
 
 - Python contract、TaskStore/service、AgentServer schedule request、Web handler 统一精确回归：**226/226 passed**。
 - Live Voice 前端精确测试：**155/155 passed**。
-- chatStore authoritative-final marker 与相关回归：**24/24 passed**。
+- chatStore authoritative-final marker 与相关回归：**24/24 passed**。`155` 与 `24` 两组有 9 项测试重叠，不能相加；这些是历史命令结果记录，Git 未保存 JUnit 产物。
 - 全前端 `tsc --noEmit`：通过。
 - Vite production build：通过，**4494 modules transformed**。
 
@@ -125,7 +127,7 @@ Python 与前端测试是在最终三项实现汇合后统一执行，不是把�
 
 - 后端幂等仅保证同一进程、同一 JSON store 路径的共享锁 + ledger；没有跨进程 CAS、唯一执行 owner、crash transaction、exactly-once 或外部副作用 reconciliation。
 - Live Voice 已有 mutation 内稳定 command ID、同-key retry 和严格 exact-key reconciliation，但没有跨刷新持久 command journal。记录不唯一、identity/target 冲突或 list 仍不可证明时继续 `mutation-unknown`，不能宣称完整恢复。
-- owner + project scope 已覆盖 list/status/cancel/logs/delete，但它仍是当前 D0 安全边界，不等于完整租户授权、审批和生产权限模型。
+- owner + project scope 已覆盖 list/status/cancel/logs/delete 的单用户请求一致性，但 Web 身份仍可由客户端声明；它不等于身份认证、租户隔离、审批或生产权限模型。
 - Agent 执行上下文只在进程内；重启后不能恢复旧 Agent。`execution_target` 尚未持久化完整 model/provider/config/permission 快照。
 - response/generation ID、服务端 cancel/replacement 顺序、工具副作用 fence、playback ACK/cursor、presented history 仍未实现。
 - 稳定句预读不是 token/audio streaming TTS，也尚未真机验收；Task Demo 尚未做真实有副作用 E2E。
@@ -134,9 +136,9 @@ Python 与前端测试是在最终三项实现汇合后统一执行，不是把�
 
 ## 6. 后续顺序
 
-1. 下一实现切片按 D-031 增加 poll-backed task monitor：派发后立即恢复 Live Voice，独立 task projection 轮询真实状态，terminal 结果写入真实任务卡，并只在安全空档播报一次。**本轮文档任务到此停止，不继续实现。**
+1. 2026-08-01 快照选择的下一实现切片是 D-031 poll-backed task monitor；当前仍是该切片，但必须先完成 D-032 开发前回顾、test inventory 与场景矩阵，具体执行权威见 [STATUS.md](STATUS.md)。
 2. 保持两个 feature flag 默认关闭；单独开启稳定句预读做 final/rewrite/timeout/Session E2E，在可丢弃或已备份的独立项目开启 Task Demo 做真实 create/status/cancel/replace E2E。
-3. V0 验收从 `2c700934` 的独立 checkout/worktree 执行，不操作当前分支或 `7f4c...` stash。随后才推进正式 response/generation lifecycle、通用 P3 和生产 durability。
+3. V0 验收始终从 `2c700934` 的独立 checkout/worktree 执行，不操作累计分支或 `7f4c...` stash；Post-V0 开发可按 D-030 在隔离轨并行推进。
 
 ## 7. 审阅提示
 

@@ -3,7 +3,8 @@
 - 最后更新：2026-08-02
 - 工作分支：`hx/0731_live_voice_ux`
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
-- 建立方案时的代码基线：`7b69fdeb`
+- 原始完整方案的代码证据快照：`69c026a6613279964146d317e164cf32c6900285`
+- Live Voice 实现分支基线：`7b69fdeb`
 - V0 核心实现提交：`346f802a`；当前已推送 V0 Candidate 恢复点：`2c700934aa0024a7ab229644bf15934e9e8170e7`
 - 当前里程碑：不可变 V0 Vertical Slice Candidate 独立验证 + Post-V0 Task Foundation + D-032 模块测试闭环 Gate
 - 实现状态：真实“麦克风 → Agent → Terminal Tool → 完整回答 → 浏览器 TTS → 自动回听”主链已在固定 Windows/Chrome 环境成功跑通一次；[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 已定义完整 Gate，但稳定性、分阶段打断和跨环境放行尚未执行完
@@ -13,6 +14,29 @@
 当前开发遵循 D-030、D-032 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`2c700934aa0024a7ab229644bf15934e9e8170e7` 固定为未放行 V0 Candidate；stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份。Post-V0 继续正常 review → commit → push；每个模块从 D-031 起必须执行开发前/开发后双回顾和完整场景测试 Gate。V0 从 `2c700934` 的独立 checkout/worktree 执行，不反复 stash 当前开发分支。
 
 对 **`2c700934` V0 Candidate baseline** 的量化判断仍是：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。这些数字来自 V0 的真实麦克风/Agent/Tool/TTS 首次贯通和当时的 47 项 Live Voice 自动化，不包含后续 Post-V0 foundation。连续 10 Turn、分阶段 10 次打断、soak 和连续 3 次主演示尚未完成，因此 V0 仍不能称为已放行；Post-V0 的完成度也不能用 V0 的百分比替代。
+
+## 2026-08-02 文档与跨机器恢复审计
+
+本轮已逐份审阅根 `AGENTS.md` 和本目录 11 份 Markdown，并与 Git 历史、实际 scripts/lockfiles、feature flags、服务端口、用户数据目录和 V0 detached 工作方式交叉核对。文档职责已重新分为：当前事实、当前交接、有效决策/路线、V0 操作、运行操作、历史证据和不可变架构源。
+
+已修正的关键执行问题：
+
+- V0 Gate 1 不再引用不断前进的 Post-V0 README 命令，而是在验收手册中固定 `2c700934` 实际存在的 47/47、22/22、TypeScript、build、Ruff 和 diff-check 命令。
+- V0 的主链、10 Turn、打断和主演示不再要求 detached HEAD 拥有分支/upstream；语料改为 candidate SHA、提交信息、干净状态和其他 detached-safe 真实仓库事实。
+- 新 clone 明确使用 `GIT_LFS_SKIP_SMUDGE=1`；agtai 当前缺少一个与 Live Voice 无关的 12 MB 文档视频 LFS 对象，跳过它不影响 Live Voice 续作。
+- V0 和累计开发使用独立的绝对 `JIUWENSWARM_DATA_DIR`，避免默认用户工作区中的 project/session/task/config/log/memory 交叉污染。
+- 历史 D1–D10、stash 后续顺序和旧“本轮停止”语句不再作为当前命令；D-031 + D-032 前置 checkpoint 是 Post-V0 唯一下一开发入口。
+- 新增 D-033/D-034：当前 Web owner/project 只保证单用户请求一致性，不是生产鉴权；D-031 首版限定同页恢复、A→B 监控 B 并保留 A 终态、只显示真实终态字段，整页刷新与版本化 outcome 留给后续正式模块。
+
+| 恢复目标 | 当前判断 | 仍需什么 |
+|---|---|---|
+| 新 Codex 无旧对话理解项目并继续设计/编码 | `READY` | pull 干净共享分支并按 README/AGENTS 阅读 |
+| 运行自动化 tests/build | `READY_WITH_SETUP` | 安装文档指定运行时，联网执行 `uv sync --frozen` / `npm ci` |
+| 真实文字 Agent/Tool | `EXTERNAL_REQUIRED` | 私有模型配置、项目注册、服务和网络 |
+| 真实 Live Voice | `EXTERNAL_REQUIRED` | 以上条件 + Chrome 权限、Web Speech、麦克风/耳机和人工观察 |
+| V0 Released / 已冻结 | `NOT_YET` | detached `2c700934` 的 Gate 0–6 全部 PASS 并提交脱敏证据 |
+
+结论是：**代码、方案、决策、阶段、测试设计规则和下一任务可以仅靠 Git 无旧聊天接续；真实运行环境不能也不应靠 Git“完美复制”。** 私有状态补齐前仍可推进 D-031 前置回顾、纯逻辑/fake-time 和 hook/UI/WebSocket integration tests；不能宣称跨机器真实语音等效或 V0 已放行。
 
 ## 当前结论
 
@@ -61,9 +85,9 @@
 - exact-key 对账不假设任务仍停在 `pending`：请求往返期间即使后端已进入 `running/success/failed/cancelled`，前端仍保留并显示该真实状态；这解决 pending drift，不把旧 pending 快照覆盖后端真值。
 - 当前 command ID 只保证同一次 Bridge mutation 及其同-key retry/reconciliation 稳定，不是跨刷新持久 command journal。`lastVisibleTask`、未决 mutation 和任务卡投影仍是当前页面/Session 内存；刷新、切 Session 后还没有持续 monitor 或通用多任务恢复。
 - schedule 执行已经改为每任务固定独立的进程内 Agent/context，不再在执行时借用 singleton 可变 `_agent`；并发 Session 分离，周期任务保留自己的 context，一次性终态、取消、删除和 service stop 会释放。进程重启后缺少旧 context 的任务会诚实失败，不借用新 Agent。
-- 任务持久化并返回 `execution_target`：`project_dir`、`project_id`、`origin_session_id`、`origin_channel_id`。前端只接受当前 persisted Session 对应的可信绝对项目路径；capture 期间 session/target/bridge 任一变化都会零请求失效，UI 显示真实 target/provenance，遗留字段显示 unknown。
+- 任务持久化并返回 `execution_target`：`project_dir`、`project_id`、`origin_session_id`、`origin_channel_id`。前端只接受从当前 persisted Session 与精确注册项目解析出的绝对项目路径；capture 期间 session/target/bridge 任一变化都会零请求失效，UI 显示真实 target/provenance，遗留字段显示 unknown。
 - 后端 `schedule.run` 已支持由服务端派生 owner scope 约束的 `origin_namespace` + `idempotency_key`。同一进程内、同一 JSON store 路径的 TaskStore 实例共享锁与持久 `create_commands` ledger/intent fingerprint：同意图重放返回同一 ID 且只触发一次，冲突返回 `IDEMPOTENCY_CONFLICT`，删除保留 tombstone，JSON reload 后仍可恢复。这是 **per-path single-process** 保证，不是跨进程事务或 exactly-once。
-- `schedule.list/status/cancel/logs/delete` 均由服务端从可信 request 派生 owner scope 和 project execution target 后校验；外部请求缺失、无效或不匹配时 fail closed，不能靠客户端伪造 scope 读取、取消或删除另一来源任务。显式内部兼容路径不等于对外放宽授权。
+- `schedule.list/status/cancel/logs/delete` 根据 Web request 字段派生 owner scope 和 project execution target 后校验；必需 `channel_id/session_id` 缺失或非法、完整 owner scope 不一致，或请求 target 与 stored target 中已知的 `project_dir/project_id` 不一致时 fail closed；`app_id` 可空，遗留 unknown project 字段不猜测。这可阻止正常客户端串来源/串项目，但 Web 身份本身仍由请求提供，不能抵御恶意客户端伪造，也不是认证、租户隔离或生产授权；正式边界见 D-033。
 
 ## 验证记录
 
@@ -90,7 +114,7 @@
 | Python 统一精确回归 | **226/226 通过**：contract、schedule TaskStore/service、AgentServer request、Web handler |
 | 工作树检查 | foundation 合并点的 `git diff --check` 已通过；精确历史与基线 lint 说明见 stash 交接单 |
 
-以上 **226/226、155/155、24/24、TypeScript 和 4494 modules** 是 foundation review 修复合入后的最终统一结果，不是子任务数字相加。后端 `3da101cf`、前端 `42e76d30` 已落地；精确历史和边界见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。
+以上 **226/226、155/155、24/24、TypeScript 和 4494 modules** 是 foundation review 修复合入时的历史统一结果。155 与 24 两组有 9 项重叠，不能相加；Git 未保存 JUnit 产物，新机器必须实际复跑后才能声称本机通过。后端 `3da101cf`、前端 `42e76d30` 已落地；精确历史和边界见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。
 
 ### D-032 模块测试闭环状态
 
@@ -118,14 +142,16 @@
 - supplement P1 协议风险仍在：ACK 早于 AgentServer cancel/replacement 完成；`chat.tool_result` 和真实工具副作用缺少 generation ID，前端不能可靠 fence。
 - Web Speech 对中文句子中的英文技术词准确率不稳定，需要继续真机测试口令、说法和必要的 Provider fallback。
 - Desktop/WebView2、Team、多语言、全双工/AEC、断线恢复和服务端 streaming TTS 未验证，也不属于本轮已经完成的能力。
-- 当前固定演示环境可用不等于跨环境兼容；模型、Chrome Speech 服务、麦克风权限和网络仍是机器私有条件。
+- 当前固定演示环境可用不等于跨环境兼容；模型、Chrome Speech 服务、麦克风权限和网络仍是机器私有条件。默认 %USERPROFILE%\.jiuwenswarm 还保存 project/session/task/config/log/memory，验收必须用独立 JIUWENSWARM_DATA_DIR。
+- agtai 当前缺少 docs/assets/videos/compression.mp4 的 Git LFS 对象；普通 clone smudge 会 404。Live Voice 使用 GIT_LFS_SKIP_SMUDGE=1 可完整恢复相关源码/文档/测试，但整个仓库的全部 LFS 媒体仍未做到无缺口恢复。
 - 稳定句预读还没有服务端 response/generation ID；并发 cron/proactive 响应或迟到旧 `chat.final` 仍可能被归到错误 Turn。10 秒 timeout 只避免永久 thinking，不能证明响应归属或恢复 provisional 文本。
 - 当前 FIFO 只能证明文本已规划或已入队，不能证明用户实际听到；正式版仍需 playback ACK/cursor 和 presented history。
 - schedule 的本轮修复解决了同一进程、同一 JSON store 路径内的主要 run/cancel/delete 竞态与幂等创建，但没有跨进程事务、唯一执行所有权、exactly-once 或生产级 crash recovery。多个进程共享同一 store、D1/D2 durability 和外部副作用 reconciliation 仍是正式版风险。
 - Task Demo 使用真实且有副作用的 AutoHarness。Live Voice 的打断、退出或 session 切换不会自动取消已经发出的 `schedule.run`，确认取消也不能撤销已经产生的代码修改。
 - task-scoped Agent/context 和 project/origin provenance 已解决“并发任务借用最后一个 `_agent`”及目标猜测问题，但 context 仍只在进程内；重启不能恢复旧 Agent，持久 target 也不包含完整 model/provider/config/permission 快照。
-- owner + project scope、稳定 command ID、同-key retry 与严格 exact-key reconciliation 已经补齐 foundation 门槛，但它们不构成跨进程 CAS、唯一执行 owner、crash transaction、exactly-once、D1/D2 或外部副作用 reconciliation。
+- 单用户 request owner + project 一致性 scope（非生产鉴权）、稳定 command ID、同-key retry 与严格 exact-key reconciliation 已经补齐 foundation 门槛，但它们不构成跨进程 CAS、唯一执行 owner、crash transaction、exactly-once、D1/D2 或外部副作用 reconciliation。
 - 前台目前仍会把任务反馈作为当前语音交互的一次结果处理；还没有“派发后立即继续监听、后台独立轮询、终态异步回流”的 task monitor。刷新恢复、多个任务、主动事件推送、重放/unread 和通用 Task Control 也未完成。
+- 当前共有 6 条 user-visible 文案错误暗示已有跨刷新恢复列表：`liveVoiceTaskBridge.ts` 的 4 条 `mutation-unknown` 提示，以及 `i18n/locales/zh.json`、`en.json` 各 1 条常驻 safety disclosure；Web 实际没有可按原 owner/project/command identity 跨刷新恢复的 AutoHarness 列表。`agent_ws_server.py` 的 owner-scope docstring 也仍沿用 `trusted request fields` 旧术语。它们是已知代码/文案债，不改变 D-033/D-034 的权威语义；D-031 开码时必须用 tests 把 6 条提示统一改成“保留后端 TaskStore/日志证据、停止 mutation、由受控诊断核对”，并把 docstring 改成 request-provided/server-observed，而不是假装已有恢复 UI 或可信身份。
 
 ## 下一步（两条隔离轨道）
 
@@ -137,7 +163,7 @@
 
 1. 下一开发切片仍是 D-031；写语义代码前先按 D-032/路线 §3.1 在本文件建立 module definition、现有/新增 test inventory、每项 test 的 why 和完整场景矩阵，并先 commit/push 前置 checkpoint。
 2. 前置 Gate 完成后建立 **poll-backed 异步任务监控**：任务派发后前台立即恢复 Live Voice，独立投影轮询真实状态，终态异步回流到真实 task card；安全空档最多播报一次简短终态。
-3. D-031 保持窄范围：不写 chatStore、不伪造 chat processing、不抢占麦克风/Agent TTS，不扩成完整 TaskEvent push/replay、通用多任务 NLU、跨进程 exactly-once 或 D1/D2；实现后完成 D-032 后置回顾才能标记闭环。
+3. D-031 保持窄范围：只承诺同页断线重连，整页刷新在持久 command journal 前明确 unsupported；A→B 监控 B、保留 A 终态；合法 envelope、匹配的 task ID/status/target/provenance 是必需事实，只有可选 progress/last_error 缺失时写 unknown；不写 chatStore、不伪造 chat processing、不抢占麦克风/Agent TTS，也不扩成完整 TaskEvent push/replay、通用多任务 NLU、跨进程 exactly-once 或 D1/D2。实现后完成 D-032 后置回顾才能标记闭环。
 4. 随后按 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) 推进 response/generation lifecycle、P1 Speech Port、P2 Realtime、P3α/完整 P3，最后进入 RC。
 
 ## 接手者注意事项

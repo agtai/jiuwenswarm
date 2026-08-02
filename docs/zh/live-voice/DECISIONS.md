@@ -75,7 +75,7 @@
 ## D-008 通用后台任务不是两周主线
 
 - 日期：2026-07-31
-- 状态：Accepted
+- 状态：Accepted（仅适用于 V0；Post-V0 范围由 D-020/D-024 扩展）
 - 背景：完整 P3 需要稳定任务 ID、状态权威、恢复、审批、多任务消歧和副作用协调。
 - 决策：核心 Demo 只要求语音驱动当前 Agent；D7 稳定后，才可复用 `schedule.run/status/cancel` 演示一个明确标注的受限后台任务。
 - 原因：当前 Agent 调用和通用持久任务是两个不同的问题，不能让 P3 阻塞 Live Voice 主链。
@@ -95,7 +95,7 @@
 ## D-010 D7 未稳定则砍掉任务增强
 
 - 日期：2026-07-31
-- 状态：Accepted
+- 状态：Accepted（仅适用于 V0 原始排期；Post-V0 范围由 D-020/D-024 扩展）
 - 背景：两周周期只有一个人，后两天必须保留稳定和演示缓冲。
 - 决策：如果 D7 语音调用 Agent、朗读、打断、错误降级和文字回归尚未全部通过，D8/D9 不做后台任务或新的架构抽象。
 - 原因：一个稳定的核心闭环比多个不可靠功能更能验证方向。
@@ -175,7 +175,7 @@
 ## D-018 只保留一条累计演进路线，不另建全功能模拟 UX 原型
 
 - 日期：2026-08-01
-- 状态：Accepted
+- 状态：Accepted（单一累计路线保留；两周范围由 D-020 扩展，版本命名由 D-021 取代）
 - 背景：V0 可以用临时实现快速打通主流程，但若再建立一套覆盖全部功能、主要依赖 hardcode 或模拟状态的独立 UX/Vision 原型，会形成第二套事实来源，消耗两周时间，并可能展示正式工程无法继承的效果。
 - 决策：两周产出定义为 V0 Vertical Slice Demo——核心体验旅程完整，但不要求所有最终功能完整。之后在同一条真实工程路径上累计演进为 V1/P1 Product Alpha、V2/P2 Realtime Alpha、V3α/P3α Task Alpha、V3 Full Capability Beta，最后进入 RC/Production hardening；不单独建设“覆盖所有功能但都不正式”的模拟 UX 版本。每个新版本包含前一版本已验证的能力，并用正式模块逐步替换 Demo shortcut。
 - 原因：纵向切片更早暴露真实 Agent、工具、取消、音频和状态耦合；累计替换避免 Demo 与生产效果来自两套机制。V2 引入实时媒体、流式语音和自然插话，是最明显的实时语音感知跃迁。
@@ -267,7 +267,7 @@
 - 日期：2026-08-01
 - 状态：Accepted as fallback（foundation 已用稳定 command ID、同-key retry 和 exact-key reconciliation 缩小触发范围）
 - 背景：`schedule.run` 有真实副作用。该决策形成时，后端已经增加可选 idempotency key，但 Live Voice 前端尚未生成/持久化 key 或接入 list reconciliation；请求可能已经创建任务，但前端在 response 前超时/断线，或收到无效 payload、缺失/冲突 task ID。把它显示为普通失败并允许重试仍会制造不可见 orphan/duplicate。
-- 决策：上述结果进入内存 `mutation-unknown` latch，明确提示“任务可能已创建，勿重试，到后台任务列表核对”，并阻止当前桥后续 create/replace。没有可见 task ID 时，status/cancel 也保持 `mutation-unknown`，不能降级成“没有任务”。cancel response 即使带业务 error，只要 task ID 匹配，也先保存其真实终态。任务反馈朗读可以在无关 Agent 仍 processing 时独立恢复监听，但不能把本地打断解释为 task cancel。
+- 决策：上述结果进入内存 `mutation-unknown` latch，明确提示“任务可能已创建，勿重试；当前没有可跨刷新的 Web 任务列表恢复入口，保留页面与后端证据并由受控运维核对真值”，并阻止当前桥后续 create/replace。没有可见 task ID 时，status/cancel 也保持 `mutation-unknown`，不能降级成“没有任务”。cancel response 即使带业务 error，只要 task ID 匹配，也先保存其真实终态。任务反馈朗读可以在无关 Agent 仍 processing 时独立恢复监听，但不能把本地打断解释为 task cancel。
 - 原因：在没有幂等创建和 list/reconciliation 前，宁可停止语音侧任务 mutation，也不能把网络不确定性转成重复真实副作用。
 - 影响：latch 只在当前页面/Session 内存中，刷新后仍会丢失；它是两周 Demo 的保守防线，不是 durability。D-029 已提供单进程服务端幂等地基，但正式路径仍需要持久 client command ID、task list/get/events 和 orphan reconciliation。
 - 重新评估条件：Live Voice client 接入 D-029 的幂等 key 与 scoped reconciliation，并能按 command ID 恢复真实结果。
@@ -277,7 +277,7 @@
 - 日期：2026-08-01
 - 状态：Accepted（Post-V0 P3α 地基）
 - 背景：singleton Scheduler service 在每次 run 覆盖共享 `_agent`，会让并发 Session 的后台任务借用最后一个 Agent；仅保存 query/task ID 也无法证明任务实际作用于哪个聊天项目。前端若从临时 cwd 或不匹配的注册项目猜路径，会把副作用发往错误目标。
-- 决策：AgentServer 使用同一个解析后的可信 `project_dir` 创建 Agent 并构造 `execution_target`。Scheduler 为每个 task ID 注册独立、不可变的进程内 Agent/context；周期任务沿用，单次终态、取消、删除和 service stop 释放。两个 Session 并发不得共享 context；进程重启后没有旧 context 的 pending 任务必须明确失败，禁止借用新 Agent。任务持久化并返回 `project_dir`、`project_id`、`origin_session_id`、`origin_channel_id`；遗留字段显示 unknown，不猜测。前端只从当前 persisted Session 与精确匹配的已注册项目解析绝对 target，没有可信 target 时 fail closed；capture 中 session、target 或 bridge identity 改变时零请求失效，run/status/cancel 均携带冻结 target 并在 UI 显示 provenance。
+- 决策：AgentServer 使用同一个解析后的 `project_dir` 创建 Agent 并构造 `execution_target`。Scheduler 为每个 task ID 注册独立、不可变的进程内 Agent/context；周期任务沿用，单次终态、取消、删除和 service stop 释放。两个 Session 并发不得共享 context；进程重启后没有旧 context 的 pending 任务必须明确失败，禁止借用新 Agent。任务持久化并返回 `project_dir`、`project_id`、`origin_session_id`、`origin_channel_id`；遗留字段显示 unknown，不猜测。前端只从当前 persisted Session 与精确匹配的已注册项目解析绝对 target，无法从 persisted Session 与精确注册项目解析 target 时 fail closed；capture 中 session、target 或 bridge identity 改变时零请求失效，run/status/cancel 均携带冻结 target 并在 UI 显示 provenance。
 - 原因：真实副作用任务首先必须回答“由谁、从哪个会话、作用于哪个项目”，而且排队后不能随全局 Agent 变化。诚实失败比重启后静默借错 Agent 安全。
 - 影响：解决当前进程内多 Session 串 context 和 project target 猜测，但 Agent/context 仍不可跨重启恢复；`execution_target` 还不是完整 model/provider/config/permission 快照，也不等于授权决策。正式版仍需可持久恢复的执行上下文和权限 provenance。
 - 重新评估条件：P3 Executor 能从版本化、加密的持久上下文安全重建 Agent，或任务迁移到独立 worker/queue。
@@ -287,9 +287,9 @@
 - 日期：2026-08-01
 - 状态：Accepted（单进程/JSON 边界；不是 exactly-once）
 - 背景：有副作用的 `schedule.run` 在 response 丢失后无法区分“未创建”和“已创建但响应丢失”。只靠前端内存 latch 能防止立即重复，但刷新后丢失，也不能为未来 reconciliation 提供稳定 command identity；同时不能信任客户端自己声明跨用户 owner scope。
-- 决策：`schedule.run` 接受可选 `origin_namespace` 与 `idempotency_key`，owner scope 由 AgentServer 根据真实 request channel/session/可用 app identity 派生。TaskStore 在单进程锁内以 scope + namespace + key 原子 get-or-create，并把标准化 intent fingerprint、task ID 和删除 tombstone写入 JSON `create_commands` ledger。同 scope/key/intent 重放返回原 task ID 且只触发一次；同 key 不同 intent 返回 `IDEMPOTENCY_CONFLICT` 和 `existing_task_id`，不得返回新 `task_id`。JSON reload 后保持语义，删除不释放 key；`schedule.list` 可按 scope/namespace/exact key 筛选。replay/conflict 路径释放本次候选 Agent pin/context；无幂等字段的旧客户端保持原行为。
+- 决策：`schedule.run` 接受可选 `origin_namespace` 与 `idempotency_key`，owner scope 由 AgentServer 根据 Web request 的 channel/session/可用 app identity 字段派生；按 D-033，它不是已认证身份。TaskStore 在单进程锁内以 scope + namespace + key 原子 get-or-create，并把标准化 intent fingerprint、task ID 和删除 tombstone写入 JSON `create_commands` ledger。同 scope/key/intent 重放返回原 task ID 且只触发一次；同 key 不同 intent 返回 `IDEMPOTENCY_CONFLICT` 和 `existing_task_id`，不得返回新 `task_id`。JSON reload 后保持语义，删除不释放 key；`schedule.list` 可按 scope/namespace/exact key 筛选。replay/conflict 路径释放本次候选 Agent pin/context；无幂等字段的旧客户端保持原行为。
 - 原因：这提供 D0 可测试的稳定 command identity，并避免把客户端可伪造 namespace 当作租户边界；tombstone 防止删除后相同 key 意外生成第二个副作用任务。
-- 影响：只保证同一进程、同一 JSON store 路径内的原子性和 JSON reload 重放，不保证多进程 CAS、crash transaction、exactly-once、唯一执行 owner 或外部副作用 reconciliation。后续 foundation 已把稳定 command ID、同-key retry、严格 exact-key reconciliation 和 list/status/cancel/logs/delete 的服务端 owner + project scope 接线；D-027 只在记录不唯一、identity/target 冲突或结果仍不可证明时继续 fail closed。
+- 影响：只保证同一进程、同一 JSON store 路径内的原子性和 JSON reload 重放，不保证多进程 CAS、crash transaction、exactly-once、唯一执行 owner 或外部副作用 reconciliation。后续 foundation 已把稳定 command ID、同-key retry、严格 exact-key reconciliation 和 list/status/cancel/logs/delete 的单用户请求一致性 scope 接线；D-027 只在记录不唯一、identity/target 冲突或结果仍不可证明时继续 fail closed。
 - 重新评估条件：迁移到支持唯一约束/条件写的正式 Task Control store，或 Live Voice client 完成持久 command journal 与 reconciliation。
 
 ## D-030 结束临时 stash 窗口，固定 V0 Candidate 后正常提交 Post-V0 增量
@@ -297,7 +297,7 @@
 - 日期：2026-08-01
 - 状态：Accepted（取代 D-022 的临时工作流；不改变 V0 Released Gate）
 - 背景：D-022 已完成其隔离目的：全部 Post-V0 增量保存为命名 stash，工作区回到 `2c700934`。用户随后明确调整顺序，要求暂缓 V0 人工验收，先保留 stash、恢复增量，只收尾任务身份、幂等、执行目标和前端任务卡等基础门槛并提交，再推进“前台持续在线 + 后台非阻塞工作 + 结果异步回流”。继续把大量已验证代码只放在单机 stash 会妨碍跨机器恢复。对应 stash commit 为 `7f4cfd2eedfb3a177b94f69417143fba441f3671`。
-- 决策：`2c700934aa0024a7ab229644bf15934e9e8170e7` 永久作为未放行的 V0 Candidate 精确恢复点；`7f4c...` 已 `apply` 且原 stash 作为额外备份保留，不 `pop/drop`。完成自动化和审阅后按逻辑切片正常 commit 并推送。后续提交全部属于 Post-V0，不得并入 V0 验收证据或把 Candidate 改称 Released。稍后验收 V0 时，从 `2c700934` 的独立 checkout/worktree 启动固定环境，不再要求把当前开发分支反复 stash 回旧基线。
+- 决策：`2c700934aa0024a7ab229644bf15934e9e8170e7` 永久作为 V0 精确恢复点；当前状态是未放行 Candidate，完整 Gate 通过后可以把同一 SHA 标记 Released；`7f4c...` 已 `apply` 且原 stash 作为额外备份保留，不 `pop/drop`。完成自动化和审阅后按逻辑切片正常 commit 并推送。后续提交全部属于 Post-V0，不得并入 V0 验收证据，也不得仅凭 Post-V0 提交把 Candidate 改称 Released。稍后验收 V0 时，从 `2c700934` 的独立 checkout/worktree 启动固定环境，不再要求把当前开发分支反复 stash 回旧基线。
 - 原因：不可变 commit 已足以精确复现 V0；把后续工作提交到同一累计分支既保留 Git 可追溯性，又让其他机器仅靠 fetch/pull 和仓库交接文档无损续作。保留原 stash 直到恢复增量已提交、推送并能从远端重建，仍提供一次额外回滚保险。
 - 影响：D-022 中“Post-V0 不 commit、不 push”的限制结束；D-022 对 V0 未放行、禁止破坏性 reset、验收必须使用精确基线和完整 Gate 的要求继续有效。当前收尾范围不扩成完整 P3：不实现跨进程 CAS、exactly-once、D1/D2、重启后 Agent context 恢复、update/provide-input/pause/resume/reprioritize 或通用多任务控制。
 - 重新评估条件：远端分支无法安全保存累计开发，或 V0 验收发现 `2c700934` 本身不可复现，需要重新建立 Candidate。
@@ -305,10 +305,10 @@
 ## D-031 下一切片用轮询实现前台持续在线、后台非阻塞与结果异步回流
 
 - 日期：2026-08-01
-- 状态：Accepted（下一实现切片；本轮 foundation 收尾只记录设计，不继续实现）
-- 背景：Task Foundation 已具备真实 task ID/target/provenance、服务端 owner + project scope、per-path single-process JSON 幂等、前端稳定 command ID、同-key retry、严格 exact-key reconciliation 和真实任务卡。但 `schedule.run` 返回“已持久/已接管”不等于任务完成；当前语音路径仍以一轮反馈为中心，不能展示“用户继续交谈，后台任务独立运行，完成后结果回来”的核心 P3α 感知效果。直接建设完整 TaskEvent store/push/replay 会扩大成本并混入完整 P3。
-- 决策：新增独立于 chatStore 的 task projection/monitor。真实派发并取得或对账出 task ID 后，Live Voice 前台立即恢复可监听状态；monitor 以 `schedule.status` 轮询真实任务状态，刷新/不确定恢复只使用 owner/namespace/exact-key 的 `schedule.list`。同一任务最多一个 in-flight poll，所有迟到 promise 必须受 task/session/target/monitor generation fence；断线暂停，连接恢复立即 reconcile；terminal、删除、feature flag 关闭、provenance 不匹配或卸载后停止。
-- 决策：任务卡始终显示 terminal 结果。终态语音通知最多一次，且只在来源 Session/target 仍匹配、Live Voice 启用、麦克风关闭、chat 不在 processing/thinking、core/TTS 空闲时播报；它不得抢占麦克风、用户插话或 Agent TTS。若一直没有安全空档，只保留可见结果，不为播报阻塞前台。task monitor 不写 chatStore message，不修改 chat `isProcessing`，不把后台任务状态伪装成 Agent Turn。
+- 状态：Accepted（当前下一实现切片；恢复、终态和安全边界由 D-033/D-034 补充）
+- 背景：Task Foundation 已具备真实 task ID/target/provenance、单用户请求一致性 scope（非生产鉴权）、per-path single-process JSON 幂等、前端稳定 command ID、同-key retry、严格 exact-key reconciliation 和真实任务卡。但 `schedule.run` 返回“已持久/已接管”不等于任务完成；当前语音路径仍以一轮反馈为中心，不能展示“用户继续交谈，后台任务独立运行，完成后结果回来”的核心 P3α 感知效果。直接建设完整 TaskEvent store/push/replay 会扩大成本并混入完整 P3。
+- 决策：新增独立于 chatStore 的 task projection/monitor。真实派发并取得或对账出 task ID 后，Live Voice 前台立即恢复可监听状态；monitor 以 `schedule.status` 轮询真实任务状态，同一页面内的断线重连/不确定恢复只使用 owner/namespace/exact-key 的 `schedule.list`；整页刷新在持久 command journal 完成前明确 unsupported。同一任务最多一个 in-flight poll，所有迟到 promise 必须受 task/session/target/monitor generation fence；断线暂停，连接恢复立即 reconcile；terminal、删除、feature flag 关闭、provenance 不匹配或卸载后停止。
+- 决策：任务卡始终显示后端实际提供的 terminal 状态与现有事实字段，不得虚构自然语言结果或版本化 outcome。合法 envelope、匹配的 `task_id`、`status`、target/provenance 是必需事实；缺失、非法或不匹配时 adapter 必须失败并保留旧投影。只有可选的 `progress`、`last_error` 缺失时显示 `unknown`。终态语音通知最多一次，且只在来源 Session/target 仍匹配、Live Voice 启用、麦克风关闭、chat 不在 processing/thinking、core/TTS 空闲时播报；它不得抢占麦克风、用户插话或 Agent TTS。若一直没有安全空档，只保留可见结果，不为播报阻塞前台。task monitor 不写 chatStore message，不修改 chat `isProcessing`，不把后台任务状态伪装成 Agent Turn。
 - 轮询基线：派发/重连后立即查询；pending 约 1 秒，running 前 30 秒约 2 秒、之后约 5 秒；瞬时错误按 1/2/5/10 秒退避并封顶。状态间隔是 Demo 运维参数，不是生产 SLO，最终实现可在不改变上述安全语义的前提下微调。
 - 原因：这一窄切片最大化两周展示价值，同时复用已经完成的 identity、scope、reconciliation 和 task card；它能真实验证“前台不被后台冻结”和“结果异步回流”，又不会把聊天消息、TTS 或假进度作为任务真值。
 - 影响：本切片仍不是服务端 TaskEvent push/replay、跨设备 unread、多任务自然语言消歧、update/provide-input/pause/resume/reprioritize、跨进程 exactly-once、D1/D2 或完整 P3。后续正式 Task Control 可以用事件订阅与持久 projection 替换轮询，而不改变 task identity、scope、UI 投影和播报仲裁边界。
@@ -318,9 +318,30 @@
 
 - 日期：2026-08-02
 - 状态：Accepted（从 D-031 起强制执行；不改变 V0 Candidate 的独立放行 Gate）
-- 背景：现有 Foundation 的 Python `226/226`、Live Voice `155/155`、相关回归 `24/24` 能证明对应 suites 在当时最终代码上通过，但测试数量、行覆盖率或纯函数测试无法单独证明模块定义中的所有行为、拒绝路径、竞态、恢复和真实接线均已覆盖。若 tests 只是跟随当前实现编写，还可能把错误行为固化成“预期”。
+- 背景：现有 Foundation 的 Python `226/226`、Live Voice `155/155`、相关回归 `24/24` 能证明对应 suites 在当时最终代码上通过；155 与 24 两组有 9 项重叠且 Git 未保存 JUnit 产物。测试数量、行覆盖率或纯函数测试无法单独证明模块定义中的所有行为、拒绝路径、竞态、恢复和真实接线均已覆盖。若 tests 只是跟随当前实现编写，还可能把错误行为固化成“预期”。
 - 决策：每个模块或逻辑切片在语义开发前、实现完成后各做一次正式回顾。两次都必须重新理解完整方案、当前阶段、模块契约/非目标、上下游、现有 tests 和实际风险，并维护 test inventory、每项 test 的设计原因以及 `scenario → test/evidence` 矩阵。每个改变的不变量必须同时有正向正确场景和反向拒绝场景；反向业务动作必须明确失败、拒绝或安全 no-op，并断言所有禁止副作用为 0，而测试进程本身应 PASS。边界、状态、时序、重复/乱序、并发/重试、恢复、scope/权限、feature flag/降级、协议/持久格式兼容和真实跨模块路径按适用性覆盖；`N/A` 必须说明理由。详细执行规范和记录模板以 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md) §3.1 为唯一权威。
 - 决策：只有双回顾齐全、全部必需场景有证据、最终命令在包含全部 code/test 行为输入且相关路径干净的 immutable candidate SHA 上通过、必要 E2E/人工观察完成且无未解释 flaky/必需 gap 时，模块才可标记 `CLOSED`；否则只能是 `PARTIAL` 或 `BLOCKED`。任何后续 code/test/input 变化都会使受影响闭环失效。现有 Foundation 结果保留为历史回归证据，但不能倒写成已经走过 D-032；已有模块在再次修改、作为新切片闭环依赖或进入版本 Gate 前补齐受影响范围。
 - 原因：这迫使测试从项目方案和模块定义出发，既证明“应该成功的确实成功”，也证明“不应发生的确实被阻止且没有副作用”，并让新机器或新 Codex 会话能够从 Git 恢复每项测试为何存在、覆盖了什么和还缺什么。
 - 影响：D-031 是第一个强制应用切片，编码前先在 `STATUS.md` 固定 monitor 的状态/时序/错误/竞态/flag-off/接线矩阵；编码后在 exact tested SHA 上重审并统一验证。`STATUS.md` 保存详细证据，`HANDOFF.md` 只摘要状态和入口。`V0_ACCEPTANCE.md` 继续独立负责 `2c700934` 的真机 Release Gate，不将 Post-V0 流程倒灌进 V0 证据。
 - 重新评估条件：模块边界或交付流程发生重大变化时可以调整模板字段，但不得取消正反例成对证明、反向零副作用、两次回顾、场景可追溯和 immutable tested evidence 这些原则。
+
+## D-033 当前 Web owner/project scope 是单用户请求一致性，不是生产鉴权
+
+- 日期：2026-08-02
+- 状态：Accepted（澄清 D-028/D-029 和 Foundation 文档口径）
+- 背景：当前 WebSocket 的 session/app/project 等身份值来自浏览器请求。服务端会拒绝必需 owner 字段（`channel_id`、`session_id`）缺失或非法，并比较完整 owner scope；`app_id` 当前允许为空。对已有任务，只校验 stored target 中已知的 `project_dir/project_id`，遗留 unknown 字段不会被猜测。它能阻止正常客户端串任务/串项目，但没有经过认证的服务端主体可以证明这些字段不可由恶意客户端伪造。
+- 决策：现阶段一律称为“单用户 Demo 的 request owner + project 一致性 scope”或“防串线边界”，不得写成可信身份、租户授权或生产权限。当前错误 owner 与不存在 task 的错误可区分，因此也不承诺隐藏对象是否存在；但拒绝路径仍不得返回跨 scope 内容或执行控制/修改。它可以继续作为 fail-closed 工程地基；生产放行前必须由认证会话、服务端派生 user/app/session identity、受控 project registry、正式授权/审批策略和存在性隐藏策略接替。
+- 原因：防止正常客户端错误与抵御恶意请求是两个安全等级。夸大当前边界会让后续 Task Control、日志读取、取消和删除错误依赖客户端自报身份。
+- 影响：当前正反测试仍应覆盖必需 owner 字段缺失/非法、完整 owner scope 不匹配、已知 stored project 字段不匹配、遗留 unknown project 字段和零副作用；这些测试只证明一致性约束。对象存在性隐藏、鉴权、租户隔离、权限升级和攻击面测试另列为 RC/Production Gate。
+- 重新评估条件：Web/Gateway 已接入可验证身份并由服务端权威映射项目和权限。
+
+## D-034 D-031 首版限定同页恢复并固定 successor、终态和错误语义
+
+- 日期：2026-08-02
+- 状态：Accepted（D-031 编码前约束）
+- 背景：当前 Live Voice command ID、未决 mutation 和 task card 都在页面内存中；整页刷新会丢失 identity。`schedule.status` 只提供现有状态/progress/last_error 等字段，尚无版本化 terminal outcome；部分业务错误可能位于 `ok=true` payload。若不先固定这些边界，monitor 会把猜测恢复或业务错误展示成成功。
+- 决策：D-031 只承诺同一页面内断线重连和精确 key reconciliation；整页刷新明确 unsupported，直到最小持久 command journal 落地。A→B 中 B 是当前被监控任务，A 保留 cancelled/terminal 卡和 successor 关系。合法 envelope、匹配的 `task_id`、`status`、target/provenance 是必需事实；缺失、非法或不匹配时 adapter 必须失败、保留旧投影且不得播报或触发 task mutation。只有可选的 `progress`、`last_error` 缺失时显示 `unknown`。未识别的新状态保留 raw value、按非终态 `unknown` 处理，不能触发终态通知。
+- 决策：后端明确返回 `deleted` 时将其保留为 terminal、非成功的 raw 状态并停止轮询；missing-task/不存在业务错误显示为独立 error/missing 结果、保留最后已知事实并停止自动 mutation/轮询。二者都不能混成“成功终态 unknown”，也不得触发成功播报。后端 TaskStore JSON 与 AutoHarness 运行日志属于 `JIUWENSWARM_DATA_DIR` 下的机器私有运行态；前端 task projection/card、command ID 与 mutation latch 当前只在浏览器页面内存，整页刷新即丢。二者都不随 Git 或换机恢复；V0、累计开发和副作用 E2E 使用隔离目录。正式 WorkProgress 闭环仍需版本化 terminal outcome、持久 projection/journal 与生产鉴权。
+- 原因：这是不扩大为完整 P3 的最窄诚实边界，同时让 D-031 的正向、反向、竞态和恢复测试有确定预期。
+- 影响：D-031 代码开始前，以上语义必须进入 `STATUS.md` 的 D-032 pre-review inventory/matrix 并形成 checkpoint commit；当前文档决策不表示实现已完成。
+- 重新评估条件：持久 command journal、TaskEvent store/subscription 或版本化 WorkProgress contract 提前落地。

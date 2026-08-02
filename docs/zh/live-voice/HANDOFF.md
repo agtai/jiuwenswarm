@@ -4,19 +4,33 @@
 - 开发分支：`hx/0731_live_voice_ux`
 - 共享远端：`agtai`（`https://github.com/agtai/jiuwenswarm.git`）
 - V0 核心实现提交：`346f802a`；当前已推送 V0 Candidate 恢复点：`2c700934aa0024a7ab229644bf15934e9e8170e7`
-- 权威 V0 恢复点：`2c700934`；它永久保持未放行 Candidate，不随 Post-V0 累计提交移动
+- 权威 V0 恢复点：`2c700934`；SHA/恢复点永久固定且不随 Post-V0 累计提交移动；当前仍是 Candidate，只有 Gate 0–6 全部 PASS 后同一 SHA 的状态才可改为 Released / 已冻结
 - 当前阶段：V0 Candidate 已提交并推送，但完整真机 Gate 尚未通过，因此还不是 V0 Released / 已冻结
-- stash 状态：`7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply，原 stash 只作为额外备份保留；当前分支不要重复 apply/pop/drop
+- stash 状态：`7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply；它只在创建它的原机器上作为额外保险存在。新 clone 没有该 stash 是正常且正确的，任何机器都不要重复 apply/pop/drop
 - 当前状态：Task Foundation 代码和历史回归已落地（后端 `3da101cf`、前端 `42e76d30`）；D-032 模块测试闭环 Gate 已接受，D-031 必须先完成开发前场景/test 回顾再编码。V0 继续从 `2c700934` 的独立 detached checkout/worktree 验收
 
 ## 接手后先做什么
 
-1. `git fetch agtai`，切换并更新 `hx/0731_live_voice_ux`。
-2. 依次阅读 [README.md](README.md)、本文件、[STATUS.md](STATUS.md)、[TWO_WEEK_DEMO.md](TWO_WEEK_DEMO.md)、[POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)、[POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)、[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 和 [DECISIONS.md](DECISIONS.md)；开发模块前必须执行 D-032 与路线 §3.1。
-3. 准备演示机时严格执行 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)，新机器必须从 lockfile 重建依赖，不复制 `.venv` 或 `node_modules`。
-4. 核对 `git status --short --branch`、HEAD 和 upstream。D-030 已恢复正常 commit/push：不要为了验收 V0 把当前开发分支重新 stash，也不要重复 apply `7f4c...`。需要 V0 Gate 时，从精确 SHA `2c700934...` 创建独立 checkout/worktree，避免把 V0 证据与 Post-V0 混在同一运行目录。
+1. 按 [README.md](README.md#新机器五分钟恢复) 使用 `GIT_LFS_SKIP_SMUDGE=1` clone 正确分支；当前 agtai LFS 缺少一个与 Live Voice 无关的视频对象，普通 smudge 会让 checkout 失败。
+2. 执行 `git pull --ff-only`、`git status --porcelain`、`git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux` 和 V0 祖先检查。必须是干净工作区、差异 `0 0`、`2c700934` 仍为祖先。
+3. 按 [README.md](README.md#新-codex-会话的阅读顺序) 读取当前事实集。普通续作不读取 stash 交接单来执行操作；只有历史取证/灾难恢复才打开它。
+4. 选择轨道：V0 验收只在 detached `2c700934` + 独立 `JIUWENSWARM_DATA_DIR` 中执行；Post-V0 开发只在累计分支进行，D-031 必须先提交 D-032 开发前 test closure checkpoint。
+5. 需要构建或运行时从 `uv.lock` / `package-lock.json` 重建依赖，不复制 `.venv` 或 `node_modules`；需要真实 Agent/语音时再从受控渠道补齐私有配置、项目注册、浏览器权限和设备。
 
-本目录是 Git 中的接续入口。不要依赖旧对话、未提交文件、某台机器的 `.codex` / `.agent` 目录或本机 stash 恢复项目事实。Task Foundation 已随代码正常 commit，并由本批 push 进入共享分支；新机器只需 fetch/pull 分支并按本文阅读顺序接续。
+本目录是 Git 中的接续入口。不要依赖旧对话、未提交文件、某台机器的 `.codex` / `.agent` 目录或本机 stash 恢复项目事实。Task Foundation 已由 `3da101cf`、`42e76d30` 和后续文档提交进入共享分支；新机器只认 fetch/pull 后的 Git 事实。
+
+## 跨机器恢复完整度
+
+| 层 | 当前结论 | 是否可由 Git 单独恢复 |
+|---|---|---|
+| 源码、tests、方案、决策、阶段与下一任务 | `READY`；共享分支是唯一事实源 | 是 |
+| Python/Node 依赖集合 | `READY_WITH_NETWORK`；由 `uv.lock` / `package-lock.json` 恢复 | 锁定集合可以；仍需包源网络和本机运行时 |
+| Codex 继续 D-031 前置设计与自动化开发 | `READY`；先执行 D-032 | 是，安装依赖后可运行测试 |
+| 模型、用户配置、project/session/task 数据 | `EXTERNAL_REQUIRED` | 否 |
+| Chrome 权限、Web Speech、麦克风/耳机、网络 | `EXTERNAL_REQUIRED` | 否 |
+| V0 Released / 跨机器真机等效 | `NOT_YET`；Gate 0–6 尚未全部通过 | 否，必须重新注入私有条件并人工验收 |
+
+因此“无旧对话继续开发”可以做到；“pull 后无需任何机器配置就得到相同真实语音效果”做不到，也不应通过提交密钥、用户数据或浏览器 profile 来伪造。
 
 ## `2c700934` V0 baseline 已经能做什么
 
@@ -46,9 +60,9 @@
 - exact-key reconciliation 接受请求期间发生的真实状态漂移；任务已从 pending 进入 running 或 terminal 时不会被旧 pending 假设覆盖。冲突、多条记录或无法证明时继续 fail closed。
 - command ID 目前只在同一次 Bridge mutation/retry/reconcile 内稳定；`lastVisibleTask`、未决 mutation 和任务卡投影仍是页面/Session 内存。刷新后没有持久 command journal、连续 monitor 或通用多任务恢复。
 - Scheduler 已改为每任务固定独立的进程内 Agent/context；并发 Session 不再借用最后写入的共享 `_agent`，周期任务保留自己的 context，终态/取消/删除/service stop 释放。进程重启后缺 context 的旧任务会诚实失败，不借用新 Agent。
-- task request、持久状态和 UI 已携带/显示 `execution_target`：项目路径、项目 ID、来源 Session、来源 Channel。前端仅允许当前 persisted Session 对应的可信绝对项目路径；capture 期间 session/target/bridge identity 改变时零请求失效，遗留任务缺字段则显示 unknown。
+- task request、持久状态和 UI 已携带/显示 `execution_target`：项目路径、项目 ID、来源 Session、来源 Channel。前端仅允许从当前 persisted Session 与精确注册项目解析出的绝对项目路径；capture 期间 session/target/bridge identity 改变时零请求失效，遗留任务缺字段则显示 unknown。
 - 后端创建支持服务端 owner scope 下的 `origin_namespace` + `idempotency_key`：同一进程、同一 JSON store 路径的 TaskStore 实例共享锁和 ledger；同意图返回同一 task ID 且只触发一次，冲突返回 `IDEMPOTENCY_CONFLICT`，删除保留 tombstone，reload 后可重放。这是 per-path single-process，不是跨进程或 exactly-once。
-- `schedule.list/status/cancel/logs/delete` 都在服务端按可信 request 派生 owner + project execution target 并在读取、取消、删除或释放 context 前校验；外部缺失、无效或不匹配 scope fail closed。
+- `schedule.list/status/cancel/logs/delete` 按 Web request 字段派生 owner + project execution target，并在读取、取消、删除或释放 context 前校验；必需 `channel_id/session_id` 缺失或非法、完整 owner scope 不一致，或请求 target 与 stored target 中已知的 `project_dir/project_id` 不一致时 fail closed。`app_id` 可空，遗留 unknown project 字段不猜测。这是单用户 Demo 的正常客户端防串线边界；身份仍由请求提供，不是认证、租户隔离或抵御恶意伪造的生产鉴权。
 
 ## 2026-08-01 已完成的验证
 
@@ -68,7 +82,7 @@
 - Python 最终统一精确回归：**226/226 passed**，覆盖 contract、TaskStore/service、AgentServer schedule request 和 Web handler。
 - foundation 合并点的 `git diff --check` 已通过；历史 lint 说明见 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)。
 
-以上 **226/226、155/155、24/24、TypeScript 和 4494 modules** 是 review 修复合入后的最终统一结果，不是子任务数字相加；后端 `3da101cf`、前端 `42e76d30` 已落地。自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。
+以上 **226/226、155/155、24/24、TypeScript 和 4494 modules** 是 review 修复合入时的历史统一结果；155 与 24 两组有 9 项重叠，不能相加，Git 也未保存 JUnit 产物；后端 `3da101cf`、前端 `42e76d30` 已落地。自动化结果仍不能替代稳定句听感和真实有副作用任务 E2E。
 
 ### D-032 模块测试闭环摘要
 
@@ -89,15 +103,24 @@
 
 详细非敏感证据和启动方式见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
 
-## 仍未完成：当前唯一主线
+## 仍未完成：两条隔离轨道
 
-- 10 个准确语音 Turn，重复提交为 0。
+### V0 独立验收轨
+
+- 10 个准确、detached-safe 的语音 Turn，重复提交为 0。
 - 10 次用户可感知打断：thinking 3 次、tool 4 次必须走真实 supplement；speaking 3 次必须立即停声并恰好走一次普通 `chat.send`。三类分别记数，旧声音恢复 0 次，并检查旧工具 UI、迟到 result、warning 和副作用。
 - 连续 20 分钟或 20 Turn 无需刷新。
-- 主演示脚本连续成功 3 次。
-- 在独立环境从 `uv.lock` / `package-lock.json` 重建并复测，不依赖主仓 `.venv`。
+- detached V0 主展示脚本连续成功 3 次。
+- 在独立环境从 `uv.lock` / `package-lock.json` 重建并复测，不依赖主仓 `.venv`；使用隔离的 `JIUWENSWARM_DATA_DIR`，不得借用累计开发 Session/Task 状态。
 
-任何一项未通过，都不能写成“Demo 已完成”。当前真实主链成功一次是关键进展，但不是放行替代品。
+任何一项未通过，都不能写成“V0 已 Released / 已冻结”。当前真实主链成功一次是关键进展，但不是放行替代品。
+
+### Post-V0 开发轨
+
+- 当前下一窄切片是 D-031 poll-backed 非阻塞任务监控。
+- 任何语义实现前，先按 D-032 在 `STATUS.md` 完成 module definition、现有/计划 test inventory、每项 test 的 why 和 P/N/B/S/T/C/R/I/F/K/X 场景矩阵，并独立 commit/push 前置 checkpoint。
+- 前置 Gate 之前可以审阅方案、代码、tests 和设计矩阵；不得顺势实现完整 P3、TaskEvent push/replay、跨进程 exactly-once 或 D1/D2。
+- D-031 首版只承诺同页断线重连，不承诺整页刷新恢复；A→B 监控 B 并保留 A 终态；合法 envelope、匹配的 task ID/status/target/provenance 是必需事实，只有可选 progress/last_error 缺失时写 unknown。完整边界见 D-033/D-034 与路线 §7.3。
 
 ## 量化进度口径
 
@@ -125,7 +148,7 @@
 
 ### 固定环境仍有机器私有状态
 
-模型配置、浏览器权限、Chrome Speech 服务、硬件和网络不会进入 Git。本轮复用主仓 `.venv` 也只是临时便利；跨机器必须按运行手册重建并重新验收。
+模型配置、浏览器权限、Chrome Speech 服务、硬件和网络不会进入 Git。本轮复用主仓 `.venv` 也只是临时便利；跨机器必须按运行手册重建并重新验收。默认 `%USERPROFILE%\.jiuwenswarm` 还包含配置、project 注册、Session、Task、日志和 memory；V0 与累计开发必须使用不同的绝对 `JIUWENSWARM_DATA_DIR`，避免旧状态污染证据。
 
 ### Post-V0 streaming 与任务风险
 
@@ -133,7 +156,8 @@
 - speech planner/FIFO 的 planned/enqueued 不能证明“已经听到”；正式版仍需 playback ACK/cursor 和 presented history。
 - schedule 当前只加强了同一进程、同一 JSON store 路径内的一致性；没有跨进程事务、唯一执行所有权、exactly-once 或生产 crash recovery。多个进程共享 store、D1/D2 durability 和外部副作用 reconciliation 不在当前保证内。
 - Task Demo 是真实有副作用的 AutoHarness，不是只读仓库工具。只有受控环境才能开启；Live Voice 退出或 session fence 只能阻止新的错误派发，不能停止已经创建的任务。
-- task-scoped Agent/context、project/origin provenance、服务端 owner+project scope、per-path single-process JSON 幂等 create、前端稳定 command ID 与严格 exact-key reconciliation 已落地，但 Agent context 不能跨重启恢复，target 未包含完整 model/provider/config/permission 快照，也没有跨刷新 command journal、持续 task monitor、跨进程 exactly-once 或 D1/D2；这些仍是正式版缺口。
+- task-scoped Agent/context、project/origin provenance、单用户 request owner+project 一致性 scope（非生产鉴权）、per-path single-process JSON 幂等 create、前端稳定 command ID 与严格 exact-key reconciliation 已落地，但 Agent context 不能跨重启恢复，target 未包含完整 model/provider/config/permission 快照，也没有跨刷新 command journal、持续 task monitor、跨进程 exactly-once 或 D1/D2；这些仍是正式版缺口。
+- 当前共有 6 条 user-visible 文案误称已有跨刷新“后台任务列表”：Bridge 的 4 条 `mutation-unknown` 提示，加中英文 safety disclosure 各 1 条；owner-scope docstring 另有 `trusted request fields` 旧术语。Web 实际没有跨刷新 AutoHarness 恢复列表，D-033 也不承诺可信身份。D-031 开码时要连同 tests 一起修正全部 6 条提示和 docstring；在此之前按 STATUS 的证据保留/停止 mutation 规则处理。
 
 ## 不要重复做或提前做的事情
 
@@ -158,10 +182,16 @@
 git status --short --branch
 git rev-parse HEAD
 git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
+$env:GIT_LFS_SKIP_SMUDGE = '1'  # 必须在执行 worktree add 的当前终端重设
 git worktree add --detach ..\live-voice-v0-acceptance 2c700934aa0024a7ab229644bf15934e9e8170e7
+$v0DataDir = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent (Get-Location)) ('jiuwenswarm-data-live-voice-v0-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))))
+if (Test-Path -LiteralPath $v0DataDir) { throw "Refusing to reuse V0 data dir: $v0DataDir" }
+New-Item -ItemType Directory -Path $v0DataDir -ErrorAction Stop | Out-Null
+$env:JIUWENSWARM_DATA_DIR = (Resolve-Path -LiteralPath $v0DataDir).Path
+$env:JIUWENSWARM_DATA_DIR  # 记录并在每个新后端终端重新设置
 ```
 
-上例目录名可按机器调整；必须选择当前仓库外的独立空目录。只在新目录确认 `HEAD=2c700934...`、工作区干净，并清除两个 Post-V0 环境变量后执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。如果 Gate 失败，不得写 `Released` 或冻结；失败证据回写当前开发分支的文档，不在 detached 验收目录继续产品开发。
+上例目录名和数据目录可按机器调整，但都必须是明确的绝对隔离路径。只在新代码目录确认 `HEAD=2c700934...`、工作区干净；在隔离数据目录重新初始化并从受控渠道配置模型/project，清除两个 Post-V0 环境变量后执行 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。不要复用累计开发的 Session、Task 或 code-project 绝对路径。如果 Gate 失败，不得写 `Released` 或冻结；失败证据回写当前开发分支的文档，不在 detached 验收目录继续产品开发。
 
 只有 V0 Gate 全部通过后，才在当前累计分支合并验收证据并明确标记 Released/freeze；不得把 Post-V0 foundation 代码算进 V0 证据。当前 foundation 已可从共享分支完整重建；原 stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已经 apply，仅作为本机额外保险保留，正常开发和 V0 验收都不要重复 apply/pop/drop，是否删除由用户明确决定。
 

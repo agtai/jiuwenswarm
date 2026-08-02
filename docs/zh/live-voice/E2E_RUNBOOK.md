@@ -1,5 +1,8 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
+- 最近恢复审计：2026-08-02
+- 适用共享分支：`hx/0731_live_voice_ux`；V0 Gate 单独使用 detached `2c700934`
+
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
 本文是环境、依赖、服务启动和健康检查的权威入口。V0 的固定语料、分阶段打断、放行 Gate 和证据汇总以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准；现场展示话术以 [DEMO_SHOWCASE.md](DEMO_SHOWCASE.md) 为准。
@@ -23,7 +26,9 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 - Python 3.12.9。仓库允许 `>=3.11,<3.14`，该确切版本已用于当前开发验证。
 - Node.js 24.14.0。仓库最低要求 Node 18，该确切版本已通过当前前端测试和构建。
 - 中文 `zh-CN`、默认麦克风、耳机、单用户、单浏览器窗口、稳定网络。
-- 网络必须同时能访问模型 Provider 和浏览器 Web Speech 所需服务。
+- 网络必须同时能访问模型 Provider 和浏览器 Web Speech 所需服务；首次依赖恢复还要访问 Python/Node 包源。
+
+仓库通过 `pyproject.toml` 约束 Python 范围、通过 lockfile 固定依赖，但目前没有 `.python-version`、`.nvmrc`、Volta 或 `engines` 来自动安装精确运行时，也没有固定 `uv`/npm 自身版本。新机器需要先人工安装 Python `3.12.9`、Node `24.14.0` 和 `uv`；可参考 [安装指南](../安装指南.md) 与 [Quickstart](../Quickstart.md)，然后以本节的精确版本检查作为 Gate。lockfile 固定的是依赖集合，不是操作系统、Chrome 或硬件。
 
 2026-08-01 首次真实贯通使用的已知可用组合：
 
@@ -43,15 +48,16 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 ## 3. 获取代码与固定依赖
 
 ```powershell
-git clone --origin agtai https://github.com/agtai/jiuwenswarm.git
+$env:GIT_LFS_SKIP_SMUDGE = '1'
+git clone --origin agtai --branch hx/0731_live_voice_ux --single-branch https://github.com/agtai/jiuwenswarm.git
 Set-Location jiuwenswarm
-git fetch agtai
-git switch --track agtai/hx/0731_live_voice_ux
+git pull --ff-only agtai hx/0731_live_voice_ux
 git status --short --branch
+git status --porcelain
+git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
 ```
 
-如果仓库已经通过普通 `git clone` 获取、远端名为 `origin`，使用 `origin/hx/0731_live_voice_ux`，或将它重命名为 `agtai`。验收前记录 `git rev-parse HEAD`，工作区必须无意外修改。
-
+`GIT_LFS_SKIP_SMUDGE=1` 当前是必要绕过：agtai 的 LFS 端点缺少与 Live Voice 无关的 `docs/assets/videos/compression.mp4`，普通 checkout 会收到 404。跳过该媒体不影响 Live Voice 源码、文档、tests、依赖或运行；在对象补传前不要执行全仓 `git lfs pull`。如果仓库已经由其他方式 clone，确保本地 `hx/0731_live_voice_ux` 跟踪正确的 `agtai`/`origin` 分支并 `pull --ff-only`。验收前记录 `git rev-parse HEAD`，upstream 差异必须 `0 0`，工作区不得有意外修改。
 Python 依赖以根目录 `uv.lock` 为准：
 
 ```powershell
@@ -62,11 +68,11 @@ uv sync --python 3.12.9 --frozen
 前端依赖以 `package-lock.json` 为准：
 
 ```powershell
-Set-Location jiuwenswarm\channels\web\frontend
+Push-Location jiuwenswarm\channels\web\frontend
 npm ci
 node --version
 npm --version
-Set-Location ..\..\..\..
+Pop-Location
 ```
 
 不要复制另一台机器的 `.venv` 或 `node_modules`；它们不是跨机器交接物。
@@ -74,6 +80,25 @@ Set-Location ..\..\..\..
 2026-08-01 的首次 E2E 为了快速验证，临时复用了同一机器主仓已经存在的 Python `.venv`。这只能证明该机器组合可运行，不能作为恢复步骤；新机器和最终彩排环境仍必须执行上面的 `uv sync --frozen`，并重新跑完整验收。
 
 ## 4. 本机配置检查
+
+### 4.1 先隔离 JiuwenSwarm 用户数据
+
+源码 worktree 不是全部运行状态。默认 `%USERPROFILE%\.jiuwenswarm` 包含模型配置、project 注册、Session、Task、日志和 memory；复用它会让累计开发与 V0 证据交叉污染。启动任何后端进程前，在该终端选择一个明确的绝对目录：
+
+```powershell
+# 本次选择一个轨道：V0 用 v0；累计开发/Task Demo 改为 post-v0。
+$runKind = 'v0'
+$runLabel = Get-Date -Format 'yyyyMMdd-HHmmss'
+$dataDirForRun = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent (Get-Location)) ("jiuwenswarm-data-live-voice-{0}-{1}" -f $runKind,$runLabel)))
+if (Test-Path -LiteralPath $dataDirForRun) { throw "Refusing to reuse data dir: $dataDirForRun" }
+New-Item -ItemType Directory -Path $dataDirForRun -ErrorAction Stop | Out-Null
+$env:JIUWENSWARM_DATA_DIR = (Resolve-Path -LiteralPath $dataDirForRun).Path
+$env:JIUWENSWARM_DATA_DIR  # 记录这个非敏感绝对路径，后续每个后端终端都重复设置
+```
+
+路径必须是新建的绝对空目录，且 V0 与 Post-V0 不共用；命令遇到同名目录会停止，不会用 `-Force` 复用旧数据。首次启动会初始化该用户工作区；模型和 code project 需要在对应隔离目录中从受控渠道重新配置。不要把默认用户目录整体复制进来，也不要删除旧目录来制造“干净环境”。环境变量只对当前 PowerShell 进程及其子进程有效；每个 AgentServer/Gateway/Web/Vite 启动终端都必须把记录的同一绝对路径重新赋给 `JIUWENSWARM_DATA_DIR`，验证结束后停止进程，再清除变量。
+
+### 4.2 私有配置与设备
 
 后端需要一个可用的默认模型配置，至少包括非空的 API base、API key、model name 和 client/provider。只检查“是否存在/是否可用”，不要把值贴到日志、文档或 commit 中。
 
@@ -85,7 +110,13 @@ Set-Location ..\..\..\..
 - 模型 Provider 的 HTTPS endpoint 可从演示机访问。
 - Chrome 已允许当前 localhost 站点使用麦克风。
 - 默认麦克风和耳机正确，系统输入电平可见。
-- 端口 `18092`、`19000`、`19001`、`5173` 未被其他进程占用。
+- 端口 `18092`、`19000`、`19001`、`5173` 未被其他进程占用。可在启动前只读检查：
+
+  ```powershell
+  Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+    Where-Object LocalPort -In 18092,19000,19001,5173 |
+    Select-Object LocalAddress,LocalPort,OwningProcess
+  ```
 
 用户工作区配置和 `.env` 是机器私有状态。不得提交完整配置、API key、Slack token 或其他凭据。
 
@@ -110,6 +141,19 @@ Chrome http://localhost:5173
 
 `19001` 是 WebSocket 端口，没有可依赖的 HTTP `/health`。浏览器 WebSocket 实际收到 `connection.ack` 才说明 Gateway 已连接到就绪的 AgentServer；仅仅“端口正在监听”不算后端健康。
 
+运行日志位于选定数据目录的 `agent/.logs/`，Web 开发日志还可能写到前端 `logs/ws-dev.log`。单独打开的日志终端不会继承其他 PowerShell 的环境变量；需要保留事件顺序时，先把第 4.1 节记录的同一绝对路径重新绑定并确认日志文件存在：
+
+```powershell
+$dataDirItem = Get-Item -LiteralPath '<替换为第 4.1 节记录的绝对数据目录>' -Force -ErrorAction Stop
+if (-not $dataDirItem.PSIsContainer -or $dataDirItem.PSProvider.Name -ne 'FileSystem') { throw 'Data dir must be an existing filesystem directory' }
+$env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
+$logPath = Join-Path $env:JIUWENSWARM_DATA_DIR 'agent\.logs\full.log'
+if (-not (Test-Path -LiteralPath $logPath -PathType Leaf)) { throw "Log file not found: $logPath" }
+Get-Content -LiteralPath $logPath -Wait
+```
+
+截取证据前必须脱敏，不打印模型配置、用户路径或私有对话。
+
 ## 6. 启动后端
 
 ### 方案 A：显式临时关闭外部 IM channel
@@ -119,6 +163,11 @@ Chrome http://localhost:5173
 然后按仓库正常方式启动：
 
 ```powershell
+Set-Location '<替换为本次代码 worktree 的绝对路径>' -ErrorAction Stop
+if (-not (Test-Path -LiteralPath '.\pyproject.toml')) { throw 'Not at the worktree root' }
+$dataDirItem = Get-Item -LiteralPath '<替换为第 4.1 节记录的绝对数据目录>' -Force -ErrorAction Stop
+if (-not $dataDirItem.PSIsContainer -or $dataDirItem.PSProvider.Name -ne 'FileSystem') { throw 'Data dir must be an existing filesystem directory' }
+$env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 & .\.venv\Scripts\python.exe -m jiuwenswarm.app
 ```
 
@@ -131,12 +180,22 @@ Chrome http://localhost:5173
 终端 1：
 
 ```powershell
+Set-Location '<替换为本次代码 worktree 的绝对路径>' -ErrorAction Stop
+if (-not (Test-Path -LiteralPath '.\pyproject.toml')) { throw 'Not at the worktree root' }
+$dataDirItem = Get-Item -LiteralPath '<替换为第 4.1 节记录的绝对数据目录>' -Force -ErrorAction Stop
+if (-not $dataDirItem.PSIsContainer -or $dataDirItem.PSProvider.Name -ne 'FileSystem') { throw 'Data dir must be an existing filesystem directory' }
+$env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 & .\.venv\Scripts\python.exe -m jiuwenswarm.server.app_agentserver
 ```
 
 终端 2：
 
 ```powershell
+Set-Location '<替换为本次代码 worktree 的绝对路径>' -ErrorAction Stop
+if (-not (Test-Path -LiteralPath '.\pyproject.toml')) { throw 'Not at the worktree root' }
+$dataDirItem = Get-Item -LiteralPath '<替换为第 4.1 节记录的绝对数据目录>' -Force -ErrorAction Stop
+if (-not $dataDirItem.PSIsContainer -or $dataDirItem.PSProvider.Name -ne 'FileSystem') { throw 'Data dir must be an existing filesystem directory' }
+$env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 & .\.venv\Scripts\python.exe -c "import jiuwenswarm.common.config as c; real=c.get_config; c.get_config=lambda:(lambda x:(x.setdefault('channels',{}).setdefault('slack',{}).__setitem__('enabled',False),x)[1])(real()); import jiuwenswarm.gateway.app_gateway as g; g.main()"
 ```
 
@@ -144,26 +203,37 @@ Chrome http://localhost:5173
 
 ## 7. 启动前端
 
-新终端：
+Vite 也会读取 `JIUWENSWARM_DATA_DIR`，所以前端终端必须使用与本次后端相同的隔离路径。默认 V0、稳定句预读和 Task Demo 三种模式一次只能选一种；切换模式时先按 `Ctrl+C` 停止现有 Vite，确认 `5173` 已释放，再在新终端完成变量设置后启动。不得先运行 `npm run dev` 再修改变量。
+
+### 7.0 默认 V0 模式
+
+在新终端执行；两个 Post-V0 flag 必须在启动前清除：
 
 ```powershell
+Set-Location '<替换为本次代码 worktree 的绝对路径>' -ErrorAction Stop
+$dataDirItem = Get-Item -LiteralPath '<替换为第 4.1 节记录的绝对数据目录>' -Force -ErrorAction Stop
+if (-not $dataDirItem.PSIsContainer -or $dataDirItem.PSProvider.Name -ne 'FileSystem') { throw 'Data dir must be an existing filesystem directory' }
+$env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH -ErrorAction SilentlyContinue
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 Set-Location jiuwenswarm\channels\web\frontend
 npm run dev
 ```
 
-打开 `http://localhost:5173`。确认浏览器连接成功并在开发者工具 WebSocket 帧中看到 `connection.ack`。在 UI 中选择或创建指向当前仓库目录的 code project，进入 Agent 模式。
+打开 `http://localhost:5173`。确认浏览器连接成功并在开发者工具 WebSocket 帧中看到 `connection.ack`。在 UI 中选择或创建指向当前 worktree 绝对路径的 code project，进入 Agent 模式。
 
-V0 验收必须使用默认配置。启动前显式清除两个 Post-V0 开关，避免把增量行为误算进 V0 Gate：
+### 7.0.1 单独验证稳定句预读
+
+只有恢复累计开发且不做 V0 Gate 时，才在新的 Vite 启动终端执行：
 
 ```powershell
-Remove-Item Env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH -ErrorAction SilentlyContinue
+Set-Location '<替换为累计开发 worktree 的绝对路径>' -ErrorAction Stop
+$dataDirItem = Get-Item -LiteralPath '<替换为第 4.1 节记录的绝对数据目录>' -Force -ErrorAction Stop
+if (-not $dataDirItem.PSIsContainer -or $dataDirItem.PSProvider.Name -ne 'FileSystem') { throw 'Data dir must be an existing filesystem directory' }
+$env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
-```
-
-恢复新开发后，单独验证稳定句预读时才在启动 Vite 的同一终端设置：
-
-```powershell
 $env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH = 'true'
+Set-Location jiuwenswarm\channels\web\frontend
 npm run dev
 ```
 
@@ -171,15 +241,27 @@ npm run dev
 
 ### 7.1 受限 Task Demo：只在独立受控环境验证
 
-这个切片默认关闭，也不属于 V0 验收。先关闭稳定句开关，再单独启用：
+这个切片默认关闭，也不属于 V0 验收。确认现有 Vite 已停止，再在新的 Vite 启动终端单独启用：
 
 ```powershell
+Set-Location '<替换为累计开发 worktree 的绝对路径>' -ErrorAction Stop
+$dataDirItem = Get-Item -LiteralPath '<替换为第 4.1 节记录的绝对数据目录>' -Force -ErrorAction Stop
+if (-not $dataDirItem.PSIsContainer -or $dataDirItem.PSProvider.Name -ne 'FileSystem') { throw 'Data dir must be an existing filesystem directory' }
+$env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 Remove-Item Env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH -ErrorAction SilentlyContinue
 $env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO = 'true'
+Set-Location jiuwenswarm\channels\web\frontend
 npm run dev
 ```
 
-**安全警告：这不是只读“查看仓库”。** 确认启动或替换会真实调用 AutoHarness `schedule.run`，固定使用有代码副作用的 `extended_evolve_pipeline`，可能生成或修改本地 Harness 代码包。取消只能阻止尚未发生的后续执行，不能撤销已有修改；Live Voice 的“打断并说话”或退出只停止本地语音反馈，不会取消 `schedule.run` 或已创建任务。只允许在单一 Session、可丢弃或已备份的目标环境验证，并先在页面常驻披露中向验收者说明这些边界。
+**安全警告：这不是只读“查看仓库”。** 确认启动或替换会真实调用 AutoHarness `schedule.run`，固定使用有代码副作用的 `extended_evolve_pipeline`，可能生成或修改本地 Harness 代码包。取消只能阻止尚未发生的后续执行，不能撤销已有修改；Live Voice 的“打断并说话”或退出只停止本地语音反馈，不会取消 `schedule.run` 或已创建任务。只允许在单一 Session、可丢弃或已备份的目标环境验证，并先在页面常驻披露中向验收者说明这些边界。所有正在运行的 AgentServer/Gateway 进程都必须是在各自启动终端中显式设置同一个 Post-V0 专用 `JIUWENSWARM_DATA_DIR` 后启动；仅给 Vite 终端设置变量不算隔离。
+
+Task Demo 启动前先建立可核对的执行身份：
+
+1. 确认 Vite 以及所有正在运行的 AgentServer/Gateway 进程都使用同一个 Post-V0 专用绝对 `JIUWENSWARM_DATA_DIR`，不是 V0 或默认用户目录。
+2. 在 UI 注册并保存**当前累计 worktree 的精确绝对路径**为 code project；用 `git rev-parse --show-toplevel` 核对页面 target，不允许用相似目录名猜测。
+3. 创建一个新的持久 Session，等待真实 session ID 生成；`session_id=new` 或项目路径/ID不匹配时不得开 Task Demo。
+4. 先用文字强制 Terminal Tool 读取当前短 SHA 和绝对仓库根，确认 Agent 实际作用目标与面板完全一致；再切换到独立语音 Session 做副作用验收。
 
 任务口令只接受 committed final；partial/interim 必须保持零请求。启动和替换继续要求显式“确认”，但为适配真实 ASR，目标前可使用 `：`、`:`、`，`、`,`、空格或口述“冒号”，固定命令末尾可带 `。！？!?`。推荐流程：
 
@@ -195,7 +277,7 @@ npm run dev
 
 必须先进入已经保存的真实 Session；`session_id=new` 时不会发任务请求。capture 期间若切换 Session，本次口令也必须以零请求失效。不要使用过于通用的“检查进度”，它会继续走普通 Chat/Agent，不属于任务口令。
 
-如果 `schedule.run` 超时、断线、payload 无效或缺少 task ID，前端会用同一稳定 command ID 查询服务端 scoped exact-key list，并只接受 namespace、key、query、pipeline 和冻结 target 全部严格匹配且无业务错误的记录；对账不能证明结果时才进入 `mutation-unknown`，且 status/cancel 不会退回操作旧 predecessor。后端对 list/status/cancel/logs/delete 强制校验创建 owner 与项目 target，任务也冻结进程内 Agent context 并返回项目/来源 provenance。command journal、最后可见任务和 latch 仍只在当前页面/Session 内存中，刷新后的自动恢复尚未实现。执行前必须核对界面显示的绝对项目 target；真实有副作用 E2E 仍应在单用户、可丢弃或已备份环境进行，因为跨进程一致性、exactly-once、外部副作用 reconciliation 和重启后的 Agent context 恢复尚未完成。
+如果 `schedule.run` 超时、断线、payload 无效或缺少 task ID，前端会用同一稳定 command ID 查询服务端 scoped exact-key list，并只接受 namespace、key、query、pipeline 和冻结 target 全部严格匹配且无业务错误的记录；对账不能证明结果时才进入 `mutation-unknown`，且 status/cancel 不会退回操作旧 predecessor。后端按 Web request 字段对 list/status/cancel/logs/delete 校验创建 owner 与项目 target，任务也冻结进程内 Agent context 并返回项目/来源 provenance；这能阻止正常客户端串线，但 Web 身份仍可由恶意请求伪造，不是生产鉴权。command journal、最后可见任务和 latch 仍只在当前页面/Session 内存中，刷新后的自动恢复明确 unsupported。后端 Task JSON 与日志属于当前机器的 `JIUWENSWARM_DATA_DIR`；前端 task projection/card/command state 只在浏览器页面内存，刷新即丢。二者都不会随 Git 或换机恢复。执行前必须核对界面显示的绝对项目 target；真实有副作用 E2E 仍应在单用户、可丢弃或已备份环境进行，因为跨进程一致性、exactly-once、外部副作用 reconciliation 和重启后的 Agent context 恢复尚未完成。
 
 验证结束后执行：
 
@@ -322,4 +404,5 @@ ASR 误识别样本：
 - 退出 Live Voice，确认麦克风和声音均停止。
 - 停止 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
+- 记录本次使用的 `JIUWENSWARM_DATA_DIR` 标签，停止所有引用它的进程后执行 `Remove-Item Env:JIUWENSWARM_DATA_DIR -ErrorAction SilentlyContinue`；不要自动删除证据目录。
 - 按 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 保存脱敏验收结果，更新 [STATUS.md](STATUS.md) 与 [HANDOFF.md](HANDOFF.md) 中的通过项、失败项和下一步。Post-V0 正常提交并推送；V0 验收必须在 `2c700934...` 的独立 checkout/worktree 中完成，验收证据和后续开发事实分别提交，不得混为同一放行结论。

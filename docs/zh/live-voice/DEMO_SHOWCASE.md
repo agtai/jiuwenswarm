@@ -2,7 +2,7 @@
 
 本文负责现场展示话术和失败退场，不替代 V0 放行验收。完整 Gate、固定语料和证据模板见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。
 
-- 适用分支：`hx/0731_live_voice_ux`
+- 当前 V0 放行执行目标：detached `2c700934aa0024a7ab229644bf15934e9e8170e7`；累计分支只用于继续开发
 - 展示目标：用 60–90 秒证明“真实语音能够连续驱动真实 Agent 和 Terminal Tool，读取演示机的确切代码快照，并把真实结果完整读回来”
 - 展示口径：纵向 Demo，不宣称生产级全双工或稳定性放行
 - 环境与启动细节：[E2E_RUNBOOK.md](E2E_RUNBOOK.md)
@@ -79,7 +79,7 @@
 | 回答朗读 | 浏览器 TTS，完整文本按句分片 | 服务端流式 TTS、音频分片、背压、播放确认和正式发音词典 |
 | 打断与历史 | 本地先静音，前端 epoch/owner/quarantine 防止主要路径串音 | 客户端与服务端共享 response ID、cancel ACK、generation fence 和 presented history；明确区分“只停声音、取消回答、取消当前工作、取消后台任务”，插话不误取消无关工作 |
 | Agent 工作 | 单 Agent Session，复用当前 Chat/Tool 链 | 非阻塞 Agent Bridge、结构化工作进度、慢工具与前台语音互不冻结 |
-| 后台任务 | V0 主 Demo 不包含；Post-V0 可选切片固定 side-effecting AutoHarness、确认口令、真实 task card/target、稳定 command ID、同-key retry、strict exact-key reconciliation 和 owner+project scope；投影仍只在当前页面/Session，尚无持续 monitor | P3α 先提供幂等 create、稳定 `task_id`、get/list/status/cancel/events、每任务不可变上下文和 D0：语音/Session 断开后，只要应用与 Executor 仍存活，任务继续；进程重启后只协调并报告真实状态，不承诺续跑。完整 P3 再增加补充输入、修改、调优先级、暂停/恢复，以及按 Executor 能力提供 checkpoint 恢复或副作用协调；歧义和破坏性操作需要澄清/确认 |
+| 后台任务 | V0 主 Demo 不包含；Post-V0 可选切片固定 side-effecting AutoHarness、确认口令、真实 task card/target、稳定 command ID、同-key retry、strict exact-key reconciliation 和单用户 request owner+project 一致性 scope（非生产鉴权）；投影仍只在当前页面/Session，尚无持续 monitor | P3α 先提供幂等 create、稳定 `task_id`、get/list/status/cancel/events、每任务不可变上下文和 D0：语音/Session 断开后，只要应用与 Executor 仍存活，任务继续；进程重启后只协调并报告真实状态，不承诺续跑。完整 P3 再增加补充输入、修改、调优先级、暂停/恢复，以及按 Executor 能力提供 checkpoint 恢复或副作用协调；歧义和破坏性操作需要澄清/确认 |
 | 故障处理 | 可见错误、Retry、退出回文字聊天 | 自动重连、状态恢复、重复抑制、故障注入和量化服务指标 |
 
 当前 Demo 像一条已经真实跑通的单车道；最终版是在相同方向上增加多车道、护栏、监控、备用路线和全天候运行能力。Demo 验证“值得做、走得通、效果是否成立”，最终版解决“能否安全、稳定、普遍地使用”。
@@ -88,8 +88,8 @@
 
 主演示只做三轮短对话：
 
-1. 强制终端查询当前分支；
-2. 强制终端查询最近一次提交的短编号；
+1. 强制终端查询当前提交的短编号；
+2. 强制终端统计工作区未提交文件数量；
 3. 根据前两轮结果做一句话总结。
 
 它最大化成功率，同时能证明：
@@ -97,7 +97,7 @@
 - 输入来自真实麦克风；
 - final 只提交一次；
 - Agent 真实调用了两次 Terminal Tool；
-- 分支和提交编号来自当前工作区，不是固定答案；
+- 提交编号和工作区状态来自真实 Terminal Tool，不是前端固定答案；
 - 技术标识符能够完整朗读；
 - TTS 后自动回听；
 - 第三轮保留前两轮上下文。
@@ -112,7 +112,7 @@
 - Chrome `150.0.7871.187` 或已经完成同等验收的固定版本；
 - Jabra EVOLVE 30 II 或已经完成同等验收的有线耳机和麦克风；
 - `zh-CN`、Agent 模式、单一浏览器标签页；
-- 分支 `hx/0731_live_voice_ux`，工作区干净；
+- detached `2c700934aa0024a7ab229644bf15934e9e8170e7`，`git branch --show-current` 为空，工作区干净；
 - 模型、项目注册、Gateway、AgentServer 和 Terminal Tool 已预热。
 
 如果观众需要听到声音，首选“有线耳机 + 会议软件共享系统音频”，并提前在同一会议中验证。不要上台后临时切换输入/输出设备。线下扬声器只有在同一房间连续彩排通过后才使用，因为当前 Demo 没有生产级 AEC。
@@ -124,21 +124,21 @@
 ### 30–60 分钟前
 
 1. 按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 启动服务并确认端口与 `connection.ack`。
-2. 在仓库中记录最终候选快照；展示文档提交后 HEAD 会变化，因此必须在全部提交和推送完成后重新执行：
+2. 在 detached V0 仓库中复核不可变候选快照；累计分支的文档提交不会改变该验收 HEAD，但每次彩排/展示前仍必须重新确认 SHA 与 dirty 状态：
 
    ```powershell
    git branch --show-current
    git rev-parse --short=8 HEAD
-   git status --short --branch
+   @(git status --porcelain).Count
    ```
 
-   分支必须正确，短编号留作台上核对，工作区必须没有修改。
+   第一条输出必须为空，证明处于 detached V0 候选；短编号必须为 `2c700934`，未提交文件数量必须为 `0`。
 3. 用文字先发送：
 
-   > 必须调用终端执行 git branch --show-current 和 git rev-parse --short=8 HEAD，不要根据上下文猜测，只返回两项实际结果。
+   > 必须调用终端查看当前提交编号前八位，并统计未提交文件数量，不要根据上下文猜测，只返回编号和数量。
 
 4. 必须看到真实 `chat.tool_call`、`chat.tool_result`，而且结果与第 2 步一致；失败先修项目绑定或工具环境，不要进入语音演示。文字预检使用单独的测试会话，不要污染主演示上下文。
-5. 提前创建主演示和备用两个 Agent Session。在主演示 Session 中只用文字执行一次 `git rev-parse --is-inside-work-tree` 完成初始化，不查询分支或 HEAD；之后不要再向该 Session 发送主演示前置答案。
+5. 提前创建主演示和备用两个 Agent Session。在主演示 Session 中只用文字执行一次 `git rev-parse --is-inside-work-tree` 完成初始化，不查询提交编号或工作区状态；之后不要再向该 Session 发送主演示前置答案。
 6. 在同一麦克风、网络和音频路由下完整彩排主演示脚本。正式上台前应让完整三轮脚本连续成功 3 次，而不是只重跑失败的一轮；未做到时只能称为试演，不能称为已放行。
 7. 保留一次同环境、同脚本、带系统音频、完整 Tool 卡和时间戳的真实录屏，作为外部网络或 Provider 故障时的备份。必须明确标记为“最近一次真实运行”，不能冒充现场成功。
 
@@ -155,44 +155,44 @@
 
 ## 7. 60–90 秒主演示脚本
 
-### Turn 1：真实工具与技术标识符朗读
+### Turn 1：读取真实候选提交
 
 启用 Live Voice，看到 Listening 后，在 2 秒内清楚说：
 
-> 调用终端查看当前分支，只回答分支名。
+> 调用终端查看当前提交编号的前八位，只回答编号。
 
 成功判据：
 
 - interim 字幕可见，final 后只出现一条用户消息；
 - UI 进入 Agent is working/Agent 正在工作，而不是立即给出预设答案；
-- 出现真实 Terminal Tool 调用，结果是当前分支；
-- 页面显示原始分支名；
-- TTS 完整读出 `hx/0731_live_voice_ux` 的斜杠、数字和下划线；
+- 出现真实 Terminal Tool 调用，结果为 `2c700934`；
+- 页面显示原始编号；
+- TTS 完整读出八位技术标识符；
 - 朗读结束后自动回到 Listening。
 
-### Turn 2：读取真实提交编号
+### Turn 2：读取真实工作区状态
 
 看到 Listening 后，在 2 秒内说：
 
-> 继续调用终端，查看最新提交编号的前八位，只回答编号。
+> 继续调用终端，统计当前工作区未提交文件的数量，只回答数字。
 
 成功判据：
 
 - 只新增一个用户 Turn；
 - Agent 再次调用 Terminal Tool，而不是复用猜测；
-- 命令类似 `git rev-parse --short=8 HEAD` 或等价只读命令；
-- 结果与上台前记录的短编号一致，并被完整朗读；
+- 命令读取 `git status --porcelain` 或使用等价只读方式；
+- 结果为 `0`，与上台前记录一致并被完整朗读；
 - 再次自动回到 Listening。
 
 ### Turn 3：连续上下文
 
 看到 Listening 后，在 2 秒内说：
 
-> 用一句话说出刚才的分支名和提交编号。
+> 用一句话说出刚才的提交编号和未提交文件数量。
 
 成功判据：
 
-- Agent 正确引用前两轮的分支名称和提交短编号；
+- Agent 正确引用前两轮的 `2c700934` 和 `0`；
 - 回答只有一句并完整朗读；
 - 没有重复提交、串入历史回答或双播。
 
@@ -213,7 +213,7 @@ Turn 3 朗读完成并出现 Listening 后，立即点击退出 Live Voice。确
 
 这只证明本地 stop/cleanup，不等于生产级语音插话。
 
-另一个独立 Post-V0 加分项是受限 Task Demo，但只有真实 AutoHarness E2E 已按运行手册通过、目标环境可丢弃或已备份、且观众已经看到常驻副作用披露时才允许追加。推荐最短流程是：先核对面板显示的绝对项目 target、来源 Session/Channel 和 fixed pipeline；再说不带“确认”的启动口令证明零请求确认边界，然后确认启动并展示真实 task ID，随后查询真实状态；取消会阻止后续执行但不能撤销已有代码修改。后端已有每任务进程内 context、per-path single-process 幂等 ledger 和 owner+project scope；Live Voice client 已为一次 committed mutation 固定 command ID，run 结果不明时先以同 key retry 和 strict exact-key list reconciliation 恢复唯一且 identity/target 全匹配的真实记录，无法证明时才保持 `mutation-unknown`。当前仍没有跨刷新持久 command journal、持续 task monitor、跨进程一致性/exactly-once 或重启后的 Agent context 恢复。因此不要在主演示仓库或无法打开后台任务列表核对的环境运行；刷新后立即到后台列表核对，切 Session/target 后不在新上下文重试未决命令，任何 identity 不明都不得由前端换新 key 盲重试。
+另一个独立 Post-V0 加分项是受限 Task Demo，但只有真实 AutoHarness E2E 已按运行手册通过、目标环境可丢弃或已备份、且观众已经看到常驻副作用披露时才允许追加。推荐最短流程是：先核对面板显示的绝对项目 target、来源 Session/Channel 和 fixed pipeline；再说不带“确认”的启动口令证明零请求确认边界，然后确认启动并展示真实 task ID，随后查询真实状态；取消会阻止后续执行但不能撤销已有代码修改。后端已有每任务进程内 context、per-path single-process 幂等 ledger 和单用户 Demo 的 request owner+project 一致性 scope；该 scope 的身份仍来自 Web 请求，不是生产鉴权，不能作为抵御恶意客户端伪造的承诺；Live Voice client 已为一次 committed mutation 固定 command ID，run 结果不明时先以同 key retry 和 strict exact-key list reconciliation 恢复唯一且 identity/target 全匹配的真实记录，无法证明时才保持 `mutation-unknown`。当前仍没有跨刷新持久 command journal、持续 task monitor、跨进程一致性/exactly-once 或重启后的 Agent context 恢复。因此不要在主演示仓库或无法保留后端 Task JSON/日志证据的环境运行。当前没有能在整页刷新后恢复原 Web scope/command identity 的列表入口：演示中不要刷新；若意外刷新，立即把该样本标为 unsupported/`mutation-unknown`、停止后续任务 mutation并保留后端证据供受控核对，绝不能在新 Session/target 中换新 key 盲重试。
 
 真正的 supplement 插话只在同一机器已经完成 10 次专项验收后展示。候选口令是：
 
@@ -232,7 +232,7 @@ Turn 3 朗读完成并出现 Listening 后，立即点击退出 Live Voice。确
 | Agent working 较慢 | 保持页面不动并等待，只用手势指向页面真实状态；不要现场旁白或连点 Retry/发送 | 超过预先彩排的最长时间或 Provider 报错 |
 | 页面有结果但没有声音 | 退出 Live Voice，修正固定音频路由，重新进入后把这一整条语音请求再说一次；Retry 不会重播旧回答 | 第二次仍无声 |
 | Turn 之间因迟疑进入 no-speech | 点一次 Retry，看到 Listening 后 2 秒内说下一句 | 连续发生两次 |
-| 分支或提交编号与预检不同 | 停止展示并核对项目绑定与实际 HEAD；不得把真实结果说成错误 | 无法在台下恢复到固定代码快照 |
+| 提交编号或未提交文件数量与预检不同 | 停止展示并核对项目绑定、实际 HEAD 与工作区；不得把真实结果说成错误 | 无法在台下恢复到固定代码快照 |
 
 不要在现场反复刷新、快速切换麦克风、临时换模型、修改配置或执行写操作。两次相同失败后应切到已标记的真实录屏和文字 Tool 详情，诚实说明外部环境故障。
 
@@ -242,7 +242,7 @@ Turn 3 朗读完成并出现 Listening 后，立即点击退出 Live Voice。确
 
 - 三轮语音都语义正确，且每轮只提交一个 final Turn；
 - 前两轮都出现真实 Terminal Tool 调用和真实结果；
-- 分支技术标识符完整可听；
+- 八位提交技术标识符完整可听；
 - 至少两次 TTS 后自动回到 Listening；
 - 第三轮正确继承上下文；
 - 全程无旧声音恢复、双播或页面刷新；

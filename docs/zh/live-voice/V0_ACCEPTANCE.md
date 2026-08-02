@@ -1,8 +1,9 @@
 # Live Voice V0 验收手册
 
 - 版本：V0 / Vertical Slice Demo
-- 适用分支：`hx/0731_live_voice_ux`
-- 最近更新：2026-08-01
+- 验收文档所在累计分支：`hx/0731_live_voice_ux`
+- 实际验收目标：detached `2c700934aa0024a7ab229644bf15934e9e8170e7`
+- 最近更新：2026-08-02（文档恢复审计；尚未执行 Gate）
 - 状态：验收方案已准备；完整真机放行尚未执行
 
 ## 1. V0 到底是什么
@@ -51,7 +52,7 @@ V0 验证的是：这条真实链路能否在受控环境中重复成立，用�
 
 ## 4. Gate 0：候选版本与环境身份
 
-D-030 已结束 D-022 的临时 dirty/stash 窗口。运行本 Gate 时，不要回退或 stash 当前 Post-V0 开发分支；应从 `2c700934aa0024a7ab229644bf15934e9e8170e7` 新建独立 detached checkout/worktree，确认该验收目录工作区干净，并清除 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 与 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO`。只有这个独立目录才是本文要验收的 V0 Candidate；当前累计分支上的任务、稳定句预读和后续 foundation 提交不得混入 V0 证据。
+D-030 已结束 D-022 的临时 dirty/stash 窗口。运行本 Gate 时，不要回退或 stash 当前 Post-V0 开发分支；应从 `2c700934aa0024a7ab229644bf15934e9e8170e7` 新建独立 detached checkout/worktree，确认该验收目录工作区干净，并清除 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 与 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO`。只有这个独立目录才是本文要验收的 V0 Candidate；当前累计分支上的任务、稳定句预读和后续 foundation 提交不得混入 V0 证据。后端和 Vite 还必须使用同一个专属的绝对 `JIUWENSWARM_DATA_DIR`，不能复用累计开发或默认用户目录中的 project/session/task/config/log/memory；按运行手册在该隔离目录重新初始化并从受控渠道配置模型和 V0 code project。
 
 验收流程以**累计开发分支上的最新版本文**为准；`2c700934` detached 目录中的同名文件只是 Candidate 当时固化的历史副本，不负责描述 D-030 之后的验收隔离方式。所有构建、服务启动和真机命令都在 detached V0 目录执行，验收证据则回写累计开发分支。
 
@@ -79,41 +80,65 @@ $LASTEXITCODE
 - Windows、Chrome、Node、Python、模型标签、`zh-CN`、麦克风、耳机和网络标签已经记录；
 - 单用户、单 Chrome 标签页、Agent 模式，没有待确认问题、演进流程或无关后台 Agent 任务；
 - 两个 Post-V0 feature flag 均未设置；
+- `JIUWENSWARM_DATA_DIR` 是已记录的绝对 V0 专属路径，且没有复用累计开发 Session、Task 或 project 注册；
 - 模型配置只验证存在和可用，不把 API key、完整 API base 或用户配置写入证据。
 
 新机器必须从 `uv.lock` 和 `package-lock.json` 重建依赖，禁止复制其他机器的 `.venv` 或 `node_modules`。详细命令和私有配置边界见 [E2E_RUNBOOK.md](E2E_RUNBOOK.md)。
 
-## 5. Gate 1：自动化、构建与文字主链
+## 5. Gate 1：V0 Candidate 自动化、构建与文字主链
 
-先执行 [README.md](README.md#直接验证) 中的完整命令集合。最低通过线：
+以下命令固定绑定 `2c700934` 自身实际存在的 scripts/files；不得改为引用累计分支 README 的 Post-V0 Foundation 命令。先在 detached V0 根目录安装该 SHA 自己的 lockfiles，然后执行：
 
-- Live Voice 纯逻辑 **47/47**；
-- 相关既有回归 **22/22**；
-- TypeScript `tsc --noEmit`；
-- Vite production build；
-- Python `ruff`；
-- `git diff --check`。
+```powershell
+Push-Location jiuwenswarm\channels\web\frontend
+node node_modules/typescript/bin/tsc --noEmit
+
+npm run test:live-voice-core
+npm run test:live-voice-turn-lifecycle
+npm run test:live-voice-tts-text
+npm run test:live-voice-message-gate
+npm run test:supplement-output-quarantine
+npm run test:speech-recognition-lifecycle
+npm run test:tts-output-ownership
+
+npm run test:stream-delta-batcher
+npm run test:create-conversation-session
+npm run test:chat-store-streaming
+npm run test:settle-historical-tool-executions
+
+node node_modules/vite/bin/vite.js build
+Pop-Location
+uv run ruff check jiuwenswarm/gateway/message_handler/message_handler.py
+git diff --check
+```
+
+最低通过线：
+
+- 七组 V0 Live Voice tests **47/47**；
+- 四组相关既有回归 **22/22**；
+- TypeScript `tsc --noEmit`、Vite production build、V0 Gateway Ruff 和 `git diff --check` 全部 exit 0；
+- 命令在 `HEAD=2c700934...` 且工作区仍干净的同一 detached 目录执行。
 
 随后按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 启动服务。浏览器必须真实收到 `connection.ack`，并先用文字请求确认：
 
 ```text
-必须调用终端查看当前分支，不要根据上下文猜测，只回答分支名。
+必须调用终端查看当前提交编号前八位，并统计工作区未提交文件数量；不要根据上下文猜测，只回答编号和数量。
 ```
 
-必须能定位 `chat.send → chat.tool_call → chat.tool_result → chat.final`，工具结果与候选仓库真实状态一致。文字主链失败时停止语音验收，先修复 Agent、项目注册、模型、工具或连接问题。
+必须能定位 `chat.send → chat.tool_call → chat.tool_result → chat.final`，真实结果包含 `2c700934` 和 `0`。文字主链失败时停止语音验收，先修复 Agent、项目注册、模型、工具或连接问题。
 
 ## 6. Gate 2：真实语音主链冒烟
 
 在一个新 Agent Session 中进入 Live Voice，说：
 
-> 调用终端查看当前分支，只回答分支名。
+> 调用终端查看当前提交编号前八位，并统计未提交文件数量，只回答编号和数量。
 
 通过条件：
 
 - 真实麦克风产生语义正确的 final；
 - interim 只更新字幕，不产生用户消息、Agent 请求或工具副作用；
 - final 只产生一个用户 Turn 和一次 `chat.send`；
-- Agent 真实调用只读 Terminal Tool，结果是当前分支；
+- Agent 真实调用只读 Terminal Tool，结果是 `2c700934` 和 `0`；
 - assistant 完整回答从耳机实际朗读，技术标识符未截断；
 - TTS 后自动回到 `Listening`；
 - 至少一个样本覆盖 `new` Session promotion，Live Voice 没有退出；
@@ -123,20 +148,21 @@ $LASTEXITCODE
 
 ### 7.1 开始前预取答案
 
-验收者先在终端用只读命令记录当前 candidate 的预期值；不要把旧 commit 的固定答案写进脚本：
+验收者先在 detached V0 根目录用只读命令记录预期值；候选身份必须固定为 `2c700934`，其他计数以当次真实输出为准：
 
 ```powershell
-git branch --show-current
 git rev-parse --short=8 HEAD
 git log -1 --pretty=format:%s
 git log -1 --date=short --pretty=format:%ad
 @(git status --porcelain).Count
-@(git branch --format='%(refname:short)').Count
+@(git ls-files).Count
 git rev-list --count HEAD
-git rev-parse --abbrev-ref --symbolic-full-name '@{u}'
+@(git diff-tree --no-commit-id --name-only -r HEAD).Count
+@(Get-ChildItem docs\zh\live-voice -Filter *.md -File).Count
 Split-Path -Leaf (git rev-parse --show-toplevel)
-Get-Date -Format 'HH:mm'
 ```
+
+不得执行 `git branch --show-current` 或查询 `@{u}` 来生成语料答案：Gate 0 要求 detached HEAD，前者本应为空，后者本应报“没有 upstream”。
 
 ### 7.2 固定中文语料
 
@@ -144,18 +170,18 @@ Get-Date -Format 'HH:mm'
 
 | Turn | 固定口令 | 预期 |
 |---:|---|---|
-| 1 | 调用终端查看当前分支，只回答名称。 | 当前分支名 |
-| 2 | 继续调用终端，查看最新提交编号的前八位，只回答编号。 | 预取的 8 位编号 |
-| 3 | 继续调用终端，查看最新一次代码提交的标题，只回答标题。 | 预取的标题 |
-| 4 | 继续调用终端，查看最新一次代码提交的日期，只回答年月日。 | 预取的日期 |
-| 5 | 继续调用终端，统计当前工作区未提交文件的数量，只回答数字。 | `0` |
-| 6 | 继续调用终端，统计当前仓库本地分支的数量，只回答数字。 | 预取的数量 |
-| 7 | 继续调用终端，统计当前分支包含的代码提交数量，只回答数字。 | 预取的数量 |
-| 8 | 继续调用终端，查看当前分支正在跟踪的远程分支，只回答名称。 | `agtai/hx/0731_live_voice_ux` |
-| 9 | 继续调用终端，查看当前代码仓库根目录的名称，只回答名称。 | `jiuwenswarm` |
-| 10 | 继续调用终端，查看电脑当前时间，只回答小时和分钟。 | 与系统时间相差不超过 1 分钟 |
+| 1 | 调用终端查看当前提交编号的前八位，只回答编号。 | `2c700934` |
+| 2 | 继续调用终端，查看这次提交的标题，只回答标题。 | 预取的标题 |
+| 3 | 继续调用终端，查看这次提交的日期，只回答年月日。 | 预取的日期 |
+| 4 | 继续调用终端，统计当前工作区未提交文件的数量，只回答数字。 | `0` |
+| 5 | 继续调用终端，统计当前仓库被跟踪文件的数量，只回答数字。 | 预取的数量 |
+| 6 | 继续调用终端，统计当前提交历史包含的提交总数，只回答数字。 | 预取的数量 |
+| 7 | 继续调用终端，统计最新一次提交修改的文件数量，只回答数字。 | 预取的数量 |
+| 8 | 继续调用终端，统计实时语音文档目录里的 Markdown 文件数量，只回答数字。 | 预取的数量 |
+| 9 | 继续调用终端，查看当前代码仓库根目录的名称，只回答名称。 | `jiuwenswarm` 或实际 clone 根目录名 |
+| 10 | 继续调用终端，查看电脑当前时间，只回答小时和分钟。 | 用该轮 tool result 的时间与同一录屏中的系统时钟即时核对，相差不超过 1 分钟；不得使用 Turn 1 前的预取值 |
 
-选择中文“当前分支/最新提交”等说法，是为了避免已知的英文技术词 ASR 误识别；Agent 结果仍然必须是真实工具结果，不得写死。
+口令故意使用中文“当前提交/这次提交”等说法，避免已知的英文技术词 ASR 误识别；Agent 结果仍必须来自真实只读工具，不得由提示词或前端写死。
 
 ### 7.3 每轮和整组判据
 
@@ -193,9 +219,9 @@ Get-Date -Format 'HH:mm'
 
 一看到 `Agent is working` 且尚未出现 Terminal Tool 卡片，立即点击“打断并说话”，说：
 
-> 停止并放弃刚才的检查，改为查看当前分支，只回答分支名。
+> 停止并放弃刚才的检查，改为查看当前提交编号的前八位，只回答编号。
 
-通过条件：新 final 到达时仍是 `processing=true`；实际发送 `chat.interrupt(intent=supplement)`；收到对应的 `chat.interrupt_result`；替代回答只回答当前分支；旧 final 和旧 TTS 不出现。
+通过条件：新 final 到达时仍是 `processing=true`；实际发送 `chat.interrupt(intent=supplement)`；收到对应的 `chat.interrupt_result`；替代回答只回答 `2c700934`；旧 final 和旧 TTS 不出现。
 
 ### 8.3 I04–I07：tool 阶段
 
@@ -205,12 +231,12 @@ Get-Date -Format 'HH:mm'
 
 确认 Terminal Tool 正在执行且页面仍为 `Agent is working` 后，点击“打断并说话”，说：
 
-> 停止并放弃刚才的检查，改为查看当前分支，只回答分支名。
+> 停止并放弃刚才的检查，改为查看当前提交编号的前八位，只回答编号。
 
 只有实际工具调用确实包含等待且新 final 到达时仍为 `processing=true`，本次才可计数。通过条件：
 
 - 实际发送 `chat.interrupt(intent=supplement)` 并收到对应 ACK；
-- 替代请求只调用只读工具并回答当前分支；
+- 替代请求只调用只读工具并回答 `2c700934`；
 - 记录旧 `chat.tool_result` 是 cancelled、success、error 还是没有到达；
 - 记录 Gateway cancel warning、迟到 tool result 和真实副作用；
 - 旧 final、旧 TTS 和旧 tool call/update 不得成为当前替代回答；迟到 `chat.tool_result` 可以保留在明确的旧工具记录中，但必须记录且不能触发当前回答或 TTS；
@@ -283,24 +309,40 @@ Gateway cancel warning 必须进入证据。warning 本身不能证明旧工作�
 在新的目录或另一台机器执行：
 
 ```powershell
-git clone --origin agtai https://github.com/agtai/jiuwenswarm.git
+# agtai 当前缺少一个与 Live Voice 无关的视频 LFS object；先跳过 media smudge。
+$env:GIT_LFS_SKIP_SMUDGE = '1'
+git clone --origin agtai --branch hx/0731_live_voice_ux --single-branch https://github.com/agtai/jiuwenswarm.git
 Set-Location jiuwenswarm
-git switch --track agtai/hx/0731_live_voice_ux
+$repoDir = Get-Location
+git pull --ff-only
 git rev-parse HEAD
 git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
 git status --porcelain
 uv sync --python 3.12.9 --frozen
-Set-Location jiuwenswarm\channels\web\frontend
+Push-Location (Join-Path $repoDir 'jiuwenswarm\channels\web\frontend')
 npm ci
-Set-Location ..\..\..\..
+Pop-Location
 
 $expectedV0Sha = '2c700934aa0024a7ab229644bf15934e9e8170e7'
-$v0AcceptanceDir = Join-Path (Split-Path -Parent (Get-Location)) 'live-voice-v0-acceptance'
+$v0AcceptanceDir = Join-Path (Split-Path -Parent $repoDir) 'live-voice-v0-acceptance'
 git worktree add --detach $v0AcceptanceDir $expectedV0Sha
 git -C $v0AcceptanceDir rev-parse HEAD
 git -C $v0AcceptanceDir status --porcelain
 git merge-base --is-ancestor $expectedV0Sha agtai/hx/0731_live_voice_ux
 $LASTEXITCODE
+Push-Location $v0AcceptanceDir
+uv sync --python 3.12.9 --frozen
+Push-Location 'jiuwenswarm\channels\web\frontend'
+npm ci
+Pop-Location
+Pop-Location
+
+# 运行 V0 服务前使用全新的专用用户数据目录，避免累计分支或旧机器状态污染。
+$v0DataDir = Join-Path (Split-Path -Parent $repoDir) ('jiuwenswarm-data-v0-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+if (Test-Path -LiteralPath $v0DataDir) { throw "Refusing to reuse V0 data dir: $v0DataDir" }
+New-Item -ItemType Directory -Path $v0DataDir -ErrorAction Stop | Out-Null
+$env:JIUWENSWARM_DATA_DIR = (Resolve-Path -LiteralPath $v0DataDir).Path
+$env:JIUWENSWARM_DATA_DIR  # 记录并在每个新的 AgentServer/Gateway/Web/Vite 终端重新设置
 ```
 
 预期：累计开发分支与远端差异 `0 0`、工作区为空，可以仅依赖 Git 和 lockfile 恢复最新代码与项目事实；独立 V0 目录的 `HEAD` 精确等于 `2c700934...`、工作区为空，并且该 SHA 仍是累计远端的祖先。累计分支的 Foundation 自动化在累计分支目录执行；本文 Gate 1 以及后续 V0 服务和真机验收只在 detached V0 目录按其 lockfile 独立重建依赖后执行，不能复制累计目录的 `.venv` 或 `node_modules`。
@@ -310,7 +352,7 @@ $LASTEXITCODE
 打开全新的 Codex session，只提供刚 pull 的仓库，不提供旧聊天，发送：
 
 ```text
-请先读取根 AGENTS.md，并按其中顺序阅读 docs/zh/live-voice/README.md、HANDOFF.md、STATUS.md、TWO_WEEK_DEMO.md、POST_V0_DELIVERY_ROADMAP.md、POST_V0_STASH_HANDOFF.md、V0_ACCEPTANCE.md、DECISIONS.md。在不启动服务和不修改文件的情况下，说明：当前累计分支与不可变 V0 Candidate 的关系；已经真实证明和只通过自动化的内容；V0 放行条件；三类打断的真实路由；下一项开发任务；禁止提前做的内容；哪些机器私有条件无法从 Git 恢复。
+请先读取根 AGENTS.md，再按 README 指定的当前状态顺序阅读 docs/zh/live-voice/README.md、STATUS.md、HANDOFF.md、DECISIONS.md、POST_V0_DELIVERY_ROADMAP.md、TWO_WEEK_DEMO.md；本次还要阅读 V0_ACCEPTANCE.md、E2E_RUNBOOK.md 和 DEMO_SHOWCASE.md。POST_V0_STASH_HANDOFF.md 只作为历史取证资料。在不启动服务和不修改文件的情况下，说明：当前累计分支与不可变 V0 Candidate 的关系；已经真实证明和只通过自动化的内容；V0 放行条件；三类打断的真实路由；D-031 开工前的 D-032 checkpoint；禁止提前做的内容；LFS-safe clone 和隔离 JIUWENSWARM_DATA_DIR 的要求；当前 owner/project scope 为什么不等于生产鉴权；哪些机器私有条件无法从 Git 恢复。
 ```
 
 正确回答至少必须包含：
@@ -321,7 +363,7 @@ $LASTEXITCODE
 - processing 中 final 才走 supplement；只剩 TTS 时先停声再走普通 `chat.send`；
 - Web Speech 技术词误识别，以及 supplement ACK 不等于旧 Agent/工具已确定停止；
 - 当前 V0 验收工作只在 detached `2c700934` 目录继续执行，不在该目录开发新功能；累计开发分支的下一窄切片是 D-031 poll-backed 非阻塞任务监控，不扩成 Team、真全双工、完整 TaskEvent/P3 或生产架构；
-- key、完整 API base、浏览器权限、默认设备和网络状态不能从 Git 恢复。
+- D-031 编码前必须先提交 D-032 开发前回顾、test inventory 与正反场景矩阵；当前 Web owner/project scope 只约束单用户 Demo 请求一致性，不是生产鉴权；`JIUWENSWARM_DATA_DIR` 必须隔离；key、完整 API base、浏览器权限、默认设备和网络状态不能从 Git 恢复。
 
 ### 10.3 私有配置边界
 
@@ -339,7 +381,7 @@ $LASTEXITCODE
 验收者：
 Run ID / Attempt：
 Gate / Case ID：
-Git branch / candidate SHA / upstream diff / dirty：
+branch=<empty> / candidate SHA / cumulative remote ancestor check / dirty：
 Windows / Chrome / Node / Python：
 语言 / 麦克风 / 耳机 / 网络标签：
 模型标签（无 key/base）：
@@ -395,6 +437,6 @@ cold_environment_recovery: PASS / FAIL / NOT RUN
 1. 在 [STATUS.md](STATUS.md) 和 [HANDOFF.md](HANDOFF.md) 将状态改为 `V0 Released / 已冻结`；
 2. 记录准确 candidate SHA 和脱敏证据文件；
 3. 可选创建明确的 V0 tag；
-4. 开始 V1/P1 工程化。
+4. V0 放行事实与累计分支继续解耦；Post-V0 仍按 `V1 Foundation Alpha` 路线推进，D-031 必须先通过 D-032 开发前 checkpoint。
 
 如果任一 Gate 未通过，当前版本仍是 `V0 Candidate`。这不否定主链已经走通，只表示稳定性、打断或跨环境证据还不足以放行。

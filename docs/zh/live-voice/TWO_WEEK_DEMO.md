@@ -2,11 +2,13 @@
 
 - 日期：2026-07-31
 - 最近实测更新：2026-08-01
+- 文档恢复审计：2026-08-02
 - 目标分支：`hx/0731_live_voice_ux`
 - 人力假设：1 人，约 10 个工作日，可使用 Codex 辅助开发
 - 交付名称：Live Voice UX / Vertical Slice Demo
 - 交付性质：验证产品流程和感知效果，不宣称达到生产 Alpha
 - 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；当前为 Candidate，验收通过后才冻结
+- 生命周期说明：D1–D10 是 2026-07-31 的原始排期快照，不是当前待办；当前事实和下一步以 [STATUS.md](STATUS.md) 为准
 
 ## 1. 先说结论
 
@@ -82,7 +84,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 
 为适配真实 ASR，启动/替换目标前允许 `：`、`:`、`，`、`,`、空格或口述“冒号”，固定命令末尾允许 `。！？!?`；高特异前缀和显式“确认”仍不可省略。普通“检查进度”不属于任务命令，会继续交给 Agent。
 
-页面必须在执行前常驻显示 executor、pipeline、代码副作用、取消边界和真实 execution target/provenance。task ID、执行状态和取消结果来自真实接口；每次 committed mutation 固定 command ID，run 结果不明时只使用同 key 重试和严格 exact-key list 对账，允许 pending 在往返期间自然漂移到后续真实状态。无法唯一证明 identity/target 时继续 fail closed。服务端对 list/status/cancel/logs/delete 强制 owner + project scope，TaskStore 幂等只覆盖同一进程、同一 JSON store 路径；真实任务卡和未决 mutation 仍是当前页面/Session 投影。它只验证语音控制后台工作的产品感觉，不代表持久 command journal、持续异步 monitor、通用 Task Control、跨进程 exactly-once、D1/D2 或重启恢复已经完成。
+页面必须在执行前常驻显示 executor、pipeline、代码副作用、取消边界和真实 execution target/provenance。task ID、执行状态和取消结果来自真实接口；每次 committed mutation 固定 command ID，run 结果不明时只使用同 key 重试和严格 exact-key list 对账，允许 pending 在往返期间自然漂移到后续真实状态。无法唯一证明 identity/target 时继续 fail closed。服务端对 list/status/cancel/logs/delete 执行 request owner + project 一致性 scope；Web 身份仍由客户端请求提供，因此它是单用户 Demo 的防串线边界，不是恶意客户端无法伪造的生产鉴权。TaskStore 幂等只覆盖同一进程、同一 JSON store 路径；真实任务卡和未决 mutation 仍是当前页面/Session 投影。它只验证语音控制后台工作的产品感觉，不代表持久 command journal、持续异步 monitor、通用 Task Control、跨进程 exactly-once、D1/D2 或重启恢复已经完成。
 
 ## 3. Demo 版与完整版的区别
 
@@ -90,14 +92,14 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 |---|---|---|---|
 | 语音发起 Agent 请求 | 完成，最终识别文字进入现有 `chat.send` | 完成，并支持更多平台、语言和连接方式 | 用户能否自然地用语音驱动 Agent |
 | Agent 调用工具 | 完成，复用现有真实 Agent/Tool 链 | 完成，并补齐统一进度、权限和可恢复语义 | 语音是否适合驱动真实工作，而不只是聊天 |
-| 连续上下文 | 完成，复用现有 Session | 完成，并有更严格的会话事实和播放历史 | 多轮语音协作是否自然 |
+| 连续上下文 | 代码路径已实现并复用现有 Session；尚未通过 V0 Release/E2E 连续多轮 Gate | 完成，并有更严格的会话事实和播放历史 | 多轮语音协作是否自然 |
 | 判断用户说完 | 固定停顿时间或显式结束 | 声音、语义和上下文共同判断 | 固定规则下的交互节奏是否可接受 |
 | 朗读回答 | 浏览器整段朗读；稳定后按完整句子排队 | 服务端流式 TTS、音频分片、背压和播放确认 | Agent 回答被听到时是否清楚、简洁、及时 |
 | 插话 | 重新开麦/点击立即停声；processing 中 final 走 supplement，只剩 TTS 时走普通下一 Turn | 持续监听、回声消除、误打断恢复，并明确区分停声、取消回答、取消工作 | 用户是否需要处理中纠正与朗读中止，以及两种路由是否可理解 |
 | 旧回答隔离 | 前端递增 epoch，清空旧播放队列 | 客户端与服务端共同使用 response ID、fence 和 ACK | 新旧回答不会在主要演示路径中串音 |
 | 音频传输 | 浏览器本地 STT/TTS；Agent 仍走现有文字 WebSocket | 独立实时音频链路、二进制帧、背压和重连 | 产品体验，而不是媒体基础设施能力 |
 | 设备和平台 | 固定 Windows、Chrome/Edge、中文、默认设备和耳机 | 多设备、多平台、多语言、设备切换 | 固定目标环境能否成立 |
-| 后台任务 | Post-V0 默认关闭；固定副作用 pipeline、确认口令、真实 target/provenance、每任务进程内 context、per-path single-process JSON 幂等、服务端 scope、稳定 command ID、严格 exact-key 对账和真实任务卡 | 持久 command journal、持续事件回流、多任务、跨进程 exactly-once、D1/D2、可恢复执行上下文、审批和精确寻址 | 语音控制后台工作的价值，并验证 identity/target/scope/reconciliation 地基；不验证完整耐久性或重启恢复 |
+| 后台任务 | Post-V0 默认关闭；固定副作用 pipeline、确认口令、真实 target/provenance、每任务进程内 context、per-path single-process JSON 幂等、单用户请求一致性 scope（非生产鉴权）、稳定 command ID、严格 exact-key 对账和真实任务卡 | 持久 command journal、持续事件回流、多任务、跨进程 exactly-once、D1/D2、可恢复执行上下文、审批和精确寻址 | 语音控制后台工作的价值，并验证 identity/target/scope/reconciliation 地基；不验证完整耐久性或重启恢复 |
 | 异常恢复 | 明确报错并回退文字聊天 | 自动重连、状态恢复、重复抑制、跨重启恢复 | 降级是否可理解，不验证生产可靠性 |
 | 质量验证 | 固定机器的短时脚本和 20 分钟稳定性 | 大样本 p95、长时 soak、故障注入和多环境矩阵 | 是否值得进入下一阶段工程化 |
 
@@ -199,7 +201,7 @@ Demo 阶段不需要为了架构美观提前拆成十个 Port。逻辑稳定后�
 - 播放前如果 epoch 已过期，直接丢弃；
 - 插话时立即 `stopAllTts()` 并清空待播句子。
 
-它不是完整版的分布式回答生命周期，但足以保证固定演示路径中旧声音不会复活。
+它不是完整版的分布式回答生命周期；它只提供固定 Demo 路径的本地 epoch 防线，是否真正阻止旧声音复活仍以真实设备打断 Gate 为准。
 
 ### 6.4 最小状态变化
 
@@ -238,11 +240,11 @@ speaking + 用户重新开麦
 
 - 稳定句预读已在独立 feature flag 下实现：只预读有 lookahead 的稳定完整句，并与权威 `chat.final` 对账；仍待真人听感和并发源隔离验收。
 - 受限 `schedule.run/status/cancel` 后台任务路径已在独立 feature flag 下实现；仍待受控副作用环境的真实 E2E。
-- Task Foundation 已完成审阅和最终统一验证，并由后端提交 `3da101cf`、前端提交 `42e76d30` 落地：服务端 owner + project scope、per-path single-process JSON 幂等、前端 stable command ID、strict exact-key reconciliation、pending drift 安全和真实 task card 均已补齐；最终确认 Python **226/226**、前端 **155/155**、相关回归 **24/24**、`tsc --noEmit` 与 Vite **4494 modules**。代码与本文档已纳入本批 Git 交付，跨机器从共享分支恢复；下一切片为 D-031。
+- Task Foundation 已完成审阅和当时的统一验证，并由后端提交 `3da101cf`、前端提交 `42e76d30` 落地：request owner + project 一致性 scope、per-path single-process JSON 幂等、前端 stable command ID、strict exact-key reconciliation、pending drift 安全和真实 task card 均已补齐；历史命令报告 Python **226/226**、前端 **155/155**、相关回归 **24/24**、`tsc --noEmit` 与 Vite **4494 modules**。其中 155 与 24 两组有 9 项重叠，数字不可相加；Git 保存命令与结果记录，但未保存 JUnit 产物，不能把记录写成新机器已复跑的证明。
 - 两者默认关闭，不能计入 `2c700934` 的 V0 Gate；不同时开启做首轮验收。
-- 戴耳机持续自然开口打断、poll-backed 任务异步监控和 TaskEvent 主动通知仍未实现；下一窄切片按 D-031 先完成轮询回流，本轮到此停止。
+- 戴耳机持续自然开口打断、poll-backed 任务异步监控和 TaskEvent 主动通知仍未实现。当前下一窄切片是 D-031，但编码前必须先完成 D-032 开发前回顾、test inventory 与正反场景矩阵 checkpoint。
 
-### 7.3 本轮明确不做
+### 7.3 V0 明确不做
 
 - WebRTC、独立二进制音频 WebSocket、20ms PCM 分片、ACK 和背压。
 - 自研 AEC、降噪、自动增益和设备选择。
@@ -274,14 +276,14 @@ speaking + 用户重新开麦
 | supplement ACK 前前端 quarantine 旧输出 | 当前有序 WebSocket 路径中，旧 delta/final/reasoning/media/tool_call/tool_update 不进入消息或朗读，并暂存旧流的 `processing=false` | ACK 实际早于 AgentServer cancel/replacement 完成；`chat.tool_result`、真实副作用、ACK 丢失、断线重放和多端并发无法 fence | 服务端分配 response/generation ID，cancel/replacement 与 ACK 定义明确顺序，客户端与服务端共同执行可恢复 fence |
 | 当前页面/Session 的真实 task card projection | 显示 task ID、command ID、原始状态、恢复来源、target/provenance 和冲突；capture 切 Session 时零请求 fence | 刷新后持续恢复、多个任务、多端投影与主动事件回流 | Task Control Core 的 list/get/events + 持久投影、monitor 与 reconciliation |
 | 高特异固定任务口令 | committed final 后才解析；支持受控 ASR 分隔符/句末标点；启动、替换、取消必须显式确认；普通语音不拦截 | 开放式任务意图理解、歧义消解和策略化确认 | Voice–Task Bridge 与确认策略 |
-| 受限 AutoHarness 后台任务 adapter | 明确选择 side-effecting `extended_evolve_pipeline` 时，可真实生成/修改本地 Harness package 并查询/取消同一 `task_id`；当前 chat 的可信绝对 project target、来源和每任务进程内 Agent/context 已固定并显示 | 通用只读任务、完整 P3α；context 不能跨重启恢复，尚无完整 model/provider/config/permission 快照和生产授权 | 独立 Task Control Core + 通用 D0 Executor + 可持久恢复的每任务执行上下文；Demo 触发前必须常驻披露副作用并确认 |
+| 受限 AutoHarness 后台任务 adapter | 明确选择 side-effecting `extended_evolve_pipeline` 时，可真实生成/修改本地 Harness package 并查询/取消同一 `task_id`；当前 chat 的绝对 project target、来源和每任务进程内 Agent/context 已固定并显示，但 Web 身份来自请求，只提供单用户防串线，不构成生产鉴权 | 通用只读任务、完整 P3α；context 不能跨重启恢复，尚无完整 model/provider/config/permission 快照和生产授权 | 独立 Task Control Core + 通用 D0 Executor + 可持久恢复的每任务执行上下文；Demo 触发前必须常驻披露副作用并确认 |
 | A→B 使用 cancel + successor create | A 的取消和 B 的创建都是真实命令，两个 task ID 和继任关系可见 | 在同一运行任务上原地 update/provide-input | 完整 P3 update/provide-input、checkpoint 和 reconciliation |
 | mutation 内稳定 command ID + exact-key reconciliation | run 超时/断线/无效 payload 时先 scoped exact-key list，必要时只用同 key 重放；只接受唯一且 identity/target 全匹配的真实记录，pending drift 不丢真值；否则继续 `mutation-unknown` | command journal、task card 和未决 mutation 不跨刷新；没有持续 monitor；后端只保证 per-path single-process JSON 幂等 | 持久 command journal、TaskEvent subscription、跨进程唯一约束与可恢复 task projection |
 | schedule 单任务取消/删除串行化 | 单进程中快速终态、并发 cancel/cancel、cancel/delete、删除前 claim fence 和 history 幂等按真实状态收敛 | 多进程 CAS、原子 claim；JSON store 在 shutdown/二次取消下仍可能迟到覆盖 | 正式 Task Control event store、条件更新、reconciliation 和故障注入 |
 
 原则：可以写死环境和选择，不能写死 Agent 的回答、工具结果或成功状态。
 
-## 9. 十个工作日计划
+## 9. 历史原始十个工作日计划（D1–D10）
 
 | 日期 | 工作内容 | 当日退出条件 |
 |---|---|---|
@@ -296,7 +298,7 @@ speaking + 用户重新开麦
 | D9 | 可选：`schedule.status/cancel`；或全部用于修复主链；完整脚本彩排 | 主脚本连续成功 3 次，代码冻结 |
 | D10 | 只修缺陷，整理日志和已知限制，准备现场环境、文字降级和录屏 | 现场脚本与降级脚本分别成功两遍，不再加功能 |
 
-排期纪律：6 天完成真实主链，1 天稳定，2 天可砍增强，1 天冻结。
+历史排期纪律是：6 天完成真实主链，1 天稳定，2 天可砍增强，1 天冻结。实际进展与后续切片不得从本表推断，应读取 [STATUS.md](STATUS.md) 和 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)。
 
 ## 10. 验收脚本
 
@@ -321,7 +323,7 @@ speaking + 用户重新开麦
 - 连续 10 个语音 Turn，重复提交为 0。
 - partial transcript 触发 Agent、Tool 或 Task 的次数为 0。
 - 固定环境下，重新开麦/点击打断到本地静音目标小于 300ms，10/10 成功。
-- 用户停止说话到 final 消息提交目标小于 2 秒。
+- 用户停止说话到 final 消息提交目标不超过 2.5 秒；其中当前设计固定包含约 2.2 秒尾部静默，故旧 `<2s` 愿望不再是可执行指标。
 - 可朗读文本就绪到开始播放目标小于 1 秒。
 - 打断后旧音频恢复次数为 0。
 - 连续 20 分钟或 20 Turn 不需要刷新页面。
