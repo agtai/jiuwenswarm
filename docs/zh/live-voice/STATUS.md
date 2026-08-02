@@ -5,13 +5,13 @@
 - 远端跟踪：`agtai/hx/0731_live_voice_ux`
 - 原始完整方案的代码证据快照：`69c026a6613279964146d317e164cf32c6900285`
 - Live Voice 实现分支基线：`7b69fdeb`
-- V0 核心实现提交：`346f802a`；最近已推送候选 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 已完成 Gate 0–2，但在 Gate 3 Attempt 1 FAIL，现作为失败历史；修复后的新 Candidate SHA=`TBD`
+- V0 核心实现提交：`346f802a`；`d4c3e32a` 保留为 Gate 3 失败历史；D-037 新 Candidate=`ee2896a4afb186e693c720476b6de10797e66f72`，累计合并提交=`52ee3c67b4c5afd175aa413f5053085fce179dbd`
 - 当前里程碑：D-037 相同确定性工具失败熔断的新 V0 Candidate + Post-V0 Task Foundation + D-032 模块测试闭环 Gate
-- 实现状态：真实语音主链和 Gate 2 已在固定 Windows/Chrome 环境通过；Gate 3 Turn 3 暴露 Windows Git OOM 与重复失败放大器，先修复并重建候选，随后才继续稳定性、打断和跨环境放行
+- 实现状态：D-037 hotfix 已实现并完成 focused tests **20/20**、adapter test **1/1**、配置接线冒烟、Ruff/py_compile/diff-check；完整 Gate 0/1 尚未重跑，本轮按用户要求在 Gate 3 前停止
 
 跨机器恢复先读 [HANDOFF.md](HANDOFF.md)；启动和固定环境按 [E2E_RUNBOOK.md](E2E_RUNBOOK.md) 执行；V0 是否放行以 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) 为准。
 
-当前开发遵循 D-030、D-032、D-036、D-037 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`d4c3e32a` 保留为 Gate 3 失败候选历史；当前先在其独立 worktree 实现并验证重复确定性失败熔断，再形成新不可变 Candidate。stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份；Post-V0 继续正常 review → commit → push。
+当前开发遵循 D-030、D-032、D-036、D-037 与 [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)：`d4c3e32a` 保留为 Gate 3 失败历史；新不可变 Candidate `ee2896a4` 已建立并合入累计分支。stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply 且只保留为备份；Post-V0 继续正常 review → commit → push。
 
 对 **`d4c3e32a` 失败候选所代表的 V0 baseline** 的量化判断仍是：代码实现约 **97%**，整体 Demo 约 **90%**，上台成熟度约 **78%**。Gate 0–2 PASS 证明主链，但 Gate 3 真实失败说明这些比例不等于放行；新 Candidate 修复并完成连续 10 Turn、分阶段打断、soak 和主演示前，V0 仍不能称为已冻结。
 
@@ -137,8 +137,8 @@
 
 - stage / decision / requirement sources：V0 Gate 3 blocker；D-032、D-037、[V0_ACCEPTANCE.md](V0_ACCEPTANCE.md) §7。
 - code scope and upstream/downstream：`circuit_breaker_rail.py` 的 invoke 内记录/检测/force-finish；`interface_deep.py` 配置接线；`resources/config.yaml` 默认值；Agent tool loop 与 processing/final 是上下游。
-- baseline SHA / candidate tested SHA / environment / clean-status evidence：baseline=`d4c3e32aa34a4d26b346cdf0396788d39930cd6b`、detached worktree clean；candidate=`TBD`；Windows / Python 3.12.9。新代码尚未开始。
-- pre-review：`DONE`；post-review：`MISSING`；closure：`PARTIAL`。
+- baseline SHA / candidate tested SHA / environment / clean-status evidence：baseline=`d4c3e32aa34a4d26b346cdf0396788d39930cd6b`；candidate=`ee2896a4afb186e693c720476b6de10797e66f72`，detached worktree clean；Windows / Python 3.12.9。
+- pre-review：`DONE`；post-review：`DONE`；closure：`DONE（D-037 hotfix scope）`。进程硬资源限制和同一模型响应的批内取消仍是独立生产 gap。
 
 #### Module definition and non-goals
 
@@ -151,11 +151,11 @@
 
 | Test / suite | 层级 | Why / scenario IDs | Oracle 与禁止结果 | 当前状态 |
 |---|---|---|---|---|
-| 新增 repeated-failure rail 精确测试 | pure/unit | `P-RF-01/02`、`N-RF-01/02/03`、`B-RF-01/02` | 前两次不熔断；第 3 次恰好 force-finish 一次；description 变化仍同参数；不同命令/结果、成功重复、失败→成功→失败不得熔断 | planned |
-| ToolOutput/dict/JSON/exception 参数化 | unit | `B-RF-03` | 本次 `success=False ... error=...`、nested data、exit code 与异常形成正确签名；不同 nested error 不得假阳性 | planned |
-| invoke lifecycle / isolation | unit | `S-RF-01/02`、`T-RF-01`、`C-RF-01`、`I-RF-01`、`R-RF-01` | reset、cleanup、A/B 隔离、迟到旧状态不污染新 invoke；顺序第 4 次为 0 | planned |
-| adapter/config default | adapter/contract | `F-RF-01/02`、`K-RF-01` | enabled/disabled/自定义 threshold 精确接线；默认启用且旧缺字段有确定默认 | planned |
-| scripted Agent + fake tool | integration | `X-RF-01` | 模型计划第 4 次相同失败时真实 executor count=3、单一安全终态、processing=false；正常多工具链和 interrupt 不回归 | planned |
+| 单文件 repeated-failure hotfix tests | pure/unit | `P/N/B/S/T/C/R/I/F/K/X-RF` | 前两次放行；第 3 次只 force-finish 一次；description 变化；成功、参数/工具/错误/nested 变化不误触发 | **20/20 PASS** |
+| ToolOutput/dict/JSON/exception 签名 | same file | `B-RF-01/03` | 等价失败同签名；nested/exit code/异常和未知对象稳定；不同失败可区分 | **included PASS** |
+| invoke lifecycle / isolation | same file | `S/T/C/I/R-RF` | 同 conversation 重叠 invoke 隔离；session/after-invoke/在途 cleanup；fake 顺序 loop executor=3 | **included PASS** |
+| adapter/config default | focused smoke | `F/K-RF` | legacy off、新 guard 默认 on、disabled、自定义 threshold、两份 YAML 一致；受影响 adapter test | **PASS；1/1 adapter** |
+| 真实 Agent/Gateway loop | manual/integration | `X-RF-01` | 本轮按用户要求不扩测试；未冒充真实 processing/final 证据 | **NOT RUN；fake loop 已覆盖顺序第 4 次=0** |
 
 #### Scenario matrix
 
@@ -176,12 +176,15 @@
 
 #### Commands and exact results
 
-- 本 checkpoint 只固定开发前定义、inventory 和 oracle；尚无 candidate 或通过结果。实现后必须先跑目标 rail/config/adapter tests，再跑 AgentServer、interrupt、Live Voice 相关回归、Ruff、diff-check，并在 immutable candidate SHA 上统一复跑。
+- exact Candidate：`ee2896a4afb186e693c720476b6de10797e66f72`，detached clean。
+- `pytest -q --no-cov tests/unit_tests/agentserver/rails/test_circuit_breaker_repeated_failure.py`：**20 passed in 5.02s**。
+- 受影响 adapter test：**1 passed**；配置默认/disabled/custom/two-YAML smoke：**PASS**。
+- changed-file Ruff、adapter `--ignore E402`（该文件已有 47 个 E402 基线）、py_compile 和 `git diff --check`：**PASS**。按用户最新要求未运行全量测试或 Gate 3。
 
 #### Remaining gaps, manual evidence and replacement plan
 
 - 单进程硬资源限制和同一模型响应的并行工具批次不由本切片解决；进入正式交付前必须继续实现和测试。Gate 3 日期语料改成 `YYYY-MM-DD` 只隔离已知 Git 平台缺陷，不替代熔断。
-- 同 conversation 的真正重叠 invoke 若 SDK 不提供稳定 invoke identity，必须在实现后评估为已覆盖或明确 gap；不得用不同 conversation 的测试冒充。
+- SDK 的同 invoke tool callbacks 共享 `ctx.extra`；本实现用 per-invoke state + lock，单文件测试已覆盖同 conversation 重叠 invoke 和 session cleanup。
 
 ### 当前 Post-V0 foundation 自动化和构建
 
@@ -237,7 +240,7 @@
 
 ### V0 独立验收轨
 
-1. 先在 detached `d4c3e32a` 独立目录完成 D-037 熔断、tests 和新 Candidate；重跑 Gate 0/1 后停止，让用户调整模型配置。之后只从新 Candidate 的全新 Session 重跑 Gate 3，不从失败 Turn 4 续算；累计 Foundation 和 stash 不混入 PASS 证据。
+1. D-037 Candidate `ee2896a4` 已建立并通过 focused tests；本轮在 Gate 3 前停止并关闭服务，让用户调整模型配置。之后在 detached `ee2896a4` 先补 Gate 0/1，再从全新 Session 重跑 Gate 3；不从失败 Turn 4 续算。
 
 ### Post-V0 开发轨
 

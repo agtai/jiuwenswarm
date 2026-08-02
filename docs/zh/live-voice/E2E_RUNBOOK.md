@@ -1,7 +1,7 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
 - 最近恢复审计：2026-08-02
-- 适用共享分支：`hx/0731_live_voice_ux`；最近完成的 detached `d4c3e32a` 在 Gate 3 FAIL，后续 V0 Gate 只使用 D-037 新 Candidate（SHA=`TBD`）
+- 适用共享分支：`hx/0731_live_voice_ux`；`d4c3e32a` 在 Gate 3 FAIL，后续 V0 Gate 只使用 D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72`
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 

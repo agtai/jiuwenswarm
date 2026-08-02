@@ -3,7 +3,7 @@
 本文负责现场展示话术和失败退场，不替代 V0 放行验收。完整 Gate、固定语料和证据模板见 [V0_ACCEPTANCE.md](V0_ACCEPTANCE.md)。
 
 - 最近已执行候选：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；它只保留为历史失败基线
-- 当前 V0 放行执行目标：D-037 修复后的新 Candidate，SHA=`TBD`；SHA 和自动 Gate 0/1 结果写回前，禁止继续彩排、展示或真人 Gate 3
+- 当前 V0 放行执行目标：D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72`；focused tests 已通过，但完整 Gate 0/1 尚未重跑，在此之前禁止继续彩排、展示或真人 Gate 3
 - 候选历史：旧 `2c700934...` 的 Gate 1 Attempt 1 虽真实完成 Agent/Terminal Tool 主链，但 runtime 生成未忽略 `.agent_history/`，结果为 `2c700934,1`，因此 FAIL；`d4c3e32a` 的真实工具结果为 `d4c3e32a,0`，随后仍在 Gate 3 FAIL
 - 展示目标：用 60–90 秒证明“真实语音能够连续驱动真实 Agent 和 Terminal Tool，读取演示机的确切代码快照，并把真实结果完整读回来”
 - 展示口径：纵向 Demo，不宣称生产级全双工或稳定性放行

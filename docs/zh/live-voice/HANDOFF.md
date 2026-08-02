@@ -3,19 +3,19 @@
 - 快照日期：2026-08-02
 - 开发分支：`hx/0731_live_voice_ux`
 - 共享远端：`agtai`（`https://github.com/agtai/jiuwenswarm.git`）
-- V0 核心实现提交：`346f802a`；最近候选 `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；新 Candidate SHA=`TBD`
-- 当前权威事实：`d4c3e32a` 是失败候选历史，不再是待继续放行的目标；D-037 要求先加入相同确定性失败熔断并建立新 SHA
-- 当前阶段：完成 D-032 开发前 checkpoint → 实现/测试熔断 → 建立新 Candidate → 自动化 Gate 0/1；在真人 Gate 3 前停止，等待用户调整模型配置
+- V0 核心实现提交：`346f802a`；失败历史 `d4c3e32a` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；D-037 新 Candidate=`ee2896a4afb186e693c720476b6de10797e66f72`
+- 当前权威事实：`ee2896a4` 已加入相同确定性失败保护，focused hotfix tests **20/20** 与接线冒烟 PASS；完整 Gate 0/1 尚未重跑，不能 Released
+- 当前阶段：本轮在真人 Gate 3 前停止并关闭服务，等待用户调整模型配置；之后 detached `ee2896a4` 从 Gate 0/1 和全新 Session 继续
 - stash 状态：`7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply；它只在创建它的原机器上作为额外保险存在。新 clone 没有该 stash 是正常且正确的，任何机器都不要重复 apply/pop/drop
-- 当前状态：Task Foundation 已落地；V0 Gate 3 的 Windows Git OOM 被模型放大为 11 次 tool call / 10 次失败，已取消且工作区 clean。实现范围和完整 test matrix 见 STATUS 的 D-037 checkpoint
+- 当前状态：Task Foundation 已落地；D-037 在第 3 次同工具/同参数/同完整失败后只 force-finish 一次，focused tests 覆盖成功、误触发、边界、隔离和清理；进程硬资源限制与同批工具取消仍是正式版 gap
 - 文档恢复基线：`7d76e9d9bd8796dd92a27034cfdbd8903e1adf53` 已推送，并通过 agtai 的 LFS-safe fresh-clone、干净状态、`0/0` divergence、V0 祖先、文档入口及 lockfile 结构冒烟；这是 Git/交接可恢复证据，不代表私有配置、依赖安装或真实语音已在新机器验收
 
 ## 接手后先做什么
 
 1. 按 [README.md](README.md#新机器五分钟恢复) 使用 `GIT_LFS_SKIP_SMUDGE=1` clone 正确分支；当前 agtai LFS 缺少一个与 Live Voice 无关的视频对象，普通 smudge 会让 checkout 失败。
-2. 执行 `git pull --ff-only`、`git status --porcelain`、`git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux` 和 V0 祖先检查。必须是干净工作区、差异 `0 0`、`d4c3e32a` 仍为祖先。
+2. 执行 `git pull --ff-only`、`git status --porcelain`、`git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux` 和 V0 祖先检查。必须是干净工作区、差异 `0 0`、`ee2896a4` 仍为祖先。
 3. 按 [README.md](README.md#新-codex-会话的阅读顺序) 读取当前事实集。普通续作不读取 stash 交接单来执行操作；只有历史取证/灾难恢复才打开它。
-4. 选择轨道：D-037 修复从 detached `d4c3e32a` 基线建立新 Candidate；在新 SHA 和自动 Gate 0/1 写回前不继续真人 V0 Gate。之后只在 detached 新 Candidate + 独立 `JIUWENSWARM_DATA_DIR` 中验收；Post-V0 开发只在累计分支进行。
+4. 选择轨道：V0 验收只在 detached `ee2896a4` + 独立 `JIUWENSWARM_DATA_DIR` 中继续；先补 Gate 0/1，再从全新 Session 重跑 Gate 3。Post-V0 开发只在累计分支进行。
 5. 需要构建或运行时从 `uv.lock` / `package-lock.json` 重建依赖，不复制 `.venv` 或 `node_modules`；需要真实 Agent/语音时再从受控渠道补齐私有配置、项目注册、浏览器权限和设备。
 
 本目录是 Git 中的接续入口。不要依赖旧对话、未提交文件、某台机器的 `.codex` / `.agent` 目录或本机 stash 恢复项目事实。Task Foundation 已由 `3da101cf`、`42e76d30` 和后续文档提交进入共享分支；新机器只认 fetch/pull 后的 Git 事实。
@@ -77,7 +77,7 @@
 
 ### 2026-08-02 Gate 1 Attempt 1
 
-父候选 `2c700934` 因未忽略 `.agent_history/` 在 Gate 1 FAIL；`d4c3e32a` 修正工作区边界后 Gate 0/1 与 Gate 2 PASS，但 Gate 3 Turn 3 又因 Windows Git OOM 和相同失败重复执行而 FAIL。两次 attempt 都永久保留；当前执行 D-037 新 Candidate，不继续旧 Gate 3 会话。
+父候选 `2c700934` 因未忽略 `.agent_history/` 在 Gate 1 FAIL；`d4c3e32a` 修正工作区边界后 Gate 0/1 与 Gate 2 PASS，但 Gate 3 Turn 3 又因 Windows Git OOM 和相同失败重复执行而 FAIL。两次 attempt 都永久保留；D-037 Candidate `ee2896a4` 已建立，不继续旧 Gate 3 会话。
 
 ### 当前 Post-V0 foundation 自动化
 
@@ -181,15 +181,14 @@
 
 ## 用户介入后的 V0 独立验收流程
 
-不要改写、stash 或 reset 当前 Post-V0 开发分支。先确认 D-037 新 Candidate 和证据文档已 commit/push，再从该不可变 SHA 创建独立 checkout/worktree；下面的 `TBD` 保护会阻止误用历史失败候选：
+不要改写、stash 或 reset 当前 Post-V0 开发分支。确认 D-037 Candidate 和证据文档已 commit/push 后，从下面固定的不可变 SHA 创建独立 checkout/worktree：
 
 ```powershell
 git status --short --branch
 git rev-parse HEAD
 git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
 $env:GIT_LFS_SKIP_SMUDGE = '1'  # 必须在执行 worktree add 的当前终端重设
-$newV0Sha = 'TBD'
-if ($newV0Sha -eq 'TBD') { throw 'D-037 new Candidate has not been recorded yet' }
+$newV0Sha = 'ee2896a4afb186e693c720476b6de10797e66f72'
 git worktree add --detach ..\live-voice-v0-acceptance $newV0Sha
 $v0DataDir = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent (Get-Location)) ('jiuwenswarm-data-live-voice-v0-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))))
 if (Test-Path -LiteralPath $v0DataDir) { throw "Refusing to reuse V0 data dir: $v0DataDir" }

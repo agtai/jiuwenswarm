@@ -7,7 +7,7 @@
 - 人力假设：1 人，约 10 个工作日，可使用 Codex 辅助开发
 - 交付名称：Live Voice UX / Vertical Slice Demo
 - 交付性质：验证产品流程和感知效果，不宣称达到生产 Alpha
-- 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；`d4c3e32a` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL，先由 D-037 新 Candidate 修复重复失败放大器，再继续 Gate 3–6
+- 版本口径：V0 核心体验旅程完整，不要求所有最终功能完整；`d4c3e32a` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；D-037 Candidate `ee2896a4` 已修复重复失败放大器并通过 focused tests，完整 Gate 0/1 与 Gate 3–6 待续
 - 候选历史：父候选 `2c700934` 的 Gate 1 Attempt 1 因 runtime 生成未忽略 `.agent_history/`、实际返回 `2c700934,1` 而 FAIL；新候选仅增加 `.gitignore` 三行，当前真实期望为 `d4c3e32a,0`
 - 生命周期说明：D1–D10 是 2026-07-31 的原始排期快照，不是当前待办；当前事实和下一步以 [STATUS.md](STATUS.md) 为准
 
@@ -71,7 +71,7 @@ Agent 正在生成或朗读较长回答时，用户可以重新开麦并说：
 
 ### 2.5 可选：语音控制一个真实后台任务
 
-该能力不属于 V0 Released Gate；Post-V0 Task Foundation 已实现一个默认关闭的受限切片，并已完成 foundation review 与统一复跑，仍待受控真人 E2E。D-037 从 `d4c3e32a` 失败基线建立新 Candidate，V0 验收只在新 SHA 写回后恢复，不再要求先 stash/freeze 才能继续本切片。它固定使用真实、有代码副作用的 AutoHarness `extended_evolve_pipeline`，不是只读“检查仓库”。
+该能力不属于 V0 Released Gate；Post-V0 Task Foundation 已实现一个默认关闭的受限切片，并已完成 foundation review 与统一复跑，仍待受控真人 E2E。D-037 Candidate 已固定为 `ee2896a4`，后续 V0 只在该 SHA 的独立验收轨继续。它固定使用真实、有代码副作用的 AutoHarness `extended_evolve_pipeline`，不是只读“检查仓库”。
 
 | 口令 | 当前行为 |
 |---|---|

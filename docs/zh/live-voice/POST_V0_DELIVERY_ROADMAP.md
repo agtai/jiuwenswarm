@@ -1,7 +1,7 @@
 # Live Voice：V0 之后的两周全能力 Demo 与正式交付路线
 
 > 更新日期：2026-08-02
-> 最近 V0 Candidate：`d4c3e32aa34a4d26b346cdf0396788d39930cd6b`（Gate 0–2 PASS、Gate 3 Attempt 1 FAIL）；D-037 修复后新 Candidate SHA=`TBD`
+> 当前 V0 Candidate：`ee2896a4afb186e693c720476b6de10797e66f72`；父 `d4c3e32a` 保留为 Gate 3 Attempt 1 FAIL 历史。focused hotfix tests PASS，完整 Gate 0/1 尚未重跑
 > 状态：Task Foundation 已由后端 `3da101cf`、前端 `42e76d30` 落地；D-031 尚未编码，必须先通过 D-032 开发前 checkpoint
 > 模块闭环：从 D-031 起强制执行 D-032 的开发前/开发后双回顾与完整场景测试 Gate
 
@@ -18,7 +18,7 @@
 
 ## 2. V0 不可变基线与正常交付边界
 
-- `d4c3e32a` 保留为 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL 的可恢复历史，不能 Released。D-037 的重复确定性失败熔断是当前 P0 窄切片；形成新 Candidate 后重跑自动化 Gate 0/1，并在真人 Gate 3 前暂停等待用户调整模型配置。
+- `d4c3e32a` 保留为 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL 的可恢复历史，不能 Released。D-037 Candidate `ee2896a4` 已建立并通过 focused tests；当前在真人 Gate 3 前暂停等待用户调整模型配置，之后先补 Gate 0/1。
 - D-022 的临时隔离已完成：stash `7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply，原 stash 只作为额外备份保留。当前分支已有这些改动时，不得再次 apply/pop/drop。
 - D-030 恢复常规 Git 流程：Post-V0 按逻辑切片 review、统一验证、commit、push；Foundation 代码已由后端 `3da101cf`、前端 `42e76d30` 落地，相关文档已纳入本批 Git 交付。跨机器只依赖共享分支和本目录文档，不依赖单机 stash。
 - 用户稍后验收 V0 时，从精确 SHA 创建独立 checkout/worktree，清除 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 和 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO` 后执行完整 Gate。不要为了回到旧基线反复 stash、reset 或改写当前开发分支。

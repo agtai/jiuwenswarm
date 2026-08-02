@@ -3,7 +3,7 @@
 - 版本：V0 / Vertical Slice Demo
 - 验收文档所在累计分支：`hx/0731_live_voice_ux`
 - 最近已执行目标：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b`（Gate 0–2 PASS、Gate 3 Attempt 1 FAIL，仅保留为历史）
-- 下一验收目标：D-037 修复后的新 Candidate，SHA=`TBD`；SHA 与自动 Gate 0/1 证据写回前不得继续真人 Gate
+- 下一验收目标：D-037 Candidate `ee2896a4afb186e693c720476b6de10797e66f72`；focused hotfix tests 已 PASS，完整 Gate 0/1 尚未重跑，之后不得直接跳到 Gate 3
 - 最近更新：2026-08-02（Gate 0–2 PASS；Gate 3 Attempt 1 FAIL）
 - 状态：V0 未 Released；Gate 3 须在新候选上从 Turn 1 重跑，Gate 4–6 尚未执行
 
@@ -53,15 +53,14 @@ V0 验证的是：这条真实链路能否在受控环境中重复成立，用�
 
 ## 4. Gate 0：候选版本与环境身份
 
-D-037 已把 `d4c3e32a` 固定为失败历史并要求建立新 Candidate；D-030 对正常 Post-V0 Git 流程和独立 V0 验收轨的约束继续有效。运行本 Gate 时，不要回退或 stash 当前 Post-V0 开发分支；只从权威文档已写回的 D-037 新 SHA 建立独立 detached checkout/worktree，确认工作区干净，并清除 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH` 与 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO`。SHA 仍为 `TBD` 时必须停止，不能用 `d4c3e32a` 续跑。后端和 Vite 还必须使用同一个专属的绝对 `JIUWENSWARM_DATA_DIR`，不能复用累计开发或默认用户目录中的 project/session/task/config/log/memory；按运行手册在该隔离目录重新初始化并从受控渠道配置模型和 V0 code project。
+D-037 已把 `d4c3e32a` 固定为失败历史并建立 `ee2896a4afb186e693c720476b6de10797e66f72`；D-030 对正常 Post-V0 Git 流程和独立 V0 验收轨的约束继续有效。运行本 Gate 时，不要回退或 stash 当前 Post-V0 开发分支；只从该 SHA 建立独立 detached checkout/worktree，确认工作区干净，并清除两个 Post-V0 feature flags。后端和 Vite 还必须使用同一个专属的绝对 `JIUWENSWARM_DATA_DIR`，不能复用累计开发或默认用户目录中的 project/session/task/config/log/memory。
 
 验收流程以**累计开发分支上的最新版本文**为准；`d4c3e32a` detached 目录中的同名文件只是失败 Candidate 当时固化的历史副本。所有构建、服务启动和真机命令都在 detached 新 Candidate 目录执行，验收证据回写累计开发分支。
 
 在启动服务前记录：
 
 ```powershell
-$expectedV0Sha = 'TBD'
-if ($expectedV0Sha -eq 'TBD') { throw 'D-037 new Candidate has not been recorded yet' }
+$expectedV0Sha = 'ee2896a4afb186e693c720476b6de10797e66f72'
 git status --short --branch
 git status --porcelain
 git rev-parse HEAD
@@ -348,8 +347,7 @@ Push-Location (Join-Path $repoDir 'jiuwenswarm\channels\web\frontend')
 npm ci
 Pop-Location
 
-$expectedV0Sha = 'TBD'
-if ($expectedV0Sha -eq 'TBD') { throw 'D-037 new Candidate has not been recorded yet' }
+$expectedV0Sha = 'ee2896a4afb186e693c720476b6de10797e66f72'
 $v0AcceptanceDir = Join-Path (Split-Path -Parent $repoDir) 'live-voice-v0-acceptance'
 git worktree add --detach $v0AcceptanceDir $expectedV0Sha
 git -C $v0AcceptanceDir rev-parse HEAD
@@ -383,12 +381,12 @@ $env:JIUWENSWARM_DATA_DIR  # 记录并在每个新的 AgentServer/Gateway/Web/Vi
 
 正确回答至少必须包含：
 
-- 共享累计分支保存 `2c700934` 与 `d4c3e32a` 两次失败历史、D-037 新 Candidate 的修复计划和已推送 Post-V0 Foundation；新 Candidate SHA 尚为 `TBD`，V0 仍不是 Released；
+- 共享累计分支保存 `2c700934` 与 `d4c3e32a` 两次失败历史、D-037 Candidate `ee2896a4` 和已推送 Post-V0 Foundation；focused hotfix tests 通过不等于 V0 Released；
 - `d4c3e32a` 的 Gate 0/1 与真实语音 Gate 2 已通过；Gate 3 Attempt 1 因 Windows Git 非 ASCII 日期格式 OOM 和重复失败保护不足而 FAIL，须由新 Candidate 修复后重跑。47/47 和 22/22 是 V0 baseline 自动化，最新 Foundation 的自动化必须与 `STATUS.md` / `HANDOFF.md` 分开报告；
 - 尚缺连续 10 Turn、分阶段 10 次打断、soak 和主演示连续 3 次；
 - processing 中 final 才走 supplement；只剩 TTS 时先停声再走普通 `chat.send`；
 - Web Speech 技术词误识别，以及 supplement ACK 不等于旧 Agent/工具已确定停止；
-- 当前只以 detached `d4c3e32a` 作为 D-037 开发基线，不在其失败会话继续 Gate；新 Candidate 写回后才在其 detached 目录恢复验收。该窄切片不扩成 Team、真全双工、完整 TaskEvent/P3 或生产架构；
+- 当前 V0 验收只从 detached `ee2896a4` 恢复；先补 Gate 0/1，再从全新 Session 重跑 Gate 3。该窄切片不扩成 Team、真全双工、完整 TaskEvent/P3 或生产架构；
 - D-031 编码前必须先提交 D-032 开发前回顾、test inventory 与正反场景矩阵；当前 Web owner/project scope 只约束单用户 Demo 请求一致性，不是生产鉴权；`JIUWENSWARM_DATA_DIR` 必须隔离；key、完整 API base、浏览器权限、默认设备和网络状态不能从 Git 恢复。
 
 ### 10.3 私有配置边界

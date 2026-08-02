@@ -4,8 +4,8 @@
 
 - 本次文档总审计：2026-08-02
 - 共享开发分支：`hx/0731_live_voice_ux`，跟踪 `agtai/hx/0731_live_voice_ux`
-- 最近 V0 Candidate：`d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL，现保留为失败历史；D-037 新 Candidate SHA=`TBD`
-- 当前动作：先按 D-032 checkpoint 实现/测试相同确定性工具失败熔断并建立新 Candidate；真人重跑 Gate 3 前停止，让用户调整模型配置
+- 当前 D-037 V0 Candidate：`ee2896a4afb186e693c720476b6de10797e66f72`（父=`d4c3e32a`）；focused hotfix tests **20/20** 与配置接线冒烟 PASS，完整 Gate 0/1 尚未重跑，V0 未 Released
+- 当前动作：本轮在重跑 Gate 3 前停止并关闭验收服务，等待用户调整模型配置；之后只从 detached `ee2896a4` 的全新 Session 先完成 Gate 0/1，再重跑 Gate 3
 
 ## 新机器五分钟恢复
 
@@ -20,7 +20,7 @@ git status --short --branch
 git status --porcelain
 git rev-parse HEAD
 git rev-list --left-right --count HEAD...agtai/hx/0731_live_voice_ux
-git merge-base --is-ancestor d4c3e32aa34a4d26b346cdf0396788d39930cd6b HEAD
+git merge-base --is-ancestor ee2896a4afb186e693c720476b6de10797e66f72 HEAD
 $LASTEXITCODE
 ```
 
@@ -65,7 +65,7 @@ V0 先验证产品流程和体验是否成立；之后沿同一条真实工程�
 
 版本能力累计保留；共享协议和 ownership 边界冻结后，P1/P2/P3 的部分工程可以并行。后台任务的 A→B 更新需要完整 P3 的 update/provide-input，或显式 cancel/create；不能把 P3α 的状态查询冒充任务更新。
 
-`d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 保留为精确失败恢复点：其父 `2c700934...` 因 `.agent_history/` 污染在 Gate 1 FAIL；它自身的 Gate 0–2 PASS，但 Gate 3 Turn 3 暴露 Git for Windows 非 ASCII 日期格式 OOM 和重复确定性失败放大器，因此不能 Released。当前从该 SHA 做 D-037 最小熔断并建立新 Candidate；旧 stash 只保留为本机备份，新机器只认共享 Git。
+`d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 保留为精确失败恢复点：其父 `2c700934...` 因 `.agent_history/` 污染在 Gate 1 FAIL；它自身的 Gate 0–2 PASS，但 Gate 3 Turn 3 暴露 Git for Windows 非 ASCII 日期格式 OOM 和重复确定性失败放大器，因此不能 Released。D-037 最小熔断 Candidate 已建立为 `ee2896a4afb186e693c720476b6de10797e66f72`；旧 stash 只保留为本机备份，新机器只认共享 Git。
 
 当前 foundation 已把任务边界推进到：服务端对 `schedule.list/status/cancel/logs/delete` 执行单用户 request owner + project 一致性 scope（Web 身份来自请求，不是生产鉴权）；同一进程、同一 JSON store 路径用共享锁和 ledger 保证 create command 幂等；前端为一次 committed mutation 固定 command ID，只接受严格 exact-key 对账，允许任务在请求期间从 pending 漂移到后续真实状态，并显示真实 task card。它仍不提供跨进程一致性、exactly-once、D1/D2 或持续后台结果监控。稳定句与任务分别由 `VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH=true`、`VITE_FEATURE_LIVE_VOICE_TASK_DEMO=true` 开启，二者默认关闭。
 
@@ -111,7 +111,7 @@ Windows `core.autocrlf=true` checkout 会把 LF 变为 CRLF，因此直接对工
 - 改长期架构、P1/P2/P3、协议、ownership、取消、持久化或生产 Gate：完整读不可变 [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md)。
 - 只有调查历史 Foundation/stash 或本机灾难恢复时才读 [POST_V0_STASH_HANDOFF.md](POST_V0_STASH_HANDOFF.md)；普通新 clone 不需要它执行任何 stash 操作。
 
-新 Session 在修改文件前应能准确复述：共享分支与 `2c700934 → d4c3e32a → D-037 新 Candidate(TBD)` 的关系；两次失败分别证明了什么；为什么 Gate 3 不能只改题做绿；D-032 checkpoint/test matrix；Foundation、D-033/D-034 和私有运行条件边界。答不出来时继续阅读，不开始实现。
+新 Session 在修改文件前应能准确复述：共享分支与 `2c700934 → d4c3e32a → ee2896a4` 的关系；两次失败分别证明了什么；为什么 Gate 3 不能只改题做绿；D-037 focused tests 与尚未重跑的 Gate 0/1；Foundation、D-033/D-034 和私有运行条件边界。答不出来时继续阅读，不开始实现。
 
 ## 信息冲突时的优先级
 
