@@ -24,7 +24,7 @@
   - [Slash 命令速查表](Slash命令表.md)
   - [Slash 命令体系设计](SLASH_COMMAND_ARCHITECTURE.md)
   - [工具权限与安全防护](工具权限与安全防护.md)
-  - [Git 日期格式 OOM 与 Agent 重复失败分析](Git日期格式OOM与Agent重复失败分析.md)
+  - [JiuwenSwarm 重复执行 Git 日期格式 OOM 问题记录](JiuwenSwarm重复执行Git日期格式OOM问题记录.md)
   - [心跳](心跳.md)
   - [定时任务](定时任务.md)
   - [任务规划](任务规划.md)
