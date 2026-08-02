@@ -19,6 +19,10 @@
 
 本轮已逐份审阅根 `AGENTS.md` 和本目录 11 份 Markdown，并与 Git 历史、实际 scripts/lockfiles、feature flags、服务端口、用户数据目录和 V0 detached 工作方式交叉核对。文档职责已重新分为：当前事实、当前交接、有效决策/路线、V0 操作、运行操作、历史证据和不可变架构源。
 
+可恢复的文档内容基线是 `7d76e9d9bd8796dd92a27034cfdbd8903e1adf53`（`docs(live-voice): make handoff reproducible`），已推送到 `agtai/hx/0731_live_voice_ux`。随后从 agtai 空目录、`GIT_LFS_SKIP_SMUDGE=1` 全新 clone 实测：HEAD/branch/upstream 正确，ahead/behind=`0/0`，工作区干净，`2c700934` 祖先检查返回 `0`；本目录 11 份 Markdown、根 `AGENTS.md`、两份 lockfile 和全部关键入口存在。`package-lock.json` 由 Node JSON parser 解析为 lockfile v3，`uv.lock` 由 Python `tomllib` 解析通过，缺失媒体按预期保留 LFS pointer。
+
+文档机械证据：96 个普通相对链接无断链，Markdown 表格、代码围栏、标题与 HANDOFF 的两个 README 锚点均通过；不可变完整方案 LF 规范化 SHA-256 仍为 `0294909A79B258194B7B454CF336F164ECF998211E87DC26B453580171EEE3AA`。全部 PowerShell fenced blocks 语法通过，数据目录 guard 已在 Windows PowerShell 5.1 用真实绝对目录执行成功。此次只验证了 Git/文档/lockfile 可恢复性，没有把依赖下载、模型配置、浏览器权限、真实设备或真人 E2E 伪装成已在新 clone 通过。
+
 已修正的关键执行问题：
 
 - V0 Gate 1 不再引用不断前进的 Post-V0 README 命令，而是在验收手册中固定 `2c700934` 实际存在的 47/47、22/22、TypeScript、build、Ruff 和 diff-check 命令。

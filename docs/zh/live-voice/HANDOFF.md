@@ -8,6 +8,7 @@
 - 当前阶段：V0 Candidate 已提交并推送，但完整真机 Gate 尚未通过，因此还不是 V0 Released / 已冻结
 - stash 状态：`7f4cfd2eedfb3a177b94f69417143fba441f3671` 已 apply；它只在创建它的原机器上作为额外保险存在。新 clone 没有该 stash 是正常且正确的，任何机器都不要重复 apply/pop/drop
 - 当前状态：Task Foundation 代码和历史回归已落地（后端 `3da101cf`、前端 `42e76d30`）；D-032 模块测试闭环 Gate 已接受，D-031 必须先完成开发前场景/test 回顾再编码。V0 继续从 `2c700934` 的独立 detached checkout/worktree 验收
+- 文档恢复基线：`7d76e9d9bd8796dd92a27034cfdbd8903e1adf53` 已推送，并通过 agtai 的 LFS-safe fresh-clone、干净状态、`0/0` divergence、V0 祖先、文档入口及 lockfile 结构冒烟；这是 Git/交接可恢复证据，不代表私有配置、依赖安装或真实语音已在新机器验收
 
 ## 接手后先做什么
 
