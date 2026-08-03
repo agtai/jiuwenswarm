@@ -1,5 +1,7 @@
 # Live Voice V0 验收手册
 
+> 当前边界说明：本文只冻结 V0 `ee2896a4` 的验收合同。文末或历史决策中把 D-031 写成 Post-V0 下一步的语句已由 D-046 取代，不再定义当前排序。Week 2/Week 4 分别使用 [INTEGRATED_DEMO_ACCEPTANCE.md](INTEGRATED_DEMO_ACCEPTANCE.md) 和 [ALPHA_ACCEPTANCE.md](ALPHA_ACCEPTANCE.md)。
+
 - 版本：V0 / Vertical Slice Demo
 - 当前共享开发分支：`hx/0803_live_voice`
 - 历史失败：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL，永久保留
@@ -376,7 +378,7 @@ $env:JIUWENSWARM_DATA_DIR  # 记录并在每个新的 AgentServer/Gateway/Web/Vi
 打开全新的 Codex session，只提供刚 pull 的仓库，不提供旧聊天，发送：
 
 ```text
-请先读取根 AGENTS.md、live-voice/README.md 和 live-voice/STATUS.md，再按 README 的任务路由读取 V0 acceptance、E2E runbook、showcase、decisions、roadmap、完整方案与 V0 evidence；archive 只用于历史取证。在不启动服务和不修改文件的情况下，说明：当前共享分支与不可变 V0 baseline 的关系；已经真实证明和只通过自动化的内容；V0 放行条件；三类打断的真实路由；D-031 开工前的 D-032 checkpoint；禁止提前做的内容；LFS-safe clone 和隔离 JIUWENSWARM_DATA_DIR 的要求；当前 owner/project scope 为什么不等于生产鉴权；哪些机器私有条件无法从 Git 恢复。
+请先读取根 AGENTS.md、live-voice/README.md 和 live-voice/STATUS.md，再按 README 的任务路由读取 V0 acceptance、E2E runbook、showcase、decisions、roadmap、完整方案与 V0 evidence；archive 只用于历史取证。在不启动服务和不修改文件的情况下，说明：当前共享分支与不可变 V0 baseline 的关系；已经真实证明和只通过自动化的内容；V0 放行条件；三类打断的真实路由；D-046 的 Week 2/Week 4 目标、并行轨和 D-031 go/no-go；禁止提前做的内容；LFS-safe clone 和隔离 JIUWENSWARM_DATA_DIR 的要求；当前 owner/project scope 为什么不等于生产鉴权；哪些机器私有条件无法从 Git 恢复。
 ```
 
 正确回答至少必须包含：
@@ -387,7 +389,7 @@ $env:JIUWENSWARM_DATA_DIR  # 记录并在每个新的 AgentServer/Gateway/Web/Vi
 - processing 中 final 才走 supplement；只剩 TTS 时先停声再走普通 `chat.send`；
 - Web Speech 技术词误识别，以及 supplement ACK 不等于旧 Agent/工具已确定停止；
 - 当前 V0 Released baseline 是 detached `ee2896a4`；复现或回归只从该 SHA 开始，未来任一已通过 Gate 失败均属于回归阻塞。该窄切片不扩成 Team、真全双工、完整 TaskEvent/P3 或生产架构；
-- D-031 编码前必须先提交 D-032 开发前回顾、test inventory 与正反场景矩阵；当前 Web owner/project scope 只约束单用户 Demo 请求一致性，不是生产鉴权；`JIUWENSWARM_DATA_DIR` 必须隔离；key、完整 API base、浏览器权限、默认设备和网络状态不能从 Git 恢复。
+- D-046 以 ACG critical kernel 后的 P1/P2/P3alpha 并行轨推进，D-031 只在 Day 5 go/no-go 后作为限时 legacy Adapter；当前 Web owner/project scope 只约束单用户 Demo 请求一致性，不是生产鉴权；`JIUWENSWARM_DATA_DIR` 必须隔离；key、完整 API base、浏览器权限、默认设备和网络状态不能从 Git 恢复。
 
 ### 10.3 私有配置边界
 
@@ -474,6 +476,6 @@ cold_environment_recovery: PASS / FAIL / NOT RUN
 1. 在 [STATUS.md](../STATUS.md) 将状态改为 `V0 Released / 已冻结`；
 2. 记录准确 candidate SHA 和脱敏证据文件；
 3. 可选创建明确的 V0 tag；
-4. V0 放行事实与累计分支继续解耦；Post-V0 仍按 `V1 Foundation Alpha` 路线推进，D-031 必须先通过 D-032 开发前 checkpoint。
+4. V0 放行事实与累计分支继续解耦；Post-V0 当前按 D-046 的并行 P1/P2/P3alpha 路线推进，D-031 仅在 Day 5 go/no-go 后作为限时 Demo Adapter 候选。
 
 如果任一 Gate 未通过，当前版本仍是 `V0 Candidate`。这不否定主链已经走通，只表示稳定性、打断或跨环境证据还不足以放行。

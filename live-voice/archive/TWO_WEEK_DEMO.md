@@ -245,7 +245,7 @@ speaking + 用户重新开麦
 - 受限 `schedule.run/status/cancel` 后台任务路径已在独立 feature flag 下实现；仍待受控副作用环境的真实 E2E。
 - Task Foundation 已完成审阅和当时的统一验证，并由后端提交 `3da101cf`、前端提交 `42e76d30` 落地：request owner + project 一致性 scope、per-path single-process JSON 幂等、前端 stable command ID、strict exact-key reconciliation、pending drift 安全和真实 task card 均已补齐；历史命令报告 Python **226/226**、前端 **155/155**、相关回归 **24/24**、`tsc --noEmit` 与 Vite **4494 modules**。其中 155 与 24 两组有 9 项重叠，数字不可相加；Git 保存命令与结果记录，但未保存 JUnit 产物，不能把记录写成新机器已复跑的证明。
 - 两者默认关闭，不能计入 `d4c3e32a` 的 V0 Gate；不同时开启做首轮验收。
-- 戴耳机持续自然开口打断、poll-backed 任务异步监控和 TaskEvent 主动通知仍未实现。当前下一窄切片是 D-031，但编码前必须先完成 D-032 开发前回顾、test inventory 与正反场景矩阵 checkpoint。
+- 戴耳机持续自然开口打断、poll-backed 任务异步监控和 TaskEvent 主动通知在该历史快照中仍未实现。当时选择的下一窄切片是 D-031；当前排序和风险分级已由 D-046 取代。
 
 ### 7.3 V0 明确不做
 

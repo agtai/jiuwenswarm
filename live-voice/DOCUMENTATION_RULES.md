@@ -20,44 +20,59 @@ They can be combined. `README.md` and `STATUS.md` are short and mandatory for ev
 | Current branch/milestone/progress/gaps/next slice | `STATUS.md` |
 | Accepted choice, rationale, impact, re-evaluation | `decisions/DECISIONS.md` |
 | Original complete design | `architecture/FULL_SOLUTION_2026-07-30.md` |
-| Delivery ordering, module definition, test-closure process | `roadmap/POST_V0_DELIVERY_ROADMAP.md` |
+| Delivery ordering, milestone definitions, replacement scoring, risk-tier closure | `roadmap/POST_V0_DELIVERY_ROADMAP.md` |
+| Current dated Week 1 priority/dependency/boundary and package contracts | `roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md` |
 | V0 pass/fail contract | `validation/V0_ACCEPTANCE.md` |
+| Week 2 Integrated Demo pass/fail and 90% scoring | `validation/INTEGRATED_DEMO_ACCEPTANCE.md` |
+| Week 3–4 Integrated Windows Alpha pass/fail | `validation/ALPHA_ACCEPTANCE.md` |
 | Environment and E2E operating procedure | `runbooks/E2E_RUNBOOK.md` |
-| Presentation flow | `demo/DEMO_SHOWCASE.md` |
+| V0 presentation flow | `demo/DEMO_SHOWCASE.md` |
+| Cumulative P1/P2/P3alpha presentation flow | `demo/INTEGRATED_SHOWCASE.md` |
+| Frozen detailed Sol pre-review designs | `SOL_MODULE_PRE_REVIEWS_2026-08-03.md` |
 | Immutable run evidence | `evidence/` |
 | Superseded plans and stash history | `archive/` |
 
 ## Anti-duplication rules
 
-1. Mutable facts live only in `STATUS.md`. Other documents link to it and must not repeat the current HEAD, ahead/behind, current completion percentage, or next task.
+1. Mutable facts live only in `STATUS.md`. Other documents link to it and must not repeat the current HEAD, ahead/behind, current replacement credit, or next action.
 2. `README.md` is a router, not a second handoff/status page.
 3. A decision is recorded once in `DECISIONS.md`; roadmap/status may cite its ID and operational consequence without duplicating its full rationale.
 4. Full design and evidence are immutable snapshots. Correct later understanding through a decision or status update instead of silently rewriting historical evidence.
 5. Archive documents must carry an archive warning and cannot override status or accepted decisions.
-6. Avoid parallel summaries such as separate HANDOFF and STATUS files. Continuation facts belong in STATUS; operational steps belong in README/runbook.
+6. Avoid parallel summaries such as separate HANDOFF and STATUS files. Continuation facts belong in STATUS; operational steps belong in README/runbook; detailed pre/post review matrices belong in dated review records and do not define current order.
 7. Repeated wording is allowed only when required for safety at the point of action, and the repeated text must link to its authority.
+8. A dated execution plan freezes package contracts and Sol oracles for its window; it must not carry mutable implementation progress, tested SHA, or replacement credit. Those facts remain in `STATUS.md`, and a later rolling plan supersedes the dated queue through an explicit STATUS/decision update.
 
 ## Read routing
 
 - Ordinary implementation: root `AGENTS.md`, `README.md`, `STATUS.md`, relevant roadmap/decision section, source, and tests.
+- A current Week 1 package: add the dated Week 1 execution plan and read only that package's consumed ACG/design sections, target source, and adjacent tests; do not load every package or the frozen historical review by default.
 - Bug/hotfix: the same minimal set plus the affected module contract and focused regression tests; a hotfix needs reasonable scenario coverage, not an unrelated full-project test campaign.
 - Architecture/protocol work: add the complete solution snapshot and all decisions governing the boundary.
-- Validation/E2E: add acceptance, runbook, showcase, and relevant evidence.
+- Validation/E2E: select exactly the V0, Week 2 Integrated Demo, or Week 3–4 Alpha acceptance contract, then add its runbook/showcase and relevant evidence.
 - Documentation work: this file plus every authoritative file that the change affects.
 - Historical investigation: archive only after current sources, never instead of them.
 
 ## Synchronization protocol
 
-- Code/module progress changes: update `STATUS.md`; update roadmap only if scope/order/contract changed.
+- Code/module progress changes: update the concise dashboard and replacement ledger in `STATUS.md`; update roadmap only if milestone scope, order, scoring, or contract changed; update a review record only for the review it owns.
+- Rolling execution planning: record a stable dated package contract under `roadmap/`, route it from README/STATUS, and keep progress out of it. Replace the route when Sol freezes a new window; do not silently mutate an old plan into a new week's history.
 - New technical or product choice: append a decision, then update only the concise consequence in STATUS/roadmap.
 - Acceptance run: keep raw/private logs outside Git as required, add a sanitized immutable evidence record, then update STATUS once.
 - New shortcut: update the applicable demo/archive ledger and record only its current consequence in STATUS.
 - Document move/rename: update `README.md`, root `AGENTS.md`, all relative links, and run the link checker.
 - Do not claim a state in advance. Record verification commands and exact tested SHA only after they actually ran.
 
-## Module test documentation (D-032)
+## Module test documentation (D-032 / D-046)
 
-Before semantic implementation, STATUS must contain the module definition, non-goals, current/planned tests, why each test exists, and the scenario matrix. After implementation, revisit the same record against the actual diff and final tests. Positive scenarios must succeed; negative scenarios must be rejected/fail closed and assert forbidden side effects as zero. Missing coverage or unexplained `N/A` prevents `CLOSED`.
+Use the roadmap risk tier before creating review artifacts:
+
+- Tier 0 documentation/mechanical/refactor work records scope and affected checks in the normal diff summary.
+- Tier 1 ordinary feature/Adapter/UI work records its contract, positive journey, key negative/flag-off paths, affected integration, and regressions in the implementation plan or grouped review.
+- Tier 2 state/concurrency/mutation work maintains a scoped Sol pre/post review and every applicable scenario dimension, including explicit forbidden effects.
+- Tier 3 shared protocol, authority, security, durability, and release work maintains the complete D-032 matrix plus immutable candidate and required real-path evidence.
+
+Detailed inventories and matrices live in dated or module review records, not in STATUS. Related packages may share a review when they change one coherent boundary. STATUS links the review and carries only current state. Positive scenarios must succeed; negative scenarios must reject/fail closed, and mutation/security boundaries assert forbidden side effects as zero. Missing required evidence prevents closure of the affected scope; irrelevant dimensions are omitted or briefly scoped out rather than expanded into ceremonial rows.
 
 ## Final documentation check
 
@@ -66,7 +81,7 @@ Before proposing a documentation commit:
 1. `git diff --check` passes.
 2. Every local Markdown link under `live-voice/` resolves.
 3. `docs/zh/live-voice/` contains no tracked duplicate.
-4. README remains routing-only and STATUS remains the sole mutable state.
+4. README remains routing-only, STATUS remains the sole concise mutable state, and frozen review records are prominently marked historical so their former queue wording cannot override STATUS/D-046.
 5. Archive warnings are present.
 6. Current code, tests, decisions, roadmap, and STATUS do not contradict one another.
 7. The proposed commit/push still follows the root approval gate.

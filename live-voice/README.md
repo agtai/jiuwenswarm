@@ -14,11 +14,15 @@ The short/full distinction and mandatory/conditional distinction are independent
 
 | Task | Read after this file and `STATUS.md` |
 |---|---|
-| Ordinary module implementation or bug fix | Relevant source/tests, the applicable part of [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md), and relevant entries in [decisions](decisions/DECISIONS.md) |
+| Ordinary module implementation or bug fix | Relevant source/tests, the applicable track and risk tier in the [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md), and relevant entries in [decisions](decisions/DECISIONS.md) |
 | Documentation structure or documentation update | [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md) before editing |
-| Long-term architecture, P1/P2/P3 boundary, protocol, ownership, cancellation, durability, production acceptance | Complete [full solution snapshot](architecture/FULL_SOLUTION_2026-07-30.md), relevant decisions, and roadmap |
+| Long-term architecture, P1/P2/P3 boundary, protocol, ownership, cancellation, durability, production acceptance | Complete [full solution snapshot](architecture/FULL_SOLUTION_2026-07-30.md), accepted [Architecture Contract Gate](architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), relevant decisions, and roadmap |
 | V0 reproduction or regression acceptance | [V0 acceptance](validation/V0_ACCEPTANCE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), [showcase](demo/DEMO_SHOWCASE.md), and immutable [V0 evidence](evidence/V0_20260802_ee2896a4.md) |
+| Week 2 cumulative Demo integration or acceptance | [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md), [Integrated showcase](demo/INTEGRATED_SHOWCASE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), roadmap, and current replacement ledger in STATUS |
+| Week 3–4 Integrated Windows Alpha acceptance | [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), full solution, ACG, roadmap, runbook, and current STATUS |
 | Post-V0 sequencing or the next development slice | [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md) and relevant decisions |
+| Week 1 implementation, DeepSeek handoff, or Sol return review | Current [Week 1 execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md), the package's target source/tests, consumed ACG sections, current STATUS, and the actual diff/evidence when returning to Sol |
+| Historical Sol module design or an implementation return-to-Sol review | Frozen [Sol module pre-reviews](SOL_MODULE_PRE_REVIEWS_2026-08-03.md), the actual diff/tests, current STATUS, and the applicable decision/roadmap contract |
 | Demo shortcuts or why V0 differs from production | [two-week demo archive](archive/TWO_WEEK_DEMO.md); treat it as historical design/ledger, not current status |
 | Old stash/foundation forensics only | [Post-V0 stash archive](archive/POST_V0_STASH_HANDOFF.md); never reconstruct or apply its machine-local stash during normal recovery |
 
@@ -27,18 +31,21 @@ The short/full distinction and mandatory/conditional distinction are independent
 | Path | Role |
 |---|---|
 | `STATUS.md` | Mutable state, verified facts, known gaps, and next concrete slice |
+| `SOL_MODULE_PRE_REVIEWS_2026-08-03.md` | Frozen detailed D-031/ACG/CR-A/SR-A/SS-A/TC-A Sol design record; not current status or execution order |
 | `DOCUMENTATION_RULES.md` | Authority, routing, anti-duplication, and synchronization rules |
 | `decisions/DECISIONS.md` | Accepted decisions and their rationale/history |
 | `architecture/FULL_SOLUTION_2026-07-30.md` | Dated immutable complete solution snapshot |
-| `roadmap/POST_V0_DELIVERY_ROADMAP.md` | Delivery order, module boundaries, and D-032 test-closure gate |
-| `validation/`, `runbooks/`, `demo/`, `evidence/` | Acceptance contract, runtime procedure, presentation script, and immutable evidence |
+| `architecture/ARCHITECTURE_CONTRACT_GATE_V1.md` | Accepted shared v2 identity/event/state/cancel/commit/progress/context contract and conformance boundary |
+| `roadmap/POST_V0_DELIVERY_ROADMAP.md` | Two-week/four-week milestones, parallel delivery tracks, replacement scoring, and risk-proportional closure |
+| `roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md` | Dated Sol priority/dependency/boundary plan and execution package contracts; STATUS, not this file, owns mutable progress |
+| `validation/`, `runbooks/`, `demo/`, `evidence/` | V0/Integrated Demo/Alpha acceptance, runtime procedure, presentation scripts, and immutable run evidence |
 | `archive/` | Historical plans and recovery context; never the current-state authority |
 
 ## Fresh-clone continuation
 
 ```powershell
-git fetch agtai hx/0803_live_voice
-git switch --track -c hx/0803_live_voice agtai/hx/0803_live_voice
+git fetch origin hx/0803_live_voice
+git switch --track -c hx/0803_live_voice origin/hx/0803_live_voice
 git status --short --branch
 git rev-parse HEAD
 git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'

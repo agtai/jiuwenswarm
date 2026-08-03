@@ -2,6 +2,8 @@
 
 本文负责现场展示话术和失败退场，不替代 V0 放行验收。完整 Gate、固定语料和证据模板见 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md)。
 
+> 本文只负责冻结的 V0 展示，不是 D-046 的 Week 2 累计 P1/P2/P3alpha Demo。新的累计展示见 [INTEGRATED_SHOWCASE.md](INTEGRATED_SHOWCASE.md)；在其运行条件落地前不得把本脚本的可选 Task 加分项拼接成“90% Integrated Demo”。
+
 - 历史失败候选：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；它只保留为历史失败基线
 - 当前 V0 Released / 已冻结：`ee2896a4afb186e693c720476b6de10797e66f72`；Gate 0–6 全部 PASS，脱敏证据见 [evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)
 - 候选历史：旧 `2c700934...` 的 Gate 1 Attempt 1 虽真实完成 Agent/Terminal Tool 主链，但 runtime 生成未忽略 `.agent_history/`，结果为 `2c700934,1`，因此 FAIL；`d4c3e32a` 的真实工具结果为 `d4c3e32a,0`，随后仍在 Gate 3 FAIL
