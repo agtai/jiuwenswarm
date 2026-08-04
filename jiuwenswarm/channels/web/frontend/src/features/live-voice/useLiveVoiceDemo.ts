@@ -18,13 +18,18 @@ import {
   selectLiveVoiceStreamingFinalTimeoutAction,
   shouldResumeAfterSilentResponse,
 } from './liveVoiceTurnLifecycle';
-import { LiveVoiceTaskBridge } from './liveVoiceTaskBridge';
+import { LiveVoiceTaskBridge, shouldFenceLiveVoiceTaskMonitor, type LiveVoiceTaskGateway } from './liveVoiceTaskBridge';
 import {
+  canAnnounceLiveVoiceTaskTerminal,
   isLiveVoiceTaskResultCurrentContext,
   projectLiveVoiceTaskActivity,
+  projectLiveVoiceTaskMonitorActivity,
   selectLiveVoiceTaskContextInvalidation,
   selectLiveVoiceTaskFeedbackDrainAction,
+  selectLiveVoiceTaskMonitorPredecessor,
+  selectLiveVoiceTaskMonitorStart,
   selectLiveVoiceTaskSafetyDisclosure,
+  shouldResumeAfterLiveVoiceTaskSpeech,
   selectLiveVoiceTaskTranscriptRoute,
   type LiveVoiceTaskActivity,
 } from './liveVoiceTaskAdapter';
@@ -34,6 +39,7 @@ import {
   type LiveVoiceTaskExecutionContext,
   type LiveVoiceTaskRequest,
 } from './liveVoiceTaskClient';
+import { LiveVoiceTaskMonitor, type LiveVoiceTaskMonitorSnapshot } from './liveVoiceTaskMonitor';
 import { createIntegratedP1Route, type IntegratedP1Route } from './formal/integratedP1Route';
 
 const DEMO_LANGUAGE = 'zh-CN';
@@ -52,7 +58,16 @@ interface TaskBridgeHolder {
   sessionId: string;
   executionTargetKey: string;
   request: LiveVoiceTaskRequest;
+  gateway: LiveVoiceTaskGateway;
   bridge: LiveVoiceTaskBridge;
+}
+
+interface TaskMonitorHolder {
+  sessionId: string;
+  executionTargetKey: string;
+  bridge: LiveVoiceTaskBridge;
+  monitor: LiveVoiceTaskMonitor;
+  predecessorTaskId?: string;
 }
 
 interface IsolatedTaskBridge {
@@ -71,6 +86,7 @@ export interface UseLiveVoiceDemoOptions {
   messages: readonly Message[];
   isProcessing: boolean;
   isThinking: boolean;
+  isConnected: boolean;
   mode: AgentMode;
   interactionBlocked: boolean;
   newSessionPromotion: {
@@ -180,6 +196,7 @@ export function useLiveVoiceDemo({
   messages,
   isProcessing,
   isThinking,
+  isConnected,
   mode,
   interactionBlocked,
   newSessionPromotion,
@@ -204,6 +221,7 @@ export function useLiveVoiceDemo({
   const [snapshot, setSnapshot] = useState<LiveVoiceSnapshot>(() => core.getSnapshot());
   const [taskActivity, setTaskActivity] = useState<LiveVoiceTaskActivity | null>(null);
   const activeRef = useRef(active);
+  const connectedRef = useRef(isConnected);
   const processingRef = useRef(isProcessing);
   const responseInProgressRef = useRef(isProcessing || isThinking);
   const interactionBlockedRef = useRef(interactionBlocked);
@@ -230,18 +248,23 @@ export function useLiveVoiceDemo({
   const coreSubscriptionRef = useRef<(() => void) | null>(null);
   const releaseTtsOutputOwnershipRef = useRef<(() => void) | null>(null);
   const taskBridgeRef = useRef<TaskBridgeHolder | null>(null);
+  const taskMonitorRef = useRef<TaskMonitorHolder | null>(null);
+  const pendingTaskTerminalRef = useRef<LiveVoiceTaskMonitor | null>(null);
+  const taskRequestRef = useRef(taskRequest);
   const isolatedTaskBridgeRef = useRef<IsolatedTaskBridge | null>(null);
   const taskExecutionContextRef = useRef(taskExecutionContext);
   const taskExecutionTargetKey = liveVoiceTaskExecutionContextKey(taskExecutionContext);
   const taskExecutionTargetKeyRef = useRef(taskExecutionTargetKey);
 
   activeRef.current = active;
+  connectedRef.current = isConnected;
   processingRef.current = isProcessing;
   responseInProgressRef.current = isProcessing || isThinking;
   interactionBlockedRef.current = interactionBlocked;
   sessionIdRef.current = activeSessionId;
   taskExecutionContextRef.current = taskExecutionContext;
   taskExecutionTargetKeyRef.current = taskExecutionTargetKey;
+  taskRequestRef.current = taskRequest;
 
   const clearStreamingFinalTimeout = useCallback(() => {
     const registration = streamingFinalTimeoutRef.current;
@@ -268,11 +291,16 @@ export function useLiveVoiceDemo({
   }, []);
 
   const enqueueTaskFeedback = useCallback(
-    (text: string, responseEpoch: number, captureKey: string) => {
+    (text: string, responseEpoch: number, captureKey: string, source: 'command-feedback' | 'terminal-notification' = 'command-feedback') => {
+      const resumeAfterSpeech = shouldResumeAfterLiveVoiceTaskSpeech(source);
+      if (!resumeAfterSpeech) {
+        resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+      }
       const speakable = sanitizeLiveVoiceTtsText(text);
       for (const [chunkIndex, chunk] of splitLiveVoiceTtsText(speakable).entries()) {
         const queued = core.enqueueSpeech(chunk, responseEpoch, `task-feedback:${captureKey}:${chunkIndex}`);
-        if (queued.accepted) {
+        if (queued.accepted && resumeAfterSpeech) {
           resumeListeningAfterSpeechRef.current = true;
           taskFeedbackOwnsResumeRef.current = true;
         }
@@ -280,6 +308,41 @@ export function useLiveVoiceDemo({
     },
     [core]
   );
+
+  const tryAnnounceTaskTerminal = useCallback(() => {
+    const monitor = pendingTaskTerminalRef.current;
+    if (!monitor || taskMonitorRef.current?.monitor !== monitor) {
+      pendingTaskTerminalRef.current = null;
+      return;
+    }
+    if (!activeRef.current) {
+      monitor.takeTerminalNotification();
+      pendingTaskTerminalRef.current = null;
+      return;
+    }
+    const currentSnapshot = core.getSnapshot();
+    if (
+      !canAnnounceLiveVoiceTaskTerminal({
+        taskDemoEnabled: FEATURE_LIVE_VOICE_TASK_DEMO,
+        liveVoiceActive: activeRef.current,
+        interactionBlocked: interactionBlockedRef.current,
+        captureOpen: recognitionCaptureOpenRef.current,
+        isProcessing: processingRef.current,
+        isThinking: responseInProgressRef.current && !processingRef.current,
+        coreStatus: currentSnapshot.status,
+        pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+        activeSpeechKey: currentSnapshot.activeSpeechKey,
+        ownsTtsOutput: releaseTtsOutputOwnershipRef.current !== null,
+      })
+    ) {
+      return;
+    }
+    const notification = monitor.takeTerminalNotification();
+    pendingTaskTerminalRef.current = null;
+    if (notification) {
+      enqueueTaskFeedback(notification, currentSnapshot.responseEpoch, `monitor:${monitor.getSnapshot().task.taskId}`, 'terminal-notification');
+    }
+  }, [core, enqueueTaskFeedback]);
 
   const getTaskBridge = useCallback(
     (sessionId: string, executionContext: LiveVoiceTaskExecutionContext): LiveVoiceTaskBridge | null => {
@@ -290,13 +353,77 @@ export function useLiveVoiceDemo({
       if (current?.sessionId === sessionId && current.executionTargetKey === executionTargetKey && current.request === taskRequest) {
         return current.bridge;
       }
-      const bridge = new LiveVoiceTaskBridge(
-        createLiveVoiceTaskGateway({ request: taskRequest, sessionId, executionContext })
-      );
-      taskBridgeRef.current = { sessionId, executionTargetKey, request: taskRequest, bridge };
+      const gateway = createLiveVoiceTaskGateway({ request: taskRequest, sessionId, executionContext });
+      const bridge = new LiveVoiceTaskBridge(gateway);
+      taskBridgeRef.current = { sessionId, executionTargetKey, request: taskRequest, gateway, bridge };
       return bridge;
     },
     [taskRequest]
+  );
+
+  const startTaskMonitor = useCallback(
+    (holder: TaskBridgeHolder, task: NonNullable<ReturnType<LiveVoiceTaskBridge['getSnapshot']>['lastVisibleTask']>, predecessorTaskId?: string) => {
+      taskMonitorRef.current?.monitor.stop();
+      pendingTaskTerminalRef.current = null;
+      let monitor: LiveVoiceTaskMonitor;
+      monitor = new LiveVoiceTaskMonitor({
+        task,
+        gateway: holder.gateway,
+        onObservation: observation => {
+          const current = taskMonitorRef.current;
+          if (
+            !current ||
+            current.monitor !== monitor ||
+            current.bridge !== holder.bridge ||
+            taskBridgeRef.current !== holder ||
+            sessionIdRef.current !== holder.sessionId ||
+            taskExecutionTargetKeyRef.current !== holder.executionTargetKey ||
+            taskRequestRef.current !== holder.request
+          ) {
+            return false;
+          }
+          return holder.bridge.applyMonitorObservation(observation);
+        },
+        onSnapshot: (monitorSnapshot: LiveVoiceTaskMonitorSnapshot) => {
+          const current = taskMonitorRef.current;
+          if (
+            !current ||
+            current.monitor !== monitor ||
+            current.bridge !== holder.bridge ||
+            taskBridgeRef.current !== holder ||
+            sessionIdRef.current !== holder.sessionId ||
+            taskExecutionTargetKeyRef.current !== holder.executionTargetKey ||
+            taskRequestRef.current !== holder.request
+          ) {
+            return;
+          }
+          const detail = t(`liveVoice.task.monitor.phases.${monitorSnapshot.phase}`, {
+            taskId: monitorSnapshot.task.taskId,
+            status: monitorSnapshot.task.status.raw ?? t('liveVoice.task.unknown'),
+            retryCount: monitorSnapshot.retryCount,
+            error: monitorSnapshot.errorCode ?? t('liveVoice.task.unknown'),
+          });
+          setTaskActivity(projectLiveVoiceTaskMonitorActivity(monitorSnapshot, t('liveVoice.task.monitor.title'), detail, current.predecessorTaskId));
+          if (monitorSnapshot.phase === 'terminal') {
+            if (activeRef.current) {
+              pendingTaskTerminalRef.current = monitor;
+              tryAnnounceTaskTerminal();
+            } else {
+              monitor.takeTerminalNotification();
+            }
+          }
+        },
+      });
+      taskMonitorRef.current = {
+        sessionId: holder.sessionId,
+        executionTargetKey: holder.executionTargetKey,
+        bridge: holder.bridge,
+        monitor,
+        predecessorTaskId,
+      };
+      monitor.start(connectedRef.current);
+    },
+    [t, tryAnnounceTaskTerminal]
   );
 
   const handleCommittedTaskCommand = useCallback(
@@ -330,9 +457,7 @@ export function useLiveVoiceDemo({
       const isolated = isolatedTaskBridgeRef.current;
       if (isolated) {
         const canRestore =
-          isolated.holder.sessionId === sessionId &&
-          isolated.holder.executionTargetKey === executionTargetKey &&
-          isolated.holder.request === taskRequest;
+          isolated.holder.sessionId === sessionId && isolated.holder.executionTargetKey === executionTargetKey && isolated.holder.request === taskRequest;
         if (canRestore) {
           taskBridgeRef.current = isolated.holder;
           isolatedTaskBridgeRef.current = null;
@@ -361,6 +486,13 @@ export function useLiveVoiceDemo({
         });
         enqueueTaskFeedback(detail, responseEpoch, captureKey);
         return;
+      }
+
+      const fencedMonitor = shouldFenceLiveVoiceTaskMonitor(transcript) ? taskMonitorRef.current : null;
+      if (fencedMonitor) {
+        fencedMonitor.monitor.stop();
+        taskMonitorRef.current = null;
+        pendingTaskTerminalRef.current = null;
       }
 
       const result = await bridge.handle({
@@ -397,11 +529,21 @@ export function useLiveVoiceDemo({
       if (nextActivity) {
         setTaskActivity(nextActivity);
       }
+      const holder = taskBridgeRef.current;
+      const monitorStart = selectLiveVoiceTaskMonitorStart(result);
+      if (holder?.bridge === bridge && monitorStart) {
+        const predecessorTaskId = selectLiveVoiceTaskMonitorPredecessor(
+          fencedMonitor?.monitor.getSnapshot().task.taskId,
+          fencedMonitor?.predecessorTaskId,
+          monitorStart
+        );
+        startTaskMonitor(holder, monitorStart.task, predecessorTaskId);
+      }
       if (result.feedback?.speakableText) {
         enqueueTaskFeedback(result.feedback.speakableText, responseEpoch, captureKey);
       }
     },
-    [enqueueTaskFeedback, getTaskBridge, t]
+    [enqueueTaskFeedback, getTaskBridge, startTaskMonitor, t]
   );
 
   const handleRecognitionResult = useCallback(
@@ -715,11 +857,29 @@ export function useLiveVoiceDemo({
   }, [core]);
 
   useEffect(() => {
-    const current = taskBridgeRef.current;
+    taskMonitorRef.current?.monitor.setConnected(isConnected);
+  }, [isConnected]);
+
+  useEffect(() => {
+    tryAnnounceTaskTerminal();
+  }, [active, isProcessing, isThinking, snapshot.activeSpeechKey, snapshot.pendingSpeechCount, snapshot.status, tryAnnounceTaskTerminal]);
+
+  useEffect(() => {
+    const currentMonitor = taskMonitorRef.current;
+    const currentBridge = taskBridgeRef.current;
     if (
-      current &&
-      (current.sessionId !== activeSessionId || current.executionTargetKey !== taskExecutionTargetKey || current.request !== taskRequest)
+      currentMonitor &&
+      (currentMonitor.sessionId !== activeSessionId ||
+        currentMonitor.executionTargetKey !== taskExecutionTargetKey ||
+        currentBridge?.bridge !== currentMonitor.bridge ||
+        currentBridge?.request !== taskRequest)
     ) {
+      currentMonitor.monitor.stop();
+      taskMonitorRef.current = null;
+      pendingTaskTerminalRef.current = null;
+    }
+    const current = taskBridgeRef.current;
+    if (current && (current.sessionId !== activeSessionId || current.executionTargetKey !== taskExecutionTargetKey || current.request !== taskRequest)) {
       const invalidation = selectLiveVoiceTaskContextInvalidation(current.bridge.getSnapshot());
       taskBridgeRef.current = null;
       if (invalidation.action === 'isolate') {
@@ -752,6 +912,9 @@ export function useLiveVoiceDemo({
   useLayoutEffect(() => {
     return () => {
       const shouldStopAllTts = activeRef.current;
+      taskMonitorRef.current?.monitor.stop();
+      taskMonitorRef.current = null;
+      pendingTaskTerminalRef.current = null;
       activeRef.current = false;
       releaseTtsOutputOwnershipRef.current?.();
       releaseTtsOutputOwnershipRef.current = null;
@@ -1089,7 +1252,19 @@ export function useLiveVoiceDemo({
       }, LIVE_VOICE_STREAMING_FINAL_TIMEOUT_MS),
     };
     streamingFinalTimeoutRef.current = registration;
-  }, [active, activeSessionId, clearStreamingFinalTimeout, core, isProcessing, isThinking, messages, snapshot.activeSpeechKey, snapshot.pendingSpeechCount, snapshot.status, t]);
+  }, [
+    active,
+    activeSessionId,
+    clearStreamingFinalTimeout,
+    core,
+    isProcessing,
+    isThinking,
+    messages,
+    snapshot.activeSpeechKey,
+    snapshot.pendingSpeechCount,
+    snapshot.status,
+    t,
+  ]);
 
   useEffect(() => {
     if (!active) return;

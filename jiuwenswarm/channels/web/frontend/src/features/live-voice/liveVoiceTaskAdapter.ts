@@ -3,7 +3,9 @@ import {
   type LiveVoiceTaskBridgeResult,
   type LiveVoiceTaskBridgeSnapshot,
   type LiveVoiceTaskExecutionTarget,
+  type LiveVoiceVisibleTask,
 } from './liveVoiceTaskBridge';
+import type { LiveVoiceTaskMonitorSnapshot } from './liveVoiceTaskMonitor';
 
 export type LiveVoiceTaskRecordRole = 'current' | 'predecessor' | 'successor' | 'conflict';
 
@@ -16,6 +18,44 @@ export interface LiveVoiceTaskRecordActivity {
   resultSource: string;
   recoveryStatus: string;
   executionTarget: LiveVoiceTaskExecutionTarget;
+  monitorState?: LiveVoiceTaskMonitorSnapshot['phase'];
+  progressSummary?: string | null;
+  lastError?: string | null;
+}
+
+export function projectLiveVoiceTaskMonitorActivity(
+  snapshot: LiveVoiceTaskMonitorSnapshot,
+  title: string,
+  detail: string,
+  predecessorTaskId?: string
+): LiveVoiceTaskActivity {
+  const level =
+    snapshot.phase === 'adapter-error' || snapshot.phase === 'missing'
+      ? 'error'
+      : snapshot.phase === 'paused-disconnected' || snapshot.phase === 'backoff'
+        ? 'warning'
+        : 'info';
+  return {
+    level,
+    title,
+    detail,
+    commandId: snapshot.task.commandId ?? undefined,
+    predecessorTaskId,
+    successorTaskId: predecessorTaskId ? snapshot.task.taskId : undefined,
+    record: {
+      role: predecessorTaskId ? 'successor' : 'current',
+      taskId: snapshot.task.taskId,
+      commandId: snapshot.task.commandId ?? undefined,
+      status: `${snapshot.task.status.kind}/${snapshot.task.status.raw ?? 'unknown'}`,
+      source: snapshot.task.source,
+      resultSource: snapshot.task.resultSource,
+      recoveryStatus: snapshot.task.recoveryStatus,
+      executionTarget: snapshot.task.executionTarget,
+      monitorState: snapshot.phase,
+      progressSummary: snapshot.progressSummary,
+      lastError: snapshot.lastError,
+    },
+  };
 }
 
 export interface LiveVoiceTaskActivity {
@@ -29,6 +69,29 @@ export interface LiveVoiceTaskActivity {
   conflictingTaskId?: string;
   record?: LiveVoiceTaskRecordActivity;
   disclosure?: string;
+}
+
+export interface LiveVoiceTaskMonitorStart {
+  task: LiveVoiceVisibleTask;
+  predecessorTaskId?: string;
+}
+
+export function selectLiveVoiceTaskMonitorStart(result: LiveVoiceTaskBridgeResult): LiveVoiceTaskMonitorStart | null {
+  const task = result.task;
+  if (!task?.commandId || task.status.terminal) return null;
+  if (!['started', 'recovered', 'replaced', 'status', 'failed'].includes(result.outcome)) return null;
+  return {
+    task,
+    predecessorTaskId: result.command === 'replace' && result.predecessorCancelled ? result.predecessorTaskId : undefined,
+  };
+}
+
+export function selectLiveVoiceTaskMonitorPredecessor(
+  previousTaskId: string | undefined,
+  previousPredecessorTaskId: string | undefined,
+  monitorStart: LiveVoiceTaskMonitorStart
+): string | undefined {
+  return monitorStart.predecessorTaskId ?? (previousTaskId === monitorStart.task.taskId ? previousPredecessorTaskId : undefined);
 }
 
 export function projectLiveVoiceTaskActivity(result: LiveVoiceTaskBridgeResult): LiveVoiceTaskActivity | null {
@@ -79,7 +142,7 @@ export function selectLiveVoiceTaskContextInvalidation(snapshot: LiveVoiceTaskBr
   const isolate = snapshot.inFlight || snapshot.mutationUnknown;
   return {
     action: isolate ? 'isolate' : 'clear',
-    commandId: snapshot.pendingCommandId ?? (isolate ? snapshot.lastVisibleTask?.commandId ?? null : null),
+    commandId: snapshot.pendingCommandId ?? (isolate ? (snapshot.lastVisibleTask?.commandId ?? null) : null),
   };
 }
 
@@ -134,6 +197,38 @@ export function selectLiveVoiceTaskTranscriptRoute({
 
 export function selectLiveVoiceTaskSafetyDisclosure(taskDemoEnabled: boolean, disclosure: string): string | undefined {
   return taskDemoEnabled ? disclosure : undefined;
+}
+
+export interface LiveVoiceTaskTerminalNotificationInput {
+  taskDemoEnabled: boolean;
+  liveVoiceActive: boolean;
+  interactionBlocked: boolean;
+  captureOpen: boolean;
+  isProcessing: boolean;
+  isThinking: boolean;
+  coreStatus: 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted' | 'error';
+  pendingSpeechCount: number;
+  activeSpeechKey: string | null;
+  ownsTtsOutput: boolean;
+}
+
+export function canAnnounceLiveVoiceTaskTerminal(input: LiveVoiceTaskTerminalNotificationInput): boolean {
+  return (
+    input.taskDemoEnabled &&
+    input.liveVoiceActive &&
+    !input.interactionBlocked &&
+    !input.captureOpen &&
+    !input.isProcessing &&
+    !input.isThinking &&
+    input.coreStatus === 'idle' &&
+    input.pendingSpeechCount === 0 &&
+    input.activeSpeechKey === null &&
+    input.ownsTtsOutput
+  );
+}
+
+export function shouldResumeAfterLiveVoiceTaskSpeech(source: 'command-feedback' | 'terminal-notification'): boolean {
+  return source === 'command-feedback';
 }
 
 /**

@@ -26,10 +26,12 @@ export interface LiveVoiceTaskGateway {
     sessionId: string;
     projectDir: string;
     projectId: string | null;
+    channelId: string;
+    appId: string;
   };
   run(request: { query: string; pipeline: typeof LIVE_VOICE_AUTO_HARNESS_PIPELINE; commandId: string }): Promise<unknown>;
-  listByCommand(commandId: string): Promise<unknown>;
-  status(taskId: string): Promise<unknown>;
+  listByCommand(commandId: string, options?: { signal?: AbortSignal }): Promise<unknown>;
+  status(taskId: string, options?: { signal?: AbortSignal }): Promise<unknown>;
   cancel(taskId: string): Promise<unknown>;
 }
 
@@ -308,13 +310,17 @@ function parseCommand(text: string): ParsedCommand | null {
     .replace(/[。！？!?]+$/u, '')
     .trim();
 
-  if (normalized === '检查后台任务进度' || normalized === '检查后台演进任务进度') {
+  if (
+    normalized === '检查后台任务进度' ||
+    normalized === '检查后台代码优化任务进度' ||
+    normalized === '检查后台演进任务进度'
+  ) {
     return { kind: 'status', confirmed: true };
   }
-  if (normalized === '确认取消后台演进任务') {
+  if (normalized === '确认取消后台代码优化任务' || normalized === '确认取消后台演进任务') {
     return { kind: 'cancel', confirmed: true };
   }
-  if (normalized === '取消后台演进任务') {
+  if (normalized === '取消后台代码优化任务' || normalized === '取消后台演进任务') {
     return { kind: 'cancel', confirmed: false };
   }
 
@@ -324,11 +330,23 @@ function parseCommand(text: string): ParsedCommand | null {
     confirmed: boolean;
   }> = [
     {
+      stem: '确认启动后台代码优化任务',
+      kind: 'create',
+      confirmed: true,
+    },
+    { stem: '启动后台代码优化任务', kind: 'create', confirmed: false },
+    {
       stem: '确认启动后台演进任务',
       kind: 'create',
       confirmed: true,
     },
     { stem: '启动后台演进任务', kind: 'create', confirmed: false },
+    {
+      stem: '确认替换后台代码优化任务',
+      kind: 'replace',
+      confirmed: true,
+    },
+    { stem: '替换后台代码优化任务', kind: 'replace', confirmed: false },
     {
       stem: '确认替换后台演进任务',
       kind: 'replace',
@@ -340,7 +358,9 @@ function parseCommand(text: string): ParsedCommand | null {
   for (const form of forms) {
     if (!normalized.startsWith(form.stem)) continue;
     const remainder = normalized.slice(form.stem.length);
-    const separated = remainder.match(/^(?:[：:，,]\s*|冒号\s*|\s+)(.+)$/u);
+    const separated = remainder.match(
+      /^(?:(?:[：:，,]\s*)?(?:任务内容|目标)(?:是|为)[：:，,]?\s*|冒号[：:，,]?\s*|[：:，,]\s*|\s+)(.+)$/u
+    );
     const query = separated?.[1]?.trim() ?? '';
     if (!query) return null;
     return { kind: form.kind, confirmed: form.confirmed, query };
@@ -352,6 +372,11 @@ function parseCommand(text: string): ParsedCommand | null {
 /** Parse-only probe used by the React adapter before choosing chat vs task. */
 export function isLiveVoiceTaskCommand(text: string): boolean {
   return parseCommand(text) !== null;
+}
+
+export function shouldFenceLiveVoiceTaskMonitor(text: string): boolean {
+  const command = parseCommand(text);
+  return Boolean(command && (command.kind === 'status' || (command.confirmed && (command.kind === 'cancel' || command.kind === 'replace'))));
 }
 
 function parseGatewayPayload(payload: unknown): ParsedGatewayPayload {
@@ -443,6 +468,23 @@ export class LiveVoiceTaskBridge {
     };
   }
 
+  applyMonitorObservation(observation: LiveVoiceVisibleTask): boolean {
+    const current = this.lastVisibleTask;
+    if (
+      !current ||
+      this.mutationUnknown ||
+      current.taskId !== observation.taskId ||
+      current.commandId !== observation.commandId ||
+      observation.source !== 'schedule.status' && observation.source !== 'schedule.list' ||
+      observation.pipeline !== LIVE_VOICE_AUTO_HARNESS_PIPELINE
+    ) {
+      return false;
+    }
+    if (executionTargetConflict(this.gateway.owner, current.executionTarget, observation.executionTarget)) return false;
+    this.rememberTask({ ...observation, query: current.query });
+    return true;
+  }
+
   async handle(input: LiveVoiceTaskBridgeInput): Promise<LiveVoiceTaskBridgeResult> {
     const command = parseCommand(input.text);
     if (!command) {
@@ -489,7 +531,7 @@ export class LiveVoiceTaskBridge {
           'warning',
           'explicit-confirmation-required',
           '需要明确确认',
-          command.kind === 'cancel' ? '请说“确认取消后台演进任务”。' : `请使用带“确认”的${command.kind === 'create' ? '启动' : '替换'}口令。`
+          command.kind === 'cancel' ? '请说“确认取消后台代码优化任务”。' : `请使用带“确认”的${command.kind === 'create' ? '启动' : '替换'}口令。`
         )
       );
     }
@@ -899,7 +941,7 @@ export class LiveVoiceTaskBridge {
             feedback(
               'info',
               recovered.code,
-              '已核对并恢复后台演进任务',
+              '已核对并恢复后台代码优化任务',
               `命令 ${pending.commandId} 对应真实 task_id ${recovered.task.taskId}。`
             ),
             { task: recovered.task, commandId: pending.commandId, recoveryStatus: 'recovered' }
@@ -964,7 +1006,7 @@ export class LiveVoiceTaskBridge {
         attempt.conflict ? 'recovery-conflict' : attempt.mutationUnknown ? 'mutation-unknown' : 'failed',
         command,
         captureKey,
-        feedback('error', attempt.code, '后台演进任务未确认启动', attempt.message),
+        feedback('error', attempt.code, '后台代码优化任务未确认启动', attempt.message),
         {
           task: attempt.task,
           commandId: pending.commandId,
@@ -981,7 +1023,7 @@ export class LiveVoiceTaskBridge {
       feedback(
         'info',
         attempt.code,
-        attempt.recovered ? '已恢复后台演进任务' : '后台演进任务已启动',
+        attempt.recovered ? '已恢复后台代码优化任务' : '后台代码优化任务已启动',
         `命令 ${pending.commandId} 的真实 task_id 为 ${attempt.task.taskId}，状态为 ${attempt.task.status.raw ?? 'unknown'}。`
       ),
       { task: attempt.task, commandId: pending.commandId, recoveryStatus: attempt.task.recoveryStatus }

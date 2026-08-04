@@ -38,6 +38,13 @@ test('run pins the persisted session, AutoHarness mode, and reviewed pipeline', 
   });
 
   assert.equal(result, response);
+  assert.deepEqual(gateway.owner, {
+    sessionId: 'session-real-1',
+    projectDir: 'D:\\work\\live-voice',
+    projectId: 'project-live-voice',
+    channelId: 'web',
+    appId: '',
+  });
   assert.deepEqual(calls, [
     {
       method: 'schedule.run',
@@ -245,4 +252,27 @@ test('exact-key reconciliation is scoped by session, target, namespace, and the 
       },
     },
   ]);
+});
+
+test('read operations propagate AbortSignal without changing run or cancel calls', async () => {
+  const calls = [];
+  const gateway = createLiveVoiceTaskGateway({
+    sessionId: 'session-signal',
+    executionContext,
+    request: async (method, params, options) => {
+      calls.push({ method, params, options });
+      return method === 'schedule.list' ? { tasks: [] } : { task_id: 'task-signal', status: 'running' };
+    },
+  });
+  const controller = new AbortController();
+
+  await gateway.status('task-signal', { signal: controller.signal });
+  await gateway.listByCommand('command-signal', { signal: controller.signal });
+  await gateway.run({ query: '目标', pipeline: LIVE_VOICE_TASK_CLIENT_PIPELINE, commandId: 'command-signal' });
+  await gateway.cancel('task-signal');
+
+  assert.equal(calls[0].options.signal, controller.signal);
+  assert.equal(calls[1].options.signal, controller.signal);
+  assert.equal(calls[2].options, undefined);
+  assert.equal(calls[3].options, undefined);
 });

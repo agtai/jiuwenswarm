@@ -65,7 +65,7 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 
 from .capabilities import AutoHarnessCapabilityRegistry, create_default_capability_registry
 from .run_log_status import TERMINAL_STATUSES
-from .scheduler import Scheduler
+from .scheduler import Scheduler, TARGET_TREE_CHANGE_REQUIRED
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
 from .repo_auth import configure_gitcode_auth
@@ -3466,6 +3466,8 @@ class AutoHarnessService:
             task_data["optimization_task"] = serialized_optimization_task
         if normalized_repo_url:
             task_data["repo_url"] = normalized_repo_url
+        if normalized_origin_namespace == "live_voice":
+            task_data["result_contract"] = TARGET_TREE_CHANGE_REQUIRED
 
         execution_context = self._capture_scheduled_task_execution_context(
             execution_agent,
@@ -3835,7 +3837,8 @@ class AutoHarnessService:
         """
         if self._task_store is None:
             return {
-                "error": "任务不存在",
+                "error": "任务存储未初始化",
+                "code": "TASK_STORE_UNAVAILABLE",
                 "task_id": task_id,
                 **_build_schedule_task_response_metadata(None, access="unknown"),
             }
@@ -3843,6 +3846,7 @@ class AutoHarnessService:
         if task is None:
             return {
                 "error": "任务不存在",
+                "code": "TASK_NOT_FOUND",
                 "task_id": task_id,
                 **_build_schedule_task_response_metadata(None, access="unknown"),
             }
@@ -3874,14 +3878,17 @@ class AutoHarnessService:
         requester_execution_target: Any = _OWNER_SCOPE_UNSET,
         origin_namespace: Any = None,
         idempotency_key: Any = None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         """List all scheduled tasks.
 
         Returns:
-            List of task dicts
+            List of task dicts or a stable availability error
         """
         if self._task_store is None:
-            return []
+            return {
+                "error": "任务存储未初始化",
+                "code": "TASK_STORE_UNAVAILABLE",
+            }
         scoped = origin_namespace is not None or idempotency_key is not None
         trusted_internal = (
             owner_scope is _OWNER_SCOPE_UNSET

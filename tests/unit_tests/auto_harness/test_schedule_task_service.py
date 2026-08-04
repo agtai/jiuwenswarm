@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from jiuwenswarm.agents.harness.common.auto_harness.run_log_status import (
     TERMINAL_STATUSES,
+    read_key_events_reverse,
 )
-from jiuwenswarm.agents.harness.common.auto_harness.scheduler import Scheduler
+from jiuwenswarm.agents.harness.common.auto_harness.scheduler import (
+    NO_EFFECTIVE_TARGET_CHANGE_ERROR,
+    Scheduler,
+    TARGET_TREE_CHANGE_REQUIRED,
+    _sync_append_log,
+)
 from jiuwenswarm.agents.harness.common.auto_harness.service import (
     AutoHarnessService,
     ScheduledTaskExecutionContext,
@@ -48,6 +56,72 @@ _OWNER_SCOPE = {
     "session_id": "session-a",
     "app_id": "desktop",
 }
+
+
+def test_log_append_retries_transient_permission_error(tmp_path, monkeypatch) -> None:
+    log_path = tmp_path / "log.json"
+    real_open = Path.open
+    attempts = 0
+
+    def flaky_open(path: Path, *args, **kwargs):
+        nonlocal attempts
+        if path == log_path and args and args[0] == "a":
+            attempts += 1
+            if attempts < 3:
+                raise PermissionError(13, "transient sharing violation", str(path))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", flaky_open)
+
+    _sync_append_log(log_path, '{"event_type":"harness.message"}\n')
+
+    assert attempts == 3
+    assert log_path.read_text(encoding="utf-8") == '{"event_type":"harness.message"}\n'
+
+
+def test_reverse_key_event_read_is_safe_across_utf8_chunk_boundary(tmp_path) -> None:
+    stage = {
+        "event_type": "harness.stage_result",
+        "stage": "plan",
+        "status": "success",
+    }
+    terminal = {
+        "event_type": "harness.session_finished",
+        "is_terminal": True,
+    }
+    tail = (
+        b'"}\n'
+        + json.dumps(stage, ensure_ascii=False).encode("utf-8")
+        + b"\n"
+        + json.dumps(terminal, ensure_ascii=False).encode("utf-8")
+        + b"\n"
+    )
+    prefix = b'{"event_type":"chat.reasoning","content":"'
+    marker = "测".encode("utf-8")
+    padding = 4097 - len(marker) - len(tail)
+    data = prefix + marker + (b"x" * padding) + tail
+    assert len(data) - 4096 == len(prefix) + 1
+    log_path = tmp_path / "log.json"
+    log_path.write_bytes(data)
+
+    events = read_key_events_reverse(log_path)
+
+    assert events == [terminal, stage]
+
+
+def test_reverse_key_event_read_skips_incomplete_trailing_utf8(tmp_path) -> None:
+    stage = {
+        "event_type": "harness.stage_result",
+        "stage": "plan",
+        "status": "success",
+    }
+    log_path = tmp_path / "log.json"
+    log_path.write_bytes(
+        json.dumps(stage, ensure_ascii=False).encode("utf-8")
+        + b'\n{"event_type":"chat.reasoning","content":"\xe6'
+    )
+
+    assert read_key_events_reverse(log_path) == [stage]
 
 
 def _assert_unknown_response_metadata(
@@ -89,6 +163,14 @@ class _TaskStore:
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
         return self.tasks.get(task_id)
+
+    def list_tasks(self) -> list[dict[str, Any]]:
+        return [dict(task) for task in self.tasks.values()]
+
+    async def enrich_tasks_with_progress(
+        self, tasks: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return [dict(task) for task in tasks]
 
     async def delete_task(self, task_id: str) -> bool:
         if task_id not in self.tasks:
@@ -148,6 +230,44 @@ def _service(task_store: _TaskStore, scheduler: _Scheduler) -> AutoHarnessServic
     service._stream_event_rail = None
     service._scheduled_task_execution_contexts = {}
     return service
+
+
+@pytest.mark.asyncio
+async def test_task_status_distinguishes_store_unavailable_from_missing() -> None:
+    unavailable_service = _service(_TaskStore(), _Scheduler())
+    unavailable_service._task_store = None
+    unavailable = await unavailable_service.get_scheduled_task_status("task-a")
+
+    missing = await _service(_TaskStore(), _Scheduler()).get_scheduled_task_status(
+        "task-a"
+    )
+
+    assert unavailable["code"] == "TASK_STORE_UNAVAILABLE"
+    assert unavailable["error"] == "任务存储未初始化"
+    assert missing["code"] == "TASK_NOT_FOUND"
+    assert missing["error"] == "任务不存在"
+    for result in (unavailable, missing):
+        assert result["task_id"] == "task-a"
+        _assert_unknown_response_metadata(
+            result,
+            access="unknown",
+            legacy_unscoped=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_task_list_distinguishes_store_unavailable_from_empty() -> None:
+    unavailable_service = _service(_TaskStore(), _Scheduler())
+    unavailable_service._task_store = None
+
+    unavailable = await unavailable_service.list_scheduled_tasks()
+    empty = await _service(_TaskStore(), _Scheduler()).list_scheduled_tasks()
+
+    assert unavailable == {
+        "error": "任务存储未初始化",
+        "code": "TASK_STORE_UNAVAILABLE",
+    }
+    assert empty == []
 
 
 def test_schedule_run_fingerprint_normalizes_intent_and_detects_changes() -> None:
@@ -305,6 +425,7 @@ async def test_new_internal_task_is_scoped_and_not_marked_legacy(
 
     raw_task = task_store.get_task(created["task_id"])
     assert raw_task is not None
+    assert "result_contract" not in raw_task
     owner_scope = raw_task["owner_scope"]
     assert all(owner_scope[field] for field in ("channel_id", "session_id", "app_id"))
     status = await service.get_scheduled_task_status(
@@ -452,7 +573,9 @@ async def test_stale_store_writer_preserves_task_and_idempotency_ledger(
 
 
 @pytest.mark.asyncio
-async def test_idempotent_run_replays_after_json_reload_without_trigger(tmp_path) -> None:
+async def test_idempotent_run_replays_after_json_reload_without_trigger(
+    tmp_path,
+) -> None:
     first_store = PersistentTaskStore(tmp_path)
     first_scheduler = _Scheduler()
     first_service = _service(first_store, first_scheduler)
@@ -632,6 +755,7 @@ async def test_task_provenance_survives_reload_list_status_and_replay(tmp_path) 
     assert raw_task["origin_namespace"] == "live_voice"
     assert raw_task["idempotency_key"] == "persisted-command"
     assert raw_task["execution_target"] == _EXECUTION_TARGET
+    assert raw_task["result_contract"] == TARGET_TREE_CHANGE_REQUIRED
 
     reloaded_service = _service(reloaded_store, _Scheduler())
     status = await reloaded_service.get_scheduled_task_status(
@@ -658,10 +782,7 @@ async def test_task_provenance_survives_reload_list_status_and_replay(tmp_path) 
         assert projection["execution_target"] == _EXECUTION_TARGET
         assert projection["provenance"]["owner_scope"] == _OWNER_SCOPE
         assert projection["provenance"]["origin_namespace"] == "live_voice"
-        assert (
-            projection["provenance"]["idempotency_key"]
-            == "persisted-command"
-        )
+        assert projection["provenance"]["idempotency_key"] == "persisted-command"
         assert projection["provenance"]["legacy_unscoped"] is False
     assert replay["task_id"] == created["task_id"]
     assert replay["idempotent_replay"] is True
@@ -838,7 +959,9 @@ async def test_run_task_reports_failure_when_immediate_trigger_is_rejected() -> 
 
 
 @pytest.mark.asyncio
-async def test_run_task_trigger_exception_fails_task_and_releases_owned_context() -> None:
+async def test_run_task_trigger_exception_fails_task_and_releases_owned_context() -> (
+    None
+):
     task_store = _TaskStore()
     scheduler = _Scheduler(trigger_error=RuntimeError("trigger exploded"))
     service = _service(task_store, scheduler)
@@ -864,7 +987,9 @@ async def test_run_task_trigger_exception_fails_task_and_releases_owned_context(
 
 
 @pytest.mark.asyncio
-async def test_run_task_trigger_exception_preserves_context_after_scheduler_claim() -> None:
+async def test_run_task_trigger_exception_preserves_context_after_scheduler_claim() -> (
+    None
+):
     task_store = _TaskStore()
     scheduler = _Scheduler(
         trigger_error=RuntimeError("late trigger error"),
@@ -1589,6 +1714,189 @@ class _BoundExecutionService(_SchedulerService):
             },
             is_complete=False,
         )
+
+
+class _FailingBoundExecutionService(_SchedulerService):
+    def __init__(self, task_id: str) -> None:
+        super().__init__()
+        self.task_id = task_id
+        self.released: list[str] = []
+
+    def get_scheduled_task_execution_context(
+        self,
+        task_id: str,
+    ) -> ScheduledTaskExecutionContext | None:
+        if task_id != self.task_id:
+            return None
+        return ScheduledTaskExecutionContext(object(), object())
+
+    def release_scheduled_task_execution_context(self, task_id: str) -> None:
+        self.released.append(task_id)
+
+    async def run(self, *_args, **_kwargs):
+        if False:
+            yield None
+        raise RuntimeError("execution exploded")
+
+
+class _CompletedBoundExecutionService(_SchedulerService):
+    def __init__(self, task_id: str, target_dir: Path, mutation: str) -> None:
+        super().__init__()
+        self.task_id = task_id
+        self.target_dir = target_dir
+        self.mutation = mutation
+        self.released: list[str] = []
+        self.started = 0
+
+    def get_scheduled_task_execution_context(
+        self,
+        task_id: str,
+    ) -> ScheduledTaskExecutionContext | None:
+        if task_id != self.task_id:
+            return None
+        return ScheduledTaskExecutionContext(object(), object())
+
+    def release_scheduled_task_execution_context(self, task_id: str) -> None:
+        self.released.append(task_id)
+
+    async def run(self, request, *_args, **_kwargs):
+        self.started += 1
+        if self.mutation == "source":
+            (self.target_dir / "generated.py").write_text(
+                "RESULT = 'task one verified'\n",
+                encoding="utf-8",
+            )
+        elif self.mutation == "ignored":
+            ignored_dir = self.target_dir / ".cache"
+            ignored_dir.mkdir()
+            (ignored_dir / "runtime.txt").write_text("runtime\n", encoding="utf-8")
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload={
+                "event_type": "harness.session_finished",
+                "is_terminal": True,
+            },
+            is_complete=False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_one_time_execution_failure_persists_visible_last_error(tmp_path) -> None:
+    task_id = "sch_failure"
+    task_store = PersistentTaskStore(tmp_path)
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "受控任务",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+        }
+    )
+    service = _FailingBoundExecutionService(task_id)
+    scheduler = Scheduler(service, task_store)
+    scheduler._resolve_model = lambda _model_name=None: None
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert stored["last_error"] == "execution exploded"
+    assert stored["execution_history"][-1]["error"] == "execution exploded"
+    assert service.released == [task_id]
+
+
+@pytest.mark.asyncio
+async def test_live_voice_result_contract_rejects_invalid_target(tmp_path) -> None:
+    task_id = "sch_invalid_target"
+    missing_target = tmp_path / "missing"
+    task_store = PersistentTaskStore(tmp_path / "store")
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "create a package and tests",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+            "execution_target": {"project_dir": str(missing_target)},
+            "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+        }
+    )
+    service = _CompletedBoundExecutionService(task_id, missing_target, "source")
+    scheduler = Scheduler(service, task_store)
+    scheduler._resolve_model = lambda _model_name=None: None
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert stored["last_error"].startswith("execution target is not a directory:")
+    assert stored["execution_history"][-1]["status"] == "failed"
+    assert service.started == 0
+    assert service.released == [task_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation", "expected_status"),
+    [("none", "failed"), ("ignored", "failed"), ("source", "success")],
+)
+async def test_live_voice_result_contract_requires_target_tree_change(
+    tmp_path,
+    mutation: str,
+    expected_status: str,
+) -> None:
+    task_id = "sch_target_change"
+    target_dir = tmp_path / "target"
+    target_dir.mkdir()
+    (target_dir / "baseline.py").write_text("BASELINE = True\n", encoding="utf-8")
+    (target_dir / ".gitignore").write_text(".cache/\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(target_dir)], check=True)
+    subprocess.run(
+        ["git", "-C", str(target_dir), "add", "baseline.py", ".gitignore"],
+        check=True,
+    )
+    task_store = PersistentTaskStore(tmp_path / "store")
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "create a package and tests",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+            "execution_target": {"project_dir": str(target_dir)},
+            "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+        }
+    )
+    service = _CompletedBoundExecutionService(task_id, target_dir, mutation)
+    scheduler = Scheduler(service, task_store)
+    scheduler._resolve_model = lambda _model_name=None: None
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == expected_status
+    assert stored["execution_history"][-1]["status"] == expected_status
+    if mutation == "source":
+        assert "last_error" not in stored
+        assert (target_dir / "generated.py").is_file()
+    else:
+        assert stored["last_error"] == NO_EFFECTIVE_TARGET_CHANGE_ERROR
+        assert stored["execution_history"][-1]["error"] == (
+            NO_EFFECTIVE_TARGET_CHANGE_ERROR
+        )
+        assert not (target_dir / "generated.py").exists()
+    assert service.released == [task_id]
 
 
 @pytest.mark.asyncio

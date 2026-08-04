@@ -2211,6 +2211,7 @@ function AppContent() {
                       onInterrupt={handleInterrupt}
                       liveVoiceTaskRequest={request}
                       liveVoiceTaskExecutionContext={liveVoiceTaskExecutionContext}
+                      isConnected={isConnected}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
                       isProcessing={isProcessing}

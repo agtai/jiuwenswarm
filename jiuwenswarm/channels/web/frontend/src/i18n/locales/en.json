@@ -2102,6 +2102,9 @@
       },
       "taskId": "Task ID",
       "status": "Observed status",
+      "monitorState": "Monitor state",
+      "progress": "Progress summary",
+      "lastError": "Last error",
       "source": "Status source",
       "resultSource": "Result source",
       "recoveryStatus": "Recovery status",
@@ -2110,6 +2113,20 @@
       "originSessionId": "Origin session ID",
       "originChannelId": "Origin channel ID",
       "unknown": "unknown",
+      "monitor": {
+        "title": "Background task monitor",
+        "phases": {
+          "idle": "Task {{taskId}} is waiting for monitoring to start.",
+          "polling": "Reading the real state of task {{taskId}}; current status is {{status}}.",
+          "paused-disconnected": "The connection is down, so monitoring for task {{taskId}} is paused. Reconnection will reconcile only the original command.",
+          "reconciling": "Reconciling task {{taskId}} using its original command.",
+          "backoff": "Task {{taskId}} is temporarily unreadable; read-only retry {{retryCount}} is pending.",
+          "terminal": "Task {{taskId}} ended with the real status {{status}}.",
+          "missing": "Task {{taskId}} can no longer be found for the original command. The last trusted facts remain visible and monitoring stopped.",
+          "adapter-error": "Task {{taskId}} returned a response that cannot be adopted safely ({{error}}). The last trusted facts remain visible and monitoring stopped.",
+          "stopped": "Monitoring for task {{taskId}} stopped."
+        }
+      },
       "safetyTitle": "Real side effects:",
       "safetyDisclosure": "Executor AutoHarness; fixed extended_evolve_pipeline; generates or modifies local Harness packages. Live Voice interrupt/exit only stops voice feedback and does not abort schedule.run or an existing task. Cancellation requires the explicit confirmed command and an observed real task ID, and cannot undo changes that already happened. Switching session or project isolates an unresolved command; only returning to its original context can resume reconciliation. Refreshing still loses voice-side task memory, so use the background task list afterward.",
       "contextIsolatedTitle": "Task command isolated",

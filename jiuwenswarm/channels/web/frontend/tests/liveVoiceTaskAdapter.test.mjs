@@ -2,15 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  canAnnounceLiveVoiceTaskTerminal,
   isLiveVoiceTaskResultCurrentContext,
   projectLiveVoiceTaskActivity,
+  projectLiveVoiceTaskMonitorActivity,
   selectLiveVoiceTaskContextInvalidation,
   selectLiveVoiceTaskFeedbackDrainAction,
+  selectLiveVoiceTaskMonitorPredecessor,
+  selectLiveVoiceTaskMonitorStart,
   selectLiveVoiceTaskSafetyDisclosure,
   selectLiveVoiceTaskTranscriptRoute,
+  shouldResumeAfterLiveVoiceTaskSpeech,
 } from '../node_modules/.cache/live-voice-task-adapter/liveVoiceTaskAdapter.mjs';
 
-const confirmedTaskCommand = '确认启动后台演进任务：检查任务适配器';
+const confirmedTaskCommand = '确认启动后台代码优化任务目标是检查任务适配器';
 const executionTargetKey = '["D:\\\\repo","project-a"]';
 
 const visibleTask = {
@@ -170,6 +175,69 @@ test('context drift isolates an in-flight or mutation-unknown command instead of
   );
 });
 
+test('a failed explicit control restarts the trusted nonterminal task monitor without inventing a successor', () => {
+  const runningTask = {
+    ...visibleTask,
+    status: { kind: 'running', raw: 'running', terminal: false },
+    source: 'schedule.status',
+    resultSource: 'status-observation',
+  };
+
+  assert.deepEqual(selectLiveVoiceTaskMonitorStart({ handled: true, outcome: 'failed', command: 'status', task: runningTask, feedback }), {
+    task: runningTask,
+    predecessorTaskId: undefined,
+  });
+  assert.deepEqual(
+    selectLiveVoiceTaskMonitorStart({
+      handled: true,
+      outcome: 'failed',
+      command: 'replace',
+      predecessorTaskId: 'task-a',
+      predecessorCancelled: false,
+      task: runningTask,
+      feedback,
+    }),
+    { task: runningTask, predecessorTaskId: undefined }
+  );
+
+  const successor = { ...runningTask, taskId: 'task-b', commandId: 'command-b' };
+  assert.deepEqual(
+    selectLiveVoiceTaskMonitorStart({
+      handled: true,
+      outcome: 'replaced',
+      command: 'replace',
+      predecessorTaskId: 'task-a',
+      predecessorCancelled: true,
+      task: successor,
+      feedback,
+    }),
+    { task: successor, predecessorTaskId: 'task-a' }
+  );
+  assert.equal(selectLiveVoiceTaskMonitorStart({ handled: true, outcome: 'mutation-unknown', command: 'replace', task: runningTask, feedback }), null);
+  assert.equal(selectLiveVoiceTaskMonitorStart({ handled: true, outcome: 'failed', command: 'cancel', task: visibleTask, feedback }), null);
+});
+
+test('restarting the same successor monitor preserves its predecessor relationship', () => {
+  const successor = {
+    ...visibleTask,
+    taskId: 'task-b',
+    commandId: 'command-b',
+    status: { kind: 'running', raw: 'running', terminal: false },
+  };
+  const statusStart = selectLiveVoiceTaskMonitorStart({
+    handled: true,
+    outcome: 'status',
+    command: 'status',
+    task: successor,
+    feedback,
+  });
+
+  assert.ok(statusStart);
+  assert.equal(selectLiveVoiceTaskMonitorPredecessor('task-b', 'task-a', statusStart), 'task-a');
+  assert.equal(selectLiveVoiceTaskMonitorPredecessor('task-c', 'task-a', statusStart), undefined);
+  assert.equal(selectLiveVoiceTaskMonitorPredecessor('task-b', 'task-old', { ...statusStart, predecessorTaskId: 'task-explicit' }), 'task-explicit');
+});
+
 test('replace activity keeps attempted command, predecessor, successor, conflict, and record provenance separate', () => {
   const predecessor = projectLiveVoiceTaskActivity({
     handled: true,
@@ -237,14 +305,8 @@ test('an asynchronous result stays stale after navigating away and back to the s
 
 test('an asynchronous result is stale when the persisted project target changes', () => {
   const bridge = {};
-  assert.equal(
-    isLiveVoiceTaskResultCurrentContext('session-a', 'session-a', bridge, bridge, 'target-a', 'target-a'),
-    true
-  );
-  assert.equal(
-    isLiveVoiceTaskResultCurrentContext('session-a', 'session-a', bridge, bridge, 'target-a', 'target-b'),
-    false
-  );
+  assert.equal(isLiveVoiceTaskResultCurrentContext('session-a', 'session-a', bridge, bridge, 'target-a', 'target-a'), true);
+  assert.equal(isLiveVoiceTaskResultCurrentContext('session-a', 'session-a', bridge, bridge, 'target-a', 'target-b'), false);
 });
 
 test('drained task feedback may reopen capture while an unrelated Agent is processing', () => {
@@ -284,4 +346,64 @@ test('task feedback cannot reopen capture before its own speech drains or withou
     }),
     'none'
   );
+});
+
+test('monitor projection keeps its health and backend facts outside Chat state', () => {
+  const activity = projectLiveVoiceTaskMonitorActivity(
+    {
+      phase: 'backoff',
+      task: { ...visibleTask, status: { kind: 'running', raw: 'running', terminal: false } },
+      progressSummary: '正在检查测试',
+      lastError: null,
+      errorCode: 'REQUEST_TIMEOUT',
+      errorDetail: 'timeout',
+      retryCount: 2,
+    },
+    '后台任务监控',
+    '只读重试中',
+    'task-predecessor'
+  );
+
+  assert.equal(activity.level, 'warning');
+  assert.equal(activity.predecessorTaskId, 'task-predecessor');
+  assert.equal(activity.successorTaskId, 'task-a');
+  assert.equal(activity.record.role, 'successor');
+  assert.equal(activity.record.monitorState, 'backoff');
+  assert.equal(activity.record.progressSummary, '正在检查测试');
+  assert.equal(activity.record.lastError, null);
+});
+
+test('terminal notification requires one fully safe voice and TTS gap', () => {
+  const safe = {
+    taskDemoEnabled: true,
+    liveVoiceActive: true,
+    interactionBlocked: false,
+    captureOpen: false,
+    isProcessing: false,
+    isThinking: false,
+    coreStatus: 'idle',
+    pendingSpeechCount: 0,
+    activeSpeechKey: null,
+    ownsTtsOutput: true,
+  };
+  assert.equal(canAnnounceLiveVoiceTaskTerminal(safe), true);
+  for (const unsafe of [
+    { taskDemoEnabled: false },
+    { liveVoiceActive: false },
+    { interactionBlocked: true },
+    { captureOpen: true },
+    { isProcessing: true },
+    { isThinking: true },
+    { coreStatus: 'listening' },
+    { pendingSpeechCount: 1 },
+    { activeSpeechKey: 'agent-speech' },
+    { ownsTtsOutput: false },
+  ]) {
+    assert.equal(canAnnounceLiveVoiceTaskTerminal({ ...safe, ...unsafe }), false);
+  }
+});
+
+test('terminal task speech never owns microphone resume', () => {
+  assert.equal(shouldResumeAfterLiveVoiceTaskSpeech('command-feedback'), true);
+  assert.equal(shouldResumeAfterLiveVoiceTaskSpeech('terminal-notification'), false);
 });

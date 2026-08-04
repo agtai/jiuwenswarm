@@ -7,15 +7,34 @@ import {
   LiveVoiceTaskBridge,
   isLiveVoiceTaskCommand,
   normalizeLiveVoiceTaskStatus,
+  shouldFenceLiveVoiceTaskMonitor,
 } from '../node_modules/.cache/live-voice-task-bridge/features/live-voice/liveVoiceTaskBridge.js';
 
 test('the parse-only probe distinguishes fixed task commands from ordinary chat', () => {
   assert.equal(isLiveVoiceTaskCommand('检查进度'), false);
   assert.equal(isLiveVoiceTaskCommand('检查后台任务进度'), true);
   assert.equal(isLiveVoiceTaskCommand('检查后台任务进度。'), true);
+  assert.equal(isLiveVoiceTaskCommand('检查后台代码优化任务进度'), true);
   assert.equal(isLiveVoiceTaskCommand('检查后台演进任务进度'), true);
+  assert.equal(isLiveVoiceTaskCommand('确认取消后台代码优化任务！'), true);
   assert.equal(isLiveVoiceTaskCommand('确认取消后台演进任务！'), true);
+  assert.equal(isLiveVoiceTaskCommand('请分析代码优化方案'), false);
   assert.equal(isLiveVoiceTaskCommand('帮我分析当前仓库'), false);
+});
+
+test('only a status or confirmed control command fences the active monitor', () => {
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('确认启动后台演进任务：检查日志'), false);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('检查后台任务进度'), true);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('检查后台代码优化任务进度'), true);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('取消后台代码优化任务'), false);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('确认取消后台代码优化任务'), true);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('替换后台代码优化任务目标是修复测试'), false);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('确认替换后台代码优化任务目标是修复测试'), true);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('取消后台演进任务'), false);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('确认取消后台演进任务'), true);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('替换后台演进任务：修复测试'), false);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('确认替换后台演进任务：修复测试'), true);
+  assert.equal(shouldFenceLiveVoiceTaskMonitor('普通聊天'), false);
 });
 
 function finalInput(text, captureKey = 'capture-1') {
@@ -83,7 +102,14 @@ test('only the exact Chinese command grammar is recognized', async () => {
   const { gateway, calls } = makeGateway();
   const bridge = new LiveVoiceTaskBridge(gateway);
 
-  for (const [index, text] of ['请检查进度', '确认启动后台演进任务目标', '确认启动后台演进任务：', '确认取消后台任务'].entries()) {
+  for (const [index, text] of [
+    '请检查进度',
+    '确认启动后台代码优化任务目标',
+    '确认启动后台代码优化任务：',
+    '确认启动后台演进任务目标',
+    '确认启动后台演进任务：',
+    '确认取消后台任务',
+  ].entries()) {
     const result = await bridge.handle(finalInput(text, `strict-${index}`));
     assert.equal(result.handled, false);
   }
@@ -91,15 +117,30 @@ test('only the exact Chinese command grammar is recognized', async () => {
   assert.deepEqual(calls, []);
 });
 
-test('spoken create separators preserve a narrow confirmed command and the query', async () => {
-  for (const [index, separator] of ['：', ':', '，', ',', ' ', '冒号'].entries()) {
+test('spoken create separators preserve a narrow confirmed code-optimization command and the query', async () => {
+  for (const [index, separator] of [
+    '：',
+    ':',
+    '，',
+    ',',
+    ' ',
+    '冒号',
+    '冒号，',
+    '任务内容是',
+    '任务内容为',
+    '，任务内容是',
+    '任务内容是：',
+    '目标是',
+    '目标为',
+    '，目标是',
+  ].entries()) {
     const { gateway, calls } = makeGateway();
     const bridge = new LiveVoiceTaskBridge(gateway);
 
-    const result = await bridge.handle(finalInput(`确认启动后台演进任务${separator}目标。`, `separator-${index}`));
+    const result = await bridge.handle(finalInput(`确认启动后台代码优化任务${separator}生成测试。`, `separator-${index}`));
 
     assert.equal(result.outcome, 'started');
-    assert.equal(calls[0].request.query, '目标');
+    assert.equal(calls[0].request.query, '生成测试');
   }
 });
 
@@ -146,6 +187,44 @@ test('unconfirmed create, replace, and cancel commands require confirmation with
     assert.equal(result.feedback.code, 'explicit-confirmation-required');
   }
   assert.deepEqual(calls, []);
+});
+
+test('unconfirmed code-optimization commands require confirmation with zero gateway calls', async () => {
+  const { gateway, calls } = makeGateway();
+  const bridge = new LiveVoiceTaskBridge(gateway);
+  const commands = [
+    '启动后台代码优化任务任务内容是目标 A',
+    '替换后台代码优化任务目标是目标 B',
+    '取消后台代码优化任务',
+  ];
+
+  for (const [index, text] of commands.entries()) {
+    const result = await bridge.handle(finalInput(text, `code-optimization-confirm-${index}`));
+    assert.equal(result.outcome, 'confirmation-required');
+    assert.equal(result.feedback.code, 'explicit-confirmation-required');
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('confirmed code-optimization aliases use the existing create, status, replace, and cancel controls', async () => {
+  const { gateway, calls } = makeGateway();
+  const bridge = new LiveVoiceTaskBridge(gateway);
+
+  const started = await bridge.handle(finalInput('确认启动后台代码优化任务目标是目标 A', 'code-optimization-create'));
+  const status = await bridge.handle(finalInput('检查后台代码优化任务进度', 'code-optimization-status'));
+  const replaced = await bridge.handle(finalInput('确认替换后台代码优化任务任务内容是目标 B', 'code-optimization-replace'));
+  const cancelled = await bridge.handle(finalInput('确认取消后台代码优化任务', 'code-optimization-cancel'));
+
+  assert.equal(started.outcome, 'started');
+  assert.equal(status.outcome, 'status');
+  assert.equal(replaced.outcome, 'replaced');
+  assert.equal(cancelled.outcome, 'cancelled');
+  assert.deepEqual(
+    calls.map(call => call.method),
+    ['run', 'status', 'cancel', 'run', 'cancel']
+  );
+  assert.equal(calls[0].request.query, '目标 A');
+  assert.equal(calls[3].request.query, '目标 B');
 });
 
 test('confirmed create uses the fixed side-effecting pipeline and saves the real task id', async () => {
@@ -999,4 +1078,35 @@ test('a server idempotency conflict exposes only an audit id and never labels it
   assert.equal(result.successorTaskId, undefined);
   assert.equal(result.conflictingTaskId, 'existing-task');
   assert.deepEqual(calls.map(call => call.method), ['run']);
+});
+
+test('a monitor observation updates the Bridge only for the exact current task and target', async () => {
+  const { gateway } = makeGateway({
+    owner: {
+      sessionId: 'session-live-voice',
+      projectDir: 'D:\\work\\live-voice',
+      projectId: 'project-live-voice',
+    },
+    run: async () => ({ task_id: 'task-monitor', status: 'running', execution_target: executionTarget }),
+  });
+  const bridge = new LiveVoiceTaskBridge(gateway, { commandIdFactory: () => 'command-monitor' });
+  const started = await startTask(bridge, '监控目标', 'monitor-create');
+  const terminal = {
+    ...started.task,
+    status: { kind: 'success', raw: 'completed', terminal: true },
+    source: 'schedule.status',
+    resultSource: 'status-observation',
+  };
+
+  assert.equal(bridge.applyMonitorObservation(terminal), true);
+  assert.equal(bridge.getSnapshot().lastVisibleTask.status.raw, 'completed');
+  assert.equal(bridge.applyMonitorObservation({ ...terminal, taskId: 'task-foreign' }), false);
+  assert.equal(
+    bridge.applyMonitorObservation({
+      ...terminal,
+      executionTarget: { ...terminal.executionTarget, projectDir: 'D:\\other' },
+    }),
+    false
+  );
+  assert.equal(bridge.getSnapshot().lastVisibleTask.taskId, 'task-monitor');
 });

@@ -45,6 +45,106 @@ function PrimaryActionIcon({ status }: { status: LiveVoiceVisualState }) {
   return <Mic size={17} strokeWidth={2} />;
 }
 
+function TaskActivityPanel({
+  taskSafetyDisclosure,
+  taskActivity,
+}: {
+  taskSafetyDisclosure?: string;
+  taskActivity: LiveVoiceTaskActivity | null;
+}) {
+  const { t } = useTranslation();
+  if (!taskSafetyDisclosure && !taskActivity) return null;
+  return (
+    <div className="live-voice-demo__task" data-level={taskActivity?.level ?? 'warning'} role={taskActivity?.level === 'error' ? 'alert' : 'status'}>
+      {taskSafetyDisclosure && (
+        <span className="live-voice-demo__task-safety" role="note">
+          <strong>{t('liveVoice.task.safetyTitle')}</strong>
+          {taskSafetyDisclosure}
+        </span>
+      )}
+      {taskActivity && (
+        <>
+          <span className="live-voice-demo__task-title">{taskActivity.title}</span>
+          <span className="live-voice-demo__task-detail">{taskActivity.detail}</span>
+          {taskActivity.commandId && (
+            <span className="live-voice-demo__task-fact">
+              {t('liveVoice.task.commandId')}: <code>{taskActivity.commandId}</code>
+            </span>
+          )}
+          {taskActivity.predecessorTaskId && (
+            <span className="live-voice-demo__task-fact">
+              {t('liveVoice.task.predecessorTaskId')}: <code>{taskActivity.predecessorTaskId}</code>
+            </span>
+          )}
+          {taskActivity.successorTaskId && (
+            <span className="live-voice-demo__task-fact">
+              {t('liveVoice.task.successorTaskId')}: <code>{taskActivity.successorTaskId}</code>
+            </span>
+          )}
+          {taskActivity.conflictingTaskId && (
+            <span className="live-voice-demo__task-fact">
+              {t('liveVoice.task.conflictingTaskId')}: <code>{taskActivity.conflictingTaskId}</code>
+            </span>
+          )}
+          {taskActivity.record && (
+            <>
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.recordRole')}: <code>{t(`liveVoice.task.roles.${taskActivity.record.role}`)}</code>
+              </span>
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.taskId')}: <code>{taskActivity.record.taskId}</code>
+              </span>
+              {taskActivity.record.commandId && taskActivity.record.commandId !== taskActivity.commandId && (
+                <span className="live-voice-demo__task-fact">
+                  {t('liveVoice.task.taskCommandId')}: <code>{taskActivity.record.commandId}</code>
+                </span>
+              )}
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.status')}: <code>{taskActivity.record.status}</code>
+              </span>
+              {taskActivity.record.monitorState && (
+                <>
+                  <span className="live-voice-demo__task-fact">
+                    {t('liveVoice.task.monitorState')}: <code>{taskActivity.record.monitorState}</code>
+                  </span>
+                  <span className="live-voice-demo__task-fact">
+                    {t('liveVoice.task.progress')}: <code>{taskActivity.record.progressSummary ?? t('liveVoice.task.unknown')}</code>
+                  </span>
+                  <span className="live-voice-demo__task-fact">
+                    {t('liveVoice.task.lastError')}: <code>{taskActivity.record.lastError ?? t('liveVoice.task.unknown')}</code>
+                  </span>
+                </>
+              )}
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.source')}: <code>{taskActivity.record.source}</code>
+              </span>
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.resultSource')}: <code>{taskActivity.record.resultSource}</code>
+              </span>
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.recoveryStatus')}: <code>{taskActivity.record.recoveryStatus}</code>
+              </span>
+              <span className="live-voice-demo__task-fact" title={taskActivity.record.executionTarget.projectDir ?? t('liveVoice.task.unknown')}>
+                {t('liveVoice.task.projectDir')}: <code>{taskActivity.record.executionTarget.projectDir ?? t('liveVoice.task.unknown')}</code>
+              </span>
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.projectId')}: <code>{taskActivity.record.executionTarget.projectId ?? t('liveVoice.task.unknown')}</code>
+              </span>
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.originSessionId')}: <code>{taskActivity.record.executionTarget.originSessionId ?? t('liveVoice.task.unknown')}</code>
+              </span>
+              <span className="live-voice-demo__task-fact">
+                {t('liveVoice.task.originChannelId')}: <code>{taskActivity.record.executionTarget.originChannelId ?? t('liveVoice.task.unknown')}</code>
+              </span>
+            </>
+          )}
+          {taskActivity.disclosure && <span className="live-voice-demo__task-disclosure">{taskActivity.disclosure}</span>}
+        </>
+      )}
+    </div>
+  );
+}
+
 export function LiveVoiceDemoBar({
   active,
   available,
@@ -66,22 +166,25 @@ export function LiveVoiceDemoBar({
 
   if (!active) {
     return (
-      <div className="live-voice-demo live-voice-demo--inactive" data-testid="live-voice-demo">
-        <span className="live-voice-demo__launch-wrap" title={!available ? resolvedUnavailableMessage : undefined}>
-          <button
-            type="button"
-            className="live-voice-demo__launch"
-            disabled={!available}
-            aria-label={t('liveVoice.enable')}
-            aria-describedby={!available ? unavailableHintId : undefined}
-            aria-pressed={false}
-            onClick={onEnable}
-          >
-            <Mic size={17} strokeWidth={2} aria-hidden="true" />
-            <span>{t('liveVoice.label')}</span>
-            <span className="live-voice-demo__experimental">{t('liveVoice.experimental')}</span>
-          </button>
-        </span>
+      <div className={`live-voice-demo live-voice-demo--inactive${taskActivity ? ' live-voice-demo--with-task' : ''}`} data-testid="live-voice-demo">
+        <div className="live-voice-demo__inactive-actions">
+          <span className="live-voice-demo__launch-wrap" title={!available ? resolvedUnavailableMessage : undefined}>
+            <button
+              type="button"
+              className="live-voice-demo__launch"
+              disabled={!available}
+              aria-label={t('liveVoice.enable')}
+              aria-describedby={!available ? unavailableHintId : undefined}
+              aria-pressed={false}
+              onClick={onEnable}
+            >
+              <Mic size={17} strokeWidth={2} aria-hidden="true" />
+              <span>{t('liveVoice.label')}</span>
+              <span className="live-voice-demo__experimental">{t('liveVoice.experimental')}</span>
+            </button>
+          </span>
+        </div>
+        {taskActivity && <TaskActivityPanel taskSafetyDisclosure={taskSafetyDisclosure} taskActivity={taskActivity} />}
         {!available && (
           <span id={unavailableHintId} className="live-voice-demo__sr-only">
             {resolvedUnavailableMessage}
@@ -133,85 +236,7 @@ export function LiveVoiceDemoBar({
           {transcript}
         </div>
 
-        {(taskSafetyDisclosure || taskActivity) && (
-          <div className="live-voice-demo__task" data-level={taskActivity?.level ?? 'warning'} role={taskActivity?.level === 'error' ? 'alert' : 'status'}>
-            {taskSafetyDisclosure && (
-              <span className="live-voice-demo__task-safety" role="note">
-                <strong>{t('liveVoice.task.safetyTitle')}</strong>
-                {taskSafetyDisclosure}
-              </span>
-            )}
-            {taskActivity && (
-              <>
-                <span className="live-voice-demo__task-title">{taskActivity.title}</span>
-                <span className="live-voice-demo__task-detail">{taskActivity.detail}</span>
-                {taskActivity.commandId && (
-                  <span className="live-voice-demo__task-fact">
-                    {t('liveVoice.task.commandId')}: <code>{taskActivity.commandId}</code>
-                  </span>
-                )}
-                {taskActivity.predecessorTaskId && (
-                  <span className="live-voice-demo__task-fact">
-                    {t('liveVoice.task.predecessorTaskId')}: <code>{taskActivity.predecessorTaskId}</code>
-                  </span>
-                )}
-                {taskActivity.successorTaskId && (
-                  <span className="live-voice-demo__task-fact">
-                    {t('liveVoice.task.successorTaskId')}: <code>{taskActivity.successorTaskId}</code>
-                  </span>
-                )}
-                {taskActivity.conflictingTaskId && (
-                  <span className="live-voice-demo__task-fact">
-                    {t('liveVoice.task.conflictingTaskId')}: <code>{taskActivity.conflictingTaskId}</code>
-                  </span>
-                )}
-                {taskActivity.record && (
-                  <>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.recordRole')}: <code>{t(`liveVoice.task.roles.${taskActivity.record.role}`)}</code>
-                    </span>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.taskId')}: <code>{taskActivity.record.taskId}</code>
-                    </span>
-                    {taskActivity.record.commandId && taskActivity.record.commandId !== taskActivity.commandId && (
-                      <span className="live-voice-demo__task-fact">
-                        {t('liveVoice.task.taskCommandId')}: <code>{taskActivity.record.commandId}</code>
-                      </span>
-                    )}
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.status')}: <code>{taskActivity.record.status}</code>
-                    </span>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.source')}: <code>{taskActivity.record.source}</code>
-                    </span>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.resultSource')}: <code>{taskActivity.record.resultSource}</code>
-                    </span>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.recoveryStatus')}: <code>{taskActivity.record.recoveryStatus}</code>
-                    </span>
-                    <span
-                      className="live-voice-demo__task-fact"
-                      title={taskActivity.record.executionTarget.projectDir ?? t('liveVoice.task.unknown')}
-                    >
-                      {t('liveVoice.task.projectDir')}: <code>{taskActivity.record.executionTarget.projectDir ?? t('liveVoice.task.unknown')}</code>
-                    </span>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.projectId')}: <code>{taskActivity.record.executionTarget.projectId ?? t('liveVoice.task.unknown')}</code>
-                    </span>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.originSessionId')}: <code>{taskActivity.record.executionTarget.originSessionId ?? t('liveVoice.task.unknown')}</code>
-                    </span>
-                    <span className="live-voice-demo__task-fact">
-                      {t('liveVoice.task.originChannelId')}: <code>{taskActivity.record.executionTarget.originChannelId ?? t('liveVoice.task.unknown')}</code>
-                    </span>
-                  </>
-                )}
-                {taskActivity.disclosure && <span className="live-voice-demo__task-disclosure">{taskActivity.disclosure}</span>}
-              </>
-            )}
-          </div>
-        )}
+        <TaskActivityPanel taskSafetyDisclosure={taskSafetyDisclosure} taskActivity={taskActivity} />
 
         <div className="live-voice-demo__actions">
           <button

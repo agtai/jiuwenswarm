@@ -34,6 +34,7 @@ The short/full distinction and mandatory/conditional distinction are independent
 | `SOL_MODULE_PRE_REVIEWS_2026-08-03.md` | Frozen detailed D-031/ACG/CR-A/SR-A/SS-A/TC-A Sol design record; not current status or execution order |
 | `W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md` | Dated five-candidate evidence, Sol implementation reviews, and post-commit correction record; STATUS owns current progress |
 | `W1_X2_P1B_REVIEW_2026-08-04.md` | Detailed W1-X2/P1B implementation evidence, W1-S3 judgment, three review passes, corrections, and validation gaps |
+| `D031_IMPLEMENTATION_REVIEW_2026-08-04.md` | Detailed D-031 minimal monitor boundary, scenario evidence, review passes, automated verification, and real-service gap |
 | `DOCUMENTATION_RULES.md` | Authority, routing, anti-duplication, and synchronization rules |
 | `decisions/DECISIONS.md` | Accepted decisions and their rationale/history |
 | `architecture/FULL_SOLUTION_2026-07-30.md` | Dated immutable complete solution snapshot |

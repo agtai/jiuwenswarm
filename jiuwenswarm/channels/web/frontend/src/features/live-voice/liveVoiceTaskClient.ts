@@ -2,7 +2,11 @@ import { LIVE_VOICE_AUTO_HARNESS_PIPELINE, type LiveVoiceTaskGateway } from './l
 
 export const LIVE_VOICE_TASK_ORIGIN_NAMESPACE = 'live_voice' as const;
 
-export type LiveVoiceTaskRequest = (method: string, params?: Record<string, unknown>) => Promise<unknown>;
+export type LiveVoiceTaskRequest = (
+  method: string,
+  params?: Record<string, unknown>,
+  options?: { signal?: AbortSignal }
+) => Promise<unknown>;
 
 export interface LiveVoiceTaskExecutionContext {
   /** Absolute project path captured from the persisted chat session. */
@@ -117,6 +121,8 @@ export function createLiveVoiceTaskGateway({ request, sessionId, executionContex
       sessionId: requireRunnableSessionId(sessionId),
       projectDir: normalizedExecutionContext?.projectDir ?? '',
       projectId: normalizedExecutionContext?.projectId ?? null,
+      channelId: 'web',
+      appId: '',
     },
 
     run({ query, pipeline, commandId }) {
@@ -129,19 +135,19 @@ export function createLiveVoiceTaskGateway({ request, sessionId, executionContex
       });
     },
 
-    listByCommand(commandId) {
+    listByCommand(commandId, options) {
       return request('schedule.list', {
         ...commonParams(),
         origin_namespace: LIVE_VOICE_TASK_ORIGIN_NAMESPACE,
         idempotency_key: commandId,
-      });
+      }, options);
     },
 
-    status(taskId) {
+    status(taskId, options) {
       return request('schedule.status', {
         ...commonParams(),
         task_id: taskId,
-      });
+      }, options);
     },
 
     cancel(taskId) {

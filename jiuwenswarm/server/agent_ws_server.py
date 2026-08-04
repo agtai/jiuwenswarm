@@ -8248,13 +8248,13 @@ class AgentWebSocketServer:
                     request,
                     resolve_request_project_dir(request),
                 )
-                tasks = await self._scheduler_service.list_scheduled_tasks(
+                listed = await self._scheduler_service.list_scheduled_tasks(
                     owner_scope=owner_scope,
                     requester_execution_target=requester_execution_target,
                     origin_namespace=params.get("origin_namespace"),
                     idempotency_key=params.get("idempotency_key"),
                 )
-                payload = {"tasks": tasks}
+                payload = listed if isinstance(listed, dict) else {"tasks": listed}
 
             elif action == "status":
                 task_id = params.get("task_id", "")

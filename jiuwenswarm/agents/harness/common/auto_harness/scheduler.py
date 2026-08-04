@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import subprocess
+import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -24,12 +27,82 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+TARGET_TREE_CHANGE_REQUIRED = "target_tree_change_required"
+NO_EFFECTIVE_TARGET_CHANGE_ERROR = (
+    "NO_EFFECTIVE_TARGET_CHANGE: target project has no file changes"
+)
+_LOG_APPEND_OPEN_RETRY_DELAYS_SECONDS = (0.0, 0.01, 0.05, 0.1, 0.25, 0.5)
+
 
 def _sync_append_log(log_path: Path, line: str) -> None:
     """Synchronous append+flush for log file — called via asyncio.to_thread."""
-    with log_path.open("a", encoding="utf-8") as f:
-        f.write(line)
-        f.flush()
+    last_error: PermissionError | None = None
+    for delay in _LOG_APPEND_OPEN_RETRY_DELAYS_SECONDS:
+        if delay:
+            time.sleep(delay)
+        try:
+            stream = log_path.open("a", encoding="utf-8")
+        except PermissionError as exc:
+            last_error = exc
+            continue
+        with stream:
+            stream.write(line)
+            stream.flush()
+        return
+    assert last_error is not None
+    raise last_error
+
+
+def _snapshot_target_tree(project_dir: str) -> str:
+    root = Path(project_dir).resolve()
+    if not root.is_dir():
+        raise RuntimeError(f"execution target is not a directory: {root}")
+
+    def run_git(*args: str) -> bytes:
+        completed = subprocess.run(
+            ["git", "-C", str(root), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"failed to inspect execution target: {detail}")
+        return completed.stdout
+
+    digest = hashlib.sha256()
+    digest.update(run_git("status", "--porcelain=v2", "-z", "--untracked-files=all"))
+    raw_paths = run_git(
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ).split(b"\0")
+    for raw_relative in sorted(path for path in raw_paths if path):
+        relative = raw_relative.decode("utf-8")
+        path = root / Path(relative)
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            if path.is_symlink():
+                digest.update(b"L\0")
+                digest.update(str(path.readlink()).encode("utf-8"))
+            elif not path.exists():
+                digest.update(b"M\0")
+            elif path.is_dir():
+                digest.update(b"D\0")
+            else:
+                digest.update(b"F\0")
+                with path.open("rb") as stream:
+                    while chunk := stream.read(1024 * 1024):
+                        digest.update(chunk)
+        except OSError as exc:
+            raise RuntimeError(
+                f"failed to read execution target file {relative}: {exc}"
+            ) from exc
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 class Scheduler:
@@ -432,8 +505,25 @@ class Scheduler:
         log_path = self._task_store.get_log_path(task_id, execution_id)
         final_status = "success"
         error_msg = ""
+        target_tree_before: str | None = None
 
         try:
+            if task.get("result_contract") == TARGET_TREE_CHANGE_REQUIRED:
+                execution_target = task.get("execution_target")
+                project_dir = (
+                    execution_target.get("project_dir")
+                    if isinstance(execution_target, dict)
+                    else None
+                )
+                if not isinstance(project_dir, str) or not project_dir.strip():
+                    raise RuntimeError(
+                        "execution target is required for target change validation"
+                    )
+                target_tree_before = await asyncio.to_thread(
+                    _snapshot_target_tree,
+                    project_dir,
+                )
+
             logger.info(
                 "[Scheduler] Using task-bound agent for task %s: %s",
                 task_id,
@@ -542,6 +632,32 @@ class Scheduler:
                 if result["failed"]:
                     final_status = "failed"
                     error_msg = result["error"]
+            if (
+                final_status == "success"
+                and task.get("result_contract") == TARGET_TREE_CHANGE_REQUIRED
+            ):
+                execution_target = task.get("execution_target")
+                project_dir = (
+                    execution_target.get("project_dir")
+                    if isinstance(execution_target, dict)
+                    else None
+                )
+                try:
+                    if not isinstance(project_dir, str) or not project_dir.strip():
+                        raise RuntimeError(
+                            "execution target is required for target change validation"
+                        )
+                    target_tree_after = await asyncio.to_thread(
+                        _snapshot_target_tree,
+                        project_dir,
+                    )
+                except Exception as exc:
+                    final_status = "failed"
+                    error_msg = f"TARGET_CHANGE_VALIDATION_FAILED: {exc}"
+                else:
+                    if target_tree_after == target_tree_before:
+                        final_status = "failed"
+                        error_msg = NO_EFFECTIVE_TARGET_CHANGE_ERROR
 
             # Record execution
             completed_at = datetime.now(timezone.utc)
@@ -558,10 +674,13 @@ class Scheduler:
             if final_status != "cancelled":
                 is_one_time = task.get("is_one_time", False)
                 if is_one_time:
-                    await self._task_store.update_task(task_id, {
+                    terminal_updates = {
                         "status": final_status,
                         "current_execution_id": None,
-                    })
+                    }
+                    if final_status == "failed":
+                        terminal_updates["last_error"] = error_msg or "任务执行失败"
+                    await self._task_store.update_task(task_id, terminal_updates)
                     logger.info("[Scheduler] One-time task %s finished with status: %s", task_id, final_status)
                 else:
                     next_run = completed_at + timedelta(hours=interval_hours)

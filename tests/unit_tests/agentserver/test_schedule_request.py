@@ -250,9 +250,10 @@ class _FailedMutationService:
 
 
 class _OwnerScopeService:
-    def __init__(self) -> None:
+    def __init__(self, list_result=None) -> None:
         self.run_kwargs: dict | None = None
         self.list_kwargs: dict | None = None
+        self.list_result = [] if list_result is None else list_result
 
     async def run_task(
         self,
@@ -264,9 +265,9 @@ class _OwnerScopeService:
         self.run_kwargs = kwargs
         return {"task_id": "sch_scoped", "status": "running"}
 
-    async def list_scheduled_tasks(self, **kwargs) -> list[dict]:
+    async def list_scheduled_tasks(self, **kwargs):
         self.list_kwargs = kwargs
-        return []
+        return self.list_result
 
 
 @pytest.mark.asyncio
@@ -760,3 +761,52 @@ async def test_schedule_run_and_list_derive_owner_scope_from_request(monkeypatch
     assert service.run_kwargs["context_release"] is not None
     service.run_kwargs["context_release"]()
     assert manager.unpinned == [facade]
+
+
+@pytest.mark.asyncio
+async def test_schedule_list_preserves_store_unavailable_response(monkeypatch) -> None:
+    server = _ScheduleServerHarness.__new__(_ScheduleServerHarness)
+    service = _OwnerScopeService(
+        {
+            "error": "任务存储未初始化",
+            "code": "TASK_STORE_UNAVAILABLE",
+        }
+    )
+    server._agent_manager = _FailIfAskedForAgent()
+    server._scheduler_service = service
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "encode_agent_response_for_wire",
+        lambda response, response_id: {
+            "type": "res",
+            "id": response_id,
+            "ok": response.ok,
+            "payload": response.payload,
+        },
+    )
+    ws = _FakeWebSocket()
+    request = AgentRequest(
+        request_id="req-list-unavailable",
+        channel_id="web",
+        session_id="session-real",
+        metadata={"app_id": "desktop-real"},
+        params={
+            "origin_namespace": "live_voice",
+            "idempotency_key": "command-1",
+            "project_dir": "D:/work/project-a",
+            "project_id": "project-a",
+        },
+    )
+
+    await server.handle_schedule_request_for_test(
+        ws,
+        request,
+        asyncio.Lock(),
+        "list",
+    )
+
+    assert ws.sent[0]["ok"] is True
+    assert ws.sent[0]["payload"] == {
+        "error": "任务存储未初始化",
+        "code": "TASK_STORE_UNAVAILABLE",
+    }

@@ -74,6 +74,7 @@ interface ChatPanelProps {
   onInterrupt: (newInput?: string) => void;
   liveVoiceTaskRequest?: LiveVoiceTaskRequest;
   liveVoiceTaskExecutionContext?: LiveVoiceTaskExecutionContext | null;
+  isConnected: boolean;
   onCancel: () => void;
   onSwitchMode: (mode: AgentMode) => void;
   isProcessing: boolean;
@@ -590,6 +591,7 @@ export function ChatPanel({
   onInterrupt,
   liveVoiceTaskRequest,
   liveVoiceTaskExecutionContext = null,
+  isConnected,
   onCancel,
   onSwitchMode,
   isProcessing,
@@ -919,6 +921,7 @@ export function ChatPanel({
     messages,
     isProcessing,
     isThinking,
+    isConnected,
     mode,
     interactionBlocked: liveVoiceInteractionBlocked,
     newSessionPromotion,
