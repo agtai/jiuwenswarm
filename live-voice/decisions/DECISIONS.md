@@ -519,3 +519,32 @@
 - 原因：一个短、精确、依赖可判定的滚动计划既能让 DeepSeek-V4-Flash 等执行模型在不重做架构推理的情况下编码，也避免 Sol 把整月计划过度细化成会快速失真的微任务。新的正式目录和单一薄接线例外让三条轨能够并行，又不会继续把临时 Demo 组织成第二套平台。
 - 影响：文档 reconciliation 完成后先形成一个纯文档 commit 候选；取得精确 commit 批准并提交后，切换非 Sol 模型执行 `W1-K1`/`W1-X1`。Sol 随实际 diff 执行 W1-S1/S2/S3，不亲自承担已冻结合同下的常规编码。相关代码包可以按 coherent boundary 共用后审和 commit，但每个 commit/push 仍需根 `AGENTS.md` 要求的独立精确批准。
 - 重新评估条件：W1-K1 超过两天仍不能关闭；正式目录与仓库部署边界不兼容；单 lane 无法在 Week 1 建立三轨 fake vertical；真实 Provider/Executor/Windows 条件改变 critical path；某包必须新增 authority/state/cancel/error/durability 语义；或用户改变模型分工、里程碑、并行资源与风险容忍度。
+
+## D-049 W1-K1 改由 Sol 重新实现，非 Sol 转为参考实现后的有界执行
+
+- 日期：2026-08-03
+- 状态：Accepted（替代 D-048 中 W1-K1 由非 Sol 实现、Sol 只做 W1-S1 的分工；其他里程碑和包依赖不变）
+- 背景：DeepSeek 先后提交 `a5f91654`、`ca3836ba`、`1b9d3b83`、`a1c6d3d2` 和 `6ce74a4b` 五个从同一 `73448519` 基线产生的替换候选。连续五轮 Sol review 后，15 类修正中仅 Attempt 默认 lifecycle 一类基本完成，Event sequence/causation、TurnCommit、parent、rule immutability、response fence、cancel、JSON boundary、Result replay、scope/capability 和 event authority 等跨语言语义仍有阻断问题；focused tests 全绿仍未覆盖这些反例。详细记录见 [W1-K1 implementation review](../W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md)。这已经满足 D-048 的 W1-K1 超时、语义分支返回 Sol 和用户改变模型分工的重新评估条件。
+- 代码来源决策：保留 `agtai/hx/0803_live_voice_ds` 及其最新 `6ce74a4b` 候选作为审查历史和可选素材，不删除、不继续 force-update，也不把它标记为已接受实现；五轮候选 SHA 全部记录在 review record 中，但前四个被替换且没有独立 remote ref 的对象不作为长期集成来源。Sol 从干净的 `hx/0803_live_voice` 基线建立独立工作分支并重新实现 W1-K1；不在 `6ce74a4b` 上继续补丁，不整体 merge 或 cherry-pick DeepSeek 候选。只有逐项对照 ACG 和反例后确认正确的 fixture、测试思路、枚举/错误等机械片段可以选择性复用。
+- 模型分工决策：Sol 直接负责 W1-K1，以及其他需要建立或改变 shared protocol、authority、identity、state、transition、cancel、commit、fence、security、concurrency 或 durability 语义的 Tier 3 核心参考实现和首组反例。DeepSeek/其他非 Sol 模型继续负责已有参考实现后的精确 Python/TypeScript 转换、fixture 扩充、普通 Port/Adapter/UI、文档和机械修改；遇到新语义选择立即返回 Sol。
+- 流程决策：W1-S1 仍是 P1/P2/P3alpha 消费 shared kernel 前的依赖条件，但 W1-K1 不再采用“非 Sol 修改、Sol 重复后审”的第六轮流程。Sol 先以共同 scenario oracle 驱动 Python/TypeScript 实现，再运行完整 Tier 3 反例与受影响回归。非 Sol 后续工作不得用新增测试去合理化候选行为，也不得把旧候选 manifest 当成执行中的协议来源。
+- 原因：五轮结果说明问题不在缺少局部修改清单，而在实现没有形成跨 identity、state、authority、replay、cancel 和 JSON 边界的一致模型。继续在同一结构上逐项补丁的预计成本和引入新问题的风险已经高于由设计 owner 直接建立参考实现；保留候选历史仍可避免丢失测试素材和已完成的机械工作。
+- 影响：D-048 的 dated Week 1 plan 保留为历史执行合同，并通过顶部提示和 STATUS 指向本决策，不静默改写原始 owner 字段。`W1-X1` 与不改变核心语义的 Tier 0/1 有界包仍可由非 Sol 并行执行。当前主分支没有集成任何 W1-K1 候选，Demo Replacement Ledger 不增加分值。
+- 重新评估条件：Sol 已建立稳定参考实现和共享场景，后续任务只剩无语义选择的等价转换；新的执行模型能在独立盲测中一次满足 Tier 3 oracle；或用户重新调整成本、速度和模型责任。
+
+## D-050 v2 canonical JSON 的整数采用跨 Python/TypeScript 安全范围
+
+- 日期：2026-08-04
+- 状态：Accepted
+- 背景：ACG 要求 Python 与 TypeScript 对同一 v2 JSON 产生相同 canonical UTF-8 bytes。JavaScript `number` 无法精确表示超出 `2^53-1` 的整数；若 Python 接受更大整数，两端可能在 fingerprint、幂等和事件冲突判断上得到不同事实。
+- 决策：v2 critical kernel 只接受绝对值不超过 `9007199254740991` 的整数和整数值浮点数；超出范围返回 `INVALID_SAFE_INTEGER`。其余数字必须有限；canonical helper 不选择或内置新的 digest 算法。
+- 影响：共享 fixture 同时验证安全范围、非有限数字和 canonical bytes。未来如需更大计数器或业务整数，必须使用明确的字符串/新类型编码并经过新合同决策，不能让 Python 单边扩大范围。
+- 重新评估条件：v2 数字模型改为精确十进制/大整数编码，或所有消费端采用能够证明相同 canonical 数字语义的新表示。
+
+## D-051 W1-K1 Sol 候选直接保留在当前开发分支的未提交工作区
+
+- 日期：2026-08-04
+- 状态：Accepted（按用户本次明确执行指令，替代 D-049 中“另建实现分支”的操作安排；代码来源和模型分工不变）
+- 决策：W1-K1 从 `73448519be9ee7cb2bb384e8aa2c4914178f9291` 开始，直接在 `hx/0803_live_voice` 工作区开发并保持未提交，完成三轮 review 和验证后再按根 `AGENTS.md` 单独申请 commit 批准。不得因此合并或 cherry-pick DeepSeek 候选，也不得绕过单独的 push 批准。
+- 影响：`STATUS.md` 记录当前未提交候选和验证事实；Git HEAD 在获得批准前仍保持基线 SHA。现有非 W1-K1 文档修改与代码候选一起保留，不擅自 stash、丢弃或提交。
+- 重新评估条件：用户要求拆分分支/提交范围，当前工作区出现无法安全区分的无关改动，或 commit 审批要求改变候选边界。

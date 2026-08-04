@@ -45,7 +45,7 @@ Integrated Windows Alpha 至少包括：
 - 至少三条能够持续产出的并行实现轨；
 - 一个共享契约/集成 owner，避免各轨创造第二套 authority；
 - 从 Day 1 开始持续接回同一个 Demo；
-- Sol 对跨轨和高风险边界集中评审，非 Sol 模型并行执行已冻结的有界包；
+- Sol 按 D-049 直接实现 Tier 3 shared kernel 和仍需选择核心语义的参考实现，并集中评审跨轨高风险边界；非 Sol 模型并行执行已有参考实现、边界明确的有界包；
 - Provider、Windows 设备、Executor 和私有配置在相应真实 Gate 前可用。
 
 若 Week 1 结束仍只有一个有效执行轨，必须重新估算范围或时间；不得继续用顺序 timebox 宣称四周可达。

@@ -1,0 +1,159 @@
+{
+  "scope": {
+    "subject_id": "subject-1",
+    "project_id": "project-1",
+    "session_id": "session-1",
+    "assurance": "authenticated"
+  },
+  "identities": [
+    {"ref": {"kind": "interaction", "id": "interaction-1"}, "parents": []},
+    {"ref": {"kind": "connection", "id": "connection-1"}, "parents": [], "connection_epoch_ref": {"connection_id": "connection-1", "connection_epoch": 7}},
+    {"ref": {"kind": "media_session", "id": "media-session-1"}, "parents": [{"kind": "interaction", "id": "interaction-1"}], "connection_epoch_ref": {"connection_id": "connection-1", "connection_epoch": 7}},
+    {"ref": {"kind": "track", "id": "track-1"}, "parents": [{"kind": "media_session", "id": "media-session-1"}]},
+    {"ref": {"kind": "turn", "id": "turn-1"}, "parents": [{"kind": "interaction", "id": "interaction-1"}]},
+    {"ref": {"kind": "response", "id": "response-1"}, "parents": [{"kind": "interaction", "id": "interaction-1"}, {"kind": "turn", "id": "turn-1"}]},
+    {"ref": {"kind": "round", "id": "round-1"}, "parents": []},
+    {"ref": {"kind": "task", "id": "task-1"}, "parents": []},
+    {"ref": {"kind": "attempt", "id": "attempt-1"}, "parents": [{"kind": "task", "id": "task-1"}]},
+    {"ref": {"kind": "event", "id": "adapter-stream-1"}, "parents": []}
+  ],
+  "command": {
+    "contract_version": "live-voice.contract.v2",
+    "request_id": "request-1",
+    "command_id": "command-1",
+    "command_type": "task.create",
+    "issued_at": "2026-08-04T08:00:00Z",
+    "scope": {
+      "subject_id": "subject-1",
+      "project_id": "project-1",
+      "session_id": "session-1",
+      "assurance": "authenticated"
+    },
+    "correlation_id": "correlation-1",
+    "causation_id": "commit-1",
+    "origin": {"kind": "committed_turn", "turn_id": "turn-1", "commit_id": "commit-1"},
+    "target_ref": {"kind": "task", "id": "task-1"},
+    "context_refs": [],
+    "required_capabilities": ["task.create"],
+    "payload": {"name": "check inventory", "priority": 1},
+    "extensions": {"example.trace": "trace-1"}
+  },
+  "query": {
+    "contract_version": "live-voice.contract.v2",
+    "request_id": "request-2",
+    "query_type": "task.status",
+    "issued_at": "2026-08-04T08:00:01Z",
+    "scope": {
+      "subject_id": "subject-1",
+      "project_id": "project-1",
+      "session_id": "session-1",
+      "assurance": "authenticated"
+    },
+    "correlation_id": "correlation-1",
+    "causation_id": "command-1",
+    "target_ref": {"kind": "task", "id": "task-1"},
+    "context_refs": [],
+    "required_capabilities": [],
+    "payload": {},
+    "extensions": {}
+  },
+  "result": {
+    "contract_version": "live-voice.contract.v2",
+    "request_id": "request-1",
+    "command_id": "command-1",
+    "ok": true,
+    "result": {"accepted": true},
+    "error": null,
+    "observed_at": "2026-08-04T08:00:02Z",
+    "extensions": {}
+  },
+  "event": {
+    "contract_version": "live-voice.contract.v2",
+    "event_id": "event-1",
+    "event_type": "task.accepted",
+    "producer": {"component": "task_core", "instance_id": "task-core-1", "authority": "task_core"},
+    "stream_ref": {"kind": "task", "id": "task-1"},
+    "seq": 0,
+    "occurred_at": "2026-08-04T08:00:03Z",
+    "scope": {
+      "subject_id": "subject-1",
+      "project_id": "project-1",
+      "session_id": "session-1",
+      "assurance": "authenticated"
+    },
+    "correlation_id": "correlation-1",
+    "causation_id": null,
+    "required_capabilities": [],
+    "payload": {"state": "accepted"},
+    "extensions": {}
+  },
+  "turn_commit": {
+    "contract_version": "live-voice.contract.v2",
+    "commit_id": "commit-1",
+    "turn_id": "turn-1",
+    "interaction_id": "interaction-1",
+    "text": "Please check the current inventory.",
+    "hypothesis_provenance": {"provider": "test.sr", "hypothesis_id": "hypothesis-3"},
+    "scope": {
+      "subject_id": "subject-1",
+      "project_id": "project-1",
+      "session_id": "session-1",
+      "assurance": "authenticated"
+    },
+    "context_refs": [],
+    "committed_at": "2026-08-04T08:00:00Z"
+  },
+  "capability": {
+    "component": "speech.sr",
+    "contract_major": "v2",
+    "supported_operations": ["recognize.batch", "recognize.stream"],
+    "supported_event_types": ["recognition.hypothesis", "recognition.final"],
+    "batch_modes": ["batch"],
+    "stream_modes": ["stream"],
+    "supports_cancel_ack": true,
+    "supports_replay": false,
+    "declared_limits": {"max_hypotheses": 10},
+    "fallback_identity": null,
+    "availability": "available"
+  },
+  "lifecycle_allowed": [
+    ["interaction", "open", "closing"],
+    ["interaction", "open", "closed"],
+    ["interaction", "closing", "closed"],
+    ["turn", "capturing", "committed"],
+    ["turn", "capturing", "cancelled"],
+    ["response", "accepted", "generating"],
+    ["response", "accepted", "terminal"],
+    ["response", "generating", "speaking"],
+    ["response", "generating", "terminal"],
+    ["response", "speaking", "terminal"],
+    ["task", "accepted", "running"],
+    ["task", "accepted", "blocked"],
+    ["task", "accepted", "decision_required"],
+    ["task", "accepted", "terminal"],
+    ["task", "running", "blocked"],
+    ["task", "running", "decision_required"],
+    ["task", "running", "terminal"],
+    ["task", "blocked", "running"],
+    ["task", "blocked", "decision_required"],
+    ["task", "blocked", "terminal"],
+    ["task", "decision_required", "running"],
+    ["task", "decision_required", "blocked"],
+    ["task", "decision_required", "terminal"],
+    ["attempt", "accepted", "running"],
+    ["attempt", "running", "terminal"]
+  ],
+  "lifecycle_forbidden": [
+    ["interaction", "closed", "open"],
+    ["turn", "committed", "capturing"],
+    ["response", "terminal", "speaking"],
+    ["task", "terminal", "running"],
+    ["attempt", "accepted", "terminal"]
+  ],
+  "invalid_cancel_values": ["playback.cancel", "response.stop", "round.cancel ", "TASK.CANCEL", ""],
+  "distinct_error_codes": ["UNSUPPORTED", "UNAVAILABLE", "RESULT_UNKNOWN", "TIMEOUT", "INTERNAL"],
+  "canonical_cases": [
+    {"input": {"z": 1, "a": [true, null, "é"]}, "canonical": "{\"a\":[true,null,\"é\"],\"z\":1}"},
+    {"input": {"n": -0.0, "small": 0.000001, "large": 1000000}, "canonical": "{\"large\":1000000,\"n\":0,\"small\":0.000001}"}
+  ]
+}

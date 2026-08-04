@@ -25,7 +25,7 @@ Therefore:
 - A v1→v2 Adapter MAY emit v2 only when it can supply every required identity, scope, sequence, source-event provenance, and known/unknown fact from authoritative data. Otherwise it returns `UNSUPPORTED` or retains a clearly labeled Demo projection.
 - A v2→v1 compatibility projection is lossy and MUST NOT be re-emitted as authoritative v2. Terminal outcome and source provenance MUST never be guessed during projection.
 - v2 schemas are closed except for an explicit namespaced `extensions` object. Unknown required capabilities, enum values, event types, state transitions, or top-level fields fail closed. Optional evolution that changes interpretation requires a new contract major or an explicitly negotiated capability.
-- Canonical command fingerprints use UTF-8 JSON with object keys sorted, no insignificant whitespace, finite numbers only, and exact string values. Consumers do not trim, case-fold, or Unicode-normalize IDs or enum values.
+- Canonical command fingerprints use UTF-8 JSON with object keys sorted, no insignificant whitespace, finite numbers only, and exact string values. Integer-valued JSON numbers MUST stay within `[-9007199254740991, 9007199254740991]` so Python and TypeScript produce the same bytes; larger exact values require a separately versioned string or numeric type. Consumers do not trim, case-fold, or Unicode-normalize IDs or enum values.
 
 ## 3. Shared identities and scope
 
@@ -47,6 +47,8 @@ All IDs are opaque, non-empty strings, are compared exactly, and are never infer
 | `command_id` | Command origin + owning Core | stable across delivery retries; its canonical fingerprint is immutable |
 | `request_id` | Transport/API caller | one delivery/query attempt; a retry gets a new request ID even when command ID is reused |
 | `event_id` | Event producer | immutable unique event identity; duplicate ID with different bytes is a protocol violation |
+
+`connection_epoch` and `response_generation` are numeric fencing values, not opaque string identity kinds. A connection record carries its exact `{connection_id, connection_epoch}` binding; a media-session record carries the same binding plus its interaction parent. Registration rejects an absent connection, a different scope, or a stale/different epoch. A round has no generic identity parent; its execution relationships come from authoritative Harness/Agent events rather than a fabricated turn parent.
 
 `ScopeRef` is required on commands, queries, events, WorkProgress, and ContextRef:
 
@@ -141,7 +143,7 @@ EventEnvelope {
 }
 ```
 
-Sequence is monotonic and contiguous only within `(producer.component, producer.instance_id, stream_ref)`. There is no global ordering. Consumers MUST apply state by sequence, never wall-clock time. Exact duplicate `event_id` plus identical canonical bytes is idempotent; the same ID with different bytes, a reused sequence with different content, or a backward transition is `PROTOCOL_VIOLATION`. A gap or out-of-order future event is quarantined until replay/reconciliation closes the gap; it is not applied speculatively. When replay is not a declared capability, the consumer exposes an honest gap/error and reconciles via the owning authority.
+Sequence is monotonic and contiguous only within `(producer.component, producer.instance_id, stream_ref)`. There is no global ordering. Consumers MUST apply state by sequence, never wall-clock time. Exact duplicate `event_id` plus identical canonical bytes is idempotent; the same ID with different bytes, a reused sequence with different content, or a backward transition is `PROTOCOL_VIOLATION`. A gap or out-of-order future event is quarantined until replay/reconciliation closes the gap; it is not applied speculatively. A stream with conflicting content is fail-closed: later sequence values are not applied automatically. The consumer must obtain an authority-led reconciliation/rebuild or a verified replacement producer instance before resuming. When replay is not a declared capability, the consumer exposes an honest gap/error and reconciles via the owning authority.
 
 Root events may have null `causation_id`; all derived events reference the immediately causal command/event. All events in one user-visible operation share `correlation_id`. Adapter-produced events identify the Adapter as producer and reference the authoritative source event; an Adapter does not impersonate the source authority.
 

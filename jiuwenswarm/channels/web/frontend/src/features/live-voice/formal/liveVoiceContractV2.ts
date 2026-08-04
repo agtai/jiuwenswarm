@@ -1,0 +1,1771 @@
+// Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+export const CONTRACT_VERSION = 'live-voice.contract.v2' as const;
+export const V1_CONTRACT_VERSION = 'live-voice.contract.v1' as const;
+export const MAX_SAFE_INTEGER = 9_007_199_254_740_991;
+
+export type ErrorCode =
+  | 'INVALID_ARGUMENT'
+  | 'UNSUPPORTED'
+  | 'UNAUTHENTICATED'
+  | 'PERMISSION_DENIED'
+  | 'NOT_FOUND'
+  | 'CONFLICT'
+  | 'STALE'
+  | 'CAPABILITY_UNAVAILABLE'
+  | 'UNAVAILABLE'
+  | 'TIMEOUT'
+  | 'CANCELLED'
+  | 'PROTOCOL_VIOLATION'
+  | 'RESULT_UNKNOWN'
+  | 'INTERNAL';
+
+export type Assurance = 'request_asserted' | 'authenticated';
+export type IdentityKind =
+  | 'connection'
+  | 'media_session'
+  | 'track'
+  | 'interaction'
+  | 'turn'
+  | 'response'
+  | 'round'
+  | 'task'
+  | 'attempt'
+  | 'command'
+  | 'request'
+  | 'event';
+export type CancelScope = 'playback.stop' | 'response.cancel' | 'round.cancel' | 'task.cancel';
+export type InputCommitState = 'partial' | 'uncommitted' | 'committed';
+export type SideEffectTarget = 'agent' | 'tool' | 'task';
+export type LifecycleKind = 'interaction' | 'turn' | 'response' | 'round' | 'task' | 'attempt';
+export type TerminalOutcome = 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
+export type Availability = 'available' | 'unavailable';
+
+export type JsonPrimitive = null | boolean | number | string;
+export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
+export type JsonObject = { readonly [key: string]: JsonValue };
+
+export interface ContractErrorValue {
+  readonly code: ErrorCode;
+  readonly reason: string | null;
+  readonly message: string;
+  readonly retriable: boolean;
+  readonly correlation_id: string | null;
+  readonly details: Readonly<JsonObject>;
+}
+
+export class ContractViolation extends Error {
+  readonly error: ContractErrorValue;
+
+  constructor(error: ContractErrorValue) {
+    super(error.message);
+    this.name = 'ContractViolation';
+    this.error = error;
+  }
+}
+
+function violation(reason: string, message: string, code: ErrorCode = 'INVALID_ARGUMENT'): ContractViolation {
+  return new ContractViolation(
+    Object.freeze({
+      code,
+      reason,
+      message,
+      retriable: false,
+      correlation_id: null,
+      details: Object.freeze({}),
+    })
+  );
+}
+
+function validUnicode(value: string, fieldName: string): string {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        throw violation('INVALID_UNICODE_SCALAR', `${fieldName} contains an unpaired surrogate`);
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      throw violation('INVALID_UNICODE_SCALAR', `${fieldName} contains an unpaired surrogate`);
+    }
+  }
+  return value;
+}
+
+function requiredText(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw violation('INVALID_REQUIRED_TEXT', `${fieldName} must be a non-empty string`);
+  }
+  return validUnicode(value, fieldName);
+}
+
+function optionalId(value: unknown, fieldName: string): string | null {
+  return value === null ? null : requiredText(value, fieldName);
+}
+
+function optionalStableReason(value: unknown, fieldName: string): string | null {
+  if (value === null) return null;
+  const parsed = requiredText(value, fieldName);
+  if (!/^[A-Z][A-Z0-9_]*$/.test(parsed)) {
+    throw violation('INVALID_ERROR_REASON', `${fieldName} must be a stable uppercase reason`);
+  }
+  return parsed;
+}
+
+function requiredBoolean(value: unknown, fieldName: string): boolean {
+  if (typeof value !== 'boolean') {
+    throw violation('INVALID_BOOLEAN', `${fieldName} must be a boolean`);
+  }
+  return value;
+}
+
+function unsignedInteger(value: unknown, fieldName: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0 || value > MAX_SAFE_INTEGER) {
+    throw violation('INVALID_SAFE_INTEGER', `${fieldName} must be an integer between 0 and ${MAX_SAFE_INTEGER}`);
+  }
+  return value;
+}
+
+function timestamp(value: unknown, fieldName: string): string {
+  const parsed = requiredText(value, fieldName);
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$/.exec(parsed);
+  if (match === null) {
+    throw violation('INVALID_UTC_TIMESTAMP', `${fieldName} must be an RFC 3339 UTC timestamp`);
+  }
+  const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, 0);
+  if (
+    year === 0 ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day ||
+    date.getUTCHours() !== hour ||
+    date.getUTCMinutes() !== minute ||
+    date.getUTCSeconds() !== second
+  ) {
+    throw violation('INVALID_UTC_TIMESTAMP', `${fieldName} is not a real timestamp`);
+  }
+  return parsed;
+}
+
+function namespaced(value: unknown, fieldName: string): string {
+  const parsed = requiredText(value, fieldName);
+  if (!/^[a-z][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)+$/.test(parsed)) {
+    throw violation('INVALID_NAMESPACED_VALUE', `${fieldName} must be namespaced`);
+  }
+  return parsed;
+}
+
+function recordDescriptors(value: object, fieldName: string): PropertyDescriptorMap {
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw violation('INVALID_JSON_OBJECT', `${fieldName} must be a plain object`);
+  }
+  const keys = Reflect.ownKeys(value);
+  if (keys.some(key => typeof key !== 'string')) {
+    throw violation('INVALID_OBJECT_KEY', `${fieldName} cannot contain symbol keys`);
+  }
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  for (const key of keys as string[]) {
+    const descriptor = descriptors[key];
+    if (
+      descriptor === undefined ||
+      !('value' in descriptor) ||
+      descriptor.get !== undefined ||
+      descriptor.set !== undefined ||
+      descriptor.enumerable !== true
+    ) {
+      throw violation('INVALID_OBJECT_PROPERTY', `${fieldName}.${key} must be enumerable data`);
+    }
+  }
+  return descriptors;
+}
+
+function strictRecord(value: unknown, fieldName: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw violation('INVALID_JSON_OBJECT', `${fieldName} must be a plain object`);
+  }
+  const descriptors = recordDescriptors(value, fieldName);
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(descriptors)) {
+    Object.defineProperty(result, key, {
+      value: descriptors[key].value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return result;
+}
+
+function strictArray(value: unknown, fieldName: string): unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) {
+    throw violation('INVALID_JSON_ARRAY', `${fieldName} must be an ordinary array`);
+  }
+  const keys = Reflect.ownKeys(value);
+  for (const key of keys) {
+    if (typeof key === 'symbol') {
+      throw violation('INVALID_ARRAY_PROPERTY', `${fieldName} cannot contain symbol keys`);
+    }
+    if (key === 'length') continue;
+    if (!/^(0|[1-9]\d*)$/.test(key)) {
+      throw violation('INVALID_ARRAY_PROPERTY', `${fieldName} cannot contain extra properties`);
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !('value' in descriptor) || descriptor.enumerable !== true) {
+      throw violation('INVALID_ARRAY_PROPERTY', `${fieldName}[${key}] must be enumerable data`);
+    }
+  }
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) {
+      throw violation('SPARSE_ARRAY', `${fieldName} must be dense`);
+    }
+  }
+  return value.map(item => item);
+}
+
+function exactKeys(value: Record<string, unknown>, required: readonly string[], fieldName: string, optional: readonly string[] = []): void {
+  const actual = Object.keys(value).sort();
+  const expected = [...required].sort();
+  const allowed = [...required, ...optional];
+  const missing = expected.filter(key => !actual.includes(key));
+  const unknown = actual.filter(key => !allowed.includes(key));
+  if (missing.length > 0) {
+    throw violation('MISSING_REQUIRED_FIELD', `${fieldName} is missing: ${missing.join(', ')}`);
+  }
+  if (unknown.length > 0) {
+    throw violation('UNKNOWN_FIELD', `${fieldName} has unknown fields: ${unknown.join(', ')}`);
+  }
+}
+
+function cloneJson(value: unknown, fieldName: string, ancestors: ReadonlySet<object> = new Set<object>()): JsonValue {
+  if (value === null) return null;
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return validUnicode(value, fieldName);
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw violation('INVALID_NUMBER', `${fieldName} must be finite`);
+    }
+    if (Number.isInteger(value) && !Number.isSafeInteger(value)) {
+      throw violation('INVALID_SAFE_INTEGER', `${fieldName} exceeds the shared safe integer range`);
+    }
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (typeof value !== 'object') {
+    throw violation('INVALID_JSON_VALUE', `${fieldName} is not JSON data`);
+  }
+  if (ancestors.has(value)) {
+    throw violation('CYCLIC_JSON', `${fieldName} contains a cycle`);
+  }
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(value);
+  if (Array.isArray(value)) {
+    const items = strictArray(value, fieldName).map((item, index) => cloneJson(item, `${fieldName}[${index}]`, nextAncestors));
+    return Object.freeze(items);
+  }
+  const data = strictRecord(value, fieldName);
+  const result: Record<string, JsonValue> = {};
+  for (const key of Object.keys(data).sort()) {
+    validUnicode(key, `${fieldName} key`);
+    Object.defineProperty(result, key, {
+      value: cloneJson(data[key], `${fieldName}.${key}`, nextAncestors),
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return Object.freeze(result);
+}
+
+function cloneObject(value: unknown, fieldName: string): Readonly<JsonObject> {
+  const cloned = cloneJson(value, fieldName);
+  if (cloned === null || Array.isArray(cloned) || typeof cloned !== 'object') {
+    throw violation('INVALID_JSON_OBJECT', `${fieldName} must be an object`);
+  }
+  return cloned as Readonly<JsonObject>;
+}
+
+export function canonicalJson(value: unknown): string {
+  const cloned = cloneJson(value, '$');
+  const encode = (item: JsonValue): string => {
+    if (item === null || typeof item === 'boolean' || typeof item === 'number') {
+      return JSON.stringify(item);
+    }
+    if (typeof item === 'string') return JSON.stringify(item);
+    if (Array.isArray(item)) return `[${item.map(encode).join(',')}]`;
+    const objectItem = item as Readonly<JsonObject>;
+    return `{${Object.keys(objectItem)
+      .sort()
+      .map(key => `${JSON.stringify(key)}:${encode(objectItem[key])}`)
+      .join(',')}}`;
+  };
+  return encode(cloned);
+}
+
+export function canonicalJsonBytes(value: unknown): Uint8Array {
+  return new TextEncoder().encode(canonicalJson(value));
+}
+
+const ASSURANCES = ['request_asserted', 'authenticated'] as const;
+const IDENTITY_KINDS = [
+  'connection',
+  'media_session',
+  'track',
+  'interaction',
+  'turn',
+  'response',
+  'round',
+  'task',
+  'attempt',
+  'command',
+  'request',
+  'event',
+] as const;
+const INPUT_COMMIT_STATES = ['partial', 'uncommitted', 'committed'] as const;
+const LIFECYCLE_KINDS = ['interaction', 'turn', 'response', 'round', 'task', 'attempt'] as const;
+const ERROR_CODES = [
+  'INVALID_ARGUMENT',
+  'UNSUPPORTED',
+  'UNAUTHENTICATED',
+  'PERMISSION_DENIED',
+  'NOT_FOUND',
+  'CONFLICT',
+  'STALE',
+  'CAPABILITY_UNAVAILABLE',
+  'UNAVAILABLE',
+  'TIMEOUT',
+  'CANCELLED',
+  'PROTOCOL_VIOLATION',
+  'RESULT_UNKNOWN',
+  'INTERNAL',
+] as const;
+
+function enumeration<T extends string>(values: readonly T[], value: unknown, fieldName: string): T {
+  if (typeof value !== 'string' || !values.includes(value as T)) {
+    throw violation('INVALID_ENUM', `${fieldName} is not a supported value`);
+  }
+  return value as T;
+}
+
+export interface ScopeRef {
+  readonly subject_id: string;
+  readonly project_id: string | null;
+  readonly session_id: string | null;
+  readonly assurance: Assurance;
+}
+
+export function parseScopeRef(value: unknown): Readonly<ScopeRef> {
+  const data = strictRecord(value, 'scope');
+  exactKeys(data, ['subject_id', 'project_id', 'session_id', 'assurance'], 'scope');
+  return Object.freeze({
+    subject_id: requiredText(data.subject_id, 'scope.subject_id'),
+    project_id: optionalId(data.project_id, 'scope.project_id'),
+    session_id: optionalId(data.session_id, 'scope.session_id'),
+    assurance: enumeration(ASSURANCES, data.assurance, 'scope.assurance'),
+  });
+}
+
+export interface IdentityRef {
+  readonly kind: IdentityKind;
+  readonly id: string;
+}
+
+export function parseIdentityRef(value: unknown, expectedKind?: IdentityKind): Readonly<IdentityRef> {
+  const data = strictRecord(value, 'identity_ref');
+  exactKeys(data, ['kind', 'id'], 'identity_ref');
+  const kind = enumeration(IDENTITY_KINDS, data.kind, 'identity_ref.kind');
+  if (expectedKind !== undefined && kind !== expectedKind) {
+    throw violation('IDENTITY_KIND_MISMATCH', `expected ${expectedKind}, received ${kind}`);
+  }
+  return Object.freeze({ kind, id: requiredText(data.id, 'identity_ref.id') });
+}
+
+export interface ConnectionEpochRef {
+  readonly connection_id: string;
+  readonly connection_epoch: number;
+}
+
+export function parseConnectionEpochRef(value: unknown): Readonly<ConnectionEpochRef> {
+  const data = strictRecord(value, 'connection_epoch_ref');
+  exactKeys(data, ['connection_id', 'connection_epoch'], 'connection_epoch_ref');
+  return Object.freeze({
+    connection_id: requiredText(data.connection_id, 'connection_epoch_ref.connection_id'),
+    connection_epoch: unsignedInteger(data.connection_epoch, 'connection_epoch_ref.connection_epoch'),
+  });
+}
+
+export interface OriginRef {
+  readonly kind: 'committed_turn' | 'structured';
+  readonly turn_id: string | null;
+  readonly commit_id: string | null;
+}
+
+function parseOriginRef(value: unknown): Readonly<OriginRef> {
+  const data = strictRecord(value, 'origin');
+  exactKeys(data, ['kind', 'turn_id', 'commit_id'], 'origin');
+  const kind = enumeration(['committed_turn', 'structured'] as const, data.kind, 'origin.kind');
+  const turnId = optionalId(data.turn_id, 'origin.turn_id');
+  const commitId = optionalId(data.commit_id, 'origin.commit_id');
+  if ((kind === 'committed_turn' && (turnId === null || commitId === null)) || (kind === 'structured' && (turnId !== null || commitId !== null))) {
+    throw violation('INVALID_ORIGIN', 'committed_turn requires turn_id and commit_id; structured forbids both');
+  }
+  return Object.freeze({ kind, turn_id: turnId, commit_id: commitId });
+}
+
+export interface ProducerRef {
+  readonly component: string;
+  readonly instance_id: string;
+  readonly authority: string;
+}
+
+function parseProducerRef(value: unknown): Readonly<ProducerRef> {
+  const data = strictRecord(value, 'producer');
+  exactKeys(data, ['component', 'instance_id', 'authority'], 'producer');
+  return Object.freeze({
+    component: requiredText(data.component, 'producer.component'),
+    instance_id: requiredText(data.instance_id, 'producer.instance_id'),
+    authority: requiredText(data.authority, 'producer.authority'),
+  });
+}
+
+const EXPECTED_PARENTS: Readonly<Record<IdentityKind, readonly IdentityKind[]>> = Object.freeze({
+  connection: [],
+  media_session: ['interaction'],
+  track: ['media_session'],
+  interaction: [],
+  turn: ['interaction'],
+  response: ['interaction', 'turn'],
+  round: [],
+  task: [],
+  attempt: ['task'],
+  command: [],
+  request: [],
+  event: [],
+});
+
+export interface IdentityRecord {
+  readonly ref: Readonly<IdentityRef>;
+  readonly scope: Readonly<ScopeRef>;
+  readonly parents: readonly Readonly<IdentityRef>[];
+  readonly connection_epoch_ref?: Readonly<ConnectionEpochRef> | null;
+}
+
+function scopeKey(scope: Readonly<ScopeRef>): string {
+  return canonicalJson(scope);
+}
+
+export class IdentityRegistry {
+  readonly #records = new Map<string, IdentityRecord>();
+  readonly #kindById = new Map<string, IdentityKind>();
+
+  register(record: IdentityRecord): IdentityRecord {
+    const data = strictRecord(record, 'identity_record');
+    exactKeys(data, ['ref', 'scope', 'parents'], 'identity_record', ['connection_epoch_ref']);
+    record = {
+      ref: parseIdentityRef(data.ref),
+      scope: parseScopeRef(data.scope),
+      parents: strictArray(data.parents, 'identity_record.parents').map(parent => parseIdentityRef(parent)),
+      connection_epoch_ref:
+        data.connection_epoch_ref === undefined || data.connection_epoch_ref === null ? null : parseConnectionEpochRef(data.connection_epoch_ref),
+    };
+    const expected = [...EXPECTED_PARENTS[record.ref.kind]].sort();
+    const actual = record.parents.map(parent => parent.kind).sort();
+    if (new Set(actual).size !== actual.length || actual.length !== expected.length || actual.some((kind, index) => kind !== expected[index])) {
+      throw violation('IDENTITY_PARENT_MISMATCH', `${record.ref.kind} requires parent kinds ${expected.join(',')}`);
+    }
+    const connectionBinding = record.connection_epoch_ref ?? null;
+    if ((record.ref.kind === 'connection' || record.ref.kind === 'media_session') && connectionBinding === null) {
+      throw violation('CONNECTION_EPOCH_BINDING_REQUIRED', `${record.ref.kind} requires connection_epoch_ref`);
+    }
+    if (record.ref.kind !== 'connection' && record.ref.kind !== 'media_session' && connectionBinding !== null) {
+      throw violation('CONNECTION_EPOCH_BINDING_FORBIDDEN', `${record.ref.kind} forbids connection_epoch_ref`);
+    }
+    if (record.ref.kind === 'connection' && connectionBinding?.connection_id !== record.ref.id) {
+      throw violation('CONNECTION_EPOCH_BINDING_MISMATCH', 'connection binding must name the registered connection');
+    }
+    const knownKind = this.#kindById.get(record.ref.id);
+    if (knownKind !== undefined && knownKind !== record.ref.kind) {
+      throw violation('IDENTITY_KIND_MISMATCH', `${record.ref.id} is already ${knownKind}`);
+    }
+    for (const parent of record.parents) {
+      const parentRecord = this.#records.get(`${parent.kind}:${parent.id}`);
+      if (parentRecord === undefined) {
+        throw violation('IDENTITY_PARENT_NOT_FOUND', `${parent.kind}:${parent.id} is unknown`);
+      }
+      if (scopeKey(parentRecord.scope) !== scopeKey(record.scope)) {
+        throw violation('IDENTITY_SCOPE_MISMATCH', 'child and parent scope must match');
+      }
+    }
+    if (record.ref.kind === 'media_session' && connectionBinding !== null) {
+      const connection = this.#records.get(`connection:${connectionBinding.connection_id}`);
+      if (connection === undefined) {
+        throw violation('IDENTITY_CONNECTION_NOT_FOUND', `connection:${connectionBinding.connection_id} is unknown`);
+      }
+      if (scopeKey(connection.scope) !== scopeKey(record.scope)) {
+        throw violation('IDENTITY_SCOPE_MISMATCH', 'media session and connection scope must match');
+      }
+      if (canonicalJson(connection.connection_epoch_ref ?? null) !== canonicalJson(connectionBinding)) {
+        throw violation('CONNECTION_EPOCH_BINDING_MISMATCH', 'media session must use the active connection epoch binding');
+      }
+    }
+    if (record.ref.kind === 'response') {
+      const interaction = record.parents.find(parent => parent.kind === 'interaction');
+      const turn = record.parents.find(parent => parent.kind === 'turn');
+      const turnRecord = turn === undefined ? undefined : this.#records.get(`turn:${turn.id}`);
+      if (
+        interaction === undefined ||
+        turnRecord === undefined ||
+        !turnRecord.parents.some(parent => parent.kind === 'interaction' && parent.id === interaction.id)
+      ) {
+        throw violation('IDENTITY_PARENT_MISMATCH', 'response interaction must own its turn');
+      }
+    }
+    const frozen = Object.freeze({
+      ref: Object.freeze({ ...record.ref }),
+      scope: Object.freeze({ ...record.scope }),
+      parents: Object.freeze(record.parents.map(parent => Object.freeze({ ...parent }))),
+      connection_epoch_ref: connectionBinding === null ? null : Object.freeze({ ...connectionBinding }),
+    });
+    const key = `${record.ref.kind}:${record.ref.id}`;
+    const existing = this.#records.get(key);
+    if (existing !== undefined) {
+      if (canonicalJson(existing) !== canonicalJson(frozen)) {
+        throw violation('IDENTITY_CONFLICT', 'identity registration is immutable', 'CONFLICT');
+      }
+      return existing;
+    }
+    this.#records.set(key, frozen);
+    this.#kindById.set(record.ref.id, record.ref.kind);
+    return frozen;
+  }
+
+  require(ref: Readonly<IdentityRef>, options: { scope?: Readonly<ScopeRef>; parent?: Readonly<IdentityRef> } = {}): IdentityRecord {
+    const normalizedRef = parseIdentityRef(ref);
+    const normalizedScope = options.scope === undefined ? undefined : parseScopeRef(options.scope);
+    const normalizedParent = options.parent === undefined ? undefined : parseIdentityRef(options.parent);
+    const record = this.#records.get(`${normalizedRef.kind}:${normalizedRef.id}`);
+    if (record === undefined) {
+      const knownKind = this.#kindById.get(normalizedRef.id);
+      if (knownKind !== undefined) {
+        throw violation('IDENTITY_KIND_MISMATCH', `${normalizedRef.id} is ${knownKind}, not ${normalizedRef.kind}`);
+      }
+      throw violation('IDENTITY_NOT_FOUND', `${normalizedRef.kind}:${normalizedRef.id} is unknown`, 'NOT_FOUND');
+    }
+    if (normalizedScope !== undefined && scopeKey(normalizedScope) !== scopeKey(record.scope)) {
+      throw violation('IDENTITY_SCOPE_MISMATCH', 'identity scope does not match');
+    }
+    if (normalizedParent !== undefined && !record.parents.some(parent => parent.kind === normalizedParent.kind && parent.id === normalizedParent.id)) {
+      throw violation('IDENTITY_PARENT_MISMATCH', 'identity parent does not match');
+    }
+    return record;
+  }
+}
+
+const COMMAND_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
+  'task.create': 'task',
+  'playback.stop': 'response',
+  'response.cancel': 'response',
+  'round.cancel': 'round',
+  'task.cancel': 'task',
+});
+const QUERY_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
+  'task.get': 'task',
+  'task.list': 'task',
+  'task.status': 'task',
+  'task.events': 'task',
+});
+const CORE_CAPABILITIES = new Set([
+  ...Object.keys(COMMAND_TARGETS),
+  ...Object.keys(QUERY_TARGETS),
+  'event.replay',
+  'recognize.batch',
+  'recognize.stream',
+  'synthesize.batch',
+  'synthesize.stream',
+  'cancel.ack',
+]);
+
+function extensions(value: unknown, fieldName: string): Readonly<JsonObject> {
+  const data = strictRecord(value, fieldName);
+  for (const key of Object.keys(data)) namespaced(key, `${fieldName} key`);
+  return cloneObject(data, fieldName);
+}
+
+function emptyContextRefs(value: unknown, fieldName: string): readonly [] {
+  if (strictArray(value, fieldName).length !== 0) {
+    throw violation('CONTEXT_REFS_UNSUPPORTED', 'non-empty context_refs are not supported by the critical kernel', 'UNSUPPORTED');
+  }
+  return Object.freeze([]);
+}
+
+function capabilityList(value: unknown, fieldName: string): readonly string[] {
+  const result: string[] = [];
+  strictArray(value, fieldName).forEach((item, index) => {
+    const capability = namespaced(item, `${fieldName}[${index}]`);
+    if (!CORE_CAPABILITIES.has(capability)) {
+      throw violation('UNKNOWN_REQUIRED_CAPABILITY', `unknown required capability ${capability}`, 'UNSUPPORTED');
+    }
+    if (result.includes(capability)) {
+      throw violation('DUPLICATE_REQUIRED_CAPABILITY', `duplicate ${capability}`);
+    }
+    result.push(capability);
+  });
+  return Object.freeze(result);
+}
+
+function commandPayload(commandType: string, value: unknown): Readonly<JsonObject> {
+  const data = strictRecord(value, 'command.payload');
+  if (commandType === 'playback.stop' || commandType === 'response.cancel') {
+    exactKeys(data, ['interaction_id', 'response_generation'], 'command.payload');
+    requiredText(data.interaction_id, 'command.payload.interaction_id');
+    unsignedInteger(data.response_generation, 'command.payload.response_generation');
+  } else if (commandType === 'round.cancel' || commandType === 'task.cancel') {
+    exactKeys(data, [], 'command.payload');
+  }
+  return cloneObject(data, 'command.payload');
+}
+
+interface EnvelopeBase {
+  readonly contract_version: typeof CONTRACT_VERSION;
+  readonly request_id: string;
+  readonly issued_at: string;
+  readonly scope: Readonly<ScopeRef>;
+  readonly correlation_id: string;
+  readonly causation_id: string | null;
+  readonly target_ref: Readonly<IdentityRef>;
+  readonly context_refs: readonly [];
+  readonly required_capabilities: readonly string[];
+  readonly payload: Readonly<JsonObject>;
+  readonly extensions: Readonly<JsonObject>;
+}
+
+export interface CommandEnvelope extends EnvelopeBase {
+  readonly command_id: string;
+  readonly command_type: string;
+  readonly origin: Readonly<OriginRef>;
+}
+
+export function parseCommandEnvelope(value: unknown, identities?: IdentityRegistry, commits?: TurnCommitLedger): Readonly<CommandEnvelope> {
+  const data = strictRecord(value, 'command');
+  exactKeys(
+    data,
+    [
+      'contract_version',
+      'request_id',
+      'command_id',
+      'command_type',
+      'issued_at',
+      'scope',
+      'correlation_id',
+      'causation_id',
+      'origin',
+      'target_ref',
+      'context_refs',
+      'required_capabilities',
+      'payload',
+      'extensions',
+    ],
+    'command'
+  );
+  if (data.contract_version !== CONTRACT_VERSION) {
+    throw violation('UNSUPPORTED_CONTRACT_VERSION', `expected ${CONTRACT_VERSION}`, 'UNSUPPORTED');
+  }
+  const commandType = namespaced(data.command_type, 'command.command_type');
+  const expectedKind = COMMAND_TARGETS[commandType];
+  if (expectedKind === undefined) {
+    throw violation('UNSUPPORTED_COMMAND_TYPE', `unsupported ${commandType}`, 'UNSUPPORTED');
+  }
+  const scope = parseScopeRef(data.scope);
+  const origin = parseOriginRef(data.origin);
+  const targetRef = parseIdentityRef(data.target_ref, expectedKind);
+  const result = Object.freeze({
+    contract_version: CONTRACT_VERSION,
+    request_id: requiredText(data.request_id, 'command.request_id'),
+    command_id: requiredText(data.command_id, 'command.command_id'),
+    command_type: commandType,
+    issued_at: timestamp(data.issued_at, 'command.issued_at'),
+    scope,
+    correlation_id: requiredText(data.correlation_id, 'command.correlation_id'),
+    causation_id: optionalId(data.causation_id, 'command.causation_id'),
+    origin,
+    target_ref: targetRef,
+    context_refs: emptyContextRefs(data.context_refs, 'command.context_refs'),
+    required_capabilities: capabilityList(data.required_capabilities, 'command.required_capabilities'),
+    payload: commandPayload(commandType, data.payload),
+    extensions: extensions(data.extensions, 'command.extensions'),
+  });
+  if (identities !== undefined) {
+    if (commandType !== 'task.create') identities.require(targetRef, { scope });
+    if (commandType === 'playback.stop' || commandType === 'response.cancel') {
+      const interaction = {
+        kind: 'interaction' as const,
+        id: result.payload.interaction_id as string,
+      };
+      identities.require(interaction, { scope });
+      identities.require(targetRef, { scope, parent: interaction });
+    }
+    if (origin.kind === 'committed_turn') {
+      identities.require({ kind: 'turn', id: origin.turn_id ?? '' }, { scope });
+    }
+  }
+  if (origin.kind === 'committed_turn' && commits !== undefined) {
+    commits.requireOrigin(origin, scope);
+  }
+  return result;
+}
+
+export function commandFingerprint(command: Readonly<CommandEnvelope>): Uint8Array {
+  const normalized = parseCommandEnvelope(command);
+  const { request_id: _requestId, ...content } = normalized;
+  return canonicalJsonBytes(content);
+}
+
+export interface QueryEnvelope extends Omit<EnvelopeBase, 'request_id'> {
+  readonly request_id: string;
+  readonly query_type: string;
+}
+
+export function parseQueryEnvelope(value: unknown, identities?: IdentityRegistry): Readonly<QueryEnvelope> {
+  const data = strictRecord(value, 'query');
+  exactKeys(
+    data,
+    [
+      'contract_version',
+      'request_id',
+      'query_type',
+      'issued_at',
+      'scope',
+      'correlation_id',
+      'causation_id',
+      'target_ref',
+      'context_refs',
+      'required_capabilities',
+      'payload',
+      'extensions',
+    ],
+    'query'
+  );
+  if (data.contract_version !== CONTRACT_VERSION) {
+    throw violation('UNSUPPORTED_CONTRACT_VERSION', `expected ${CONTRACT_VERSION}`, 'UNSUPPORTED');
+  }
+  const queryType = namespaced(data.query_type, 'query.query_type');
+  const expectedKind = QUERY_TARGETS[queryType];
+  if (expectedKind === undefined) {
+    throw violation('UNSUPPORTED_QUERY_TYPE', `unsupported ${queryType}`, 'UNSUPPORTED');
+  }
+  const scope = parseScopeRef(data.scope);
+  const targetRef = parseIdentityRef(data.target_ref, expectedKind);
+  const result = Object.freeze({
+    contract_version: CONTRACT_VERSION,
+    request_id: requiredText(data.request_id, 'query.request_id'),
+    query_type: queryType,
+    issued_at: timestamp(data.issued_at, 'query.issued_at'),
+    scope,
+    correlation_id: requiredText(data.correlation_id, 'query.correlation_id'),
+    causation_id: optionalId(data.causation_id, 'query.causation_id'),
+    target_ref: targetRef,
+    context_refs: emptyContextRefs(data.context_refs, 'query.context_refs'),
+    required_capabilities: capabilityList(data.required_capabilities, 'query.required_capabilities'),
+    payload: cloneObject(data.payload, 'query.payload'),
+    extensions: extensions(data.extensions, 'query.extensions'),
+  });
+  if (identities !== undefined) identities.require(targetRef, { scope });
+  return result;
+}
+
+export interface ResultEnvelope {
+  readonly contract_version: typeof CONTRACT_VERSION;
+  readonly request_id: string;
+  readonly command_id: string | null;
+  readonly ok: boolean;
+  readonly result: Readonly<JsonObject> | null;
+  readonly error: Readonly<ContractErrorValue> | null;
+  readonly observed_at: string;
+  readonly extensions: Readonly<JsonObject>;
+}
+
+export function parseContractError(value: unknown): Readonly<ContractErrorValue> {
+  const data = strictRecord(value, 'error');
+  exactKeys(data, ['code', 'reason', 'message', 'retriable', 'correlation_id', 'details'], 'error');
+  return Object.freeze({
+    code: enumeration(ERROR_CODES, data.code, 'error.code'),
+    reason: optionalStableReason(data.reason, 'error.reason'),
+    message: requiredText(data.message, 'error.message'),
+    retriable: requiredBoolean(data.retriable, 'error.retriable'),
+    correlation_id: optionalId(data.correlation_id, 'error.correlation_id'),
+    details: cloneObject(data.details, 'error.details'),
+  });
+}
+
+function errorToWire(error: Readonly<ContractErrorValue>): Readonly<JsonObject> {
+  return Object.freeze({
+    code: error.code,
+    reason: error.reason,
+    message: error.message,
+    retriable: error.retriable,
+    correlation_id: error.correlation_id,
+    details: error.details,
+  });
+}
+
+export function parseResultEnvelope(value: unknown, owner?: Readonly<CommandEnvelope | QueryEnvelope>): Readonly<ResultEnvelope> {
+  const normalizedOwner = owner === undefined ? undefined : normalizeOwner(owner);
+  const data = strictRecord(value, 'result');
+  exactKeys(data, ['contract_version', 'request_id', 'command_id', 'ok', 'result', 'error', 'observed_at', 'extensions'], 'result');
+  if (data.contract_version !== CONTRACT_VERSION) {
+    throw violation('UNSUPPORTED_CONTRACT_VERSION', `expected ${CONTRACT_VERSION}`, 'UNSUPPORTED');
+  }
+  const ok = requiredBoolean(data.ok, 'result.ok');
+  const resultValue = data.result === null ? null : cloneObject(data.result, 'result.result');
+  const errorValue = data.error === null ? null : parseContractError(data.error);
+  if (ok ? resultValue === null || errorValue !== null : resultValue !== null || errorValue === null) {
+    throw violation('INVALID_RESULT_EXCLUSIVITY', 'success requires result only; failure requires error only', 'PROTOCOL_VIOLATION');
+  }
+  const parsed = Object.freeze({
+    contract_version: CONTRACT_VERSION,
+    request_id: requiredText(data.request_id, 'result.request_id'),
+    command_id: optionalId(data.command_id, 'result.command_id'),
+    ok,
+    result: resultValue,
+    error: errorValue,
+    observed_at: timestamp(data.observed_at, 'result.observed_at'),
+    extensions: extensions(data.extensions, 'result.extensions'),
+  });
+  if (normalizedOwner !== undefined) {
+    const expectedCommandId = 'command_id' in normalizedOwner ? normalizedOwner.command_id : null;
+    if (parsed.request_id !== normalizedOwner.request_id || parsed.command_id !== expectedCommandId) {
+      throw violation('RESULT_OWNER_MISMATCH', 'result request_id/command_id does not match its owner', 'PROTOCOL_VIOLATION');
+    }
+  }
+  return parsed;
+}
+
+function normalizeOwner(owner: Readonly<CommandEnvelope | QueryEnvelope>): Readonly<CommandEnvelope | QueryEnvelope> {
+  const data = strictRecord(owner, 'result.owner');
+  return Object.prototype.hasOwnProperty.call(data, 'command_id') ? parseCommandEnvelope(data) : parseQueryEnvelope(data);
+}
+
+export function successResult(owner: Readonly<CommandEnvelope | QueryEnvelope>, result: JsonObject, observedAt: string): Readonly<ResultEnvelope> {
+  const normalizedOwner = normalizeOwner(owner);
+  return parseResultEnvelope(
+    {
+      contract_version: CONTRACT_VERSION,
+      request_id: normalizedOwner.request_id,
+      command_id: 'command_id' in normalizedOwner ? normalizedOwner.command_id : null,
+      ok: true,
+      result,
+      error: null,
+      observed_at: observedAt,
+      extensions: {},
+    },
+    normalizedOwner
+  );
+}
+
+export function failureResult(
+  owner: Readonly<CommandEnvelope | QueryEnvelope>,
+  error: Readonly<ContractErrorValue>,
+  observedAt: string
+): Readonly<ResultEnvelope> {
+  const normalizedOwner = normalizeOwner(owner);
+  return parseResultEnvelope(
+    {
+      contract_version: CONTRACT_VERSION,
+      request_id: normalizedOwner.request_id,
+      command_id: 'command_id' in normalizedOwner ? normalizedOwner.command_id : null,
+      ok: false,
+      result: null,
+      error: errorToWire(error),
+      observed_at: observedAt,
+      extensions: {},
+    },
+    normalizedOwner
+  );
+}
+
+interface EventRule {
+  readonly streamKind: IdentityKind;
+  readonly authority: string;
+  readonly state?: string;
+  readonly terminal?: boolean;
+  readonly adapter?: boolean;
+}
+
+const EVENT_RULES: Readonly<Record<string, EventRule>> = Object.freeze({
+  'interaction.opened': { streamKind: 'interaction', authority: 'conversation_runtime', state: 'open' },
+  'interaction.closing': {
+    streamKind: 'interaction',
+    authority: 'conversation_runtime',
+    state: 'closing',
+  },
+  'interaction.closed': {
+    streamKind: 'interaction',
+    authority: 'conversation_runtime',
+    state: 'closed',
+  },
+  'turn.capturing': { streamKind: 'turn', authority: 'conversation_runtime', state: 'capturing' },
+  'turn.committed': { streamKind: 'turn', authority: 'conversation_runtime', state: 'committed' },
+  'turn.cancelled': { streamKind: 'turn', authority: 'conversation_runtime', state: 'cancelled' },
+  'response.accepted': {
+    streamKind: 'response',
+    authority: 'conversation_runtime',
+    state: 'accepted',
+  },
+  'response.generating': {
+    streamKind: 'response',
+    authority: 'conversation_runtime',
+    state: 'generating',
+  },
+  'response.speaking': {
+    streamKind: 'response',
+    authority: 'conversation_runtime',
+    state: 'speaking',
+  },
+  'response.terminal': {
+    streamKind: 'response',
+    authority: 'conversation_runtime',
+    state: 'terminal',
+    terminal: true,
+  },
+  'round.accepted': { streamKind: 'round', authority: 'harness', state: 'accepted' },
+  'round.running': { streamKind: 'round', authority: 'harness', state: 'running' },
+  'round.blocked': { streamKind: 'round', authority: 'harness', state: 'blocked' },
+  'round.decision_required': {
+    streamKind: 'round',
+    authority: 'harness',
+    state: 'decision_required',
+  },
+  'round.terminal': {
+    streamKind: 'round',
+    authority: 'harness',
+    state: 'terminal',
+    terminal: true,
+  },
+  'task.accepted': { streamKind: 'task', authority: 'task_core', state: 'accepted' },
+  'task.running': { streamKind: 'task', authority: 'task_core', state: 'running' },
+  'task.blocked': { streamKind: 'task', authority: 'task_core', state: 'blocked' },
+  'task.decision_required': {
+    streamKind: 'task',
+    authority: 'task_core',
+    state: 'decision_required',
+  },
+  'task.terminal': {
+    streamKind: 'task',
+    authority: 'task_core',
+    state: 'terminal',
+    terminal: true,
+  },
+  'attempt.accepted': { streamKind: 'attempt', authority: 'executor', state: 'accepted' },
+  'attempt.running': { streamKind: 'attempt', authority: 'executor', state: 'running' },
+  'attempt.terminal': {
+    streamKind: 'attempt',
+    authority: 'executor',
+    state: 'terminal',
+    terminal: true,
+  },
+  'adapter.observed': { streamKind: 'event', authority: 'adapter', adapter: true },
+});
+
+const TERMINAL_OUTCOMES = ['completed', 'failed', 'cancelled', 'interrupted', 'unknown'] as const;
+
+function eventPayload(value: unknown, eventType: string, rule: EventRule): Readonly<JsonObject> {
+  const data = strictRecord(value, 'event.payload');
+  if (rule.adapter === true) {
+    exactKeys(data, ['source_event_type'], 'event.payload');
+    namespaced(data.source_event_type, 'event.payload.source_event_type');
+  } else if (rule.terminal === true) {
+    exactKeys(data, ['state', 'outcome'], 'event.payload');
+    if (data.state !== rule.state) {
+      throw violation('EVENT_STATE_MISMATCH', `${eventType} requires state ${rule.state}`);
+    }
+    enumeration(TERMINAL_OUTCOMES, data.outcome, 'event.payload.outcome');
+  } else {
+    exactKeys(data, ['state'], 'event.payload');
+    if (data.state !== rule.state) {
+      throw violation('EVENT_STATE_MISMATCH', `${eventType} requires state ${rule.state}`);
+    }
+  }
+  return cloneObject(data, 'event.payload');
+}
+
+export interface EventEnvelope {
+  readonly contract_version: typeof CONTRACT_VERSION;
+  readonly event_id: string;
+  readonly event_type: string;
+  readonly producer: Readonly<ProducerRef>;
+  readonly stream_ref: Readonly<IdentityRef>;
+  readonly seq: number;
+  readonly occurred_at: string;
+  readonly scope: Readonly<ScopeRef>;
+  readonly correlation_id: string;
+  readonly causation_id: string | null;
+  readonly required_capabilities: readonly string[];
+  readonly payload: Readonly<JsonObject>;
+  readonly extensions: Readonly<JsonObject>;
+}
+
+export function parseEventEnvelope(value: unknown, identities?: IdentityRegistry): Readonly<EventEnvelope> {
+  const data = strictRecord(value, 'event');
+  exactKeys(
+    data,
+    [
+      'contract_version',
+      'event_id',
+      'event_type',
+      'producer',
+      'stream_ref',
+      'seq',
+      'occurred_at',
+      'scope',
+      'correlation_id',
+      'causation_id',
+      'required_capabilities',
+      'payload',
+      'extensions',
+    ],
+    'event'
+  );
+  if (data.contract_version !== CONTRACT_VERSION) {
+    throw violation('UNSUPPORTED_CONTRACT_VERSION', `expected ${CONTRACT_VERSION}`, 'UNSUPPORTED');
+  }
+  const eventType = namespaced(data.event_type, 'event.event_type');
+  const rule = EVENT_RULES[eventType];
+  if (rule === undefined) {
+    throw violation('UNKNOWN_EVENT_TYPE', `unknown ${eventType}`, 'UNSUPPORTED');
+  }
+  const producer = parseProducerRef(data.producer);
+  if (producer.authority !== rule.authority) {
+    throw violation('EVENT_AUTHORITY_MISMATCH', `${eventType} requires authority ${rule.authority}`, 'PERMISSION_DENIED');
+  }
+  const streamRef = parseIdentityRef(data.stream_ref, rule.streamKind);
+  const causationId = optionalId(data.causation_id, 'event.causation_id');
+  if (rule.adapter === true && causationId === null) {
+    throw violation('ADAPTER_CAUSATION_REQUIRED', 'adapter events require a source event');
+  }
+  const scope = parseScopeRef(data.scope);
+  const result = Object.freeze({
+    contract_version: CONTRACT_VERSION,
+    event_id: requiredText(data.event_id, 'event.event_id'),
+    event_type: eventType,
+    producer,
+    stream_ref: streamRef,
+    seq: unsignedInteger(data.seq, 'event.seq'),
+    occurred_at: timestamp(data.occurred_at, 'event.occurred_at'),
+    scope,
+    correlation_id: requiredText(data.correlation_id, 'event.correlation_id'),
+    causation_id: causationId,
+    required_capabilities: capabilityList(data.required_capabilities, 'event.required_capabilities'),
+    payload: eventPayload(data.payload, eventType, rule),
+    extensions: extensions(data.extensions, 'event.extensions'),
+  });
+  if (identities !== undefined) identities.require(streamRef, { scope });
+  return result;
+}
+
+export interface CapabilityDescriptor {
+  readonly component: string;
+  readonly contract_major: 'v2';
+  readonly supported_operations: readonly string[];
+  readonly supported_event_types: readonly string[];
+  readonly batch_modes: readonly 'batch'[];
+  readonly stream_modes: readonly 'stream'[];
+  readonly supports_cancel_ack: boolean;
+  readonly supports_replay: boolean;
+  readonly declared_limits: Readonly<JsonObject>;
+  readonly fallback_identity: string | null;
+  readonly availability: Availability;
+}
+
+function uniqueNamespaced(value: unknown, fieldName: string): readonly string[] {
+  const result = strictArray(value, fieldName).map((item, index) => namespaced(item, `${fieldName}[${index}]`));
+  if (new Set(result).size !== result.length) {
+    throw violation('DUPLICATE_CAPABILITY_VALUE', `${fieldName} contains duplicates`);
+  }
+  return Object.freeze(result);
+}
+
+function uniqueModes<T extends string>(value: unknown, fieldName: string, choices: readonly T[]): readonly T[] {
+  const result = strictArray(value, fieldName).map((item, index) => enumeration(choices, item, `${fieldName}[${index}]`));
+  if (new Set(result).size !== result.length) {
+    throw violation('DUPLICATE_CAPABILITY_VALUE', `${fieldName} contains duplicates`);
+  }
+  return Object.freeze(result);
+}
+
+export function parseCapabilityDescriptor(value: unknown): Readonly<CapabilityDescriptor> {
+  const data = strictRecord(value, 'capability');
+  exactKeys(
+    data,
+    [
+      'component',
+      'contract_major',
+      'supported_operations',
+      'supported_event_types',
+      'batch_modes',
+      'stream_modes',
+      'supports_cancel_ack',
+      'supports_replay',
+      'declared_limits',
+      'fallback_identity',
+      'availability',
+    ],
+    'capability'
+  );
+  if (data.contract_major !== 'v2') {
+    throw violation('UNSUPPORTED_CONTRACT_MAJOR', 'contract_major must be v2', 'UNSUPPORTED');
+  }
+  return Object.freeze({
+    component: requiredText(data.component, 'capability.component'),
+    contract_major: 'v2',
+    supported_operations: uniqueNamespaced(data.supported_operations, 'capability.supported_operations'),
+    supported_event_types: uniqueNamespaced(data.supported_event_types, 'capability.supported_event_types'),
+    batch_modes: uniqueModes(data.batch_modes, 'capability.batch_modes', ['batch']),
+    stream_modes: uniqueModes(data.stream_modes, 'capability.stream_modes', ['stream']),
+    supports_cancel_ack: requiredBoolean(data.supports_cancel_ack, 'capability.supports_cancel_ack'),
+    supports_replay: requiredBoolean(data.supports_replay, 'capability.supports_replay'),
+    declared_limits: cloneObject(data.declared_limits, 'capability.declared_limits'),
+    fallback_identity: optionalId(data.fallback_identity, 'capability.fallback_identity'),
+    availability: enumeration(['available', 'unavailable'] as const, data.availability, 'capability.availability'),
+  });
+}
+
+export class CapabilityRegistry {
+  readonly #descriptors = new Map<string, Readonly<CapabilityDescriptor>>();
+
+  register(descriptor: Readonly<CapabilityDescriptor>): void {
+    const normalized = parseCapabilityDescriptor(descriptor);
+    const existing = this.#descriptors.get(normalized.component);
+    if (existing !== undefined && canonicalJson(existing) !== canonicalJson(normalized)) {
+      throw violation('CAPABILITY_DESCRIPTOR_CONFLICT', `${normalized.component} changed descriptor`, 'CONFLICT');
+    }
+    this.#descriptors.set(normalized.component, normalized);
+  }
+
+  require(component: string, operation: string): void {
+    const parsedComponent = requiredText(component, 'capability.component');
+    const parsedOperation = namespaced(operation, 'capability.operation');
+    const descriptor = this.#descriptors.get(parsedComponent);
+    if (descriptor === undefined || !descriptor.supported_operations.includes(parsedOperation)) {
+      throw violation('CAPABILITY_UNSUPPORTED', `${parsedComponent} does not support ${parsedOperation}`, 'UNSUPPORTED');
+    }
+    if (descriptor.availability === 'unavailable') {
+      throw violation('CAPABILITY_TEMPORARILY_UNAVAILABLE', `${parsedComponent} is temporarily unavailable`, 'UNAVAILABLE');
+    }
+  }
+}
+
+export function contractError(
+  code: ErrorCode,
+  reason: string,
+  message: string,
+  retriable = false,
+  correlationId: string | null = null,
+  details: JsonObject = {}
+): Readonly<ContractErrorValue> {
+  return Object.freeze({
+    code: enumeration(ERROR_CODES, code, 'error.code'),
+    reason: optionalStableReason(reason, 'error.reason'),
+    message: requiredText(message, 'error.message'),
+    retriable,
+    correlation_id: optionalId(correlationId, 'error.correlation_id'),
+    details: cloneObject(details, 'error.details'),
+  });
+}
+
+const LIFECYCLE_TRANSITIONS: Readonly<Record<LifecycleKind, Readonly<Record<string, readonly string[]>>>> = Object.freeze({
+  interaction: Object.freeze({
+    open: Object.freeze(['closing', 'closed']),
+    closing: Object.freeze(['closed']),
+  }),
+  turn: Object.freeze({ capturing: Object.freeze(['committed', 'cancelled']) }),
+  response: Object.freeze({
+    accepted: Object.freeze(['generating', 'terminal']),
+    generating: Object.freeze(['speaking', 'terminal']),
+    speaking: Object.freeze(['terminal']),
+  }),
+  round: Object.freeze({
+    accepted: Object.freeze(['running', 'blocked', 'decision_required', 'terminal']),
+    running: Object.freeze(['blocked', 'decision_required', 'terminal']),
+    blocked: Object.freeze(['running', 'decision_required', 'terminal']),
+    decision_required: Object.freeze(['running', 'blocked', 'terminal']),
+  }),
+  task: Object.freeze({
+    accepted: Object.freeze(['running', 'blocked', 'decision_required', 'terminal']),
+    running: Object.freeze(['blocked', 'decision_required', 'terminal']),
+    blocked: Object.freeze(['running', 'decision_required', 'terminal']),
+    decision_required: Object.freeze(['running', 'blocked', 'terminal']),
+  }),
+  attempt: Object.freeze({ accepted: Object.freeze(['running']), running: Object.freeze(['terminal']) }),
+});
+
+export function validateTransition(kind: LifecycleKind, current: string, nextState: string, outcome: TerminalOutcome | null = null): void {
+  const parsedKind = enumeration(LIFECYCLE_KINDS, kind, 'lifecycle.kind');
+  const parsedCurrent = requiredText(current, 'lifecycle.current');
+  const parsedNext = requiredText(nextState, 'lifecycle.next');
+  const allowed = LIFECYCLE_TRANSITIONS[parsedKind][parsedCurrent] ?? [];
+  if (!allowed.includes(parsedNext)) {
+    throw violation('INVALID_LIFECYCLE_TRANSITION', `${parsedKind} cannot transition from ${parsedCurrent} to ${parsedNext}`, 'CONFLICT');
+  }
+  if (parsedNext === 'terminal') {
+    if (outcome === null) {
+      throw violation('TERMINAL_OUTCOME_REQUIRED', 'terminal transitions require an outcome');
+    }
+    enumeration(TERMINAL_OUTCOMES, outcome, 'lifecycle.outcome');
+  } else if (outcome !== null) {
+    throw violation('NON_TERMINAL_OUTCOME_FORBIDDEN', 'outcome is only valid for terminal transitions');
+  }
+}
+
+export interface TurnCommit {
+  readonly contract_version: typeof CONTRACT_VERSION;
+  readonly commit_id: string;
+  readonly turn_id: string;
+  readonly interaction_id: string;
+  readonly text: string;
+  readonly hypothesis_provenance: Readonly<JsonObject>;
+  readonly scope: Readonly<ScopeRef>;
+  readonly context_refs: readonly [];
+  readonly committed_at: string;
+}
+
+export function parseTurnCommit(value: unknown, identities?: IdentityRegistry): Readonly<TurnCommit> {
+  const data = strictRecord(value, 'turn_commit');
+  exactKeys(
+    data,
+    ['contract_version', 'commit_id', 'turn_id', 'interaction_id', 'text', 'hypothesis_provenance', 'scope', 'context_refs', 'committed_at'],
+    'turn_commit'
+  );
+  if (data.contract_version !== CONTRACT_VERSION) {
+    throw violation('UNSUPPORTED_CONTRACT_VERSION', `expected ${CONTRACT_VERSION}`, 'UNSUPPORTED');
+  }
+  const scope = parseScopeRef(data.scope);
+  const turnId = requiredText(data.turn_id, 'turn_commit.turn_id');
+  const interactionId = requiredText(data.interaction_id, 'turn_commit.interaction_id');
+  if (identities !== undefined) {
+    const interaction = { kind: 'interaction' as const, id: interactionId };
+    identities.require(interaction, { scope });
+    identities.require({ kind: 'turn', id: turnId }, { scope, parent: interaction });
+  }
+  return Object.freeze({
+    contract_version: CONTRACT_VERSION,
+    commit_id: requiredText(data.commit_id, 'turn_commit.commit_id'),
+    turn_id: turnId,
+    interaction_id: interactionId,
+    text: requiredText(data.text, 'turn_commit.text'),
+    hypothesis_provenance: cloneObject(data.hypothesis_provenance, 'turn_commit.hypothesis_provenance'),
+    scope,
+    context_refs: emptyContextRefs(data.context_refs, 'turn_commit.context_refs'),
+    committed_at: timestamp(data.committed_at, 'turn_commit.committed_at'),
+  });
+}
+
+export class TurnCommitLedger {
+  readonly #byCommitId = new Map<string, Readonly<TurnCommit>>();
+  readonly #byTurnId = new Map<string, Readonly<TurnCommit>>();
+
+  accept(commit: Readonly<TurnCommit>): boolean {
+    const normalized = parseTurnCommit(commit);
+    const existing = this.#byCommitId.get(normalized.commit_id) ?? this.#byTurnId.get(normalized.turn_id);
+    if (existing !== undefined) {
+      if (canonicalJson(existing) === canonicalJson(normalized)) return false;
+      throw violation('TURN_COMMIT_CONFLICT', 'commit_id and turn_id are immutable and may commit only once', 'CONFLICT');
+    }
+    this.#byCommitId.set(normalized.commit_id, normalized);
+    this.#byTurnId.set(normalized.turn_id, normalized);
+    return true;
+  }
+
+  requireOrigin(origin: Readonly<OriginRef>, scope: Readonly<ScopeRef>): Readonly<TurnCommit> {
+    const normalizedOrigin = parseOriginRef(origin);
+    const normalizedScope = parseScopeRef(scope);
+    if (normalizedOrigin.kind !== 'committed_turn') {
+      throw violation('COMMITTED_ORIGIN_REQUIRED', 'origin must identify a committed turn');
+    }
+    const commit = this.#byCommitId.get(normalizedOrigin.commit_id ?? '');
+    if (commit === undefined || commit.turn_id !== normalizedOrigin.turn_id || scopeKey(commit.scope) !== scopeKey(normalizedScope)) {
+      throw violation('TURN_COMMIT_NOT_ACCEPTED', 'origin does not match an accepted commit in the exact scope', 'PERMISSION_DENIED');
+    }
+    return commit;
+  }
+
+  dispatch<T>(commit: Readonly<TurnCommit>, target: SideEffectTarget, effect: (commit: Readonly<TurnCommit>) => T): readonly [boolean, T | undefined] {
+    enumeration(['agent', 'tool', 'task'] as const, target, 'input.target');
+    const normalized = parseTurnCommit(commit);
+    if (!this.accept(normalized)) return Object.freeze([false, undefined]);
+    return Object.freeze([true, effect(normalized)]);
+  }
+}
+
+export function dispatchCommittedInput<T>(state: InputCommitState, target: SideEffectTarget, effect: () => T): T {
+  const parsedState = enumeration(INPUT_COMMIT_STATES, state, 'input.state');
+  enumeration(['agent', 'tool', 'task'] as const, target, 'input.target');
+  if (parsedState !== 'committed') {
+    throw violation('INPUT_NOT_COMMITTED', 'partial or uncommitted input cannot invoke Agent, Tool, or Task', 'PERMISSION_DENIED');
+  }
+  return effect();
+}
+
+export interface ResponseRef {
+  readonly interaction_id: string;
+  readonly response_id: string;
+  readonly response_generation: number;
+}
+
+function parseResponseRef(ref: ResponseRef): Readonly<ResponseRef> {
+  return Object.freeze({
+    interaction_id: requiredText(ref.interaction_id, 'response_ref.interaction_id'),
+    response_id: requiredText(ref.response_id, 'response_ref.response_id'),
+    response_generation: unsignedInteger(ref.response_generation, 'response_ref.response_generation'),
+  });
+}
+
+interface ResponseState {
+  readonly ref: Readonly<ResponseRef>;
+  fenced: boolean;
+  terminal: boolean;
+}
+
+export class ResponseFence {
+  readonly #byInteraction = new Map<string, ResponseState>();
+  readonly #seenIds = new Set<string>();
+  readonly #lastGeneration = new Map<string, number>();
+
+  begin(input: ResponseRef): void {
+    const ref = parseResponseRef(input);
+    const last = this.#lastGeneration.get(ref.interaction_id) ?? -1;
+    if (this.#seenIds.has(ref.response_id)) {
+      throw violation('RESPONSE_ID_REUSED', 'every replacement response requires a new response_id', 'CONFLICT');
+    }
+    if (ref.response_generation <= last) {
+      throw violation('RESPONSE_GENERATION_NOT_INCREASING', 'response_generation must strictly increase per interaction', 'STALE');
+    }
+    const prior = this.#byInteraction.get(ref.interaction_id);
+    if (prior !== undefined) prior.fenced = true;
+    this.#seenIds.add(ref.response_id);
+    this.#lastGeneration.set(ref.interaction_id, ref.response_generation);
+    this.#byInteraction.set(ref.interaction_id, { ref, fenced: false, terminal: false });
+  }
+
+  cancel(input: ResponseRef): void {
+    this.#requireExact(parseResponseRef(input)).fenced = true;
+  }
+
+  terminal(input: ResponseRef): void {
+    const state = this.#requireExact(parseResponseRef(input));
+    state.fenced = true;
+    state.terminal = true;
+  }
+
+  applyIfCurrent<T>(input: ResponseRef, effect: () => T): T {
+    const ref = parseResponseRef(input);
+    const state = this.#byInteraction.get(ref.interaction_id);
+    if (state === undefined || canonicalJson(state.ref) !== canonicalJson(ref) || state.fenced || state.terminal) {
+      throw violation('STALE_RESPONSE_OUTPUT', 'output does not match the exact active response tuple', 'STALE');
+    }
+    return effect();
+  }
+
+  #requireExact(ref: Readonly<ResponseRef>): ResponseState {
+    const state = this.#byInteraction.get(ref.interaction_id);
+    if (state === undefined || canonicalJson(state.ref) !== canonicalJson(ref)) {
+      throw violation('STALE_RESPONSE_REFERENCE', 'operation does not match the exact active response tuple', 'STALE');
+    }
+    return state;
+  }
+}
+
+export function defaultBargeInScopes(cancelResponse = false): readonly CancelScope[] {
+  requiredBoolean(cancelResponse, 'barge_in.cancel_response');
+  return Object.freeze(cancelResponse ? ['playback.stop', 'response.cancel'] : ['playback.stop']);
+}
+
+export function dispatchCancel<T>(
+  command: Readonly<CommandEnvelope>,
+  handlers: Readonly<Partial<Record<CancelScope, (command: Readonly<CommandEnvelope>) => T>>>
+): T {
+  const normalized = parseCommandEnvelope(command);
+  const scope = normalized.command_type as CancelScope;
+  if (!(['playback.stop', 'response.cancel', 'round.cancel', 'task.cancel'] as const).includes(scope)) {
+    throw violation('NOT_A_CANCEL_COMMAND', 'command is not an explicit cancel operation');
+  }
+  const handler = handlers[scope];
+  if (handler === undefined) {
+    throw violation('CANCEL_HANDLER_UNAVAILABLE', `no handler is available for ${scope}`, 'CAPABILITY_UNAVAILABLE');
+  }
+  return handler(normalized);
+}
+
+interface CommandExecution {
+  readonly fingerprint: Uint8Array;
+  readonly result: Promise<Readonly<ResultEnvelope>>;
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function resultForRequest(result: Readonly<ResultEnvelope>, requestId: string): Readonly<ResultEnvelope> {
+  return Object.freeze({ ...result, request_id: requiredText(requestId, 'result.request_id') });
+}
+
+export class CommandResultLedger {
+  readonly #entries = new Map<string, CommandExecution>();
+
+  async execute(
+    command: Readonly<CommandEnvelope>,
+    observedAt: string,
+    handler: (command: Readonly<CommandEnvelope>) => Readonly<ResultEnvelope> | Promise<Readonly<ResultEnvelope>>
+  ): Promise<Readonly<ResultEnvelope>> {
+    const normalized = parseCommandEnvelope(command);
+    const normalizedObservedAt = timestamp(observedAt, 'result.observed_at');
+    const fingerprint = commandFingerprint(normalized);
+    const existing = this.#entries.get(normalized.command_id);
+    if (existing !== undefined) {
+      if (!bytesEqual(existing.fingerprint, fingerprint)) {
+        return failureResult(
+          normalized,
+          contractError('CONFLICT', 'IDEMPOTENCY_CONFLICT', 'command_id was reused with different content'),
+          normalizedObservedAt
+        );
+      }
+      return resultForRequest(await existing.result, normalized.request_id);
+    }
+    let resolvePending!: (value: Readonly<ResultEnvelope>) => void;
+    const pending = new Promise<Readonly<ResultEnvelope>>(resolve => {
+      resolvePending = resolve;
+    });
+    this.#entries.set(normalized.command_id, { fingerprint, result: pending });
+    let result: Readonly<ResultEnvelope>;
+    try {
+      result = parseResultEnvelope(await handler(normalized), normalized);
+    } catch (error: unknown) {
+      if (error instanceof ContractViolation) {
+        try {
+          result = failureResult(normalized, error.error, normalizedObservedAt);
+        } catch {
+          result = failureResult(normalized, contractError('INTERNAL', 'COMMAND_HANDLER_FAILED', 'command handler failed'), normalizedObservedAt);
+        }
+      } else {
+        result = failureResult(normalized, contractError('INTERNAL', 'COMMAND_HANDLER_FAILED', 'command handler failed'), normalizedObservedAt);
+      }
+    }
+    resolvePending(result);
+    return result;
+  }
+}
+
+export type EventApplyStatus =
+  | 'applied'
+  | 'duplicate_applied'
+  | 'quarantined_gap'
+  | 'quarantined_causation'
+  | 'duplicate_quarantined'
+  | 'rejected_conflict'
+  | 'rejected_causation'
+  | 'rejected_lifecycle';
+
+export interface EventApplyResult {
+  readonly status: EventApplyStatus;
+  readonly error: Readonly<ContractErrorValue> | null;
+  readonly appliedEventIds: readonly string[];
+}
+
+interface EventStreamState {
+  nextSeq: number;
+  readonly appliedBySeq: Map<number, Readonly<EventEnvelope>>;
+  readonly quarantinedBySeq: Map<number, Readonly<EventEnvelope>>;
+  readonly poisonedSeq: Set<number>;
+}
+
+const INITIAL_LIFECYCLE_STATES: Readonly<Partial<Record<IdentityKind, string>>> = Object.freeze({
+  interaction: 'open',
+  turn: 'capturing',
+  response: 'accepted',
+  round: 'accepted',
+  task: 'accepted',
+  attempt: 'accepted',
+});
+
+function eventStreamKey(event: Readonly<EventEnvelope>): string {
+  return canonicalJson([event.producer.component, event.producer.instance_id, event.stream_ref.kind, event.stream_ref.id]);
+}
+
+function applyResult(
+  status: EventApplyStatus,
+  error: Readonly<ContractErrorValue> | null = null,
+  appliedEventIds: readonly string[] = []
+): Readonly<EventApplyResult> {
+  return Object.freeze({ status, error, appliedEventIds: Object.freeze([...appliedEventIds]) });
+}
+
+export class EventSequenceTracker {
+  readonly #streams = new Map<string, EventStreamState>();
+  readonly #events = new Map<string, Readonly<EventEnvelope>>();
+  readonly #results = new Map<string, Readonly<EventApplyResult>>();
+  readonly #appliedIds = new Set<string>();
+  readonly #externalCauses = new Map<string, Readonly<{ scope: Readonly<ScopeRef>; correlationId: string }>>();
+  readonly #lifecycleByObject = new Map<string, string>();
+  readonly #scopeByObject = new Map<string, Readonly<ScopeRef>>();
+
+  registerAppliedCause(command: Readonly<CommandEnvelope>): readonly string[] {
+    const normalized = parseCommandEnvelope(command);
+    const causeId = normalized.command_id;
+    if (this.#events.has(causeId)) {
+      throw violation('CAUSATION_ID_KIND_CONFLICT', 'an event_id cannot also be an external command cause', 'PROTOCOL_VIOLATION');
+    }
+    const existing = this.#externalCauses.get(causeId);
+    if (existing !== undefined && (scopeKey(existing.scope) !== scopeKey(normalized.scope) || existing.correlationId !== normalized.correlation_id)) {
+      throw violation('CAUSATION_SOURCE_CONFLICT', 'an applied command cause cannot change scope or correlation', 'PROTOCOL_VIOLATION');
+    }
+    this.#externalCauses.set(causeId, Object.freeze({ scope: normalized.scope, correlationId: normalized.correlation_id }));
+    return Object.freeze(this.#applyAndDrain());
+  }
+
+  accept(input: Readonly<EventEnvelope>): Readonly<EventApplyResult> {
+    const event = parseEventEnvelope(input);
+    if (this.#externalCauses.has(event.event_id)) {
+      return this.#errorResult('rejected_conflict', 'CAUSATION_ID_KIND_CONFLICT', 'an external command cause cannot also be an event_id');
+    }
+    const existing = this.#events.get(event.event_id);
+    if (existing !== undefined) {
+      const prior = this.#results.get(event.event_id);
+      if (canonicalJson(existing) !== canonicalJson(event)) {
+        const result = this.#errorResult('rejected_conflict', 'EVENT_ID_CONFLICT', 'event_id was reused with different content');
+        if (!this.#appliedIds.has(event.event_id)) {
+          const existingStream = this.#streams.get(eventStreamKey(existing));
+          existingStream?.quarantinedBySeq.delete(existing.seq);
+          existingStream?.poisonedSeq.add(existing.seq);
+          this.#results.set(event.event_id, result);
+        }
+        return result;
+      }
+      return applyResult(this.#appliedIds.has(event.event_id) ? 'duplicate_applied' : 'duplicate_quarantined', prior?.error ?? null);
+    }
+
+    this.#events.set(event.event_id, event);
+    if (this.#causalCycle(event)) {
+      const result = this.#errorResult('rejected_causation', 'CAUSATION_CYCLE', 'event causation must be acyclic');
+      this.#results.set(event.event_id, result);
+      return result;
+    }
+
+    const key = eventStreamKey(event);
+    const stream = this.#streams.get(key) ?? {
+      nextSeq: 0,
+      appliedBySeq: new Map<number, Readonly<EventEnvelope>>(),
+      quarantinedBySeq: new Map<number, Readonly<EventEnvelope>>(),
+      poisonedSeq: new Set<number>(),
+    };
+    this.#streams.set(key, stream);
+    const priorAtSeq = stream.appliedBySeq.get(event.seq) ?? stream.quarantinedBySeq.get(event.seq);
+    if (priorAtSeq !== undefined) {
+      stream.quarantinedBySeq.delete(event.seq);
+      stream.poisonedSeq.add(event.seq);
+      const result = this.#errorResult('rejected_conflict', 'EVENT_SEQUENCE_CONFLICT', 'two different events claim the same producer stream sequence');
+      this.#results.set(event.event_id, result);
+      return result;
+    }
+    if (event.seq < stream.nextSeq || stream.poisonedSeq.has(event.seq)) {
+      const result = this.#errorResult('rejected_conflict', 'EVENT_SEQUENCE_REUSED', 'producer stream sequence was already consumed or poisoned');
+      this.#results.set(event.event_id, result);
+      return result;
+    }
+    stream.quarantinedBySeq.set(event.seq, event);
+    if (event.seq > stream.nextSeq) {
+      const result = this.#errorResult('quarantined_gap', 'EVENT_SEQUENCE_GAP', `expected sequence ${stream.nextSeq}, received ${event.seq}`);
+      this.#results.set(event.event_id, result);
+      return result;
+    }
+    const causalError = this.#causalBlock(event);
+    if (causalError !== null) {
+      if (causalError[2]) {
+        stream.quarantinedBySeq.delete(event.seq);
+        stream.poisonedSeq.add(event.seq);
+        const result = this.#errorResult('rejected_causation', causalError[0], causalError[1]);
+        this.#results.set(event.event_id, result);
+        return result;
+      }
+      const result = this.#errorResult('quarantined_causation', causalError[0], causalError[1]);
+      this.#results.set(event.event_id, result);
+      return result;
+    }
+    const lifecycleError = this.#lifecycleError(event);
+    if (lifecycleError !== null) {
+      stream.quarantinedBySeq.delete(event.seq);
+      stream.poisonedSeq.add(event.seq);
+      const result = applyResult('rejected_lifecycle', lifecycleError);
+      this.#results.set(event.event_id, result);
+      return result;
+    }
+    const applied = this.#applyAndDrain();
+    const current = this.#results.get(event.event_id);
+    if (!this.#appliedIds.has(event.event_id) && current !== undefined) return current;
+    const result = applyResult('applied', null, applied);
+    this.#results.set(event.event_id, result);
+    return result;
+  }
+
+  #errorResult(status: EventApplyStatus, reason: string, message: string): Readonly<EventApplyResult> {
+    const code: ErrorCode = 'PROTOCOL_VIOLATION';
+    const retriable = status === 'quarantined_gap' || status === 'quarantined_causation';
+    return applyResult(status, contractError(code, reason, message, retriable));
+  }
+
+  #causalCycle(event: Readonly<EventEnvelope>): boolean {
+    const seen = new Set([event.event_id]);
+    let cursor = event.causation_id;
+    while (cursor !== null) {
+      if (seen.has(cursor)) return true;
+      seen.add(cursor);
+      cursor = this.#events.get(cursor)?.causation_id ?? null;
+    }
+    return false;
+  }
+
+  #causalBlock(event: Readonly<EventEnvelope>): readonly [string, string, boolean] | null {
+    if (event.causation_id === null) return null;
+    const source = this.#events.get(event.causation_id);
+    const external = this.#externalCauses.get(event.causation_id);
+    if (source === undefined && external !== undefined) {
+      const mismatch = this.#causalContextError(event, external.scope, external.correlationId);
+      if (mismatch !== null) return mismatch;
+      return event.event_type === 'adapter.observed'
+        ? ['ADAPTER_SOURCE_EVENT_REQUIRED', 'adapter events must reference an authoritative source event', true]
+        : null;
+    }
+    if (source === undefined || !this.#appliedIds.has(source.event_id)) {
+      return ['CAUSATION_NOT_APPLIED', 'causation_id must reference an already applied event', false];
+    }
+    const mismatch = this.#causalContextError(event, source.scope, source.correlation_id);
+    if (mismatch !== null) return mismatch;
+    if (event.event_type === 'adapter.observed') {
+      if (source.producer.authority === 'adapter') {
+        return ['ADAPTER_SOURCE_NOT_AUTHORITATIVE', 'adapter events cannot establish authority for another adapter event', true];
+      }
+      if (event.payload.source_event_type !== source.event_type) {
+        return ['ADAPTER_SOURCE_TYPE_MISMATCH', 'adapter source_event_type must match the causal source event', true];
+      }
+    }
+    return null;
+  }
+
+  #causalContextError(event: Readonly<EventEnvelope>, sourceScope: Readonly<ScopeRef>, sourceCorrelationId: string): readonly [string, string, boolean] | null {
+    if (scopeKey(event.scope) !== scopeKey(sourceScope)) {
+      return ['CAUSATION_SCOPE_MISMATCH', 'a derived event must have the same scope as its immediate cause', true];
+    }
+    if (event.correlation_id !== sourceCorrelationId) {
+      return ['CAUSATION_CORRELATION_MISMATCH', 'a derived event must have the same correlation_id as its immediate cause', true];
+    }
+    return null;
+  }
+
+  #lifecycleError(event: Readonly<EventEnvelope>): Readonly<ContractErrorValue> | null {
+    const initial = INITIAL_LIFECYCLE_STATES[event.stream_ref.kind];
+    if (initial === undefined) return null;
+    const objectKey = `${event.stream_ref.kind}:${event.stream_ref.id}`;
+    const objectScope = this.#scopeByObject.get(objectKey);
+    if (objectScope !== undefined && scopeKey(objectScope) !== scopeKey(event.scope)) {
+      return contractError('PROTOCOL_VIOLATION', 'LIFECYCLE_SCOPE_MISMATCH', 'lifecycle identity cannot change scope');
+    }
+    const state = event.payload.state;
+    if (typeof state !== 'string') {
+      return contractError('PROTOCOL_VIOLATION', 'INVALID_LIFECYCLE_STATE', 'lifecycle event payload must contain a state');
+    }
+    const currentState = this.#lifecycleByObject.get(objectKey);
+    if (currentState === undefined) {
+      return state === initial
+        ? null
+        : contractError('PROTOCOL_VIOLATION', 'INVALID_INITIAL_LIFECYCLE_STATE', `${event.stream_ref.kind} must begin at ${initial}`);
+    }
+    try {
+      validateTransition(event.stream_ref.kind as LifecycleKind, currentState, state, (event.payload.outcome ?? null) as TerminalOutcome | null);
+    } catch (error: unknown) {
+      if (error instanceof ContractViolation) {
+        return contractError(
+          'PROTOCOL_VIOLATION',
+          error.error.reason ?? 'INVALID_LIFECYCLE_TRANSITION',
+          error.error.message,
+          false,
+          event.correlation_id,
+          error.error.details
+        );
+      }
+      throw error;
+    }
+    return null;
+  }
+
+  #applyAndDrain(): string[] {
+    const applied: string[] = [];
+    let madeProgress = true;
+    while (madeProgress) {
+      madeProgress = false;
+      for (const stream of this.#streams.values()) {
+        if (stream.poisonedSeq.has(stream.nextSeq)) continue;
+        const candidate = stream.quarantinedBySeq.get(stream.nextSeq);
+        if (candidate === undefined) continue;
+        const causalError = this.#causalBlock(candidate);
+        if (causalError !== null) {
+          if (causalError[2]) {
+            stream.quarantinedBySeq.delete(stream.nextSeq);
+            stream.poisonedSeq.add(stream.nextSeq);
+            this.#results.set(candidate.event_id, this.#errorResult('rejected_causation', causalError[0], causalError[1]));
+          }
+          continue;
+        }
+        const lifecycleError = this.#lifecycleError(candidate);
+        if (lifecycleError !== null) {
+          stream.quarantinedBySeq.delete(stream.nextSeq);
+          stream.poisonedSeq.add(stream.nextSeq);
+          this.#results.set(candidate.event_id, applyResult('rejected_lifecycle', lifecycleError));
+          continue;
+        }
+        stream.quarantinedBySeq.delete(stream.nextSeq);
+        stream.appliedBySeq.set(stream.nextSeq, candidate);
+        stream.nextSeq += 1;
+        if (typeof candidate.payload.state === 'string') {
+          const objectKey = `${candidate.stream_ref.kind}:${candidate.stream_ref.id}`;
+          this.#lifecycleByObject.set(objectKey, candidate.payload.state);
+          this.#scopeByObject.set(objectKey, candidate.scope);
+        }
+        this.#appliedIds.add(candidate.event_id);
+        this.#results.set(candidate.event_id, applyResult('applied', null, [candidate.event_id]));
+        applied.push(candidate.event_id);
+        madeProgress = true;
+      }
+    }
+    return applied;
+  }
+}
+
+export function classifyContract(value: unknown): 'v1' | 'v2' {
+  const data = strictRecord(value, 'contract');
+  if (data.contract_version === CONTRACT_VERSION) return 'v2';
+  if (data.contract_version === V1_CONTRACT_VERSION) return 'v1';
+  throw violation('UNSUPPORTED_CONTRACT_VERSION', 'payload is neither the v1 nor v2 contract', 'UNSUPPORTED');
+}
+
+export function parseV2Envelope(
+  value: unknown,
+  identities?: IdentityRegistry,
+  commits?: TurnCommitLedger
+): Readonly<CommandEnvelope | QueryEnvelope | ResultEnvelope | EventEnvelope> {
+  const data = strictRecord(value, 'envelope');
+  if (data.contract_version !== CONTRACT_VERSION) {
+    throw violation('UNSUPPORTED_CONTRACT_VERSION', `expected ${CONTRACT_VERSION}`, 'UNSUPPORTED');
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'command_type')) {
+    return parseCommandEnvelope(data, identities, commits);
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'query_type')) {
+    return parseQueryEnvelope(data, identities);
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'event_type')) {
+    return parseEventEnvelope(data, identities);
+  }
+  if (Object.prototype.hasOwnProperty.call(data, 'ok')) return parseResultEnvelope(data);
+  throw violation('UNKNOWN_ENVELOPE_KIND', 'cannot identify v2 envelope kind');
+}
