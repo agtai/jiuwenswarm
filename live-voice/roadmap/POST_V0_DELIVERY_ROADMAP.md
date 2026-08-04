@@ -169,6 +169,13 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 | 2 | 状态、并发、mutation、cancel/fence | scoped pre/post review；所有适用 P/N/B/S/T/C/R/I/F/K/X 风险；零禁止副作用 | Sol 必须签署边界和实际 diff |
 | 3 | shared protocol/authority/security/durability、Week 2/4 Gate | 完整 D-032、fault/recovery、immutable candidate、真实 E2E/manual evidence | Sol 最终判断和 Gate 签字 |
 
+### D-053 三轮 review
+
+- Tier 2/3 的一个完整开发批次依次执行：实现者自我 review、脱离开发理由的完整 diff review、独立 `/review` 或当前环境中等价的独立审查入口。
+- 每轮发现的问题先修改并重跑受影响测试；修改改变核心语义时，最终完整 diff review 必须再执行一次。
+- `/review` 不可用时必须记录替代方式和限制，不得写成已经运行 `/review`。
+- Tier 0 继续只做相关检查；Tier 1 默认自我 review 加完整 diff review，只有跨取消、副作用或其他较高风险边界时才增加第三轮。
+
 ### D-032 保留的不变量
 
 - tests 从预期合同产生，不能只证明当前实现；

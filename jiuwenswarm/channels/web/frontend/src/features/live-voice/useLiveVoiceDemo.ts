@@ -6,7 +6,7 @@ import type { AgentMode, Message } from '../../types';
 import { onTtsStop, sanitizeLiveVoiceTtsText, splitLiveVoiceTtsText, stopAllTts } from '../../utils/tts';
 import { acquireLiveVoiceTtsOutputOwnership } from '../../utils/ttsOutputOwnership';
 import type { LiveVoiceDemoBarProps } from '../../components/ChatPanel/LiveVoiceDemoBar';
-import { FEATURE_LIVE_VOICE_STREAMING_SPEECH, FEATURE_LIVE_VOICE_TASK_DEMO } from '../../featureFlags';
+import { FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_STREAMING_SPEECH, FEATURE_LIVE_VOICE_TASK_DEMO } from '../../featureFlags';
 import { createLiveVoiceCore, type LiveVoiceCore, type LiveVoiceSnapshot, type LiveVoiceSpeechPlayer } from './liveVoiceCore';
 import { selectLiveVoiceResponseMessages } from './liveVoiceMessageGate';
 import { advanceLiveVoiceStreamingSpeech, createLiveVoiceStreamingSpeechState } from './liveVoiceStreamingSpeech';
@@ -34,6 +34,7 @@ import {
   type LiveVoiceTaskExecutionContext,
   type LiveVoiceTaskRequest,
 } from './liveVoiceTaskClient';
+import { createIntegratedP1Route, type IntegratedP1Route } from './formal/integratedP1Route';
 
 const DEMO_LANGUAGE = 'zh-CN';
 const DEMO_END_OF_SPEECH_TIMEOUT_MS = 2200;
@@ -138,8 +139,8 @@ function createBrowserSpeechPlayer(): LiveVoiceSpeechPlayer {
   };
 }
 
-function createCore(): LiveVoiceCore {
-  return createLiveVoiceCore({ player: createBrowserSpeechPlayer() });
+function createCore(player: LiveVoiceSpeechPlayer = createBrowserSpeechPlayer()): LiveVoiceCore {
+  return createLiveVoiceCore({ player });
 }
 
 function findErrorMessageAfterBoundary(messages: readonly Message[], userBoundaryId: string): Message | null {
@@ -188,9 +189,14 @@ export function useLiveVoiceDemo({
   taskExecutionContext = null,
 }: UseLiveVoiceDemoOptions): LiveVoiceDemoBarProps {
   const { t } = useTranslation();
+  const integratedP1RouteRef = useRef<IntegratedP1Route | null>(null);
+  if (FEATURE_LIVE_VOICE_INTEGRATED_P1 && integratedP1RouteRef.current === null) {
+    integratedP1RouteRef.current = createIntegratedP1Route({ correlationId: 'live-voice-browser-p1' });
+  }
+  const integratedP1Route = integratedP1RouteRef.current;
   const coreRef = useRef<LiveVoiceCore | null>(null);
   if (coreRef.current === null) {
-    coreRef.current = createCore();
+    coreRef.current = createCore(integratedP1Route?.speechPlayer);
   }
   const core = coreRef.current;
 
@@ -401,31 +407,34 @@ export function useLiveVoiceDemo({
   const handleRecognitionResult = useCallback(
     (transcript: string, isFinal: boolean) => {
       if (!activeRef.current) return;
+      const observation = integratedP1Route?.observeRecognition(transcript, isFinal);
+      if (integratedP1Route && observation === null) return;
       const nextTranscript = mergeSpeechRecognitionTranscript(
         {
           finalTranscript: finalChunksRef.current,
           interimTranscript: interimChunkRef.current,
         },
-        transcript,
-        isFinal
+        observation?.display_text ?? transcript,
+        observation?.kind === 'final' || (!observation && isFinal)
       );
       finalChunksRef.current = nextTranscript.finalTranscript;
       interimChunkRef.current = nextTranscript.interimTranscript;
       core.setInterimTranscript(combinedSpeechRecognitionTranscript(nextTranscript));
     },
-    [core]
+    [core, integratedP1Route]
   );
 
   const handleRecognitionError = useCallback(
     (message: string) => {
       if (!activeRef.current || recognitionFailedRef.current) return;
+      integratedP1Route?.cancelRecognition();
       recognitionFailedRef.current = true;
       finalChunksRef.current = '';
       interimChunkRef.current = '';
       resumeListeningAfterSpeechRef.current = false;
       core.fail('speech-recognition', message);
     },
-    [core]
+    [core, integratedP1Route]
   );
 
   const handleRecognitionEnd = useCallback(() => {
@@ -454,6 +463,7 @@ export function useLiveVoiceDemo({
       }
       return;
     }
+    integratedP1Route?.finishRecognition();
     if (interactionBlockedRef.current) {
       finalChunksRef.current = '';
       interimChunkRef.current = '';
@@ -553,7 +563,7 @@ export function useLiveVoiceDemo({
       pendingSupplementAfterPromotionRef.current = null;
       onSendMessage(committed.transcript);
     }
-  }, [core, handleCommittedTaskCommand, onInterrupt, onSendMessage, t]);
+  }, [core, handleCommittedTaskCommand, integratedP1Route, onInterrupt, onSendMessage, t]);
 
   const shouldContinueRecognitionTail = useCallback(() => activeRef.current && recognitionCaptureOpenRef.current && !recognitionFailedRef.current, []);
 
@@ -594,6 +604,7 @@ export function useLiveVoiceDemo({
     interimChunkRef.current = '';
     resumeListeningAfterSpeechRef.current = false;
     taskFeedbackOwnsResumeRef.current = false;
+    integratedP1Route?.beginRecognition();
     core.beginListening();
     recognitionCaptureOpenRef.current = true;
     recognitionCaptureSessionIdRef.current = sessionIdRef.current;
@@ -601,13 +612,14 @@ export function useLiveVoiceDemo({
     try {
       startListening();
     } catch (error) {
+      integratedP1Route?.cancelRecognition();
       recognitionCaptureOpenRef.current = false;
       recognitionCaptureSessionIdRef.current = null;
       recognitionCaptureExecutionTargetKeyRef.current = null;
       const message = error instanceof Error && error.message ? error.message : t('speech.errors.recognitionGeneric', { error: 'start-failed' });
       core.fail('speech-recognition-start', message);
     }
-  }, [available, clearStreamingFinalTimeout, core, startListening, t]);
+  }, [available, clearStreamingFinalTimeout, core, integratedP1Route, startListening, t]);
   beginCaptureRef.current = beginCapture;
 
   const safelyStopListening = useCallback(() => {
@@ -633,6 +645,7 @@ export function useLiveVoiceDemo({
     recognitionCaptureSessionIdRef.current = null;
     recognitionCaptureExecutionTargetKeyRef.current = null;
     recognitionFailedRef.current = false;
+    integratedP1Route?.cancelRecognition();
     retryCaptureAfterRecognitionEndRef.current = false;
     pendingSupplementAfterPromotionRef.current = null;
     clearStreamingFinalTimeout();
@@ -644,7 +657,7 @@ export function useLiveVoiceDemo({
     safelyStopListening();
     core.exit();
     stopEveryVoiceOutput();
-  }, [clearStreamingFinalTimeout, core, releaseTtsOutputOwnership, safelyStopListening, stopEveryVoiceOutput]);
+  }, [clearStreamingFinalTimeout, core, integratedP1Route, releaseTtsOutputOwnership, safelyStopListening, stopEveryVoiceOutput]);
 
   const enableLiveVoice = useCallback(() => {
     if (!available || activeRef.current) return;
@@ -1139,6 +1152,7 @@ export function useLiveVoiceDemo({
     committedTranscript: snapshot.finalTranscript,
     errorMessage: snapshot.error?.message ?? '',
     unavailableMessage,
+    routeLabel: integratedP1Route?.routeLabel,
     taskSafetyDisclosure: selectLiveVoiceTaskSafetyDisclosure(FEATURE_LIVE_VOICE_TASK_DEMO, t('liveVoice.task.safetyDisclosure')),
     taskActivity,
     onEnable: enableLiveVoice,

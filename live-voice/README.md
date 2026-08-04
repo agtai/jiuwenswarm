@@ -21,7 +21,7 @@ The short/full distinction and mandatory/conditional distinction are independent
 | Week 2 cumulative Demo integration or acceptance | [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md), [Integrated showcase](demo/INTEGRATED_SHOWCASE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), roadmap, and current replacement ledger in STATUS |
 | Week 3–4 Integrated Windows Alpha acceptance | [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), full solution, ACG, roadmap, runbook, and current STATUS |
 | Post-V0 sequencing or the next development slice | [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md) and relevant decisions |
-| Week 1 implementation or execution-model allocation | Current [Week 1 execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md), current allocation [D-052](decisions/DECISIONS.md), the package's target source/tests, consumed ACG sections, current STATUS, and the actual diff/evidence; read [W1-K1 reviews](W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md) only for shared-kernel work/history |
+| Week 1 implementation or execution-model allocation | Current [Week 1 execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md), current allocation/review policy [D-052/D-053](decisions/DECISIONS.md), the package's target source/tests, consumed ACG sections, current STATUS, and the actual diff/evidence; read [W1-K1 reviews](W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md) only for shared-kernel work/history |
 | Historical Sol module design or an implementation return-to-Sol review | Frozen [Sol module pre-reviews](SOL_MODULE_PRE_REVIEWS_2026-08-03.md), the actual diff/tests, current STATUS, and the applicable decision/roadmap contract |
 | Demo shortcuts or why V0 differs from production | [two-week demo archive](archive/TWO_WEEK_DEMO.md); treat it as historical design/ledger, not current status |
 | Old stash/foundation forensics only | [Post-V0 stash archive](archive/POST_V0_STASH_HANDOFF.md); never reconstruct or apply its machine-local stash during normal recovery |
@@ -33,6 +33,7 @@ The short/full distinction and mandatory/conditional distinction are independent
 | `STATUS.md` | Mutable state, verified facts, known gaps, and next concrete slice |
 | `SOL_MODULE_PRE_REVIEWS_2026-08-03.md` | Frozen detailed D-031/ACG/CR-A/SR-A/SS-A/TC-A Sol design record; not current status or execution order |
 | `W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md` | Dated five-candidate evidence, Sol implementation reviews, and post-commit correction record; STATUS owns current progress |
+| `W1_X2_P1B_REVIEW_2026-08-04.md` | Detailed W1-X2/P1B implementation evidence, W1-S3 judgment, three review passes, corrections, and validation gaps |
 | `DOCUMENTATION_RULES.md` | Authority, routing, anti-duplication, and synchronization rules |
 | `decisions/DECISIONS.md` | Accepted decisions and their rationale/history |
 | `architecture/FULL_SOLUTION_2026-07-30.md` | Dated immutable complete solution snapshot |

@@ -16,6 +16,7 @@ export interface LiveVoiceDemoBarProps {
   committedTranscript?: string;
   errorMessage?: string;
   unavailableMessage?: string;
+  routeLabel?: string;
   /** Always-visible warning shown before any task command can dispatch. */
   taskSafetyDisclosure?: string;
   taskActivity?: LiveVoiceTaskActivity | null;
@@ -52,6 +53,7 @@ export function LiveVoiceDemoBar({
   committedTranscript = '',
   errorMessage = '',
   unavailableMessage,
+  routeLabel,
   taskSafetyDisclosure,
   taskActivity = null,
   onEnable,
@@ -115,6 +117,11 @@ export function LiveVoiceDemoBar({
             {statusLabel}
           </span>
           <span className="live-voice-demo__experimental">{t('liveVoice.experimental')}</span>
+          {routeLabel && (
+            <span className="live-voice-demo__experimental" data-testid="live-voice-route-label">
+              {routeLabel}
+            </span>
+          )}
         </div>
 
         <div

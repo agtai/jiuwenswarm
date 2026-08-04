@@ -557,3 +557,23 @@
 - 历史候选：已有外部候选只作为审查历史或可选择复用的素材；任何片段都要按当前合同、完整 diff 和实际测试重新验证，不得整体 merge/cherry-pick 来代替实现与审查。
 - 影响：dated Week 1 plan 的包边界和风险 Gate 继续有效，但其中历史 owner/model 字段不再决定当前执行。原三到四周估算依赖多条并行实现轨；默认单线执行后必须按实际速度重新估算，不能继续沿用原资源假设。
 - 重新评估条件：只有用户以后明确作出新的模型分工决策，或项目范围、时间和可用资源发生变化。
+
+## D-053 高风险开发批次采用三轮 review
+
+- 日期：2026-08-04
+- 状态：Accepted（面向本决定之后开始的开发批次，不追溯改变已经接受的历史 Gate 结果）
+- 背景：实现者自我检查、脱离实现理由的完整 diff 检查和独立 `/review` 能发现不同类型的问题。只依赖第一次检查容易遗漏实现者已经习惯的假设；只规定测试次数又不能证明需求、兼容性、并发、取消和禁止副作用正确。但对文档、格式和低风险机械修改一律执行三轮会增加时间而没有对应收益。
+- 决策：一个完整开发批次按 D-046 风险分级 review。Tier 2/3 在接受前必须依次完成三轮：第一轮由实现者对需求、边界、代码和测试自我 review；第二轮不采信开发过程中的实现理由，只依据原始需求、仓库规则、既有行为/API、完整 Git diff 和真实测试结果进行冷态 diff review；第三轮使用独立 `/review`，或使用当前环境中等价的独立审查入口。每轮发现的问题先修改并重跑受影响测试；若修改明显改变语义，必须再执行一次最终完整 diff review，直到没有可操作缺陷。
+- 低风险规则：Tier 0 只执行相关检查；Tier 1 默认执行自我 review 和完整 diff review，涉及取消、权限、跨范围副作用、并发或发布影响时升级为三轮。三轮以一个 coherent implementation batch 为单位，不要求每个文件、每次保存或每个小 commit 重复三次。
+- 可用性规则：若当前环境不能调用字面意义上的 `/review`，必须记录实际替代的独立审查方式和剩余限制，不得声称 `/review` 已运行。缺少 Tier 2/3 所需的第三轮且没有等价独立审查时，该批次保持 `PARTIAL`。
+- 影响：`W1-X2` 及后续 Tier 2/3 开发按三轮流程执行；`W1-P1B` 的普通 Adapter 部分按 Tier 1 执行，但其 commit/playback 边界按 Tier 2 升级为三轮。review 记录写明每轮发现、修正、测试和仍未覆盖的验证；`STATUS.md` 只记录当前批次是否满足规则。Git commit/push 批准规则不变。
+- 重新评估条件：独立 review 工具长期不可用且替代流程无法提供不同视角；实际数据表明第三轮没有发现独立问题；风险分类发生变化；或用户调整质量、速度与发布要求。
+
+## D-054 W1-S3 选择限时的 D-031 最小任务监控候选
+
+- 日期：2026-08-04
+- 状态：Accepted（仅接受 W1-S3 范围判断；不授权 D-031 开发、commit 或 push）
+- 背景：当前 P3alpha 只有内存 Task Core、确定性 Executor fake、Voice Task Bridge 和 fake WorkProgress 投影。真实 Store/outbox、Harness Adapter、restart reconciliation、生产 AuthorizationContext、公开 events API 和累计 Demo 接线都未完成；在当前单一 GPT/Sol 执行线上，`TC-B + TaskEvent/projection` 无法可信地在 Day 7 前进入累计 Demo。
+- 决策：W1-S3 结果为 `TIMEBOX`，不选择 `SKIP` 或 `REDUCE`。若用户批准后续执行包，D-031 只实现 roadmap §9 的一个 current task、1–2 个工作日轮询 Adapter，并保留 single in-flight、精确 task/target、generation/context fence、真实 unknown/error、零 Chat mutation 和安全播报仲裁。
+- 影响：本决定不把旧 schedule/JSON 路径称为正式 TC/TaskEvent，也不增加 Demo Replacement Ledger 分值。D-031 实现仍需用户单独批准；在批准前可以继续与它无依赖的正式 P1/P2/P3alpha 工作。
+- 重新评估条件：D-031 开始前正式 Store/Event/Harness 依赖已经具备并可在相同时间内进入累计 Demo；用户拒绝临时 polling 路径；或 Day 7/Week 2 范围发生变化。

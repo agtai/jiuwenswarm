@@ -8,7 +8,7 @@
 - Development branch: `hx/0803_live_voice`.
 - Upstream: `agtai/hx/0803_live_voice`.
 - Corrected W1-K1 is committed as `857d5c06`; W1-X1 route telemetry is committed as `ac608738`; execution-policy documentation is committed as `f12a790b`.
-- The P1A/P2A/P3A implementation is the commit containing this status. Retrieve its exact SHA and upstream relation from Git at every resume rather than self-recording the containing commit's identity.
+- The P1A/P2A/P3A implementation is committed as `56450bdf`.
 - Runtime implementation baseline reviewed by this consolidated planning record: `ac988b85e8a21eb4f378086bab58dac6a4d55d82`. Subsequent commits through the consolidated planning commit change documentation only. The planning commit intentionally does not self-record its SHA—verify actual HEAD and upstream at every resume.
 - V0 immutable Released / Frozen baseline: `ee2896a4afb186e693c720476b6de10797e66f72` with Gate 0–6 PASS.
 - Post-V0 foundation is integrated but remains partial; it is not formal P1/P2/P3alpha closure.
@@ -69,15 +69,21 @@ The commit containing this status implements `W1-P1A`, `W1-P2A-CR`, `W1-P2A-PORT
 
 This candidate does not claim a real Speech Provider, media transport, Harness Adapter, persistent Task Store/outbox, production authorization, restart recovery, public API, Integrated route, or Demo replacement credit.
 
+### W1-X2 and W1-P1B: COMMITTED / VERIFIED / THREE REVIEWS COMPLETE
+
+The commit containing this status adds the three deterministic fake verticals and an opt-in Browser Speech P1 compatibility route. Focused backend/frontend tests, affected legacy regressions, and default-off plus flag-on production builds pass. The fakes remain an automated harness, and Browser Speech remains a visible fallback rather than a real Provider.
+
+Self-review, cold complete-diff review, and an independent Codex `/review` are complete. The independent review found one whitespace-only Browser recognition callback defect; it was fixed, its regression test was added, affected suites and both production-build modes passed, and the final cold diff found no further actionable defect. Detailed corrections, commands, and exclusions are in [the W1-X2/P1B review](W1_X2_P1B_REVIEW_2026-08-04.md).
+
 ## Parallel delivery dashboard
 
 | Track | Committed outcome | Current state | Next bounded action | Gate / dependency |
 |---|---|---|---|---|
 | Shared contract | ACG critical kernel plus fixtures/fakes/conformance | corrected commit `857d5c06`; W1-S1 `CLOSED` | hold the contract stable while A packages consume it | consumed primitives are available to A packages |
-| P1 Speech I/O | AIO + SR/SS Ports and real/fallback Adapters | P1A Port/fake committed and verified; no real Adapter | compose `W1-X2`, then decide conditional `W1-P1B` | Provider/device evidence required for B/C closure |
-| P2 Realtime | CR + RM + II + AB with real non-blocking path | P2A reducer/Port/fake committed and verified; no real transport/Agent route | compose its `W1-X2` fake vertical | real B/C waits for consumed consumer Gate |
-| P3alpha Task | TC + ED + VB, D0 and progress return | P3A in-memory Core/Port/fake committed and verified; no Store/Harness Adapter | compose `W1-X2`, then make W1-S3 decision | D-031 remains Day 5 conditional; durability/auth remain later Gates |
-| Integration | cumulative Demo, observability, fault injection, Windows path | W1-X1 committed; A-package candidate remains unwired | compose the accepted candidate in `W1-X2` without claiming a user-facing Demo | Week 2 90% Gate and Week 4 Alpha Gate |
+| P1 Speech I/O | AIO + SR/SS Ports and real/fallback Adapters | P1A and the tested/reviewed P1B Browser fallback are committed | plan real Provider/device B/C work | Provider/device evidence required for B/C closure |
+| P2 Realtime | CR + RM + II + AB with real non-blocking path | P2A and the tested/reviewed W1-X2 fake vertical are committed; no real transport/Agent route | define the real Agent compatibility path | real B/C waits for consumed consumer Gate |
+| P3alpha Task | TC + ED + VB, D0 and progress return | P3A committed; P3 fake vertical tested; no Store/Harness Adapter | obtain user decision on the D-054 timeboxed D-031 package | durability/auth and formal Store/Event remain later Gates |
+| Integration | cumulative Demo, observability, fault injection, Windows path | three fake verticals composed; opt-in Browser P1 fallback wired; implementation is committed and reviewed | prepare the next real Provider/Agent/Harness routes without claiming a user-facing Demo | Week 2 90% Gate and Week 4 Alpha Gate |
 
 Tracks are dependency-driven but not globally serialized. Multiple bounded packages may execute concurrently after their consumed contract subset is frozen. Sol retains final judgment for cross-module semantics, high-risk closure, the Week 2 Gate, and the Week 4 Gate.
 
@@ -88,10 +94,11 @@ Tracks are dependency-driven but not globally serialized. Multiple bounded packa
 - Historical external output is reference material only and must be revalidated before selective reuse.
 - Keep implementation and review in the current GPT/Sol task, including work estimated above one hour.
 - Tier 2/3 semantics and release decisions remain with GPT/Sol; Git commit and push approvals remain separate.
+- D-053 applies prospectively: Tier 2/3 implementation batches use self-review, cold complete-diff review, and independent `/review` or a documented equivalent; Tier 1 normally uses the first two unless its boundary raises the risk.
 
 ## D-031 decision point
 
-D-031 is no longer the unconditional first project task. It is a legacy Demo Adapter candidate for the P3alpha track:
+D-054 records the W1-S3 result as `TIMEBOX`. D-031 is a legacy Demo Adapter candidate for the P3alpha track, not an authorized implementation package:
 
 - if formal `TC-B + TaskEvent/projection` can enter the cumulative Demo by Day 7, skip or reduce D-031;
 - otherwise timebox a minimal single-task poll monitor to 1–2 working days;
@@ -99,6 +106,8 @@ D-031 is no longer the unconditional first project task. It is a legacy Demo Ada
 - do not expand the disposable polling path into general recovery, multi-task control, durable replay, or a second Task Core.
 
 The detailed original pre-review remains available in the frozen Sol review record; it is an input, not a mandatory full implementation scope.
+
+Starting the 1–2 working-day D-031 package requires explicit user approval. Until then, no polling monitor is implemented.
 
 ## Demo Replacement Ledger
 
@@ -125,6 +134,8 @@ D-032 is risk-proportional under D-046:
 
 Related packages may share one design checkpoint, implementation batch, post-review, and commit. A separate pre-review commit/push for every small package is not required. Every commit and push still requires the exact separate approval specified by root `AGENTS.md`.
 
+D-053 adds three-pass review for Tier 2/3 batches. Each pass records findings and fixes, affected tests rerun after fixes, and material semantic changes trigger another final cold complete-diff review. An unavailable `/review` is recorded as a limitation with the actual substitute; it is never reported as executed.
+
 ## Known blockers and risks
 
 - The three-to-four-week target assumed at least three useful parallel implementation lanes; D-052 now fixes execution to one GPT/Sol lane, so the 31-package, roughly 47–78 sequential-person-day estimate must be recalculated from actual progress.
@@ -148,9 +159,11 @@ Related packages may share one design checkpoint, implementation batch, post-rev
 - Corrected W1-K1 commit `857d5c06`: `77` Python v1+v2 tests and `25` TypeScript tests pass; Ruff, Prettier, Vite production build, links, diff check, and final diff review pass.
 - W1-X1 commit `ac608738`: strict planned TypeScript compile and `17` focused tests pass; Prettier, Vite production build, diff check, and final diff review pass.
 - Week 1 A-package commit containing this status: Python focused plus affected regressions `188 passed` (`53` focused A-package cases); frontend shared contract/conversation/audio `25 + 8 + 8 = 41 passed`; Ruff, Prettier, and Vite production build pass. The applicable checks were repeated after commit; see [the detailed review](W1_A_PACKAGE_REVIEW_2026-08-04.md).
+- Committed W1-X2 implementation: backend `64 passed` with Ruff format/check; frontend fake/telemetry plus affected legacy suites `55 passed`; production build passed.
+- Committed W1-P1B implementation: Adapter tests `9 passed`, planned legacy suites `82 passed`, standalone TypeScript/esbuild checks, default-off build, and flag-on build passed. All three D-053 reviews are complete; the independent finding is fixed and covered.
 
 ## Next actions
 
-1. Compose the three deterministic fake verticals in `W1-X2` without describing them as the user-facing Integrated Demo.
-2. Make the W1-S3 decision from actual P3alpha integration progress.
-3. Consider the conditional P1B fallback route while keeping real Provider/device closure in the later B/C packages.
+1. Request separate approval for a normal push of the commit containing this status.
+2. Decide whether to authorize the D-054 1–2 working-day D-031 minimal single-task monitor package.
+3. Prepare the next rolling package for real Provider/device and Agent/Harness paths without expanding the fallback or fake implementations.
