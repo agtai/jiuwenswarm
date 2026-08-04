@@ -7,7 +7,8 @@
 
 - Development branch: `hx/0803_live_voice`.
 - Upstream: `agtai/hx/0803_live_voice`.
-- Corrected W1-K1 is committed as `857d5c06`; W1-X1 route telemetry is committed as `ac608738`. The commit containing this status aligns current execution policy and documentation; verify its exact SHA and upstream relation from Git at every resume.
+- Corrected W1-K1 is committed as `857d5c06`; W1-X1 route telemetry is committed as `ac608738`; execution-policy documentation is committed as `f12a790b`.
+- The P1A/P2A/P3A implementation is the commit containing this status. Retrieve its exact SHA and upstream relation from Git at every resume rather than self-recording the containing commit's identity.
 - Runtime implementation baseline reviewed by this consolidated planning record: `ac988b85e8a21eb4f378086bab58dac6a4d55d82`. Subsequent commits through the consolidated planning commit change documentation only. The planning commit intentionally does not self-record its SHA—verify actual HEAD and upstream at every resume.
 - V0 immutable Released / Frozen baseline: `ee2896a4afb186e693c720476b6de10797e66f72` with Gate 0–6 PASS.
 - Post-V0 foundation is integrated but remains partial; it is not formal P1/P2/P3alpha closure.
@@ -62,15 +63,21 @@ The committed Sol implementation provides the v2 shared kernel, but a later inde
 
 Only the two bounded files from historical DeepSeek candidate `9a5663c6d3fe25143240717e7e2e5ec5f1a0dbe2` were selectively reused; its branch history and W1-K1 changes were not merged or cherry-picked. GPT/Sol corrected runtime-mutability of the route vocabulary, missing formal provider provenance, and missing reasons on non-formal routes. Commit `ac608738` passes strict planned compilation, `17` focused tests, Prettier, the production build, and final diff review. This remains Tier 1 instrumentation and carries no replacement credit.
 
+### Week 1 A packages: COMMITTED / VERIFIED / W1-S2 CLOSED
+
+The commit containing this status implements `W1-P1A`, `W1-P2A-CR`, `W1-P2A-PORTS`, `W1-P3A-TC`, and `W1-P3A-PORTS`. The bounded Port/fake behavior, negative side-effect checks, immutable-commit verification, and grouped review pass. Detailed boundaries, corrections, scenario evidence, and exclusions are in [the Week 1 A-package review](W1_A_PACKAGE_REVIEW_2026-08-04.md).
+
+This candidate does not claim a real Speech Provider, media transport, Harness Adapter, persistent Task Store/outbox, production authorization, restart recovery, public API, Integrated route, or Demo replacement credit.
+
 ## Parallel delivery dashboard
 
 | Track | Committed outcome | Current state | Next bounded action | Gate / dependency |
 |---|---|---|---|---|
 | Shared contract | ACG critical kernel plus fixtures/fakes/conformance | corrected commit `857d5c06`; W1-S1 `CLOSED` | hold the contract stable while A packages consume it | consumed primitives are available to A packages |
-| P1 Speech I/O | AIO + SR/SS Ports and real/fallback Adapters | V0 fallback exists; formal Ports not started | execute `W1-P1A`, then conditional Browser route `W1-P1B` | W1-S1 first; Provider/device evidence required for B/C closure |
-| P2 Realtime | CR + RM + II + AB with real non-blocking path | design accepted; implementation not started | execute `W1-P2A-CR` and `W1-P2A-PORTS` against shared fakes | W1-S1 first; real B/C waits for consumed consumer Gate |
-| P3alpha Task | TC + ED + VB, D0 and progress return | legacy foundation exists; formal Core not started | execute `W1-P3A-TC` and `W1-P3A-PORTS`; use actual progress at `W1-S3` | W1-S1 first; D-031 remains Day 5 conditional |
-| Integration | cumulative Demo, observability, fault injection, Windows path | W1-X1 committed; modes remain separate | compose accepted A packages in `W1-X2` after their Gates | Week 2 90% Gate and Week 4 Alpha Gate |
+| P1 Speech I/O | AIO + SR/SS Ports and real/fallback Adapters | P1A Port/fake committed and verified; no real Adapter | compose `W1-X2`, then decide conditional `W1-P1B` | Provider/device evidence required for B/C closure |
+| P2 Realtime | CR + RM + II + AB with real non-blocking path | P2A reducer/Port/fake committed and verified; no real transport/Agent route | compose its `W1-X2` fake vertical | real B/C waits for consumed consumer Gate |
+| P3alpha Task | TC + ED + VB, D0 and progress return | P3A in-memory Core/Port/fake committed and verified; no Store/Harness Adapter | compose `W1-X2`, then make W1-S3 decision | D-031 remains Day 5 conditional; durability/auth remain later Gates |
+| Integration | cumulative Demo, observability, fault injection, Windows path | W1-X1 committed; A-package candidate remains unwired | compose the accepted candidate in `W1-X2` without claiming a user-facing Demo | Week 2 90% Gate and Week 4 Alpha Gate |
 
 Tracks are dependency-driven but not globally serialized. Multiple bounded packages may execute concurrently after their consumed contract subset is frozen. Sol retains final judgment for cross-module semantics, high-risk closure, the Week 2 Gate, and the Week 4 Gate.
 
@@ -122,7 +129,7 @@ Related packages may share one design checkpoint, implementation batch, post-rev
 
 - The three-to-four-week target assumed at least three useful parallel implementation lanes; D-052 now fixes execution to one GPT/Sol lane, so the 31-package, roughly 47–78 sequential-person-day estimate must be recalculated from actual progress.
 - No real streaming Speech Provider, media transport, or Windows device baseline is selected/restored in Git.
-- The repository `.venv` exists. Frontend dependencies were restored with `npm ci`; local `tsc`, focused Node tests, and the Vite production build now run successfully in this worktree.
+- The repository `.venv` exists and is the verified project runtime. Pytest is also installed in the system-default Python, but that environment lacks other project dependencies; frontend dependencies, local `tsc`, focused Node tests, and the Vite production build run successfully in this worktree.
 - Current runbook modes are mutually exclusive; Integrated mode is a documented target but not yet runnable.
 - Browser Speech first-pass fidelity remains weak for critical Chinese/technical tokens.
 - Current supplement/cancel behavior is not a production generation or tool-side-effect fence.
@@ -140,9 +147,10 @@ Related packages may share one design checkpoint, implementation batch, post-rev
 - Committed Sol W1-K1 candidate after three reviews: historical result `76` Python and `24` TypeScript tests plus Ruff/build/link checks passed; a later review reopened W1-S1 for the two P1 corrections recorded above.
 - Corrected W1-K1 commit `857d5c06`: `77` Python v1+v2 tests and `25` TypeScript tests pass; Ruff, Prettier, Vite production build, links, diff check, and final diff review pass.
 - W1-X1 commit `ac608738`: strict planned TypeScript compile and `17` focused tests pass; Prettier, Vite production build, diff check, and final diff review pass.
+- Week 1 A-package commit containing this status: Python focused plus affected regressions `188 passed` (`53` focused A-package cases); frontend shared contract/conversation/audio `25 + 8 + 8 = 41 passed`; Ruff, Prettier, and Vite production build pass. The applicable checks were repeated after commit; see [the detailed review](W1_A_PACKAGE_REVIEW_2026-08-04.md).
 
 ## Next actions
 
-1. Continue with `W1-P2A-CR` in the current GPT/Sol task, then `W1-P3A-TC`, `W1-P1A`, and the bounded Port packages according to the dated dependency plan.
-2. Run grouped `W1-S2` over accepted A packages and their positive, negative, stale, cancel, replay, and zero-side-effect evidence.
-3. Compose accepted A packages in `W1-X2` without describing fake verticals as the user-facing Integrated Demo.
+1. Compose the three deterministic fake verticals in `W1-X2` without describing them as the user-facing Integrated Demo.
+2. Make the W1-S3 decision from actual P3alpha integration progress.
+3. Consider the conditional P1B fallback route while keeping real Provider/device closure in the later B/C packages.
