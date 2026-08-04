@@ -1,6 +1,7 @@
 # Live Voice Sol module pre-review record: 2026-08-03
 
 > Frozen design record. This file preserves the D-031, ACG-1, CR-A, SR-A/SS-A, and TC-A Sol pre-reviews that originally lived in `STATUS.md`. It is not the current execution queue or mutable project state. D-046 and the current [STATUS.md](STATUS.md) supersede its former D-031-first ordering and universal D-032 operating process; blank execution/result cells remain historical evidence that implementation had not started when the record was frozen.
+> D-052 supersedes the non-Sol owner/allocation language below, and D-055 supersedes Windows/X-WIN carrier language. The original design/oracles remain historical inputs; current execution, carrier and closure come only from decisions, STATUS and the actual diff/tests.
 
 ## Git and release identity
 

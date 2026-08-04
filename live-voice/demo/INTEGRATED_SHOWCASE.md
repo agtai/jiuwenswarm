@@ -2,7 +2,9 @@
 
 > Status: `NOT RUNNABLE YET`
 > Week 2 pass/fail authority: [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
+> Week 3–4 Web Alpha pass/fail authority: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
 > Environment procedure: [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md)
+> Stable delivery/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
 This script demonstrates the cumulative engineering route after formal modules begin replacing V0 shortcuts. It never replaces acceptance evidence. Until the runbook's Integrated mode is implemented and route telemetry identifies every segment, this script is a planned Gate and must not be presented as a working capability.
 
@@ -34,6 +36,7 @@ The UI/trace must identify every segment as `formal`, `fallback`, `demo_substitu
 4. Confirm the Demo target is safe for one real side-effecting task or select an isolated/disposable project.
 5. Confirm route telemetry, correlated events and sanitized evidence capture are active.
 6. Confirm text fallback remains usable.
+7. For Web Alpha evidence, verify the declared Chrome/Edge versions, secure origin, permission/device/autoplay/page-lifecycle checks and Browser↔Gateway deployment route before opening the microphone.
 
 ## 3. Integrated script
 
@@ -52,6 +55,8 @@ Start a deliberately slow read-only Agent request. While it is working or speaki
 - route telemetry shows CR/RM/II/AB owners or explicitly labels the remaining substitute.
 
 ### Turn 3 — create a real detached task
+
+> Current blocker: this planned step is not runnable while STATUS reports D-031 target/execution/artifact mismatch. Do not perform a positive real task until the project-bound Executor/Harness contract (or an explicitly restricted runtime-extension Demo contract) is implemented, reviewed and cleared for isolated validation.
 
 Issue a task intent without confirmation and show zero task mutation plus a clarification/confirmation request. Then give the exact confirmation in the isolated target. Show the real task ID, command ID, target, Executor and accepted/running facts.
 

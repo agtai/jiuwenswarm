@@ -1,13 +1,15 @@
 # Live Voice Week 1 Sol execution plan
 
 > Planning date: 2026-08-03
-> Freeze-state snapshot: **SOL DESIGN COMPLETE / IMPLEMENTATION NOT STARTED at plan creation**; consult STATUS for current progress
-> Delivery window: the next five working days after this documentation candidate is committed
+> Historical execution contract: **Week 1 is complete**. The package boundaries, dependencies and scenario oracles remain useful reference material, but this file is not the current queue.
+> Freeze-state snapshot at plan creation: **SOL DESIGN COMPLETE / IMPLEMENTATION NOT STARTED**; consult STATUS for the completed implementation facts.
+> Original delivery window: the five working days after the documentation candidate was committed; this is historical timing, not a current schedule.
 > Current progress authority: [STATUS.md](../STATUS.md)
 > Product milestones and risk tiers: [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)
 > Shared contract authority: [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md)
 > Ownership update: [D-049](../decisions/DECISIONS.md) replaces this snapshot's W1-K1 non-Sol owner with direct Sol implementation after five unsuccessful candidate reviews. The original owner text below is retained as dated history; see [the review record](../W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md) and STATUS for current action.
 > Execution-policy update: [D-052](../decisions/DECISIONS.md) makes current GPT/Sol the only executor for future packages; work is no longer switched to DeepSeek. Historical owner/model fields below no longer assign work; package boundaries, dependencies, risk tiers, and scenario oracles remain valid.
+> Product-carrier update: [D-055](../decisions/DECISIONS.md) replaces historical Windows/X-WIN productization with Web/X-WEB. Windows wording below remains part of this dated plan and does not define the current Alpha carrier.
 
 This is the dated, execution-level handoff required by D-041, D-046, and D-048. It freezes priority, dependencies, code ownership, package boundaries, scenario oracles, target files, and verification commands for Week 1. It does not report implementation progress. `STATUS.md` remains the only mutable source for package state, tested SHA, blockers, and current next action.
 
@@ -395,7 +397,7 @@ Every proposed commit must again show exact status, diff/test summary, exclusion
 
 ## 8. Environment and capacity blockers
 
-- The current workspace check found no repository `.venv` and no frontend `node_modules`; verification commands are specifications until dependencies are restored. Failed setup is a blocker, not test evidence.
+- At plan creation, the workspace check found no repository `.venv` and no frontend `node_modules`; that historical observation is not current environment state. Verification setup failures remain blockers rather than product test evidence.
 - No real streaming Speech Provider, Realtime Media transport, or Windows device baseline is selected in Git. Week 1 A packages and fakes can proceed; Provider/device B/C closure cannot.
 - The four-week plan assumes at least three useful implementation lanes. With one lane, preserve E0, one A path per plane, truthful integration, and Day 5 evidence; re-estimate scope instead of silently dropping review or safety.
 - Machine-private credentials, endpoints, project registration, runtime data, browser permission, and devices stay outside this plan and Git.

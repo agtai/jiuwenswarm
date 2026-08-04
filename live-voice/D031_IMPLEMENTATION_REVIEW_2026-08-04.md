@@ -4,7 +4,7 @@
 >
 > Candidate base: `ad02fa6ff5f81d5726b484ab3a33ba93651affc8`
 >
-> Implementation commit: `d84fd388712ebe23d0a6a1a4b15f4383475391c4`
+> Final local implementation commit: `617fe256db05b07a07b6d457b15f07c02d17d9bf` (`d031-05` real-service evidence below ran against its pre-amend candidate `d84fd388`)
 >
 > Acceptance state: `PARTIAL`; monitor and fail-closed behavior are verified, but a successful project-bound AutoHarness delivery is not
 >
@@ -206,4 +206,4 @@ Likely investigation points are `liveVoiceTaskBridge.ts` for the fixed pipeline/
 
 - No formal Task Core/Event Store/Harness Adapter, TaskEvent push/replay, durable journal, multi-task monitor, cross-page/process recovery, or production authorization.
 - No natural-language task result is invented; terminal speech states only task ID and raw backend status.
-- No Week 2 replacement credit or semantically correct project-bound AutoHarness delivery is claimed by this record. Commit `d84fd388` is implementation evidence, not D-031 acceptance closure or push evidence.
+- No Week 2 replacement credit or semantically correct project-bound AutoHarness delivery is claimed by this record. Final local commit `617fe256` is implementation evidence, not D-031 acceptance closure or push evidence.

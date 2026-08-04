@@ -19,9 +19,9 @@ The short/full distinction and mandatory/conditional distinction are independent
 | Long-term architecture, P1/P2/P3 boundary, protocol, ownership, cancellation, durability, production acceptance | Complete [full solution snapshot](architecture/FULL_SOLUTION_2026-07-30.md), accepted [Architecture Contract Gate](architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), relevant decisions, and roadmap |
 | V0 reproduction or regression acceptance | [V0 acceptance](validation/V0_ACCEPTANCE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), [showcase](demo/DEMO_SHOWCASE.md), and immutable [V0 evidence](evidence/V0_20260802_ee2896a4.md) |
 | Week 2 cumulative Demo integration or acceptance | [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md), [Integrated showcase](demo/INTEGRATED_SHOWCASE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), roadmap, and current replacement ledger in STATUS |
-| Week 3–4 Integrated Windows Alpha acceptance | [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), full solution, ACG, roadmap, runbook, and current STATUS |
-| Post-V0 sequencing or the next development slice | [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md) and relevant decisions |
-| Week 1 implementation or execution-model allocation | Current [Week 1 execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md), current allocation/review policy [D-052/D-053](decisions/DECISIONS.md), the package's target source/tests, consumed ACG sections, current STATUS, and the actual diff/evidence; read [W1-K1 reviews](W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md) only for shared-kernel work/history |
+| Integrated Web Alpha acceptance (`W3/W4` delivery windows, not current calendar promises) | [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), D-055, full solution, ACG, [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md), roadmap, runbook, and current STATUS |
+| Post-V0 sequencing or the next development slice | [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md), [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md), and relevant decisions |
+| Week 1 package history, regression work, or execution-model history | Historical [Week 1 execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md), current allocation/review policy [D-052/D-053](decisions/DECISIONS.md), the package's target source/tests, consumed ACG sections, current STATUS, and the actual diff/evidence; Week 1 is complete and this dated plan is not the current queue |
 | Historical Sol module design or an implementation return-to-Sol review | Frozen [Sol module pre-reviews](SOL_MODULE_PRE_REVIEWS_2026-08-03.md), the actual diff/tests, current STATUS, and the applicable decision/roadmap contract |
 | Demo shortcuts or why V0 differs from production | [two-week demo archive](archive/TWO_WEEK_DEMO.md); treat it as historical design/ledger, not current status |
 | Old stash/foundation forensics only | [Post-V0 stash archive](archive/POST_V0_STASH_HANDOFF.md); never reconstruct or apply its machine-local stash during normal recovery |
@@ -39,8 +39,9 @@ The short/full distinction and mandatory/conditional distinction are independent
 | `decisions/DECISIONS.md` | Accepted decisions and their rationale/history |
 | `architecture/FULL_SOLUTION_2026-07-30.md` | Dated immutable complete solution snapshot |
 | `architecture/ARCHITECTURE_CONTRACT_GATE_V1.md` | Accepted shared v2 identity/event/state/cancel/commit/progress/context contract and conformance boundary |
-| `roadmap/POST_V0_DELIVERY_ROADMAP.md` | Two-week/four-week milestones, parallel delivery tracks, replacement scoring, and risk-proportional closure |
-| `roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md` | Dated Sol priority/dependency/boundary plan and execution package contracts; STATUS, not this file, owns mutable progress |
+| `roadmap/POST_V0_DELIVERY_ROADMAP.md` | Logical delivery windows, target scope/order, replacement scoring, and risk-proportional closure; current single-lane calendar timing is not frozen |
+| `roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md` | Completed Week 1 historical priority/dependency/boundary plan; its package contracts remain reference material, not the current queue |
+| `roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md` | Dated stable package map from current Demo/fallback routes to formal Web Alpha owners, dependencies, target windows, and acceptance links; STATUS owns mutable progress |
 | `validation/`, `runbooks/`, `demo/`, `evidence/` | V0/Integrated Demo/Alpha acceptance, runtime procedure, presentation scripts, and immutable run evidence |
 | `archive/` | Historical plans and recovery context; never the current-state authority |
 

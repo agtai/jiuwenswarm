@@ -3,14 +3,14 @@
 > Gate revision: `ACG-1`
 > Target contract family: `live-voice.contract.v2`
 > Decision: D-042
-> Status: Sol design accepted; no v2 runtime implementation or conformance result is implied
-> Delivery interpretation: D-046 preserves all semantics in this document but implements them through a Day 1–2 critical kernel plus consumer-specific gates. Sections not consumed by an A-package do not globally block unrelated A-package work; every consumed section and the complete Alpha boundary still require the applicable conformance and Sol review before real B/C integration or Week 4 closure.
+> Status: accepted normative design; implementation and conformance progress are reported only in STATUS and package review records
+> Delivery interpretation: D-046 preserves all semantics in this document but implements them through a Day 1–2 critical kernel plus consumer-specific gates. D-055 changes the current product carrier from Windows Desktop/WebView2 to Web without changing this wire contract. Sections not consumed by an A-package do not globally block unrelated A-package work; every consumed section and the complete Alpha boundary still require the applicable conformance and Sol review before real B/C integration or Week 4 closure.
 
 ## 1. Purpose and authority
 
 This document is the normative architecture-review output required by [FULL_SOLUTION_2026-07-30.md](FULL_SOLUTION_2026-07-30.md) §5.2 and §8 before P1/P2/P3 `*-A` packages can implement shared types, Ports, fakes, reducers, and conformance suites. It freezes cross-plane meaning; it does not implement a Provider, conversation runtime, task core, executor, transport, or production security boundary.
 
-The immutable full-solution snapshot remains the product and module boundary source. This Gate is the newer normative source for the shared wire contract where it makes a more specific choice. D-046 risk tiers govern review depth: grouped Tier 2/3 boundaries require Sol pre/post review, while ordinary A-package mechanics use their scoped contract and evidence rather than a universal full-matrix checkpoint.
+The immutable full-solution snapshot remains the historical architecture and module-boundary source; D-055 supersedes only its Windows product-carrier and productization interpretation. This Gate is the newer normative source for the shared wire contract where it makes a more specific choice. D-046 risk tiers govern review depth: grouped Tier 2/3 boundaries require Sol pre/post review, while ordinary A-package mechanics use their scoped contract and evidence rather than a universal full-matrix checkpoint.
 
 Normative terms `MUST`, `MUST NOT`, `SHOULD`, and `MAY` have their ordinary RFC-style meanings. An omitted, unknown, unsupported, stale, or untrusted fact MUST NOT be converted to success.
 
@@ -309,7 +309,7 @@ ACG-1 accepted shared semantics
 ├─ P3: TC-A, ED-A, VB-A
 │  └─ TC canonical state/event/idempotency -> AutoHarness D0 Executor adapter and Command/Voice bridges
 └─ X-OBS contract work
-   └─ X-E2E / X-WIN after the relevant real adapters
+   └─ X-E2E / X-WEB after the relevant real adapters
 ```
 
 The Day 1–2 critical kernel implements the shared identity/scope, authority, committed-input, core-lifecycle, four-cancel, generation-fence, minimum-envelope/sequence, capability/error, and feature-off primitives. After its grouped Tier 3 review, `*-A` packages may proceed in parallel against shared fakes. Consumer-specific ACG sections become local gates before the B/C package that actually consumes them: Speech/Audio provenance and privacy before real Provider/Audio wiring; presented cursor/history and notification Context before P2 presentation wiring; AuthorizationContext, atomic outbox, attempt dedup, and restart reconciliation before P3 Store/Executor wiring. A pure contract test cannot close a real adapter, and a real happy-path demo cannot replace the required negative/state/race/recovery evidence.
@@ -319,7 +319,7 @@ The Day 1–2 critical kernel implements the shared identity/scope, authority, c
 | Boundary | Contract/fake baseline | First concrete integration baseline | Honest limitation |
 |---|---|---|---|
 | Speech Provider | deterministic batch/stream/cancel/capability/error fake | existing Browser Speech recognition/synthesis behind P1 batch Ports | compatibility/fallback only; fixed-browser quality is not Provider selection or P1 closure |
-| Interaction | deterministic Cascade policy fake | Windows Alpha Cascade using the shared Speech Ports | Native Audio Engine remains a later replaceable Adapter and never becomes an Agent/Tool control plane |
+| Interaction | deterministic Cascade policy fake | Web Alpha Cascade using the shared Speech Ports | Native Audio Engine remains a later replaceable Adapter and never becomes an Agent/Tool control plane |
 | Realtime Media | loopback/fault-injection fake | no real Provider selected by this Gate | real duplex transport, AEC, device, latency, and privacy evidence remain open |
 | Executor | deterministic event-script Executor fake | existing AutoHarness scheduler plus fixed `extended_evolve_pipeline` behind an Executor Port | side-effecting Demo/D0 integration target only; isolated data/project required; no general Executor, D1/D2, exactly-once, or rollback claim |
 

@@ -1,16 +1,17 @@
-# Live Voice Week 3–4 Integrated Windows Alpha acceptance
+# Live Voice W3/W4 Integrated Web Alpha acceptance
 
 > Status: `NOT STARTED`
-> Committed scope: P1 + P2 + P3alpha; complete P3 is stretch
-> Architecture: [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), D-042–D-046
+> Accepted scope: P1 + P2 + P3alpha; complete P3 is stretch
+> Architecture: historical [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), normative [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), and all applicable current decisions, especially D-046, D-047, D-050, D-052, D-053 and D-055
+> Stable package/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
-This contract decides whether the four-week Integrated Windows Alpha is complete. It is not RC/Production approval.
+This contract decides whether the Integrated Web Alpha scope is complete; `W3/W4` is a delivery-order window, not a current single-lane calendar promise. The accepted carrier is the JiuwenSwarm desktop Web frontend. Chrome/Chromium 107 remains the implementation compatibility floor for modified frontend code, while the candidate must separately name the exact accepted desktop Chromium evidence baseline. D-055 does not silently turn current Chrome evidence into a Chrome+Edge or wider compatibility promise. This is not a mobile/PWA, Firefox/Safari, public compatibility-matrix, RC, or Production approval.
 
 ## 1. Candidate boundary
 
 - One immutable candidate contains every runtime, schema, Adapter, flag, fixture, benchmark and documentation input.
 - The candidate has a clean worktree and an explicit relation to its development branch/upstream.
-- Private Provider/Executor/project/device/network conditions are recorded without secrets and restored independently of Git.
+- Private Provider/Executor/project/browser/device/network/deployment conditions are recorded without secrets and restored independently of Git.
 - All required Tier 3 automated suites and real-path evidence run against this candidate; historical counts or Week 2 evidence are context, not automatic PASS.
 
 ## 2. Shared contract Gate
@@ -29,9 +30,9 @@ Unknown or unsupported facts remain explicit. A legacy v1 Adapter cannot be rela
 
 ## 3. P1 Gate
 
-Pass the real `microphone → Audio I/O → STT → existing Chat/E2A → TTS → playout` path on Windows:
+Pass the real `browser microphone → browser Audio I/O → STT → existing Chat/E2A → TTS → browser playout` path:
 
-- real Audio I/O device/permission lifecycle and immediate exact-response stop;
+- real browser Audio I/O capture/playout, permission/device lifecycle and immediate exact-response stop;
 - Recognition and Synthesis Ports with one real Adapter plus Browser or other declared fallback;
 - ordered partial/final/cancel and audio chunk/text-span provenance;
 - critical-token and side-effect clarification policy;
@@ -41,7 +42,7 @@ Pass the real `microphone → Audio I/O → STT → existing Chat/E2A → TTS �
 
 ## 4. P2 Gate
 
-Pass the real `microphone → Realtime Media → Conversation Runtime/Interaction Engine → Agent Bridge/Harness → streaming TTS/playout` path:
+Pass the real `browser microphone → Browser↔Gateway Realtime Media → Conversation Runtime/Interaction Engine → Agent Bridge/Harness → streaming TTS/browser playout` path:
 
 - concurrent bounded media, ACK/backpressure/drop/reorder/close behavior;
 - canonical response/generation owner and zero stale UI/audio/history effects;
@@ -80,21 +81,25 @@ Pass requires:
 - slow Harness synchronous wait on the realtime hot path is 0;
 - partial speech mutations and stale post-fence effects are 0.
 
-## 7. Windows and degradation Gate
+## 7. Web platform and degradation Gate
 
-- permissions, device selection/hot failure, input/output routing and visible diagnostics have no silent failure;
+- freeze the desktop-browser scope before candidate testing and run the complete candidate on every browser/version in that declared baseline; an absent or changing baseline is `BLOCKED`, and exact browser, OS, origin, device and network labels are evidence rather than a public compatibility promise;
+- non-localhost deployment uses HTTPS/WSS or an equivalent secure context; localhost remains a development/controlled-test exception only;
+- microphone grant, denial and revocation; device selection and `devicechange`; input/output loss; autoplay/user-activation; page hidden/background/resume; refresh/reconnect and visible diagnostics have no silent failure or stale audio resurrection;
+- the selected browser capture/playout implementation, media encoding and Browser↔Gateway transport are documented with capability and fallback provenance; unsupported behavior remains explicit;
+- Gateway/AgentServer proxying, CSP, CORS and WebSocket/transport routing work in the declared deployment topology; Browser code contains no long-lived Speech/model Provider credential;
 - selected real Provider and Executor failure profiles are exercised;
-- feature/capability off preserves the text product path;
+- feature/capability off and permission/Provider/media failure preserve the text product path;
 - route/metric traces can reproduce the declared Alpha targets or record an explicit accepted Alpha deviation;
-- no credentials, raw secrets or unauthorized content appear in logs, Context, TaskEvent, WorkProgress or speech evidence.
+- raw audio is not persisted by default, and no credentials, raw secrets or unauthorized content appear in browser storage, URLs, logs, Context, TaskEvent, WorkProgress or speech evidence.
 
 ## 8. Final decision
 
 Sol reviews the actual diff, grouped Tier 2/3 evidence, exact candidate, unresolved gaps and every accepted deviation. Result is one of:
 
-- `PASS — INTEGRATED WINDOWS ALPHA`;
+- `PASS — INTEGRATED WEB ALPHA`;
 - `PARTIAL — candidate runs but one or more committed Gate requirements remain`;
 - `BLOCKED — required external condition or authority decision is unavailable`;
 - `FAIL — candidate violates a committed invariant or cannot run the required real paths`.
 
-Production authentication, full P3, D1/D2, multi-platform and RC hardening remain separate even after PASS.
+Production authentication, full P3, D1/D2, mobile/PWA and browsers outside the accepted Alpha baseline, public compatibility promises and RC hardening remain separate even after PASS.

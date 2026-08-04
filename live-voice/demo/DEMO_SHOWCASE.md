@@ -3,6 +3,7 @@
 本文负责现场展示话术和失败退场，不替代 V0 放行验收。完整 Gate、固定语料和证据模板见 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md)。
 
 > 本文只负责冻结的 V0 展示，不是 D-046 的 Week 2 累计 P1/P2/P3alpha Demo。新的累计展示见 [INTEGRATED_SHOWCASE.md](INTEGRATED_SHOWCASE.md)；在其运行条件落地前不得把本脚本的可选 Task 加分项拼接成“90% Integrated Demo”。
+> 本文出现的“当前 Demo”只表示冻结的 V0 候选；其中 Post-V0 Task/monitor/E2E 描述也是写入本脚本时的历史边界，不得用于判断当前分支能力。当前任务事实和限制只看 [STATUS.md](../STATUS.md) 与 [D-031 review](../D031_IMPLEMENTATION_REVIEW_2026-08-04.md)。
 
 - 历史失败候选：detached `d4c3e32aa34a4d26b346cdf0396788d39930cd6b` 的 Gate 0–2 PASS、Gate 3 Attempt 1 FAIL；它只保留为历史失败基线
 - 当前 V0 Released / 已冻结：`ee2896a4afb186e693c720476b6de10797e66f72`；Gate 0–6 全部 PASS，脱敏证据见 [evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)

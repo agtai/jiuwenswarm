@@ -134,7 +134,7 @@ The review ignored prior rationale and judged the complete worktree against the 
 5. timestamp and several stable validation reasons were not fully aligned across Python and TypeScript;
 6. `STATUS.md` and the environment blocker still described pre-implementation facts.
 
-All code findings were corrected and focused suites passed again. Documentation now records the current uncommitted candidate and restored Node environment. Review 3 remains pending below.
+At this checkpoint, all code findings were corrected and focused suites passed again. Documentation recorded the then-uncommitted candidate and restored Node environment; Review 3 was still pending and is completed in the following section.
 
 ### Review 3 — Codex `/review`: corrected
 

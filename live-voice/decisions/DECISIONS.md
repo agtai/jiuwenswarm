@@ -2,14 +2,16 @@
 
 本文件记录已经明确接受的产品和工程取舍。后续 Codex 不应仅因为当前代码更容易而静默改变这些决策；如需改变，应新增决策并把旧决策标记为 `Superseded`。
 
+旧决策的历史正文可以保留，但状态行必须指出被后续决定取代的当前含义；实现进度始终由 `STATUS.md` 提供。
+
 ## D-001 方案知识保存在 Git 跟踪的普通文档中
 
 - 日期：2026-07-31
-- 状态：Accepted
+- 状态：Accepted（“知识进入 Git 跟踪文档”的原则保留；旧 `docs/zh/live-voice/` 路径由 D-040 取代，commit/push 操作由根 `AGENTS.md` 的逐次审批规则取代）
 - 背景：需要在多台机器上通过 GitHub 同步代码并让新的 Codex 会话快速接续。
-- 决策：完整方案和 Demo 方案保存在 `docs/zh/live-voice/`；根目录 `AGENTS.md` 只保存阅读入口和维护规则；不把完整知识仅存入 `.codex`、`.agent`、本地数据库或聊天记录。
+- 原决策：完整方案和 Demo 方案保存在 `docs/zh/live-voice/`；D-040 后续把权威位置调整为根 `live-voice/`。不把完整知识仅存入 `.codex`、`.agent`、本地数据库或聊天记录的原则不变。
 - 原因：普通 Markdown 可审查、可 diff、可提交、可跨工具阅读；隐藏工具目录容易与某一运行环境绑定。
-- 影响：每次实质性工作结束前必须更新 `STATUS.md`，作出新取舍时更新本文件，并 commit/push。
+- 原影响：实质性工作更新 STATUS，新取舍更新本文件；其中自动 commit/push 要求已失效，当前每次 commit 与 push 都按根 `AGENTS.md` 分别取得精确批准。
 - 重新评估条件：仓库建立了统一且跨工具的项目知识系统。
 
 ## D-002 先交付纵向 Demo，不把它称为 Alpha
@@ -411,7 +413,8 @@
 ## D-041 以 Sol 冻结高风险语义并由非 Sol 模型执行有界工作包
 
 - 日期：2026-08-03
-- 状态：Accepted（模型分工仍有效；原 D-031-first 排序和普遍 D-032 流程已由 D-046 取代，临时层扩建边界由 D-047 约束）
+- 状态：Partially superseded（风险判断和历史设计职责保留；面向未来任务的非 Sol 执行分工由 D-052 取代，原 D-031-first 排序和普遍 D-032 流程由 D-046 取代）
+- 当前解释：以下非 Sol owner、交接和成本分配正文只记录接受本决定时的策略，不能用于分配当前或未来任务。
 - 背景：Live Voice 后续同时包含契约、并发状态机、取消与副作用安全、持久化、真机媒体和大量可机械执行的 Adapter/tests 工作。高能力模型额度有限；若让同一模型承担全部编码，会把稀缺推理消耗在已经能够由明确规范驱动的实现上。反过来，若让执行模型自行决定状态权威、错误语义、恢复、权限或测试放行标准，则可能把错误实现固化为预期。
 - 优先级决策：P1/P2/P3 是能力平面，不作为简单的串行开发顺序。当前排序以 D-046 为权威：先在 1–2 天内冻结并实现 ACG critical kernel，同时建立累计 Integrated Demo 的 route telemetry 与 Replacement Ledger；随后 P1、P2、P3alpha 和集成轨按已冻结依赖并行。D-031 只保留 Day 5/Day 7 决策点，若正式 `TC-B + TaskEvent/projection` 不能及时进入 Demo，再把最小单任务 monitor 限时为 1–2 个工作日；不再把完整 D-031 作为共享 Contract Gate 和全部能力轨的前置任务。
 - 模型职责决策：GPT-5.6 Sol 是指定的设计与审查模型，负责 D-046 风险分级要求的开发前/开发后回顾、模块定义与非目标、适用的 P/N/B/S/T/C/R/I/F/K/X 场景及 test oracle、跨模块 schema/state authority/identity/ownership/cancel/commit/fence/compatibility、安全与 durability 边界、架构变更、证据解释以及 `CLOSED/PARTIAL/BLOCKED` 和版本放行判断。Sol 不承担已冻结规范下的常规执行和实现，除非用户以后明确改变该分工。
@@ -425,7 +428,7 @@
 ## D-042 Architecture Contract Gate 采用完整 v2 契约并允许 Sol 先行冻结后续设计
 
 - 日期：2026-08-03
-- 状态：Accepted（Sol 架构设计签字；实现与模块闭环尚未开始；交付排序和 review 深度按 D-046/D-048 解释）
+- 状态：Accepted design（“实现尚未开始”只描述接受本决定时的快照；当前实现和 closure 只看 STATUS，交付排序和 review 深度按 D-046/D-053）
 - 背景：用户要求把 D-031 的非 Sol 实现内容登记后留空，并在切换执行模型前继续消耗 Sol 额度完成只有 Sol 应判断的工作。完整方案要求下一 Gate 冻结版本化 API/Event schema、interaction/response 与 task 状态机、cancel/fence/presented-history、WorkProgress、ContextRef、依赖 DAG、首个 Provider/Executor 基线和 conformance skeleton。仓库现有 `live-voice.contract.v1` 只是严格最小 Foundation 子集，会拒绝完整 WorkProgress 所需的新增字段；在相同版本名下扩展会改写既有序列化含义。
 - 决策：接受 [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md) 为 `ACG-1` 的规范架构产物，完整目标 contract family 定为 `live-voice.contract.v2`。v1 保留为现有 Foundation 兼容输入；只有能够从权威来源补齐完整 identity、scope、sequence、source-event provenance 和 known/unknown facts 的 Adapter 才可升级为 v2，否则返回 `unsupported` 或保留明确标注的 Demo projection，禁止把 v1 重新贴标为完整 v2。
 - 决策：冻结精确 authority map、opaque identity/parent/scope、Command/Query/Result/Event envelopes、按 authority stream 的 sequence/dedup/gap 规则、interaction/turn/response 与 task/attempt 状态机、四类不互相升级的 cancel、TurnCommit 零副作用边界、response generation fence、按 surface ACK 的 presented ledger、结构化 WorkProgress provenance/unknown、ContextRef expiry/permission/redaction、capability/error/compatibility 和 feature-off 规则。ACK 不等于 lifecycle terminal，queued output 不等于 presented，task cancel 不等于副作用回滚。
@@ -438,7 +441,7 @@
 ## D-043 CR-A 用服务端 canonical Runtime 加前端验证 replica 建立 response/generation 基础
 
 - 日期：2026-08-03
-- 状态：Accepted（CR-A Sol 设计记录；实现尚未开始；实际 review/closure 按 D-046 风险等级）
+- 状态：Accepted design（“实现尚未开始”只描述接受本决定时的快照；当前实现和 closure 只看 STATUS，实际 review 按 D-046/D-053）
 - 背景：当前 Web Demo 用前端 `responseEpoch`、message ID/文本边界、`isResponseFinal`、TTS owner 和 supplement ACK quarantine 保护主要 UI/播放路径；Gateway/Agent 事件没有统一的 interaction/turn/response/generation provenance，ACK 在取消完成前即可发出，也没有 playback cursor 或 presented-history ledger。把这些本地标记直接重命名为正式协议，会让迟到 Agent/Tool 副作用、跨连接乱序和历史修复继续没有权威边界。
 - 决策：CR-A 的 canonical Conversation Runtime 位于 Gateway/服务端逻辑边界，唯一分配并拥有 `interaction_id/turn_id/response_id/response_generation`、canonical transition、output fence 和 cancel record；前端实现同 schema 的验证 replica、presentation ledger 和 effect router，但不能自行创造或推进服务端 lifecycle。客户端 capture ID、旧 `responseEpoch`、WebSocket `request_id/rid`、chat message ID 和 `isResponseFinal` 均为兼容关联，不得当作正式 identity。
 - 决策：response lifecycle 与取消状态正交。`response.cancel` 在 Runtime 接受命令时立即把精确 response tuple 的未来 UI/audio/history output fence 掉并请求 Provider/Bridge cancel，但 response 只有在权威 terminal event 到达后才进入 terminal；ACK、超时或 `RESULT_UNKNOWN` 均不冒充 terminal。新 response 被接受时 generation 必须严格递增并原子 fence 同 interaction 的旧前台 response，但不隐式升级为 `round.cancel` 或 `task.cancel`。
@@ -451,7 +454,7 @@
 ## D-044 P1 Speech Port 保留原始假设与展示文本，并把语义决策和播放事实留给各自权威
 
 - 日期：2026-08-03
-- 状态：Accepted（SR-A/SS-A Sol 设计记录；实现与真实 Provider 后验尚未开始；实际 review/closure 按 D-046 风险等级）
+- 状态：Accepted design（“实现尚未开始”只描述接受本决定时的快照；当前实现和真实 Provider 后验只看 STATUS，实际 review 按 D-046/D-053）
 - 背景：现有 `useSpeech.ts` 直接绑定 Browser Speech，识别只读取第一候选并用本地化字符串报告错误；现有 TTS 能保留完整回答、转换技术 token 并有界分块，但 Browser `onstart/onend`、全局 audio owner 和 `tts.synthesize` 兼容函数都没有 response/generation、audio cursor 或 provider provenance。它们是重要兼容基线，不是正式 Speech Port。D-039 还要求对否定词、数字、日期、SHA、路径、分支和副作用动词实施可审计的 critical-token 安全门。
 - 决策：P1 以共享 capability/provider/error/identity primitives 定义两个独立模块：Speech Recognition Port `SR-A` 与 Speech Synthesis Port `SS-A`。二者共享协议风格和 deterministic fake/conformance，但各自独立实施、后审与闭环；任何一个通过都不能替另一个或 Realtime Media/Audio 声称完成。Browser Speech 只作为明确标注 capability 缺口的 batch/fallback compatibility Adapter；本决策不选择云端、本地或 Native Provider。
 - 决策：Recognition Provider 只能发出带 session/generation/sequence、partial/final/cancel、locale/timing/capability/fallback provenance 的原始 hypothesis；Provider 支持时携带 alternatives/confidence，不支持时显式 `unknown`，不得制造数值。原始候选不可修改。独立的 deterministic domain resolver 可以使用有权限且未过期的 ContextRef 对候选重排或生成 resolved copy，但必须记录选中候选、规则/上下文引用、修订原因和置信来源。critical-token gate 只输出 `eligible/clarification_required/blocked` 及理由；Recognition final 不是 TurnCommit，只有 Interaction/Conversation Runtime 能决定提交、澄清和 Agent/Tool/Task 副作用。
@@ -459,13 +462,13 @@
 - 决策：recognition/synthesis session cancel 是 Port owner 对精确 Provider session 的内部 control，不新增第五种业务 CommandEnvelope cancel scope，也不能由外部调用者越权发出；它与 `playback.stop` 的 target/authority 不同。接受 session control 后立刻 fence 精确 session/generation 的迟到事件，但 ACK、超时和本地静音不伪造 final/terminal。Provider 失败、能力不匹配或降级只可选择满足请求策略的已声明 fallback；fallback 也必须保留原始错误与选择 provenance，不能把失败吞成空 transcript、成功音频或已播放。
 - 隐私与放行：原始音频默认不持久化；固定语料优先使用合成/获同意样本，任何录音保存都需要目的、同意、retention、删除和 redaction 证据。SR 除 CER/WER 外必须度量 critical semantic error、first-pass task success、clarification、错误工具派发、speech-end→decision/commit、重复提交和 fallback 一致性；SS 必须度量首音频、stop、stale playback、可懂度、display→spoken 覆盖和关键 token 发音。没有固定环境、样本明细、真实设备/Provider 后验和零禁止副作用证据，SR-A/SS-A 只能保持 `PARTIAL`。
 - 原因：把声学事实、领域解析、提交决策、文本呈现和实际播放拆到各自权威，既允许替换 Provider，也防止高置信度幻觉、静默改词和浏览器回调被误当作用户意图或听见的事实。
-- 影响：非 Sol 模型可在所消费的 ACG shared primitives 落地并通过 grouped review 后分别实现 Port types、fake、resolver/render plan 与 conformance，但不得接通真实 Agent/Tool/Task、Gateway Speech RPC、Realtime Media 或 Session History。真实 Browser Adapter、专用 Provider、Audio ACK 与 Windows 设备闭环属于 SR-B/C、SS-B/C、AIO/RM/CR-B 的后续 consumer Gate，按 D-046 风险等级验证。
+- 当时的执行影响：本决定接受时允许非 Sol 模型在 shared primitives 后实现 Port/fake/conformance；该模型分配由 D-052 取代。真实 Browser Adapter、专用 Provider、Audio ACK 与当前 Web 设备/权限闭环仍属于 SR-B/C、SS-B/C、AIO/RM/CR-B 的后续 consumer Gate。
 - 重新评估条件：真实 Provider 无法表达当前 hypothesis/audio event 模型；critical-token policy 需要新的授权主体；某浏览器/Native API 可提供可验证 audio cursor；或隐私/多语言/无障碍要求改变保存、解析或呈现边界。
 
 ## D-045 P3α Task Core 采用 command/event/attempt/outbox 权威模型并把现有 scheduler 降为 Executor 兼容目标
 
 - 日期：2026-08-03
-- 状态：Accepted（`TC-A` Sol 设计记录；Core/Store/Executor 接线尚未开始；实际 review/closure 按 D-046 风险等级）
+- 状态：Accepted design（“接线尚未开始”只描述接受本决定时的快照；当前 Core/Store/Executor 状态只看 STATUS，实际 review 按 D-046/D-053）
 - 背景：现有 AutoHarness `schedule.run/status/list/cancel` 已有稳定 task ID、服务端派生的单用户一致性 scope、执行 target、单进程/单 JSON 路径 create 幂等 ledger、进程内 task-bound Agent context、取消竞态防护和重启孤儿 `running→failed` 修复；但任务行、execution history 和 Harness log 不是版本化 append-only TaskEvent store，没有 durable attempt dispatch outbox、跨进程 CAS/唯一执行 owner、正式 terminal outcome 或通用 `events` API。它是强兼容基础和首个 D0 Executor 集成目标，不是 Task Control Core。
 - 决策：`TC-A` 唯一拥有 canonical `task_id`、`command_id` ledger、TaskEvent stream、task reducer、attempt record 和 reconciliation record。P3α state/terminal outcome/operation 集严格沿用 ACG-1：状态为 `accepted/running/blocked/decision_required/terminal`，attempt 为 `accepted/running/terminal`，终态 outcome 为 `completed/failed/cancelled/interrupted/unknown`；命令只有 `create/cancel`，`get/list/status/events` 是零 mutation Query。`update/provide_input/pause/resume/reprioritize/delete/logs/recurrence/arbitrary recover` 不是正式 P3α Core operation，旧 schedule 能力只能保留在明确标注的兼容或 Executor Adapter 边界。
 - 决策：同一 canonical `command_id + fingerprint` 重放原 Result，fingerprint 冲突零 mutation；`request_id` 每次 transport 尝试可变，不能成为幂等键。create 的 durable 单元必须原子包含 command ledger、task record、首个 accepted TaskEvent、result 和首次 attempt-dispatch intent；后续 event append 与 reducer snapshot 原子，Executor 投递通过 durable outbox 至少一次。Core 在持久化后分配 attempt ID，Executor 必须以 `(task_id, attempt_id)` 幂等接收并回报事实；这不承诺外部工具副作用 exactly-once。
@@ -474,24 +477,24 @@
 - 决策：启动时 Core 枚举所有非终态 task/attempt，fence 新 dispatch 并按原 attempt ID 查询 Executor。精确 active/terminal 事实继续或终结原记录；明确丢失且不可续跑的 D0 attempt 终结为 `interrupted` 并记录稳定原因；暂时不可查询保持原 lifecycle、标记独立 reconciliation pending 且禁止重派。只有显式、有 provenance 的 Core reconciliation decision 才可在事实永远不可知时终结为 `unknown`；重启绝不借用新 Agent/context 或自动创建新 attempt。
 - 安全决策：Core invocation 除 envelope 外接收由可信入口提供的 `AuthorizationContext`，绑定 principal、scope、operation、target、command ID、能力与需要时的精确确认；它不是客户端可自报 payload，也不得由本地化错误或 ContextRef 自身推导。当前 D-033 Web scope 只能进入 legacy consistency Adapter，不能冒充正式 authentication/authorization。自然语言命令仍需 committed intent 和 Voice–Task Bridge；partial/uncommitted 的 command/event/store/outbox/Executor 副作用为 0。
 - 原因：将 command、event、attempt 和 outbox 作为同一权威模型，才能在 ACK 丢失、重复投递、并发取消和进程重启后解释“接受了什么、实际执行了哪一次、依据哪个事件进入当前状态”；同时保留 at-least-once 的可实现性而不虚构 exactly-once 或回滚。
-- 影响：非 Sol 模型可在 ACG shared types 后实现纯 types/reducer/fake/fixture conformance；真实 store/API/outbox/restart 属 `TC-B/C`，AutoHarness 适配属 `ED-A/B`，结构化 Command Adapter 与 Voice–Task Bridge 属各自后续 Gate。现有 scheduler 的 104-case backend Foundation 与 Live Voice task client/bridge/adapter 回归继续是兼容门，但不能直接计为 TC-A conformance。
+- 当时的执行影响：本决定接受时允许非 Sol 模型实现纯 types/reducer/fake/fixture conformance；该模型分配由 D-052 取代。真实 store/API/outbox/restart 仍属 `TC-B/C`，AutoHarness 适配属 `ED-A/B`，结构化 Command Adapter 与 Voice–Task Bridge 属各自后续 Gate；legacy 回归不能直接计为 TC-A conformance。
 - 重新评估条件：目标 store 无法提供所需原子单元/outbox；Executor 不能按 attempt ID 幂等接收或查询；生产 identity/authorization 模型改变 ScopeRef 语义；D1/D2、recurrence、delete 或 input/pause/resume 被提升进 P3α；或真实副作用需要事务性 exactly-once/补偿契约。
 
 ## D-046 以两周 90% 累计 Demo 和四周 Integrated Alpha 驱动并行交付
 
 - 日期：2026-08-03
-- 状态：Accepted（项目目标、里程碑、排序和验证流程；取代 D-031/D-039/D-041 中“D-031 必须先于共享 Contract Gate 和全部能力轨”的排序部分，并修订 D-032 的普遍强制执行方式；历史正文保留）
+- 状态：Partially superseded（累计路线、范围、评分和风险分级保留；Windows/X-WIN 载体由 D-055 取代，未来模型分工和原并行资源假设由 D-052 取代；`W2/W3/W4` 当前是顺序窗口，不是单线执行下的日历承诺）
 - 背景：用户明确项目目标不是无限期平台建设，也不是只维护 V0 或只完成 D-031。V0 要第一时间打通真实端到端，随后正式模块沿同一工程路径持续替换 Demo 中的手工代码、固定限制和兼容实现；第 2 周 Demo 达到可审计的 90% 完成度，第 3–4 周完成 P1 + P2 + P3，若完整 P3 风险过高则 P3alpha 可作为承诺结果。完整方案现有 31 个 Alpha 工程包的顺序时间盒约为 47–78 人日，尚未包含完整 P3 扩展；若按每个小切片独立 D-032 checkpoint、单执行流和末期统一集成推进，四周目标在流程上即不可达。
-- 目标定义：四周承诺范围定义为 **Integrated Windows Alpha = P1 + P2 + P3alpha + Context/Progress/Failure/Observability + 三个真实纵向切片 + P2/P3alpha 联合 Gate**。它不是 RC/Production，不自动包含完整 P3 的 `update/provide_input/pause/resume/reprioritize`、D1/D2、跨设备 replay、外部副作用 reconciliation，也不包含生产多租户鉴权、全平台兼容、正式运营 SLO、隐私保留系统和发布加固。完整 P3 是四周 stretch goal；P3alpha 是承诺的最低 Task 能力。
+- 接受时的目标定义：原四周并行范围写作 **Integrated Windows Alpha = P1 + P2 + P3alpha + Context/Progress/Failure/Observability + 三个真实纵向切片 + P2/P3alpha 联合 Gate**。D-055 已把 carrier 映射为 Web/X-WEB，D-052 已取消原并行日历承诺；能力范围仍不是 RC/Production，完整 P3 仍是 stretch，P3alpha 是当前 Alpha 的最低 Task 范围。
 - 两周决策：Week 2 必须运行一个累计 Integrated Demo，而不是分别运行互斥的 V0、稳定句和 Task 样例。完成度按权威 Demo Replacement Ledger 的用户旅程权重计算，不按代码行数、测试数、文件数或模块名计数；总分至少 90/100，且 committed-only、副作用确认、精确 identity/scope、stale fence、unknown/error 不冒充成功、文字 flag-off 回归等 mandatory invariant 全部通过。`fallback`、`Demo substitute`、`unsupported` 和 `unknown` 必须可见；substitute 可以证明类别价值，但不能自动获得正式模块全部分值。
 - 演进决策：V0 `ee2896a4` 保持不可变证据基线。新模块通过 Port/Adapter/capability/feature flag 逐段接管同一累计 Demo，必须由 route telemetry/trace 证明每段实际使用 formal、fallback 或 substitute；不另建第二套假 UX，也不等到所有模块完成后再进行首次集成。
 - 并行决策：共享 ACG critical kernel 在最初 1–2 天冻结并实现，包含 identity/scope、authority、committed input、核心 lifecycle、四种 cancel、generation fence、Event/Error/Capability 和 feature-off primitives。随后 P1（AIO/SR/SS）、P2（CR/RM/II/AB）、P3alpha（TC/ED/VB）与 X-OBS/X-E2E/Windows 集成按依赖并行。ACG 的 ContextRef 全量策略、presentation ACK、完整 restart reconciliation 等扩展仍属于完整目标，但只在消费它们的 B/C 接线前成为局部门槛，不阻塞无关 A 包。
 - D-031 决策：D-031 不再是整个项目无条件第一任务。它是 P3alpha 轨上的 legacy Demo Adapter 候选：若 `TC-B + TaskEvent/projection` 可在 Day 7 前进入累计 Demo，则跳过或缩减 D-031；否则把最小单任务 monitor 限时为 1–2 个工作日。必须保留 single in-flight、精确 identity/target、迟到结果 fence、错误不冒充终态、零 Chat mutation 和播报仲裁，但不得把临时 poll 路径扩成通用多任务、持久 replay、跨进程恢复或第二个 Task Core。
 - D-032 决策：测试与 Sol 回顾按风险分级。Tier 0 文档/机械/纯重构执行受影响检查；Tier 1 普通功能/Adapter/UI 覆盖正向旅程、关键反例/flag-off、受影响集成和回归；Tier 2 状态/并发/副作用边界执行 scoped Sol pre/post review 和全部适用维度；Tier 3 共享协议、authority、安全、durability、Week 2/Week 4 Release Gate 执行完整 D-032、fault/recovery、immutable candidate 和真实路径证据。相关包可以共享一次设计 checkpoint、实现批次、post-review 和 commit；不再要求每个小包独立 pre-review commit/push。根 `AGENTS.md` 的每次 commit 与 push 分别精确批准仍保持不变。
-- 模型分工：D-041 的 Sol 最终判断保持有效。Sol 冻结跨轨契约、高风险状态/ownership/cancel/commit/fence/durability，审查 grouped Tier 2/3 实现并签署 Week 2/Week 4 Gate；非 Sol 模型可在已冻结的消费契约下并行执行多个有界包。执行模型遇到会新增或改变 authority、identity、状态、取消、错误、兼容或安全语义的歧义时返回 Sol，不自行扩展。
+- 历史模型分工：本决定接受时沿用 D-041；D-052 后续已把设计、实现、测试和审查统一为当前 GPT/Sol 单线。这里保留的跨轨契约、高风险判断和 Gate 责任仍有效，但不再授权非 Sol 模型执行未来包。
 - 文档影响：`STATUS.md` 只保留短 dashboard、当前 replacement ledger、blocker 和 next actions；2026-08-03 已完成的详细 D-031/ACG/CR-A/SR-A/SS-A/TC-A 设计移入冻结 review record。Roadmap 以 Week 2/Week 4 Gate 和并行轨为权威；V0 acceptance/evidence/showcase 保持历史边界，并新增 Integrated Demo 与 Alpha acceptance/showcase。Runbook 在代码具备组合路由前必须诚实标注 Integrated mode 尚不可运行。
 - 原因：架构规模与明确的 P1/P2/P3alpha 目标匹配，真正的风险是串行 Gate、临时 Adapter 过度建设和最后一刻集成。风险分级不降低 committed-only、精确对象、副作用、fence、truthfulness 和兼容性底线，而是把完整证明集中到真正高风险边界和累计 Gate，使三至四周并行交付具有可执行性。
-- 重新评估条件：Week 1 结束仍只有一个有效执行轨；共享 kernel 超过两天仍不能支持并行；Week 2 route telemetry 无法证明 90% 分值；真实 Provider/Windows/Executor 条件不可用；P3alpha 联合 Gate 暴露必须提前实现完整 P3 的依赖；或用户改变四周范围、资源并行度或生产责任。
+- 重新评估条件：Week 1 结束仍只有一个有效执行轨；共享 kernel 超过两天仍不能支持并行；Week 2 route telemetry 无法证明 90% 分值；真实 Provider/Web/Executor 条件不可用；P3alpha 联合 Gate 暴露必须提前实现完整 P3 的依赖；或用户改变范围、资源并行度、日历目标或生产责任。D-052 已触发资源假设重新估算，当前没有接受新的四周日历承诺。
 
 ## D-047 保留必要安全并冻结临时 authority，正式模块只在替换时收缩兼容层
 
@@ -509,13 +512,13 @@
 ## D-048 采用模块级全局图与五工作日 execution-ready 滚动计划
 
 - 日期：2026-08-03
-- 状态：Accepted（Sol 项目规划与 Week 1 设计签字；实现、测试、commit、push 和版本 Gate 尚未开始）
+- 状态：Completed historical plan（Week 1 包边界和 oracles 保留；当时的实现状态、环境、owner、模型和五日时序不再描述当前工作，未来模型分工由 D-052 取代）
 - 背景：D-046 已冻结两周 90% Demo、四周 Integrated Alpha、ACG critical kernel 和并行轨，但 roadmap 的 Day 1–10 表仍不足以直接交给非 Sol 模型实现。执行模型还需要精确包状态、依赖、目标文件、场景 oracle、禁止副作用、验证命令和 return-to-Sol 条件；同时旧 D-042 仍残留“每次只执行一个包、每包完整 D-032”的历史操作措辞。若不补齐，执行模型要么自行决定架构，要么为低风险工作重复完整仪式。
 - 决策：接受 [WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](../roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md) 为下一五个工作日的 dated Sol execution handoff。完整项目继续用模块级优先级、authority map 和依赖 DAG 管理；只把当前一周展开为 execution-ready 包。`STATUS.md` 唯一记录当前包状态、tested SHA、blocker 和下一动作；dated plan 冻结包合同，不复制进度。
 - 优先级：Week 1 先完成 `W1-K1` ACG critical kernel 和 `W1-X1` route telemetry；kernel 通过 `W1-S1` grouped Tier 3 review 后，P1 `AIO/SR/SS`、P2 `CR/RM/II/AB`、P3alpha `TC/ED/VB` A 包按文件边界并行；随后 `W1-X2` 组合三个 fake vertical，并在条件具备时用 `W1-P1B` 让 Browser Speech 作为明确 fallback 进入正式 P1 Port route。Day 5 由 Sol 用实际 TC/Event 进展执行 D-031 `SKIP/REDUCE/TIMEBOX`，不自动运行历史 `D031-B1..B4`。
 - 代码边界：shared v2 wire validation 新建在 `jiuwenswarm/common/schema/live_voice_contract_v2.py`，不改写 v1；正式服务端模块新建在 `jiuwenswarm/server/live_voice/`；正式前端 replica/Port/route 新建在 `src/features/live-voice/formal/`。除 plan 明确允许的 `W1-P1B` 薄 route selection/label 外，不修改或扩建 `useLiveVoiceDemo`、TaskBridge、旧 `schedule.*`/JSON authority。该布局是 Week 1 实现边界，不宣称已经落地，也不阻止后续在证据支持下经新决策调整。
 - 执行门：第一项非 Sol 代码包是 `W1-K1`；独立 lane 可并行执行纯 `W1-X1`。其余包只有在依赖 Gate 实际 `CLOSED` 后才能执行。每包保持未提交，报告 start SHA、diff、命令/结果、scenario evidence、未决问题和 exclusions，再由 Sol 完成适用 review；package plan、Sol sign-off 和测试命令都不等于代码已通过。
-- 环境与非目标：当前仓库未恢复 `.venv` 和 frontend `node_modules`，命令在依赖恢复前只是验证规范；不得把 setup 失败记为产品 test。Week 1 不选择真实 streaming Speech Provider、Realtime Media transport、Windows 设备基线或生产 Store/Auth，不承诺 TC-B/outbox/restart、Week 2 90%、Week 4 Alpha、完整 P3、D1/D2 或清理全部 Demo 代码。
+- 环境与非目标：在本决定接受时，仓库尚未恢复 `.venv` 和 frontend `node_modules`，命令在依赖恢复前只是验证规范；该环境描述不是当前事实。Week 1 不选择真实 streaming Speech Provider、Realtime Media transport、历史 Windows 设备基线或生产 Store/Auth，也不承诺后续 Gate。
 - 原因：一个短、精确、依赖可判定的滚动计划既能让 DeepSeek-V4-Flash 等执行模型在不重做架构推理的情况下编码，也避免 Sol 把整月计划过度细化成会快速失真的微任务。新的正式目录和单一薄接线例外让三条轨能够并行，又不会继续把临时 Demo 组织成第二套平台。
 - 影响：文档 reconciliation 完成后先形成一个纯文档 commit 候选；取得精确 commit 批准并提交后，切换非 Sol 模型执行 `W1-K1`/`W1-X1`。Sol 随实际 diff 执行 W1-S1/S2/S3，不亲自承担已冻结合同下的常规编码。相关代码包可以按 coherent boundary 共用后审和 commit，但每个 commit/push 仍需根 `AGENTS.md` 要求的独立精确批准。
 - 重新评估条件：W1-K1 超过两天仍不能关闭；正式目录与仓库部署边界不兼容；单 lane 无法在 Week 1 建立三轨 fake vertical；真实 Provider/Executor/Windows 条件改变 critical path；某包必须新增 authority/state/cancel/error/durability 语义；或用户改变模型分工、里程碑、并行资源与风险容忍度。
@@ -523,13 +526,13 @@
 ## D-049 W1-K1 改由 Sol 重新实现，非 Sol 转为参考实现后的有界执行
 
 - 日期：2026-08-03
-- 状态：Accepted（替代 D-048 中 W1-K1 由非 Sol 实现、Sol 只做 W1-S1 的分工；其他里程碑和包依赖不变）
+- 状态：Completed historical source decision（W1-K1 代码来源和五轮候选判断保留；面向未来任务的模型分工由 D-052 取代，当前实现状态只看 STATUS）
 - 背景：DeepSeek 先后提交 `a5f91654`、`ca3836ba`、`1b9d3b83`、`a1c6d3d2` 和 `6ce74a4b` 五个从同一 `73448519` 基线产生的替换候选。连续五轮 Sol review 后，15 类修正中仅 Attempt 默认 lifecycle 一类基本完成，Event sequence/causation、TurnCommit、parent、rule immutability、response fence、cancel、JSON boundary、Result replay、scope/capability 和 event authority 等跨语言语义仍有阻断问题；focused tests 全绿仍未覆盖这些反例。详细记录见 [W1-K1 implementation review](../W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md)。这已经满足 D-048 的 W1-K1 超时、语义分支返回 Sol 和用户改变模型分工的重新评估条件。
 - 代码来源决策：保留 `agtai/hx/0803_live_voice_ds` 及其最新 `6ce74a4b` 候选作为审查历史和可选素材，不删除、不继续 force-update，也不把它标记为已接受实现；五轮候选 SHA 全部记录在 review record 中，但前四个被替换且没有独立 remote ref 的对象不作为长期集成来源。Sol 从干净的 `hx/0803_live_voice` 基线建立独立工作分支并重新实现 W1-K1；不在 `6ce74a4b` 上继续补丁，不整体 merge 或 cherry-pick DeepSeek 候选。只有逐项对照 ACG 和反例后确认正确的 fixture、测试思路、枚举/错误等机械片段可以选择性复用。
-- 模型分工决策：Sol 直接负责 W1-K1，以及其他需要建立或改变 shared protocol、authority、identity、state、transition、cancel、commit、fence、security、concurrency 或 durability 语义的 Tier 3 核心参考实现和首组反例。DeepSeek/其他非 Sol 模型继续负责已有参考实现后的精确 Python/TypeScript 转换、fixture 扩充、普通 Port/Adapter/UI、文档和机械修改；遇到新语义选择立即返回 Sol。
+- 当时的模型分工决策：Sol 直接负责 W1-K1 和高风险参考实现，非 Sol 只处理参考实现后的有界工作；D-052 已取代这段面向未来任务的安排，后续不再据此分配工作。
 - 流程决策：W1-S1 仍是 P1/P2/P3alpha 消费 shared kernel 前的依赖条件，但 W1-K1 不再采用“非 Sol 修改、Sol 重复后审”的第六轮流程。Sol 先以共同 scenario oracle 驱动 Python/TypeScript 实现，再运行完整 Tier 3 反例与受影响回归。非 Sol 后续工作不得用新增测试去合理化候选行为，也不得把旧候选 manifest 当成执行中的协议来源。
 - 原因：五轮结果说明问题不在缺少局部修改清单，而在实现没有形成跨 identity、state、authority、replay、cancel 和 JSON 边界的一致模型。继续在同一结构上逐项补丁的预计成本和引入新问题的风险已经高于由设计 owner 直接建立参考实现；保留候选历史仍可避免丢失测试素材和已完成的机械工作。
-- 影响：D-048 的 dated Week 1 plan 保留为历史执行合同，并通过顶部提示和 STATUS 指向本决策，不静默改写原始 owner 字段。`W1-X1` 与不改变核心语义的 Tier 0/1 有界包仍可由非 Sol 并行执行。当前主分支没有集成任何 W1-K1 候选，Demo Replacement Ledger 不增加分值。
+- 影响：D-048 的 dated Week 1 plan 保留为历史执行合同，不静默改写原始 owner 字段。本决定接受时主分支尚未集成 W1-K1 候选；后续 Sol 实现、closure 和当前 Replacement Ledger 只看 STATUS，非 Sol 并行安排已失效。
 - 重新评估条件：Sol 已建立稳定参考实现和共享场景，后续任务只剩无语义选择的等价转换；新的执行模型能在独立盲测中一次满足 Tier 3 oracle；或用户重新调整成本、速度和模型责任。
 
 ## D-050 v2 canonical JSON 的整数采用跨 Python/TypeScript 安全范围
@@ -544,9 +547,9 @@
 ## D-051 W1-K1 Sol 候选直接保留在当前开发分支的未提交工作区
 
 - 日期：2026-08-04
-- 状态：Accepted（按用户本次明确执行指令，替代 D-049 中“另建实现分支”的操作安排；代码来源和模型分工不变）
+- 状态：Completed historical operation（记录 W1-K1 当时直接保留在开发分支的操作授权；候选现已提交，当前 Git/实现状态只看 STATUS）
 - 决策：W1-K1 从 `73448519be9ee7cb2bb384e8aa2c4914178f9291` 开始，直接在 `hx/0803_live_voice` 工作区开发并保持未提交，完成三轮 review 和验证后再按根 `AGENTS.md` 单独申请 commit 批准。不得因此合并或 cherry-pick DeepSeek 候选，也不得绕过单独的 push 批准。
-- 影响：`STATUS.md` 记录当前未提交候选和验证事实；Git HEAD 在获得批准前仍保持基线 SHA。现有非 W1-K1 文档修改与代码候选一起保留，不擅自 stash、丢弃或提交。
+- 当时影响：`STATUS.md` 记录未提交候选和验证事实，Git HEAD 在获得批准前保持基线 SHA；该操作已完成，不再表示当前候选仍未提交。
 - 重新评估条件：用户要求拆分分支/提交范围，当前工作区出现无法安全区分的无关改动，或 commit 审批要求改变候选边界。
 
 ## D-052 后续开发固定由当前 GPT/Sol 单线完成
@@ -572,8 +575,22 @@
 ## D-054 W1-S3 选择限时的 D-031 最小任务监控候选
 
 - 日期：2026-08-04
-- 状态：Accepted（仅接受 W1-S3 范围判断；不授权 D-031 开发、commit 或 push）
+- 状态：Completed scope decision（本条在接受时只决定 `TIMEBOX`、不自动授权开发；用户后来已单独授权并完成 D-031 最小监控，当前状态和下一缺口只看 STATUS）
 - 背景：当前 P3alpha 只有内存 Task Core、确定性 Executor fake、Voice Task Bridge 和 fake WorkProgress 投影。真实 Store/outbox、Harness Adapter、restart reconciliation、生产 AuthorizationContext、公开 events API 和累计 Demo 接线都未完成；在当前单一 GPT/Sol 执行线上，`TC-B + TaskEvent/projection` 无法可信地在 Day 7 前进入累计 Demo。
 - 决策：W1-S3 结果为 `TIMEBOX`，不选择 `SKIP` 或 `REDUCE`。若用户批准后续执行包，D-031 只实现 roadmap §9 的一个 current task、1–2 个工作日轮询 Adapter，并保留 single in-flight、精确 task/target、generation/context fence、真实 unknown/error、零 Chat mutation 和安全播报仲裁。
-- 影响：本决定不把旧 schedule/JSON 路径称为正式 TC/TaskEvent，也不增加 Demo Replacement Ledger 分值。D-031 实现仍需用户单独批准；在批准前可以继续与它无依赖的正式 P1/P2/P3alpha 工作。
+- 影响：本决定不把旧 schedule/JSON 路径称为正式 TC/TaskEvent，也不增加 Demo Replacement Ledger 分值。所需实现授权后来已经取得；这句话不再阻止当前 D-031 修正，但任何 commit/push 仍需新的精确批准。
 - 重新评估条件：D-031 开始前正式 Store/Event/Harness 依赖已经具备并可在相同时间内进入累计 Demo；用户拒绝临时 polling 路径；或 Day 7/Week 2 范围发生变化。
+
+## D-055 Live Voice Alpha 产品载体从 Windows Desktop/WebView2 调整为 Web
+
+- 日期：2026-08-05
+- 状态：Accepted（用户已明确将当前 Alpha 产品目标从 Windows Desktop/WebView2 调整为 Web；本条把此前对话中的产品决定同步为仓库权威记录）
+- 背景：当前可运行 V0 和 Post-V0 Demo 已经通过 JiuwenSwarm Web 前端、浏览器麦克风和浏览器音频路径验证产品价值；继续把 Windows `.exe`、WebView2 权限、原生设备生命周期和安装包作为四周 Alpha Gate，会把平台产品化工作放在真实 Speech/Media/Conversation/Task 纵向链之前。用户已经决定当前交付载体改为 Web，但 D-046、roadmap、STATUS 和 Alpha acceptance 仍保留 Windows Alpha 表述，造成当前目标与文档权威不一致。
+- 产品决定：当前范围目标为 **Integrated Web Alpha**。`W2/W3/W4` 表示累计交付顺序；D-052 固定单 GPT/Sol 轨后，原四周并行估算不再是当前日历承诺，必须根据实际速度重新估算。首期载体是 JiuwenSwarm 桌面 Web 前端；实际验收必须使用并记录明确声明的桌面浏览器、操作系统、设备和网络标签，但不把固定验收环境冒充公开兼容矩阵。D-055 不自行承诺 Chrome+Edge 双浏览器覆盖；X-WEB 真实 Gate 前必须明确冻结是单一 Chromium 基线还是 Chrome+Edge 双 Chromium 基线。移动 Web、PWA、Firefox、Safari 和全平台兼容不属于当前 Alpha 范围。
+- 安全与部署边界：部署环境必须使用安全上下文；`localhost` 只作为本地开发和受控验收例外。Speech/模型 Provider 凭据只能保存在 Gateway/服务端，浏览器不得持有长期 Provider 密钥。麦克风权限、权限撤销、设备变化、autoplay/user-activation、页面隐藏/后台、CSP、CORS、反向代理、连接失败和文字降级必须在 Web Alpha Gate 中可见且无静默失败。原始音频默认不持久化。
+- 架构保持：P1/P2/P3alpha、ACG v2 wire contract、identity/scope/authority、committed-only、四种取消作用域、generation fence、presented history、Task/Core/Executor 边界、Week 2 90% 评分和风险分级不变。Web 是产品载体变化，不授权 Browser、UI、Provider 或 Transport 成为新的生命周期权威。
+- 工作包影响：`AIO-B/C` 保留稳定 ID，交付解释改为浏览器采集、播放、权限、设备和 exact-response stop；`RM-B` 保留稳定 ID，改为 Browser↔Gateway 实时媒体传输；`X-WEB` 取代 `X-WIN`，负责 Web UI、权限/隐私、部署、诊断和正式 P3alpha 控件接线。Browser Speech Recognition/Synthesis 继续作为显式 fallback，不获得正式 Provider 或 Realtime Media credit。不得为所有包机械增加 `-Web` 后缀。
+- 待消费包决定：AudioWorklet/MediaRecorder 的组合、上行与下行编码/采样率/frame、WebSocket/WebTransport 及其 fallback、具体 Provider 和部署拓扑，不由本决策提前指定；它们必须在 AIO-B/C、RM-B/C、SR-C/SS-C 的设计与真实接线前形成有证据的消费决策。未决定或不可用时必须标记 `unknown/unsupported`，不得由实现默认值静默成为产品合同。
+- 文档和历史：D-055 取代不可变 Full Solution、D-046、D-048 和历史 X-WIN 计划中的 Windows 产品载体与产品化安排，但不倒写带日期的 Full Solution、V0 evidence/showcase、Week 1 execution plan 或历史 review。V0 的 Windows/Chrome/Jabra 证据继续是不可变历史事实，不代表当前 Web Alpha 的兼容范围。当前目标、阶段和 blocker 只在 STATUS 维护；稳定工作包、替换关系和目标窗口记录在 dated Web Alpha delivery matrix。
+- 非目标：Windows `.exe`、WebView2、Windows 原生设备生命周期和安装升级不再属于当前 Alpha Gate；完整 P3、D1/D2、生产多租户鉴权、未被后续范围决定纳入的浏览器/多端、公开兼容承诺、运营 SLO、完整隐私保留系统和 RC/Production hardening 仍属于 Later。
+- 重新评估条件：用户重新选择 Desktop/native 作为产品载体；目标客户必须使用移动端、PWA 或非 Chromium 浏览器；浏览器权限、音频或后台限制无法达到 Alpha Gate；Gateway 代理或安全上下文无法满足部署要求；或真实测量证明 Web 平台无法达到已接受的 P1/P2/P3alpha 用户体验和安全边界。

@@ -1,16 +1,18 @@
-# Live Voice Week 2 Integrated Demo acceptance
+# Live Voice W2 Integrated Demo acceptance
 
 > Status: `NOT STARTED`
-> Authority: D-046 and [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md)
+> Authority: D-046, D-055 and [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md)
 > Current score and implementation facts: [STATUS.md](../STATUS.md)
 > Showcase: [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md)
 
-This contract decides whether the cumulative P1/P2/P3alpha Demo has reached 90%. It does not modify or rerun the frozen V0 release claim and does not sign the Week 3–4 Integrated Windows Alpha.
+This contract decides whether the cumulative P1/P2/P3alpha Demo has reached 90%. It does not modify or rerun the frozen V0 release claim and does not sign the Week 3–4 Integrated Web Alpha.
+
+`W2` names the cumulative delivery-order Gate. Under the current single GPT/Sol lane it is not a promised calendar week or Day 10 deadline; the behavior, scoring and evidence requirements remain unchanged.
 
 ## 1. Candidate and evidence rules
 
 - Run on one immutable candidate containing every code, test, fixture, flag, route-label and documentation input used by the Demo.
-- Record exact SHA, dirty state, runtime versions, Provider/Executor labels, Windows/browser/device/network labels, and sanitized route traces.
+- Record exact SHA, dirty state, runtime versions, Provider/Executor labels, browser/OS/device/network/origin-security labels, and sanitized route traces.
 - Agent, Tool, task ID, status, outcome and result must come from real sources. Fakes are allowed only for automated conformance/fault injection and never as showcase success evidence.
 - Every journey segment must identify its actual owner and route as `formal`, `fallback`, `demo_substitute`, `unsupported`, or `unknown`.
 - Git cannot restore credentials, Provider configuration, project registration, runtime data, permissions, devices or network; their availability and exact test boundary must be recorded without secrets.
@@ -136,4 +138,4 @@ gate_result: PASS / PARTIAL / FAIL
 Sol_sign_off:
 ```
 
-A PASS proves the two-week cumulative Demo target only. Every formal module remains subject to its Week 4 Alpha evidence.
+A PASS proves the W2 cumulative Demo Gate only. It does not prove a calendar deadline, and every formal module remains subject to its W3/W4 Alpha evidence.

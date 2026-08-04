@@ -3,7 +3,7 @@
 - 最近恢复审计：2026-08-02
 - 适用共享分支：`hx/0803_live_voice`；`d4c3e32a` 在 Gate 3 FAIL，`ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6 并标记 `V0 Released / 已冻结`
 - 最终脱敏证据：[evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)；本文仍是以后重建相同受控环境的操作手册
-- 当前交付解释：D-046 新增 Week 2 cumulative Integrated Demo 和 Week 3–4 Integrated Windows Alpha。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；Integrated 模式尚未实现，不得把计划中的组合命令当作可运行事实。
+- 当前交付解释：D-046 定义 Week 2 cumulative Integrated Demo，D-055 将 Week 3–4 产品载体调整为 Integrated Web Alpha。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；Integrated 模式尚未实现，不得把计划中的组合命令当作可运行事实。
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
@@ -21,7 +21,7 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 | Python/Node 依赖 | `uv.lock`、`package-lock.json` | 是 |
 | 密钥、浏览器权限、硬件和网络 | 演示机检查清单与无密钥证据 | 否，只记录结果 |
 
-## 2. 推荐的 Demo 基线
+## 2. V0 历史复现基线
 
 - Windows 10/11 x64；最终彩排和演示使用同一台机器。
 - Chrome/Chromium 107 或更高；推荐固定当前 Chrome stable 的确切版本，并在最终彩排到演示之间暂停升级。
@@ -45,7 +45,17 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 
 这组值是当前证据基线，不是兼容性承诺。模型 key/base、浏览器 profile、Windows 用户目录和其他机器私有配置不得写入 Git。
 
-这不是正式兼容性矩阵；它是受控 Demo 的可复现范围。
+这不是正式兼容性矩阵；它是受控 V0 Demo 的可复现范围。D-055 不倒写该历史环境，也不能用它单独签署当前 Web Alpha。
+
+### 2.1 当前 Web Alpha 验收基线
+
+- 产品载体是 JiuwenSwarm 桌面 Web 前端。X-WEB 真实 Gate 前必须明确冻结单一 Chromium 或 Chrome+Edge 双 Chromium 基线；每次 candidate 必须覆盖该范围中的每个浏览器并记录精确浏览器、OS、origin、设备和网络标签。当前 Chrome 历史/开发证据不自动承诺 Chrome+Edge 或更宽范围。
+- 前端 `AGENTS.md` 要求修改后的代码兼容 Chrome/Chromium 107 及以上，这是实现下限；它不替代 X-WEB 对实际 Alpha candidate 的精确浏览器/版本证据范围决定。
+- `localhost` 可以用于本地开发和受控验证；非 localhost 的 Alpha 部署必须使用 HTTPS/WSS 或等价安全上下文，并验证 Gateway/AgentServer 反向代理、CSP、CORS 和实时连接路由。
+- 浏览器必须分别验证麦克风允许、拒绝、撤销，设备变化/丢失，autoplay/user-activation，页面隐藏/后台/恢复，以及 refresh/reconnect 后无陈旧音频、重复提交或静默失败。
+- Speech/模型 Provider 凭据只存在 Gateway/服务端；浏览器 storage、URL、日志和 bundle 中不得出现长期 Provider 密钥。原始音频默认不持久化。
+- AudioWorklet/MediaRecorder、媒体编码/采样率/frame、WebSocket/WebTransport 和 Provider 仍由对应 B/C 包在接线前决定；运行手册只记录候选实际采用且通过 review 的路线，不提前给计划路线写成功命令。
+- 移动 Web、PWA 和公开跨浏览器/跨 OS 兼容矩阵不属于当前 Alpha Gate；任何未被后续范围决定纳入的浏览器结果只能作为探索证据，不能扩大产品承诺。
 
 ## 3. 获取代码与固定依赖
 
@@ -124,6 +134,8 @@ $env:JIUWENSWARM_DATA_DIR  # 记录这个非敏感绝对路径，后续每个后
 
 ## 5. 服务拓扑与健康判据
 
+下图是当前 localhost 开发/V0/Post-V0 验证拓扑，不是最终 Web Alpha 部署证明：
+
 ```text
 Chrome http://localhost:5173
   → 同源 ws://localhost:5173/ws
@@ -142,6 +154,8 @@ Chrome http://localhost:5173
 - Vite：`FRONTEND_PORT=5173`
 
 `19001` 是 WebSocket 端口，没有可依赖的 HTTP `/health`。浏览器 WebSocket 实际收到 `connection.ack` 才说明 Gateway 已连接到就绪的 AgentServer；仅仅“端口正在监听”不算后端健康。
+
+Web Alpha candidate 还必须在声明的安全 origin 上验证 `browser → same-origin/reverse proxy → Gateway → AgentServer`。实际 path、HTTPS/WSS 终止点、CSP/CORS、认证/凭据边界和诊断入口必须记录为环境证据；localhost 的 `ws://` 成功不能替代部署 Gate。
 
 运行日志位于选定数据目录的 `agent/.logs/`，Web 开发日志还可能写到前端 `logs/ws-dev.log`。单独打开的日志终端不会继承其他 PowerShell 的环境变量；需要保留事件顺序时，先把第 4.1 节记录的同一绝对路径重新绑定并确认日志文件存在：
 
@@ -207,7 +221,7 @@ $env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 
 Vite 也会读取 `JIUWENSWARM_DATA_DIR`，所以前端终端必须使用与本次后端相同的隔离路径。**当前已实现的**默认 V0、稳定句预读和 Task Demo 三种模式一次只能选一种；切换模式时先按 `Ctrl+C` 停止现有 Vite，确认 `5173` 已释放，再在新终端完成变量设置后启动。不得先运行 `npm run dev` 再修改变量。
 
-### 7.I 计划中的 cumulative Integrated 模式：当前不可运行
+### 7.1 计划中的 cumulative Integrated / Web Alpha 模式：当前不可运行
 
 Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability，并由 route telemetry 标记每段 `formal/fallback/demo_substitute/unsupported/unknown`。当前代码和下面的命令尚未提供这种组合模式，因此：
 
@@ -219,7 +233,7 @@ Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2
 
 Integrated 模式实现后仍要保留下述 V0 模式用于不可变回归，并允许每个 formal module 单独切回其声明的 fallback。Week 2/Week 4 分别按 [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 和 [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md) 取证。
 
-### 7.0 默认 V0 模式
+### 7.2 默认 V0 模式
 
 在新终端执行；两个 Post-V0 flag 必须在启动前清除：
 
@@ -236,7 +250,7 @@ npm run dev
 
 打开 `http://localhost:5173`。确认浏览器连接成功并在开发者工具 WebSocket 帧中看到 `connection.ack`。在 UI 中选择或创建指向当前 worktree 绝对路径的 code project，进入 Agent 模式。
 
-### 7.0.1 单独验证稳定句预读
+### 7.3 单独验证稳定句预读
 
 只有恢复累计开发且不做 V0 Gate 时，才在新的 Vite 启动终端执行：
 
@@ -253,7 +267,7 @@ npm run dev
 
 该开关只启用 chatStore 稳定句预读，不等于启用 token/audio streaming TTS。首次验证时关闭 cron、proactive response 和其他可能向同一 Session 注入 assistant 输出的来源；当前服务端事件没有 response/generation provenance，并发输出可能归错 Turn。若 processing 已停止、预读队列已经 drain 但权威 `chat.final` 一直缺失，当前实现等待 10 秒后废弃该 epoch 并显示可 Retry 错误；不得把 provisional 当作 final，也不得补播或重放未确认文本。开关开启时，speaking 可能与 Agent processing 重叠；打断样本必须按新 final 到达时的实际 processing 状态分类，不再预设 speaking 都是普通 `chat.send`。验证结束后清除该变量。
 
-### 7.1 受限 Task Demo：只在独立受控环境验证
+### 7.4 受限 Task Demo：只在独立受控环境验证
 
 这个切片默认关闭，也不属于 V0 验收。确认现有 Vite 已停止，再在新的 Vite 启动终端单独启用：
 
@@ -409,8 +423,16 @@ project.create（首次注册时）
 日期/时间：
 Git commit：
 工作区是否干净：
-Windows 版本/build：
+OS 版本/build：
 Chrome 版本：
+Edge 版本：
+Web origin 与 secure-context 状态：
+HTTPS/WSS 终止点与反向代理标签：
+CSP/CORS/实时连接路由：通过 / 失败
+麦克风允许/拒绝/撤销：
+设备变化/丢失与恢复：
+autoplay/user-activation：
+页面隐藏/后台/恢复：
 Python 版本：
 Node/npm 版本：
 模型 Provider 标签（不得记录 key/base 完整值）：

@@ -1,11 +1,12 @@
-# Live Voice：两周 90% Demo 与四周 Integrated Alpha 路线
+# Live Voice：W2 90% Demo 与 Integrated Web Alpha 交付路线
 
-> 更新日期：2026-08-04
-> 当前产品和交付决策：[D-046](../decisions/DECISIONS.md)
+> 更新日期：2026-08-05
+> 当前产品和交付决策：[D-046、D-055](../decisions/DECISIONS.md)
 > 当前实现事实、track 状态和 Demo Replacement Ledger：[STATUS.md](../STATUS.md)
-> 当前五工作日的 Sol priority/dependency/boundary 与 execution-ready 包：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
+> 已完成 Week 1 的历史 priority/dependency/boundary 与 package contracts：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
+> Web Alpha 稳定工作包、Demo 替换关系、依赖和目标窗口：[WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 > 当前执行方式：[D-052](../decisions/DECISIONS.md)；固定由当前 GPT/Sol 单线完成，不再进行 GPT/DeepSeek 切换，dated plan 中旧模型 owner 只作历史记录。
-> 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前四周执行解释，不把 Alpha 写成 Production。
+> 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前范围、顺序窗口和 Gate，不把 Alpha 写成 Production，也不把原并行估算继续写成单线日历承诺。
 
 ## 1. 交付目标
 
@@ -13,41 +14,44 @@
 
 1. **V0 — 已完成且冻结**：第一时间证明真实麦克风输入、committed transcript、真实 JiuwenSwarm Agent/Tool、真实结果和语音输出能端到端运行。
 2. **Week 2 — Integrated Demo 90%**：P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability 在同一 Demo 中累计运行；正式模块按 Port/Adapter/flag 逐段替换 V0 shortcut，Replacement Ledger 至少 90/100 且 mandatory invariants 全部通过。
-3. **Week 3–4 — Integrated Windows Alpha**：P1 + P2 + P3alpha 三个真实纵向切片以及 P2/P3alpha 联合 Gate 通过。完整 P3 是 stretch goal。
-4. **Later — Beta/RC/Production**：完整 P3、D1/D2、生产鉴权、跨平台、运营 SLO、隐私/retention、兼容矩阵和发布加固继续累计，不倒灌为四周 Alpha 的隐含阻塞项。
+3. **Week 3–4 — Integrated Web Alpha**：P1 + P2 + P3alpha 三个真实纵向切片、桌面 Web 产品路径以及 P2/P3alpha 联合 Gate 通过。完整 P3 是 stretch goal。
+4. **Later — Beta/RC/Production**：完整 P3、D1/D2、生产鉴权、跨平台、运营 SLO、隐私/retention、兼容矩阵和发布加固继续累计，不倒灌为当前 Web Alpha 的隐含阻塞项。
 
 V0、Week 2 和 Week 4 使用不同的验收合同。一次 V0 PASS 不能证明 Alpha，一次模块 conformance 也不能证明累计 Demo 或真实设备路径。
 
-## 2. 四周承诺与非目标
+本文沿用 `W2/W3/W4` 作为依赖和交付顺序窗口。D-052 固定单 GPT/Sol 轨后，原“两周/四周”并行日历不再是当前承诺；只有新的资源与工期决定才能重新冻结日期。
 
-### 2.1 承诺范围
+## 2. Web Alpha 范围与非目标
 
-Integrated Windows Alpha 至少包括：
+### 2.1 Alpha 范围
 
-- **P1 Speech I/O**：Audio I/O、Speech Recognition/Synthesis Port、一个真实可用 Adapter、Browser fallback、提交/编辑或安全澄清边界、文字降级；
+Integrated Web Alpha 至少包括：
+
+- **P1 Speech I/O**：浏览器 Audio I/O、Speech Recognition/Synthesis Port、一个真实可用 Adapter、Browser fallback、提交/编辑或安全澄清边界、文字降级；
 - **P2 Realtime Conversation**：Realtime Media、Conversation Runtime、Interaction Engine、Agent Bridge、response/generation fence、自然或受控 barge-in、真实 presentation facts、后台工作不冻结前台；
 - **P3alpha Task Control**：稳定 task/command/attempt identity、`create/get/list/status/cancel/events`、TaskEvent/Core reducer、一个 D0 Executor、committed Voice–Task Bridge、progress/result 回流、restart reconciliation 的诚实状态；
-- **横切能力**：Context、WorkProgress、Capability/Error、route telemetry、fault injection、feature-off/text regression、Windows 集成和受控真实设备证据。
+- **横切能力**：Context、WorkProgress、Capability/Error、route telemetry、fault injection、feature-off/text regression、Web 集成、安全上下文、浏览器权限/设备/页面生命周期和受控真实设备证据。
 
-### 2.2 四周非目标
+### 2.2 Alpha 非目标
 
 - 完整 P3 的 `update/provide_input/pause/resume/reprioritize`、跨设备 unread/replay 和 D1/D2；
 - 外部工具副作用 exactly-once、通用补偿或回滚；
 - 生产多租户鉴权、对象存在性隐藏、完整审批体系；
-- macOS/HarmonyOS/移动端兼容矩阵；
+- 移动 Web、PWA、Firefox、Safari 和公开跨浏览器/跨操作系统兼容矩阵；
+- Windows `.exe`、WebView2、原生安装升级和 Windows 原生设备生命周期；
 - RC/Production 的长期 SLO、安装升级全矩阵、正式运维和隐私保留系统。
 
-这些内容只能在明确改变 milestone 后进入四周承诺，不得因“完整方案”四个字静默扩张。
+这些内容只能在明确改变 milestone 后进入 Alpha 范围，不得因“完整方案”四个字静默扩张。
 
 ## 3. 资源与可行性假设
 
-完整方案列出 28 个模块包和 3 个横切包，顺序时间盒约 47–78 人日，且不包含完整 P3 扩展。因此四周目标依赖：
+完整方案列出 28 个模块包和 3 个横切包，顺序时间盒约 47–78 人日，且不包含完整 P3 扩展。原四周目标依赖：
 
 - 至少三条能够持续产出的并行实现轨；
 - 一个共享契约/集成 owner，避免各轨创造第二套 authority；
 - 从 Day 1 开始持续接回同一个 Demo；
 - 当前 GPT/Sol 完成设计、实现、测试和审查，不再提醒、委派或切换到 DeepSeek/其他外部执行模型；
-- Provider、Windows 设备、Executor 和私有配置在相应真实 Gate 前可用。
+- Provider、桌面 Chromium 浏览器、音频设备、Web 部署/代理、Executor 和私有配置在相应真实 Gate 前可用。
 
 当前默认只有一个执行轨，因此三到四周目标的资源假设需要按实际推进速度重新估算；不得继续用原并行 timebox 宣称四周可达。
 
@@ -75,7 +79,7 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 - P1 Provider/Audio 接线前：hypothesis/audio chunk、provider provenance、session cancel、隐私/retention；
 - P2 播放/history 接线前：surface ACK/cursor、presented ledger、Context/WorkProgress 仲裁；
 - P3alpha Store/Executor 接线前：AuthorizationContext、atomic command/event/snapshot/outbox、attempt dedup、restart reconciliation；
-- Windows/Release Gate 前：route telemetry、benchmark schema、真实设备/Provider/Executor evidence。
+- Web/Release Gate 前：route telemetry、benchmark schema、安全上下文、权限/设备/页面生命周期、部署/代理以及真实 Provider/Executor evidence。
 
 无关模块不等待未消费的扩展 contract。完整 ACG conformance 仍在 Week 4 Alpha Gate 前闭环。
 
@@ -83,35 +87,35 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 
 | Track | A 包：contract/fake | B/C 包：真实接线 | 纵向退出条件 |
 |---|---|---|---|
-| Shared/X | ACG kernel、trace/metric schema、route labels | X-OBS、X-E2E、Windows integration | 每个 Demo 段可证明 formal/fallback/substitute；故障和 flag-off 可复现 |
-| P1 | AIO-A、SR-A、SS-A | AIO-B/C、SR-B/C、SS-B/C | microphone → AIO → STT → current Agent → TTS → playout，含 fallback/设备/权限 |
+| Shared/X | ACG kernel、trace/metric schema、route labels | X-OBS、X-E2E、Web integration | 每个 Demo 段可证明 formal/fallback/substitute；Web 故障和 flag-off 可复现 |
+| P1 | AIO-A、SR-A、SS-A | AIO-B/C、SR-B/C、SS-B/C | browser microphone → AIO → STT → current Agent → TTS → browser playout，含 fallback/设备/权限 |
 | P2 | CR-A、RM-A、II-A、AB-A | CR-B/C、RM-B/C、II-B/C、AB-B | 持续输入、非阻塞 Agent、barge-in、fence、presented history 和后台负载成立 |
 | P3alpha | TC-A、ED-A、VB-A | TC-B/C、ED-B、VB-B/C | structured/text/voice command → Core → D0 Executor → TaskEvent/Progress → origin surface |
 
 各轨可以在共享 kernel 后并行；同一轨内部仍按消费者依赖推进。每次真实接线都必须立即进入累计 Integrated Demo 的可选 route，而不是等待 Week 2 前统一合并。
 
-## 6. 两周 critical path
+## 6. W2 顺序窗口（原并行资源下的十日模型）
 
-本节冻结里程碑时序；当前 Week 1 的精确 owner、依赖 Gate、目标文件、scenario oracle、验证命令和 return-to-Sol 条件以 dated [Week 1 execution plan](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md) 为准。包的实际状态和 tested SHA 仍只写入 STATUS。
+本节保留原并行资源假设下的依赖顺序和 Gate 间距，不再表示当前单线执行的实际日期。已完成 Week 1 的精确历史 owner、依赖 Gate、目标文件、scenario oracle 和验证命令可查 dated [Week 1 execution plan](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)；当前状态和下一动作只写入 STATUS。
 
-| 时间 | 必达产出 | 退出判据 |
+| 原并行时间模型 | 顺序目标 | 退出判据 |
 |---|---|---|
 | Day 1–2 | ACG critical kernel；route telemetry schema；各轨 A 包可编译骨架 | shared fixtures/fakes 在 Python/TypeScript 一致；现有 flag-off 回归不变 |
 | Day 3–5 | P1/P2/P3alpha A 包并行；首批 Browser/Agent/AutoHarness compatibility Adapter 接入 | 三轨各有 fake vertical；至少一个真实累计路径开始替换 V0 shortcut |
 | Day 5 | D-031 go/no-go | TC-B/Event projection 可在 Day 7 入 Demo则跳过/缩减；否则批准 1–2 天最小 poll Adapter |
-| Day 6–8 | 真实 B 包、Continuous Integration、Windows/Provider/Executor 后验启动 | formal route 有 trace；fallback/substitute 可切换；错误不污染文字路径 |
+| Day 6–8 | 真实 B 包、Continuous Integration、Web/Provider/Executor 后验启动 | formal route 有 trace；fallback/substitute 可切换；错误不污染文字路径 |
 | Day 9 | Week 2 candidate freeze | Replacement Ledger 有证据、mandatory invariants 全绿、未达项明确 |
 | Day 10 | Integrated Demo Gate | [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 至少 90/100，并按 [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 连续运行 |
 
 遇到风险时，优先保住共享 authority、committed-only、真实状态、fence、文字降级和累计可运行 Demo；降低非关键 UI 精度、扩展 Context adapter 或完整 P3 stretch，而不是用 hardcode 伪造结果。
 
-## 7. Week 3–4 critical path
+## 7. W3/W4 顺序窗口
 
 ### Week 3
 
 - 完成主要 B/C 包和 consumer-specific ACG 扩展；
 - 用真实 Media/Speech/Agent/Executor 替换剩余关键 substitute；
-- 完成 Windows 设备/权限/路由、故障注入和 benchmark 基线；
+- 完成桌面 Web 安全上下文、浏览器权限/设备/页面生命周期、媒体路由、故障注入和 benchmark 基线；
 - 连续运行 P1/P2/P3alpha 三个纵向切片；
 - 开始 P2/P3alpha 联合 non-blocking interaction/progress 场景。
 
@@ -119,9 +123,9 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 
 - 关闭所有 Tier 2/3 必需 gap；
 - 对共享 ACG 和各真实 Adapter 执行 grouped Sol post-review；
-- 在同一 immutable candidate 运行受影响 unit/contract/integration/build、真实 Windows/Provider/Executor、纵向和联合 Gates；
+- 在同一 immutable candidate 运行受影响 unit/contract/integration/build、真实 Web/Provider/Executor、纵向和联合 Gates；
 - 形成 sanitized Alpha evidence；
-- 只有在 P1 + P2 + P3alpha 必需 Gate 全部通过时标记 Integrated Windows Alpha。
+- 只有在 P1 + P2 + P3alpha 和 Web 平台必需 Gate 全部通过时标记 Integrated Web Alpha。
 
 完整 P3 stretch 不得阻塞 P3alpha Alpha。如果 stretch 改变 canonical operation/state/durability，必须单独设计和验收。
 
@@ -141,7 +145,7 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 
 - `formal`：目标模块及真实 Adapter 通过本 Journey 所需证据，可获得该子项全分；
 - `formal + fallback`：正常路径正式、fallback 诚实且可验证，可获得全分；
-- `Demo substitute`：只能按 acceptance 中预先分配的部分分计入，不能因为“可展示”就当作正式完成；
+- `demo_substitute`：telemetry/数据中的稳定枚举值；面向人的显示文本可以写作 “Demo substitute”。它只能按 acceptance 中预先分配的部分分计入，不能因为“可展示”就当作正式完成；
 - `unsupported/unknown`：可以保持诚实，但对应目标能力不得计满；
 - 没有 route telemetry 或证据无法确定实际实现时记 0；
 - 任一 mandatory invariant 失败时，Demo Gate FAIL，即使算术达到 90。
