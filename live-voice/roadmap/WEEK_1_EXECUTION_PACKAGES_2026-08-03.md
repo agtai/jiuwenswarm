@@ -7,6 +7,7 @@
 > Product milestones and risk tiers: [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)
 > Shared contract authority: [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md)
 > Ownership update: [D-049](../decisions/DECISIONS.md) replaces this snapshot's W1-K1 non-Sol owner with direct Sol implementation after five unsuccessful candidate reviews. The original owner text below is retained as dated history; see [the review record](../W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md) and STATUS for current action.
+> Execution-policy update: [D-052](../decisions/DECISIONS.md) makes current GPT/Sol the only executor for future packages; work is no longer switched to DeepSeek. Historical owner/model fields below no longer assign work; package boundaries, dependencies, risk tiers, and scenario oracles remain valid.
 
 This is the dated, execution-level handoff required by D-041, D-046, and D-048. It freezes priority, dependencies, code ownership, package boundaries, scenario oracles, target files, and verification commands for Week 1. It does not report implementation progress. `STATUS.md` remains the only mutable source for package state, tested SHA, blockers, and current next action.
 
@@ -94,24 +95,11 @@ Recommended lanes after `W1-S1`:
 
 If only one executor is available, use this order: `K1 → X1 → P2A-CR → P3A-TC → P1A → P2A-PORTS → P3A-PORTS → X2 → P1B`. Do not interpret this fallback order as a new architecture dependency.
 
-## 5. Model allocation and handoff protocol
+## 5. Execution and handoff protocol
 
-Sol owns:
+D-052 makes the current GPT/Sol task the only implementation and review lane. It owns the package diff, tests, evidence, all Tier 2/3 semantic decisions, and `W1-S1`/`W1-S2`/`W1-S3` judgments. Work is not reminded, delegated, or switched to DeepSeek or another external executor; historical external output is reference material only.
 
-- this priority/DAG/boundary plan;
-- all new or changed authority, identity, state, transition, cancel, commit, fence, compatibility, security, or durability semantics;
-- `W1-S1`, `W1-S2`, and `W1-S3` judgments;
-- Tier 2/3 closure and Week 2/Week 4 release decisions.
-
-The non-Sol executor owns implementation, tests, mechanical fixtures, fakes, adapters, and reported evidence inside a ready package. For every package it must:
-
-1. record start SHA and confirm the stated dependency Gate;
-2. reread only the package sources, target code/tests, and referenced contract sections;
-3. keep changes uncommitted until Sol/user review;
-4. report changed files, exact commands/results, scenario coverage, unresolved issues, and excluded work;
-5. stop the semantic branch if a return-to-Sol condition occurs.
-
-No package permits the executor to weaken an assertion, update a snapshot to hide a mismatch, infer success from an error string, or broaden scope because current Demo code is easier to reuse.
+For every package: record the start SHA and dependency Gate, read only routed sources, keep changes uncommitted until approval, report exact commands/results and exclusions, and stop if the package requires an unaccepted semantic change. No package permits weakening an assertion, hiding a mismatch with a snapshot, inferring success from an error string, or broadening scope because current Demo code is easier to reuse.
 
 ## 6. Week 1 detailed work packages
 
@@ -159,8 +147,7 @@ No package permits the executor to weaken an assertion, update a snapshot to hid
 ```powershell
 python -m pytest -q tests/unit_tests/common/test_live_voice_contract.py tests/unit_tests/common/test_live_voice_contract_v2.py
 Set-Location jiuwenswarm/channels/web/frontend
-npx tsc src/features/live-voice/formal/liveVoiceContractV2.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/live-voice-contract-v2 --skipLibCheck --noEmitOnError
-node --test tests/liveVoiceContractV2.test.mjs
+npm run test:live-voice-contract-v2
 npm run build
 ```
 
@@ -174,6 +161,7 @@ npm run build
 - **Readiness:** `READY` after W1-D0 is committed.
 - **Goal:** add a pure, side-effect-free route record/ledger for cumulative Demo segments.
 - **Required fields:** segment ID, implementation class (`formal|fallback|demo_substitute|unsupported|unknown`), owner module, capability/provider provenance when known, contract version when formal, correlation ID, timestamp supplied by caller, and safe reason for non-formal routes.
+- **Consumer Gate:** W1-X1 has no logger/exporter. Before persistence or external telemetry is wired, the consumer must restrict or redact `safe_reason` so free text, credentials, user content, and raw audio cannot leave the process.
 - **Target files:**
   - `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/liveVoiceRouteTelemetry.ts` (new);
   - `jiuwenswarm/channels/web/frontend/tests/liveVoiceRouteTelemetry.test.mjs` (new).

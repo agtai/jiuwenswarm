@@ -7,11 +7,11 @@
 
 - Development branch: `hx/0803_live_voice`.
 - Upstream: `agtai/hx/0803_live_voice`.
-- The commit containing this status also contains the complete W1-K1 Sol candidate. A commit cannot self-record its final SHA; verify `HEAD` and its upstream relation from Git at every resume.
+- Corrected W1-K1 is committed as `857d5c06`; W1-X1 route telemetry is committed as `ac608738`. The commit containing this status aligns current execution policy and documentation; verify its exact SHA and upstream relation from Git at every resume.
 - Runtime implementation baseline reviewed by this consolidated planning record: `ac988b85e8a21eb4f378086bab58dac6a4d55d82`. Subsequent commits through the consolidated planning commit change documentation only. The planning commit intentionally does not self-record its SHA—verify actual HEAD and upstream at every resume.
 - V0 immutable Released / Frozen baseline: `ee2896a4afb186e693c720476b6de10797e66f72` with Gate 0–6 PASS.
 - Post-V0 foundation is integrated but remains partial; it is not formal P1/P2/P3alpha closure.
-- D-049 governs the Sol/non-Sol responsibility split; D-050 fixes the shared safe-integer rule; D-051 records the direct-on-development-branch implementation path used before this candidate was committed. D-041/D-048 remain historical context for the earlier split.
+- D-052 governs current execution: GPT/Sol is the only implementation and review lane; D-041/D-048/D-049 remain historical context and code-source evidence. D-050 fixes the shared safe-integer rule; D-051 records the direct-on-development-branch implementation path.
 - The previous Sol design batch is preserved in [SOL_MODULE_PRE_REVIEWS_2026-08-03.md](SOL_MODULE_PRE_REVIEWS_2026-08-03.md). Its blank non-Sol result fields are not current progress claims.
 - D-048's dated package boundaries remain in [WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md), but D-049 replaces its W1-K1 owner. Five non-Sol W1-K1 candidates were reviewed and not integrated; see [the implementation review record](W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md).
 
@@ -52,23 +52,35 @@ The committed HEAD does not yet contain:
 
 D-047 records the accepted code-scope audit: the current V0 and task foundations retain their necessary safety regressions but are frozen as fallback, Demo substitute, or Compatibility Adapter. Do not add formal authority or platform features to `useLiveVoiceDemo`, the frontend TaskBridge, or the legacy `schedule.*`/JSON path; CR/TC/ED and the other target modules must take ownership through incremental Integrated-route replacement rather than a separate cleanup rewrite.
 
-### W1-K1 Sol candidate: COMMITTED / THREE REVIEWS CORRECTED / W1-S1 CLOSED
+### W1-K1 correction: COMMITTED / VERIFIED / W1-S1 CLOSED
 
 DeepSeek's five rejected candidates remain historical reference only, ending at remote `agtai/hx/0803_live_voice_ds` commit `6ce74a4b5ad9a3ea6f5be044e7114315826f6baa`. No candidate was merged or cherry-picked.
 
-The committed Sol implementation adds the v2 identity/scope and envelope validators, lifecycle/event ordering, commit/idempotency/cancel/response-fence helpers, Capability/Error distinctions, strict canonical JSON, v1 separation, and one shared Python/TypeScript scenario set. Sol self-review, the user-specified independent-diff review, and Codex `/review` all found actionable defects; every reported defect was corrected and covered by focused tests before the candidate was committed. The committed candidate supplies the immutable Tier 3 evidence required to close W1-S1. Detailed evidence is in [W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md](W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md).
+The committed Sol implementation provides the v2 shared kernel, but a later independent review reproduced two P1 gaps: the dated TypeScript verification command/output path was inconsistent, and the identity registry did not enforce the ACG connection-epoch binding while assigning `round` a false turn parent. Amended commit `857d5c06` aligns Python, TypeScript, fixtures, tests, ACG, and the canonical npm verification command. D-050 large-integer rejection and fail-closed poisoned streams remain intentional. Corrected results are `77` Python and `25` TypeScript tests, Ruff, Prettier, production build, diff check, and Markdown links passing; final diff review found no additional actionable defect. Detailed history is in [W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md](W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md).
+
+### W1-X1 route telemetry: COMMITTED / VERIFIED
+
+Only the two bounded files from historical DeepSeek candidate `9a5663c6d3fe25143240717e7e2e5ec5f1a0dbe2` were selectively reused; its branch history and W1-K1 changes were not merged or cherry-picked. GPT/Sol corrected runtime-mutability of the route vocabulary, missing formal provider provenance, and missing reasons on non-formal routes. Commit `ac608738` passes strict planned compilation, `17` focused tests, Prettier, the production build, and final diff review. This remains Tier 1 instrumentation and carries no replacement credit.
 
 ## Parallel delivery dashboard
 
 | Track | Committed outcome | Current state | Next bounded action | Gate / dependency |
 |---|---|---|---|---|
-| Shared contract | ACG critical kernel plus fixtures/fakes/conformance | committed from clean `73448519`; three reviews corrected; W1-S1 `CLOSED` | hold the contract stable while A packages consume it | consumed primitives are available to P1/P2/P3alpha A packages |
+| Shared contract | ACG critical kernel plus fixtures/fakes/conformance | corrected commit `857d5c06`; W1-S1 `CLOSED` | hold the contract stable while A packages consume it | consumed primitives are available to A packages |
 | P1 Speech I/O | AIO + SR/SS Ports and real/fallback Adapters | V0 fallback exists; formal Ports not started | execute `W1-P1A`, then conditional Browser route `W1-P1B` | W1-S1 first; Provider/device evidence required for B/C closure |
 | P2 Realtime | CR + RM + II + AB with real non-blocking path | design accepted; implementation not started | execute `W1-P2A-CR` and `W1-P2A-PORTS` against shared fakes | W1-S1 first; real B/C waits for consumed consumer Gate |
 | P3alpha Task | TC + ED + VB, D0 and progress return | legacy foundation exists; formal Core not started | execute `W1-P3A-TC` and `W1-P3A-PORTS`; use actual progress at `W1-S3` | W1-S1 first; D-031 remains Day 5 conditional |
-| Integration | cumulative Demo, observability, fault injection, Windows path | V0 only; modes are currently separate | execute `W1-X1`, then compose landed A packages in `W1-X2` | Week 2 90% Gate and Week 4 Alpha Gate |
+| Integration | cumulative Demo, observability, fault injection, Windows path | W1-X1 committed; modes remain separate | compose accepted A packages in `W1-X2` after their Gates | Week 2 90% Gate and Week 4 Alpha Gate |
 
 Tracks are dependency-driven but not globally serialized. Multiple bounded packages may execute concurrently after their consumed contract subset is frozen. Sol retains final judgment for cross-module semantics, high-risk closure, the Week 2 Gate, and the Week 4 Gate.
+
+## Current execution policy
+
+- GPT/Sol is the only current lane for design, implementation, tests, and review; no package depends on DeepSeek.
+- Do not remind, delegate, or switch work to DeepSeek or another external execution model.
+- Historical external output is reference material only and must be revalidated before selective reuse.
+- Keep implementation and review in the current GPT/Sol task, including work estimated above one hour.
+- Tier 2/3 semantics and release decisions remain with GPT/Sol; Git commit and push approvals remain separate.
 
 ## D-031 decision point
 
@@ -108,7 +120,7 @@ Related packages may share one design checkpoint, implementation batch, post-rev
 
 ## Known blockers and risks
 
-- The three-to-four-week target assumes at least three useful parallel implementation lanes plus continuous integration; the complete solution lists 31 packages totaling roughly 47–78 sequential person-days before full-P3 extensions.
+- The three-to-four-week target assumed at least three useful parallel implementation lanes; D-052 now fixes execution to one GPT/Sol lane, so the 31-package, roughly 47–78 sequential-person-day estimate must be recalculated from actual progress.
 - No real streaming Speech Provider, media transport, or Windows device baseline is selected/restored in Git.
 - The repository `.venv` exists. Frontend dependencies were restored with `npm ci`; local `tsc`, focused Node tests, and the Vite production build now run successfully in this worktree.
 - Current runbook modes are mutually exclusive; Integrated mode is a documented target but not yet runnable.
@@ -125,10 +137,12 @@ Related packages may share one design checkpoint, implementation batch, post-rev
 - Historical Post-V0 backend: contract/Web handler `122/122`, schedule request/task service `104/104` PASS.
 - Historical Post-V0 frontend: 12 focused Live Voice scripts, TypeScript, and Vite production build PASS.
 - W1-K1 candidate `6ce74a4b`: Python focused suites `92 passed`; TypeScript fresh single-file compilation and `41` focused tests succeeded; adversarial probes still failed the accepted semantics, so W1-S1 was not accepted. Full Vite build was not counted because the detached review worktree could not resolve local frontend dependencies.
-- Committed Sol W1-K1 candidate after three review corrections: v1+v2 Python focused suites `76 passed`; TypeScript W1-K1 suite `24 passed`; Ruff, Python/TypeScript formatting, TypeScript compilation, Vite production build, `git diff --check`, and all Live Voice Markdown relative links pass. The commit containing this record is the immutable W1-S1 candidate; this is not Week 2/Week 4 runtime evidence.
+- Committed Sol W1-K1 candidate after three reviews: historical result `76` Python and `24` TypeScript tests plus Ruff/build/link checks passed; a later review reopened W1-S1 for the two P1 corrections recorded above.
+- Corrected W1-K1 commit `857d5c06`: `77` Python v1+v2 tests and `25` TypeScript tests pass; Ruff, Prettier, Vite production build, links, diff check, and final diff review pass.
+- W1-X1 commit `ac608738`: strict planned TypeScript compile and `17` focused tests pass; Prettier, Vite production build, diff check, and final diff review pass.
 
 ## Next actions
 
-1. Start `W1-P1A`, `W1-P2A-CR`, `W1-P2A-PORTS`, `W1-P3A-TC`, and `W1-P3A-PORTS` in bounded parallel lanes; pure `W1-X1` may proceed independently.
-2. Run grouped Sol review `W1-S2` over the landed A packages and their positive, negative, stale, cancel, replay, and zero-side-effect evidence.
+1. Continue with `W1-P2A-CR` in the current GPT/Sol task, then `W1-P3A-TC`, `W1-P1A`, and the bounded Port packages according to the dated dependency plan.
+2. Run grouped `W1-S2` over accepted A packages and their positive, negative, stale, cancel, replay, and zero-side-effect evidence.
 3. Compose accepted A packages in `W1-X2` without describing fake verticals as the user-facing Integrated Demo.

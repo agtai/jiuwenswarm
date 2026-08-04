@@ -1,9 +1,10 @@
 # Live Voice：两周 90% Demo 与四周 Integrated Alpha 路线
 
-> 更新日期：2026-08-03
+> 更新日期：2026-08-04
 > 当前产品和交付决策：[D-046](../decisions/DECISIONS.md)
 > 当前实现事实、track 状态和 Demo Replacement Ledger：[STATUS.md](../STATUS.md)
 > 当前五工作日的 Sol priority/dependency/boundary 与 execution-ready 包：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
+> 当前执行方式：[D-052](../decisions/DECISIONS.md)；固定由当前 GPT/Sol 单线完成，不再进行 GPT/DeepSeek 切换，dated plan 中旧模型 owner 只作历史记录。
 > 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前四周执行解释，不把 Alpha 写成 Production。
 
 ## 1. 交付目标
@@ -45,10 +46,10 @@ Integrated Windows Alpha 至少包括：
 - 至少三条能够持续产出的并行实现轨；
 - 一个共享契约/集成 owner，避免各轨创造第二套 authority；
 - 从 Day 1 开始持续接回同一个 Demo；
-- Sol 按 D-049 直接实现 Tier 3 shared kernel 和仍需选择核心语义的参考实现，并集中评审跨轨高风险边界；非 Sol 模型并行执行已有参考实现、边界明确的有界包；
+- 当前 GPT/Sol 完成设计、实现、测试和审查，不再提醒、委派或切换到 DeepSeek/其他外部执行模型；
 - Provider、Windows 设备、Executor 和私有配置在相应真实 Gate 前可用。
 
-若 Week 1 结束仍只有一个有效执行轨，必须重新估算范围或时间；不得继续用顺序 timebox 宣称四周可达。
+当前默认只有一个执行轨，因此三到四周目标的资源假设需要按实际推进速度重新估算；不得继续用原并行 timebox 宣称四周可达。
 
 ## 4. Architecture Contract Gate 的渐进实现
 
