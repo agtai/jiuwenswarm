@@ -65,7 +65,12 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 
 from .capabilities import AutoHarnessCapabilityRegistry, create_default_capability_registry
 from .run_log_status import TERMINAL_STATUSES
-from .scheduler import Scheduler, TARGET_TREE_CHANGE_REQUIRED
+from .scheduler import Scheduler
+from .project_execution import (
+    PROJECT_CODE_PIPELINE,
+    PROJECT_CODE_RESULT_CONTRACT,
+    resolve_project_execution_contract,
+)
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
 from .repo_auth import configure_gitcode_auth
@@ -83,7 +88,12 @@ _DEFAULT_LOCAL_REPO = _AUTO_HARNESS_DATA_DIR / "repo" / "openJiuwen--agent-core"
 # Default values for ci_gate config
 _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
-_SCHEDULE_PIPELINES = frozenset({EXTENDED_EVOLVE_PIPELINE, META_EVOLVE_PIPELINE})
+_AUTO_HARNESS_SCHEDULE_PIPELINES = frozenset(
+    {EXTENDED_EVOLVE_PIPELINE, META_EVOLVE_PIPELINE}
+)
+_ONE_TIME_PIPELINES = frozenset(
+    {*_AUTO_HARNESS_SCHEDULE_PIPELINES, PROJECT_CODE_PIPELINE}
+)
 _UNKNOWN_EXECUTION_TARGET_VALUE = "unknown"
 _EXECUTION_TARGET_FIELDS = (
     "project_dir",
@@ -107,6 +117,8 @@ _MAX_IDEMPOTENCY_KEY_LENGTH = 256
 def _validate_schedule_task_input(
     query: Any,
     pipeline: Any,
+    *,
+    allowed_pipelines: frozenset[str] = _AUTO_HARNESS_SCHEDULE_PIPELINES,
 ) -> tuple[str, Optional[str], Optional[dict[str, str]]]:
     """Validate and normalize inputs shared by one-time and recurring tasks."""
     if not isinstance(query, str) or not query.strip():
@@ -120,7 +132,7 @@ def _validate_schedule_task_input(
     else:
         return "", None, {"error": "任务流水线无效"}
 
-    if normalized_pipeline is not None and normalized_pipeline not in _SCHEDULE_PIPELINES:
+    if normalized_pipeline is not None and normalized_pipeline not in allowed_pipelines:
         return "", None, {"error": "任务流水线无效"}
 
     return query.strip(), normalized_pipeline, None
@@ -141,6 +153,29 @@ def _normalize_schedule_execution_target(target: Any) -> dict[str, str]:
             if isinstance(value, str) and value.strip()
             else _UNKNOWN_EXECUTION_TARGET_VALUE
         )
+    return normalized
+
+
+def _normalize_schedule_execution_contract(value: Any) -> dict[str, Any]:
+    """Return stable backend execution provenance without client inference."""
+    source = value if isinstance(value, dict) else {}
+    normalized: dict[str, Any] = {}
+    for field in (
+        "effective_execution_root",
+        "artifact_kind",
+        "executor",
+        "pipeline",
+    ):
+        item = source.get(field)
+        normalized[field] = (
+            item.strip()
+            if isinstance(item, str) and item.strip()
+            else _UNKNOWN_EXECUTION_TARGET_VALUE
+        )
+    effect_policy = source.get("effect_policy")
+    normalized["effect_policy"] = (
+        dict(effect_policy) if isinstance(effect_policy, dict) else {}
+    )
     return normalized
 
 
@@ -193,6 +228,7 @@ def _build_schedule_run_fingerprint(
     execution_target: Any = None,
     optimization_task: Any = None,
     repo_url: Any = "",
+    execution_contract: Any = None,
 ) -> str:
     """Fingerprint normalized intent, not mutable resolved execution objects."""
     normalized_target = _normalize_schedule_execution_target(execution_target)
@@ -208,6 +244,10 @@ def _build_schedule_run_fingerprint(
         "optimization_task": optimization_task,
         "repo_url": _normalize_schedule_fingerprint_text(repo_url),
     }
+    if isinstance(execution_contract, dict):
+        intent["execution_contract"] = _normalize_schedule_execution_contract(
+            execution_contract
+        )
     canonical = json.dumps(
         intent,
         ensure_ascii=False,
@@ -233,6 +273,7 @@ def _build_schedule_run_replay_payload(
             "origin_namespace": store_result.get("origin_namespace"),
             "idempotency_key": store_result.get("idempotency_key"),
             "execution_target": store_result.get("execution_target"),
+            "execution_contract": store_result.get("execution_contract"),
         }
     payload: dict[str, Any] = {
         "task_id": str(store_result.get("task_id") or ""),
@@ -267,7 +308,7 @@ def _build_schedule_task_response_metadata(
     )
     origin_namespace = task.get("origin_namespace") if task else None
     idempotency_key = task.get("idempotency_key") if task else None
-    return {
+    metadata = {
         "execution_target": (
             dict(_normalize_schedule_execution_target(None))
             if redact_owner
@@ -291,6 +332,27 @@ def _build_schedule_task_response_metadata(
             "access": access,
         },
     }
+    if task is not None and isinstance(task.get("execution_contract"), dict):
+        metadata["execution_contract"] = (
+            _normalize_schedule_execution_contract(None)
+            if redact_owner
+            else _normalize_schedule_execution_contract(task["execution_contract"])
+        )
+    return metadata
+
+
+def _build_schedule_run_execution_metadata(task: dict[str, Any]) -> dict[str, Any]:
+    """Preserve the run response shape while adding trusted project provenance."""
+    metadata = {
+        "execution_target": _normalize_schedule_execution_target(
+            task.get("execution_target")
+        )
+    }
+    if isinstance(task.get("execution_contract"), dict):
+        metadata["execution_contract"] = _normalize_schedule_execution_contract(
+            task["execution_contract"]
+        )
+    return metadata
 
 
 def _schedule_task_access_label(task: dict[str, Any]) -> str:
@@ -532,6 +594,7 @@ class ScheduledTaskExecutionContext:
     agent: Any
     stream_event_rail: Any
     release: Optional[Callable[[], None]] = None
+    project_executor: Any | None = None
 
 
 class AutoHarnessService:
@@ -601,6 +664,7 @@ class AutoHarnessService:
     def _capture_scheduled_task_execution_context(
         self,
         execution_agent: Any | None = None,
+        project_executor: Any | None = None,
         release: Optional[Callable[[], None]] = None,
     ) -> Optional[ScheduledTaskExecutionContext]:
         """Capture one task's non-serializable execution dependencies now."""
@@ -621,6 +685,7 @@ class AutoHarnessService:
         return ScheduledTaskExecutionContext(
             agent=agent,
             stream_event_rail=stream_event_rail,
+            project_executor=project_executor,
             release=release,
         )
 
@@ -3251,7 +3316,7 @@ class AutoHarnessService:
 
         execution_context = self._capture_scheduled_task_execution_context(
             execution_agent,
-            context_release,
+            release=context_release,
         )
         try:
             self._bind_scheduled_task_execution_context(task_id, execution_context)
@@ -3337,6 +3402,8 @@ class AutoHarnessService:
         repo_url: str = "",
         *,
         execution_agent: Any | None = None,
+        project_executor: Any | None = None,
+        effective_execution_root: Any = None,
         context_release: Optional[Callable[[], None]] = None,
         execution_target: Optional[dict[str, Any]] = None,
         owner_scope: Any = _OWNER_SCOPE_UNSET,
@@ -3353,14 +3420,18 @@ class AutoHarnessService:
         Args:
             query: The optimization goal/task description
             model: Model configuration from JiuwenSwarm
-            pipeline: Pipeline preference (extended_evolve_pipeline or meta_evolve_pipeline)
+            pipeline: AutoHarness preference or the Live Voice project_code_pipeline
             optimization_task: Optional explicit task metadata for specialized callers
             repo_url: Target repository URL for the task (stored at task_data level)
 
         Returns:
             {"task_id": str, "status": "running", "message": str}
         """
-        query, pipeline, validation_error = _validate_schedule_task_input(query, pipeline)
+        query, pipeline, validation_error = _validate_schedule_task_input(
+            query,
+            pipeline,
+            allowed_pipelines=_ONE_TIME_PIPELINES,
+        )
         if validation_error is not None:
             return validation_error
 
@@ -3425,6 +3496,29 @@ class AutoHarnessService:
             else None
         )
         normalized_repo_url = _normalize_schedule_fingerprint_text(repo_url) or ""
+        execution_contract: dict[str, Any] | None = None
+        if normalized_origin_namespace == "live_voice":
+            if pipeline != PROJECT_CODE_PIPELINE:
+                return {
+                    "error": (
+                        "Live Voice project tasks require the project-bound "
+                        f"{PROJECT_CODE_PIPELINE} pipeline"
+                    ),
+                    "code": "EXECUTION_TARGET_NOT_BOUND",
+                }
+            execution_contract, contract_error = resolve_project_execution_contract(
+                query=query,
+                execution_target=normalized_execution_target,
+                bound_execution_root=effective_execution_root,
+                project_executor=project_executor,
+            )
+            if contract_error is not None:
+                return contract_error
+        elif pipeline == PROJECT_CODE_PIPELINE:
+            return {
+                "error": "project_code_pipeline is restricted to live_voice commands",
+                "code": "PROJECT_EXECUTION_SCOPE_REQUIRED",
+            }
 
         fingerprint = None
         if idempotency_requested:
@@ -3435,6 +3529,7 @@ class AutoHarnessService:
                 normalized_execution_target,
                 serialized_optimization_task,
                 normalized_repo_url,
+                execution_contract,
             )
 
         task_data = {
@@ -3462,15 +3557,18 @@ class AutoHarnessService:
                 normalized_idempotency_key if idempotency_requested else None
             ),
         }
+        if execution_contract is not None:
+            task_data["execution_contract"] = dict(execution_contract)
         if serialized_optimization_task is not None:
             task_data["optimization_task"] = serialized_optimization_task
         if normalized_repo_url:
             task_data["repo_url"] = normalized_repo_url
         if normalized_origin_namespace == "live_voice":
-            task_data["result_contract"] = TARGET_TREE_CHANGE_REQUIRED
+            task_data["result_contract"] = PROJECT_CODE_RESULT_CONTRACT
 
         execution_context = self._capture_scheduled_task_execution_context(
             execution_agent,
+            project_executor,
             context_release,
         )
         try:
@@ -3555,7 +3653,7 @@ class AutoHarnessService:
                     "error": failure_message or "一次性任务执行失败",
                     "task_id": task_id,
                     "status": latest_status,
-                    "execution_target": dict(task_data["execution_target"]),
+                    **_build_schedule_run_execution_metadata(task_data),
                 }
             if latest_status == "cancelled":
                 self.release_scheduled_task_execution_context(task_id)
@@ -3563,7 +3661,7 @@ class AutoHarnessService:
                     "error": "一次性任务已取消",
                     "task_id": task_id,
                     "status": latest_status,
-                    "execution_target": dict(task_data["execution_target"]),
+                    **_build_schedule_run_execution_metadata(task_data),
                 }
             if latest_status in TERMINAL_STATUSES:
                 self.release_scheduled_task_execution_context(task_id)
@@ -3571,7 +3669,7 @@ class AutoHarnessService:
                     "task_id": task_id,
                     "status": latest_status,
                     "message": "一次性任务已结束",
-                    "execution_target": dict(task_data["execution_target"]),
+                    **_build_schedule_run_execution_metadata(task_data),
                 }
             if scheduler_claimed or latest_status == "running":
                 logger.info(
@@ -3583,7 +3681,7 @@ class AutoHarnessService:
                     "task_id": task_id,
                     "status": latest_status,
                     "message": "一次性任务已由调度器接管",
-                    "execution_target": dict(task_data["execution_target"]),
+                    **_build_schedule_run_execution_metadata(task_data),
                 }
             if trigger_error is not None:
                 completed_at = datetime.now(timezone.utc).isoformat()
@@ -3601,7 +3699,7 @@ class AutoHarnessService:
                     "error": trigger_error,
                     "task_id": task_id,
                     "status": "failed",
-                    "execution_target": dict(task_data["execution_target"]),
+                    **_build_schedule_run_execution_metadata(task_data),
                 }
             if latest_status != "pending":
                 self.release_scheduled_task_execution_context(task_id)
@@ -3609,7 +3707,7 @@ class AutoHarnessService:
                     "error": "一次性任务启动状态异常",
                     "task_id": task_id,
                     "status": latest_status or "unknown",
-                    "execution_target": dict(task_data["execution_target"]),
+                    **_build_schedule_run_execution_metadata(task_data),
                 }
 
             completed_at = datetime.now(timezone.utc).isoformat()
@@ -3624,14 +3722,14 @@ class AutoHarnessService:
                 "error": "一次性任务启动失败",
                 "task_id": task_id,
                 "status": "failed",
-                "execution_target": dict(task_data["execution_target"]),
+                **_build_schedule_run_execution_metadata(task_data),
             }
 
         result = {
             "task_id": task_id,
             "status": "running",
             "message": "一次性任务已创建并开始执行",
-            "execution_target": dict(task_data["execution_target"]),
+            **_build_schedule_run_execution_metadata(task_data),
         }
         if idempotency_requested:
             result.update(

@@ -87,11 +87,19 @@ class _ScheduleService:
 
 
 class _AgentFacade:
-    def __init__(self, instance: object) -> None:
+    def __init__(self, instance: object, project_root: str | None = None) -> None:
         self.instance = instance
+        self.project_root = project_root
 
     def get_instance(self) -> object:
         return self.instance
+
+    def get_project_execution_root(self) -> str | None:
+        return self.project_root
+
+    async def process_background_code_task_stream(self, _request):
+        if False:
+            yield None
 
 
 class _ConcurrentAgentManager:
@@ -671,7 +679,7 @@ async def test_schedule_logs_passes_real_owner_and_project_without_agent(
 @pytest.mark.asyncio
 async def test_schedule_run_and_list_derive_owner_scope_from_request(monkeypatch) -> None:
     server = _ScheduleServerHarness.__new__(_ScheduleServerHarness)
-    facade = _AgentFacade(object())
+    facade = _AgentFacade(object(), "D:/work/project-a")
     manager = _ConcurrentAgentManager({"web": facade})
     service = _OwnerScopeService()
     server._agent_manager = manager
@@ -692,9 +700,12 @@ async def test_schedule_run_and_list_derive_owner_scope_from_request(monkeypatch
         session_id="session-real",
         metadata={"app_id": "desktop-real"},
         params={
-            "mode": "auto_harness",
+            "mode": "code",
             "query": "受控任务",
             "model_name": "demo-model",
+            "pipeline": "project_code_pipeline",
+            "project_dir": "D:/work/project-a",
+            "project_id": "project-a",
             "origin_namespace": "live_voice",
             "idempotency_key": "command-1",
             "owner_scope": {
@@ -721,6 +732,9 @@ async def test_schedule_run_and_list_derive_owner_scope_from_request(monkeypatch
     assert service.run_kwargs["origin_namespace"] == "live_voice"
     assert service.run_kwargs["idempotency_key"] == "command-1"
     assert service.run_kwargs["model_intent"] == "demo-model"
+    assert service.run_kwargs["project_executor"] is facade
+    assert service.run_kwargs["effective_execution_root"] == "D:/work/project-a"
+    assert manager.get_agent_calls[0]["mode"] == "code"
 
     list_request = AgentRequest(
         request_id="req-scoped-list",

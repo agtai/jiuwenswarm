@@ -23,6 +23,13 @@ from jiuwenswarm.agents.harness.common.auto_harness.service import (
     ScheduledTaskExecutionContext,
     _build_schedule_run_fingerprint,
 )
+from jiuwenswarm.agents.harness.common.auto_harness.project_execution import (
+    PROJECT_CODE_ARTIFACT_KIND,
+    PROJECT_CODE_EFFECT_POLICY,
+    PROJECT_CODE_EXECUTOR,
+    PROJECT_CODE_PIPELINE,
+    PROJECT_CODE_RESULT_CONTRACT,
+)
 from jiuwenswarm.agents.harness.common.auto_harness.task_store import (
     TaskStore as PersistentTaskStore,
 )
@@ -56,6 +63,37 @@ _OWNER_SCOPE = {
     "session_id": "session-a",
     "app_id": "desktop",
 }
+
+
+class _ProjectExecutor:
+    async def process_background_code_task_stream(self, request):
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload={"event_type": "chat.final", "content": "done"},
+            is_complete=True,
+        )
+
+
+def _create_git_project(tmp_path: Path, name: str = "project") -> tuple[Path, dict[str, str]]:
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    subprocess.run(["git", "init", "-q", str(project_dir)], check=True)
+    target = {
+        **_EXECUTION_TARGET,
+        "project_dir": str(project_dir),
+        "project_id": name,
+    }
+    return project_dir, target
+
+
+def _project_run_kwargs(project_dir: Path, target: dict[str, str]) -> dict[str, Any]:
+    return {
+        "pipeline": PROJECT_CODE_PIPELINE,
+        "project_executor": _ProjectExecutor(),
+        "effective_execution_root": str(project_dir),
+        "execution_target": target,
+    }
 
 
 def test_log_append_retries_transient_permission_error(tmp_path, monkeypatch) -> None:
@@ -449,7 +487,7 @@ async def test_idempotent_run_concurrency_creates_and_triggers_once(tmp_path) ->
             execution_agent=object(),
             context_release=lambda: releases.append("first"),
             owner_scope=_OWNER_SCOPE,
-            origin_namespace="live_voice",
+            origin_namespace="task_test",
             idempotency_key="command-1",
             model_intent=" demo-model ",
         ),
@@ -458,7 +496,7 @@ async def test_idempotent_run_concurrency_creates_and_triggers_once(tmp_path) ->
             execution_agent=object(),
             context_release=lambda: releases.append("second"),
             owner_scope=dict(_OWNER_SCOPE),
-            origin_namespace=" live_voice ",
+            origin_namespace=" task_test ",
             idempotency_key=" command-1 ",
             model_intent="demo-model",
         ),
@@ -498,7 +536,7 @@ async def test_idempotent_run_coordinates_multiple_store_instances_for_same_path
             execution_agent=object(),
             execution_target=_EXECUTION_TARGET,
             owner_scope=_OWNER_SCOPE,
-            origin_namespace="live_voice",
+            origin_namespace="task_test",
             idempotency_key="multi-store-command",
         ),
         second_service.run_task(
@@ -506,7 +544,7 @@ async def test_idempotent_run_coordinates_multiple_store_instances_for_same_path
             execution_agent=object(),
             execution_target=_EXECUTION_TARGET,
             owner_scope=_OWNER_SCOPE,
-            origin_namespace="live_voice",
+            origin_namespace="task_test",
             idempotency_key="multi-store-command",
         ),
     )
@@ -535,7 +573,7 @@ async def test_stale_store_writer_preserves_task_and_idempotency_ledger(
         "multi-store task",
         execution_agent=object(),
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="stale-writer-command",
     )
     await stale_store.add_task(
@@ -564,7 +602,7 @@ async def test_stale_store_writer_preserves_task_and_idempotency_ledger(
         "multi-store task",
         execution_agent=object(),
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="stale-writer-command",
     )
     assert replay["task_id"] == winner["task_id"]
@@ -583,7 +621,7 @@ async def test_idempotent_run_replays_after_json_reload_without_trigger(
         "任务\r\n目标",
         execution_agent=object(),
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="reload-command",
         model_intent="demo-model",
     )
@@ -597,7 +635,7 @@ async def test_idempotent_run_replays_after_json_reload_without_trigger(
         execution_agent=object(),
         context_release=lambda: released.append("candidate"),
         owner_scope=dict(_OWNER_SCOPE),
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="reload-command",
         model_intent=" demo-model ",
     )
@@ -622,7 +660,7 @@ async def test_idempotency_conflict_releases_candidate_without_overwriting_winne
         "任务 A",
         execution_agent=winner_agent,
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="shared-command",
         model_intent="model-a",
     )
@@ -632,7 +670,7 @@ async def test_idempotency_conflict_releases_candidate_without_overwriting_winne
         execution_agent=object(),
         context_release=lambda: loser_releases.append("loser"),
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="shared-command",
         model_intent="model-a",
     )
@@ -641,7 +679,7 @@ async def test_idempotency_conflict_releases_candidate_without_overwriting_winne
         "error": "idempotency_key 已用于不同的任务意图",
         "code": "IDEMPOTENCY_CONFLICT",
         "existing_task_id": winner["task_id"],
-        "origin_namespace": "live_voice",
+        "origin_namespace": "task_test",
     }
     assert "task_id" not in conflict
     assert scheduler.triggered == [winner["task_id"]]
@@ -668,7 +706,7 @@ async def test_same_idempotency_key_and_query_conflict_when_target_changes(
         execution_agent=object(),
         execution_target=_EXECUTION_TARGET,
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="target-command",
         model_intent="model-a",
     )
@@ -678,7 +716,7 @@ async def test_same_idempotency_key_and_query_conflict_when_target_changes(
         execution_agent=object(),
         execution_target=target_b,
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="target-command",
         model_intent="model-a",
     )
@@ -715,7 +753,7 @@ async def test_same_idempotency_key_conflicts_when_execution_inputs_change(
         "same task",
         execution_agent=object(),
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="execution-input-command",
         **winner_extra,
     )
@@ -724,7 +762,7 @@ async def test_same_idempotency_key_conflicts_when_execution_inputs_change(
         "same task",
         execution_agent=object(),
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="execution-input-command",
         **conflict_extra,
     )
@@ -736,50 +774,66 @@ async def test_same_idempotency_key_conflicts_when_execution_inputs_change(
 
 @pytest.mark.asyncio
 async def test_task_provenance_survives_reload_list_status_and_replay(tmp_path) -> None:
-    task_store = PersistentTaskStore(tmp_path)
+    project_dir, execution_target = _create_git_project(tmp_path)
+    project_kwargs = _project_run_kwargs(project_dir, execution_target)
+    store_dir = tmp_path / "store"
+    task_store = PersistentTaskStore(store_dir)
     scheduler = _Scheduler()
     service = _service(task_store, scheduler)
     created = await service.run_task(
         "受控任务",
         execution_agent=object(),
-        execution_target=_EXECUTION_TARGET,
         owner_scope=_OWNER_SCOPE,
         origin_namespace="live_voice",
         idempotency_key="persisted-command",
+        **project_kwargs,
     )
 
-    reloaded_store = PersistentTaskStore(tmp_path)
+    reloaded_store = PersistentTaskStore(store_dir)
     raw_task = reloaded_store.get_task(created["task_id"])
     assert raw_task is not None
     assert raw_task["owner_scope"] == _OWNER_SCOPE
     assert raw_task["origin_namespace"] == "live_voice"
     assert raw_task["idempotency_key"] == "persisted-command"
-    assert raw_task["execution_target"] == _EXECUTION_TARGET
-    assert raw_task["result_contract"] == TARGET_TREE_CHANGE_REQUIRED
+    assert raw_task["execution_target"] == execution_target
+    assert raw_task["result_contract"] == PROJECT_CODE_RESULT_CONTRACT
+    assert raw_task["execution_contract"] == {
+        "effective_execution_root": str(project_dir.resolve()),
+        "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+        "executor": PROJECT_CODE_EXECUTOR,
+        "pipeline": PROJECT_CODE_PIPELINE,
+        "effect_policy": {
+            "git_commit": "forbidden",
+            "git_push": "forbidden",
+            "tests": "forbidden",
+            "shell": "forbidden",
+        },
+    }
 
     reloaded_service = _service(reloaded_store, _Scheduler())
     status = await reloaded_service.get_scheduled_task_status(
         created["task_id"],
         requester_owner_scope=_OWNER_SCOPE,
-        requester_execution_target=_EXECUTION_TARGET,
+        requester_execution_target=execution_target,
     )
     listed = await reloaded_service.list_scheduled_tasks(
         owner_scope=_OWNER_SCOPE,
-        requester_execution_target=_EXECUTION_TARGET,
+        requester_execution_target=execution_target,
         origin_namespace="live_voice",
         idempotency_key="persisted-command",
     )
     replay = await reloaded_service.run_task(
         "受控任务",
         execution_agent=object(),
-        execution_target=_EXECUTION_TARGET,
         owner_scope=_OWNER_SCOPE,
         origin_namespace="live_voice",
         idempotency_key="persisted-command",
+        **project_kwargs,
     )
 
     for projection in (status, listed[0], replay):
-        assert projection["execution_target"] == _EXECUTION_TARGET
+        assert projection["execution_target"] == execution_target
+        assert projection["execution_contract"] == raw_task["execution_contract"]
         assert projection["provenance"]["owner_scope"] == _OWNER_SCOPE
         assert projection["provenance"]["origin_namespace"] == "live_voice"
         assert projection["provenance"]["idempotency_key"] == "persisted-command"
@@ -789,10 +843,10 @@ async def test_task_provenance_survives_reload_list_status_and_replay(tmp_path) 
     cancelled = await reloaded_service.cancel_scheduled_task(
         created["task_id"],
         requester_owner_scope=_OWNER_SCOPE,
-        requester_execution_target=_EXECUTION_TARGET,
+        requester_execution_target=execution_target,
     )
     assert cancelled["status"] == "cancelled"
-    assert cancelled["execution_target"] == _EXECUTION_TARGET
+    assert cancelled["execution_target"] == execution_target
     assert cancelled["provenance"]["owner_scope"] == _OWNER_SCOPE
 
 
@@ -800,34 +854,40 @@ async def test_task_provenance_survives_reload_list_status_and_replay(tmp_path) 
 async def test_idempotency_ledger_tombstone_blocks_recreation_after_delete(
     tmp_path,
 ) -> None:
-    task_store = PersistentTaskStore(tmp_path)
+    project_dir, execution_target = _create_git_project(tmp_path)
+    project_kwargs = _project_run_kwargs(project_dir, execution_target)
+    store_dir = tmp_path / "store"
+    task_store = PersistentTaskStore(store_dir)
     first_service = _service(task_store, _Scheduler())
     first = await first_service.run_task(
         "受控任务",
         execution_agent=object(),
-        execution_target=_EXECUTION_TARGET,
         owner_scope=_OWNER_SCOPE,
         origin_namespace="live_voice",
         idempotency_key="deleted-command",
+        **project_kwargs,
     )
     assert await task_store.delete_task(first["task_id"]) is True
 
-    replay_store = PersistentTaskStore(tmp_path)
+    replay_store = PersistentTaskStore(store_dir)
     replay_scheduler = _Scheduler()
     replay = await _service(replay_store, replay_scheduler).run_task(
         "受控任务",
         execution_agent=object(),
-        execution_target=_EXECUTION_TARGET,
         owner_scope=_OWNER_SCOPE,
         origin_namespace="live_voice",
         idempotency_key="deleted-command",
+        **project_kwargs,
     )
 
     assert replay["task_id"] == first["task_id"]
     assert replay["status"] == "deleted"
     assert replay["idempotent_replay"] is True
     assert replay["deleted_at"]
-    assert replay["execution_target"] == _EXECUTION_TARGET
+    assert replay["execution_target"] == execution_target
+    assert replay["execution_contract"]["effective_execution_root"] == str(
+        project_dir.resolve()
+    )
     assert replay["provenance"] == {
         "owner_scope": _OWNER_SCOPE,
         "origin_namespace": "live_voice",
@@ -837,11 +897,14 @@ async def test_idempotency_ledger_tombstone_blocks_recreation_after_delete(
     }
     assert replay_scheduler.triggered == []
     persisted = json.loads(
-        (tmp_path / "scheduled-tasks.json").read_text(encoding="utf-8")
+        (store_dir / "scheduled-tasks.json").read_text(encoding="utf-8")
     )
     assert persisted["tasks"] == []
     assert persisted["create_commands"][0]["deleted_at"]
-    assert persisted["create_commands"][0]["execution_target"] == _EXECUTION_TARGET
+    assert persisted["create_commands"][0]["execution_target"] == execution_target
+    assert persisted["create_commands"][0]["execution_contract"]["executor"] == (
+        PROJECT_CODE_EXECUTOR
+    )
 
 
 @pytest.mark.asyncio
@@ -855,14 +918,14 @@ async def test_scoped_list_filters_exact_owner_namespace_and_key(tmp_path) -> No
         "任务 A",
         execution_agent=object(),
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="command-a",
     )
     await service.run_task(
         "任务 B",
         execution_agent=object(),
         owner_scope=owner_b,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="command-a",
     )
     await service.run_task(
@@ -875,12 +938,12 @@ async def test_scoped_list_filters_exact_owner_namespace_and_key(tmp_path) -> No
 
     exact = await service.list_scheduled_tasks(
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
         idempotency_key="command-a",
     )
     namespace = await service.list_scheduled_tasks(
         owner_scope=_OWNER_SCOPE,
-        origin_namespace="live_voice",
+        origin_namespace="task_test",
     )
 
     assert [task["task_id"] for task in exact] == [task_a["task_id"]]
@@ -1439,6 +1502,123 @@ async def test_run_task_rejects_invalid_pipeline_without_creating_task(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pipeline", "bound_root", "query", "expected_code"),
+    [
+        (
+            "extended_evolve_pipeline",
+            "selected",
+            "create a verified project change",
+            "EXECUTION_TARGET_NOT_BOUND",
+        ),
+        (
+            PROJECT_CODE_PIPELINE,
+            "other",
+            "create a verified project change",
+            "EXECUTION_TARGET_NOT_BOUND",
+        ),
+        (
+            PROJECT_CODE_PIPELINE,
+            "selected",
+            "修复实现并运行所有测试",
+            "UNSUPPORTED_PROJECT_TASK_CONSTRAINT",
+        ),
+        (
+            PROJECT_CODE_PIPELINE,
+            "selected",
+            "repair the implementation and run all tests",
+            "UNSUPPORTED_PROJECT_TASK_CONSTRAINT",
+        ),
+        (
+            PROJECT_CODE_PIPELINE,
+            "selected",
+            "repair the implementation and run npm build",
+            "UNSUPPORTED_PROJECT_TASK_CONSTRAINT",
+        ),
+        (
+            PROJECT_CODE_PIPELINE,
+            "selected",
+            "execute a migration script after the edit",
+            "UNSUPPORTED_PROJECT_TASK_CONSTRAINT",
+        ),
+        (
+            PROJECT_CODE_PIPELINE,
+            "selected",
+            "commit and push the change",
+            "UNSUPPORTED_PROJECT_TASK_CONSTRAINT",
+        ),
+        (
+            PROJECT_CODE_PIPELINE,
+            "selected",
+            "修复实现并执行迁移脚本",
+            "UNSUPPORTED_PROJECT_TASK_CONSTRAINT",
+        ),
+    ],
+)
+async def test_live_voice_project_preflight_fails_before_task_or_trigger(
+    tmp_path,
+    pipeline: str,
+    bound_root: str,
+    query: str,
+    expected_code: str,
+) -> None:
+    selected_dir, execution_target = _create_git_project(tmp_path, "selected")
+    other_dir, _ = _create_git_project(tmp_path, "other")
+    task_store = _TaskStore()
+    scheduler = _Scheduler()
+    executor = _ProjectExecutor()
+    service = _service(task_store, scheduler)
+
+    result = await service.run_task(
+        query,
+        pipeline=pipeline,
+        execution_agent=object(),
+        project_executor=executor,
+        effective_execution_root=str(
+            selected_dir if bound_root == "selected" else other_dir
+        ),
+        execution_target=execution_target,
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="preflight-command",
+    )
+
+    assert result["code"] == expected_code
+    assert "task_id" not in result
+    assert task_store.added == []
+    assert scheduler.triggered == []
+    assert service._scheduled_task_execution_contexts == {}
+
+
+@pytest.mark.asyncio
+async def test_live_voice_project_preflight_accepts_enforced_no_shell_effects(
+    tmp_path,
+) -> None:
+    project_dir, execution_target = _create_git_project(tmp_path)
+    task_store = PersistentTaskStore(tmp_path / "store")
+    scheduler = _Scheduler()
+    service = _service(task_store, scheduler)
+
+    result = await service.run_task(
+        "create one project file; do not run tests, commit, or push",
+        execution_agent=object(),
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="safe-effects-command",
+        **_project_run_kwargs(project_dir, execution_target),
+    )
+
+    assert result["status"] == "running"
+    assert scheduler.triggered == [result["task_id"]]
+    assert result["execution_contract"]["effect_policy"] == {
+        "git_commit": "forbidden",
+        "git_push": "forbidden",
+        "tests": "forbidden",
+        "shell": "forbidden",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("query", ["", "  \n", None, 123])
 async def test_create_scheduled_task_rejects_empty_query(query: Any) -> None:
     task_store = _TaskStore()
@@ -1754,7 +1934,11 @@ class _CompletedBoundExecutionService(_SchedulerService):
     ) -> ScheduledTaskExecutionContext | None:
         if task_id != self.task_id:
             return None
-        return ScheduledTaskExecutionContext(object(), object())
+        return ScheduledTaskExecutionContext(
+            object(),
+            object(),
+            project_executor=self,
+        )
 
     def release_scheduled_task_execution_context(self, task_id: str) -> None:
         self.released.append(task_id)
@@ -1778,6 +1962,31 @@ class _CompletedBoundExecutionService(_SchedulerService):
                 "is_terminal": True,
             },
             is_complete=False,
+        )
+
+    async def process_background_code_task_stream(self, request):
+        self.started += 1
+        if self.mutation == "source":
+            (self.target_dir / "generated.py").write_text(
+                "RESULT = 'task one verified'\n",
+                encoding="utf-8",
+            )
+        elif self.mutation == "ignored":
+            ignored_dir = self.target_dir / ".cache"
+            ignored_dir.mkdir()
+            (ignored_dir / "runtime.txt").write_text("runtime\n", encoding="utf-8")
+        elif self.mutation == "foreign":
+            foreign_dir = self.target_dir.parent / "foreign"
+            foreign_dir.mkdir()
+            (foreign_dir / "generated.py").write_text(
+                "FOREIGN = True\n",
+                encoding="utf-8",
+            )
+        yield AgentResponseChunk(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            payload={"event_type": "chat.final", "content": "done"},
+            is_complete=True,
         )
 
 
@@ -1825,6 +2034,14 @@ async def test_live_voice_result_contract_rejects_invalid_target(tmp_path) -> No
             "execution_history": [],
             "execution_target": {"project_dir": str(missing_target)},
             "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+            "pipeline": PROJECT_CODE_PIPELINE,
+            "execution_contract": {
+                "effective_execution_root": str(missing_target),
+                "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+                "executor": PROJECT_CODE_EXECUTOR,
+                "pipeline": PROJECT_CODE_PIPELINE,
+                "effect_policy": dict(PROJECT_CODE_EFFECT_POLICY),
+            },
         }
     )
     service = _CompletedBoundExecutionService(task_id, missing_target, "source")
@@ -1844,9 +2061,55 @@ async def test_live_voice_result_contract_rejects_invalid_target(tmp_path) -> No
 
 
 @pytest.mark.asyncio
+async def test_live_voice_execution_revalidates_persisted_contract_pipeline(
+    tmp_path,
+) -> None:
+    task_id = "sch_invalid_contract_pipeline"
+    target_dir, _ = _create_git_project(tmp_path, "target")
+    task_store = PersistentTaskStore(tmp_path / "store")
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "create a project file",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+            "execution_target": {"project_dir": str(target_dir)},
+            "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+            "pipeline": PROJECT_CODE_PIPELINE,
+            "execution_contract": {
+                "effective_execution_root": str(target_dir),
+                "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+                "executor": PROJECT_CODE_EXECUTOR,
+                "pipeline": "extended_evolve_pipeline",
+                "effect_policy": dict(PROJECT_CODE_EFFECT_POLICY),
+            },
+        }
+    )
+    service = _CompletedBoundExecutionService(task_id, target_dir, "source")
+    scheduler = Scheduler(service, task_store)
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert stored["last_error"].startswith("EXECUTION_TARGET_NOT_BOUND:")
+    assert service.started == 0
+    assert service.released == [task_id]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mutation", "expected_status"),
-    [("none", "failed"), ("ignored", "failed"), ("source", "success")],
+    [
+        ("none", "failed"),
+        ("ignored", "failed"),
+        ("foreign", "failed"),
+        ("source", "success"),
+    ],
 )
 async def test_live_voice_result_contract_requires_target_tree_change(
     tmp_path,
@@ -1874,6 +2137,14 @@ async def test_live_voice_result_contract_requires_target_tree_change(
             "execution_history": [],
             "execution_target": {"project_dir": str(target_dir)},
             "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+            "pipeline": PROJECT_CODE_PIPELINE,
+            "execution_contract": {
+                "effective_execution_root": str(target_dir),
+                "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+                "executor": PROJECT_CODE_EXECUTOR,
+                "pipeline": PROJECT_CODE_PIPELINE,
+                "effect_policy": dict(PROJECT_CODE_EFFECT_POLICY),
+            },
         }
     )
     service = _CompletedBoundExecutionService(task_id, target_dir, mutation)
@@ -1896,6 +2167,54 @@ async def test_live_voice_result_contract_requires_target_tree_change(
             NO_EFFECTIVE_TARGET_CHANGE_ERROR
         )
         assert not (target_dir / "generated.py").exists()
+        if mutation == "foreign":
+            assert (tmp_path / "foreign" / "generated.py").is_file()
+    assert service.released == [task_id]
+
+
+@pytest.mark.asyncio
+async def test_live_voice_result_contract_rejects_unreadable_target_before_agent(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    task_id = "sch_unreadable_target"
+    target_dir, _ = _create_git_project(tmp_path, "target")
+    task_store = PersistentTaskStore(tmp_path / "store")
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "create a project file",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+            "execution_target": {"project_dir": str(target_dir)},
+            "result_contract": TARGET_TREE_CHANGE_REQUIRED,
+            "pipeline": PROJECT_CODE_PIPELINE,
+            "execution_contract": {
+                "effective_execution_root": str(target_dir),
+                "artifact_kind": PROJECT_CODE_ARTIFACT_KIND,
+                "executor": PROJECT_CODE_EXECUTOR,
+                "pipeline": PROJECT_CODE_PIPELINE,
+                "effect_policy": dict(PROJECT_CODE_EFFECT_POLICY),
+            },
+        }
+    )
+    service = _CompletedBoundExecutionService(task_id, target_dir, "source")
+    scheduler = Scheduler(service, task_store)
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.auto_harness.scheduler._snapshot_target_tree",
+        lambda _path: (_ for _ in ()).throw(PermissionError("target unreadable")),
+    )
+
+    assert await scheduler.trigger_immediate(task_id) is True
+    await scheduler._running_executions[task_id]
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "failed"
+    assert stored["last_error"] == "target unreadable"
+    assert service.started == 0
     assert service.released == [task_id]
 
 

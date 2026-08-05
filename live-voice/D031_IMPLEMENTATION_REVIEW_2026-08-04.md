@@ -6,11 +6,11 @@
 >
 > Final local implementation commit: `617fe256db05b07a07b6d457b15f07c02d17d9bf` (`d031-05` real-service evidence below ran against its pre-amend candidate `d84fd388`)
 >
-> Acceptance state: `PARTIAL`; monitor and fail-closed behavior are verified, but a successful project-bound AutoHarness delivery is not
+> Acceptance state: `CLOSED` for the accepted D-031 compatibility boundary; the project-bound candidate passed isolated real-service validation, while Speech fidelity, shared Agent Runtime workspace artifacts and guaranteed terminal-audio delivery remain separate follow-ups
 >
 > Risk tier: D-046 Tier 2
 
-Current progress and next actions remain authoritative only in [STATUS.md](STATUS.md). This record owns the D-031 implementation boundary, scenario evidence, review findings, automated verification, and remaining real-service gap for this candidate.
+Current progress and next actions remain authoritative only in [STATUS.md](STATUS.md). This record owns the D-031 implementation boundary, scenario evidence, review findings and automated verification; the sanitized closure run is preserved in [D031 project-bound evidence](evidence/D031_20260805_PROJECT_BOUND.md).
 
 ## Implemented boundary
 
@@ -32,20 +32,20 @@ Current progress and next actions remain authoritative only in [STATUS.md](STATU
 
 ## Scenario evidence
 
-| Dimension | Automated evidence | Remaining gap |
+| Dimension | Automated/real-path evidence | Remaining limitation |
 |---|---|---|
-| Positive/state | immediate read, queued/running/unknown cadence, valid terminal, Bridge synchronization, visible projection, and one real task observed through terminal | a real task has not yet produced a correct requested target change |
-| Negative/boundary | invalid envelope, task/status/target/provenance mismatch, malformed optional facts, business error, missing, unavailable, and Bridge rejection stop without adoption | real server error envelopes not yet observed through WebSocket |
-| Timing/concurrency | fake clock covers cadence/backoff; deferred reads cover one in-flight read, abort, no reconnect overlap, and late-result fencing | real disconnect timing and browser reconnect not yet observed |
-| Recovery/isolation | exact-key same-page list accepts one exact record; empty/multiple records stop; stop and error states do not revive | full refresh/restart remains explicitly unsupported |
-| Compatibility | primary and legacy command names, spoken target markers, task flag-off routing, Bridge/client/adapter suites, default-off build, and task-flag-on build pass | corrected primary command still needs a manual task flag-on microphone/speaker rerun |
-| Forbidden effects | monitor gateway exposes only status/list; test gateways omit mutation methods; hook monitor callbacks do not receive Chat send/interrupt/store setters | browser-level store spies remain a real-path validation gap |
+| Positive/state | immediate read, queued/running/unknown cadence, valid terminal, Bridge synchronization, visible projection, and an isolated real task that made the requested semantic target change and reached `success/success` | none inside the accepted D-031 boundary |
+| Negative/boundary | invalid envelope, task/status/target/provenance mismatch, malformed optional facts, business error, missing, unavailable, and Bridge rejection stop without adoption | real server error envelopes were not fault-injected through the browser; automated fail-closed coverage remains the evidence |
+| Timing/concurrency | fake clock covers cadence/backoff; deferred reads cover one in-flight read, abort, no reconnect overlap and late-result fencing; the closure run observed timeout recovery and terminal polling stop | real disconnect timing and browser reconnect were not fault-injected |
+| Recovery/isolation | exact-key same-page list accepts one exact record; empty/multiple records stop; the closure run used two same-key wire attempts but created one durable task and one execution | full refresh/restart remains explicitly unsupported |
+| Compatibility | primary and legacy command names, spoken target markers, task flag-off routing, Bridge/client/adapter suites, both builds, and the primary microphone route pass | terminal speech is safe at most once, not guaranteed delivery; the accepted run observed zero terminal announcements |
+| Forbidden effects | the monitor has no mutation/Chat API; the project task contract forbids shell, tests, Git and remote commands; the closure target kept HEAD unchanged | Code Agent created shared runtime-support paths; D-057 assigns their placement to Agent Runtime isolation rather than D-031 and this record does not claim an absolutely clean target |
 
 ## ASR command correction
 
 The first manual attempt did not enter the task route: one transcript changed “演进” to another word, and the replacement phrase “后台代码优化任务” was not yet recognized. Both attempts went to the ordinary Agent path; the second created disposable-worktree code while producing no `schedule.run`, real `sch_*` ID, or D-031 monitor. It is not counted as D-031 validation evidence.
 
-The correction adds the complete exact “后台代码优化任务” create, status, replace, and cancel grammar; retains the old name; and accepts “任务内容是/为” and “目标是/为” with optional punctuation. Unconfirmed primary commands produce zero task gateway calls, confirmed commands reuse the existing fixed pipeline and controls, and ordinary mentions such as “请分析代码优化方案” remain Chat input. The correction's repeat reviews are complete; real-service validation must restart with a candidate containing the corrected primary command.
+The correction adds the complete exact “后台代码优化任务” create, status, replace, and cancel grammar; retains the old name; and accepts “任务内容是/为” and “目标是/为” with optional punctuation. Unconfirmed primary commands produce zero task gateway calls, confirmed commands reuse the existing fixed pipeline and controls, and ordinary mentions such as “请分析代码优化方案” remain Chat input. The later clean closure run used this corrected primary command.
 
 ## Review passes
 
@@ -155,9 +155,9 @@ This is a mixed-contract defect, not an ASR defect: the selected project is used
 
 The manually captured `worktree-before.tsv` is not valid hash evidence. Its PowerShell Git pipeline recorded `2,665` rows and silently omitted `140` non-ASCII paths. A later UTF-8-safe enumeration found the real `2,805` files, so direct `Compare-Object` against that TSV falsely reports 140 additions. Do not reuse this file or its count. The zero-change conclusion instead rests on the scheduler's own Git-visible pre/post fingerprint, the stored `NO_EFFECTIVE_TARGET_CHANGE` result, unchanged `d84fd388`, and clean target Git status. A future manual manifest must use an explicitly UTF-8-safe implementation and prove its baseline count before task start.
 
-## Required next slice before another real run
+## Historical required next slice after `d031-05`
 
-Do not repeat a positive real-service task until the execution/result contract is made coherent. A new Session must first choose and record one of these product meanings:
+At the `d031-05` checkpoint, another positive real-service task was forbidden until the execution/result contract became coherent. D-056 later selected the first of these meanings:
 
 1. **Project-bound code task — recommended for the current “后台代码优化任务” wording.** The selected project is the actual execution repository, and success means the requested Git-visible project change exists. This requires a project-capable Executor/Harness Adapter; merely passing the path into `extended_evolve_pipeline` is insufficient because that pipeline creates and promotes runtime extensions in its own worktrees.
 2. **Runtime-extension Demo.** The command is restricted and renamed to an explicit Harness extension operation, the runtime extension store is the declared artifact target, and success validates the promoted extension rather than the selected code project. This does not satisfy a generic project code-optimization promise and must remain visibly a Demo substitute.
@@ -179,24 +179,71 @@ Likely investigation points are `liveVoiceTaskBridge.ts` for the fixed pipeline/
 - Mismatched selected target/effective execution root fails before model creation, repository clone/update, runtime-extension creation, task mutation beyond the failed record, or target writes.
 - A supported project-bound fake writes one expected Git-visible target file and succeeds; no change, ignored-cache-only change, foreign-root change, unreadable target, or invalid Git target fails.
 - The task record, status response, monitor projection, and result validation all carry the same target, effective execution root, artifact kind, command, task, owner, Session, and channel facts.
-- Unsupported “no tests/no commit/no push” constraints reject before execution unless the chosen executor can prove those effects remain zero.
+- Explicit requirements to run tests, shell or Git commands reject before execution; explicit no-tests/no-commit/no-push constraints are supported by the file-tools-only, no-shell executor contract.
 - Existing idempotency, wrong-scope, reconnect, retry, terminal-stop, flag-off, cancel/replace, and text-path regressions remain green. Any state/concurrency/mutation change follows the applicable D-053 review passes.
 
 ### Required real-service evidence
 
 - Use a fresh isolated data directory and disposable clean Git target with a UTF-8-safe baseline.
 - Unconfirmed speech produces zero task requests and zero side effects.
-- One confirmed committed-final capture produces exactly one `schedule.run`, one real task ID, and status reads only for that ID.
+- One confirmed committed-final capture produces one logical create command, one durable task and one execution. Timeout recovery may send more than one `schedule.run` wire request only when every attempt uses the same idempotency key and produces no duplicate task or execution.
 - Backend provenance proves the effective execution root equals the selected target before model work starts.
-- The requested artifact appears only in the target, unexpected files remain zero, HEAD remains unchanged when commit/push are forbidden, and semantic content is checked rather than inferred from task status.
-- The backend reaches truthful `success/success`; the monitor stops after terminal adoption and terminal speech is observed at most once. A changed but wrong artifact, runtime-data-only artifact, or zero target change is a failed run.
+- The requested semantic artifact appears in the bound target, D-031-specific forbidden effects remain zero, HEAD remains unchanged when commit/push are forbidden, and semantic content is checked rather than inferred from task status. Shared Agent Runtime support paths are inventoried separately and cannot be silently described as a clean target.
+- The backend reaches truthful `success/success`; the monitor stops after terminal adoption and terminal speech is observed zero or one time. A changed but wrong artifact, runtime-data-only artifact or zero target change is a failed run.
+
+## 2026-08-05 project-bound completion candidate
+
+This section extends rather than rewrites the immutable `d031-01` through `d031-05` evidence above. The uncommitted candidate starts from branch HEAD `56b45480d8ef05199a00cbcb100d499557871035` and implements the recommended project-bound meaning recorded by D-056.
+
+### Coherent execution contract
+
+- The frontend now requests Code Agent mode with fixed `project_code_pipeline`. The historical exported constant name remains only to avoid an unrelated frontend API rename.
+- Before task creation, `resolve_project_execution_contract` requires the selected persisted-session project, the bound Code Agent root and the selected Git top-level root to resolve to the same directory. It rejects the legacy extension pipeline, a missing/non-project executor, a foreign root, an invalid/missing Git project and an explicit requirement to run tests, shell or Git commands before task persistence or scheduler trigger.
+- A successful preflight persists `effective_execution_root`, `artifact_kind=git_visible_project_change`, `executor=jiuwenswarm_code_agent`, `pipeline=project_code_pipeline` and the effect policy. The command ledger, replay/tombstone, run response, status/list/cancel responses, Bridge and monitor all preserve or strictly validate this backend-owned contract.
+- The scheduler invokes the already-bound Code Agent facade in a unique `sched_*` Session. The facade rejects an already-used or session-scoped adapter, forces the exact project root/cwd/trusted directory, disables user interaction, memory and A2UI, and calls the adapter directly rather than the ordinary Chat facade path. The dedicated Session is cleaned on success, failure or cancellation; regressions prove reuse rejection, cleanup after an exception and zero Chat history append.
+- The fresh task Session removes every ability except project-scoped read/search/write/edit file tools; task/subagent, cron, send-file, search, skill, terminal and configured extension abilities are not available. During the project stream, both JiuwenSwarm command tools and the installed OpenJiuwen Bash/PowerShell hooks also share a task-local policy that rejects every shell command. Tests, generated/interpreter scripts, Git commands and remote commands therefore cannot run through those entry points. The dedicated Session boundary and cleanup keep the restriction out of ordinary interactive and non-Live-Voice AutoHarness work.
+- Success still requires a changed Git-visible selected-project fingerprint. No change, ignored-only change and foreign-root-only change fail with `NO_EFFECTIVE_TARGET_CHANGE`; missing, unreadable or invalid target inspection fails before Agent execution. A changed target file succeeds. This proves location/effect, not semantic correctness.
+
+### Constraint and compatibility outcomes
+
+- `no tests`, `no commit` and `no push` are supported because all background shell execution is disabled and that limitation is disclosed before dispatch.
+- An explicit requirement to run tests, shell or Git commands is not silently accepted. Preflight returns `UNSUPPORTED_PROJECT_TASK_CONSTRAINT` with zero task creation and zero scheduler trigger; callers needing executed validation must use a future reviewed isolated Executor capability.
+- New owner-bound task creation and same-key reconciliation still require the complete execution contract. Status and cancel may observe a tracked legacy task whose old row has no contract, while any partial or conflicting contract still fails closed and no missing contract can satisfy monitor success evidence.
+- Non-Live-Voice one-time and recurring AutoHarness tasks retain their existing pipelines, response shapes and execution path. Existing generic idempotency tests use a non-Live-Voice namespace; focused Live Voice tests exercise the new project contract and its durable provenance.
+- The monitor state machine, one-current-task limit, exact-key recovery, cancel/replace behavior, feature flag, terminal speech arbitration and lack of formal Task Core authority are unchanged.
+
+### Verification before real-service closure
+
+- Frontend task suites: Bridge `49`, client `17`, monitor `23`, adapter `19` (`108` total); the monitor rejects a missing or weakened shell/test effect policy, while Bridge regressions keep legacy no-contract status/cancel available without weakening new task acceptance. Adjacent core `9`, turn lifecycle `16` and TTS ownership `2` suites pass.
+- Backend affected regression set: `204 passed` across schedule service, schedule WebSocket handling, Agent facade modes and shell safety. Focused tests cover preflight rejection with zero task/trigger, project provenance/replay, persisted-contract revalidation, valid/invalid/unreadable/no-change/ignored/foreign/source effects, Code Agent root and fresh dedicated child Session/file-tool isolation, success/error cleanup, no Chat history and non-leaking shell denial including interpreter/generated-script attempts.
+- Both the default and task-flag-on TypeScript/Vite production builds pass. Targeted Ruff passes for all new/changed focused files; `interface_code.py` passes with its two pre-existing unused-import findings excluded. The two already recorded whole-file baseline findings in `service.py` and `agent_ws_server.py` remain outside this batch. The repository-local Python environment has no Ruff, so the existing verified standalone Ruff executable was used. `compileall` and `git diff --check` pass.
+- Before the closure run, the implementation remained uncommitted under the repository Git approval gate and real-path facts were not yet claimed. The next section records the later isolated evidence; Git remains the authority for the batch's landed state.
+
+### D-053 review passes for this candidate
+
+- Implementation self-review corrected positional dataclass compatibility, generic schedule response/fingerprint/ledger compatibility, project-only WebSocket kwargs and missing durable execution-contract projection.
+- The first cold complete-diff review found that the new Git policy accidentally covered ordinary AutoHarness scheduling; it was narrowed to the project pipeline. It also added persisted pipeline/effect-policy revalidation and repaired stale current documentation.
+- Independent `codex review --uncommitted` attempts at default effort produced no usable result at 184-second and 604-second timeouts. A low-effort independent run completed in 115 seconds and returned one P1 finding: command-text Git filtering could be bypassed through Python or a generated script. The fix removes every non-file ability from the task Session and rejects every shell command at both JiuwenSwarm and installed OpenJiuwen entry points.
+- A 132-second low-effort complete-diff rerun found a P1 persistent ability-set mutation and a P2 late acceptance of explicit shell/Git requirements. The first fix restored abilities and expanded preflight. A subsequent 199-second rerun found that the restoration state itself was shared across concurrent requests and that missing contracts blocked legacy status/cancel. The final design instead requires a fresh dedicated task Session, rejects reuse, cleans the Session on every exit, rejects explicit test/shell/Git requirements before task creation, and permits a completely absent legacy contract only for tracked status/cancel observations.
+- A further 271-second rerun repeated a P1 recommendation to allow Git-repository subdirectories and a P1 concern that ability removal could affect a shared adapter. The subdirectory recommendation is not actionable because accepted D-056 deliberately requires the persisted project, Code Agent root and Git top-level to be exactly equal. The ability finding prompted a structural improvement: the root Code Adapter now creates and marks a fresh dedicated child before execution, only that child can receive the file-tool restriction, request metadata alone cannot mutate a shared adapter, reuse fails closed, and every exit cleans the child.
+- The complete affected matrix and production build passed after those semantic corrections. The final independent low-effort complete-diff rerun finished in 281 seconds and reported no discrete actionable bug attributable to the patch. The lower reasoning effort and the earlier default-effort timeouts remain recorded limitations; this is the actual independent substitute used for D-053, not a claim that the in-app `/review` command ran.
+- The final cold complete-diff repeat reviewed the original D-031 request, root instructions, accepted D-056 exact-root contract, all 28 code/test/document changes, current Git identity, generic schedule compatibility, dedicated child-Session lifecycle, legacy status/cancel exception, zero-forbidden-side-effect assertions and the actual verification results. It confirmed HEAD/upstream remained `0/0`, found no unrelated generated change, and found no further actionable defect. `git diff --check`, targeted compilation/Ruff, 204 backend regressions, 108 frontend task regressions and the 159-link documentation check all passed after the final semantic correction.
+
+### Clean project-bound real-service closure
+
+- On 2026-08-05, one committed-final microphone capture in a new saved Session carried the accepted query “修改项目根目录中的说明文件在末尾新增一行验证通过不要修改其他文件”. It used command `lv-3635c613-d033-4834-bb41-e275c171ca91`, task `sch_592b8579` and execution `exec_4a99d01d` against disposable project `proj_561839da`.
+- The first `schedule.run` exceeded the frontend's 15-second wait. Exact-key reconciliation issued `schedule.list` and retried `schedule.run` with the same command/idempotency key. The store contains one create-command record, one task and one execution; this is accepted logical at-most-once recovery, not a claim of one wire request.
+- Durable provenance records the target as the effective execution root with `artifact_kind=git_visible_project_change`, `executor=jiuwenswarm_code_agent`, `pipeline=project_code_pipeline`, and shell/tests/Git commit/Git push all forbidden. The Code Agent edited the selected root `README.md` to append `验证通过`; target HEAD stayed `dca9f142ccf73efd5f92a3b6e2b22c6cf6f44a9d`.
+- The scheduler and stored execution both reached `success`; the monitor adopted the terminal result at about `15:12:42` local time and issued no later poll. Startup task details were spoken. No terminal completion announcement was heard, which satisfies the current safe at-most-once contract but does not prove eventual audio delivery.
+- The target also contained `.gitignore`, `coding_memory/`, `prompt_attachment/` and ignored `.agent_history/` support artifacts associated with Agent/runtime setup. D-057 records the user's ownership decision: these paths remain an explicit Agent Runtime/workspace-isolation follow-up and are not rewritten as absent. Earlier ASR mutation to `radi.nd` is likewise retained as a Speech fidelity sample, not counted as the valid D-031 command.
+- With those explicit ownership boundaries, the user accepted the project binding, semantic result, logical idempotency, truthful terminal state, polling stop and effect policy as D-031 closure evidence. Full sanitized facts and limitations are in [the closure evidence](evidence/D031_20260805_PROJECT_BOUND.md).
 
 ## Automated verification
 
-- Frontend monitor: `22 passed`.
-- Existing/extended task suites: Bridge `47 passed`, client `17 passed`, adapter `19 passed`.
+- Frontend monitor: `23 passed`.
+- Existing/extended task suites: Bridge `49 passed`, client `17 passed`, adapter `19 passed`.
 - Adjacent lifecycle suites: core `9 passed`, turn lifecycle `16 passed`, TTS ownership `2 passed`.
-- Backend schedule service and WebSocket handlers: `115 passed`.
+- Candidate affected backend matrix: `204 passed` across schedule service, WebSocket request handling, Agent facade/mode isolation and shell safety.
 - The repaired fingerprint read the preserved 2,805-file `d031-04` target twice with the same digest; each read took about 1.8 seconds and made no target change.
 - TypeScript/Vite production build: default task flag and `VITE_FEATURE_LIVE_VOICE_TASK_DEMO=true` both passed.
 - New monitor source/test Prettier check, changed-document relative links, and `git diff --check` passed.
@@ -206,4 +253,4 @@ Likely investigation points are `liveVoiceTaskBridge.ts` for the fixed pipeline/
 
 - No formal Task Core/Event Store/Harness Adapter, TaskEvent push/replay, durable journal, multi-task monitor, cross-page/process recovery, or production authorization.
 - No natural-language task result is invented; terminal speech states only task ID and raw backend status.
-- No Week 2 replacement credit or semantically correct project-bound AutoHarness delivery is claimed by this record. Final local commit `617fe256` is implementation evidence, not D-031 acceptance closure or push evidence.
+- D-031 closure grants no Week 2 replacement credit and does not turn the Compatibility Adapter into formal Task Core/Event Store/Executor authority. The committed monitor/result-gate snapshot `617fe256` remains implementation evidence; this review record by itself is not push or production-release evidence.

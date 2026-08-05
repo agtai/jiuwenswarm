@@ -26,12 +26,24 @@ const visibleTask = {
   source: 'schedule.cancel',
   resultSource: 'cancel-observation',
   recoveryStatus: 'not-needed',
-  pipeline: 'extended_evolve_pipeline',
+  pipeline: 'project_code_pipeline',
   executionTarget: {
     projectDir: 'D:\\repo',
     projectId: 'project-a',
     originSessionId: 'session-a',
     originChannelId: 'channel-web',
+  },
+  executionContract: {
+    effectiveExecutionRoot: 'D:\\repo',
+    artifactKind: 'git_visible_project_change',
+    executor: 'jiuwenswarm_code_agent',
+    pipeline: 'project_code_pipeline',
+    effectPolicy: {
+      gitCommit: 'forbidden',
+      gitPush: 'forbidden',
+      tests: 'forbidden',
+      shell: 'forbidden',
+    },
   },
 };
 

@@ -84,6 +84,19 @@ const executionTarget = {
   origin_channel_id: 'channel-web',
 };
 
+const executionContract = {
+  effective_execution_root: 'D:\\work\\live-voice',
+  artifact_kind: 'git_visible_project_change',
+  executor: 'jiuwenswarm_code_agent',
+  pipeline: 'project_code_pipeline',
+  effect_policy: {
+    git_commit: 'forbidden',
+    git_push: 'forbidden',
+    tests: 'forbidden',
+    shell: 'forbidden',
+  },
+};
+
 async function startTask(bridge, query = '改进工具路由', captureKey = 'start') {
   return bridge.handle(finalInput(`确认启动后台演进任务：${query}`, captureKey));
 }
@@ -474,7 +487,7 @@ test('a run transport error performs one same-key retry before remaining mutatio
   assert.match(result.feedback.detail, /transport unavailable/);
 });
 
-test('every AutoHarness terminal status is not cancelled again', async () => {
+test('every backend terminal task status is not cancelled again', async () => {
   for (const [index, terminalStatus] of [
     'success',
     'FAILED',
@@ -770,7 +783,12 @@ test('a transport-unknown create reuses one stable command id for bounded retry 
     run: async () => {
       runCount += 1;
       if (runCount === 1) throw new Error('response lost');
-      return { task_id: 'task-retried', status: 'running', execution_target: executionTarget };
+      return {
+        task_id: 'task-retried',
+        status: 'running',
+        execution_target: executionTarget,
+        execution_contract: executionContract,
+      };
     },
   });
   const bridge = new LiveVoiceTaskBridge(gateway, { commandIdFactory: () => 'command-stable' });
@@ -1035,6 +1053,27 @@ test('a task observed outside the captured owner target fails closed and is not 
   assert.deepEqual(calls.map(call => call.method), ['run']);
 });
 
+test('a new owner-bound task without an execution contract fails closed', async () => {
+  const { gateway } = makeGateway({
+    owner: {
+      sessionId: 'session-live-voice',
+      projectDir: 'D:\\work\\live-voice',
+      projectId: 'project-live-voice',
+    },
+    run: async () => ({
+      task_id: 'missing-contract-task',
+      status: 'running',
+      execution_target: executionTarget,
+    }),
+  });
+  const bridge = new LiveVoiceTaskBridge(gateway, { commandIdFactory: () => 'missing-contract-command' });
+
+  const result = await startTask(bridge, 'missing contract', 'missing-contract-create');
+
+  assert.equal(result.outcome, 'recovery-conflict');
+  assert.equal(bridge.getSnapshot().lastVisibleTask, null);
+});
+
 test('status and cancel observations preserve known command and target provenance when fields are omitted', async () => {
   const { gateway } = makeGateway({
     owner: {
@@ -1042,7 +1081,12 @@ test('status and cancel observations preserve known command and target provenanc
       projectDir: 'D:\\work\\live-voice',
       projectId: 'project-live-voice',
     },
-    run: async () => ({ task_id: 'provenance-task', status: 'running', execution_target: executionTarget }),
+    run: async () => ({
+      task_id: 'provenance-task',
+      status: 'running',
+      execution_target: executionTarget,
+      execution_contract: executionContract,
+    }),
     status: async taskId => ({ task_id: taskId, status: 'running' }),
     cancel: async taskId => ({ task_id: taskId, status: 'cancelled' }),
   });
@@ -1060,9 +1104,37 @@ test('status and cancel observations preserve known command and target provenanc
       originSessionId: 'session-live-voice',
       originChannelId: 'channel-web',
     });
+    assert.equal(result.task.executionContract.executor, 'jiuwenswarm_code_agent');
   }
   assert.equal(status.task.resultSource, 'status-observation');
   assert.equal(cancelled.task.resultSource, 'cancel-observation');
+});
+
+test('status and cancel remain available for a tracked legacy task with no execution contract', async () => {
+  const { gateway } = makeGateway({
+    run: async () => ({
+      task_id: 'legacy-task',
+      status: 'running',
+      execution_target: executionTarget,
+    }),
+    status: async taskId => ({ task_id: taskId, status: 'running' }),
+    cancel: async taskId => ({ task_id: taskId, status: 'cancelled' }),
+  });
+  const bridge = new LiveVoiceTaskBridge(gateway, { commandIdFactory: () => 'legacy-command' });
+  await startTask(bridge, 'legacy task', 'legacy-create');
+  gateway.owner = {
+    sessionId: 'session-live-voice',
+    projectDir: 'D:\\work\\live-voice',
+    projectId: 'project-live-voice',
+  };
+
+  const status = await bridge.handle(finalInput('检查后台任务进度', 'legacy-status'));
+  const cancelled = await bridge.handle(finalInput('确认取消后台演进任务', 'legacy-cancel'));
+
+  assert.equal(status.outcome, 'status');
+  assert.equal(status.task.executionContract.executor, null);
+  assert.equal(cancelled.outcome, 'cancelled');
+  assert.equal(cancelled.task.executionContract.executor, null);
 });
 
 test('a server idempotency conflict exposes only an audit id and never labels it as a successor', async () => {
@@ -1087,7 +1159,12 @@ test('a monitor observation updates the Bridge only for the exact current task a
       projectDir: 'D:\\work\\live-voice',
       projectId: 'project-live-voice',
     },
-    run: async () => ({ task_id: 'task-monitor', status: 'running', execution_target: executionTarget }),
+    run: async () => ({
+      task_id: 'task-monitor',
+      status: 'running',
+      execution_target: executionTarget,
+      execution_contract: executionContract,
+    }),
   });
   const bridge = new LiveVoiceTaskBridge(gateway, { commandIdFactory: () => 'command-monitor' });
   const started = await startTask(bridge, '监控目标', 'monitor-create');

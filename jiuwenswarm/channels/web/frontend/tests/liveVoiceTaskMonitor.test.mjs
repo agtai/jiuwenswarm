@@ -19,12 +19,24 @@ const task = {
   source: 'schedule.run',
   resultSource: 'fresh',
   recoveryStatus: 'not-needed',
-  pipeline: 'extended_evolve_pipeline',
+  pipeline: 'project_code_pipeline',
   executionTarget: {
     projectDir: 'D:\\repo',
     projectId: 'project-a',
     originSessionId: 'session-a',
     originChannelId: null,
+  },
+  executionContract: {
+    effectiveExecutionRoot: 'D:\\repo',
+    artifactKind: 'git_visible_project_change',
+    executor: 'jiuwenswarm_code_agent',
+    pipeline: 'project_code_pipeline',
+    effectPolicy: {
+      gitCommit: 'forbidden',
+      gitPush: 'forbidden',
+      tests: 'forbidden',
+      shell: 'forbidden',
+    },
   },
 };
 
@@ -33,13 +45,25 @@ function observation(status = 'running', overrides = {}) {
     task_id: 'task-a',
     status,
     query: '改进日志路由',
-    pipeline: 'extended_evolve_pipeline',
+    pipeline: 'project_code_pipeline',
     idempotency_key: 'command-a',
     execution_target: {
       project_dir: 'D:\\repo',
       project_id: 'project-a',
       origin_session_id: 'session-a',
       origin_channel_id: 'web',
+    },
+    execution_contract: {
+      effective_execution_root: 'D:\\repo',
+      artifact_kind: 'git_visible_project_change',
+      executor: 'jiuwenswarm_code_agent',
+      pipeline: 'project_code_pipeline',
+      effect_policy: {
+        git_commit: 'forbidden',
+        git_push: 'forbidden',
+        tests: 'forbidden',
+        shell: 'forbidden',
+      },
     },
     provenance: {
       owner_scope: { channel_id: 'web', session_id: 'session-a', app_id: '' },
@@ -205,6 +229,16 @@ for (const [name, payload, code] of [
   ['wrong task id', observation('running', { task_id: 'task-foreign' }), 'task-id-mismatch'],
   ['missing status', observation('running', { status: '' }), 'invalid-task-status'],
   ['wrong target', observation('running', { execution_target: { ...observation().execution_target, project_dir: 'D:\\other' } }), 'task-scope-mismatch'],
+  [
+    'wrong execution effect policy',
+    observation('running', {
+      execution_contract: {
+        ...observation().execution_contract,
+        effect_policy: { ...observation().execution_contract.effect_policy, shell: 'allowed' },
+      },
+    }),
+    'task-scope-mismatch',
+  ],
   ['denied provenance', observation('running', { provenance: { ...observation().provenance, access: 'denied' } }), 'task-scope-mismatch'],
   [
     'wrong channel target and provenance',

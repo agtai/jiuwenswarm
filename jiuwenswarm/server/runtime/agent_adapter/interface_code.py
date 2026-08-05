@@ -341,6 +341,22 @@ _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
     "write_file",
     "edit_file",
 ]
+_BACKGROUND_PROJECT_FILE_TOOLS = frozenset(
+    {"read_file", "grep", "list_files", "ls", "glob", "write_file", "edit_file"}
+)
+
+
+def _restrict_background_project_abilities(
+    instance: Any,
+) -> None:
+    """Leave only project file tools on one dedicated task adapter."""
+    manager = getattr(instance, "ability_manager", None)
+    if manager is None:
+        return
+    for existing in list(manager.list() or []):
+        name = str(getattr(existing, "name", "") or "")
+        if name not in _BACKGROUND_PROJECT_FILE_TOOLS:
+            manager.remove(name)
 
 
 class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
@@ -1154,6 +1170,19 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── Runtime config ──────────────────────────
 
+    async def prepare_background_project_session(self, session_id: str) -> None:
+        """Create one fresh child adapter reserved for a bounded project task."""
+        if self._is_session_scoped_adapter:
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background tasks require a root Code Agent adapter"
+            )
+        if self._get_cached_session_adapter(session_id) is not None:
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background task session was already used"
+            )
+        child = await self._get_or_create_session_adapter(session_id)
+        child._is_dedicated_background_project_adapter = True
+
     async def _update_runtime_config(self, runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig") -> None:
         """Code 模式 runtime config: ProjectMemoryRail 语言同步 + rail 模式切换."""
         if self._instance is None:
@@ -1250,6 +1279,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 self._instance.ability_manager.add(tool.card)
         except ImportError:
             pass
+
+        if getattr(self, "_is_dedicated_background_project_adapter", False):
+            _restrict_background_project_abilities(self._instance)
 
     # ─── Tools 构建 ──────────────────────────
 

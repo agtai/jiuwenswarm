@@ -594,3 +594,28 @@
 - 文档和历史：D-055 取代不可变 Full Solution、D-046、D-048 和历史 X-WIN 计划中的 Windows 产品载体与产品化安排，但不倒写带日期的 Full Solution、V0 evidence/showcase、Week 1 execution plan 或历史 review。V0 的 Windows/Chrome/Jabra 证据继续是不可变历史事实，不代表当前 Web Alpha 的兼容范围。当前目标、阶段和 blocker 只在 STATUS 维护；稳定工作包、替换关系和目标窗口记录在 dated Web Alpha delivery matrix。
 - 非目标：Windows `.exe`、WebView2、Windows 原生设备生命周期和安装升级不再属于当前 Alpha Gate；完整 P3、D1/D2、生产多租户鉴权、未被后续范围决定纳入的浏览器/多端、公开兼容承诺、运营 SLO、完整隐私保留系统和 RC/Production hardening 仍属于 Later。
 - 重新评估条件：用户重新选择 Desktop/native 作为产品载体；目标客户必须使用移动端、PWA 或非 Chromium 浏览器；浏览器权限、音频或后台限制无法达到 Alpha Gate；Gateway 代理或安全上下文无法满足部署要求；或真实测量证明 Web 平台无法达到已接受的 P1/P2/P3alpha 用户体验和安全边界。
+
+## D-056 D-031 采用项目绑定 Code Agent，而不是把 AutoHarness runtime extension 伪装成项目代码任务
+
+- 日期：2026-08-05
+- 状态：Accepted implementation choice（用户要求完成 D-031；本条采用 D-031 评审和 STATUS 中已推荐的 project-bound code execution，取代 `d031-05` 暴露的混合合同）
+- 背景：D-031 monitor、幂等对账、严格 scope/provenance 和零变化结果门槛已经完成，但 `extended_evolve_pipeline` 实际修改配置的 Agent Core/runtime-extension 存储，页面选择的项目只用于授权和结果检查。继续给 AutoHarness 增加一个 `repo_url` 字段不能改变 extension-only artifact 语义，也不能满足“后台代码优化任务”对当前项目的承诺。
+- 决策：Live Voice Task Demo 固定使用 `project_code_pipeline` 和 JiuwenSwarm Code Agent。服务端必须在任务持久化、模型调用和执行副作用前证明：页面保存的绝对 `project_dir`、Code Agent 根目录和 `git rev-parse --show-toplevel` 完全一致；随后持久化 `effective_execution_root`、`artifact_kind=git_visible_project_change`、`executor=jiuwenswarm_code_agent` 和 pipeline。任何缺失、外部根、无效 Git 根或合同冲突都以稳定错误 fail closed，且不创建任务。
+- 副作用决定：该兼容执行器把 task Session ability 收窄为 Code Agent 的项目 read/search/write/edit 文件工具，并移除 task/subagent、cron、send-file、search、skill、terminal 与其他配置能力；后台上下文同时禁用 JiuwenSwarm command tool 与 OpenJiuwen Bash/PowerShell 的全部 shell 命令，因此测试、脚本、Git 与远端命令均不可执行。明确 no-tests/no-commit/no-push 约束可被该边界满足；明确要求运行测试或执行 shell 的任务在执行前以 `UNSUPPORTED_PROJECT_TASK_CONSTRAINT` 拒绝，不能接受后再静默违反。该收窄来自 D-053 独立 review：仅按命令文本筛查 Git 无法阻止 Python 或生成脚本间接改变 ref。
+- Authority：旧 `schedule.*`/JSON 仍只是 D-031 Demo carrier，TaskBridge/monitor 继续只负责一个页面内任务的命令、轮询和可见事实，不获得执行权、Chat 写入权或正式 Task Core/Event Store 权威。后台 Code Agent 使用独立 task Session、关闭 memory/A2UI/user interaction，并绕过 Chat history hooks。正式替换仍由 TC-B/ED-B/VB-B 及其后续包负责，D-031 不获得 Replacement Ledger credit。
+- 初始成功口径：Executor 必须正常终止，且选定 Git 项目的 tracked 或未忽略 untracked 内容指纹发生变化；零变化、仅忽略文件变化、外部目录变化、不可读或无效目标均失败。该门槛只证明 Git-visible effect，不证明修改语义正确；真实验收还需检查精确产物、HEAD、同一 task 终态与安全播报。D-056 原本要求“意外文件为零”，D-057 根据真实样本把共享 Agent Runtime support paths 改为必须显式盘点的独立归属，禁止继续宣称绝对为零。
+- 初始影响（D-056 接受时）：自动化候选可以解除“混合 target/runtime extension”这一代码阻断，但在新的项目绑定候选完成三轮 review 和一次隔离真实服务正向验证前，D-031 仍为 `PARTIAL`。凭据、Provider、项目注册、浏览器权限、设备和运行时数据仍是机器私有条件。后续真实验证和关闭归属由 D-057 记录。
+- 重新评估条件：产品明确把口令改为 runtime-extension 创建；正式 ED/TC/VB 路径可在相同时间内替换兼容 carrier；产品要求后台任务运行测试；Code Agent 工具集合新增绕过统一安全钩子的命令/代码执行入口；或真实运行证明项目根绑定、禁用副作用、结果指纹或无 Chat history 隔离不成立。
+
+## D-057 D-031 按逻辑单任务和项目绑定边界闭环，Speech 与 Agent Runtime 问题分别归属
+
+- 日期：2026-08-05
+- 状态：Accepted validation and ownership decision（用户在执行前已恢复基线的隔离项目正向验证后明确接受该边界）
+- 背景：项目绑定候选的有效 committed-final 口令产生了两次同幂等键 `schedule.run` wire attempt，但持久层只有一个 create command、一个 task 和一个 execution；任务正确修改了选定项目的 `README.md`，HEAD 未变化并达到 `success/success`。同时，Agent/runtime 初始化在目标内留下 `.gitignore`、`coding_memory/`、`prompt_attachment/` 和被忽略的 `.agent_history/`，终态安全播报没有发生；更早样本还出现过 ASR 把 README 识别为 `radi.nd`。
+- 输入权威：D-031 以提交后的 final transcript 为命令权威。Executor 忠实执行错误的 ASR final 不构成 D-031 project binding/monitor 缺陷；识别 fidelity 归 P1 Speech 跟进，但关键 token 不清楚时仍应由产品确认流程阻止误执行。
+- 幂等口径：一次用户 committed-final 对应一个稳定 command/idempotency key。超时或未知 mutation 后允许 exact-key list 与同 key 重试；wire 上可以出现多个 `schedule.run`，验收要求是一个 durable create command、一个 task、一个 execution 和零重复副作用。该口径不是跨进程 exactly-once 承诺。
+- 副作用归属：D-031 必须证明选定项目/Code Agent/Git root 一致、语义产物正确、shell/tests/Git/remote effect policy 生效、HEAD 不变、任务终态真实且监控停止。共享 Code Agent 初始化目录的落盘位置归 Agent Runtime/workspace isolation，不再作为 D-031 关闭阻断；这些路径必须被如实记录，不能写成“意外文件为零”，未来要求 clean workspace 的正式 ED Gate 仍需解决。
+- 语音口径：终态播报合同保持 safe at-most-once，而不是 guaranteed delivery。安全窗口不存在时允许 0 次且不延迟补播；超过 1 次失败。若产品需要必达通知，必须由后续正式事件/通知 owner 增加可恢复投递与确认合同，不能把本次 0 次改写成已具备。
+- 当前影响：2026-08-05 隔离且执行前已基线化的项目样本满足上述 D-031 Compatibility Adapter 边界，因此 D-031 可记为 `CLOSED`。该关闭不增加 Demo Replacement Ledger credit，不授予旧 `schedule.*`/TaskBridge 正式 Task Core/Event Store/Executor 权威，也不关闭 Speech fidelity、Agent Runtime workspace isolation 或正式终态通知任务。
+- 证据：[D-031 project-bound real-service evidence](../evidence/D031_20260805_PROJECT_BOUND.md)。
+- 重新评估条件：发现同 key 重试产生多个 durable task/execution 或重复项目写入；execution root 与选定项目不一致；shell/test/Git/remote 禁令可绕过；运行时支持文件影响用户项目语义、安全或正式 ED clean-workspace Gate；或产品把终态语音从 at-most-once 改为必达。

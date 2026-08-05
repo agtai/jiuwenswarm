@@ -11,14 +11,18 @@
 
 import { generateUuidV4 } from '../../utils/uuid';
 
-export const LIVE_VOICE_AUTO_HARNESS_PIPELINE = 'extended_evolve_pipeline' as const;
+export const LIVE_VOICE_AUTO_HARNESS_PIPELINE = 'project_code_pipeline' as const;
+
+export const LIVE_VOICE_PROJECT_EXECUTOR = 'jiuwenswarm_code_agent' as const;
+
+export const LIVE_VOICE_PROJECT_ARTIFACT_KIND = 'git_visible_project_change' as const;
 
 export const LIVE_VOICE_AUTO_HARNESS_DEMO_DISCLOSURE = {
-  label: 'Demo substitute: AutoHarness',
-  executor: 'AutoHarness',
+  label: 'Demo substitute: project-bound Code Agent',
+  executor: LIVE_VOICE_PROJECT_EXECUTOR,
   pipeline: LIVE_VOICE_AUTO_HARNESS_PIPELINE,
   hasCodeSideEffects: true,
-  description: '这是受限 AutoHarness Demo。任务会使用 extended_evolve_pipeline 生成或修改本地 Harness 代码包，不是只读仓库检查，也不是完整 P3 Task Control。',
+  description: '这是受限的项目绑定代码任务 Demo。后台 Code Agent 只能以当前已保存项目为执行根；所有 shell、测试、Git 和远端命令均被禁止。它不是完整 P3 Task Control。',
 } as const;
 
 export interface LiveVoiceTaskGateway {
@@ -60,6 +64,19 @@ export interface LiveVoiceTaskExecutionTarget {
   originChannelId: string | null;
 }
 
+export interface LiveVoiceTaskExecutionContract {
+  effectiveExecutionRoot: string | null;
+  artifactKind: string | null;
+  executor: string | null;
+  pipeline: string | null;
+  effectPolicy: {
+    gitCommit: string | null;
+    gitPush: string | null;
+    tests: string | null;
+    shell: string | null;
+  };
+}
+
 export interface LiveVoiceVisibleTask {
   taskId: string;
   commandId: string | null;
@@ -77,6 +94,7 @@ export interface LiveVoiceVisibleTask {
   pipeline: typeof LIVE_VOICE_AUTO_HARNESS_PIPELINE;
   /** Backend-owned task provenance. Missing/legacy fields remain null. */
   executionTarget: LiveVoiceTaskExecutionTarget;
+  executionContract: LiveVoiceTaskExecutionContract;
 }
 
 export type LiveVoiceTaskBridgeOutcome =
@@ -150,6 +168,7 @@ interface ParsedGatewayPayload {
   code: string | null;
   idempotentReplay: boolean;
   executionTarget: LiveVoiceTaskExecutionTarget;
+  executionContract: LiveVoiceTaskExecutionContract;
 }
 
 interface TaskMutationAttempt {
@@ -223,6 +242,28 @@ function parseExecutionTarget(record: Record<string, unknown> | null): LiveVoice
   };
 }
 
+function parseExecutionContract(record: Record<string, unknown> | null): LiveVoiceTaskExecutionContract {
+  const value = record?.execution_contract;
+  const contract = typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  const effectValue = contract?.effect_policy;
+  const effectPolicy =
+    typeof effectValue === 'object' && effectValue !== null && !Array.isArray(effectValue)
+      ? (effectValue as Record<string, unknown>)
+      : null;
+  return {
+    effectiveExecutionRoot: executionTargetField(contract, 'effective_execution_root'),
+    artifactKind: executionTargetField(contract, 'artifact_kind'),
+    executor: executionTargetField(contract, 'executor'),
+    pipeline: executionTargetField(contract, 'pipeline'),
+    effectPolicy: {
+      gitCommit: executionTargetField(effectPolicy, 'git_commit'),
+      gitPush: executionTargetField(effectPolicy, 'git_push'),
+      tests: executionTargetField(effectPolicy, 'tests'),
+      shell: executionTargetField(effectPolicy, 'shell'),
+    },
+  };
+}
+
 function mergeExecutionTarget(
   known: LiveVoiceTaskExecutionTarget | null,
   observed: LiveVoiceTaskExecutionTarget
@@ -265,6 +306,53 @@ function executionTargetConflict(
   }
   if (!observed.originSessionId || observed.originSessionId !== owner.sessionId) {
     return 'origin_session_id 不属于当前持久会话';
+  }
+  return null;
+}
+
+function isExecutionContractCompletelyMissing(observed: LiveVoiceTaskExecutionContract): boolean {
+  return (
+    !observed.effectiveExecutionRoot &&
+    !observed.artifactKind &&
+    !observed.executor &&
+    !observed.pipeline &&
+    !observed.effectPolicy.gitCommit &&
+    !observed.effectPolicy.gitPush &&
+    !observed.effectPolicy.tests &&
+    !observed.effectPolicy.shell
+  );
+}
+
+function mergeExecutionContract(
+  known: LiveVoiceTaskExecutionContract,
+  observed: LiveVoiceTaskExecutionContract
+): LiveVoiceTaskExecutionContract {
+  return isExecutionContractCompletelyMissing(observed) ? known : observed;
+}
+
+function executionContractConflict(
+  owner: LiveVoiceTaskGateway['owner'],
+  observed: LiveVoiceTaskExecutionContract,
+  allowCompletelyMissing = false
+): string | null {
+  if (!owner) return null;
+  if (isExecutionContractCompletelyMissing(observed) && allowCompletelyMissing) return null;
+  if (
+    !observed.effectiveExecutionRoot ||
+    normalizedPathForComparison(observed.effectiveExecutionRoot) !== normalizedPathForComparison(owner.projectDir)
+  ) {
+    return 'effective_execution_root 不属于当前持久会话目标';
+  }
+  if (observed.artifactKind !== LIVE_VOICE_PROJECT_ARTIFACT_KIND) return 'artifact_kind 与项目代码任务不一致';
+  if (observed.executor !== LIVE_VOICE_PROJECT_EXECUTOR) return 'executor 与项目代码任务不一致';
+  if (observed.pipeline !== LIVE_VOICE_AUTO_HARNESS_PIPELINE) return 'execution contract pipeline 不一致';
+  if (
+    observed.effectPolicy.gitCommit !== 'forbidden' ||
+    observed.effectPolicy.gitPush !== 'forbidden' ||
+    observed.effectPolicy.tests !== 'forbidden' ||
+    observed.effectPolicy.shell !== 'forbidden'
+  ) {
+    return 'execution effect policy 与受限项目任务不一致';
   }
   return null;
 }
@@ -391,6 +479,7 @@ function parseGatewayPayload(payload: unknown): ParsedGatewayPayload {
       code: null,
       idempotentReplay: false,
       executionTarget: parseExecutionTarget(null),
+      executionContract: parseExecutionContract(null),
     };
   }
 
@@ -403,6 +492,7 @@ function parseGatewayPayload(payload: unknown): ParsedGatewayPayload {
     code: toNonEmptyString(record.code),
     idempotentReplay: record.idempotent_replay === true,
     executionTarget: parseExecutionTarget(record),
+    executionContract: parseExecutionContract(record),
   };
 }
 
@@ -422,7 +512,15 @@ function parseExactKeyTaskList(payload: unknown): { tasks: Record<string, unknow
 }
 
 function cloneTask(task: LiveVoiceVisibleTask): LiveVoiceVisibleTask {
-  return { ...task, status: { ...task.status }, executionTarget: { ...task.executionTarget } };
+  return {
+    ...task,
+    status: { ...task.status },
+    executionTarget: { ...task.executionTarget },
+    executionContract: {
+      ...task.executionContract,
+      effectPolicy: { ...task.executionContract.effectPolicy },
+    },
+  };
 }
 
 function feedback(
@@ -481,6 +579,7 @@ export class LiveVoiceTaskBridge {
       return false;
     }
     if (executionTargetConflict(this.gateway.owner, current.executionTarget, observation.executionTarget)) return false;
+    if (executionContractConflict(this.gateway.owner, observation.executionContract)) return false;
     this.rememberTask({ ...observation, query: current.query });
     return true;
   }
@@ -605,6 +704,7 @@ export class LiveVoiceTaskBridge {
     status: LiveVoiceTaskStatus,
     source: LiveVoiceVisibleTask['source'],
     executionTarget: LiveVoiceTaskExecutionTarget,
+    executionContract: LiveVoiceTaskExecutionContract,
     resultSource: LiveVoiceVisibleTask['resultSource'],
     recoveryStatus: LiveVoiceVisibleTask['recoveryStatus']
   ): LiveVoiceVisibleTask {
@@ -618,6 +718,10 @@ export class LiveVoiceTaskBridge {
       recoveryStatus,
       pipeline: LIVE_VOICE_AUTO_HARNESS_PIPELINE,
       executionTarget: { ...executionTarget },
+      executionContract: {
+        ...executionContract,
+        effectPolicy: { ...executionContract.effectPolicy },
+      },
     };
   }
 
@@ -690,6 +794,7 @@ export class LiveVoiceTaskBridge {
       parsed.status,
       'schedule.run',
       parsed.executionTarget,
+      parsed.executionContract,
       parsed.idempotentReplay ? 'idempotent-replay' : fromRecovery ? 'same-key-retry' : 'fresh',
       parsed.idempotentReplay || fromRecovery ? 'recovered' : 'not-needed'
     );
@@ -697,9 +802,10 @@ export class LiveVoiceTaskBridge {
       return this.rememberUnknownRunOutcome(pending, 'successor 返回了与前任务相同的 task_id。', true, candidate);
     }
     const targetConflict = executionTargetConflict(this.gateway.owner, null, parsed.executionTarget);
-    if (targetConflict) {
+    const contractConflict = executionContractConflict(this.gateway.owner, parsed.executionContract);
+    if (targetConflict || contractConflict) {
       candidate.recoveryStatus = 'conflict';
-      return this.rememberUnknownRunOutcome(pending, targetConflict, true, candidate);
+      return this.rememberUnknownRunOutcome(pending, targetConflict ?? contractConflict ?? 'execution contract mismatch', true, candidate);
     }
 
     const task = this.rememberTask(candidate, true);
@@ -765,6 +871,7 @@ export class LiveVoiceTaskBridge {
       parsed.status,
       'schedule.list',
       parsed.executionTarget,
+      parsed.executionContract,
       'exact-key-reconciliation',
       'recovered'
     );
@@ -773,9 +880,10 @@ export class LiveVoiceTaskBridge {
       return this.rememberUnknownRunOutcome(pending, 'exact-key list 返回了前任务 ID，无法证明 successor 已创建。', true, candidate);
     }
     const targetConflict = executionTargetConflict(this.gateway.owner, null, parsed.executionTarget);
-    if (targetConflict) {
+    const contractConflict = executionContractConflict(this.gateway.owner, parsed.executionContract);
+    if (targetConflict || contractConflict) {
       candidate.recoveryStatus = 'conflict';
-      return this.rememberUnknownRunOutcome(pending, targetConflict, true, candidate);
+      return this.rememberUnknownRunOutcome(pending, targetConflict ?? contractConflict ?? 'execution contract mismatch', true, candidate);
     }
 
     const task = this.rememberTask(candidate, true);
@@ -882,12 +990,14 @@ export class LiveVoiceTaskBridge {
     }
 
     const mergedExecutionTarget = mergeExecutionTarget(task.executionTarget, parsed.executionTarget);
+    const mergedExecutionContract = mergeExecutionContract(task.executionContract, parsed.executionContract);
     const targetConflict = executionTargetConflict(this.gateway.owner, task.executionTarget, mergedExecutionTarget);
-    if (targetConflict) {
+    const contractConflict = executionContractConflict(this.gateway.owner, mergedExecutionContract, true);
+    if (targetConflict || contractConflict) {
       return {
         ok: false,
-        code: 'execution-target-conflict',
-        message: targetConflict,
+        code: contractConflict ? 'execution-contract-conflict' : 'execution-target-conflict',
+        message: targetConflict ?? contractConflict ?? 'execution contract mismatch',
         commandId: task.commandId ?? undefined,
       };
     }
@@ -899,6 +1009,7 @@ export class LiveVoiceTaskBridge {
         parsed.status,
         'schedule.cancel',
         mergedExecutionTarget,
+        mergedExecutionContract,
         'cancel-observation',
         task.recoveryStatus
       )
@@ -1113,13 +1224,20 @@ export class LiveVoiceTaskBridge {
     }
 
     const mergedExecutionTarget = mergeExecutionTarget(current.executionTarget, parsed.executionTarget);
+    const mergedExecutionContract = mergeExecutionContract(current.executionContract, parsed.executionContract);
     const targetConflict = executionTargetConflict(this.gateway.owner, current.executionTarget, mergedExecutionTarget);
-    if (targetConflict) {
+    const contractConflict = executionContractConflict(this.gateway.owner, mergedExecutionContract, true);
+    if (targetConflict || contractConflict) {
       return this.handledResult(
         'failed',
         command,
         captureKey,
-        feedback('error', 'execution-target-conflict', '任务进度响应目标冲突', targetConflict),
+        feedback(
+          'error',
+          contractConflict ? 'execution-contract-conflict' : 'execution-target-conflict',
+          '任务进度响应目标冲突',
+          targetConflict ?? contractConflict ?? 'execution contract mismatch'
+        ),
         { task: cloneTask(current) }
       );
     }
@@ -1131,6 +1249,7 @@ export class LiveVoiceTaskBridge {
         parsed.status,
         'schedule.status',
         mergedExecutionTarget,
+        mergedExecutionContract,
         'status-observation',
         current.recoveryStatus
       )

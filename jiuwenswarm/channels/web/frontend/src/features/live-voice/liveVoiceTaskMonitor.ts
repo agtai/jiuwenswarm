@@ -1,6 +1,9 @@
 import {
   LIVE_VOICE_AUTO_HARNESS_PIPELINE,
+  LIVE_VOICE_PROJECT_ARTIFACT_KIND,
+  LIVE_VOICE_PROJECT_EXECUTOR,
   normalizeLiveVoiceTaskStatus,
+  type LiveVoiceTaskExecutionContract,
   type LiveVoiceTaskExecutionTarget,
   type LiveVoiceTaskGateway,
   type LiveVoiceVisibleTask,
@@ -111,6 +114,50 @@ function parseExecutionTarget(
   return { projectDir, projectId, originSessionId, originChannelId };
 }
 
+function parseExecutionContract(
+  value: unknown,
+  expected: LiveVoiceVisibleTask,
+  owner: NonNullable<LiveVoiceTaskGateway['owner']>
+): LiveVoiceTaskExecutionContract | null {
+  const source = record(value);
+  if (!source) return null;
+  const effectiveExecutionRoot = targetValue(source.effective_execution_root);
+  const artifactKind = targetValue(source.artifact_kind);
+  const executor = targetValue(source.executor);
+  const pipeline = targetValue(source.pipeline);
+  const effectPolicy = record(source.effect_policy);
+  const gitCommit = targetValue(effectPolicy?.git_commit);
+  const gitPush = targetValue(effectPolicy?.git_push);
+  const tests = targetValue(effectPolicy?.tests);
+  const shell = targetValue(effectPolicy?.shell);
+  if (!effectiveExecutionRoot || pathKey(effectiveExecutionRoot) !== pathKey(owner.projectDir)) return null;
+  if (
+    expected.executionContract.effectiveExecutionRoot &&
+    pathKey(effectiveExecutionRoot) !== pathKey(expected.executionContract.effectiveExecutionRoot)
+  ) {
+    return null;
+  }
+  if (artifactKind !== LIVE_VOICE_PROJECT_ARTIFACT_KIND || expected.executionContract.artifactKind !== artifactKind) return null;
+  if (executor !== LIVE_VOICE_PROJECT_EXECUTOR || expected.executionContract.executor !== executor) return null;
+  if (pipeline !== LIVE_VOICE_AUTO_HARNESS_PIPELINE || expected.executionContract.pipeline !== pipeline) return null;
+  if (gitCommit !== 'forbidden' || gitPush !== 'forbidden' || tests !== 'forbidden' || shell !== 'forbidden') return null;
+  if (
+    expected.executionContract.effectPolicy.gitCommit !== gitCommit ||
+    expected.executionContract.effectPolicy.gitPush !== gitPush ||
+    expected.executionContract.effectPolicy.tests !== tests ||
+    expected.executionContract.effectPolicy.shell !== shell
+  ) {
+    return null;
+  }
+  return {
+    effectiveExecutionRoot,
+    artifactKind,
+    executor,
+    pipeline,
+    effectPolicy: { gitCommit, gitPush, tests, shell },
+  };
+}
+
 function validProvenance(
   value: unknown,
   expected: LiveVoiceVisibleTask,
@@ -152,7 +199,8 @@ export function parseLiveVoiceTaskObservation(
   const rawStatus = requiredString(value.status);
   if (!rawStatus) return { ok: false, code: 'invalid-task-status', detail: 'Task response has no valid status' };
   const executionTarget = parseExecutionTarget(value.execution_target, expected, owner);
-  if (!executionTarget || !validProvenance(value.provenance, expected, executionTarget, owner)) {
+  const executionContract = parseExecutionContract(value.execution_contract, expected, owner);
+  if (!executionTarget || !executionContract || !validProvenance(value.provenance, expected, executionTarget, owner)) {
     return { ok: false, code: 'task-scope-mismatch', detail: 'Task response identity or scope does not match the monitor' };
   }
   if (OWN.call(value, 'progress') && !record(value.progress)) {
@@ -174,6 +222,7 @@ export function parseLiveVoiceTaskObservation(
         resultSource: source === 'schedule.list' ? 'exact-key-reconciliation' : 'status-observation',
         recoveryStatus: source === 'schedule.list' ? 'recovered' : expected.recoveryStatus,
         executionTarget,
+        executionContract,
       },
       progressSummary,
       lastError,
@@ -182,7 +231,15 @@ export function parseLiveVoiceTaskObservation(
 }
 
 function cloneTask(task: LiveVoiceVisibleTask): LiveVoiceVisibleTask {
-  return { ...task, status: { ...task.status }, executionTarget: { ...task.executionTarget } };
+  return {
+    ...task,
+    status: { ...task.status },
+    executionTarget: { ...task.executionTarget },
+    executionContract: {
+      ...task.executionContract,
+      effectPolicy: { ...task.executionContract.effectPolicy },
+    },
+  };
 }
 
 function isRetriableReadError(error: unknown): boolean {

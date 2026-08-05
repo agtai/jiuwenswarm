@@ -282,16 +282,17 @@ Set-Location jiuwenswarm\channels\web\frontend
 npm run dev
 ```
 
-**安全警告：这不是只读“查看仓库”。** 确认启动或替换会真实调用 AutoHarness `schedule.run`，固定使用有代码副作用的 `extended_evolve_pipeline`，可能生成或修改本地 Harness 代码包。取消只能阻止尚未发生的后续执行，不能撤销已有修改；Live Voice 的“打断并说话”或退出只停止本地语音反馈，不会取消 `schedule.run` 或已创建任务。只允许在单一 Session、可丢弃或已备份的目标环境验证，并先在页面常驻披露中向验收者说明这些边界。所有正在运行的 AgentServer/Gateway 进程都必须是在各自启动终端中显式设置同一个 Post-V0 专用 `JIUWENSWARM_DATA_DIR` 后启动；仅给 Vite 终端设置变量不算隔离。
+**安全警告：这不是只读“查看仓库”。** 确认启动或替换会真实调用 `schedule.run`，固定使用有代码副作用的 `project_code_pipeline` 和项目绑定 JiuwenSwarm Code Agent，可能直接修改当前已保存的 Git 项目。后台上下文禁用全部 shell 命令，因此测试、脚本、Git 与远端命令都不能运行；明确要求运行测试或 shell 的任务会在创建前拒绝。取消只能阻止尚未发生的后续执行，不能撤销已有修改；Live Voice 的“打断并说话”或退出只停止本地语音反馈，不会取消 `schedule.run` 或已创建任务。只允许在单一 Session、可丢弃或已备份的目标环境验证，并先在页面常驻披露中向验收者说明这些边界。所有正在运行的 AgentServer/Gateway 进程都必须是在各自启动终端中显式设置同一个 Post-V0 专用 `JIUWENSWARM_DATA_DIR` 后启动；仅给 Vite 终端设置变量不算隔离。
 
-> **2026-08-05 当前阻断：不要继续正向真实任务。** `d031-05` 已证明页面选择的项目只参与 owner/target 校验和最终变化检查；`extended_evolve_pipeline` 实际仍使用 AutoHarness 配置的 Agent Core 仓库并把结果提升到私有 `runtime_extensions`，不是该页面项目。零变化结果会被正确改判失败，但重复运行不能产生可接受的项目交付。恢复正向 E2E 前，必须按 [D-031 评审记录](../D031_IMPLEMENTATION_REVIEW_2026-08-04.md#required-next-slice-before-another-real-run) 先选择项目执行或显式 runtime-extension Demo 合同，并让 target、effective execution root、pipeline 和 artifact result 在模型调用前一致；否则只运行下方的自动化结果门槛测试。
+> **项目绑定验收基线：** D-056 已选择项目绑定 Code Agent，D-057 已接受一次隔离正向 E2E；脱敏样本见 [D-031 project-bound evidence](../evidence/D031_20260805_PROJECT_BOUND.md)。旧 `d031-05` 的 AutoHarness/runtime-extension 混合合同不得再使用。每次正向验证仍必须证明页面 target、Code Agent root 与 Git root 完全一致，并从响应读取 `effective_execution_root`、`artifact_kind=git_visible_project_change`、`executor=jiuwenswarm_code_agent`、`pipeline=project_code_pipeline`；任一事实缺失或冲突都停止，不得用 UI 文案或最终变化反推执行根。
 
 Task Demo 启动前先建立可核对的执行身份：
 
 1. 确认 Vite 以及所有正在运行的 AgentServer/Gateway 进程都使用同一个 Post-V0 专用绝对 `JIUWENSWARM_DATA_DIR`，不是 V0 或默认用户目录。
-2. 在 UI 注册并保存**当前累计 worktree 的精确绝对路径**为 code project；用 `git rev-parse --show-toplevel` 核对页面 target，不允许用相似目录名猜测。
-3. 创建一个新的持久 Session，等待真实 session ID 生成；`session_id=new` 或项目路径/ID不匹配时不得开 Task Demo。
-4. 先用文字强制 Terminal Tool 读取当前短 SHA 和绝对仓库根，只确认普通 Agent 会话目标与面板一致。不得据此推断 AutoHarness 使用同一仓库；AutoHarness还必须返回受信的 effective execution root，且在恢复正向 E2E 前与页面 target 精确一致。
+2. 在 UI 注册并保存**本次可丢弃 Git 目标的精确绝对路径**为 code project；用 `git rev-parse --show-toplevel` 核对页面 target，不允许用累计源码仓库、相似目录名或旧目标代替。
+3. 创建一个用于普通文字冒烟的持久 Session，等待真实 session ID 生成；`session_id=new` 或项目路径/ID不匹配时不得继续。
+4. 先用文字强制 Terminal Tool 读取当前短 SHA 和绝对仓库根，只确认普通 Agent 会话目标与面板一致。Task Demo 的 `schedule.run`/`schedule.status` 还必须返回受信的 project execution contract；其中 effective execution root 必须与页面 target 和 `git rev-parse --show-toplevel` 精确一致，artifact/executor/pipeline 必须匹配上方固定值。
+5. 等文字冒烟完全结束后重新检查目标。普通 Agent 初始化可能已创建 runtime support paths；只在确认目标确实是可丢弃环境后，精确清理或接受这些已识别变化并重新记录 baseline。仅为删除已知目标变化不需要重启服务。随后新建一个无旧 Chat 历史的持久 Session 进行 D-031 正向验证，并再次核对项目 ID/路径。
 
 任务口令只接受 committed final；partial/interim 必须保持零请求。启动和替换继续要求显式“确认”，但为适配真实 ASR，目标前可使用 `：`、`:`、`，`、`,`、空格、口述“冒号”、“任务内容是/为”或“目标是/为”，固定命令末尾可带 `。！？!?`。“后台代码优化任务”是主要语音口令，“后台演进任务”仅保留兼容。推荐流程：
 
@@ -307,9 +308,13 @@ Task Demo 启动前先建立可核对的执行身份：
 
 必须先进入已经保存的真实 Session；`session_id=new` 时不会发任务请求。capture 期间若切换 Session，本次口令也必须以零请求失效。不要使用过于通用的“检查进度”，它会继续走普通 Chat/Agent，不属于任务口令。
 
-如果 `schedule.run` 超时、断线、payload 无效或缺少 task ID，前端会用同一稳定 command ID 查询服务端 scoped exact-key list，并只接受 namespace、key、query、pipeline 和冻结 target 全部严格匹配且无业务错误的记录；对账不能证明结果时才进入 `mutation-unknown`，且 status/cancel 不会退回操作旧 predecessor。后端按 Web request 字段对 list/status/cancel/logs/delete 校验创建 owner 与项目 target，任务也冻结进程内 Agent context 并返回项目/来源 provenance；这能阻止正常客户端串线，但 Web 身份仍可由恶意请求伪造，不是生产鉴权。command journal、最后可见任务和 latch 仍只在当前页面/Session 内存中，刷新后的自动恢复明确 unsupported。后端 Task JSON 与日志属于当前机器的 `JIUWENSWARM_DATA_DIR`；前端 task projection/card/command state 只在浏览器页面内存，刷新即丢。二者都不会随 Git 或换机恢复。执行前必须核对界面显示的绝对项目 target；真实有副作用 E2E 仍应在单用户、可丢弃或已备份环境进行，因为跨进程一致性、exactly-once、外部副作用 reconciliation 和重启后的 Agent context 恢复尚未完成。
+如果 `schedule.run` 超时、断线、payload 无效或缺少 task ID，前端会用同一稳定 command ID 查询服务端 scoped exact-key list，并只接受 namespace、key、query、pipeline 和冻结 target 全部严格匹配且无业务错误的记录；对账不能证明结果时才进入 `mutation-unknown`，且 status/cancel 不会退回操作旧 predecessor。一次逻辑命令在恢复时可能出现多个同 key `schedule.run` wire attempt；验收要检查持久层只有一个 create command、一个 task 和一个 execution，而不是把“只能看到一次网络请求”当作合同。后端按 Web request 字段对 list/status/cancel/logs/delete 校验创建 owner 与项目 target，任务也冻结进程内 Agent context 并返回项目/来源 provenance；这能阻止正常客户端串线，但 Web 身份仍可由恶意请求伪造，不是生产鉴权。command journal、最后可见任务和 latch 仍只在当前页面/Session 内存中，刷新后的自动恢复明确 unsupported。后端 Task JSON 与日志属于当前机器的 `JIUWENSWARM_DATA_DIR`；前端 task projection/card/command state 只在浏览器页面内存，刷新即丢。二者都不会随 Git 或换机恢复。执行前必须核对界面显示的绝对项目 target；真实有副作用 E2E 仍应在单用户、可丢弃或已备份环境进行，因为跨进程一致性、exactly-once、外部副作用 reconciliation 和重启后的 Agent context 恢复尚未完成。
 
-Live Voice 创建的一次性代码优化任务还要求目标 Git 项目的 tracked 或未忽略 untracked 文件在执行前后发生变化。只有流水线终态成功且目标指纹变化，调度状态才可为成功；零变化、只有 `.pytest_cache` 等忽略文件变化、目标不可读或目标不是有效 Git 项目都必须返回失败。该检查只能拒绝无效果任务，不能证明修改内容正确。需要快速验证结果门槛时，运行 `pytest tests/unit_tests/auto_harness/test_schedule_task_service.py -q -k live_voice_result_contract --no-cov`，不必启动真实模型流水线。
+Live Voice 创建的一次性代码优化任务还要求目标 Git 项目的 tracked 或未忽略 untracked 文件在执行前后发生变化。只有 Code Agent 正常终止且目标指纹变化，调度状态才可为成功；零变化、只有 `.pytest_cache` 等忽略文件变化、只改外部目录、目标不可读或目标不是有效 Git 项目都必须返回失败。该检查只能拒绝无效果任务，不能证明修改内容正确。需要快速验证结果门槛时，运行 `python -m pytest -o addopts='' tests/unit_tests/auto_harness/test_schedule_task_service.py -q -k live_voice_result_contract`，不必启动真实模型流水线。
+
+任务启动播报和终态播报必须分开计数。当前终态合同是 safe at-most-once：只有终态被采用时恰好存在安全语音窗口才尝试一次，不排队延迟补播。因此终态播报 `0` 或 `1` 次符合该合同，超过 `1` 次失败；不要把 `0` 写成“必达通知通过”。如果验收目标要求 guaranteed/eventual delivery，必须等待正式 TaskEvent/notification owner 提供可恢复投递合同。
+
+当前 Code Agent 还可能在选定项目内创建 `.gitignore`、`coding_memory/`、`prompt_attachment/` 和 `.agent_history/` 等 runtime support paths。D-057 将其位置治理归给 Agent Runtime/workspace isolation；D-031 验收必须逐项记录这些路径，不能宣称绝对“意外文件为零”。若当前 Gate 明确要求 clean workspace，则这些路径仍是失败项，不能用 D-031 已关闭豁免。
 
 手工文件清单必须显式证明非 ASCII 路径被完整记录。`d031-05` 的 PowerShell `git ls-files | Get-FileHash | Export-Csv` 基线只保存 2,665 行并漏掉 140 个非 ASCII 路径，后续对比会把它们误报为新增；该 TSV 不得作为证据。优先使用调度器的 Git-visible 指纹、干净的 `git status` 和经 UTF-8 路径样本校验的独立清单实现。
 
@@ -319,7 +324,7 @@ Live Voice 创建的一次性代码优化任务还要求目标 Git 项目的 tra
 Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 ```
 
-真实任务测试必须保存脱敏的 task ID、原始状态、请求顺序和目标环境说明；不能用 UI 反馈代替后台事实。
+真实任务测试必须保存脱敏的 task ID、原始状态、请求顺序和目标环境说明；不能用 UI 反馈代替后台事实。已接受的 2026-08-05 样本格式见 [D-031 project-bound evidence](../evidence/D031_20260805_PROJECT_BOUND.md)。
 
 ## 8. 先做文字工具冒烟，再做语音
 

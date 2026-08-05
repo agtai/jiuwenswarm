@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import time
 import uuid
@@ -19,6 +21,16 @@ from typing import TYPE_CHECKING, Any, Optional
 from openjiuwen.auto_harness.pipelines import META_EVOLVE_PIPELINE
 from openjiuwen.core.foundation.llm import Model
 
+from jiuwenswarm.agents.harness.common.tools.command_tools import (
+    forbid_background_project_shell_commands,
+)
+
+from .project_execution import (
+    PROJECT_CODE_ARTIFACT_KIND,
+    PROJECT_CODE_EFFECT_POLICY,
+    PROJECT_CODE_EXECUTOR,
+    PROJECT_CODE_PIPELINE,
+)
 from .run_log_status import TERMINAL_STATUSES, has_terminal_session_event
 
 if TYPE_CHECKING:
@@ -506,6 +518,7 @@ class Scheduler:
         final_status = "success"
         error_msg = ""
         target_tree_before: str | None = None
+        project_execution = pipeline == PROJECT_CODE_PIPELINE
 
         try:
             if task.get("result_contract") == TARGET_TREE_CHANGE_REQUIRED:
@@ -524,6 +537,52 @@ class Scheduler:
                     project_dir,
                 )
 
+            if project_execution:
+                execution_contract = task.get("execution_contract")
+                effective_root = (
+                    execution_contract.get("effective_execution_root")
+                    if isinstance(execution_contract, dict)
+                    else None
+                )
+                artifact_kind = (
+                    execution_contract.get("artifact_kind")
+                    if isinstance(execution_contract, dict)
+                    else None
+                )
+                executor_id = (
+                    execution_contract.get("executor")
+                    if isinstance(execution_contract, dict)
+                    else None
+                )
+                contract_pipeline = (
+                    execution_contract.get("pipeline")
+                    if isinstance(execution_contract, dict)
+                    else None
+                )
+                effect_policy = (
+                    execution_contract.get("effect_policy")
+                    if isinstance(execution_contract, dict)
+                    else None
+                )
+                target = task.get("execution_target")
+                selected_root = (
+                    target.get("project_dir") if isinstance(target, dict) else None
+                )
+                if (
+                    not isinstance(effective_root, str)
+                    or not isinstance(selected_root, str)
+                    or os.path.normcase(os.path.normpath(str(Path(effective_root).resolve())))
+                    != os.path.normcase(os.path.normpath(str(Path(selected_root).resolve())))
+                    or artifact_kind != PROJECT_CODE_ARTIFACT_KIND
+                    or executor_id != PROJECT_CODE_EXECUTOR
+                    or contract_pipeline != PROJECT_CODE_PIPELINE
+                    or effect_policy != PROJECT_CODE_EFFECT_POLICY
+                    or execution_context.project_executor is None
+                ):
+                    raise RuntimeError(
+                        "EXECUTION_TARGET_NOT_BOUND: persisted project execution contract is invalid"
+                    )
+
             logger.info(
                 "[Scheduler] Using task-bound agent for task %s: %s",
                 task_id,
@@ -536,9 +595,10 @@ class Scheduler:
             # Resolve pipeline preference (use task's pipeline or default to META_EVOLVE_PIPELINE)
             pipeline_preference = pipeline if pipeline else META_EVOLVE_PIPELINE
             params = {
-                "mode": "auto_harness",
+                "mode": "code" if project_execution else "auto_harness",
                 "scheduled": True,
                 "pipeline_preference": pipeline_preference,
+                "query": query,
             }
             optimization_task = task.get("optimization_task")
             if isinstance(optimization_task, dict):
@@ -546,16 +606,34 @@ class Scheduler:
             repo_url = task.get("repo_url", "")
             if repo_url:
                 params["repo_url"] = repo_url
+            if project_execution:
+                params.update(
+                    {
+                        "project_dir": effective_root,
+                        "cwd": effective_root,
+                        "trusted_dirs": [effective_root],
+                        "supports_user_interaction": False,
+                    }
+                )
+                if model_name:
+                    params["model_name"] = model_name
 
             request = AgentRequest(
                 request_id=execution_id,
-                channel_id="tui",
+                channel_id=str(
+                    (task.get("owner_scope") or {}).get("channel_id") or "web"
+                ),
                 session_id=session_id,
                 params=params,
+                metadata={
+                    "enable_memory": False,
+                    "background_task": True,
+                    "task_id": task_id,
+                },
             )
 
             # Resolve model from jiuwenswarm config (same approach as interface_deep)
-            model = self._resolve_model(model_name)
+            model = None if project_execution else self._resolve_model(model_name)
             logger.info(
                 "[Scheduler] Resolved model for task %s: %s (requested=%s)",
                 task_id, model is not None, model_name
@@ -563,19 +641,42 @@ class Scheduler:
 
             # Execute with the task-scoped binding. Scheduled runs have no
             # interactive channel, so interactions are auto-accepted.
-            async for chunk in self._service.run(
-                request,
-                session_id,
-                execution_id,
-                query=query,
-                model=model,
-                auto_accept=True,
-                execution_agent=execution_context.agent,
-                stream_event_rail=execution_context.stream_event_rail,
-            ):
-                if chunk.payload:
+            if project_execution:
+                stream = execution_context.project_executor.process_background_code_task_stream(
+                    request
+                )
+            else:
+                stream = self._service.run(
+                    request,
+                    session_id,
+                    execution_id,
+                    query=query,
+                    model=model,
+                    auto_accept=True,
+                    execution_agent=execution_context.agent,
+                    stream_event_rail=execution_context.stream_event_rail,
+                )
+
+            project_terminal = False
+            project_error = ""
+            shell_policy = (
+                forbid_background_project_shell_commands()
+                if project_execution
+                else contextlib.nullcontext()
+            )
+            with shell_policy:
+                async for chunk in stream:
+                    payload = chunk.payload if isinstance(chunk.payload, dict) else None
+                    if project_execution and chunk.is_complete:
+                        project_terminal = True
+                    if project_execution and payload and payload.get("event_type") == "chat.error":
+                        project_error = str(
+                            payload.get("error") or payload.get("message") or "project executor failed"
+                        )
+                    if not payload:
+                        continue
                     # Skip context compression events - not needed in logs
-                    event_type = chunk.payload.get("event_type", "")
+                    event_type = payload.get("event_type", "")
                     if event_type in ("context.usage", "context.compression_state"):
                         continue
                     if event_type == "harness.message" and chunk.payload.get("stage"):
@@ -598,13 +699,22 @@ class Scheduler:
                     # Append log chunk via thread pool (avoids blocking event loop)
                     line = json.dumps(chunk.payload, ensure_ascii=False) + "\n"
                     await asyncio.to_thread(_sync_append_log, log_path, line)
-                    if event_type == "harness.session_finished" and chunk.payload.get("is_terminal") is True:
+                    if (
+                        not project_execution
+                        and event_type == "harness.session_finished"
+                        and chunk.payload.get("is_terminal") is True
+                    ):
                         logger.info(
                             "[Scheduler] Task %s execution %s received terminal session event",
                             task_id,
                             execution_id,
                         )
                         break
+
+            if project_execution and project_error:
+                raise RuntimeError(project_error)
+            if project_execution and not project_terminal:
+                raise RuntimeError("PROJECT_EXECUTOR_INCOMPLETE: no terminal response")
 
             logger.info(
                 "[Scheduler] Task %s execution %s completed successfully",
@@ -621,13 +731,18 @@ class Scheduler:
             logger.exception("[Scheduler] Task %s execution %s failed: %s", task_id, execution_id, e)
 
         finally:
-            if final_status == "success" and log_path.exists() and not has_terminal_session_event(log_path):
+            if (
+                final_status == "success"
+                and not project_execution
+                and log_path.exists()
+                and not has_terminal_session_event(log_path)
+            ):
                 logger.warning(
                     "[Scheduler] Task %s execution %s ended without terminal session event",
                     task_id,
                     execution_id,
                 )
-            if final_status == "success" and log_path.exists():
+            if final_status == "success" and not project_execution and log_path.exists():
                 result = self._task_store.determine_pipeline_status_from_log(log_path)
                 if result["failed"]:
                     final_status = "failed"

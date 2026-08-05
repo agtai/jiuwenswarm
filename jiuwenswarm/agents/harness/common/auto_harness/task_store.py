@@ -201,6 +201,7 @@ class TaskStore:
                     "origin_namespace": command.get("origin_namespace"),
                     "idempotency_key": command.get("idempotency_key"),
                     "execution_target": command.get("execution_target"),
+                    "execution_contract": command.get("execution_contract"),
                 }
 
             task_id = str(task.get("task_id") or "")
@@ -211,18 +212,21 @@ class TaskStore:
 
             created_at = datetime.now(timezone.utc).isoformat()
             data.setdefault("tasks", []).append(task)
-            commands.append(
-                {
-                    "owner_scope": dict(owner_scope),
-                    "origin_namespace": origin_namespace,
-                    "idempotency_key": idempotency_key,
-                    "fingerprint": fingerprint,
-                    "task_id": task_id,
-                    "execution_target": dict(task.get("execution_target") or {}),
-                    "created_at": created_at,
-                    "deleted_at": None,
-                }
-            )
+            command_record = {
+                "owner_scope": dict(owner_scope),
+                "origin_namespace": origin_namespace,
+                "idempotency_key": idempotency_key,
+                "fingerprint": fingerprint,
+                "task_id": task_id,
+                "execution_target": dict(task.get("execution_target") or {}),
+                "created_at": created_at,
+                "deleted_at": None,
+            }
+            if isinstance(task.get("execution_contract"), dict):
+                command_record["execution_contract"] = dict(
+                    task["execution_contract"]
+                )
+            commands.append(command_record)
             await self._save_tasks(data)
             logger.info(
                 "[TaskStore] Added idempotent task: %s namespace=%s",

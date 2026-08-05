@@ -28,7 +28,7 @@ function makeClient(sessionId = 'session-real-1') {
   return { gateway, calls, response };
 }
 
-test('run pins the persisted session, AutoHarness mode, and reviewed pipeline', async () => {
+test('run pins the persisted session, Code Agent mode, and project pipeline', async () => {
   const { gateway, calls, response } = makeClient();
 
   const result = await gateway.run({
@@ -50,11 +50,11 @@ test('run pins the persisted session, AutoHarness mode, and reviewed pipeline', 
       method: 'schedule.run',
       params: {
         session_id: 'session-real-1',
-        mode: 'auto_harness',
+        mode: 'code',
         project_dir: 'D:\\work\\live-voice',
         project_id: 'project-live-voice',
         query: '改进日志路由',
-        pipeline: 'extended_evolve_pipeline',
+        pipeline: 'project_code_pipeline',
         origin_namespace: 'live_voice',
         idempotency_key: 'command-stable-1',
       },
@@ -73,7 +73,7 @@ test('status and cancel target exactly the supplied real task id', async () => {
       method: 'schedule.status',
       params: {
         session_id: 'session-real-2',
-        mode: 'auto_harness',
+        mode: 'code',
         project_dir: 'D:\\work\\live-voice',
         project_id: 'project-live-voice',
         task_id: 'task-a',
@@ -83,7 +83,7 @@ test('status and cancel target exactly the supplied real task id', async () => {
       method: 'schedule.cancel',
       params: {
         session_id: 'session-real-2',
-        mode: 'auto_harness',
+        mode: 'code',
         project_dir: 'D:\\work\\live-voice',
         project_id: 'project-live-voice',
         task_id: 'task-a',
@@ -215,10 +215,10 @@ test('all task operations carry the immutable persisted-session target and omit 
   }
   assert.deepEqual(calls[0].params, {
     session_id: 'session-target',
-    mode: 'auto_harness',
+    mode: 'code',
     project_dir: '/srv/original',
     query: '目标',
-    pipeline: 'extended_evolve_pipeline',
+    pipeline: 'project_code_pipeline',
     origin_namespace: 'live_voice',
     idempotency_key: 'command-target',
   });
@@ -226,7 +226,7 @@ test('all task operations carry the immutable persisted-session target and omit 
     method: 'schedule.list',
     params: {
       session_id: 'session-target',
-      mode: 'auto_harness',
+      mode: 'code',
       project_dir: '/srv/original',
       origin_namespace: 'live_voice',
       idempotency_key: 'command-target',
@@ -244,7 +244,7 @@ test('exact-key reconciliation is scoped by session, target, namespace, and the 
       method: 'schedule.list',
       params: {
         session_id: 'session-reconcile',
-        mode: 'auto_harness',
+        mode: 'code',
         project_dir: 'D:\\work\\live-voice',
         project_id: 'project-live-voice',
         origin_namespace: 'live_voice',

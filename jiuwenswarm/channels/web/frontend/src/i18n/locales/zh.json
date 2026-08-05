@@ -2126,7 +2126,7 @@
         }
       },
       "safetyTitle": "真实副作用：",
-      "safetyDisclosure": "执行器 AutoHarness；固定流水线 extended_evolve_pipeline；会生成或修改本地 Harness 代码包。Live Voice 的打断或退出只停止语音反馈，不会中止 schedule.run 或已创建任务；取消必须使用“确认取消后台代码优化任务”和已观察到的真实任务 ID，且不能撤销已经产生的修改。切换会话或项目会隔离未决命令，只有返回原上下文才能继续核对；刷新仍会丢失语音侧任务记忆，之后应到后台任务列表处理。",
+      "safetyDisclosure": "执行器 JiuwenSwarm Code Agent；固定项目绑定流水线 project_code_pipeline；只允许以当前已保存项目为执行根，所有 shell、测试、Git 和远端命令均被硬阻止。Live Voice 的打断或退出只停止语音反馈，不会中止 schedule.run 或已创建任务；取消必须使用“确认取消后台代码优化任务”和已观察到的真实任务 ID，且不能撤销已经产生的修改。切换会话或项目会隔离未决命令，只有返回原上下文才能继续核对；刷新仍会丢失语音侧任务记忆，之后应到后台任务列表处理。",
       "contextIsolatedTitle": "任务命令已隔离",
       "contextIsolated": "任务命令 {{commandId}} 的请求或结果仍未核对，但会话或项目上下文已经改变。为防止重复副作用，其他上下文不会重试；请返回原会话和项目继续核对。",
       "isolatedResult": "该结果属于已隔离的原上下文，不会合入当前上下文：{{detail}}",

@@ -96,8 +96,8 @@ export function liveVoiceTaskExecutionContextKey(context: LiveVoiceTaskExecution
  * Narrow Web request adapter for the Post-V0 task demo.
  *
  * The adapter deliberately exposes only the four operations used by
- * LiveVoiceTaskBridge. It always pins AutoHarness mode and the reviewed
- * side-effecting pipeline; response payloads are returned untouched so the
+ * LiveVoiceTaskBridge. It always pins Code Agent mode and the reviewed
+ * project-bound code pipeline; response payloads are returned untouched so the
  * bridge, not this transport layer, decides whether a task really started,
  * stopped, or completed.
  */
@@ -110,7 +110,7 @@ export function createLiveVoiceTaskGateway({ request, sessionId, executionContex
     }
     return {
       session_id: requireRunnableSessionId(sessionId),
-      mode: 'auto_harness',
+      mode: 'code',
       project_dir: normalizedExecutionContext.projectDir,
       ...(normalizedExecutionContext.projectId ? { project_id: normalizedExecutionContext.projectId } : {}),
     };

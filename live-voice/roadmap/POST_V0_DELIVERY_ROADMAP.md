@@ -1,7 +1,7 @@
 # Live Voice：W2 90% Demo 与 Integrated Web Alpha 交付路线
 
 > 更新日期：2026-08-05
-> 当前产品和交付决策：[D-046、D-055](../decisions/DECISIONS.md)
+> 当前产品和交付决策：[D-046、D-055、D-056](../decisions/DECISIONS.md)
 > 当前实现事实、track 状态和 Demo Replacement Ledger：[STATUS.md](../STATUS.md)
 > 已完成 Week 1 的历史 priority/dependency/boundary 与 package contracts：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
 > Web Alpha 稳定工作包、Demo 替换关系、依赖和目标窗口：[WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)

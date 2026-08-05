@@ -19,6 +19,7 @@ The short/full distinction and mandatory/conditional distinction are independent
 | Long-term architecture, P1/P2/P3 boundary, protocol, ownership, cancellation, durability, production acceptance | Complete [full solution snapshot](architecture/FULL_SOLUTION_2026-07-30.md), accepted [Architecture Contract Gate](architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), relevant decisions, and roadmap |
 | V0 reproduction or regression acceptance | [V0 acceptance](validation/V0_ACCEPTANCE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), [showcase](demo/DEMO_SHOWCASE.md), and immutable [V0 evidence](evidence/V0_20260802_ee2896a4.md) |
 | Week 2 cumulative Demo integration or acceptance | [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md), [Integrated showcase](demo/INTEGRATED_SHOWCASE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), roadmap, and current replacement ledger in STATUS |
+| D-031 task Demo, monitor, project-bound execution or validation | [D-031 implementation review](D031_IMPLEMENTATION_REVIEW_2026-08-04.md), D-056/D-057, [project-bound evidence](evidence/D031_20260805_PROJECT_BOUND.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), relevant task/scheduler/Code Agent source and tests, and current STATUS |
 | Integrated Web Alpha acceptance (`W3/W4` delivery windows, not current calendar promises) | [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), D-055, full solution, ACG, [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md), roadmap, runbook, and current STATUS |
 | Post-V0 sequencing or the next development slice | [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md), [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md), and relevant decisions |
 | Week 1 package history, regression work, or execution-model history | Historical [Week 1 execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md), current allocation/review policy [D-052/D-053](decisions/DECISIONS.md), the package's target source/tests, consumed ACG sections, current STATUS, and the actual diff/evidence; Week 1 is complete and this dated plan is not the current queue |
@@ -34,7 +35,7 @@ The short/full distinction and mandatory/conditional distinction are independent
 | `SOL_MODULE_PRE_REVIEWS_2026-08-03.md` | Frozen detailed D-031/ACG/CR-A/SR-A/SS-A/TC-A Sol design record; not current status or execution order |
 | `W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md` | Dated five-candidate evidence, Sol implementation reviews, and post-commit correction record; STATUS owns current progress |
 | `W1_X2_P1B_REVIEW_2026-08-04.md` | Detailed W1-X2/P1B implementation evidence, W1-S3 judgment, three review passes, corrections, and validation gaps |
-| `D031_IMPLEMENTATION_REVIEW_2026-08-04.md` | Detailed D-031 minimal monitor boundary, scenario evidence, review passes, automated verification, and real-service gap |
+| `D031_IMPLEMENTATION_REVIEW_2026-08-04.md` | Detailed D-031 minimal monitor boundary, review passes, automated verification, real-service closure and explicit follow-ups |
 | `DOCUMENTATION_RULES.md` | Authority, routing, anti-duplication, and synchronization rules |
 | `decisions/DECISIONS.md` | Accepted decisions and their rationale/history |
 | `architecture/FULL_SOLUTION_2026-07-30.md` | Dated immutable complete solution snapshot |
@@ -48,8 +49,8 @@ The short/full distinction and mandatory/conditional distinction are independent
 ## Fresh-clone continuation
 
 ```powershell
-git fetch agtai hx/0803_live_voice
-git switch --track -c hx/0803_live_voice agtai/hx/0803_live_voice
+git fetch origin hx/0803_live_voice
+git switch --track -c hx/0803_live_voice origin/hx/0803_live_voice
 git status --short --branch
 git rev-parse HEAD
 git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'

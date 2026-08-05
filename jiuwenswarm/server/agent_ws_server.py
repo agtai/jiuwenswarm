@@ -19,6 +19,9 @@ from weakref import WeakValueDictionary
 from websockets.exceptions import ConnectionClosed as WebSocketConnectionClosed
 
 from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService, reset_harness_packages_state
+from jiuwenswarm.agents.harness.common.auto_harness.project_execution import (
+    PROJECT_CODE_PIPELINE,
+)
 from jiuwenswarm.server.gateway_push.wire import build_server_push_wire
 from jiuwenswarm.server.ws_send import send_wire_payload
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_acp_output_manager
@@ -8146,6 +8149,8 @@ class AgentWebSocketServer:
         )
         task_context_release: Optional[Callable[[], None]] = None
         execution_agent: Any = None
+        project_executor: Any = None
+        effective_execution_root: str | None = None
         execution_target: Optional[dict[str, str | None]] = None
         owner_scope = _build_schedule_owner_scope(request)
         try:
@@ -8181,6 +8186,21 @@ class AgentWebSocketServer:
                         request,
                         resolved_project_dir,
                     )
+                    if (
+                        action == "run"
+                        and params.get("pipeline") == PROJECT_CODE_PIPELINE
+                    ):
+                        project_executor = agent
+                        get_execution_root = getattr(
+                            agent,
+                            "get_project_execution_root",
+                            None,
+                        )
+                        effective_execution_root = (
+                            get_execution_root()
+                            if callable(get_execution_root)
+                            else None
+                        )
                     task_context_release = self._pin_scheduler_task_agent(agent)
                     logger.info(
                         "[AgentServer] Captured task-scoped agent for schedule action %s",
@@ -8230,6 +8250,12 @@ class AgentWebSocketServer:
                 idempotency_key = params.get("idempotency_key")
                 # Resolve model from jiuwenswarm config
                 model = self._resolve_model(model_name)
+                project_execution_kwargs: dict[str, Any] = {}
+                if pipeline == PROJECT_CODE_PIPELINE:
+                    project_execution_kwargs = {
+                        "project_executor": project_executor,
+                        "effective_execution_root": effective_execution_root,
+                    }
                 payload = await self._scheduler_service.run_task(
                     query,
                     model,
@@ -8241,6 +8267,7 @@ class AgentWebSocketServer:
                     origin_namespace=origin_namespace,
                     idempotency_key=idempotency_key,
                     model_intent=model_name,
+                    **project_execution_kwargs,
                 )
 
             elif action == "list":

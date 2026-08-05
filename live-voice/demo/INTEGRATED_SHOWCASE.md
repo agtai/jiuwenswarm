@@ -56,7 +56,7 @@ Start a deliberately slow read-only Agent request. While it is working or speaki
 
 ### Turn 3 — create a real detached task
 
-> Current blocker: this planned step is not runnable while STATUS reports D-031 target/execution/artifact mismatch. Do not perform a positive real task until the project-bound Executor/Harness contract (or an explicitly restricted runtime-extension Demo contract) is implemented, reviewed and cleared for isolated validation.
+> Current gate: closing the bounded D-031 project-bound carrier does not make this cumulative script runnable. Consult STATUS for the formal Integrated-mode dependencies, and do not substitute the shell-disabled Compatibility Adapter for Task Core/Event/Executor authority.
 
 Issue a task intent without confirmation and show zero task mutation plus a clarification/confirmation request. Then give the exact confirmation in the isolated target. Show the real task ID, command ID, target, Executor and accepted/running facts.
 
