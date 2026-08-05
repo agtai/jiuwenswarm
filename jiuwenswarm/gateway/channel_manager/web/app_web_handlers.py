@@ -1534,7 +1534,7 @@ def _tts_audio_to_base64(audio_data: bytes) -> str:
     try:
         base64.b64decode(audio_data, validate=True)
         return audio_data.decode("ascii")
-    except (ValueError, UnicodeDecodeError):
+    except ValueError:
         return base64.b64encode(audio_data).decode("ascii")
 
 
