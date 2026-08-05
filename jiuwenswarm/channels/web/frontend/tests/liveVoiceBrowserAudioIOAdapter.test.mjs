@@ -389,6 +389,49 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(adapter.businessCancelCount(), 0);
 });
 
+test('capture handoff reports an input track that is already muted', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  fake.mediaDevices.stream.track.muted = true;
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onCaptureState: event => events.push(event) },
+  });
+
+  await adapter.startCapture();
+  assert.deepEqual(
+    events.map(event => event.reason),
+    ['start_requested', 'capture_started', 'track_muted']
+  );
+  assert.equal(adapter.captureState(), 'active');
+  await adapter.stopCapture('test_complete');
+});
+
+test('capture handoff does not duplicate a simultaneously delivered mute event', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  let adapter;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onCaptureState(event) {
+        events.push(event);
+        if (event.reason === 'capture_started') {
+          fake.mediaDevices.stream.track.muted = true;
+          fake.mediaDevices.stream.track.emit('mute');
+        }
+      },
+    },
+  });
+
+  await adapter.startCapture();
+  assert.equal(events.filter(event => event.reason === 'track_muted').length, 1);
+  assert.equal(adapter.captureState(), 'active');
+  await adapter.stopCapture('test_complete');
+});
+
 test('permission denial and pending-start cancellation fail closed with zero active capture', async () => {
   const denied = fakeEnvironment();
   denied.mediaDevices.getUserMediaImpl = async () => {
@@ -417,6 +460,83 @@ test('permission denial and pending-start cancellation fail closed with zero act
   );
   assert.equal(pending.mediaDevices.stream.track.stopCount, 1);
   assert.equal(pending.contexts.length, 0);
+});
+
+test('a starting observer can fence capture before any microphone or context effect', async () => {
+  const fake = fakeEnvironment();
+  let adapter;
+  let stopPromise = null;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onCaptureState(event) {
+        if (event.reason === 'start_requested') stopPromise = adapter.stopCapture('observer_fence');
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.startCapture(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'CAPTURE_CANCELLED'
+  );
+  assert.notEqual(stopPromise, null);
+  await stopPromise;
+  assert.equal(fake.mediaDevices.constraints.length, 0);
+  assert.equal(fake.contexts.length, 0);
+  assert.equal(fake.document.listenerCount('visibilitychange'), 0);
+  assert.equal(adapter.captureState(), 'stopped');
+});
+
+test('a page-hidden transition during starting is cleaned before media effects', async () => {
+  const fake = fakeEnvironment();
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onCaptureState(event) {
+        if (event.reason === 'start_requested') fake.document.visibilityState = 'hidden';
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.startCapture(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PAGE_HIDDEN'
+  );
+  assert.equal(fake.mediaDevices.constraints.length, 0);
+  assert.equal(fake.contexts.length, 0);
+  assert.equal(fake.document.listenerCount('visibilitychange'), 0);
+  assert.equal(adapter.captureState(), 'failed');
+});
+
+test('an active-handoff observer stop prevents capture startup from reporting success', async () => {
+  const fake = fakeEnvironment();
+  const reasons = [];
+  let adapter;
+  let stopPromise = null;
+  fake.mediaDevices.stream.track.muted = true;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onCaptureState(event) {
+        reasons.push(event.reason);
+        if (event.reason === 'capture_started') stopPromise = adapter.stopCapture('observer_handoff_fence');
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.startCapture(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'CAPTURE_CANCELLED'
+  );
+  assert.notEqual(stopPromise, null);
+  await stopPromise;
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.equal(fake.contexts[0].state, 'closed');
+  assert.equal(adapter.captureState(), 'stopped');
+  assert.equal(reasons.includes('track_muted'), false);
 });
 
 test('stop releases microphone and context while AudioWorklet loading remains pending', async () => {
@@ -717,6 +837,34 @@ test('capture cleanup is serialized, blocks restart, and is awaited by close', a
   assert.equal(fake.contexts[0].closeCount, 1);
 });
 
+test('a stopping observer cannot restart before cleanup ownership is published', async () => {
+  const fake = fakeEnvironment();
+  const closeGate = deferred();
+  let adapter;
+  let restartResult = null;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onCaptureState(event) {
+        if (event.state === 'stopping') restartResult = adapter.startCapture().catch(error => error);
+      },
+    },
+  });
+  await adapter.startCapture();
+  fake.contexts[0].closePromise = closeGate.promise;
+
+  const stopPromise = adapter.stopCapture('observer_restart_probe');
+  assert.notEqual(restartResult, null);
+  const restartError = await restartResult;
+  assert.equal(restartError instanceof BrowserAudioIOViolation, true);
+  assert.equal(restartError.reason, 'CAPTURE_STOP_IN_PROGRESS');
+  assert.equal(fake.mediaDevices.constraints.length, 1);
+  closeGate.resolve();
+  await stopPromise;
+  assert.equal(adapter.captureState(), 'stopped');
+});
+
 test('startup-failure cleanup also blocks restart and is awaited by close', async () => {
   const fake = fakeEnvironment();
   const addModule = deferred();
@@ -829,6 +977,9 @@ test('playout schedules exact current response and acknowledges only contiguous 
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
 
   context.bufferSources[1].end();
+  assert.equal(context.bufferSources[1].disconnectCount, 1);
+  context.bufferSources[1].end();
+  assert.equal(context.bufferSources[1].disconnectCount, 1);
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
   context.bufferSources[0].end();
   const completed = events.filter(event => event.reason === 'render_completed');
@@ -929,6 +1080,41 @@ test('wrong-response and invalid playout have zero browser or acknowledgement ef
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
 });
 
+test('opaque response IDs compare structurally and observer events expose only normalized identity fields', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  const activeResponse = Object.freeze({
+    interaction_id: 'scope',
+    response_id: 'part\u0000tail',
+    response_generation: 0,
+    private_extension: 'must-not-propagate',
+  });
+  const collidingDelimitedKey = Object.freeze({
+    interaction_id: 'scope\u0000part',
+    response_id: 'tail',
+    response_generation: 0,
+  });
+
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(activeResponse);
+  assert.deepEqual(events.at(-1).response, {
+    interaction_id: 'scope',
+    response_id: 'part\u0000tail',
+    response_generation: 0,
+  });
+  assert.equal(adapter.enqueuePlayout(pcmChunk(collidingDelimitedKey, 0, { channel_count: 2 })), false);
+  assert.equal(adapter.stopPlayout(collidingDelimitedKey), false);
+  assert.equal(fake.contexts[0].buffers.length, 0);
+  assert.equal(fake.contexts[0].bufferSources.length, 0);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(activeResponse, 0)), true);
+  assert.equal(adapter.businessCancelCount(), 0);
+});
+
 test('an invalid replacement response leaves the current browser playback active', async () => {
   const fake = fakeEnvironment();
   const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
@@ -939,6 +1125,10 @@ test('an invalid replacement response leaves the current browser playback active
   assert.throws(
     () => adapter.beginPlayout(firstResponse),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'RESPONSE_ID_REUSED'
+  );
+  assert.throws(
+    () => adapter.beginPlayout(null),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_BEGIN_FAILED'
   );
   assert.equal(source.stopCount, 0);
   assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
@@ -1049,4 +1239,28 @@ test('close fences a pending playout unlock and remains terminal', async () => {
     () => adapter.startCapture(),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'ADAPTER_CLOSED'
   );
+});
+
+test('a playout-ready observer that closes the adapter fences the unlock result', async () => {
+  const fake = fakeEnvironment();
+  let adapter;
+  let closePromise = null;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onPlayoutState(event) {
+        if (event.reason === 'playout_unlocked') closePromise = adapter.close();
+      },
+    },
+  });
+
+  await assert.rejects(
+    () => adapter.unlockPlayout(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_CANCELLED'
+  );
+  assert.notEqual(closePromise, null);
+  await closePromise;
+  assert.equal(fake.contexts[0].closeCount, 1);
+  assert.equal(adapter.playoutState(), 'closed');
 });

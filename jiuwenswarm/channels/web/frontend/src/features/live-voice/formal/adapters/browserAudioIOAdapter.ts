@@ -324,8 +324,8 @@ function requiredText(value: string, field: string): string {
   return value;
 }
 
-function responseKey(response: Readonly<AudioResponseRef>): string {
-  return `${response.interaction_id}\u0000${response.response_id}\u0000${response.response_generation}`;
+function sameResponse(left: Readonly<AudioResponseRef>, right: Readonly<AudioResponseRef>): boolean {
+  return left.interaction_id === right.interaction_id && left.response_id === right.response_id && left.response_generation === right.response_generation;
 }
 
 function safeBoolean(value: unknown): boolean | null {
@@ -497,6 +497,7 @@ export class BrowserAudioIOAdapter {
     let worklet: BrowserAudioWorkletNodeLike | null = null;
     let startedSession: CaptureSession | null = null;
     try {
+      this.#requireCurrentCaptureToken(token);
       const deviceId = typeof input.deviceId === 'string' && input.deviceId.trim() ? input.deviceId : null;
       const audioConstraints: MediaTrackConstraints = {
         echoCancellation: { ideal: true },
@@ -605,11 +606,18 @@ export class BrowserAudioIOAdapter {
         }),
       });
       const onTrackEnded = pending.onTrackEnded;
+      let reportedTrackMuted: boolean | null = null;
       const onTrackMute = () => {
-        if (this.#capture?.token === token) this.#emitCaptureState('active', 'track_muted', metadata);
+        if (this.#capture?.token === token && reportedTrackMuted !== true) {
+          reportedTrackMuted = true;
+          this.#emitCaptureState('active', 'track_muted', metadata);
+        }
       };
       const onTrackUnmute = () => {
-        if (this.#capture?.token === token) this.#emitCaptureState('active', 'track_unmuted', metadata);
+        if (this.#capture?.token === token && reportedTrackMuted !== false) {
+          reportedTrackMuted = false;
+          this.#emitCaptureState('active', 'track_unmuted', metadata);
+        }
       };
       const onDeviceChange = () => void this.#observeDeviceChange(token);
       const onContextStateChange = pending.onContextStateChange;
@@ -645,6 +653,16 @@ export class BrowserAudioIOAdapter {
       this.#pendingCaptureResources = null;
       source.connect(worklet);
       this.#emitCaptureState('active', 'capture_started', metadata);
+      if (this.#capture !== session || token !== this.#captureToken) {
+        throw new BrowserAudioIOViolation('CAPTURE_CANCELLED', 'capture was fenced during active handoff');
+      }
+      if (track.muted === true && reportedTrackMuted !== true) {
+        reportedTrackMuted = true;
+        this.#emitCaptureState('active', 'track_muted', metadata);
+      }
+      if (this.#capture !== session || token !== this.#captureToken) {
+        throw new BrowserAudioIOViolation('CAPTURE_CANCELLED', 'capture was fenced during muted-track handoff');
+      }
       return metadata;
     } catch (error) {
       const cancelled = token !== this.#captureToken;
@@ -679,8 +697,14 @@ export class BrowserAudioIOAdapter {
   stopCapture(reason = 'requested'): Promise<boolean> {
     if (this.#captureStopPromise !== null) return this.#captureStopPromise;
     if (this.#captureCleanupPromise !== null) return this.#captureCleanupPromise.then(() => false);
-    const operation = this.#stopCaptureResources(reason);
+    let resolveStop: (value: boolean) => void = () => undefined;
+    let rejectStop: (reason?: unknown) => void = () => undefined;
+    const operation = new Promise<boolean>((resolve, reject) => {
+      resolveStop = resolve;
+      rejectStop = reject;
+    });
     this.#captureStopPromise = operation;
+    void this.#stopCaptureResources(reason).then(resolveStop, rejectStop);
     const clearOperation = () => {
       if (this.#captureStopPromise === operation) this.#captureStopPromise = null;
     };
@@ -758,6 +782,7 @@ export class BrowserAudioIOAdapter {
         this.#emitPlayoutState('failed', 'audio_context_not_running', playback);
       };
       this.#emitPlayoutState('ready', 'playout_unlocked', null);
+      this.#requireCurrentPlayoutUnlock(generation, context);
       return Object.freeze({
         encoding: 'pcm_f32' as const,
         sample_rate_hz: context.sampleRate,
@@ -777,8 +802,14 @@ export class BrowserAudioIOAdapter {
       throw new BrowserAudioIOViolation('PLAYOUT_NOT_UNLOCKED', 'playout must be unlocked by a user action');
     }
     const prior = this.#playback;
+    let normalizedResponse: Readonly<AudioResponseRef>;
     try {
-      this.#audioPort.begin(response);
+      normalizedResponse = Object.freeze({
+        interaction_id: response.interaction_id,
+        response_id: response.response_id,
+        response_generation: response.response_generation,
+      });
+      this.#audioPort.begin(normalizedResponse);
     } catch (error) {
       throw mapBrowserFailure(error, 'PLAYOUT_BEGIN_FAILED');
     }
@@ -787,7 +818,7 @@ export class BrowserAudioIOAdapter {
       this.#stopPlaybackSources(prior, 'response_replaced');
     }
     this.#playback = {
-      response: Object.freeze({ ...response }),
+      response: normalizedResponse,
       sources: new Map(),
       completed: new Map(),
       acknowledged: new Map(),
@@ -802,7 +833,7 @@ export class BrowserAudioIOAdapter {
     const context = this.#playoutContext;
     const playback = this.#playback;
     if (context === null || context.state !== 'running' || playback === null || playback.stopped) return false;
-    if (responseKey(playback.response) !== responseKey(chunk.response)) return false;
+    if (!sameResponse(playback.response, chunk.response)) return false;
     requiredText(chunk.unit_id, 'unit_id');
     if (chunk.channel_count !== 1 || !Number.isSafeInteger(chunk.sample_rate_hz) || chunk.sample_rate_hz <= 0) {
       throw new BrowserAudioIOViolation('INVALID_PLAYOUT_FORMAT', 'playout requires mono PCM with a positive sample rate');
@@ -869,7 +900,7 @@ export class BrowserAudioIOAdapter {
 
   stopPlayout(response: Readonly<AudioResponseRef>, reason = 'requested'): boolean {
     const playback = this.#playback;
-    if (playback === null || responseKey(playback.response) !== responseKey(response) || playback.stopped) return false;
+    if (playback === null || !sameResponse(playback.response, response) || playback.stopped) return false;
     try {
       if (!this.#audioPort.stopLocal(response)) return false;
     } catch (error) {
@@ -1016,6 +1047,7 @@ export class BrowserAudioIOAdapter {
 
   #handlePlaybackEnded(playback: PlaybackSession, record: PlaybackSourceRecord): void {
     if (this.#playback !== playback || playback.stopped || record.stopped) return;
+    record.stopped = true;
     playback.sources.delete(`${record.unitId}\u0000${record.seq}`);
     try {
       record.source.disconnect();
