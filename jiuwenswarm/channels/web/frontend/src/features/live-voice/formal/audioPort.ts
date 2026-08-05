@@ -18,6 +18,31 @@ export interface AudioChunk {
   readonly provider: Readonly<AudioProviderRef>;
 }
 
+export const LIVE_VOICE_AUDIO_FRAME_DURATION_MS = 20;
+
+export interface AudioCaptureRef {
+  readonly capture_id: string;
+  readonly capture_generation: number;
+  readonly track_id: string;
+}
+
+export interface AudioFrameFormat {
+  readonly encoding: 'pcm_f32';
+  readonly sample_rate_hz: number;
+  readonly channel_count: 1;
+  readonly frame_duration_ms: typeof LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
+  readonly samples_per_channel: number;
+}
+
+export interface CapturedAudioFrame {
+  readonly capture: Readonly<AudioCaptureRef>;
+  readonly seq: number;
+  readonly sample_cursor: number;
+  readonly context_time_s: number;
+  readonly format: Readonly<AudioFrameFormat>;
+  readonly samples: Float32Array;
+}
+
 export interface AudioRenderTransform {
   readonly transform: string;
   readonly source_start: number;
@@ -56,6 +81,71 @@ function normalizeRef(ref: Readonly<AudioResponseRef>): Readonly<AudioResponseRe
     interaction_id: requiredText(ref.interaction_id, 'interaction_id'),
     response_id: requiredText(ref.response_id, 'response_id'),
     response_generation: ref.response_generation,
+  });
+}
+
+function nonNegativeSafeInteger(value: number, field: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new AudioPortViolation('INVALID_AUDIO_INTEGER', `${field} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+export function audioFrameSamples(sampleRateHz: number): number {
+  if (!Number.isSafeInteger(sampleRateHz) || sampleRateHz <= 0) {
+    throw new AudioPortViolation('INVALID_SAMPLE_RATE', 'sample_rate_hz must be a positive safe integer');
+  }
+  const frameSampleNumerator = sampleRateHz * LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
+  if (!Number.isSafeInteger(frameSampleNumerator) || frameSampleNumerator % 1000 !== 0) {
+    throw new AudioPortViolation('NON_INTEGRAL_AUDIO_FRAME', 'sample_rate_hz must produce an exact 20ms frame');
+  }
+  return frameSampleNumerator / 1000;
+}
+
+export function createCapturedAudioFrame(input: Readonly<CapturedAudioFrame>): Readonly<CapturedAudioFrame> {
+  const generation = nonNegativeSafeInteger(input.capture.capture_generation, 'capture_generation');
+  const seq = nonNegativeSafeInteger(input.seq, 'seq');
+  const sampleCursor = nonNegativeSafeInteger(input.sample_cursor, 'sample_cursor');
+  const expectedSamples = audioFrameSamples(input.format.sample_rate_hz);
+  if (
+    input.format.encoding !== 'pcm_f32' ||
+    input.format.channel_count !== 1 ||
+    input.format.frame_duration_ms !== LIVE_VOICE_AUDIO_FRAME_DURATION_MS ||
+    input.format.samples_per_channel !== expectedSamples
+  ) {
+    throw new AudioPortViolation('INVALID_AUDIO_FRAME_FORMAT', 'capture frame format does not match the frozen AIO-B contract');
+  }
+  if (!(input.samples instanceof Float32Array) || input.samples.length !== expectedSamples) {
+    throw new AudioPortViolation('INVALID_AUDIO_FRAME_SAMPLES', 'capture frame samples do not match the declared format');
+  }
+  for (const sample of input.samples) {
+    if (!Number.isFinite(sample)) {
+      throw new AudioPortViolation('INVALID_AUDIO_FRAME_SAMPLES', 'capture frame samples must be finite');
+    }
+  }
+  if (!Number.isFinite(input.context_time_s) || input.context_time_s < 0) {
+    throw new AudioPortViolation('INVALID_AUDIO_TIMESTAMP', 'context_time_s must be a non-negative finite number');
+  }
+  if (sampleCursor !== seq * expectedSamples) {
+    throw new AudioPortViolation('INVALID_AUDIO_CURSOR', 'sample_cursor must be contiguous with the frame sequence');
+  }
+  return Object.freeze({
+    capture: Object.freeze({
+      capture_id: requiredText(input.capture.capture_id, 'capture_id'),
+      capture_generation: generation,
+      track_id: requiredText(input.capture.track_id, 'track_id'),
+    }),
+    seq,
+    sample_cursor: sampleCursor,
+    context_time_s: input.context_time_s,
+    format: Object.freeze({
+      encoding: 'pcm_f32',
+      sample_rate_hz: input.format.sample_rate_hz,
+      channel_count: 1,
+      frame_duration_ms: LIVE_VOICE_AUDIO_FRAME_DURATION_MS,
+      samples_per_channel: expectedSamples,
+    }),
+    samples: input.samples.slice(),
   });
 }
 

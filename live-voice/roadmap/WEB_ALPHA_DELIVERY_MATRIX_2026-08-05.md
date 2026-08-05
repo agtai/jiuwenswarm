@@ -26,12 +26,12 @@ This file is **not** a second status page or an implementation-ready queue:
 
 ## 2. Web Alpha scope shared by every package
 
-- Carrier: JiuwenSwarm desktop Web frontend. X-WEB must freeze the exact single-Chromium or Chrome+Edge dual-Chromium baseline before its real Gate; current Chrome evidence does not silently promise Chrome+Edge coverage.
+- Carrier: JiuwenSwarm desktop Web frontend. D-058 freezes the first Alpha browser scope to one desktop Google Chrome baseline. Each candidate records its exact Chrome version, OS, origin, device and network; this does not silently promise Edge, every Chromium build or a public cross-platform matrix.
 - Deployment: `localhost` is a development/controlled-test exception; non-localhost Alpha evidence requires a secure context and a declared Browser↔Gateway deployment/proxy path.
 - Security: Speech/model Provider credentials stay behind Gateway/AgentServer; raw audio is not persisted by default.
 - Web behavior: permission grant/deny/revoke, device change/loss, autoplay/user activation, page hidden/background/resume, refresh/reconnect, CSP/CORS/proxy diagnostics and text fallback are explicit evidence, never silent assumptions.
-- Deferred compatibility: mobile Web, PWA, browsers outside the later accepted Alpha baseline and a public cross-platform matrix are Later unless a newer accepted decision changes scope.
-- Deferred implementation choices: AudioWorklet/MediaRecorder, media encoding/rate/frame, WebSocket/WebTransport and selected real Speech Provider must be frozen by their consuming B/C package before real integration.
+- Deferred compatibility: Edge/other Chromium, Firefox, Safari, mobile Web, PWA, WebView2/native clients and a public cross-platform matrix are Later unless a newer accepted decision changes scope.
+- AIO-B consumption decision: D-058 selects `getUserMedia + AudioWorklet`, 20ms mono `pcm_f32` at the actual AudioContext rate, and explicit Web Audio playout. MediaRecorder is not a realtime-frame fallback. Wire codec/resampling, WebSocket/WebTransport and selected real Speech Provider remain deferred to RM-B/C and SR/SS-C.
 - Shared invariants: committed-only side effects, exact identity/scope, four non-escalating cancel scopes, generation fencing, presentation truth, Task/Core/Executor authority and flag-off text compatibility remain unchanged by the Web carrier.
 
 ## 3. Classification and package notation
@@ -75,7 +75,7 @@ Current source examples are [useLiveVoiceDemo.ts](../../jiuwenswarm/channels/web
 | WP | Module | Deliverable and user-visible result | Demo predecessor → formal target | Dependencies / parallel work | Window / timebox | Risk / acceptance | Current status |
 |---|---|---|---|---|---|---|---|
 | `AIO-A` | Audio Device & I/O | AudioFrame/PlaybackControl Port, clocked fake and conformance; later browser adapters share one contract | `unsupported` formal Audio Port → AIO authority | ACG Identity/Clock/Audio/Error; parallel SR-A/SS-A/RM-A | W1 / `0.5–1d` | T1; ACG + module conformance | see STATUS |
-| `AIO-B` | Audio Device & I/O | Browser capture/playout, permission/device lifecycle and declared processing path | Browser Demo capture `fallback` → formal browser AIO Adapter | AIO-A; parallel SR-B/SS-B/RM-B/X-WEB | W2–W3 / `2–3d` | T2; P1 + Web Alpha Gate | see STATUS |
+| `AIO-B` | Audio Device & I/O | Chrome `getUserMedia`/AudioWorklet capture, explicit Web Audio playout, permission/device lifecycle and actual processing provenance | Browser Demo capture `fallback` → formal browser AIO Adapter | AIO-A + D-058; parallel SR-B/SS-B/RM-B/X-WEB | W2–W3 / `2–3d` | T2; P1 + Web Alpha Gate | see STATUS |
 | `AIO-C` | Audio Device & I/O | Exact-response hard-stop, device/permission/page-lifecycle failures and measured Web baseline | Local TTS stop `demo_substitute` → AIO playback authority | AIO-B + fake/real Runtime control; parallel SS-C/CR-B | W3 / `0.5–1d` | T2; P1/P2 + Web Alpha Gate | see STATUS |
 | `SR-A` | Speech Recognition | Provider-neutral batch/stream/cancel/capability/error Port and fake | Browser recognition `fallback` → formal SR Port | ACG Speech/Commit/Error; parallel SS-A/AIO-A | W1 / `0.5–1d` | T1; ACG + SR conformance | see STATUS |
 | `SR-B` | Speech Recognition | P1 batch STT Adapter, Browser fallback and Gateway Speech RPC | Direct Browser final `fallback` → formal batch SR route | SR-A; parallel AIO-B/SS-B/text regression | W2 / `1–2d` | T1; P1 + Week 2 Gate | see STATUS |
@@ -119,7 +119,7 @@ Current source examples are [useLiveVoiceDemo.ts](../../jiuwenswarm/channels/web
 |---|---|---|---|---|---|---|---|
 | `X-OBS` | Observability & Benchmark | Correlated trace/metric schema, latency segments, queue/cancel/fence/task metrics and reproducible benchmarks | Route labels/logs `demo_substitute` → formal evidence plane | Event/metric definitions; parallel all tracks | W2–W3 / `2–3d` | T2; Week 2/Web Alpha evidence | see STATUS |
 | `X-E2E` | Vertical Integration & Fault Injection | One cumulative P1/P2/P3alpha route, real/fallback switching, fault injection and flag-off regressions | Separate Demo modes `demo_substitute` → cumulative Integrated route | Fake slices first; real Gates depend on matching B/C packages | W2–W4 / `3–5d` | T3; Week 2 and Web Alpha release Gates | see STATUS |
-| `X-WEB` | Web Productization | Desktop Web UI, browser-scope decision, permissions/privacy, secure deployment, diagnostics, route controls and exact P3alpha structured controls | Historical X-WIN `unsupported` → Web product carrier | AIO/Speech contracts for UI; real Gate AIO-B/C, SR/SS, RM/CR and TC-B | W2–W4 / `3–5d` | T3 at release; Web platform Gate | see STATUS |
+| `X-WEB` | Web Productization | Desktop Web UI, single-Chrome scope, permissions/privacy, secure deployment, diagnostics, route controls and exact P3alpha structured controls | Historical X-WIN `unsupported` → Web product carrier | Browser scope fixed by D-058; AIO/Speech contracts for UI; real Gate AIO-B/C, SR/SS, RM/CR and TC-B | W2–W4 / `3–5d` | T3 at release; Web platform Gate | see STATUS |
 
 `X-WEB` supersedes `X-WIN`; it does not rename or absorb the AIO, RM, Speech, CR or Task authorities. Platform UI may display and route their facts but cannot own their lifecycle.
 

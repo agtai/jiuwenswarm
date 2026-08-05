@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live Voice AIO-B Chrome Harness</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 2rem;
+        max-width: 70rem;
+      }
+      button {
+        margin: 0 0.5rem 0.5rem 0;
+        padding: 0.6rem 1rem;
+      }
+      pre {
+        background: Canvas;
+        border: 1px solid GrayText;
+        padding: 1rem;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Live Voice AIO-B Chrome Harness</h1>
+    <p>
+      Evidence-only harness. It records metadata and event counts, never raw microphone samples. It does not prove Speech, Agent, Realtime Media, AIO-C latency
+      or Web Alpha release closure.
+    </p>
+    <button id="start" type="button">Start capture</button>
+    <button id="stop" type="button">Stop capture</button>
+    <button id="play" type="button">Play synthetic PCM</button>
+    <button id="close" type="button">Close adapter</button>
+    <pre id="state" aria-live="polite"></pre>
+    <script type="module" src="./liveVoiceBrowserAudioIOHarness.ts"></script>
+  </body>
+</html>
