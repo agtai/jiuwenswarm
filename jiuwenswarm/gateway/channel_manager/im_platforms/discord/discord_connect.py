@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from jiuwenswarm.gateway.channel_manager.base import BaseChannel, ChannelMetadata, RobotMessageRouter
+from jiuwenswarm.gateway.channel_manager.sdk.capabilities import ChannelCapabilities  
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
@@ -37,7 +38,9 @@ class DiscordChannel(BaseChannel):
     """Discord Bot channel."""
 
     name = "discord"
-
+    capabilities = ChannelCapabilities(          # ← AJOUTE (3 lignes)
+        max_message_length=2000,
+    )
     def __init__(self, config: DiscordChannelConfig, router: RobotMessageRouter):
         super().__init__(config, router)
         self.config: DiscordChannelConfig = config
