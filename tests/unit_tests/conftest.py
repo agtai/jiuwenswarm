@@ -18,8 +18,11 @@ functions, hence this hook.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
+
+import pytest
 
 import jiuwenswarm.common.utils as _utils
 
@@ -36,6 +39,18 @@ _EXTERNAL_MEMORY_BASENAMES = frozenset(
         "test_external_memory_config.py",
     }
 )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def event_loop_policy() -> asyncio.AbstractEventLoopPolicy:
+    """Keep pytest-asyncio from creating an unowned policy-level event loop.
+
+    Its Runner snapshots the current loop before each async scope. On Python
+    3.12, the default policy otherwise creates one just for that snapshot.
+    """
+    policy = asyncio.get_event_loop_policy()
+    policy.set_event_loop(None)
+    return policy
 
 
 def _stub_get_config_file() -> Path:

@@ -1903,7 +1903,7 @@ def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkey
     assert adapter._evolution_interrupt_rail is interrupt_rails[0]
 
 
-def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):
+async def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     monkeypatch.setattr(
@@ -1923,12 +1923,15 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
         },
     )
 
-    response = asyncio.run(adapter.handle_user_answer(request))
+    try:
+        response = await adapter.handle_user_answer(request)
+    finally:
+        await adapter.cleanup()
 
     assert response.payload["resolved"] is False
 
 
-def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch):
+async def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     calls: list[tuple[str, str]] = []
@@ -1971,7 +1974,10 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
         },
     )
 
-    response = asyncio.run(adapter.handle_user_answer(request))
+    try:
+        response = await adapter.handle_user_answer(request)
+    finally:
+        await adapter.cleanup()
 
     assert response.payload["resolved"] is True
     assert calls == [("approve_simplify", "evolve_simplify_team123")]
