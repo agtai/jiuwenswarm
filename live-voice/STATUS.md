@@ -9,7 +9,7 @@
 - Product Gate: Integrated Demo `NOT RUNNABLE`; Replacement Ledger `0/100`.
 - Routes: P1 `fallback + AIO foundation`; P2 `formal foundations only`; P3alpha `Compatibility Adapter + reviewed formal backend foundation`; Integrated `unavailable`.
 - Current priority: add authenticated product composition for the reviewed P3alpha backend while keeping the formal mutation route disabled until that authority exists.
-- Next independent slices: Speech critical-token safety; then real Agent Adapter + CR notification consumer for P2.
+- Next independent slices: Speech critical-token safety; D-059 now unblocks the real Agent Adapter + CR notification consumer for P2 under its frozen interface Task Packet.
 - Verified code base: `250ffa6` (pre-P3alpha reviewed code base); current P3alpha backend affected verification `PASS`. Detailed evidence is linked below.
 
 ## Package state capsule
@@ -51,7 +51,7 @@ The carrier is the JiuwenSwarm desktop Web frontend. D-058 freezes the first Alp
 |---|---|---|---|
 | Shared contract | ACG v2 critical kernel, fixtures/fakes/conformance and route telemetry are committed and reviewed; strict Python/TypeScript ContextRef and source-backed WorkProgress v2 parity are integrated | keep stable while real consumers integrate | ContextRef authorization/expiry/redaction enforcement remains consumer-owned; no replacement credit from contract/fake evidence alone |
 | P1 Speech I/O | AIO/SR/SS Ports and Browser Speech fallback are committed; AIO-B adds a reviewed Chrome `getUserMedia`/AudioWorklet/Web Audio Adapter, exact 20ms PCM frames, lifecycle tests and one real-device normal-path run | connect the bounded Adapter only through owned SR/RM B/C packages without claiming a complete P1 route | no real SR/SS Provider or Browser↔Gateway media route; permission revoke/device loss/background and AIO-C latency lack real evidence; AIO-B alone earns no P1 credit |
-| P2 Realtime | CR/RM/II/AB A packages and deterministic fake vertical are committed; CR-B owns the bounded runtime/presentation foundation, while AB-B adds bounded non-blocking Agent dispatch and source-backed round WorkProgress over an injected Adapter | connect CR-B/AB-B through a separately reviewed real Agent compatibility Adapter and CR notification consumer | no real media transport, Agent Adapter/route, browser presentation ACK, Session History durability or CR notification consumption; CR-B/AB-B foundations earn no P2/Web Gate credit |
+| P2 Realtime | CR/RM/II/AB A packages and deterministic fake vertical are committed; CR-B owns the bounded runtime/presentation foundation, while AB-B adds bounded non-blocking Agent dispatch and source-backed round WorkProgress over an injected Adapter; D-059 freezes the five previously missing adjacent interfaces | resume the [P2 real Agent + CR Task Packet](roadmap/P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md) and connect the real Harness source through the reviewed foundations | implementation and real-facade evidence remain open; no real media route, browser PresentationAck, authenticated product composition or complete history durability; no P2/Web Gate credit |
 | P3alpha Task | TC/ED/VB A packages and fake vertical are committed; the reviewed backend batch adds durable TC-B Core/Store, a project-bound ED-B Adapter foundation and strict VB-B policy over D-031's carrier | add authenticated product composition, startup/periodic reconciliation and route telemetry; close ED workspace isolation before the clean-workspace Gate | formal mutation route remains disabled; VB-C, TC-C, WorkProgress/CR return wiring and product/real-service acceptance remain open |
 | Integration | three fake verticals and opt-in Browser P1 fallback exist | after one real route passes review, start cumulative integration and service validation | Integrated mode is documented but not runnable |
 
@@ -94,6 +94,7 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 - Browser Speech fidelity remains weak for critical Chinese and technical tokens; committed text and critical-token clarification remain required.
 - Existing task scope is single-user request consistency, not production authorization; JSON guarantees are same-process, not exactly-once.
 - Current supplement/cancel behavior is not a production generation or Agent/Tool side-effect fence.
+- D-059 closes the P2 interface-decision blocker only. Canonical Harness round instrumentation, exact scoped cancellation, the formal no-history seam, atomic reservation and retained shutdown are not implemented or accepted until the Worker2 candidate passes review.
 - A repository-local `.venv` directory and restored frontend dependencies are present on this machine, but their usability, credentials, Provider configuration, project registration, runtime data, browser permissions/devices and network state are machine-private and are not Git-restored guarantees.
 
 ## Detailed evidence routes
@@ -103,6 +104,7 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 - AIO-B/X-WEB decision, implementation and evidence: [AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md](AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md).
 - CR-B runtime loop, presentation truth and review evidence: [CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md](CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md).
 - WorkProgress v2 and AB-B runtime foundation review/evidence: [AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md](AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md).
+- Frozen P2 real Agent/Harness interface execution contract: [P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md](roadmap/P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md).
 - Formal P3alpha backend Core/Store/Executor/policy review and evidence: [P3ALPHA_REPLACEMENT_REVIEW_2026-08-05.md](P3ALPHA_REPLACEMENT_REVIEW_2026-08-05.md).
 - V0 immutable evidence: [V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md).
 - Environment and operating procedures: [E2E_RUNBOOK.md](runbooks/E2E_RUNBOOK.md).
@@ -111,4 +113,4 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 
 1. Build the next P3alpha acceptance slice around the reviewed backend: obtain a real authenticated principal and server-resolved authorization/context, compose policy/Core/Store/ED with startup and periodic reconciliation plus route telemetry, and close ED workspace isolation. Keep VB-C, TC-C and WorkProgress/CR return wiring as explicit later work.
 2. Keep Speech critical-token safety as the next independent P1 slice; it must gate committed input with zero Agent/Tool/Task side effects before clarification, without taking Task authority from VB-B/TC-B.
-3. Connect AIO-B only through owned SR/RM B/C packages; connect CR-B/AB-B only through a reviewed real Agent compatibility Adapter and CR notification consumer. These bounded foundations are not the formal P1/P2 end-to-end routes.
+3. Resume Worker2 against D-059 and the frozen P2 interface Task Packet; connect CR-B/AB-B only through its reviewed real Agent/Harness source, exact cancel, formal history and atomic composition seams. Connect AIO-B only through owned SR/RM B/C packages. These bounded foundations are not the formal P1/P2 end-to-end routes.
