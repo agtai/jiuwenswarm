@@ -705,6 +705,24 @@ class AutoHarnessService:
         if existing is not context:
             raise RuntimeError(f"Task execution context already bound: {task_id}")
 
+    def _adopt_scheduled_task_execution_context(
+        self,
+        candidate_task_id: str,
+        persisted_task_id: str,
+    ) -> bool:
+        """Move a replay candidate binding to one persisted pending task."""
+
+        contexts = getattr(self, "_scheduled_task_execution_contexts", {})
+        context = contexts.pop(candidate_task_id, None)
+        if context is None:
+            return False
+        if persisted_task_id in contexts:
+            if context.release is not None:
+                context.release()
+            return False
+        contexts[persisted_task_id] = context
+        return True
+
     def get_scheduled_task_execution_context(
         self,
         task_id: str,
@@ -886,10 +904,26 @@ class AutoHarnessService:
             await self._scheduler.start()
             logger.info("[AutoHarnessService] Scheduler started")
 
-    async def stop_scheduler(self) -> None:
+    async def reconcile_task_statuses(self) -> int:
+        """Recover persisted carrier facts without starting its polling loop."""
+
+        if self._task_store is None:
+            self._init_scheduler()
+        if self._task_store is None:
+            raise RuntimeError("carrier task store is unavailable")
+        return int(
+            await self._task_store.reconcile_task_statuses(
+                origin_namespace="live_voice"
+            )
+        )
+
+    async def stop_scheduler(self, *, interrupt_running: bool = False) -> None:
         """Stop the scheduler (called on server shutdown)."""
         if self._scheduler is not None:
-            await self._scheduler.stop()
+            if interrupt_running:
+                await self._scheduler.stop(interrupt_running=True)
+            else:
+                await self._scheduler.stop()
             logger.info("[AutoHarnessService] Scheduler stopped")
         self.clear_scheduled_task_execution_contexts()
 
@@ -3591,14 +3625,68 @@ class AutoHarnessService:
                     fingerprint=fingerprint,
                 )
                 if store_result.get("result") != "created":
-                    self.release_scheduled_task_execution_context(task_id)
                     if store_result.get("result") == "conflict":
+                        self.release_scheduled_task_execution_context(task_id)
                         return {
                             "error": "idempotency_key 已用于不同的任务意图",
                             "code": "IDEMPOTENCY_CONFLICT",
                             "existing_task_id": store_result.get("existing_task_id"),
                             "origin_namespace": normalized_origin_namespace,
                         }
+                    replay_task = store_result.get("task")
+                    replay_status = (
+                        str(replay_task.get("status") or "")
+                        if isinstance(replay_task, dict)
+                        else ""
+                    )
+                    persisted_task_id = str(store_result.get("task_id") or "")
+                    if (
+                        normalized_origin_namespace == "live_voice"
+                        and persisted_task_id
+                        and replay_status == "pending"
+                    ):
+                        adopted = self._adopt_scheduled_task_execution_context(
+                            task_id,
+                            persisted_task_id,
+                        )
+                        try:
+                            triggered = bool(
+                                adopted
+                                and self._scheduler is not None
+                                and await self._scheduler.trigger_immediate(
+                                    persisted_task_id
+                                )
+                            )
+                        except Exception as exc:
+                            self.release_scheduled_task_execution_context(
+                                persisted_task_id
+                            )
+                            return {
+                                "error": f"formal task replay trigger failed: {exc}",
+                                "code": "EXECUTOR_DELIVERY_UNAVAILABLE",
+                                "task_id": persisted_task_id,
+                            }
+                        latest = self._task_store.get_task(persisted_task_id) or {}
+                        is_execution_active = getattr(
+                            self._scheduler, "is_execution_active", None
+                        )
+                        active = bool(
+                            callable(is_execution_active)
+                            and is_execution_active(persisted_task_id)
+                        )
+                        if not triggered and not active:
+                            self.release_scheduled_task_execution_context(
+                                persisted_task_id
+                            )
+                            if latest.get("status") not in TERMINAL_STATUSES:
+                                return {
+                                    "error": "formal task replay could not resume execution",
+                                    "code": "EXECUTOR_DELIVERY_UNAVAILABLE",
+                                    "task_id": persisted_task_id,
+                                }
+                        store_result = {**store_result, "task": latest}
+                    else:
+                        self.release_scheduled_task_execution_context(task_id)
                     return _build_schedule_run_replay_payload(
                         store_result,
                         normalized_origin_namespace,

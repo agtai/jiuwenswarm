@@ -45,6 +45,7 @@ _PROTOCOL_TERMINAL_STATUSES = (
     "completed_without_pr",
     "skipped",
     "needs_human",
+    "interrupted",
 )
 _UNKNOWN_EXECUTION_TARGET = {
     "project_dir": "unknown",
@@ -75,7 +76,9 @@ class _ProjectExecutor:
         )
 
 
-def _create_git_project(tmp_path: Path, name: str = "project") -> tuple[Path, dict[str, str]]:
+def _create_git_project(
+    tmp_path: Path, name: str = "project"
+) -> tuple[Path, dict[str, str]]:
     project_dir = tmp_path / name
     project_dir.mkdir()
     subprocess.run(["git", "init", "-q", str(project_dir)], check=True)
@@ -648,6 +651,94 @@ async def test_idempotent_run_replays_after_json_reload_without_trigger(
 
 
 @pytest.mark.asyncio
+async def test_live_voice_pending_replay_rebinds_and_resumes_original_task(
+    tmp_path,
+) -> None:
+    project_dir, execution_target = _create_git_project(tmp_path)
+    project_kwargs = _project_run_kwargs(project_dir, execution_target)
+    store_dir = tmp_path / "store"
+    first_store = PersistentTaskStore(store_dir)
+    first_service = _service(first_store, _Scheduler())
+    first_releases: list[str] = []
+    first = await first_service.run_task(
+        "durable formal task",
+        execution_agent=object(),
+        context_release=lambda: first_releases.append("first"),
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="formal-restart-command",
+        **project_kwargs,
+    )
+    first_service.clear_scheduled_task_execution_contexts()
+
+    replay_store = PersistentTaskStore(store_dir)
+    replay_scheduler = _Scheduler()
+    replay_service = _service(replay_store, replay_scheduler)
+    replay_agent = object()
+    replay = await replay_service.run_task(
+        "durable formal task",
+        execution_agent=replay_agent,
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="formal-restart-command",
+        **project_kwargs,
+    )
+
+    assert replay["task_id"] == first["task_id"]
+    assert replay["idempotent_replay"] is True
+    assert replay_scheduler.triggered == [first["task_id"]]
+    rebound = replay_service.get_scheduled_task_execution_context(first["task_id"])
+    assert rebound is not None and rebound.agent is replay_agent
+    assert len(replay_store.list_tasks()) == 1
+    assert first_releases == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_live_voice_pending_replay_releases_binding_when_terminal_wins_race(
+    tmp_path,
+) -> None:
+    project_dir, execution_target = _create_git_project(tmp_path)
+    project_kwargs = _project_run_kwargs(project_dir, execution_target)
+    store_dir = tmp_path / "store"
+    first_service = _service(PersistentTaskStore(store_dir), _Scheduler())
+    first = await first_service.run_task(
+        "durable formal task",
+        execution_agent=object(),
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="formal-terminal-race",
+        **project_kwargs,
+    )
+    first_service.clear_scheduled_task_execution_contexts()
+
+    replay_store = PersistentTaskStore(store_dir)
+
+    class _TerminalWinsScheduler(_Scheduler):
+        async def trigger_immediate(self, task_id: str) -> bool:
+            self.triggered.append(task_id)
+            await replay_store.update_task(task_id, {"status": "success"})
+            return False
+
+    releases: list[str] = []
+    replay_service = _service(replay_store, _TerminalWinsScheduler())
+    replay = await replay_service.run_task(
+        "durable formal task",
+        execution_agent=object(),
+        context_release=lambda: releases.append("candidate"),
+        owner_scope=_OWNER_SCOPE,
+        origin_namespace="live_voice",
+        idempotency_key="formal-terminal-race",
+        **project_kwargs,
+    )
+
+    assert replay["task_id"] == first["task_id"]
+    assert replay["status"] == "success"
+    assert replay["idempotent_replay"] is True
+    assert releases == ["candidate"]
+    assert replay_service._scheduled_task_execution_contexts == {}
+
+
+@pytest.mark.asyncio
 async def test_idempotency_conflict_releases_candidate_without_overwriting_winner(
     tmp_path,
 ) -> None:
@@ -998,6 +1089,45 @@ async def test_stop_scheduler_releases_all_task_contexts() -> None:
     assert scheduler.stopped is True
     assert sorted(released) == ["sch_a", "sch_b"]
     assert service._scheduled_task_execution_contexts == {}
+
+
+@pytest.mark.asyncio
+async def test_carrier_reconcile_without_scheduler_loop_recovers_orphan(
+    tmp_path,
+) -> None:
+    task_store = PersistentTaskStore(tmp_path)
+    await task_store.add_task(
+        {
+            "task_id": "sch_orphan_formal",
+            "query": "formal task",
+            "status": "running",
+            "origin_namespace": "live_voice",
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "current_execution_id": "exec_orphan",
+            "execution_history": [],
+        }
+    )
+    await task_store.add_task(
+        {
+            "task_id": "sch_active_legacy",
+            "query": "legacy task",
+            "status": "running",
+            "origin_namespace": "task_test",
+            "created_at": "2026-08-01T00:00:00+00:00",
+            "current_execution_id": "exec_legacy",
+            "execution_history": [],
+        }
+    )
+    service = _service(task_store, _Scheduler())
+
+    corrected = await service.reconcile_task_statuses()
+
+    assert corrected == 1
+    formal = task_store.get_task("sch_orphan_formal")
+    assert formal["status"] == "interrupted"
+    assert formal["last_error"] == "FORMAL_EXECUTION_LOST_ON_PROCESS_RESTART"
+    assert formal["execution_history"][-1]["status"] == "interrupted"
+    assert task_store.get_task("sch_active_legacy")["status"] == "running"
 
 
 @pytest.mark.asyncio
@@ -2314,6 +2444,66 @@ async def test_recurring_task_retains_one_context_across_executions(tmp_path) ->
     assert PersistentTaskStore(tmp_path).get_task(task_id)["execution_target"] == (
         _EXECUTION_TARGET
     )
+
+
+@pytest.mark.asyncio
+async def test_legacy_scheduler_loop_never_claims_formal_pending_row(tmp_path) -> None:
+    task_id = "sch_formal_owned_elsewhere"
+    task_store = PersistentTaskStore(tmp_path)
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "formal task",
+            "status": "pending",
+            "origin_namespace": "live_voice",
+            "execution_history": [],
+        }
+    )
+    scheduler = Scheduler(_SchedulerService(), task_store)
+
+    await scheduler.start()
+    await asyncio.sleep(0.01)
+    await scheduler.stop()
+
+    assert scheduler._running_executions == {}
+    assert task_store.get_task(task_id)["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_formal_shutdown_records_interruption_not_user_cancel(tmp_path) -> None:
+    task_id = "sch_formal_shutdown"
+    task_store = PersistentTaskStore(tmp_path)
+    await task_store.add_task(
+        {
+            "task_id": task_id,
+            "query": "formal task",
+            "interval_hours": 0,
+            "is_one_time": True,
+            "status": "pending",
+            "execution_history": [],
+        }
+    )
+    service = _BoundExecutionService(
+        {task_id: ScheduledTaskExecutionContext(object(), object())},
+        expected_starts=2,
+    )
+    scheduler = Scheduler(service, task_store)
+    scheduler._resolve_model = lambda _model_name=None: None
+    assert await scheduler.trigger_immediate(task_id) is True
+    for _ in range(100):
+        if service.started:
+            break
+        await asyncio.sleep(0.01)
+    assert service.started
+
+    await scheduler.stop(interrupt_running=True)
+
+    stored = task_store.get_task(task_id)
+    assert stored is not None
+    assert stored["status"] == "interrupted"
+    assert stored["status"] != "cancelled"
+    assert stored["execution_history"][-1]["status"] == "interrupted"
+    assert service.released == [task_id]
 
 
 @pytest.mark.asyncio

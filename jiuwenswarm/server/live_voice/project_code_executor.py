@@ -9,7 +9,7 @@ formal command, task, attempt, event, or retry identity.
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -76,8 +76,10 @@ class ProjectExecutionBinding:
     resolved_revision_kind: str
     resolved_revision_value: str | None
     model: Any = None
-    model_intent: str | None = None
+    model_identity: str | None = None
+    model_config_version: str | None = None
     context_release: Callable[[], None] | None = None
+    dispatch_fence: Callable[[], Awaitable[None]] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -160,17 +162,30 @@ class ProjectExecutionBinding:
                 "formal context, selected project, and Code Agent root must match",
                 ErrorCode.PERMISSION_DENIED,
             )
-        expected_model_intent = dict(spec.attributes).get("model_intent")
-        if self.model_intent != expected_model_intent:
+        attributes = dict(spec.attributes)
+        expected_model_identity = attributes.get("model_identity")
+        expected_model_config_version = attributes.get("model_config_version")
+        if (
+            not expected_model_identity
+            or not expected_model_config_version
+            or self.model_identity != expected_model_identity
+            or self.model_config_version != expected_model_config_version
+        ):
             raise FormalTaskViolation(
-                "EXECUTOR_MODEL_INTENT_MISMATCH",
-                "runtime model selection does not match the immutable task spec",
+                "EXECUTOR_MODEL_BINDING_MISMATCH",
+                "runtime model identity or configuration does not match the task",
                 ErrorCode.PERMISSION_DENIED,
             )
         if for_dispatch and self.execution_agent is None:
             raise FormalTaskViolation(
                 "EXECUTOR_CAPABILITY_UNAVAILABLE",
                 "project dispatch requires a task-scoped execution Agent",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        if for_dispatch and not callable(self.dispatch_fence):
+            raise FormalTaskViolation(
+                "EXECUTION_DISPATCH_FENCE_REQUIRED",
+                "project dispatch requires an authoritative handoff fence",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
         if for_dispatch and not callable(
@@ -247,6 +262,8 @@ class ProjectCodeExecutorAdapter:
         carrier_owns_release = False
         try:
             binding.validate(item.spec, for_dispatch=True)
+            assert binding.dispatch_fence is not None
+            await binding.dispatch_fence()
             payload = await binding.service.run_task(
                 item.spec.instruction,
                 binding.model,
@@ -259,7 +276,7 @@ class ProjectCodeExecutorAdapter:
                 owner_scope=dict(binding.owner_scope),
                 origin_namespace="live_voice",
                 idempotency_key=item.attempt_id,
-                model_intent=binding.model_intent,
+                model_intent=binding.model_identity,
             )
             task_id = _text(payload, "task_id")
             if task_id is None:
@@ -633,7 +650,7 @@ class ProjectCodeExecutorAdapter:
             return FormalAttemptState.TERMINAL, TerminalOutcome.FAILED
         if normalized == "cancelled":
             return FormalAttemptState.TERMINAL, TerminalOutcome.CANCELLED
-        if normalized in {"needs_human", "skipped"}:
+        if normalized in {"needs_human", "skipped", "interrupted"}:
             return FormalAttemptState.TERMINAL, TerminalOutcome.INTERRUPTED
         raise FormalTaskViolation(
             "UNSUPPORTED_EXECUTOR_STATUS",

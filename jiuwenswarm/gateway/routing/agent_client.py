@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
 AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
+_LOG_REDACTED_KEYS = frozenset({"auth_token"})
 
 
 class _ReceiverFailure:
@@ -48,12 +49,34 @@ def _wire_request_id_key(request_id: Any) -> str:
     return str(request_id)
 
 
+def _redact_log_secrets(data: Any) -> Any:
+    """Return a log-only copy with formal-route credentials removed."""
+    if isinstance(data, dict):
+        return {
+            key: "[REDACTED]"
+            if str(key).lower() in _LOG_REDACTED_KEYS
+            else _redact_log_secrets(value)
+            for key, value in data.items()
+        }
+    if isinstance(data, list):
+        return [_redact_log_secrets(value) for value in data]
+    if isinstance(data, tuple):
+        return tuple(_redact_log_secrets(value) for value in data)
+    return data
+
+
 def _to_json(data: Any) -> str:
     """将任意对象序列化为日志友好的 JSON 字符串."""
+    sanitized = _redact_log_secrets(data)
     try:
-        return json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
+        return json.dumps(
+            sanitized,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
     except Exception:
-        return repr(data)
+        return repr(sanitized)
 
 
 def _build_ws_origin(uri: str) -> str | None:

@@ -452,7 +452,11 @@ class AgentManager:
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有已创建 Agent 实例上的在途任务。"""
-        for modes in list(self.agents.values()):
+        for channel_id, modes in list(self.agents.items()):
+            # Formal tasks are durable server-owned executions. A transport
+            # disconnect is not an authorized ``task.cancel`` command.
+            if channel_id == "live_voice_formal_task":
+                continue
             for agent in list(modes.values()):
                 try:
                     await agent.cancel_inflight_work(reason)
@@ -632,6 +636,66 @@ class AgentManager:
                 cache_key=cache_key,
             )
             return self._borrow_agent(agent)
+
+    async def get_live_voice_formal_task_agent(
+        self,
+        project_dir: str,
+    ) -> "JiuWenSwarm | None":
+        """Return a project Code Agent with application-owned support files.
+
+        The dedicated channel/cache identity prevents a formal background task
+        from silently reusing a normal interactive Code Agent whose runtime
+        support contract may edit the target project's ``.gitignore``.
+        """
+
+        channel_key = "live_voice_formal_task"
+        mode_key = "code"
+        project_key = _normalize_project_dir(project_dir)
+        if not project_key:
+            return None
+        cache_key = _make_agent_cache_key(mode_key, "formal_task", project_key)
+        channel_agents = self.agents.get(channel_key, {})
+        if cache_key in channel_agents:
+            return self._borrow_agent(channel_agents[cache_key])
+
+        create_lock = self._get_agent_create_lock(channel_key, cache_key)
+        async with create_lock:
+            existing = self.agents.get(channel_key, {}).get(cache_key)
+            if existing is not None:
+                return self._borrow_agent(existing)
+            agent = await self._create_agent(
+                channel_key,
+                mode_key,
+                {
+                    "project_dir": project_key,
+                    "project_clean_runtime_support": True,
+                },
+                cache_key=cache_key,
+            )
+            return self._borrow_agent(agent)
+
+    async def cleanup_live_voice_formal_task_agents(self) -> None:
+        """Close and forget only the Agents owned by the formal P3 route."""
+
+        channel_key = "live_voice_formal_task"
+        agents = self.agents.pop(channel_key, {})
+        self._agent_create_params.pop(channel_key, None)
+        for agent in agents.values():
+            self._agent_pins.pop(id(agent), None)
+            self._agent_borrowers.pop(id(agent), None)
+            cleanup = getattr(agent, "cleanup", None)
+            if not callable(cleanup):
+                continue
+            try:
+                await cleanup()
+            except Exception as exc:  # noqa: BLE001 -- close remaining agents
+                logger.warning(
+                    "[AgentManager] formal Live Voice Agent cleanup failed: %s",
+                    exc,
+                )
+        for lock_key in list(self._agent_create_locks):
+            if lock_key[0] == channel_key:
+                self._agent_create_locks.pop(lock_key, None)
 
     def get_agent_nowait(
         self,

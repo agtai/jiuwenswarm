@@ -10,6 +10,7 @@ import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    ErrorCode,
     OriginRef,
     ScopeRef,
     TerminalOutcome,
@@ -69,7 +70,10 @@ def _spec(project: Path) -> FormalTaskSpec:
         executor_id=FORMAL_PROJECT_EXECUTOR_ID,
         required_capabilities=("task.create",),
         side_effect_class="project_mutation",
-        attributes=(("model_intent", "default"),),
+        attributes=(
+            ("model_config_version", "catalog-v1"),
+            ("model_identity", "default#0"),
+        ),
     )
 
 
@@ -140,6 +144,10 @@ class _Resolver:
         return self.binding
 
 
+async def _clean_dispatch_fence() -> None:
+    return None
+
+
 def _binding(project: Path, service: _Service) -> ProjectExecutionBinding:
     return ProjectExecutionBinding(
         service=service,
@@ -159,7 +167,9 @@ def _binding(project: Path, service: _Service) -> ProjectExecutionBinding:
         },
         resolved_revision_kind="version",
         resolved_revision_value="a77516a0",
-        model_intent="default",
+        model_identity="default#0",
+        model_config_version="catalog-v1",
+        dispatch_fence=_clean_dispatch_fence,
     )
 
 
@@ -346,6 +356,34 @@ async def test_runtime_revision_drift_rejects_before_legacy_service_call(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_handoff_fence_rejects_new_dirty_state_before_carrier_call(
+    tmp_path: Path,
+) -> None:
+    service = _Service(tmp_path)
+    releases: list[str] = []
+
+    async def dirty_fence() -> None:
+        raise FormalTaskViolation(
+            "TASK_CONTEXT_WORKTREE_DIRTY",
+            "formal task project became dirty before handoff",
+            ErrorCode.PERMISSION_DENIED,
+        )
+
+    binding = replace(
+        _binding(tmp_path, service),
+        context_release=lambda: releases.append("released"),
+        dispatch_fence=dirty_fence,
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await ProjectCodeExecutorAdapter(_Resolver(binding)).dispatch(_item(tmp_path))
+
+    assert raised.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
+    assert service.run_calls == []
+    assert releases == ["released"]
+
+
+@pytest.mark.asyncio
 async def test_dispatch_failure_before_carrier_ownership_releases_binding_once(
     tmp_path: Path,
 ) -> None:
@@ -432,18 +470,18 @@ async def test_status_uses_immutable_binding_after_revision_and_path_change(
 
 
 @pytest.mark.asyncio
-async def test_model_intent_drift_rejects_before_legacy_service_call(
+async def test_model_binding_drift_rejects_before_legacy_service_call(
     tmp_path: Path,
 ) -> None:
     service = _Service(tmp_path)
     adapter = ProjectCodeExecutorAdapter(
-        _Resolver(replace(_binding(tmp_path, service), model_intent="other-model"))
+        _Resolver(replace(_binding(tmp_path, service), model_identity="other-model#0"))
     )
 
     with pytest.raises(FormalTaskViolation) as raised:
         await adapter.dispatch(_item(tmp_path))
 
-    assert raised.value.reason == "EXECUTOR_MODEL_INTENT_MISMATCH"
+    assert raised.value.reason == "EXECUTOR_MODEL_BINDING_MISMATCH"
     assert service.run_calls == []
 
 
@@ -563,3 +601,10 @@ def test_ed_carrier_contract_matches_legacy_compatibility_module() -> None:
     assert legacy["PROJECT_CODE_EXECUTOR"] == PROJECT_CODE_EXECUTOR
     assert legacy["PROJECT_CODE_ARTIFACT_KIND"] == PROJECT_CODE_ARTIFACT_KIND
     assert legacy["PROJECT_CODE_EFFECT_POLICY"] == PROJECT_CODE_EFFECT_POLICY
+
+
+def test_shutdown_interruption_is_not_projected_as_user_cancellation() -> None:
+    state, outcome = ProjectCodeExecutorAdapter._map_status("interrupted")
+
+    assert state is FormalAttemptState.TERMINAL
+    assert outcome is TerminalOutcome.INTERRUPTED

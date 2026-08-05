@@ -311,7 +311,8 @@ def has_terminal_session_event(log_path: Path) -> bool:
 # 终态任务状态集合 - 终态任务不需要读取日志
 TERMINAL_STATUSES = {
     "success", "failed", "cancelled", "pr_created",
-    "completed", "completed_without_pr", "skipped", "needs_human"
+    "completed", "completed_without_pr", "skipped", "needs_human",
+    "interrupted",
 }
 
 # 关键事件类型 - 只读取这些事件获取进度

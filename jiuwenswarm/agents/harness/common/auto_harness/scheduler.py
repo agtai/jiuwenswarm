@@ -134,6 +134,7 @@ class Scheduler:
         self._loop_task: Optional[asyncio.Task] = None
         self._running_executions: dict[str, asyncio.Task] = {}
         self._cancellation_tasks: dict[str, asyncio.Task[bool]] = {}
+        self._shutdown_interruptions: set[str] = set()
         self._model_cache: dict[str, Model] = {}
         self._default_model: Optional[Model] = None
 
@@ -215,10 +216,16 @@ class Scheduler:
         self._loop_task = asyncio.create_task(self._schedule_loop())
         logger.info("[Scheduler] Started scheduling loop")
 
-    async def stop(self) -> None:
-        """Stop the scheduler and cancel running executions."""
+    async def stop(self, *, interrupt_running: bool = False) -> None:
+        """Stop the scheduler and terminate running executions.
+
+        ``interrupt_running`` is reserved for durable formal task shutdown. It
+        records process interruption rather than inventing a user cancellation.
+        """
         # Cancel all running executions
         for task_id, exec_task in list(self._running_executions.items()):
+            if interrupt_running:
+                self._shutdown_interruptions.add(task_id)
             exec_task.cancel()
             try:
                 await exec_task
@@ -405,6 +412,11 @@ class Scheduler:
 
                 for task in pending_tasks:
                     task_id = task.get("task_id")
+                    # Formal Live Voice rows have a separate authenticated
+                    # composition owner and may only run via trigger_immediate
+                    # after a fresh process-local authority binding.
+                    if task.get("origin_namespace") == "live_voice":
+                        continue
                     if task_id and task_id not in self._running_executions:
                         # Spawn execution
                         exec_task = asyncio.create_task(
@@ -722,8 +734,17 @@ class Scheduler:
             )
 
         except asyncio.CancelledError:
-            final_status = "cancelled"
-            logger.info("[Scheduler] Task %s execution %s cancelled", task_id, execution_id)
+            if task_id in self._shutdown_interruptions:
+                final_status = "interrupted"
+                error_msg = "formal task execution interrupted by process shutdown"
+                logger.info(
+                    "[Scheduler] Task %s execution %s interrupted by shutdown",
+                    task_id,
+                    execution_id,
+                )
+            else:
+                final_status = "cancelled"
+                logger.info("[Scheduler] Task %s execution %s cancelled", task_id, execution_id)
 
         except Exception as e:
             final_status = "failed"
@@ -821,3 +842,4 @@ class Scheduler:
 
             # Remove from running dict
             self._running_executions.pop(task_id, None)
+            self._shutdown_interruptions.discard(task_id)

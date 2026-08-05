@@ -551,7 +551,8 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         initial_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        self._ensure_project_gitignore_agent_history(initial_workspace)
+        if not self._uses_application_runtime_support():
+            self._ensure_project_gitignore_agent_history(initial_workspace)
         self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")

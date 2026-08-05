@@ -77,11 +77,20 @@ class FormalTaskPolicyInput:
                 "task intent attributes must be non-empty string facts",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if set(self.attributes) - {"model_intent"}:
+        if set(self.attributes) - {"model_identity", "model_config_version"}:
             raise FormalTaskViolation(
                 "UNSUPPORTED_FORMAL_TASK_ATTRIBUTE",
-                "project task intent accepts only the reviewed model_intent attribute",
+                "project task intent accepts only server-resolved model binding facts",
                 ErrorCode.UNSUPPORTED,
+            )
+        if self.attributes and set(self.attributes) != {
+            "model_identity",
+            "model_config_version",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_ATTRIBUTES",
+                "project task intent requires a complete resolved model binding",
+                ErrorCode.INVALID_ARGUMENT,
             )
         object.__setattr__(self, "attributes", MappingProxyType(dict(self.attributes)))
 

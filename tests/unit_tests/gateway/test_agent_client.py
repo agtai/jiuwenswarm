@@ -90,6 +90,28 @@ def test_agent_client_uses_shared_websocket_limit():
     assert agent_client.AGENT_WS_MAX_MESSAGE_BYTES == AGENT_WS_MAX_MESSAGE_BYTES
 
 
+def test_agent_client_log_json_redacts_auth_token_without_mutating_payload():
+    class BrokenString:
+        def __str__(self) -> str:
+            raise RuntimeError("cannot serialize")
+
+    payload = {
+        "params": {
+            "auth_token": "formal-route-secret",
+            "nested": [{"AUTH_TOKEN": "second-secret"}],
+        },
+        "forces_safe_repr_fallback": BrokenString(),
+    }
+
+    rendered = agent_client._to_json(payload)
+
+    assert "formal-route-secret" not in rendered
+    assert "second-secret" not in rendered
+    assert rendered.count("[REDACTED]") == 2
+    assert payload["params"]["auth_token"] == "formal-route-secret"
+    assert payload["params"]["nested"][0]["AUTH_TOKEN"] == "second-secret"
+
+
 @pytest.mark.asyncio
 async def test_send_request_stream_keeps_tail_window_for_processing_status(monkeypatch):
     client = AgentClientHarness()

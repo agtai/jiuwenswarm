@@ -209,6 +209,15 @@ class ReqMethod(Enum):
     SCHEDULE_LOGS = "schedule.logs"
     SCHEDULE_CANCEL = "schedule.cancel"
     SCHEDULE_DELETE = "schedule.delete"
+
+    # Authenticated formal Live Voice P3-alpha task composition
+    LIVE_VOICE_TASK_CREATE = "live_voice.task.create"
+    LIVE_VOICE_TASK_GET = "live_voice.task.get"
+    LIVE_VOICE_TASK_LIST = "live_voice.task.list"
+    LIVE_VOICE_TASK_STATUS = "live_voice.task.status"
+    LIVE_VOICE_TASK_CANCEL = "live_voice.task.cancel"
+    LIVE_VOICE_TASK_EVENTS = "live_voice.task.events"
+
     ISSUE_WATCH_ONCE = "issue.watch_once"
     ISSUE_STATE_LIST = "issue.state.list"
     ISSUE_DELETE = "issue.delete"

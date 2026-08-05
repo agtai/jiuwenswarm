@@ -114,6 +114,10 @@ def _create(
         name="Formal project task",
         instruction=instruction,
         context=_context(project),
+        attributes={
+            "model_identity": "default#0",
+            "model_config_version": "catalog-v1",
+        },
         destructive=True,
         confirmed=True,
         confirmation_id="confirm-1",
@@ -1232,4 +1236,6 @@ async def test_restart_reconciles_only_the_original_attempt(
     assert (task.outcome is TerminalOutcome.INTERRUPTED) is terminal
     assert task.reconciliation_state is reconciliation
     assert restarted_store.counts()["attempts"] == 1
+    assert restart_executor.dispatches == []
+    assert restart_executor.cancels == []
     assert sum(summary[key] for key in ("known", "unavailable", "lost")) == 1

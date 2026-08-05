@@ -98,6 +98,10 @@ async def test_formal_ed_dispatches_through_real_project_bound_legacy_carrier(
         executor_id=FORMAL_PROJECT_EXECUTOR_ID,
         required_capabilities=("task.create",),
         side_effect_class="project_mutation",
+        attributes=(
+            ("model_identity", "default#0"),
+            ("model_config_version", "catalog-v1"),
+        ),
     )
     item = PersistentOutboxItem(
         outbox_id="outbox-1",
@@ -115,6 +119,10 @@ async def test_formal_ed_dispatches_through_real_project_bound_legacy_carrier(
     scheduler = _Scheduler()
     service = _legacy_service(LegacyTaskStore(tmp_path / "legacy-store"), scheduler)
     project_executor = _ProjectExecutor()
+
+    async def dispatch_fence() -> None:
+        return None
+
     binding = ProjectExecutionBinding(
         service=service,
         execution_agent=object(),
@@ -133,6 +141,9 @@ async def test_formal_ed_dispatches_through_real_project_bound_legacy_carrier(
         },
         resolved_revision_kind="version",
         resolved_revision_value="a77516a0",
+        model_identity="default#0",
+        model_config_version="catalog-v1",
+        dispatch_fence=dispatch_fence,
     )
 
     delivered = await ProjectCodeExecutorAdapter(_Resolver(binding)).dispatch(item)

@@ -663,7 +663,11 @@ class TaskStore:
         data = self._load_tasks()
         return any(t.get("status") in {"completed", "running"} for t in data.get("tasks", []))
 
-    async def reconcile_task_statuses(self) -> int:
+    async def reconcile_task_statuses(
+        self,
+        *,
+        origin_namespace: str | None = None,
+    ) -> int:
         """Re-check task logs and fix stale status values."""
         async with self._store_lock:
             self._tasks_cache = None
@@ -671,6 +675,11 @@ class TaskStore:
             corrected = 0
 
             for task in data.get("tasks", []):
+                if (
+                    origin_namespace is not None
+                    and task.get("origin_namespace") != origin_namespace
+                ):
+                    continue
                 task_id = task.get("task_id")
                 old_status = task.get("status")
 
@@ -686,10 +695,16 @@ class TaskStore:
                 )
                 if orphaned_running:
                     completed_at = datetime.now(timezone.utc).isoformat()
-                    error = "任务执行在服务重启后失去运行上下文"
+                    formal_carrier = task.get("origin_namespace") == "live_voice"
+                    terminal_status = "interrupted" if formal_carrier else "failed"
+                    error = (
+                        "FORMAL_EXECUTION_LOST_ON_PROCESS_RESTART"
+                        if formal_carrier
+                        else "任务执行在服务重启后失去运行上下文"
+                    )
                     task.update(
                         {
-                            "status": "failed",
+                            "status": terminal_status,
                             "current_execution_id": None,
                             "last_error": error,
                             "completed_at": completed_at,
@@ -712,15 +727,16 @@ class TaskStore:
                         task["execution_history"] = history
                     latest.update(
                         {
-                            "status": "failed",
+                            "status": terminal_status,
                             "error": error,
                             "completed_at": completed_at,
                         }
                     )
                     corrected += 1
                     logger.warning(
-                        "[TaskStore] Reconciled orphaned running task %s as failed",
+                        "[TaskStore] Reconciled orphaned running task %s as %s",
                         task_id,
+                        terminal_status,
                     )
                     continue
 

@@ -862,6 +862,9 @@ class AgentWebSocketServer:
         # Scheduler service instance (for scheduled auto_harness tasks)
         self._scheduler_service: Optional[AutoHarnessService] = None
         self._scheduler_agent: Any = None
+        # Authenticated formal Live Voice P3-alpha composition. Construction is
+        # deferred until start() so flag-off has no Store or timer effects.
+        self._live_voice_p3_composition: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
@@ -980,6 +983,8 @@ class AgentWebSocketServer:
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
+        await self._start_live_voice_p3_composition()
+
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
 
         async def _warmup_checkpointer() -> None:
@@ -1171,6 +1176,58 @@ class AgentWebSocketServer:
                     unpin(scheduler_agent)
             self._scheduler_agent = None
 
+    async def _start_live_voice_p3_composition(self) -> None:
+        """Start P3 only when its feature and complete authority gate validate."""
+
+        if self._live_voice_p3_composition is not None:
+            return
+        composition: Any = None
+        try:
+            from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+                create_p3_composition_from_environment,
+            )
+            from jiuwenswarm.server.live_voice.p3_model_resolution import (
+                ServerModelCatalogResolver,
+            )
+
+            composition = create_p3_composition_from_environment(
+                agent_manager=self._agent_manager,
+                model_resolver=ServerModelCatalogResolver(
+                    catalog_reader=self._live_voice_p3_model_catalog,
+                    model_builder=self._build_live_voice_p3_model,
+                ),
+            )
+            if composition is None:
+                logger.info("[LiveVoiceP3] formal route disabled")
+                return
+            await composition.start()
+            self._live_voice_p3_composition = composition
+            if composition.mutation_authority_ready:
+                logger.info("[LiveVoiceP3] authenticated formal route ready")
+            else:
+                logger.warning(
+                    "[LiveVoiceP3] authenticated query route ready; "
+                    "mutation route closed because no trusted confirmation owner is wired"
+                )
+        except Exception as exc:  # noqa: BLE001 -- server stays up, route stays closed
+            logger.exception("[LiveVoiceP3] startup failed closed: %s", exc)
+            if composition is not None:
+                try:
+                    await composition.stop()
+                except Exception:  # noqa: BLE001
+                    logger.exception("[LiveVoiceP3] failed composition cleanup failed")
+            self._live_voice_p3_composition = None
+
+    async def _stop_live_voice_p3_composition(self) -> None:
+        composition = self._live_voice_p3_composition
+        self._live_voice_p3_composition = None
+        if composition is None:
+            return
+        try:
+            await composition.stop()
+        except Exception as exc:  # noqa: BLE001 -- continue transport shutdown
+            logger.warning("[LiveVoiceP3] shutdown failed: %s", exc)
+
     def _set_scheduler_agent(self, agent: Any) -> None:
         """Pin the facade whose DeepAgent is retained by the scheduler."""
         previous = getattr(self, "_scheduler_agent", None)
@@ -1254,6 +1311,8 @@ class AgentWebSocketServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
+
+        await self._stop_live_voice_p3_composition()
 
         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
             cancel_pending_tasks,
@@ -1601,6 +1660,16 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.SCHEDULE_DELETE:
                 await self._handle_schedule_request(ws, request, send_lock, "delete")
+                return
+            if request.req_method in {
+                ReqMethod.LIVE_VOICE_TASK_CREATE,
+                ReqMethod.LIVE_VOICE_TASK_GET,
+                ReqMethod.LIVE_VOICE_TASK_LIST,
+                ReqMethod.LIVE_VOICE_TASK_STATUS,
+                ReqMethod.LIVE_VOICE_TASK_CANCEL,
+                ReqMethod.LIVE_VOICE_TASK_EVENTS,
+            }:
+                await self._handle_live_voice_p3_request(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.ISSUE_WATCH_ONCE:
                 await self._handle_schedule_request(ws, request, send_lock, "issue_watch_once")
@@ -8071,6 +8140,52 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
+    @staticmethod
+    def _build_live_voice_p3_model(
+        model_client_config: dict[str, Any],
+        model_config_obj: dict[str, Any],
+    ) -> Any:
+        from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
+            JiuWenSwarmDeepAdapter,
+        )
+
+        return JiuWenSwarmDeepAdapter._build_model_from_entry(
+            model_client_config, model_config_obj
+        )
+
+    @staticmethod
+    def _live_voice_p3_model_catalog() -> list[dict[str, Any]]:
+        """Read the current catalog; P3 resolves it exactly on every boundary."""
+
+        config = get_config()
+        defaults = [dict(entry) for entry in get_default_models(config)]
+        if defaults:
+            return defaults
+        default_model_config = config.get("models", {}).get("default", {})
+        react_config = config.get("react", {})
+        model_client_config = dict(
+            default_model_config.get("model_client_config")
+            or react_config.get("model_client_config")
+            or {}
+        )
+        model_name = (
+            model_client_config.get("model_name")
+            or react_config.get("model_name")
+            or "gpt-4"
+        )
+        model_client_config["model_name"] = model_name
+        return [
+            {
+                "model_client_config": model_client_config,
+                "model_config_obj": (
+                    default_model_config.get("model_config_obj")
+                    or react_config.get("model_config_obj")
+                    or {}
+                ),
+                "is_default": True,
+            }
+        ]
+
     def _resolve_model(self, model_name: Optional[str] = None) -> Optional[Any]:
         """Resolve model from jiuwenswarm config.
 
@@ -8134,6 +8249,65 @@ class AgentWebSocketServer:
                 "[AgentServer] Built model cache with %d models, default=%s",
                 len(self._model_cache), first_name
             )
+
+    async def _handle_live_voice_p3_request(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Route one formal task request without accepting browser authority."""
+
+        from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+            P3_ROUTE_METHODS,
+        )
+
+        method = request.req_method.value if request.req_method is not None else ""
+        operation = P3_ROUTE_METHODS.get(method, "")
+        composition = self._live_voice_p3_composition
+        if composition is None:
+            result_ok = False
+            payload: dict[str, object] = {
+                "request_id": request.request_id,
+                "ok": False,
+                "result": None,
+                "error": {
+                    "code": "UNAVAILABLE",
+                    "reason": "FORMAL_TASK_ROUTE_DISABLED",
+                    "message": "formal task route is unavailable",
+                },
+            }
+        else:
+            # AppGateway adds these established routing hints to every
+            # forwarded request.  They are transport metadata, not formal
+            # Task input or authority, so do not let them either break the
+            # closed P3 payload or influence policy/Core resolution.
+            formal_params = {
+                key: value
+                for key, value in (request.params or {}).items()
+                if key not in {"mode", "agent_type", "agent_ref"}
+            }
+            result = await composition.handle(
+                operation=operation,
+                params=formal_params,
+                request_id=request.request_id,
+                session_id=request.session_id,
+            )
+            result_ok = result.ok
+            payload = result.payload
+        response = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=result_ok,
+            payload=payload,
+            agent_ref=request.agent_ref,
+        )
+        wire = encode_agent_response_for_wire(
+            response,
+            response_id=request.request_id,
+        )
+        async with send_lock:
+            await send_wire_payload(ws, wire)
 
     async def _handle_schedule_request(
         self,

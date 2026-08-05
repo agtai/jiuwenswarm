@@ -4794,7 +4794,16 @@ class JiuWenSwarmDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment sync skipped: %s", exc)
 
+    def _uses_application_runtime_support(self) -> bool:
+        """Whether runtime support must remain outside the target project."""
+
+        return bool(
+            self._instance_overrides.get("project_clean_runtime_support", False)
+        )
+
     def _prompt_attachment_root(self) -> Path:
+        if self._uses_application_runtime_support():
+            return get_prompt_attachment_dir()
         if self._workspace_dir == str(get_agent_workspace_dir()):
             return get_prompt_attachment_dir()
         return Path(self._workspace_dir) / "prompt_attachment"

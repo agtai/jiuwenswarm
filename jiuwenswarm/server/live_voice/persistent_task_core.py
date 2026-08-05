@@ -245,11 +245,11 @@ class PersistentTaskCore:
                     "task attributes must be a string map",
                     ErrorCode.INVALID_ARGUMENT,
                 )
-            if set(attributes) - {"model_intent"}:
+            if set(attributes) != {"model_identity", "model_config_version"}:
                 raise FormalTaskViolation(
-                    "UNSUPPORTED_FORMAL_TASK_ATTRIBUTE",
-                    "project Code Agent tasks accept only the reviewed model_intent attribute",
-                    ErrorCode.UNSUPPORTED,
+                    "INVALID_FORMAL_TASK_ATTRIBUTES",
+                    "project Code Agent tasks require an exact resolved model binding",
+                    ErrorCode.INVALID_ARGUMENT,
                 )
             spec = FormalTaskSpec(
                 name=payload["name"],
