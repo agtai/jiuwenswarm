@@ -422,20 +422,41 @@ class ConversationRuntime:
             )
             return event, effect
 
-    def acknowledge_response_cancel(self, ref: ResponseRef) -> RuntimeEvent:
+    def acknowledge_response_cancel(self, ref: ResponseRef) -> RuntimeEvent | None:
         return self._set_cancel_state(ref, CancelState.ACKNOWLEDGED)
 
-    def mark_response_cancel_unknown(self, ref: ResponseRef) -> RuntimeEvent:
+    def mark_response_cancel_unknown(self, ref: ResponseRef) -> RuntimeEvent | None:
         return self._set_cancel_state(ref, CancelState.RESULT_UNKNOWN)
 
-    def _set_cancel_state(self, ref: ResponseRef, target: CancelState) -> RuntimeEvent:
+    def _set_cancel_state(
+        self, ref: ResponseRef, target: CancelState
+    ) -> RuntimeEvent | None:
         with self._lock:
             self._require_enabled()
             record = self._response(ref)
-            if record.cancel_state is not CancelState.REQUESTED:
+            if record.cancel_state is CancelState.NONE:
                 raise ConversationRuntimeViolation(
                     "CANCEL_NOT_REQUESTED",
                     "cancel acknowledgement requires a prior exact request",
+                    ErrorCode.CONFLICT,
+                )
+            if record.cancel_state is target:
+                return None
+            if (
+                record.cancel_state is CancelState.ACKNOWLEDGED
+                and target is CancelState.RESULT_UNKNOWN
+            ):
+                return None
+            if not (
+                record.cancel_state is CancelState.REQUESTED
+                or (
+                    record.cancel_state is CancelState.RESULT_UNKNOWN
+                    and target is CancelState.ACKNOWLEDGED
+                )
+            ):
+                raise ConversationRuntimeViolation(
+                    "INVALID_CANCEL_RECONCILIATION",
+                    "cancel reconciliation cannot rewrite authoritative acknowledgement",
                     ErrorCode.CONFLICT,
                 )
             updated = replace(record, cancel_state=target)

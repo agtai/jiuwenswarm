@@ -82,6 +82,37 @@ test('cancel acknowledgement fences output but is not terminal', () => {
   assert.deepEqual(replica.selectOutputEffects('interaction-1', 'response-1', 0), []);
 });
 
+test('late authoritative cancel acknowledgement reconciles an unknown result', () => {
+  const replica = new ConversationRuntimeReplica(fixture.scope);
+  for (const event of fixture.events.slice(0, 5)) replica.apply(event);
+  replica.apply({
+    ...fixture.events[4],
+    seq: 6,
+    event_type: 'response.cancel_requested',
+    state: 'generating',
+    cancel_state: 'requested',
+  });
+  replica.apply({
+    ...fixture.events[4],
+    seq: 7,
+    event_type: 'response.cancel_result_unknown',
+    state: 'generating',
+    cancel_state: 'result_unknown',
+  });
+  replica.apply({
+    ...fixture.events[4],
+    seq: 8,
+    event_type: 'response.cancel_acknowledged',
+    state: 'generating',
+    cancel_state: 'acknowledged',
+  });
+
+  const response = replica.snapshot().responses[0];
+  assert.equal(response.state, 'generating');
+  assert.equal(response.cancel_state, 'acknowledged');
+  assert.deepEqual(replica.selectOutputEffects('interaction-1', 'response-1', 0), []);
+});
+
 test('disabled replica accepts no events and produces no effects', () => {
   const replica = new ConversationRuntimeReplica(fixture.scope, { enabled: false });
   assert.equal(replica.apply(fixture.events[0]), false);

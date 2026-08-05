@@ -6,8 +6,9 @@
 ## Git and release identity
 
 - Development branch: `hx/0803_live_voice`; upstream: `origin/hx/0803_live_voice`.
-- Current AIO-B integration base: `f4535302398208c4f647eb7aebaed70eb92fb193`; always verify Git and the working tree at resume instead of inferring landed state from this base.
+- Current CR-B integration base: `50b98b4a381cc44c25a63b8c37ec684ecb6adea3`; always verify Git and the working tree at resume instead of inferring landed state from this base.
 - The reviewed AIO-B/X-WEB source from `e407af45cbb97b23aedab5b5ce9b24880b09667b` is reconciled onto this base. Current-branch integration hardening additionally rejects capture-ID reuse, exposes the actual playout PCM rate and unsupported output-device/physical-heard capabilities, and reports idle playout-context loss. Its candidate-local browser decision ID moved from D-057 to D-058 because this branch already owns D-057 for D-031 closure; the integration review record owns the exact fixes and verification.
+- The reviewed CR-B source from `4b384970ff06ef7adc5fe9ad4b0bd7f745ab412b` is reconciled onto the current AIO/D-031 base. Current-branch review additionally preserves the single shutdown-effect result when the first `close()` waiter is cancelled; the CR-B review record owns the exact fix and verification.
 - Week 1 implementation is complete: corrected W1-K1 `857d5c06`, route telemetry `ac608738`, execution policy `f12a790b`, A packages `56450bdf`, and W1-X2/P1B `ad02fa6f` are committed in this branch history.
 - D-031 monitor and zero-effect result gate are committed in `617fe256`. The project-bound Code Agent batch makes target/execution/artifact facts coherent, completed its affected automated matrix and D-053 reviews, and passed the accepted isolated real-service run. D-031 is `CLOSED` for its bounded Compatibility Adapter scope under D-057.
 - V0 immutable Released/Frozen baseline: `ee2896a4afb186e693c720476b6de10797e66f72`, Gate 0–6 PASS.
@@ -33,7 +34,7 @@ The carrier is the JiuwenSwarm desktop Web frontend. D-058 freezes the first Alp
 |---|---|---|---|
 | Shared contract | ACG v2 critical kernel, fixtures/fakes/conformance and route telemetry are committed and reviewed | keep stable while real consumers integrate | no replacement credit from contract/fake evidence alone |
 | P1 Speech I/O | AIO/SR/SS Ports and Browser Speech fallback are committed; AIO-B adds a reviewed Chrome `getUserMedia`/AudioWorklet/Web Audio Adapter, exact 20ms PCM frames, lifecycle tests and one real-device normal-path run | connect the bounded Adapter only through owned SR/RM B/C packages without claiming a complete P1 route | no real SR/SS Provider or Browser↔Gateway media route; permission revoke/device loss/background and AIO-C latency lack real evidence; AIO-B alone earns no P1 credit |
-| P2 Realtime | CR/RM/II/AB A packages and deterministic fake vertical are committed | implement the first real Agent compatibility path | no real media transport, canonical runtime loop or Agent WorkProgress route yet |
+| P2 Realtime | CR/RM/II/AB A packages and deterministic fake vertical are committed; CR-B adds an explicitly started bounded runtime loop, exact presentation ACK/history ledger, generation fencing, non-escalating barge-in and a declarative in-memory effect outbox | connect CR-B only through a reviewed real Agent compatibility Adapter | no real media transport, Agent route, browser presentation ACK, Session History durability or Agent WorkProgress route; CR-B alone earns no P2/Web Gate credit |
 | P3alpha Task | TC/ED/VB A packages and fake vertical are committed; D-031's reviewed project-bound compatibility carrier passed its accepted real-service closure run | complete the current formal TC-B/ED-B/VB-B replacement batch | VB-C, TC-C and candidate-dependent WorkProgress/CR return are excluded; acceptance evidence is not yet complete |
 | Integration | three fake verticals and opt-in Browser P1 fallback exist | after one real route passes review, start cumulative integration and service validation | Integrated mode is documented but not runnable |
 
@@ -93,6 +94,7 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 - Week 1 implementation and review: [W1-K1](W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md), [A packages](W1_A_PACKAGE_REVIEW_2026-08-04.md), [W1-X2/P1B](W1_X2_P1B_REVIEW_2026-08-04.md).
 - D-031 review and sanitized real-service evidence: [implementation review](D031_IMPLEMENTATION_REVIEW_2026-08-04.md), [project-bound closure run](evidence/D031_20260805_PROJECT_BOUND.md).
 - AIO-B/X-WEB decision, implementation and evidence: [AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md](AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md).
+- CR-B runtime loop, presentation truth and review evidence: [CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md](CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md).
 - V0 immutable evidence: [V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md).
 - Environment and operating procedures: [E2E_RUNBOOK.md](runbooks/E2E_RUNBOOK.md).
 
@@ -100,4 +102,4 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 
 1. Complete the current formal P3alpha replacement batch: TC-B owns durable command/task/event/result/snapshot/outbox authority, ED-B owns the project-bound Executor Adapter and workspace isolation, and VB-B owns committed task-command policy. VB-C, TC-C and candidate-dependent WorkProgress/CR return remain excluded.
 2. Keep Speech critical-token safety as the next independent P1 slice; it must gate committed input with zero Agent/Tool/Task side effects before clarification, without taking Task authority from VB-B/TC-B.
-3. Connect the AIO-B Adapter only through owned SR/RM B/C packages; do not describe the Adapter or synthetic playout harness as the formal P1 end-to-end route.
+3. Connect AIO-B only through owned SR/RM B/C packages and CR-B only through a reviewed real Agent compatibility Adapter; neither bounded foundation is the formal P1/P2 end-to-end route.

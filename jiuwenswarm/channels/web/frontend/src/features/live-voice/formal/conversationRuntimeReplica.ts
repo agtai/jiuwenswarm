@@ -247,7 +247,8 @@ export class ConversationRuntimeReplica {
     const nextCancel = cancelByType[event.event_type];
     if (nextCancel === undefined || event.cancel_state !== nextCancel || event.state !== response!.state) this.#invalid(event.event_type);
     if (nextCancel === 'requested' && response!.cancel_state !== 'none') this.#invalid(event.event_type);
-    if (nextCancel !== 'requested' && response!.cancel_state !== 'requested') this.#invalid(event.event_type);
+    if (nextCancel === 'acknowledged' && response!.cancel_state !== 'requested' && response!.cancel_state !== 'result_unknown') this.#invalid(event.event_type);
+    if (nextCancel === 'result_unknown' && response!.cancel_state !== 'requested') this.#invalid(event.event_type);
     this.#responses.set(key, Object.freeze({ ...response!, cancel_state: nextCancel, fenced: true }));
   }
 

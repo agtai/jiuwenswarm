@@ -134,6 +134,25 @@ def test_cancel_acknowledgement_is_not_terminal_and_has_no_task_effect() -> None
     assert all("task" not in item.effect_type for item in [effect])
 
 
+def test_late_cancel_ack_reconciles_unknown_without_timeout_downgrade() -> None:
+    runtime = prepared()
+    ref, _ = runtime.accept_response("turn-1", "response-1")
+    runtime.transition_response(ref, ResponseState.GENERATING)
+    runtime.request_response_cancel(ref)
+    unknown = runtime.mark_response_cancel_unknown(ref)
+    acknowledged = runtime.acknowledge_response_cancel(ref)
+
+    assert unknown is not None
+    assert unknown.event_type == "response.cancel_result_unknown"
+    assert acknowledged is not None
+    assert acknowledged.event_type == "response.cancel_acknowledged"
+    assert runtime.mark_response_cancel_unknown(ref) is None
+    assert runtime.acknowledge_response_cancel(ref) is None
+    record = runtime.snapshot().responses[0]
+    assert record.cancel_state is CancelState.ACKNOWLEDGED
+    assert record.state is ResponseState.GENERATING
+
+
 def test_illegal_transitions_and_wrong_response_tuple_fail_closed() -> None:
     runtime = prepared()
     ref, _ = runtime.accept_response("turn-1", "response-1")
