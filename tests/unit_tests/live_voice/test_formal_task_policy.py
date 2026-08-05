@@ -1,0 +1,210 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+
+import pytest
+
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CONTRACT_VERSION,
+    Assurance,
+    CommandEnvelope,
+    InputCommitState,
+    QueryEnvelope,
+    ScopeRef,
+    TurnCommit,
+    TurnCommitLedger,
+)
+from jiuwenswarm.server.live_voice.formal_task_models import (
+    FormalTaskViolation,
+    ResolvedTaskContext,
+    TaskAuthorizationGrant,
+)
+from jiuwenswarm.server.live_voice.voice_task_policy import (
+    FormalTaskPolicyAdapter,
+    FormalTaskPolicyInput,
+)
+
+NOW = "2026-08-05T12:00:00Z"
+EXPIRY = "2026-08-05T13:00:00Z"
+
+
+def _scope() -> ScopeRef:
+    return ScopeRef("user-1", "project-1", "session-1", Assurance.AUTHENTICATED)
+
+
+def _context(project: Path) -> ResolvedTaskContext:
+    return ResolvedTaskContext(
+        source="gateway.project_registry",
+        stable_id="project-1",
+        uri=project.resolve().as_uri(),
+        revision_kind="version",
+        revision_value="a77516a0",
+        scope=_scope(),
+        permissions=("task.execute", "project.write"),
+        expires_at=EXPIRY,
+        redaction_policy_id="live_voice.project.v1",
+    )
+
+
+def _grant(
+    operation: str, *, command_id: str | None, target: str | None
+) -> TaskAuthorizationGrant:
+    return TaskAuthorizationGrant(
+        principal_id="user-1",
+        scope=_scope(),
+        operation=operation,
+        command_id=command_id,
+        target_task_id=target,
+        allowed_capabilities=frozenset({operation}),
+        confirmation_id="confirm-1" if command_id is not None else None,
+        confirmed=command_id is not None,
+        expires_at=EXPIRY,
+    )
+
+
+def _create(project: Path) -> FormalTaskPolicyInput:
+    return FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED,
+        source="voice",
+        operation="task.create",
+        request_id="request-1",
+        command_id="command-1",
+        issued_at=NOW,
+        scope=_scope(),
+        correlation_id="correlation-1",
+        authorization=_grant("task.create", command_id="command-1", target=None),
+        turn_id="turn-1",
+        commit_id="commit-1",
+        name="Implement formal task",
+        instruction="Create the bounded project change.",
+        context=_context(project),
+        destructive=True,
+        confirmed=True,
+        confirmation_id="confirm-1",
+    )
+
+
+def _voice_policy() -> FormalTaskPolicyAdapter:
+    commits = TurnCommitLedger()
+    commits.accept(
+        TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": "commit-1",
+                "turn_id": "turn-1",
+                "interaction_id": "interaction-1",
+                "text": "Create the bounded formal project task.",
+                "hypothesis_provenance": {"provider": "test"},
+                "scope": _scope().to_dict(),
+                "context_refs": [],
+                "committed_at": NOW,
+            }
+        )
+    )
+    return FormalTaskPolicyAdapter(commits)
+
+
+def test_committed_voice_create_maps_to_formal_v2_without_claiming_authority(
+    tmp_path: Path,
+) -> None:
+    invocation = _voice_policy().map(_create(tmp_path))
+
+    assert isinstance(invocation.envelope, CommandEnvelope)
+    assert invocation.envelope.command_type == "task.create"
+    assert invocation.envelope.origin.to_dict() == {
+        "kind": "committed_turn",
+        "turn_id": "turn-1",
+        "commit_id": "commit-1",
+    }
+    assert invocation.envelope.payload["executor_id"] == (
+        "jiuwenswarm_code_agent.project_code"
+    )
+    assert invocation.authorization.principal_id == "user-1"
+    assert invocation.context == _context(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"state": InputCommitState.PARTIAL}, "INPUT_NOT_COMMITTED"),
+        ({"ambiguous": True}, "TASK_INTENT_AMBIGUOUS"),
+        ({"authorization": None}, "FORMAL_TASK_AUTHORIZATION_REQUIRED"),
+        ({"confirmed": False}, "TASK_CONFIRMATION_REQUIRED"),
+        ({"confirmation_id": "other"}, "TASK_CONFIRMATION_MISMATCH"),
+        ({"context": None}, "FORMAL_TASK_CONTEXT_REQUIRED"),
+    ],
+)
+def test_voice_create_rejects_unsafe_policy_inputs_before_core(
+    tmp_path: Path,
+    change: dict[str, object],
+    reason: str,
+) -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        _voice_policy().map(replace(_create(tmp_path), **change))
+
+    assert raised.value.reason == reason
+
+
+def test_status_is_a_read_only_query_with_exact_task_and_no_context() -> None:
+    intent = FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED,
+        source="structured",
+        operation="task.status",
+        request_id="request-status",
+        issued_at=NOW,
+        scope=_scope(),
+        correlation_id="correlation-status",
+        authorization=_grant("task.status", command_id=None, target="task-1"),
+        task_id="task-1",
+    )
+
+    invocation = FormalTaskPolicyAdapter().map(intent)
+
+    assert isinstance(invocation.envelope, QueryEnvelope)
+    assert invocation.envelope.query_type == "task.status"
+    assert invocation.envelope.target_ref.id == "task-1"
+    assert invocation.context is None
+
+
+def test_request_derived_scope_cannot_be_promoted_to_formal_authorization() -> None:
+    request_scope = ScopeRef(
+        "web-channel",
+        "project-1",
+        "session-1",
+        Assurance.REQUEST_ASSERTED,
+    )
+    intent = FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED,
+        source="structured",
+        operation="task.status",
+        request_id="request-status",
+        issued_at=NOW,
+        scope=request_scope,
+        correlation_id="correlation-status",
+        authorization=None,
+        task_id="task-1",
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        FormalTaskPolicyAdapter().map(intent)
+
+    assert raised.value.reason == "FORMAL_TASK_AUTHORIZATION_REQUIRED"
+
+
+def test_voice_intent_cannot_claim_commit_without_commit_authority(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        FormalTaskPolicyAdapter().map(_create(tmp_path))
+
+    assert raised.value.reason == "COMMIT_AUTHORITY_REQUIRED"
+
+
+def test_unreviewed_task_attribute_is_rejected_before_core(tmp_path: Path) -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        replace(_create(tmp_path), attributes={"execution_root": str(tmp_path)})
+
+    assert raised.value.reason == "UNSUPPORTED_FORMAL_TASK_ATTRIBUTE"

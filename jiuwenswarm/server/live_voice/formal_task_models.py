@@ -1,0 +1,966 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Formal P3-alpha task records shared by the persistent Core and Executor.
+
+These records are deliberately independent from the legacy schedule JSON rows.
+They contain only stable, non-secret facts that the formal Task Core can persist.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from types import MappingProxyType
+from typing import Any
+from urllib.parse import unquote, urlparse
+
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    Assurance,
+    ContractViolation,
+    ErrorCode,
+    OriginRef,
+    ScopeRef,
+    TerminalOutcome,
+    canonical_json_bytes,
+)
+
+
+class FormalTaskViolation(ValueError):
+    def __init__(self, reason: str, message: str, code: ErrorCode) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.code = code
+
+
+class FormalTaskState(StrEnum):
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    BLOCKED = "blocked"
+    DECISION_REQUIRED = "decision_required"
+    TERMINAL = "terminal"
+
+
+class FormalAttemptState(StrEnum):
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    TERMINAL = "terminal"
+
+
+class OutboxKind(StrEnum):
+    ATTEMPT_DISPATCH = "attempt.dispatch"
+    ATTEMPT_CANCEL = "attempt.cancel"
+
+
+class OutboxState(StrEnum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    DELIVERED = "delivered"
+    SUPPRESSED = "suppressed"
+
+
+class ReconciliationState(StrEnum):
+    REQUIRED = "required"
+    IN_PROGRESS = "in_progress"
+    PENDING = "pending"
+    RESOLVED = "resolved"
+
+
+class ExecutorResolution(StrEnum):
+    KNOWN = "known"
+    UNAVAILABLE = "unavailable"
+    LOST = "lost"
+
+
+def utc_now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _require_text(value: object, field_name: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_FIELD",
+            f"{field_name} must be a non-empty string",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    return value
+
+
+def _parse_utc(value: object, field_name: str) -> datetime:
+    if type(value) is not str:
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_TIMESTAMP",
+            f"{field_name} must be an RFC3339 timestamp",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_TIMESTAMP",
+            f"{field_name} must be an RFC3339 timestamp",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from exc
+    if parsed.tzinfo is None:
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_TIMESTAMP",
+            f"{field_name} must include a timezone",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    return parsed.astimezone(UTC)
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedTaskContext:
+    """Server-resolved execution resource; it is not an authorization grant."""
+
+    source: str
+    stable_id: str
+    uri: str
+    revision_kind: str
+    revision_value: str | None
+    scope: ScopeRef
+    permissions: tuple[str, ...]
+    expires_at: str | None
+    redaction_policy_id: str
+    redacted: bool = False
+    redacted_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_text(self.source, "context.source")
+        _require_text(self.stable_id, "context.stable_id")
+        uri = _require_text(self.uri, "context.uri")
+        parsed = urlparse(uri)
+        if not parsed.scheme:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_URI",
+                "context.uri must be absolute",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if not isinstance(self.scope, ScopeRef):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_SCOPE",
+                "context scope must be a ScopeRef",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if self.revision_kind not in {"version", "snapshot", "unversioned"}:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_REVISION",
+                "context revision kind is unsupported",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if self.revision_kind == "unversioned":
+            if self.revision_value is not None:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_CONTEXT_REVISION",
+                    "unversioned context forbids a revision value",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        else:
+            _require_text(self.revision_value, "context.revision_value")
+        if self.scope.assurance is not Assurance.AUTHENTICATED:
+            raise FormalTaskViolation(
+                "TASK_CONTEXT_NOT_AUTHENTICATED",
+                "formal task context requires authenticated scope",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        if (
+            type(self.permissions) is not tuple
+            or len(set(self.permissions)) != len(self.permissions)
+            or any(
+                type(item) is not str or not item.strip() for item in self.permissions
+            )
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_PERMISSIONS",
+                "context permissions must be unique non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        object.__setattr__(self, "permissions", tuple(sorted(self.permissions)))
+        if self.expires_at is not None and type(self.expires_at) is not str:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_TIMESTAMP",
+                "context.expires_at must be a timestamp or null",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if self.expires_at is not None:
+            _parse_utc(self.expires_at, "context.expires_at")
+        _require_text(self.redaction_policy_id, "context.redaction_policy_id")
+        if type(self.redacted) is not bool:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_REDACTION",
+                "context redacted flag must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            type(self.redacted_fields) is not tuple
+            or len(set(self.redacted_fields)) != len(self.redacted_fields)
+            or any(
+                type(item) is not str or not item.strip()
+                for item in self.redacted_fields
+            )
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_REDACTION",
+                "redacted field names must be unique non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        object.__setattr__(self, "redacted_fields", tuple(sorted(self.redacted_fields)))
+
+    @property
+    def file_path(self) -> str | None:
+        parsed = urlparse(self.uri)
+        if parsed.scheme != "file":
+            return None
+        path = unquote(parsed.path)
+        if parsed.netloc:
+            return f"//{parsed.netloc}{path}"
+        if len(path) >= 3 and path[0] == "/" and path[2] == ":":
+            return path[1:]
+        return path
+
+    def require_usable(
+        self,
+        *,
+        scope: ScopeRef,
+        required_permissions: frozenset[str],
+        destructive: bool,
+        now: str,
+    ) -> None:
+        if self.scope != scope:
+            raise FormalTaskViolation(
+                "TASK_CONTEXT_SCOPE_MISMATCH",
+                "resolved context does not match the exact task scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if self.expires_at is not None and _parse_utc(
+            self.expires_at, "context.expires_at"
+        ) <= _parse_utc(now, "now"):
+            raise FormalTaskViolation(
+                "TASK_CONTEXT_EXPIRED",
+                "resolved task context has expired",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if self.redacted or self.redacted_fields:
+            raise FormalTaskViolation(
+                "TASK_CONTEXT_REDACTED",
+                "redacted context cannot authorize task execution",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if destructive and self.revision_kind == "unversioned":
+            raise FormalTaskViolation(
+                "UNVERSIONED_DESTRUCTIVE_CONTEXT",
+                "destructive task execution requires a versioned context",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if not required_permissions.issubset(self.permissions):
+            raise FormalTaskViolation(
+                "TASK_CONTEXT_PERMISSION_MISSING",
+                "resolved context lacks a required permission",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "stable_id": self.stable_id,
+            "uri": self.uri,
+            "revision": {
+                "kind": self.revision_kind,
+                "value": self.revision_value,
+            },
+            "scope": self.scope.to_dict(),
+            "permissions": list(self.permissions),
+            "expires_at": self.expires_at,
+            "redaction": {
+                "policy_id": self.redaction_policy_id,
+                "redacted": self.redacted,
+                "fields": list(self.redacted_fields),
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ResolvedTaskContext:
+        if type(payload) is not dict:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT",
+                "resolved context must be an object",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        expected = {
+            "source",
+            "stable_id",
+            "uri",
+            "revision",
+            "scope",
+            "permissions",
+            "expires_at",
+            "redaction",
+        }
+        if set(payload) != expected:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT",
+                "resolved context fields are incomplete or unknown",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        revision = payload["revision"]
+        redaction = payload["redaction"]
+        if type(revision) is not dict or set(revision) != {"kind", "value"}:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_REVISION",
+                "context revision is malformed",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(redaction) is not dict or set(redaction) != {
+            "policy_id",
+            "redacted",
+            "fields",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT_REDACTION",
+                "context redaction is malformed",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        permissions = payload["permissions"]
+        redacted_fields = redaction["fields"]
+        if type(permissions) is not list or type(redacted_fields) is not list:
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONTEXT",
+                "context permissions and redacted fields must be arrays",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return cls(
+            source=_require_text(payload["source"], "context.source"),
+            stable_id=_require_text(payload["stable_id"], "context.stable_id"),
+            uri=_require_text(payload["uri"], "context.uri"),
+            revision_kind=_require_text(revision["kind"], "context.revision.kind"),
+            revision_value=revision["value"],
+            scope=ScopeRef.from_dict(payload["scope"]),
+            permissions=tuple(permissions),
+            expires_at=payload["expires_at"],
+            redaction_policy_id=_require_text(
+                redaction["policy_id"], "context.redaction.policy_id"
+            ),
+            redacted=redaction["redacted"],
+            redacted_fields=tuple(redacted_fields),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAuthorizationGrant:
+    """Trusted, out-of-band decision bound to one exact Core invocation."""
+
+    principal_id: str
+    scope: ScopeRef
+    operation: str
+    command_id: str | None
+    target_task_id: str | None
+    allowed_capabilities: frozenset[str]
+    confirmation_id: str | None
+    confirmed: bool
+    expires_at: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.principal_id, "authorization.principal_id")
+        if not isinstance(self.scope, ScopeRef):
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_AUTHORIZATION",
+                "authorization scope must be a ScopeRef",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        _require_text(self.operation, "authorization.operation")
+        for field_name, value in (
+            ("authorization.command_id", self.command_id),
+            ("authorization.target_task_id", self.target_task_id),
+            ("authorization.confirmation_id", self.confirmation_id),
+        ):
+            if value is not None:
+                _require_text(value, field_name)
+        if type(self.confirmed) is not bool:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_AUTHORIZATION",
+                "authorization confirmed flag must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(self.allowed_capabilities) is not frozenset or any(
+            type(capability) is not str or not capability.strip()
+            for capability in self.allowed_capabilities
+        ):
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_AUTHORIZATION",
+                "authorization capabilities must be non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        _parse_utc(self.expires_at, "authorization.expires_at")
+
+    def authorize(
+        self,
+        *,
+        scope: ScopeRef,
+        operation: str,
+        command_id: str | None,
+        target_task_id: str | None,
+        required_capabilities: frozenset[str],
+        destructive: bool,
+        now: str,
+    ) -> None:
+        if (
+            self.scope.assurance is not Assurance.AUTHENTICATED
+            or scope.assurance is not Assurance.AUTHENTICATED
+        ):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task mutations require authenticated scope",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        if (
+            not self.principal_id.strip()
+            or self.principal_id != scope.subject_id
+            or self.scope != scope
+            or self.operation != operation
+            or self.command_id != command_id
+            or self.target_task_id != target_task_id
+        ):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "authorization does not bind the exact task invocation",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if not required_capabilities.issubset(self.allowed_capabilities):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_CAPABILITY_DENIED",
+                "authorization does not grant every required capability",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if _parse_utc(self.expires_at, "authorization.expires_at") <= _parse_utc(
+            now, "now"
+        ):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_EXPIRED",
+                "authorization has expired",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if destructive and (not self.confirmed or not self.confirmation_id):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_CONFIRMATION_REQUIRED",
+                "destructive task operation requires exact confirmation",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class FormalTaskSpec:
+    name: str
+    instruction: str
+    origin: OriginRef
+    context: ResolvedTaskContext
+    executor_id: str
+    required_capabilities: tuple[str, ...]
+    side_effect_class: str
+    attributes: tuple[tuple[str, str], ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_text(self.name, "task.name")
+        _require_text(self.instruction, "task.instruction")
+        _require_text(self.executor_id, "task.executor_id")
+        if not isinstance(self.origin, OriginRef):
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_ORIGIN",
+                "task origin must be a committed-turn or structured OriginRef",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            normalized_origin = OriginRef.from_dict(self.origin.to_dict())
+        except ContractViolation as error:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_ORIGIN",
+                str(error),
+                error.code,
+            ) from error
+        object.__setattr__(self, "origin", normalized_origin)
+        if not isinstance(self.context, ResolvedTaskContext):
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_CONTEXT",
+                "task context must be server-resolved",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if self.side_effect_class not in {"read_only", "project_mutation"}:
+            raise FormalTaskViolation(
+                "INVALID_TASK_SIDE_EFFECT_CLASS",
+                "task side-effect class is unsupported",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            type(self.required_capabilities) is not tuple
+            or len(set(self.required_capabilities)) != len(self.required_capabilities)
+            or any(
+                type(capability) is not str or not capability.strip()
+                for capability in self.required_capabilities
+            )
+        ):
+            raise FormalTaskViolation(
+                "DUPLICATE_TASK_CAPABILITY",
+                "required task capabilities must be unique non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        object.__setattr__(
+            self,
+            "required_capabilities",
+            tuple(sorted(self.required_capabilities)),
+        )
+        if type(self.attributes) is not tuple:
+            raise FormalTaskViolation(
+                "INVALID_TASK_ATTRIBUTES",
+                "task attributes must be an immutable tuple",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if any(type(item) is not tuple or len(item) != 2 for item in self.attributes):
+            raise FormalTaskViolation(
+                "INVALID_TASK_ATTRIBUTES",
+                "task attributes must contain key/value pairs",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        keys = [item[0] for item in self.attributes]
+        if len(set(keys)) != len(keys) or any(
+            type(key) is not str
+            or not key.strip()
+            or type(value) is not str
+            or not value.strip()
+            for key, value in self.attributes
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_ATTRIBUTES",
+                "task attributes must have unique non-empty string keys and values",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        object.__setattr__(self, "attributes", tuple(sorted(self.attributes)))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "name": self.name,
+            "instruction": self.instruction,
+            "origin": self.origin.to_dict(),
+            "context": self.context.to_dict(),
+            "executor_id": self.executor_id,
+            "required_capabilities": list(self.required_capabilities),
+            "side_effect_class": self.side_effect_class,
+            "attributes": dict(self.attributes),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> FormalTaskSpec:
+        if type(payload) is not dict or set(payload) != {
+            "name",
+            "instruction",
+            "origin",
+            "context",
+            "executor_id",
+            "required_capabilities",
+            "side_effect_class",
+            "attributes",
+        }:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_SPEC",
+                "formal task spec fields are incomplete or unknown",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        capabilities = payload["required_capabilities"]
+        attributes = payload["attributes"]
+        if type(capabilities) is not list or type(attributes) is not dict:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_SPEC",
+                "task capabilities and attributes have invalid types",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            origin = OriginRef.from_dict(payload["origin"])
+        except ContractViolation as error:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_ORIGIN",
+                str(error),
+                error.code,
+            ) from error
+        return cls(
+            name=_require_text(payload["name"], "task.name"),
+            instruction=_require_text(payload["instruction"], "task.instruction"),
+            origin=origin,
+            context=ResolvedTaskContext.from_dict(payload["context"]),
+            executor_id=_require_text(payload["executor_id"], "task.executor_id"),
+            required_capabilities=tuple(capabilities),
+            side_effect_class=_require_text(
+                payload["side_effect_class"], "task.side_effect_class"
+            ),
+            attributes=tuple(sorted(attributes.items())),
+        )
+
+    def fingerprint_bytes(self) -> bytes:
+        return canonical_json_bytes(self.to_dict())
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentTaskRecord:
+    task_id: str
+    scope: ScopeRef
+    spec: FormalTaskSpec
+    state: FormalTaskState
+    attempt_id: str
+    correlation_id: str
+    cancel_requested: bool
+    dispatch_fenced: bool
+    outcome: TerminalOutcome | None
+    reconciliation_state: ReconciliationState | None
+    reconciliation_reason: str | None
+    event_head: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "scope": self.scope.to_dict(),
+            "spec": self.spec.to_dict(),
+            "state": self.state.value,
+            "attempt_id": self.attempt_id,
+            "correlation_id": self.correlation_id,
+            "cancel_requested": self.cancel_requested,
+            "dispatch_fenced": self.dispatch_fenced,
+            "outcome": None if self.outcome is None else self.outcome.value,
+            "reconciliation": (
+                None
+                if self.reconciliation_state is None
+                else {
+                    "state": self.reconciliation_state.value,
+                    "reason": self.reconciliation_reason,
+                }
+            ),
+            "event_head": self.event_head,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentAttemptRecord:
+    attempt_id: str
+    task_id: str
+    executor_id: str
+    executor_ref: str | None
+    state: FormalAttemptState
+    outcome: TerminalOutcome | None
+    source_seq: int
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "attempt_id": self.attempt_id,
+            "task_id": self.task_id,
+            "executor_id": self.executor_id,
+            "executor_ref": self.executor_ref,
+            "state": self.state.value,
+            "outcome": None if self.outcome is None else self.outcome.value,
+            "source_seq": self.source_seq,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentTaskEvent:
+    event_id: str
+    task_id: str
+    attempt_id: str
+    scope: ScopeRef
+    seq: int
+    event_type: str
+    state: str
+    outcome: str | None
+    producer: str
+    source_event_id: str | None
+    causation_id: str
+    correlation_id: str
+    occurred_at: str
+    details: Mapping[str, object]
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("event.event_id", self.event_id),
+            ("event.task_id", self.task_id),
+            ("event.attempt_id", self.attempt_id),
+            ("event.event_type", self.event_type),
+            ("event.state", self.state),
+            ("event.producer", self.producer),
+            ("event.causation_id", self.causation_id),
+            ("event.correlation_id", self.correlation_id),
+        ):
+            _require_text(value, field_name)
+        if not isinstance(self.scope, ScopeRef):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_SCOPE",
+                "task event scope must be an exact ScopeRef",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        try:
+            normalized_scope = ScopeRef.from_dict(self.scope.to_dict())
+        except ContractViolation as error:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_SCOPE",
+                str(error),
+                error.code,
+            ) from error
+        if normalized_scope.assurance is not Assurance.AUTHENTICATED:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_SCOPE",
+                "formal task events require authenticated scope",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        object.__setattr__(self, "scope", normalized_scope)
+        if type(self.seq) is not int or self.seq < 0:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_SEQUENCE",
+                "task event sequence must be a non-negative integer",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        _parse_utc(self.occurred_at, "event.occurred_at")
+        allowed_states = {state.value for state in FormalTaskState}
+        if self.state not in allowed_states:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_STATE",
+                "task event state is outside the canonical lifecycle vocabulary",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.outcome is not None:
+            _require_text(self.outcome, "event.outcome")
+            try:
+                TerminalOutcome(self.outcome)
+            except ValueError as error:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_EVENT_OUTCOME",
+                    "task event outcome is outside the canonical terminal vocabulary",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                ) from error
+        if (self.state == FormalTaskState.TERMINAL.value) != (self.outcome is not None):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_OUTCOME",
+                "terminal task events require an outcome and nonterminal events forbid it",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.source_event_id is not None:
+            _require_text(self.source_event_id, "event.source_event_id")
+        if not isinstance(self.details, Mapping):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_DETAILS",
+                "task event details must be an object",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if any(
+            type(key) is not str
+            or not key.strip()
+            or type(value) not in {str, int, bool, type(None)}
+            for key, value in self.details.items()
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_DETAILS",
+                "task event details must contain only scalar JSON facts",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        object.__setattr__(self, "details", MappingProxyType(dict(self.details)))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "event_id": self.event_id,
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "scope": self.scope.to_dict(),
+            "seq": self.seq,
+            "event_type": self.event_type,
+            "state": self.state,
+            "outcome": self.outcome,
+            "producer": self.producer,
+            "source_event_id": self.source_event_id,
+            "causation_id": self.causation_id,
+            "correlation_id": self.correlation_id,
+            "occurred_at": self.occurred_at,
+            "details": dict(self.details),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class PersistentOutboxItem:
+    outbox_id: str
+    kind: OutboxKind
+    task_id: str
+    attempt_id: str
+    command_id: str
+    scope: ScopeRef
+    spec: FormalTaskSpec
+    executor_ref: str | None
+    source_seq: int
+    state: OutboxState
+    delivery_count: int
+    claim_token: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorObservation:
+    resolution: ExecutorResolution
+    executor_id: str
+    executor_ref: str | None
+    task_id: str
+    attempt_id: str
+    source_event_id: str | None
+    source_seq: int | None
+    attempt_state: FormalAttemptState | None
+    attempt_outcome: TerminalOutcome | None
+    occurred_at: str
+    raw_status: str | None
+    summary: str | None = None
+    error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.resolution, ExecutorResolution):
+            raise FormalTaskViolation(
+                "INVALID_EXECUTOR_RESOLUTION",
+                "Executor resolution is unsupported",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        _require_text(self.executor_id, "executor_observation.executor_id")
+        _require_text(self.task_id, "executor_observation.task_id")
+        _require_text(self.attempt_id, "executor_observation.attempt_id")
+        _parse_utc(self.occurred_at, "executor_observation.occurred_at")
+        for field_name, value in (
+            ("executor_observation.executor_ref", self.executor_ref),
+            ("executor_observation.source_event_id", self.source_event_id),
+            ("executor_observation.raw_status", self.raw_status),
+            ("executor_observation.summary", self.summary),
+            ("executor_observation.error", self.error),
+        ):
+            if value is not None:
+                _require_text(value, field_name)
+        if self.resolution is ExecutorResolution.KNOWN:
+            if (
+                self.executor_ref is None
+                or self.source_event_id is None
+                or type(self.source_seq) is not int
+                or self.source_seq < 0
+                or not isinstance(self.attempt_state, FormalAttemptState)
+            ):
+                raise FormalTaskViolation(
+                    "EXECUTOR_EVENT_INCOMPLETE",
+                    "known Executor observation lacks exact lifecycle evidence",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            if self.attempt_state is FormalAttemptState.TERMINAL:
+                if not isinstance(self.attempt_outcome, TerminalOutcome):
+                    raise FormalTaskViolation(
+                        "TERMINAL_OUTCOME_REQUIRED",
+                        "terminal Executor observation requires an outcome",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+            elif self.attempt_outcome is not None:
+                raise FormalTaskViolation(
+                    "NONTERMINAL_OUTCOME_FORBIDDEN",
+                    "nonterminal Executor observation cannot carry an outcome",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif any(
+            value is not None
+            for value in (
+                self.source_event_id,
+                self.source_seq,
+                self.attempt_state,
+                self.attempt_outcome,
+            )
+        ):
+            raise FormalTaskViolation(
+                "INVALID_EXECUTOR_RESOLUTION",
+                "unknown Executor resolution cannot carry lifecycle evidence",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    def canonical_dict(self) -> dict[str, object]:
+        return {
+            "resolution": self.resolution.value,
+            "executor_id": self.executor_id,
+            "executor_ref": self.executor_ref,
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "source_event_id": self.source_event_id,
+            "source_seq": self.source_seq,
+            "attempt_state": (
+                None if self.attempt_state is None else self.attempt_state.value
+            ),
+            "attempt_outcome": (
+                None if self.attempt_outcome is None else self.attempt_outcome.value
+            ),
+            "occurred_at": self.occurred_at,
+            "raw_status": self.raw_status,
+            "summary": self.summary,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorDeliveryResult:
+    executor_ref: str
+    observations: tuple[ExecutorObservation, ...]
+
+    def __post_init__(self) -> None:
+        _require_text(self.executor_ref, "executor_delivery.executor_ref")
+        if type(self.observations) is not tuple or any(
+            not isinstance(observation, ExecutorObservation)
+            or observation.resolution is not ExecutorResolution.KNOWN
+            or observation.executor_ref != self.executor_ref
+            for observation in self.observations
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_DELIVERY_BINDING_MISMATCH",
+                "delivery observations must be known facts for one executor reference",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+def require_exact_payload(
+    payload: dict[str, object], expected: AbstractSet[str], *, field_name: str
+) -> None:
+    if set(payload) != expected:
+        missing = sorted(expected - set(payload))
+        unknown = sorted(set(payload) - expected)
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if unknown:
+            detail.append("unknown " + ", ".join(unknown))
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_PAYLOAD",
+            f"{field_name} has " + "; ".join(detail),
+            ErrorCode.INVALID_ARGUMENT,
+        )
+
+
+def safe_json_value(value: Any) -> Any:
+    """Return a JSON-only copy and reject custom values before persistence."""
+
+    canonical_json_bytes(value)
+    if type(value) is dict:
+        return {key: safe_json_value(item) for key, item in value.items()}
+    if type(value) is list:
+        return [safe_json_value(item) for item in value]
+    return value
+
+
+__all__ = [
+    "ExecutorDeliveryResult",
+    "ExecutorObservation",
+    "ExecutorResolution",
+    "FormalAttemptState",
+    "FormalTaskSpec",
+    "FormalTaskState",
+    "FormalTaskViolation",
+    "OutboxKind",
+    "OutboxState",
+    "PersistentAttemptRecord",
+    "PersistentOutboxItem",
+    "PersistentTaskEvent",
+    "PersistentTaskRecord",
+    "ReconciliationState",
+    "ResolvedTaskContext",
+    "TaskAuthorizationGrant",
+    "require_exact_payload",
+    "safe_json_value",
+    "utc_now",
+]

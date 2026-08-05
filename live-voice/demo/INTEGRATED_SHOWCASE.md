@@ -36,7 +36,7 @@ The UI/trace must identify every segment as `formal`, `fallback`, `demo_substitu
 4. Confirm the Demo target is safe for one real side-effecting task or select an isolated/disposable project.
 5. Confirm route telemetry, correlated events and sanitized evidence capture are active.
 6. Confirm text fallback remains usable.
-7. For Web Alpha evidence, verify the declared Chrome/Edge versions, secure origin, permission/device/autoplay/page-lifecycle checks and Browser↔Gateway deployment route before opening the microphone.
+7. For Web Alpha evidence, verify the declared Google Chrome version, secure origin, permission/device/autoplay/page-lifecycle checks and Browser↔Gateway deployment route before opening the microphone. Non-Chrome evidence is exploratory and earns no Alpha credit.
 
 ## 3. Integrated script
 

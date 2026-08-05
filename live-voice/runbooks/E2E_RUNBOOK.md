@@ -49,12 +49,12 @@ Live Voice 同时依赖浏览器语音能力、麦克风权限、音频设备、
 
 ### 2.1 当前 Web Alpha 验收基线
 
-- 产品载体是 JiuwenSwarm 桌面 Web 前端。X-WEB 真实 Gate 前必须明确冻结单一 Chromium 或 Chrome+Edge 双 Chromium 基线；每次 candidate 必须覆盖该范围中的每个浏览器并记录精确浏览器、OS、origin、设备和网络标签。当前 Chrome 历史/开发证据不自动承诺 Chrome+Edge 或更宽范围。
-- 前端 `AGENTS.md` 要求修改后的代码兼容 Chrome/Chromium 107 及以上，这是实现下限；它不替代 X-WEB 对实际 Alpha candidate 的精确浏览器/版本证据范围决定。
+- 产品载体是 JiuwenSwarm 桌面 Web 前端。D-058 已冻结单一桌面 Google Chrome Alpha 基线；每次 candidate 必须记录精确 Chrome 版本、OS、origin、设备和网络标签。Edge 或其他浏览器结果只能作为探索证据，不能获得 Alpha credit 或扩大产品承诺。
+- 前端 `AGENTS.md` 要求修改后的代码兼容 Chrome/Chromium 107 及以上，这是实现下限；它不替代 D-058 的单 Chrome 范围或实际 Alpha candidate 的精确 Chrome 版本证据。
 - `localhost` 可以用于本地开发和受控验证；非 localhost 的 Alpha 部署必须使用 HTTPS/WSS 或等价安全上下文，并验证 Gateway/AgentServer 反向代理、CSP、CORS 和实时连接路由。
 - 浏览器必须分别验证麦克风允许、拒绝、撤销，设备变化/丢失，autoplay/user-activation，页面隐藏/后台/恢复，以及 refresh/reconnect 后无陈旧音频、重复提交或静默失败。
 - Speech/模型 Provider 凭据只存在 Gateway/服务端；浏览器 storage、URL、日志和 bundle 中不得出现长期 Provider 密钥。原始音频默认不持久化。
-- AudioWorklet/MediaRecorder、媒体编码/采样率/frame、WebSocket/WebTransport 和 Provider 仍由对应 B/C 包在接线前决定；运行手册只记录候选实际采用且通过 review 的路线，不提前给计划路线写成功命令。
+- D-058 已选择 `getUserMedia + AudioWorklet` 产生 20ms mono `pcm_f32` 正式浏览器音频帧，并排除 MediaRecorder 作为 realtime-frame fallback。Wire codec/resampling、WebSocket/WebTransport 和 Speech Provider 仍由对应 RM/SR/SS B/C 包在接线前决定；运行手册只记录候选实际采用且通过 review 的路线，不提前给计划路线写成功命令。
 - 移动 Web、PWA 和公开跨浏览器/跨 OS 兼容矩阵不属于当前 Alpha Gate；任何未被后续范围决定纳入的浏览器结果只能作为探索证据，不能扩大产品承诺。
 
 ## 3. 获取代码与固定依赖
@@ -430,7 +430,7 @@ Git commit：
 工作区是否干净：
 OS 版本/build：
 Chrome 版本：
-Edge 版本：
+非 Chrome 探索浏览器/版本（可选，不计 Alpha credit）：
 Web origin 与 secure-context 状态：
 HTTPS/WSS 终止点与反向代理标签：
 CSP/CORS/实时连接路由：通过 / 失败
