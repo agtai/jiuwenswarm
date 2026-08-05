@@ -21,6 +21,7 @@ import {
   parseCapabilityDescriptor,
   parseCommandEnvelope,
   parseConnectionEpochRef,
+  parseContextRef,
   parseEventEnvelope,
   parseIdentityRef,
   parseQueryEnvelope,
@@ -28,6 +29,7 @@ import {
   parseScopeRef,
   parseTurnCommit,
   parseV2Envelope,
+  parseWorkProgressEventV2,
   successResult,
   validateTransition,
 } from '../node_modules/.cache/live-voice-contract-v2/liveVoiceContractV2.js';
@@ -105,15 +107,322 @@ test('shared canonical JSON cases have exact bytes', () => {
   );
 });
 
+test('ContextRef wire shape round-trips and cross-scope use fails closed', () => {
+  const fixture = load('critical_kernel.valid.json');
+  const progressFixture = load('work_progress.v2.json');
+  const refs = progressFixture.context_refs.map(parseContextRef);
+  assert.deepEqual(refs, progressFixture.context_refs);
+  assert.equal(refs[0].revision.value, 'sha256:abc');
+  assert.equal(refs[1].revision.value, 'snapshot-2');
+  assert.equal(refs[2].revision.value, undefined);
+
+  const commandRaw = clone(fixture.command);
+  commandRaw.context_refs = clone(progressFixture.context_refs);
+  const command = parseCommandEnvelope(commandRaw);
+  assert.deepEqual(command, commandRaw);
+  assert.equal(command.context_refs.length, 3);
+
+  const queryRaw = clone(fixture.query);
+  queryRaw.context_refs = clone(progressFixture.context_refs);
+  assert.deepEqual(parseQueryEnvelope(queryRaw), queryRaw);
+
+  const commitRaw = clone(fixture.turn_commit);
+  commitRaw.context_refs = clone(progressFixture.context_refs);
+  assert.deepEqual(parseTurnCommit(commitRaw), commitRaw);
+
+  const wrongScope = clone(commandRaw);
+  wrongScope.context_refs[0].scope.session_id = 'other-session';
+  assert.throws(
+    () => parseCommandEnvelope(wrongScope),
+    error => error instanceof ContractViolation && error.error.reason === 'CONTEXT_SCOPE_MISMATCH'
+  );
+
+  const secretField = clone(progressFixture.context_refs[0]);
+  secretField.content = 'must-not-cross-the-wire';
+  assert.throws(
+    () => parseContextRef(secretField),
+    error => error instanceof ContractViolation && error.error.reason === 'UNKNOWN_FIELD'
+  );
+});
+
+test('WorkProgress v2 preserves known/unknown facts and separates envelope/project sequences', () => {
+  const fixture = load('work_progress.v2.json');
+  const tracker = new EventSequenceTracker();
+  const sources = fixture.source_events.map(item => parseEventEnvelope(item));
+  const progressEvents = fixture.progress_events.map(item => parseEventEnvelope(item));
+  const accepted = parseWorkProgressEventV2(progressEvents[0].payload, progressEvents[0].scope);
+  const running = parseWorkProgressEventV2(progressEvents[1].payload, progressEvents[1].scope);
+  const terminal = parseWorkProgressEventV2(progressEvents[2].payload, progressEvents[2].scope);
+  assert.deepEqual(accepted, fixture.progress_events[0].payload);
+  assert.deepEqual(accepted.artifact_refs, { knowledge: 'unknown' });
+  assert.deepEqual(running.artifact_refs, { knowledge: 'unknown' });
+  assert.equal(terminal.outcome, 'completed');
+  assert.equal(progressEvents[1].seq, 0);
+  assert.equal(running.seq, 1);
+  const maximum = clone(progressEvents[0].payload);
+  maximum.seq = Number.MAX_SAFE_INTEGER;
+  assert.equal(parseWorkProgressEventV2(maximum).seq, Number.MAX_SAFE_INTEGER);
+  const knownEmpty = clone(progressEvents[0].payload);
+  knownEmpty.artifact_refs = { knowledge: 'known', value: [] };
+  assert.deepEqual(parseWorkProgressEventV2(knownEmpty).artifact_refs, { knowledge: 'known', value: [] });
+
+  for (const source of sources) assert.equal(tracker.accept(source).status, 'applied');
+  const futureRaw = clone(fixture.progress_events[2]);
+  futureRaw.producer.instance_id = 'bridge-3';
+  futureRaw.seq = 0;
+  const future = tracker.accept(parseEventEnvelope(futureRaw));
+  assert.equal(future.status, 'quarantined_projection');
+  assert.equal(future.error.reason, 'PROGRESS_SEQUENCE_GAP');
+  assert.equal(tracker.accept(progressEvents[0]).status, 'applied');
+  const second = tracker.accept(progressEvents[1]);
+  assert.equal(second.status, 'applied');
+  assert.deepEqual(second.appliedEventIds, ['progress-1', 'progress-2']);
+
+  const duplicateSource = clone(fixture.progress_events[0]);
+  duplicateSource.event_id = 'progress-overlap';
+  duplicateSource.producer.instance_id = 'bridge-overlap';
+  duplicateSource.seq = 0;
+  duplicateSource.payload.seq = 3;
+  const duplicate = tracker.accept(parseEventEnvelope(duplicateSource));
+  assert.equal(duplicate.status, 'rejected_projection');
+  assert.equal(duplicate.error.reason, 'PROGRESS_SOURCE_ALREADY_PROJECTED');
+
+  const orderTracker = new EventSequenceTracker();
+  for (const source of sources) assert.equal(orderTracker.accept(source).status, 'applied');
+  const reversedProgress = clone(fixture.progress_events[2]);
+  reversedProgress.event_id = 'progress-terminal-first';
+  reversedProgress.producer.instance_id = 'bridge-terminal-first';
+  reversedProgress.seq = 0;
+  reversedProgress.payload.seq = 0;
+  const reversed = orderTracker.accept(parseEventEnvelope(reversedProgress));
+  assert.equal(reversed.status, 'rejected_projection');
+  assert.equal(reversed.error.reason, 'PROGRESS_SOURCE_ORDER_MISMATCH');
+
+  const fabricatedDetail = clone(fixture.progress_events[0]);
+  fabricatedDetail.event_id = 'progress-fabricated-detail';
+  fabricatedDetail.producer.instance_id = 'bridge-fabricated-detail';
+  fabricatedDetail.seq = 0;
+  fabricatedDetail.payload.summary = { knowledge: 'known', value: 'guessed' };
+  const detail = orderTracker.accept(parseEventEnvelope(fabricatedDetail));
+  assert.equal(detail.status, 'rejected_projection');
+  assert.equal(detail.error.reason, 'PROGRESS_DETAIL_UNPROVEN');
+});
+
+test('WorkProgress v2 rejects false authority, outcome, and source mapping', () => {
+  const fixture = load('work_progress.v2.json');
+  const wrongAuthority = clone(fixture.progress_events[0]);
+  wrongAuthority.payload.source.authority = 'executor';
+  assert.throws(
+    () => parseEventEnvelope(wrongAuthority),
+    error => error instanceof ContractViolation && error.error.reason === 'PROGRESS_SOURCE_AUTHORITY_MISMATCH'
+  );
+
+  const wrongOutcome = clone(fixture.progress_events[0]);
+  wrongOutcome.payload.outcome = 'completed';
+  assert.throws(
+    () => parseEventEnvelope(wrongOutcome),
+    error => error instanceof ContractViolation && error.error.reason === 'NON_TERMINAL_OUTCOME_FORBIDDEN'
+  );
+
+  const tracker = new EventSequenceTracker();
+  assert.equal(tracker.accept(parseEventEnvelope(fixture.source_events[0])).status, 'applied');
+  const falseProgress = clone(fixture.progress_events[0]);
+  falseProgress.payload.state = 'running';
+  const rejected = tracker.accept(parseEventEnvelope(falseProgress));
+  assert.equal(rejected.status, 'rejected_causation');
+  assert.equal(rejected.error.reason, 'PROGRESS_SOURCE_MISMATCH');
+
+  const attemptProgress = clone(fixture.progress_events[0]);
+  attemptProgress.event_id = 'attempt-progress-0';
+  attemptProgress.stream_ref = { kind: 'task', id: 'task-1' };
+  attemptProgress.causation_id = 'attempt-source-0';
+  attemptProgress.payload.work_ref = { kind: 'task', id: 'task-1' };
+  attemptProgress.payload.source = {
+    authority: 'executor',
+    event_id: 'attempt-source-0',
+    source_work_ref: { kind: 'attempt', id: 'attempt-1' },
+    adapter: 'jiuwenswarm.executor',
+  };
+  assert.throws(
+    () => parseEventEnvelope(attemptProgress),
+    error => error instanceof ContractViolation && error.error.reason === 'PROGRESS_ATTEMPT_PARENT_UNVERIFIED'
+  );
+  const identities = new IdentityRegistry();
+  const exactScope = parseScopeRef(fixture.scope);
+  identities.register({ ref: { kind: 'task', id: 'task-1' }, scope: exactScope, parents: [], connection_epoch_ref: null });
+  identities.register({
+    ref: { kind: 'attempt', id: 'attempt-1' },
+    scope: exactScope,
+    parents: [{ kind: 'task', id: 'task-1' }],
+    connection_epoch_ref: null,
+  });
+  const parsedAttemptProgress = parseEventEnvelope(attemptProgress, identities);
+  assert.equal(parsedAttemptProgress.stream_ref.id, 'task-1');
+
+  const attemptSource = clone(fixture.source_events[0]);
+  attemptSource.event_id = 'attempt-source-0';
+  attemptSource.event_type = 'attempt.accepted';
+  attemptSource.producer = { component: 'task.executor', instance_id: 'executor-1', authority: 'executor' };
+  attemptSource.stream_ref = { kind: 'attempt', id: 'attempt-1' };
+  const attemptTracker = new EventSequenceTracker(identities);
+  assert.equal(attemptTracker.accept(parseEventEnvelope(attemptSource, identities)).status, 'applied');
+  assert.equal(attemptTracker.accept(parsedAttemptProgress).status, 'applied');
+});
+
+test('WorkProgress mixed authority streams do not invent a global source order', () => {
+  const fixture = load('work_progress.v2.json');
+  const exactScope = parseScopeRef(fixture.scope);
+  const identities = new IdentityRegistry();
+  const taskRef = { kind: 'task', id: 'task-mixed' };
+  identities.register({ ref: taskRef, scope: exactScope, parents: [], connection_epoch_ref: null });
+  for (const attemptId of ['attempt-mixed-1', 'attempt-mixed-2']) {
+    identities.register({
+      ref: { kind: 'attempt', id: attemptId },
+      scope: exactScope,
+      parents: [taskRef],
+      connection_epoch_ref: null,
+    });
+  }
+  const sourceEvent = ({ eventId, kind, refId, authority, instance }) => {
+    const raw = clone(fixture.source_events[0]);
+    raw.event_id = eventId;
+    raw.event_type = `${kind}.accepted`;
+    raw.producer = { component: `${kind}.runtime`, instance_id: instance, authority };
+    raw.stream_ref = { kind, id: refId };
+    return parseEventEnvelope(raw, identities);
+  };
+  const taskSource = sourceEvent({
+    eventId: 'task-mixed-source',
+    kind: 'task',
+    refId: taskRef.id,
+    authority: 'task_core',
+    instance: 'task-core-1',
+  });
+  const attemptOne = sourceEvent({
+    eventId: 'attempt-mixed-source-1',
+    kind: 'attempt',
+    refId: 'attempt-mixed-1',
+    authority: 'executor',
+    instance: 'executor-1',
+  });
+  const attemptTwo = sourceEvent({
+    eventId: 'attempt-mixed-source-2',
+    kind: 'attempt',
+    refId: 'attempt-mixed-2',
+    authority: 'executor',
+    instance: 'executor-2',
+  });
+  const tracker = new EventSequenceTracker(identities);
+  for (const source of [taskSource, attemptOne, attemptTwo]) assert.equal(tracker.accept(source).status, 'applied');
+
+  const projection = (source, seq) => {
+    const raw = clone(fixture.progress_events[0]);
+    raw.event_id = `mixed-progress-${seq}`;
+    raw.producer.instance_id = `mixed-bridge-${seq}`;
+    raw.stream_ref = taskRef;
+    raw.seq = 0;
+    raw.causation_id = source.event_id;
+    raw.payload.work_ref = taskRef;
+    raw.payload.source = {
+      authority: source.producer.authority,
+      event_id: source.event_id,
+      source_work_ref: source.stream_ref,
+      adapter: 'mixed.authority.adapter',
+    };
+    raw.payload.seq = seq;
+    return parseEventEnvelope(raw, identities);
+  };
+  for (const [seq, source] of [attemptTwo, taskSource, attemptOne].entries()) {
+    assert.equal(tracker.accept(projection(source, seq)).status, 'applied');
+  }
+});
+
+test('WorkProgress source order survives producer replacement', () => {
+  const fixture = load('work_progress.v2.json');
+  const source = ({ eventId, instance, eventType, cause }) => {
+    const raw = clone(fixture.source_events[0]);
+    raw.event_id = eventId;
+    raw.producer.instance_id = instance;
+    raw.event_type = eventType;
+    raw.seq = 0;
+    raw.causation_id = cause;
+    raw.payload = { state: eventType.split('.', 2)[1] };
+    return parseEventEnvelope(raw);
+  };
+  const accepted = source({
+    eventId: 'round-replaced-accepted',
+    instance: 'harness-before-restart',
+    eventType: 'round.accepted',
+    cause: null,
+  });
+  const running = source({
+    eventId: 'round-replaced-running',
+    instance: 'harness-after-restart',
+    eventType: 'round.running',
+    cause: accepted.event_id,
+  });
+  const tracker = new EventSequenceTracker();
+  assert.equal(tracker.accept(accepted).status, 'applied');
+  assert.equal(tracker.accept(running).status, 'applied');
+
+  const projection = (source, { eventId, instance, progressSeq }) => {
+    const raw = clone(fixture.progress_events[0]);
+    raw.event_id = eventId;
+    raw.producer.instance_id = instance;
+    raw.seq = 0;
+    raw.causation_id = source.event_id;
+    raw.payload.source = {
+      authority: source.producer.authority,
+      event_id: source.event_id,
+      source_work_ref: source.stream_ref,
+      adapter: 'restarted.task-core.adapter',
+    };
+    raw.payload.state = source.payload.state;
+    raw.payload.seq = progressSeq;
+    return parseEventEnvelope(raw);
+  };
+
+  const reversed = tracker.accept(
+    projection(running, {
+      eventId: 'task-replaced-progress-running-early',
+      instance: 'bridge-running-early',
+      progressSeq: 0,
+    })
+  );
+  assert.equal(reversed.status, 'rejected_projection');
+  assert.equal(reversed.error.reason, 'PROGRESS_SOURCE_ORDER_MISMATCH');
+  assert.equal(
+    tracker.accept(
+      projection(accepted, {
+        eventId: 'task-replaced-progress-accepted',
+        instance: 'bridge-accepted',
+        progressSeq: 0,
+      })
+    ).status,
+    'applied'
+  );
+  assert.equal(
+    tracker.accept(
+      projection(running, {
+        eventId: 'task-replaced-progress-running',
+        instance: 'bridge-running',
+        progressSeq: 1,
+      })
+    ).status,
+    'applied'
+  );
+});
+
 test('shared invalid fixture rejects every indexed scenario with zero effects', () => {
   const { cases } = load('critical_kernel.invalid.json');
   assert.equal(new Set(cases.map(item => item.id)).size, cases.length);
   const fixture = load('critical_kernel.valid.json');
+  const progressFixture = load('work_progress.v2.json');
   for (const scenario of cases) {
     let effects = 0;
     assert.throws(
       () => {
-        if (scenario.change === 'context_refs_non_empty') {
+        if (scenario.change === 'context_refs_malformed') {
           const raw = clone(fixture.command);
           raw.context_refs = [{ kind: 'turn', id: 'turn-1' }];
           parseCommandEnvelope(raw);
@@ -163,6 +472,14 @@ test('shared invalid fixture rejects every indexed scenario with zero effects', 
               effects += 1;
             }
           );
+        } else if (scenario.change === 'context_uri_bom') {
+          const raw = clone(progressFixture.context_refs[0]);
+          raw.uri = 'urn:test:\ufeff';
+          parseContextRef(raw);
+        } else if (scenario.change === 'context_stable_id_bom_only') {
+          const raw = clone(progressFixture.context_refs[0]);
+          raw.stable_id = '\ufeff';
+          parseContextRef(raw);
         } else {
           assert.fail(`unknown invalid scenario ${scenario.change}`);
         }

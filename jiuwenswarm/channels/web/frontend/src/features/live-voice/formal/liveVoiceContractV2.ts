@@ -40,6 +40,13 @@ export type SideEffectTarget = 'agent' | 'tool' | 'task';
 export type LifecycleKind = 'interaction' | 'turn' | 'response' | 'round' | 'task' | 'attempt';
 export type TerminalOutcome = 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
 export type Availability = 'available' | 'unavailable';
+export type Knowledge = 'known' | 'unknown';
+export type ContextRevisionKind = 'version' | 'snapshot' | 'unversioned';
+export type WorkState = 'accepted' | 'running' | 'blocked' | 'decision_required' | 'terminal';
+export type WorkSourceAuthority = 'harness' | 'task_core' | 'executor';
+export type WorkUrgency = 'normal' | 'attention' | 'urgent' | 'unknown';
+export type Speakability = 'not_speakable' | 'eligible' | 'attention_requested';
+export type KnownFact<T> = { readonly knowledge: 'known'; readonly value: T } | { readonly knowledge: 'unknown' };
 
 export type JsonPrimitive = null | boolean | number | string;
 export type JsonValue = JsonPrimitive | readonly JsonValue[] | { readonly [key: string]: JsonValue };
@@ -98,6 +105,35 @@ function requiredText(value: unknown, fieldName: string): string {
     throw violation('INVALID_REQUIRED_TEXT', `${fieldName} must be a non-empty string`);
   }
   return validUnicode(value, fieldName);
+}
+
+const CONTEXT_WHITESPACE = new Set([
+  0x0085, 0x00a0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000,
+  0xfeff,
+]);
+
+function isContextWhitespaceOrControl(code: number): boolean {
+  return code <= 0x20 || (code >= 0x7f && code <= 0x9f) || CONTEXT_WHITESPACE.has(code);
+}
+
+function contextRequiredText(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw violation('INVALID_REQUIRED_TEXT', `${fieldName} must be a non-empty string`);
+  }
+  const normalized = validUnicode(value, fieldName);
+  if (![...normalized].some(char => !isContextWhitespaceOrControl(char.codePointAt(0) ?? 0))) {
+    throw violation('INVALID_REQUIRED_TEXT', `${fieldName} must be a non-empty string`);
+  }
+  return normalized;
+}
+
+function contextUri(value: unknown): string {
+  const uri = contextRequiredText(value, 'context_ref.uri');
+  const scheme = /^[A-Za-z][A-Za-z0-9+.-]*:/.exec(uri);
+  if (scheme === null || scheme[0].length === uri.length || [...uri].some(char => isContextWhitespaceOrControl(char.codePointAt(0) ?? 0))) {
+    throw violation('INVALID_CONTEXT_URI', 'context_ref.uri must be a non-empty absolute URI without whitespace or controls');
+  }
+  return uri;
 }
 
 function optionalId(value: unknown, fieldName: string): string | null {
@@ -368,6 +404,72 @@ export function parseScopeRef(value: unknown): Readonly<ScopeRef> {
   });
 }
 
+export type ContextRevision = { readonly kind: 'version' | 'snapshot'; readonly value: string } | { readonly kind: 'unversioned' };
+
+export interface ContextRedaction {
+  readonly policy_id: string;
+  readonly redacted: boolean;
+  readonly fields: readonly string[];
+}
+
+export interface ContextRef {
+  readonly source: string;
+  readonly stable_id: string;
+  readonly uri: string;
+  readonly revision: Readonly<ContextRevision>;
+  readonly scope: Readonly<ScopeRef>;
+  readonly permissions: readonly string[];
+  readonly expires_at: string | null;
+  readonly redaction: Readonly<ContextRedaction>;
+  readonly extensions: Readonly<JsonObject>;
+}
+
+function parseContextRevision(value: unknown): Readonly<ContextRevision> {
+  const data = strictRecord(value, 'context_ref.revision');
+  const kind = enumeration(['version', 'snapshot', 'unversioned'] as const, data.kind, 'context_ref.revision.kind');
+  if (kind === 'unversioned') {
+    exactKeys(data, ['kind'], 'context_ref.revision');
+    return Object.freeze({ kind });
+  }
+  exactKeys(data, ['kind', 'value'], 'context_ref.revision');
+  return Object.freeze({ kind, value: contextRequiredText(data.value, 'context_ref.revision.value') });
+}
+
+function parseContextRedaction(value: unknown): Readonly<ContextRedaction> {
+  const data = strictRecord(value, 'context_ref.redaction');
+  exactKeys(data, ['policy_id', 'redacted', 'fields'], 'context_ref.redaction');
+  const fields: string[] = [];
+  strictArray(data.fields, 'context_ref.redaction.fields').forEach((item, index) => {
+    fields.push(contextRequiredText(item, `context_ref.redaction.fields[${index}]`));
+  });
+  return Object.freeze({
+    policy_id: contextRequiredText(data.policy_id, 'context_ref.redaction.policy_id'),
+    redacted: requiredBoolean(data.redacted, 'context_ref.redaction.redacted'),
+    fields: Object.freeze(fields),
+  });
+}
+
+export function parseContextRef(value: unknown): Readonly<ContextRef> {
+  const data = strictRecord(value, 'context_ref');
+  exactKeys(data, ['source', 'stable_id', 'uri', 'revision', 'scope', 'permissions', 'expires_at', 'redaction', 'extensions'], 'context_ref');
+  const uri = contextUri(data.uri);
+  const permissions: string[] = [];
+  strictArray(data.permissions, 'context_ref.permissions').forEach((item, index) => {
+    permissions.push(namespaced(item, `context_ref.permissions[${index}]`));
+  });
+  return Object.freeze({
+    source: namespaced(data.source, 'context_ref.source'),
+    stable_id: contextRequiredText(data.stable_id, 'context_ref.stable_id'),
+    uri,
+    revision: parseContextRevision(data.revision),
+    scope: parseScopeRef(data.scope),
+    permissions: Object.freeze(permissions),
+    expires_at: data.expires_at === null ? null : timestamp(data.expires_at, 'context_ref.expires_at'),
+    redaction: parseContextRedaction(data.redaction),
+    extensions: extensions(data.extensions, 'context_ref.extensions'),
+  });
+}
+
 export interface IdentityRef {
   readonly kind: IdentityKind;
   readonly id: string;
@@ -594,11 +696,16 @@ function extensions(value: unknown, fieldName: string): Readonly<JsonObject> {
   return cloneObject(data, fieldName);
 }
 
-function emptyContextRefs(value: unknown, fieldName: string): readonly [] {
-  if (strictArray(value, fieldName).length !== 0) {
-    throw violation('CONTEXT_REFS_UNSUPPORTED', 'non-empty context_refs are not supported by the critical kernel', 'UNSUPPORTED');
-  }
-  return Object.freeze([]);
+function contextRefs(value: unknown, fieldName: string, scope: Readonly<ScopeRef>): readonly Readonly<ContextRef>[] {
+  const refs: Readonly<ContextRef>[] = [];
+  strictArray(value, fieldName).forEach((item, index) => {
+    const ref = parseContextRef(item);
+    if (scopeKey(ref.scope) !== scopeKey(scope)) {
+      throw violation('CONTEXT_SCOPE_MISMATCH', `${fieldName}[${index}] does not match the enclosing scope`, 'PERMISSION_DENIED');
+    }
+    refs.push(ref);
+  });
+  return Object.freeze(refs);
 }
 
 function capabilityList(value: unknown, fieldName: string): readonly string[] {
@@ -636,7 +743,7 @@ interface EnvelopeBase {
   readonly correlation_id: string;
   readonly causation_id: string | null;
   readonly target_ref: Readonly<IdentityRef>;
-  readonly context_refs: readonly [];
+  readonly context_refs: readonly Readonly<ContextRef>[];
   readonly required_capabilities: readonly string[];
   readonly payload: Readonly<JsonObject>;
   readonly extensions: Readonly<JsonObject>;
@@ -692,7 +799,7 @@ export function parseCommandEnvelope(value: unknown, identities?: IdentityRegist
     causation_id: optionalId(data.causation_id, 'command.causation_id'),
     origin,
     target_ref: targetRef,
-    context_refs: emptyContextRefs(data.context_refs, 'command.context_refs'),
+    context_refs: contextRefs(data.context_refs, 'command.context_refs', scope),
     required_capabilities: capabilityList(data.required_capabilities, 'command.required_capabilities'),
     payload: commandPayload(commandType, data.payload),
     extensions: extensions(data.extensions, 'command.extensions'),
@@ -767,7 +874,7 @@ export function parseQueryEnvelope(value: unknown, identities?: IdentityRegistry
     correlation_id: requiredText(data.correlation_id, 'query.correlation_id'),
     causation_id: optionalId(data.causation_id, 'query.causation_id'),
     target_ref: targetRef,
-    context_refs: emptyContextRefs(data.context_refs, 'query.context_refs'),
+    context_refs: contextRefs(data.context_refs, 'query.context_refs', scope),
     required_capabilities: capabilityList(data.required_capabilities, 'query.required_capabilities'),
     payload: cloneObject(data.payload, 'query.payload'),
     extensions: extensions(data.extensions, 'query.extensions'),
@@ -886,12 +993,130 @@ export function failureResult(
   );
 }
 
+export interface WorkProgressSource {
+  readonly authority: WorkSourceAuthority;
+  readonly event_id: string;
+  readonly source_work_ref: Readonly<IdentityRef>;
+  readonly adapter: string | null;
+}
+
+export interface WorkProgressEventV2 {
+  readonly work_ref: Readonly<IdentityRef>;
+  readonly source: Readonly<WorkProgressSource>;
+  readonly seq: number;
+  readonly state: WorkState;
+  readonly outcome: TerminalOutcome | null;
+  readonly summary: Readonly<KnownFact<string>>;
+  readonly blocking_question: Readonly<KnownFact<string>>;
+  readonly artifact_refs: Readonly<KnownFact<readonly Readonly<ContextRef>[]>>;
+  readonly urgency: WorkUrgency;
+  readonly speakability: Speakability;
+}
+
+function parseKnownFact<T>(value: unknown, fieldName: string, parser: (item: unknown) => T): Readonly<KnownFact<T>> {
+  const data = strictRecord(value, fieldName);
+  const knowledge = enumeration(['known', 'unknown'] as const, data.knowledge, `${fieldName}.knowledge`);
+  if (knowledge === 'unknown') {
+    exactKeys(data, ['knowledge'], fieldName);
+    return Object.freeze({ knowledge });
+  }
+  exactKeys(data, ['knowledge', 'value'], fieldName);
+  return Object.freeze({ knowledge, value: parser(data.value) });
+}
+
+function parseFactText(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string') {
+    throw violation('INVALID_FACT_TEXT', `${fieldName} must be a string`);
+  }
+  return validUnicode(value, fieldName);
+}
+
+function parseWorkProgressSource(value: unknown): Readonly<WorkProgressSource> {
+  const data = strictRecord(value, 'work_progress.source');
+  exactKeys(data, ['authority', 'event_id', 'source_work_ref', 'adapter'], 'work_progress.source');
+  const authority = enumeration(['harness', 'task_core', 'executor'] as const, data.authority, 'work_progress.source.authority');
+  const sourceWorkRef = parseIdentityRef(data.source_work_ref);
+  const expectedKind: IdentityKind = ({ harness: 'round', task_core: 'task', executor: 'attempt' } as const)[authority];
+  if (sourceWorkRef.kind !== expectedKind) {
+    throw violation('PROGRESS_SOURCE_AUTHORITY_MISMATCH', `${authority} progress requires ${expectedKind} source_work_ref`, 'PERMISSION_DENIED');
+  }
+  return Object.freeze({
+    authority,
+    event_id: requiredText(data.event_id, 'work_progress.source.event_id'),
+    source_work_ref: sourceWorkRef,
+    adapter: optionalId(data.adapter, 'work_progress.source.adapter'),
+  });
+}
+
+export function parseWorkProgressEventV2(value: unknown, scope?: Readonly<ScopeRef>, identities?: IdentityRegistry): Readonly<WorkProgressEventV2> {
+  const data = strictRecord(value, 'work_progress');
+  exactKeys(
+    data,
+    ['work_ref', 'source', 'seq', 'state', 'outcome', 'summary', 'blocking_question', 'artifact_refs', 'urgency', 'speakability'],
+    'work_progress'
+  );
+  const workRef = parseIdentityRef(data.work_ref);
+  if (workRef.kind !== 'round' && workRef.kind !== 'task') {
+    throw violation('INVALID_WORK_REF_KIND', 'work_ref must identify a round or task');
+  }
+  const source = parseWorkProgressSource(data.source);
+  if (source.source_work_ref.kind === 'round' || source.source_work_ref.kind === 'task') {
+    if (source.source_work_ref.kind !== workRef.kind || source.source_work_ref.id !== workRef.id) {
+      throw violation('PROGRESS_SOURCE_WORK_MISMATCH', 'round/task source_work_ref must equal work_ref');
+    }
+  } else if (workRef.kind !== 'task') {
+    throw violation('PROGRESS_ATTEMPT_PARENT_MISMATCH', 'an attempt source can project only to a task');
+  }
+  if (scope !== undefined && identities !== undefined) {
+    identities.require(workRef, { scope });
+    identities.require(source.source_work_ref, {
+      scope,
+      parent: source.source_work_ref.kind === 'attempt' ? workRef : undefined,
+    });
+  }
+  const state = enumeration(['accepted', 'running', 'blocked', 'decision_required', 'terminal'] as const, data.state, 'work_progress.state');
+  const outcome = data.outcome === null ? null : enumeration(TERMINAL_OUTCOMES, data.outcome, 'work_progress.outcome');
+  if (state === 'terminal' && outcome === null) {
+    throw violation('TERMINAL_OUTCOME_REQUIRED', 'terminal WorkProgress requires an outcome');
+  }
+  if (state !== 'terminal' && outcome !== null) {
+    throw violation('NON_TERMINAL_OUTCOME_FORBIDDEN', 'non-terminal WorkProgress forbids an outcome');
+  }
+  const artifacts = parseKnownFact(data.artifact_refs, 'work_progress.artifact_refs', item => {
+    const refs = strictArray(item, 'work_progress.artifact_refs.value').map(parseContextRef);
+    if (scope !== undefined) {
+      for (const ref of refs) {
+        if (scopeKey(ref.scope) !== scopeKey(scope)) {
+          throw violation('CONTEXT_SCOPE_MISMATCH', 'artifact context scope must match WorkProgress scope', 'PERMISSION_DENIED');
+        }
+      }
+    }
+    return Object.freeze(refs);
+  });
+  return Object.freeze({
+    work_ref: workRef,
+    source,
+    seq: unsignedInteger(data.seq, 'work_progress.seq'),
+    state,
+    outcome,
+    summary: parseKnownFact(data.summary, 'work_progress.summary', item => parseFactText(item, 'work_progress.summary.value')),
+    blocking_question: parseKnownFact(data.blocking_question, 'work_progress.blocking_question', item =>
+      parseFactText(item, 'work_progress.blocking_question.value')
+    ),
+    artifact_refs: artifacts,
+    urgency: enumeration(['normal', 'attention', 'urgent', 'unknown'] as const, data.urgency, 'work_progress.urgency'),
+    speakability: enumeration(['not_speakable', 'eligible', 'attention_requested'] as const, data.speakability, 'work_progress.speakability'),
+  });
+}
+
 interface EventRule {
-  readonly streamKind: IdentityKind;
+  readonly streamKind: IdentityKind | readonly IdentityKind[];
   readonly authority: string;
   readonly state?: string;
   readonly terminal?: boolean;
   readonly adapter?: boolean;
+  readonly lifecycle?: boolean;
+  readonly progress?: boolean;
 }
 
 const EVENT_RULES: Readonly<Record<string, EventRule>> = Object.freeze({
@@ -967,12 +1192,22 @@ const EVENT_RULES: Readonly<Record<string, EventRule>> = Object.freeze({
     terminal: true,
   },
   'adapter.observed': { streamKind: 'event', authority: 'adapter', adapter: true },
+  'work.progress': {
+    streamKind: Object.freeze(['round', 'task'] as const),
+    authority: 'adapter',
+    adapter: true,
+    lifecycle: false,
+    progress: true,
+  },
 });
 
 const TERMINAL_OUTCOMES = ['completed', 'failed', 'cancelled', 'interrupted', 'unknown'] as const;
 
 function eventPayload(value: unknown, eventType: string, rule: EventRule): Readonly<JsonObject> {
   const data = strictRecord(value, 'event.payload');
+  if (rule.progress === true) {
+    return parseWorkProgressEventV2(data) as unknown as Readonly<JsonObject>;
+  }
   if (rule.adapter === true) {
     exactKeys(data, ['source_event_type'], 'event.payload');
     namespaced(data.source_event_type, 'event.payload.source_event_type');
@@ -1040,7 +1275,11 @@ export function parseEventEnvelope(value: unknown, identities?: IdentityRegistry
   if (producer.authority !== rule.authority) {
     throw violation('EVENT_AUTHORITY_MISMATCH', `${eventType} requires authority ${rule.authority}`, 'PERMISSION_DENIED');
   }
-  const streamRef = parseIdentityRef(data.stream_ref, rule.streamKind);
+  const streamRef = parseIdentityRef(data.stream_ref);
+  const streamKinds = Array.isArray(rule.streamKind) ? rule.streamKind : [rule.streamKind];
+  if (!streamKinds.includes(streamRef.kind)) {
+    throw violation('IDENTITY_KIND_MISMATCH', `expected one of ${streamKinds.join(', ')}, received ${streamRef.kind}`);
+  }
   const causationId = optionalId(data.causation_id, 'event.causation_id');
   if (rule.adapter === true && causationId === null) {
     throw violation('ADAPTER_CAUSATION_REQUIRED', 'adapter events require a source event');
@@ -1061,6 +1300,18 @@ export function parseEventEnvelope(value: unknown, identities?: IdentityRegistry
     payload: eventPayload(data.payload, eventType, rule),
     extensions: extensions(data.extensions, 'event.extensions'),
   });
+  if (rule.progress === true) {
+    const progress = parseWorkProgressEventV2(result.payload, scope, identities);
+    if (progress.source.source_work_ref.kind === 'attempt' && identities === undefined) {
+      throw violation('PROGRESS_ATTEMPT_PARENT_UNVERIFIED', 'attempt-to-task WorkProgress requires an IdentityRegistry parent binding', 'PERMISSION_DENIED');
+    }
+    if (progress.work_ref.kind !== streamRef.kind || progress.work_ref.id !== streamRef.id) {
+      throw violation('PROGRESS_ENVELOPE_MISMATCH', 'work.progress stream_ref must match its projection work_ref');
+    }
+    if (progress.source.event_id !== causationId) {
+      throw violation('PROGRESS_CAUSATION_MISMATCH', 'work.progress causation_id must equal source.event_id');
+    }
+  }
   if (identities !== undefined) identities.require(streamRef, { scope });
   return result;
 }
@@ -1227,7 +1478,7 @@ export interface TurnCommit {
   readonly text: string;
   readonly hypothesis_provenance: Readonly<JsonObject>;
   readonly scope: Readonly<ScopeRef>;
-  readonly context_refs: readonly [];
+  readonly context_refs: readonly Readonly<ContextRef>[];
   readonly committed_at: string;
 }
 
@@ -1257,7 +1508,7 @@ export function parseTurnCommit(value: unknown, identities?: IdentityRegistry): 
     text: requiredText(data.text, 'turn_commit.text'),
     hypothesis_provenance: cloneObject(data.hypothesis_provenance, 'turn_commit.hypothesis_provenance'),
     scope,
-    context_refs: emptyContextRefs(data.context_refs, 'turn_commit.context_refs'),
+    context_refs: contextRefs(data.context_refs, 'turn_commit.context_refs', scope),
     committed_at: timestamp(data.committed_at, 'turn_commit.committed_at'),
   });
 }
@@ -1462,9 +1713,11 @@ export type EventApplyStatus =
   | 'duplicate_applied'
   | 'quarantined_gap'
   | 'quarantined_causation'
+  | 'quarantined_projection'
   | 'duplicate_quarantined'
   | 'rejected_conflict'
   | 'rejected_causation'
+  | 'rejected_projection'
   | 'rejected_lifecycle';
 
 export interface EventApplyResult {
@@ -1488,9 +1741,20 @@ const INITIAL_LIFECYCLE_STATES: Readonly<Partial<Record<IdentityKind, string>>> 
   task: 'accepted',
   attempt: 'accepted',
 });
+const PROJECTION_ERROR_REASONS = new Set([
+  'PROGRESS_SEQUENCE_GAP',
+  'PROGRESS_SEQUENCE_REUSED',
+  'PROGRESS_SOURCE_ALREADY_PROJECTED',
+  'PROGRESS_SOURCE_ORDER_MISMATCH',
+  'PROGRESS_DETAIL_UNPROVEN',
+]);
 
 function eventStreamKey(event: Readonly<EventEnvelope>): string {
   return canonicalJson([event.producer.component, event.producer.instance_id, event.stream_ref.kind, event.stream_ref.id]);
+}
+
+function progressSourceKey(event: Readonly<EventEnvelope>): string {
+  return canonicalJson([event.scope, event.stream_ref.kind, event.stream_ref.id]);
 }
 
 function applyResult(
@@ -1502,6 +1766,7 @@ function applyResult(
 }
 
 export class EventSequenceTracker {
+  readonly #identities: IdentityRegistry | undefined;
   readonly #streams = new Map<string, EventStreamState>();
   readonly #events = new Map<string, Readonly<EventEnvelope>>();
   readonly #results = new Map<string, Readonly<EventApplyResult>>();
@@ -1509,6 +1774,13 @@ export class EventSequenceTracker {
   readonly #externalCauses = new Map<string, Readonly<{ scope: Readonly<ScopeRef>; correlationId: string }>>();
   readonly #lifecycleByObject = new Map<string, string>();
   readonly #scopeByObject = new Map<string, Readonly<ScopeRef>>();
+  readonly #nextProgressSeq = new Map<string, number>();
+  readonly #progressSourceQueues = new Map<string, string[]>();
+  readonly #projectedSources = new Set<string>();
+
+  constructor(identities?: IdentityRegistry) {
+    this.#identities = identities;
+  }
 
   registerAppliedCause(command: Readonly<CommandEnvelope>): readonly string[] {
     const normalized = parseCommandEnvelope(command);
@@ -1525,7 +1797,7 @@ export class EventSequenceTracker {
   }
 
   accept(input: Readonly<EventEnvelope>): Readonly<EventApplyResult> {
-    const event = parseEventEnvelope(input);
+    const event = parseEventEnvelope(input, this.#identities);
     if (this.#externalCauses.has(event.event_id)) {
       return this.#errorResult('rejected_conflict', 'CAUSATION_ID_KIND_CONFLICT', 'an external command cause cannot also be an event_id');
     }
@@ -1584,11 +1856,19 @@ export class EventSequenceTracker {
       if (causalError[2]) {
         stream.quarantinedBySeq.delete(event.seq);
         stream.poisonedSeq.add(event.seq);
-        const result = this.#errorResult('rejected_causation', causalError[0], causalError[1]);
+        const result = this.#errorResult(
+          PROJECTION_ERROR_REASONS.has(causalError[0]) ? 'rejected_projection' : 'rejected_causation',
+          causalError[0],
+          causalError[1]
+        );
         this.#results.set(event.event_id, result);
         return result;
       }
-      const result = this.#errorResult('quarantined_causation', causalError[0], causalError[1]);
+      const result = this.#errorResult(
+        causalError[0] === 'PROGRESS_SEQUENCE_GAP' ? 'quarantined_projection' : 'quarantined_causation',
+        causalError[0],
+        causalError[1]
+      );
       this.#results.set(event.event_id, result);
       return result;
     }
@@ -1610,7 +1890,7 @@ export class EventSequenceTracker {
 
   #errorResult(status: EventApplyStatus, reason: string, message: string): Readonly<EventApplyResult> {
     const code: ErrorCode = 'PROTOCOL_VIOLATION';
-    const retriable = status === 'quarantined_gap' || status === 'quarantined_causation';
+    const retriable = status === 'quarantined_gap' || status === 'quarantined_causation' || status === 'quarantined_projection';
     return applyResult(status, contractError(code, reason, message, retriable));
   }
 
@@ -1632,7 +1912,7 @@ export class EventSequenceTracker {
     if (source === undefined && external !== undefined) {
       const mismatch = this.#causalContextError(event, external.scope, external.correlationId);
       if (mismatch !== null) return mismatch;
-      return event.event_type === 'adapter.observed'
+      return EVENT_RULES[event.event_type].adapter === true
         ? ['ADAPTER_SOURCE_EVENT_REQUIRED', 'adapter events must reference an authoritative source event', true]
         : null;
     }
@@ -1641,11 +1921,52 @@ export class EventSequenceTracker {
     }
     const mismatch = this.#causalContextError(event, source.scope, source.correlation_id);
     if (mismatch !== null) return mismatch;
-    if (event.event_type === 'adapter.observed') {
+    const rule = EVENT_RULES[event.event_type];
+    if (rule.adapter === true) {
       if (source.producer.authority === 'adapter') {
         return ['ADAPTER_SOURCE_NOT_AUTHORITATIVE', 'adapter events cannot establish authority for another adapter event', true];
       }
-      if (event.payload.source_event_type !== source.event_type) {
+      if (rule.progress === true) {
+        const progress = parseWorkProgressEventV2(event.payload, event.scope);
+        const sourceOutcome = source.payload.outcome ?? null;
+        if (
+          progress.source.event_id !== source.event_id ||
+          progress.source.authority !== source.producer.authority ||
+          progress.source.source_work_ref.kind !== source.stream_ref.kind ||
+          progress.source.source_work_ref.id !== source.stream_ref.id ||
+          progress.state !== source.payload.state ||
+          progress.outcome !== sourceOutcome
+        ) {
+          return ['PROGRESS_SOURCE_MISMATCH', 'WorkProgress must preserve source identity, authority, state, and outcome', true];
+        }
+        const progressKey = canonicalJson([event.scope, progress.work_ref.kind, progress.work_ref.id]);
+        const expected = this.#nextProgressSeq.get(progressKey) ?? 0;
+        if (progress.seq > expected) {
+          return ['PROGRESS_SEQUENCE_GAP', 'WorkProgress projection sequence is waiting for an earlier event', false];
+        }
+        if (progress.seq < expected) {
+          return ['PROGRESS_SEQUENCE_REUSED', 'WorkProgress projection sequence was already consumed', true];
+        }
+        if (this.#projectedSources.has(source.event_id)) {
+          return ['PROGRESS_SOURCE_ALREADY_PROJECTED', 'one authoritative source event can produce only one WorkProgress projection', true];
+        }
+        const sourceQueue = this.#progressSourceQueues.get(progressSourceKey(source));
+        if (sourceQueue === undefined || sourceQueue.length === 0) {
+          return ['PROGRESS_SOURCE_ORDER_MISMATCH', 'WorkProgress source has no pending authoritative position', true];
+        }
+        if (sourceQueue[0] !== source.event_id) {
+          return ['PROGRESS_SOURCE_ORDER_MISMATCH', 'WorkProgress must preserve authoritative source application order', true];
+        }
+        if (
+          progress.summary.knowledge === 'known' ||
+          progress.blocking_question.knowledge === 'known' ||
+          progress.artifact_refs.knowledge === 'known' ||
+          progress.urgency !== 'unknown' ||
+          progress.speakability !== 'not_speakable'
+        ) {
+          return ['PROGRESS_DETAIL_UNPROVEN', 'current source event schema cannot prove WorkProgress detail or notification hints', true];
+        }
+      } else if (event.payload.source_event_type !== source.event_type) {
         return ['ADAPTER_SOURCE_TYPE_MISMATCH', 'adapter source_event_type must match the causal source event', true];
       }
     }
@@ -1663,6 +1984,7 @@ export class EventSequenceTracker {
   }
 
   #lifecycleError(event: Readonly<EventEnvelope>): Readonly<ContractErrorValue> | null {
+    if (EVENT_RULES[event.event_type].lifecycle === false) return null;
     const initial = INITIAL_LIFECYCLE_STATES[event.stream_ref.kind];
     if (initial === undefined) return null;
     const objectKey = `${event.stream_ref.kind}:${event.stream_ref.id}`;
@@ -1712,7 +2034,10 @@ export class EventSequenceTracker {
           if (causalError[2]) {
             stream.quarantinedBySeq.delete(stream.nextSeq);
             stream.poisonedSeq.add(stream.nextSeq);
-            this.#results.set(candidate.event_id, this.#errorResult('rejected_causation', causalError[0], causalError[1]));
+            this.#results.set(
+              candidate.event_id,
+              this.#errorResult(PROJECTION_ERROR_REASONS.has(causalError[0]) ? 'rejected_projection' : 'rejected_causation', causalError[0], causalError[1])
+            );
           }
           continue;
         }
@@ -1726,10 +2051,27 @@ export class EventSequenceTracker {
         stream.quarantinedBySeq.delete(stream.nextSeq);
         stream.appliedBySeq.set(stream.nextSeq, candidate);
         stream.nextSeq += 1;
-        if (typeof candidate.payload.state === 'string') {
+        if (EVENT_RULES[candidate.event_type].lifecycle !== false && typeof candidate.payload.state === 'string') {
           const objectKey = `${candidate.stream_ref.kind}:${candidate.stream_ref.id}`;
           this.#lifecycleByObject.set(objectKey, candidate.payload.state);
           this.#scopeByObject.set(objectKey, candidate.scope);
+          if (candidate.stream_ref.kind === 'round' || candidate.stream_ref.kind === 'task' || candidate.stream_ref.kind === 'attempt') {
+            const sourceProgressKey = progressSourceKey(candidate);
+            const queue = this.#progressSourceQueues.get(sourceProgressKey) ?? [];
+            queue.push(candidate.event_id);
+            this.#progressSourceQueues.set(sourceProgressKey, queue);
+          }
+        }
+        if (EVENT_RULES[candidate.event_type].progress === true) {
+          const progress = parseWorkProgressEventV2(candidate.payload, candidate.scope);
+          const progressKey = canonicalJson([candidate.scope, progress.work_ref.kind, progress.work_ref.id]);
+          this.#nextProgressSeq.set(progressKey, progress.seq + 1);
+          const sourceEvent = this.#events.get(progress.source.event_id);
+          const sourceQueue = sourceEvent === undefined ? undefined : this.#progressSourceQueues.get(progressSourceKey(sourceEvent));
+          if (sourceQueue === undefined || sourceQueue.shift() !== progress.source.event_id) {
+            throw violation('PROGRESS_SOURCE_ORDER_MISMATCH', 'applied WorkProgress lost its authoritative source position', 'PROTOCOL_VIOLATION');
+          }
+          this.#projectedSources.add(progress.source.event_id);
         }
         this.#appliedIds.add(candidate.event_id);
         this.#results.set(candidate.event_id, applyResult('applied', null, [candidate.event_id]));

@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
     CommandResultLedger,
     ConnectionEpochRef,
+    ContextRef,
     ContractViolation,
     ErrorCode,
     EventApplyStatus,
@@ -31,7 +32,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     IdentityRef,
     IdentityRegistry,
     InputCommitState,
+    KnownFact,
+    Knowledge,
     LifecycleKind,
+    MAX_SAFE_INTEGER,
     QueryEnvelope,
     ResponseFence,
     ResponseRef,
@@ -41,6 +45,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TerminalOutcome,
     TurnCommit,
     TurnCommitLedger,
+    WorkProgressEventV2,
     canonical_json,
     canonical_json_bytes,
     classify_contract,
@@ -135,6 +140,379 @@ def test_shared_canonical_json_cases() -> None:
         assert canonical_json(case["input"]) == case["canonical"]
 
 
+def test_context_ref_wire_shape_round_trips_and_scope_mismatch_fails_closed() -> None:
+    fixture = _load("critical_kernel.valid.json")
+    progress_fixture = _load("work_progress.v2.json")
+    refs = progress_fixture["context_refs"]
+    parsed = [ContextRef.from_dict(item) for item in refs]
+    assert [item.to_dict() for item in parsed] == refs
+    assert parsed[0].revision.value == "sha256:abc"
+    assert parsed[1].revision.value == "snapshot-2"
+    assert parsed[2].revision.value is None
+
+    command_raw = copy.deepcopy(fixture["command"])
+    command_raw["context_refs"] = copy.deepcopy(refs)
+    command = CommandEnvelope.from_dict(command_raw)
+    assert command.to_dict() == command_raw
+    assert len(command.context_refs) == 3
+
+    query_raw = copy.deepcopy(fixture["query"])
+    query_raw["context_refs"] = copy.deepcopy(refs)
+    assert QueryEnvelope.from_dict(query_raw).to_dict() == query_raw
+
+    commit_raw = copy.deepcopy(fixture["turn_commit"])
+    commit_raw["context_refs"] = copy.deepcopy(refs)
+    assert TurnCommit.from_dict(commit_raw).to_dict() == commit_raw
+
+    wrong_scope = copy.deepcopy(command_raw)
+    wrong_scope["context_refs"][0]["scope"]["session_id"] = "other-session"
+    with pytest.raises(ContractViolation) as mismatch:
+        CommandEnvelope.from_dict(wrong_scope)
+    assert mismatch.value.reason == "CONTEXT_SCOPE_MISMATCH"
+    assert mismatch.value.code is ErrorCode.PERMISSION_DENIED
+
+    secret_field = copy.deepcopy(refs[0])
+    secret_field["content"] = "must-not-cross-the-wire"
+    with pytest.raises(ContractViolation) as secret:
+        ContextRef.from_dict(secret_field)
+    assert secret.value.reason == "UNKNOWN_FIELD"
+
+
+def test_work_progress_v2_round_trip_preserves_known_unknown_and_sequence_domains() -> (
+    None
+):
+    fixture = _load("work_progress.v2.json")
+    tracker = EventSequenceTracker()
+    sources = [EventEnvelope.from_dict(item) for item in fixture["source_events"]]
+    progress_events = [
+        EventEnvelope.from_dict(item) for item in fixture["progress_events"]
+    ]
+
+    accepted = WorkProgressEventV2.from_dict(
+        progress_events[0].payload,
+        scope=progress_events[0].scope,
+    )
+    running = WorkProgressEventV2.from_dict(
+        progress_events[1].payload,
+        scope=progress_events[1].scope,
+    )
+    terminal = WorkProgressEventV2.from_dict(
+        progress_events[2].payload,
+        scope=progress_events[2].scope,
+    )
+    assert accepted.to_dict() == fixture["progress_events"][0]["payload"]
+    assert accepted.artifact_refs.knowledge is Knowledge.UNKNOWN
+    assert running.artifact_refs.knowledge is Knowledge.UNKNOWN
+    assert terminal.outcome is TerminalOutcome.COMPLETED
+    assert progress_events[1].seq == 0 and running.seq == 1
+
+    known_empty = copy.deepcopy(progress_events[0].payload)
+    known_empty["artifact_refs"] = {"knowledge": "known", "value": []}
+    parsed_known_empty = WorkProgressEventV2.from_dict(known_empty)
+    assert parsed_known_empty.artifact_refs.knowledge is Knowledge.KNOWN
+    assert parsed_known_empty.artifact_refs.value == ()
+
+    maximum = copy.deepcopy(progress_events[0].payload)
+    maximum["seq"] = MAX_SAFE_INTEGER
+    assert WorkProgressEventV2.from_dict(maximum).seq == MAX_SAFE_INTEGER
+
+    for source in sources:
+        assert tracker.accept(source).status is EventApplyStatus.APPLIED
+
+    future_raw = copy.deepcopy(fixture["progress_events"][2])
+    future_raw["producer"]["instance_id"] = "bridge-3"
+    future_raw["seq"] = 0
+    future = EventEnvelope.from_dict(future_raw)
+    future_result = tracker.accept(future)
+    assert future_result.status is EventApplyStatus.QUARANTINED_PROJECTION
+    assert future_result.error is not None
+    assert future_result.error.reason == "PROGRESS_SEQUENCE_GAP"
+
+    first = tracker.accept(progress_events[0])
+    assert first.status is EventApplyStatus.APPLIED
+    second = tracker.accept(progress_events[1])
+    assert second.status is EventApplyStatus.APPLIED
+    assert second.applied_event_ids == ("progress-1", "progress-2")
+
+    duplicate_source = copy.deepcopy(fixture["progress_events"][0])
+    duplicate_source["event_id"] = "progress-overlap"
+    duplicate_source["producer"]["instance_id"] = "bridge-overlap"
+    duplicate_source["seq"] = 0
+    duplicate_source["payload"]["seq"] = 3
+    duplicate = tracker.accept(EventEnvelope.from_dict(duplicate_source))
+    assert duplicate.status is EventApplyStatus.REJECTED_PROJECTION
+    assert duplicate.error is not None
+    assert duplicate.error.reason == "PROGRESS_SOURCE_ALREADY_PROJECTED"
+
+    order_tracker = EventSequenceTracker()
+    for source in sources:
+        assert order_tracker.accept(source).status is EventApplyStatus.APPLIED
+    reversed_progress = copy.deepcopy(fixture["progress_events"][2])
+    reversed_progress["event_id"] = "progress-terminal-first"
+    reversed_progress["producer"]["instance_id"] = "bridge-terminal-first"
+    reversed_progress["seq"] = 0
+    reversed_progress["payload"]["seq"] = 0
+    reversed_result = order_tracker.accept(EventEnvelope.from_dict(reversed_progress))
+    assert reversed_result.status is EventApplyStatus.REJECTED_PROJECTION
+    assert reversed_result.error is not None
+    assert reversed_result.error.reason == "PROGRESS_SOURCE_ORDER_MISMATCH"
+
+    fabricated_detail = copy.deepcopy(fixture["progress_events"][0])
+    fabricated_detail["event_id"] = "progress-fabricated-detail"
+    fabricated_detail["producer"]["instance_id"] = "bridge-fabricated-detail"
+    fabricated_detail["seq"] = 0
+    fabricated_detail["payload"]["summary"] = {
+        "knowledge": "known",
+        "value": "guessed",
+    }
+    detail_result = order_tracker.accept(EventEnvelope.from_dict(fabricated_detail))
+    assert detail_result.status is EventApplyStatus.REJECTED_PROJECTION
+    assert detail_result.error is not None
+    assert detail_result.error.reason == "PROGRESS_DETAIL_UNPROVEN"
+
+    with pytest.raises(ContractViolation) as invalid_knowledge:
+        KnownFact("unknown")  # type: ignore[arg-type]
+    assert invalid_knowledge.value.reason == "INVALID_ENUM"
+
+
+def test_work_progress_v2_rejects_false_authority_outcome_and_source_mapping() -> None:
+    fixture = _load("work_progress.v2.json")
+    raw = copy.deepcopy(fixture["progress_events"][0])
+    raw["payload"]["source"]["authority"] = "executor"
+    with pytest.raises(ContractViolation) as authority:
+        EventEnvelope.from_dict(raw)
+    assert authority.value.reason == "PROGRESS_SOURCE_AUTHORITY_MISMATCH"
+
+    raw = copy.deepcopy(fixture["progress_events"][0])
+    raw["payload"]["outcome"] = "completed"
+    with pytest.raises(ContractViolation) as outcome:
+        EventEnvelope.from_dict(raw)
+    assert outcome.value.reason == "NON_TERMINAL_OUTCOME_FORBIDDEN"
+
+    tracker = EventSequenceTracker()
+    source = EventEnvelope.from_dict(fixture["source_events"][0])
+    assert tracker.accept(source).status is EventApplyStatus.APPLIED
+    false_progress = copy.deepcopy(fixture["progress_events"][0])
+    false_progress["payload"]["state"] = "running"
+    rejected = tracker.accept(EventEnvelope.from_dict(false_progress))
+    assert rejected.status is EventApplyStatus.REJECTED_CAUSATION
+    assert rejected.error is not None
+    assert rejected.error.reason == "PROGRESS_SOURCE_MISMATCH"
+
+    attempt_progress = copy.deepcopy(fixture["progress_events"][0])
+    attempt_progress["event_id"] = "attempt-progress-0"
+    attempt_progress["stream_ref"] = {"kind": "task", "id": "task-1"}
+    attempt_progress["causation_id"] = "attempt-source-0"
+    attempt_progress["payload"]["work_ref"] = {"kind": "task", "id": "task-1"}
+    attempt_progress["payload"]["source"] = {
+        "authority": "executor",
+        "event_id": "attempt-source-0",
+        "source_work_ref": {"kind": "attempt", "id": "attempt-1"},
+        "adapter": "jiuwenswarm.executor",
+    }
+    with pytest.raises(ContractViolation) as unbound:
+        EventEnvelope.from_dict(attempt_progress)
+    assert unbound.value.reason == "PROGRESS_ATTEMPT_PARENT_UNVERIFIED"
+
+    identities = IdentityRegistry()
+    exact_scope = ScopeRef.from_dict(fixture["scope"])
+    identities.register(
+        IdentityRecord(IdentityRef(IdentityKind.TASK, "task-1"), exact_scope, ())
+    )
+    identities.register(
+        IdentityRecord(
+            IdentityRef(IdentityKind.ATTEMPT, "attempt-1"),
+            exact_scope,
+            (IdentityRef(IdentityKind.TASK, "task-1"),),
+        )
+    )
+    parsed_attempt_progress = EventEnvelope.from_dict(
+        attempt_progress, identities=identities
+    )
+    assert parsed_attempt_progress.stream_ref.id == "task-1"
+    attempt_source = copy.deepcopy(fixture["source_events"][0])
+    attempt_source["event_id"] = "attempt-source-0"
+    attempt_source["event_type"] = "attempt.accepted"
+    attempt_source["producer"] = {
+        "component": "task.executor",
+        "instance_id": "executor-1",
+        "authority": "executor",
+    }
+    attempt_source["stream_ref"] = {"kind": "attempt", "id": "attempt-1"}
+    attempt_tracker = EventSequenceTracker(identities)
+    assert (
+        attempt_tracker.accept(
+            EventEnvelope.from_dict(attempt_source, identities=identities)
+        ).status
+        is EventApplyStatus.APPLIED
+    )
+    assert (
+        attempt_tracker.accept(parsed_attempt_progress).status
+        is EventApplyStatus.APPLIED
+    )
+
+
+def test_work_progress_mixed_authority_streams_do_not_invent_global_order() -> None:
+    fixture = _load("work_progress.v2.json")
+    exact_scope = ScopeRef.from_dict(fixture["scope"])
+    identities = IdentityRegistry()
+    task_ref = IdentityRef(IdentityKind.TASK, "task-mixed")
+    identities.register(IdentityRecord(task_ref, exact_scope, ()))
+    for attempt_id in ("attempt-mixed-1", "attempt-mixed-2"):
+        identities.register(
+            IdentityRecord(
+                IdentityRef(IdentityKind.ATTEMPT, attempt_id),
+                exact_scope,
+                (task_ref,),
+            )
+        )
+
+    def source_event(
+        *, event_id: str, kind: str, ref_id: str, authority: str, instance: str
+    ) -> EventEnvelope:
+        raw = copy.deepcopy(fixture["source_events"][0])
+        raw["event_id"] = event_id
+        raw["event_type"] = f"{kind}.accepted"
+        raw["producer"] = {
+            "component": f"{kind}.runtime",
+            "instance_id": instance,
+            "authority": authority,
+        }
+        raw["stream_ref"] = {"kind": kind, "id": ref_id}
+        return EventEnvelope.from_dict(raw, identities=identities)
+
+    task_source = source_event(
+        event_id="task-mixed-source",
+        kind="task",
+        ref_id=task_ref.id,
+        authority="task_core",
+        instance="task-core-1",
+    )
+    attempt_one = source_event(
+        event_id="attempt-mixed-source-1",
+        kind="attempt",
+        ref_id="attempt-mixed-1",
+        authority="executor",
+        instance="executor-1",
+    )
+    attempt_two = source_event(
+        event_id="attempt-mixed-source-2",
+        kind="attempt",
+        ref_id="attempt-mixed-2",
+        authority="executor",
+        instance="executor-2",
+    )
+    tracker = EventSequenceTracker(identities)
+    for source in (task_source, attempt_one, attempt_two):
+        assert tracker.accept(source).status is EventApplyStatus.APPLIED
+
+    def projection(source: EventEnvelope, seq: int) -> EventEnvelope:
+        raw = copy.deepcopy(fixture["progress_events"][0])
+        raw["event_id"] = f"mixed-progress-{seq}"
+        raw["producer"]["instance_id"] = f"mixed-bridge-{seq}"
+        raw["stream_ref"] = task_ref.to_dict()
+        raw["seq"] = 0
+        raw["causation_id"] = source.event_id
+        raw["payload"]["work_ref"] = task_ref.to_dict()
+        raw["payload"]["source"] = {
+            "authority": source.producer.authority,
+            "event_id": source.event_id,
+            "source_work_ref": source.stream_ref.to_dict(),
+            "adapter": "mixed.authority.adapter",
+        }
+        raw["payload"]["seq"] = seq
+        return EventEnvelope.from_dict(raw, identities=identities)
+
+    for seq, source in enumerate((attempt_two, task_source, attempt_one)):
+        assert (
+            tracker.accept(projection(source, seq)).status is EventApplyStatus.APPLIED
+        )
+
+
+def test_work_progress_source_order_survives_producer_replacement() -> None:
+    fixture = _load("work_progress.v2.json")
+
+    def source(
+        *, event_id: str, instance: str, event_type: str, cause: str | None
+    ) -> EventEnvelope:
+        raw = copy.deepcopy(fixture["source_events"][0])
+        raw["event_id"] = event_id
+        raw["producer"]["instance_id"] = instance
+        raw["event_type"] = event_type
+        raw["seq"] = 0
+        raw["causation_id"] = cause
+        raw["payload"] = {"state": event_type.split(".", 1)[1]}
+        return EventEnvelope.from_dict(raw)
+
+    accepted = source(
+        event_id="round-replaced-accepted",
+        instance="harness-before-restart",
+        event_type="round.accepted",
+        cause=None,
+    )
+    running = source(
+        event_id="round-replaced-running",
+        instance="harness-after-restart",
+        event_type="round.running",
+        cause=accepted.event_id,
+    )
+    tracker = EventSequenceTracker()
+    assert tracker.accept(accepted).status is EventApplyStatus.APPLIED
+    assert tracker.accept(running).status is EventApplyStatus.APPLIED
+
+    def projection(
+        source: EventEnvelope, *, event_id: str, instance: str, progress_seq: int
+    ) -> EventEnvelope:
+        raw = copy.deepcopy(fixture["progress_events"][0])
+        raw["event_id"] = event_id
+        raw["producer"]["instance_id"] = instance
+        raw["seq"] = 0
+        raw["causation_id"] = source.event_id
+        raw["payload"]["source"] = {
+            "authority": source.producer.authority,
+            "event_id": source.event_id,
+            "source_work_ref": source.stream_ref.to_dict(),
+            "adapter": "restarted.task-core.adapter",
+        }
+        raw["payload"]["state"] = source.payload["state"]
+        raw["payload"]["seq"] = progress_seq
+        return EventEnvelope.from_dict(raw)
+
+    reversed_running = projection(
+        running,
+        event_id="task-replaced-progress-running-early",
+        instance="bridge-running-early",
+        progress_seq=0,
+    )
+    reversed_result = tracker.accept(reversed_running)
+    assert reversed_result.status is EventApplyStatus.REJECTED_PROJECTION
+    assert reversed_result.error is not None
+    assert reversed_result.error.reason == "PROGRESS_SOURCE_ORDER_MISMATCH"
+
+    assert (
+        tracker.accept(
+            projection(
+                accepted,
+                event_id="task-replaced-progress-accepted",
+                instance="bridge-accepted",
+                progress_seq=0,
+            )
+        ).status
+        is EventApplyStatus.APPLIED
+    )
+    assert (
+        tracker.accept(
+            projection(
+                running,
+                event_id="task-replaced-progress-running",
+                instance="bridge-running",
+                progress_seq=1,
+            )
+        ).status
+        is EventApplyStatus.APPLIED
+    )
+
+
 @pytest.mark.parametrize(
     "scenario",
     _load("critical_kernel.invalid.json")["cases"],
@@ -144,6 +522,7 @@ def test_shared_invalid_fixture_rejects_with_zero_effects(
     scenario: dict[str, object],
 ) -> None:
     fixture = _load("critical_kernel.valid.json")
+    progress_fixture = _load("work_progress.v2.json")
     effects = 0
 
     def effect() -> None:
@@ -152,7 +531,7 @@ def test_shared_invalid_fixture_rejects_with_zero_effects(
 
     with pytest.raises(ContractViolation) as raised:
         match scenario["change"]:
-            case "context_refs_non_empty":
+            case "context_refs_malformed":
                 raw = copy.deepcopy(fixture["command"])
                 raw["context_refs"] = [{"kind": "turn", "id": "turn-1"}]
                 CommandEnvelope.from_dict(raw)
@@ -196,6 +575,14 @@ def test_shared_invalid_fixture_rejects_with_zero_effects(
                 fence.apply_if_current(
                     ResponseRef("interaction-1", "wrong-response", 0), effect
                 )
+            case "context_uri_bom":
+                raw = copy.deepcopy(progress_fixture["context_refs"][0])
+                raw["uri"] = "urn:test:\ufeff"
+                ContextRef.from_dict(raw)
+            case "context_stable_id_bom_only":
+                raw = copy.deepcopy(progress_fixture["context_refs"][0])
+                raw["stable_id"] = "\ufeff"
+                ContextRef.from_dict(raw)
             case unknown:
                 raise AssertionError(f"unknown invalid scenario {unknown}")
 

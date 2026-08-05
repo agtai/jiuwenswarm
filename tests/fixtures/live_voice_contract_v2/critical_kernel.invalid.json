@@ -1,12 +1,14 @@
 {
   "cases": [
-    {"id": "K-N01", "kind": "command", "change": "context_refs_non_empty", "reason": "CONTEXT_REFS_UNSUPPORTED", "zero_effect": true},
+    {"id": "K-N01", "kind": "command", "change": "context_refs_malformed", "reason": "MISSING_REQUIRED_FIELD", "zero_effect": true},
     {"id": "K-N02", "kind": "command", "change": "wrong_scope_type", "reason": "INVALID_JSON_OBJECT", "zero_effect": true},
     {"id": "K-N03", "kind": "event", "change": "wrong_authority", "reason": "EVENT_AUTHORITY_MISMATCH", "zero_effect": true},
     {"id": "K-N04", "kind": "result", "change": "success_with_error", "reason": "INVALID_RESULT_EXCLUSIVITY", "zero_effect": true},
     {"id": "K-N05", "kind": "command", "change": "unsafe_integer", "reason": "INVALID_SAFE_INTEGER", "zero_effect": true},
     {"id": "K-N06", "kind": "command", "change": "unpaired_surrogate", "reason": "INVALID_UNICODE_SCALAR", "zero_effect": true},
     {"id": "K-N07", "kind": "attempt", "change": "accepted_to_terminal", "reason": "INVALID_LIFECYCLE_TRANSITION", "zero_effect": true},
-    {"id": "K-N08", "kind": "response", "change": "generation_only_match", "reason": "STALE_RESPONSE_OUTPUT", "zero_effect": true}
+    {"id": "K-N08", "kind": "response", "change": "generation_only_match", "reason": "STALE_RESPONSE_OUTPUT", "zero_effect": true},
+    {"id": "K-N09", "kind": "context_ref", "change": "context_uri_bom", "reason": "INVALID_CONTEXT_URI", "zero_effect": true},
+    {"id": "K-N10", "kind": "context_ref", "change": "context_stable_id_bom_only", "reason": "INVALID_REQUIRED_TEXT", "zero_effect": true}
   ]
 }

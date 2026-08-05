@@ -6,9 +6,10 @@
 ## Git and release identity
 
 - Development branch: `hx/0803_live_voice`; upstream: `origin/hx/0803_live_voice`.
-- Current CR-B integration base: `50b98b4a381cc44c25a63b8c37ec684ecb6adea3`; always verify Git and the working tree at resume instead of inferring landed state from this base.
+- Current AB-B integration base: `1d721ca07587764f054e905bb4701e5af6d6a6ef`; always verify Git and the working tree at resume instead of inferring landed state from this base.
 - The reviewed AIO-B/X-WEB source from `e407af45cbb97b23aedab5b5ce9b24880b09667b` is reconciled onto this base. Current-branch integration hardening additionally rejects capture-ID reuse, exposes the actual playout PCM rate and unsupported output-device/physical-heard capabilities, and reports idle playout-context loss. Its candidate-local browser decision ID moved from D-057 to D-058 because this branch already owns D-057 for D-031 closure; the integration review record owns the exact fixes and verification.
 - The reviewed CR-B source from `4b384970ff06ef7adc5fe9ad4b0bd7f745ab412b` is reconciled onto the current AIO/D-031 base. Current-branch review additionally preserves the single shutdown-effect result when the first `close()` waiter is cancelled; the CR-B review record owns the exact fix and verification.
+- The reviewed WorkProgress v2/AB-B source from `a7ec6bad2ad50f04f18010fac6f4091f0ebd25f5` is reconciled onto the current branch. Current-branch review additionally prevents a caller timeout from cancelling the shared request completion and prevents a cancelled delivery waiter from consuming an arriving Agent/WorkProgress output; the AB-B review record owns the exact fixes and verification.
 - Week 1 implementation is complete: corrected W1-K1 `857d5c06`, route telemetry `ac608738`, execution policy `f12a790b`, A packages `56450bdf`, and W1-X2/P1B `ad02fa6f` are committed in this branch history.
 - D-031 monitor and zero-effect result gate are committed in `617fe256`. The project-bound Code Agent batch makes target/execution/artifact facts coherent, completed its affected automated matrix and D-053 reviews, and passed the accepted isolated real-service run. D-031 is `CLOSED` for its bounded Compatibility Adapter scope under D-057.
 - V0 immutable Released/Frozen baseline: `ee2896a4afb186e693c720476b6de10797e66f72`, Gate 0–6 PASS.
@@ -32,10 +33,10 @@ The carrier is the JiuwenSwarm desktop Web frontend. D-058 freezes the first Alp
 
 | Track | Current implementation fact | Next bounded work | Dependency / limit |
 |---|---|---|---|
-| Shared contract | ACG v2 critical kernel, fixtures/fakes/conformance and route telemetry are committed and reviewed | keep stable while real consumers integrate | no replacement credit from contract/fake evidence alone |
+| Shared contract | ACG v2 critical kernel, fixtures/fakes/conformance and route telemetry are committed and reviewed; strict Python/TypeScript ContextRef and source-backed WorkProgress v2 parity are integrated | keep stable while real consumers integrate | ContextRef authorization/expiry/redaction enforcement remains consumer-owned; no replacement credit from contract/fake evidence alone |
 | P1 Speech I/O | AIO/SR/SS Ports and Browser Speech fallback are committed; AIO-B adds a reviewed Chrome `getUserMedia`/AudioWorklet/Web Audio Adapter, exact 20ms PCM frames, lifecycle tests and one real-device normal-path run | connect the bounded Adapter only through owned SR/RM B/C packages without claiming a complete P1 route | no real SR/SS Provider or Browser↔Gateway media route; permission revoke/device loss/background and AIO-C latency lack real evidence; AIO-B alone earns no P1 credit |
-| P2 Realtime | CR/RM/II/AB A packages and deterministic fake vertical are committed; CR-B adds an explicitly started bounded runtime loop, exact presentation ACK/history ledger, generation fencing, non-escalating barge-in and a declarative in-memory effect outbox | connect CR-B only through a reviewed real Agent compatibility Adapter | no real media transport, Agent route, browser presentation ACK, Session History durability or Agent WorkProgress route; CR-B alone earns no P2/Web Gate credit |
-| P3alpha Task | TC/ED/VB A packages and fake vertical are committed; D-031's reviewed project-bound compatibility carrier passed its accepted real-service closure run | complete the current formal TC-B/ED-B/VB-B replacement batch | VB-C, TC-C and candidate-dependent WorkProgress/CR return are excluded; acceptance evidence is not yet complete |
+| P2 Realtime | CR/RM/II/AB A packages and deterministic fake vertical are committed; CR-B owns the bounded runtime/presentation foundation, while AB-B adds bounded non-blocking Agent dispatch and source-backed round WorkProgress over an injected Adapter | connect CR-B/AB-B through a separately reviewed real Agent compatibility Adapter and CR notification consumer | no real media transport, Agent Adapter/route, browser presentation ACK, Session History durability or CR notification consumption; CR-B/AB-B foundations earn no P2/Web Gate credit |
+| P3alpha Task | TC/ED/VB A packages and fake vertical are committed; D-031's reviewed project-bound compatibility carrier passed its accepted real-service closure run | complete the current formal TC-B/ED-B/VB-B replacement batch | VB-C, TC-C and WorkProgress/CR return wiring are excluded; acceptance evidence is not yet complete |
 | Integration | three fake verticals and opt-in Browser P1 fallback exist | after one real route passes review, start cumulative integration and service validation | Integrated mode is documented but not runnable |
 
 V0 and task compatibility code remains fallback, `demo_substitute` or Compatibility Adapter under D-047. Do not add formal authority to `useLiveVoiceDemo`, the frontend TaskBridge or legacy `schedule.*`/JSON state. CR/TC/ED and the target modules must take ownership through incremental replacement.
@@ -95,11 +96,12 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 - D-031 review and sanitized real-service evidence: [implementation review](D031_IMPLEMENTATION_REVIEW_2026-08-04.md), [project-bound closure run](evidence/D031_20260805_PROJECT_BOUND.md).
 - AIO-B/X-WEB decision, implementation and evidence: [AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md](AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md).
 - CR-B runtime loop, presentation truth and review evidence: [CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md](CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md).
+- WorkProgress v2 and AB-B runtime foundation review/evidence: [AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md](AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md).
 - V0 immutable evidence: [V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md).
 - Environment and operating procedures: [E2E_RUNBOOK.md](runbooks/E2E_RUNBOOK.md).
 
 ## Next actions
 
-1. Complete the current formal P3alpha replacement batch: TC-B owns durable command/task/event/result/snapshot/outbox authority, ED-B owns the project-bound Executor Adapter and workspace isolation, and VB-B owns committed task-command policy. VB-C, TC-C and candidate-dependent WorkProgress/CR return remain excluded.
+1. Complete the current formal P3alpha replacement batch: TC-B owns durable command/task/event/result/snapshot/outbox authority, ED-B owns the project-bound Executor Adapter and workspace isolation, and VB-B owns committed task-command policy. VB-C, TC-C and WorkProgress/CR return wiring remain excluded.
 2. Keep Speech critical-token safety as the next independent P1 slice; it must gate committed input with zero Agent/Tool/Task side effects before clarification, without taking Task authority from VB-B/TC-B.
-3. Connect AIO-B only through owned SR/RM B/C packages and CR-B only through a reviewed real Agent compatibility Adapter; neither bounded foundation is the formal P1/P2 end-to-end route.
+3. Connect AIO-B only through owned SR/RM B/C packages; connect CR-B/AB-B only through a reviewed real Agent compatibility Adapter and CR notification consumer. These bounded foundations are not the formal P1/P2 end-to-end routes.

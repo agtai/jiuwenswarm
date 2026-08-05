@@ -8,12 +8,13 @@ import json
 import math
 import re
 import threading
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final, TypeAlias, TypeVar
+from typing import Final, Generic, TypeAlias, TypeVar
 
 
 CONTRACT_VERSION: Final = "live-voice.contract.v2"
@@ -99,14 +100,54 @@ class Availability(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+class Knowledge(StrEnum):
+    KNOWN = "known"
+    UNKNOWN = "unknown"
+
+
+class ContextRevisionKind(StrEnum):
+    VERSION = "version"
+    SNAPSHOT = "snapshot"
+    UNVERSIONED = "unversioned"
+
+
+class WorkState(StrEnum):
+    ACCEPTED = "accepted"
+    RUNNING = "running"
+    BLOCKED = "blocked"
+    DECISION_REQUIRED = "decision_required"
+    TERMINAL = "terminal"
+
+
+class WorkSourceAuthority(StrEnum):
+    HARNESS = "harness"
+    TASK_CORE = "task_core"
+    EXECUTOR = "executor"
+
+
+class WorkUrgency(StrEnum):
+    NORMAL = "normal"
+    ATTENTION = "attention"
+    URGENT = "urgent"
+    UNKNOWN = "unknown"
+
+
+class Speakability(StrEnum):
+    NOT_SPEAKABLE = "not_speakable"
+    ELIGIBLE = "eligible"
+    ATTENTION_REQUESTED = "attention_requested"
+
+
 class EventApplyStatus(StrEnum):
     APPLIED = "applied"
     DUPLICATE_APPLIED = "duplicate_applied"
     QUARANTINED_GAP = "quarantined_gap"
     QUARANTINED_CAUSATION = "quarantined_causation"
+    QUARANTINED_PROJECTION = "quarantined_projection"
     DUPLICATE_QUARANTINED = "duplicate_quarantined"
     REJECTED_CONFLICT = "rejected_conflict"
     REJECTED_CAUSATION = "rejected_causation"
+    REJECTED_PROJECTION = "rejected_projection"
     REJECTED_LIFECYCLE = "rejected_lifecycle"
 
 
@@ -204,9 +245,25 @@ class ContractViolation(ValueError):
 
 _EnumT = TypeVar("_EnumT", bound=StrEnum)
 _ValueT = TypeVar("_ValueT")
+_FactT = TypeVar("_FactT")
 _NAMESPACE_RE = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)+$")
 _REASON_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$")
+_URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+_CONTEXT_WHITESPACE: Final = frozenset(
+    {
+        0x0085,
+        0x00A0,
+        0x1680,
+        *range(0x2000, 0x200B),
+        0x2028,
+        0x2029,
+        0x202F,
+        0x205F,
+        0x3000,
+        0xFEFF,
+    }
+)
 
 
 def _violation(
@@ -234,6 +291,44 @@ def _required_text(value: object, field_name: str) -> str:
             "INVALID_REQUIRED_TEXT", f"{field_name} must be a non-empty string"
         )
     return _validate_unicode(value, field_name)
+
+
+def _context_required_text(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise _violation(
+            "INVALID_REQUIRED_TEXT", f"{field_name} must be a non-empty string"
+        )
+    normalized = _validate_unicode(value, field_name)
+    if not any(
+        ord(char) > 0x20
+        and not 0x7F <= ord(char) <= 0x9F
+        and ord(char) not in _CONTEXT_WHITESPACE
+        for char in normalized
+    ):
+        raise _violation(
+            "INVALID_REQUIRED_TEXT", f"{field_name} must be a non-empty string"
+        )
+    return normalized
+
+
+def _context_uri(value: object) -> str:
+    uri = _context_required_text(value, "context_ref.uri")
+    scheme = _URI_SCHEME_RE.match(uri)
+    if (
+        scheme is None
+        or scheme.end() == len(uri)
+        or any(
+            ord(char) <= 0x20
+            or 0x7F <= ord(char) <= 0x9F
+            or ord(char) in _CONTEXT_WHITESPACE
+            for char in uri
+        )
+    ):
+        raise _violation(
+            "INVALID_CONTEXT_URI",
+            "context_ref.uri must be a non-empty absolute URI without whitespace or controls",
+        )
+    return uri
 
 
 def _optional_id(value: object, field_name: str) -> str | None:
@@ -461,7 +556,7 @@ def _canonical_frozen(value: FrozenJson) -> str:
         return "true"
     if value is False:
         return "false"
-    if type(value) in {int, float}:
+    if isinstance(value, (int, float)):
         return _canonical_number(value)
     if isinstance(value, str):
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -514,6 +609,158 @@ class ScopeRef:
             "project_id": self.project_id,
             "session_id": self.session_id,
             "assurance": self.assurance.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextRevision:
+    kind: ContextRevisionKind
+    value: str | None
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ContextRevision:
+        data = _strict_object(payload, field_name="context_ref.revision")
+        kind = _enum(
+            ContextRevisionKind,
+            data.get("kind"),
+            "context_ref.revision.kind",
+        )
+        required = (
+            {"kind"}
+            if kind is ContextRevisionKind.UNVERSIONED
+            else {
+                "kind",
+                "value",
+            }
+        )
+        _require_exact_keys(
+            data,
+            required=required,
+            field_name="context_ref.revision",
+        )
+        return cls(
+            kind=kind,
+            value=(
+                None
+                if kind is ContextRevisionKind.UNVERSIONED
+                else _context_required_text(data["value"], "context_ref.revision.value")
+            ),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {"kind": self.kind.value}
+        if self.value is not None:
+            result["value"] = self.value
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class ContextRedaction:
+    policy_id: str
+    redacted: bool
+    fields: tuple[str, ...]
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ContextRedaction:
+        data = _strict_object(payload, field_name="context_ref.redaction")
+        _require_exact_keys(
+            data,
+            required={"policy_id", "redacted", "fields"},
+            field_name="context_ref.redaction",
+        )
+        fields: list[str] = []
+        for index, item in enumerate(
+            _strict_array(data["fields"], field_name="context_ref.redaction.fields")
+        ):
+            fields.append(
+                _context_required_text(item, f"context_ref.redaction.fields[{index}]")
+            )
+        return cls(
+            policy_id=_context_required_text(
+                data["policy_id"], "context_ref.redaction.policy_id"
+            ),
+            redacted=_bool(data["redacted"], "context_ref.redaction.redacted"),
+            fields=tuple(fields),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "policy_id": self.policy_id,
+            "redacted": self.redacted,
+            "fields": list(self.fields),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ContextRef:
+    source: str
+    stable_id: str
+    uri: str
+    revision: ContextRevision
+    scope: ScopeRef
+    permissions: tuple[str, ...]
+    expires_at: str | None
+    redaction: ContextRedaction
+    _extensions: _FrozenObject = field(repr=False)
+
+    @property
+    def extensions(self) -> dict[str, object]:
+        return _thaw_object(self._extensions)
+
+    @classmethod
+    def from_dict(cls, payload: object) -> ContextRef:
+        data = _strict_object(payload, field_name="context_ref")
+        _require_exact_keys(
+            data,
+            required={
+                "source",
+                "stable_id",
+                "uri",
+                "revision",
+                "scope",
+                "permissions",
+                "expires_at",
+                "redaction",
+                "extensions",
+            },
+            field_name="context_ref",
+        )
+        uri = _context_uri(data["uri"])
+        permissions: list[str] = []
+        for index, item in enumerate(
+            _strict_array(data["permissions"], field_name="context_ref.permissions")
+        ):
+            permissions.append(_namespaced(item, f"context_ref.permissions[{index}]"))
+        expires_at = data["expires_at"]
+        return cls(
+            source=_namespaced(data["source"], "context_ref.source"),
+            stable_id=_context_required_text(
+                data["stable_id"], "context_ref.stable_id"
+            ),
+            uri=uri,
+            revision=ContextRevision.from_dict(data["revision"]),
+            scope=ScopeRef.from_dict(data["scope"]),
+            permissions=tuple(permissions),
+            expires_at=(
+                None
+                if expires_at is None
+                else _timestamp(expires_at, "context_ref.expires_at")
+            ),
+            redaction=ContextRedaction.from_dict(data["redaction"]),
+            _extensions=_extensions(data["extensions"], "context_ref.extensions"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source": self.source,
+            "stable_id": self.stable_id,
+            "uri": self.uri,
+            "revision": self.revision.to_dict(),
+            "scope": self.scope.to_dict(),
+            "permissions": list(self.permissions),
+            "expires_at": self.expires_at,
+            "redaction": self.redaction.to_dict(),
+            "extensions": self.extensions,
         }
 
 
@@ -896,15 +1143,20 @@ def _extensions(value: object, field_name: str) -> _FrozenObject:
     return _freeze_object(data, field_name)
 
 
-def _empty_context_refs(value: object, field_name: str) -> tuple[()]:
-    refs = _strict_array(value, field_name=field_name)
-    if refs:
-        raise _violation(
-            "CONTEXT_REFS_UNSUPPORTED",
-            "non-empty context_refs are not supported by the critical kernel",
-            code=ErrorCode.UNSUPPORTED,
-        )
-    return ()
+def _context_refs(
+    value: object, field_name: str, *, scope: ScopeRef
+) -> tuple[ContextRef, ...]:
+    parsed: list[ContextRef] = []
+    for index, item in enumerate(_strict_array(value, field_name=field_name)):
+        ref = ContextRef.from_dict(item)
+        if ref.scope != scope:
+            raise _violation(
+                "CONTEXT_SCOPE_MISMATCH",
+                f"{field_name}[{index}] does not match the enclosing scope",
+                code=ErrorCode.PERMISSION_DENIED,
+            )
+        parsed.append(ref)
+    return tuple(parsed)
 
 
 def _capability_list(value: object, field_name: str) -> tuple[str, ...]:
@@ -959,6 +1211,7 @@ class CommandEnvelope:
     causation_id: str | None
     origin: OriginRef
     target_ref: IdentityRef
+    context_refs: tuple[ContextRef, ...]
     required_capabilities: tuple[str, ...]
     _payload: _FrozenObject = field(repr=False)
     _extensions: _FrozenObject = field(repr=False)
@@ -1017,7 +1270,6 @@ class CommandEnvelope:
         target_ref = IdentityRef.from_dict(
             data["target_ref"], expected_kind=expected_kind
         )
-        _empty_context_refs(data["context_refs"], "command.context_refs")
         result = cls(
             request_id=_required_text(data["request_id"], "command.request_id"),
             command_id=_required_text(data["command_id"], "command.command_id"),
@@ -1030,6 +1282,9 @@ class CommandEnvelope:
             causation_id=_optional_id(data["causation_id"], "command.causation_id"),
             origin=origin,
             target_ref=target_ref,
+            context_refs=_context_refs(
+                data["context_refs"], "command.context_refs", scope=scope
+            ),
             required_capabilities=_capability_list(
                 data["required_capabilities"], "command.required_capabilities"
             ),
@@ -1069,7 +1324,7 @@ class CommandEnvelope:
             "causation_id": self.causation_id,
             "origin": self.origin.to_dict(),
             "target_ref": self.target_ref.to_dict(),
-            "context_refs": [],
+            "context_refs": [ref.to_dict() for ref in self.context_refs],
             "required_capabilities": list(self.required_capabilities),
             "payload": self.payload,
             "extensions": self.extensions,
@@ -1090,6 +1345,7 @@ class QueryEnvelope:
     correlation_id: str
     causation_id: str | None
     target_ref: IdentityRef
+    context_refs: tuple[ContextRef, ...]
     required_capabilities: tuple[str, ...]
     _payload: _FrozenObject = field(repr=False)
     _extensions: _FrozenObject = field(repr=False)
@@ -1144,7 +1400,6 @@ class QueryEnvelope:
         target_ref = IdentityRef.from_dict(
             data["target_ref"], expected_kind=expected_kind
         )
-        _empty_context_refs(data["context_refs"], "query.context_refs")
         result = cls(
             request_id=_required_text(data["request_id"], "query.request_id"),
             query_type=query_type,
@@ -1155,6 +1410,9 @@ class QueryEnvelope:
             ),
             causation_id=_optional_id(data["causation_id"], "query.causation_id"),
             target_ref=target_ref,
+            context_refs=_context_refs(
+                data["context_refs"], "query.context_refs", scope=scope
+            ),
             required_capabilities=_capability_list(
                 data["required_capabilities"], "query.required_capabilities"
             ),
@@ -1175,7 +1433,7 @@ class QueryEnvelope:
             "correlation_id": self.correlation_id,
             "causation_id": self.causation_id,
             "target_ref": self.target_ref.to_dict(),
-            "context_refs": [],
+            "context_refs": [ref.to_dict() for ref in self.context_refs],
             "required_capabilities": list(self.required_capabilities),
             "payload": self.payload,
             "extensions": self.extensions,
@@ -1341,12 +1599,272 @@ class ResultEnvelope:
 
 
 @dataclass(frozen=True, slots=True)
+class KnownFact(Generic[_FactT]):
+    knowledge: Knowledge
+    value: _FactT | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.knowledge, Knowledge):
+            raise _violation(
+                "INVALID_ENUM",
+                "known_fact.knowledge must be known or unknown",
+            )
+        if self.knowledge is Knowledge.KNOWN and self.value is None:
+            raise _violation(
+                "KNOWN_FACT_VALUE_REQUIRED", "a known fact requires a value"
+            )
+        if self.knowledge is Knowledge.UNKNOWN and self.value is not None:
+            raise _violation(
+                "UNKNOWN_FACT_VALUE_FORBIDDEN", "an unknown fact forbids a value"
+            )
+
+
+def _known_fact(
+    payload: object,
+    field_name: str,
+    parser: Callable[[object], _FactT],
+) -> KnownFact[_FactT]:
+    data = _strict_object(payload, field_name=field_name)
+    knowledge = _enum(Knowledge, data.get("knowledge"), f"{field_name}.knowledge")
+    required = {"knowledge", "value"} if knowledge is Knowledge.KNOWN else {"knowledge"}
+    _require_exact_keys(data, required=required, field_name=field_name)
+    return KnownFact(
+        knowledge,
+        None if knowledge is Knowledge.UNKNOWN else parser(data["value"]),
+    )
+
+
+def _fact_text(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise _violation("INVALID_FACT_TEXT", f"{field_name} must be a string")
+    return _validate_unicode(value, field_name)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkProgressSource:
+    authority: WorkSourceAuthority
+    event_id: str
+    source_work_ref: IdentityRef
+    adapter: str | None
+
+    @classmethod
+    def from_dict(cls, payload: object) -> WorkProgressSource:
+        data = _strict_object(payload, field_name="work_progress.source")
+        _require_exact_keys(
+            data,
+            required={"authority", "event_id", "source_work_ref", "adapter"},
+            field_name="work_progress.source",
+        )
+        source_work_ref = IdentityRef.from_dict(data["source_work_ref"])
+        if source_work_ref.kind not in {
+            IdentityKind.ROUND,
+            IdentityKind.TASK,
+            IdentityKind.ATTEMPT,
+        }:
+            raise _violation(
+                "INVALID_PROGRESS_SOURCE_KIND",
+                "source_work_ref must identify a round, task, or attempt",
+            )
+        authority = _enum(
+            WorkSourceAuthority,
+            data["authority"],
+            "work_progress.source.authority",
+        )
+        expected_kind = {
+            WorkSourceAuthority.HARNESS: IdentityKind.ROUND,
+            WorkSourceAuthority.TASK_CORE: IdentityKind.TASK,
+            WorkSourceAuthority.EXECUTOR: IdentityKind.ATTEMPT,
+        }[authority]
+        if source_work_ref.kind is not expected_kind:
+            raise _violation(
+                "PROGRESS_SOURCE_AUTHORITY_MISMATCH",
+                f"{authority.value} progress requires {expected_kind.value} source_work_ref",
+                code=ErrorCode.PERMISSION_DENIED,
+            )
+        return cls(
+            authority=authority,
+            event_id=_required_text(data["event_id"], "work_progress.source.event_id"),
+            source_work_ref=source_work_ref,
+            adapter=_optional_id(data["adapter"], "work_progress.source.adapter"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "authority": self.authority.value,
+            "event_id": self.event_id,
+            "source_work_ref": self.source_work_ref.to_dict(),
+            "adapter": self.adapter,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class WorkProgressEventV2:
+    work_ref: IdentityRef
+    source: WorkProgressSource
+    seq: int
+    state: WorkState
+    outcome: TerminalOutcome | None
+    summary: KnownFact[str]
+    blocking_question: KnownFact[str]
+    artifact_refs: KnownFact[tuple[ContextRef, ...]]
+    urgency: WorkUrgency
+    speakability: Speakability
+
+    @classmethod
+    def from_dict(
+        cls,
+        payload: object,
+        *,
+        scope: ScopeRef | None = None,
+        identities: IdentityRegistry | None = None,
+    ) -> WorkProgressEventV2:
+        data = _strict_object(payload, field_name="work_progress")
+        _require_exact_keys(
+            data,
+            required={
+                "work_ref",
+                "source",
+                "seq",
+                "state",
+                "outcome",
+                "summary",
+                "blocking_question",
+                "artifact_refs",
+                "urgency",
+                "speakability",
+            },
+            field_name="work_progress",
+        )
+        work_ref = IdentityRef.from_dict(data["work_ref"])
+        if work_ref.kind not in {IdentityKind.ROUND, IdentityKind.TASK}:
+            raise _violation(
+                "INVALID_WORK_REF_KIND", "work_ref must identify a round or task"
+            )
+        source = WorkProgressSource.from_dict(data["source"])
+        if source.source_work_ref.kind in {IdentityKind.ROUND, IdentityKind.TASK}:
+            if source.source_work_ref != work_ref:
+                raise _violation(
+                    "PROGRESS_SOURCE_WORK_MISMATCH",
+                    "round/task source_work_ref must equal work_ref",
+                )
+        elif work_ref.kind is not IdentityKind.TASK:
+            raise _violation(
+                "PROGRESS_ATTEMPT_PARENT_MISMATCH",
+                "an attempt source can project only to a task",
+            )
+        if scope is not None and identities is not None:
+            identities.require(work_ref, scope=scope)
+            identities.require(
+                source.source_work_ref,
+                scope=scope,
+                parent=(
+                    work_ref
+                    if source.source_work_ref.kind is IdentityKind.ATTEMPT
+                    else None
+                ),
+            )
+        state = _enum(WorkState, data["state"], "work_progress.state")
+        outcome = (
+            None
+            if data["outcome"] is None
+            else _enum(TerminalOutcome, data["outcome"], "work_progress.outcome")
+        )
+        if state is WorkState.TERMINAL and outcome is None:
+            raise _violation(
+                "TERMINAL_OUTCOME_REQUIRED",
+                "terminal WorkProgress requires an outcome",
+            )
+        if state is not WorkState.TERMINAL and outcome is not None:
+            raise _violation(
+                "NON_TERMINAL_OUTCOME_FORBIDDEN",
+                "non-terminal WorkProgress forbids an outcome",
+            )
+
+        def parse_artifacts(value: object) -> tuple[ContextRef, ...]:
+            values = _strict_array(
+                value, field_name="work_progress.artifact_refs.value"
+            )
+            refs = tuple(ContextRef.from_dict(item) for item in values)
+            if scope is not None:
+                for ref in refs:
+                    if ref.scope != scope:
+                        raise _violation(
+                            "CONTEXT_SCOPE_MISMATCH",
+                            "artifact context scope must match WorkProgress scope",
+                            code=ErrorCode.PERMISSION_DENIED,
+                        )
+            return refs
+
+        return cls(
+            work_ref=work_ref,
+            source=source,
+            seq=_uint(data["seq"], "work_progress.seq"),
+            state=state,
+            outcome=outcome,
+            summary=_known_fact(
+                data["summary"],
+                "work_progress.summary",
+                lambda value: _fact_text(value, "work_progress.summary.value"),
+            ),
+            blocking_question=_known_fact(
+                data["blocking_question"],
+                "work_progress.blocking_question",
+                lambda value: _fact_text(
+                    value, "work_progress.blocking_question.value"
+                ),
+            ),
+            artifact_refs=_known_fact(
+                data["artifact_refs"],
+                "work_progress.artifact_refs",
+                parse_artifacts,
+            ),
+            urgency=_enum(WorkUrgency, data["urgency"], "work_progress.urgency"),
+            speakability=_enum(
+                Speakability, data["speakability"], "work_progress.speakability"
+            ),
+        )
+
+    @staticmethod
+    def _fact_dict(
+        fact: KnownFact[_FactT], serializer: Callable[[_FactT], object]
+    ) -> dict[str, object]:
+        if fact.knowledge is Knowledge.UNKNOWN:
+            return {"knowledge": Knowledge.UNKNOWN.value}
+        assert fact.value is not None
+        return {
+            "knowledge": Knowledge.KNOWN.value,
+            "value": serializer(fact.value),
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "work_ref": self.work_ref.to_dict(),
+            "source": self.source.to_dict(),
+            "seq": self.seq,
+            "state": self.state.value,
+            "outcome": None if self.outcome is None else self.outcome.value,
+            "summary": self._fact_dict(self.summary, lambda value: value),
+            "blocking_question": self._fact_dict(
+                self.blocking_question, lambda value: value
+            ),
+            "artifact_refs": self._fact_dict(
+                self.artifact_refs,
+                lambda value: [ref.to_dict() for ref in value],
+            ),
+            "urgency": self.urgency.value,
+            "speakability": self.speakability.value,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class _EventRule:
-    stream_kind: IdentityKind
+    stream_kind: IdentityKind | tuple[IdentityKind, ...]
     authority: str
     state: str | None = None
     terminal: bool = False
     adapter: bool = False
+    lifecycle: bool = True
+    progress: bool = False
 
 
 _EVENT_RULES: Final = MappingProxyType(
@@ -1408,6 +1926,13 @@ _EVENT_RULES: Final = MappingProxyType(
             IdentityKind.ATTEMPT, "executor", "terminal", terminal=True
         ),
         "adapter.observed": _EventRule(IdentityKind.EVENT, "adapter", adapter=True),
+        "work.progress": _EventRule(
+            (IdentityKind.ROUND, IdentityKind.TASK),
+            "adapter",
+            adapter=True,
+            lifecycle=False,
+            progress=True,
+        ),
     }
 )
 
@@ -1415,6 +1940,9 @@ _EVENT_RULES: Final = MappingProxyType(
 def _validate_event_payload(
     event_type: str, data: Mapping[str, object], rule: _EventRule
 ) -> _FrozenObject:
+    if rule.progress:
+        progress = WorkProgressEventV2.from_dict(dict(data))
+        return _freeze_object(progress.to_dict(), "event.payload")
     if rule.adapter:
         _require_exact_keys(
             data,
@@ -1468,6 +1996,12 @@ class EventEnvelope:
             self.stream_ref.id,
         )
 
+    @property
+    def progress_source_key(self) -> tuple[ScopeRef, IdentityKind, str]:
+        """Logical source identity that survives an authority instance restart."""
+
+        return (self.scope, self.stream_ref.kind, self.stream_ref.id)
+
     @classmethod
     def from_dict(
         cls,
@@ -1516,9 +2050,18 @@ class EventEnvelope:
                 f"{event_type} requires authority {rule.authority!r}",
                 code=ErrorCode.PERMISSION_DENIED,
             )
-        stream_ref = IdentityRef.from_dict(
-            data["stream_ref"], expected_kind=rule.stream_kind
+        stream_ref = IdentityRef.from_dict(data["stream_ref"])
+        allowed_stream_kinds = (
+            rule.stream_kind
+            if isinstance(rule.stream_kind, tuple)
+            else (rule.stream_kind,)
         )
+        if stream_ref.kind not in allowed_stream_kinds:
+            expected = ", ".join(kind.value for kind in allowed_stream_kinds)
+            raise _violation(
+                "IDENTITY_KIND_MISMATCH",
+                f"expected one of {expected}, got {stream_ref.kind.value}",
+            )
         causation_id = _optional_id(data["causation_id"], "event.causation_id")
         if rule.adapter and causation_id is None:
             raise _violation(
@@ -1545,6 +2088,29 @@ class EventEnvelope:
             _payload=_validate_event_payload(event_type, event_payload, rule),
             _extensions=_extensions(data["extensions"], "event.extensions"),
         )
+        if rule.progress:
+            progress = WorkProgressEventV2.from_dict(
+                result.payload, scope=scope, identities=identities
+            )
+            if (
+                progress.source.source_work_ref.kind is IdentityKind.ATTEMPT
+                and identities is None
+            ):
+                raise _violation(
+                    "PROGRESS_ATTEMPT_PARENT_UNVERIFIED",
+                    "attempt-to-task WorkProgress requires an IdentityRegistry parent binding",
+                    code=ErrorCode.PERMISSION_DENIED,
+                )
+            if progress.work_ref != stream_ref:
+                raise _violation(
+                    "PROGRESS_ENVELOPE_MISMATCH",
+                    "work.progress stream_ref must match its projection work_ref",
+                )
+            if progress.source.event_id != causation_id:
+                raise _violation(
+                    "PROGRESS_CAUSATION_MISMATCH",
+                    "work.progress causation_id must equal source.event_id",
+                )
         if identities is not None:
             identities.require(stream_ref, scope=scope)
         return result
@@ -1816,6 +2382,7 @@ class TurnCommit:
     text: str
     committed_at: str
     scope: ScopeRef
+    context_refs: tuple[ContextRef, ...]
     _hypothesis_provenance: _FrozenObject = field(repr=False)
     contract_version: str = CONTRACT_VERSION
 
@@ -1852,7 +2419,6 @@ class TurnCommit:
                 f"expected {CONTRACT_VERSION}",
                 code=ErrorCode.UNSUPPORTED,
             )
-        _empty_context_refs(data["context_refs"], "turn_commit.context_refs")
         scope = ScopeRef.from_dict(data["scope"])
         turn_id = _required_text(data["turn_id"], "turn_commit.turn_id")
         interaction_id = _required_text(
@@ -1873,6 +2439,9 @@ class TurnCommit:
             text=_required_text(data["text"], "turn_commit.text"),
             committed_at=_timestamp(data["committed_at"], "turn_commit.committed_at"),
             scope=scope,
+            context_refs=_context_refs(
+                data["context_refs"], "turn_commit.context_refs", scope=scope
+            ),
             _hypothesis_provenance=_freeze_object(
                 data["hypothesis_provenance"],
                 "turn_commit.hypothesis_provenance",
@@ -1888,7 +2457,7 @@ class TurnCommit:
             "text": self.text,
             "hypothesis_provenance": self.hypothesis_provenance,
             "scope": self.scope.to_dict(),
-            "context_refs": [],
+            "context_refs": [ref.to_dict() for ref in self.context_refs],
             "committed_at": self.committed_at,
         }
 
@@ -2182,13 +2751,23 @@ _INITIAL_LIFECYCLE_STATES: Final = MappingProxyType(
         IdentityKind.ATTEMPT: "accepted",
     }
 )
+_PROJECTION_ERROR_REASONS: Final = frozenset(
+    {
+        "PROGRESS_SEQUENCE_GAP",
+        "PROGRESS_SEQUENCE_REUSED",
+        "PROGRESS_SOURCE_ALREADY_PROJECTED",
+        "PROGRESS_SOURCE_ORDER_MISMATCH",
+        "PROGRESS_DETAIL_UNPROVEN",
+    }
+)
 
 
 class EventSequenceTracker:
     """Orders producer streams and resolves only applied causal ancestry."""
 
-    def __init__(self) -> None:
+    def __init__(self, identities: IdentityRegistry | None = None) -> None:
         self._lock = threading.RLock()
+        self._identities = identities
         self._streams: dict[tuple[str, str, IdentityKind, str], _EventStreamState] = {}
         self._events: dict[str, EventEnvelope] = {}
         self._results: dict[str, EventApplyResult] = {}
@@ -2196,6 +2775,11 @@ class EventSequenceTracker:
         self._external_causes: dict[str, tuple[ScopeRef, str]] = {}
         self._lifecycle_by_object: dict[tuple[IdentityKind, str], str] = {}
         self._scope_by_object: dict[tuple[IdentityKind, str], ScopeRef] = {}
+        self._next_progress_seq: dict[tuple[ScopeRef, IdentityKind, str], int] = {}
+        self._progress_source_queues: dict[
+            tuple[ScopeRef, IdentityKind, str], deque[str]
+        ] = {}
+        self._projected_sources: set[str] = set()
 
     def register_applied_cause(self, command: CommandEnvelope) -> tuple[str, ...]:
         with self._lock:
@@ -2220,6 +2804,9 @@ class EventSequenceTracker:
 
     def accept(self, event: EventEnvelope) -> EventApplyResult:
         with self._lock:
+            event = EventEnvelope.from_dict(
+                event.to_dict(), identities=self._identities
+            )
             if event.event_id in self._external_causes:
                 return self._error_result(
                     EventApplyStatus.REJECTED_CONFLICT,
@@ -2298,14 +2885,22 @@ class EventSequenceTracker:
                     del stream.quarantined_by_seq[event.seq]
                     stream.poisoned_seq.add(event.seq)
                     result = self._error_result(
-                        EventApplyStatus.REJECTED_CAUSATION,
+                        (
+                            EventApplyStatus.REJECTED_PROJECTION
+                            if causal_error[0] in _PROJECTION_ERROR_REASONS
+                            else EventApplyStatus.REJECTED_CAUSATION
+                        ),
                         causal_error[0],
                         causal_error[1],
                     )
                     self._results[event.event_id] = result
                     return result
                 result = self._error_result(
-                    EventApplyStatus.QUARANTINED_CAUSATION,
+                    (
+                        EventApplyStatus.QUARANTINED_PROJECTION
+                        if causal_error[0] == "PROGRESS_SEQUENCE_GAP"
+                        else EventApplyStatus.QUARANTINED_CAUSATION
+                    ),
                     causal_error[0],
                     causal_error[1],
                 )
@@ -2346,6 +2941,7 @@ class EventSequenceTracker:
                 in {
                     EventApplyStatus.QUARANTINED_GAP,
                     EventApplyStatus.QUARANTINED_CAUSATION,
+                    EventApplyStatus.QUARANTINED_PROJECTION,
                 },
                 correlation_id=None,
                 _details=_freeze_object({}, "error.details"),
@@ -2377,7 +2973,7 @@ class EventSequenceTracker:
             )
             if mismatch is not None:
                 return mismatch
-            if event.event_type == "adapter.observed":
+            if _EVENT_RULES[event.event_type].adapter:
                 return (
                     "ADAPTER_SOURCE_EVENT_REQUIRED",
                     "adapter events must reference an authoritative source event",
@@ -2395,20 +2991,88 @@ class EventSequenceTracker:
         )
         if mismatch is not None:
             return mismatch
-        if event.event_type == "adapter.observed":
+        rule = _EVENT_RULES[event.event_type]
+        if rule.adapter:
             if source.producer.authority == "adapter":
                 return (
                     "ADAPTER_SOURCE_NOT_AUTHORITATIVE",
                     "adapter events cannot establish authority for another adapter event",
                     True,
                 )
-            source_type = event.payload["source_event_type"]
-            if source_type != source.event_type:
-                return (
-                    "ADAPTER_SOURCE_TYPE_MISMATCH",
-                    "adapter source_event_type must match the causal source event",
-                    True,
+            if rule.progress:
+                progress = WorkProgressEventV2.from_dict(
+                    event.payload, scope=event.scope
                 )
+                source_outcome = source.payload.get("outcome")
+                if (
+                    progress.source.event_id != source.event_id
+                    or progress.source.authority.value != source.producer.authority
+                    or progress.source.source_work_ref != source.stream_ref
+                    or progress.state.value != source.payload.get("state")
+                    or (None if progress.outcome is None else progress.outcome.value)
+                    != source_outcome
+                ):
+                    return (
+                        "PROGRESS_SOURCE_MISMATCH",
+                        "WorkProgress must preserve source identity, authority, state, and outcome",
+                        True,
+                    )
+                expected_progress_seq = self._next_progress_seq.get(
+                    (event.scope, progress.work_ref.kind, progress.work_ref.id), 0
+                )
+                if progress.seq != expected_progress_seq:
+                    if progress.seq > expected_progress_seq:
+                        return (
+                            "PROGRESS_SEQUENCE_GAP",
+                            "WorkProgress projection sequence is waiting for an earlier event",
+                            False,
+                        )
+                    return (
+                        "PROGRESS_SEQUENCE_REUSED",
+                        "WorkProgress projection sequence was already consumed",
+                        True,
+                    )
+                if source.event_id in self._projected_sources:
+                    return (
+                        "PROGRESS_SOURCE_ALREADY_PROJECTED",
+                        "one authoritative source event can produce only one WorkProgress projection",
+                        True,
+                    )
+                source_queue = self._progress_source_queues.get(
+                    source.progress_source_key
+                )
+                if source_queue is None or not source_queue:
+                    return (
+                        "PROGRESS_SOURCE_ORDER_MISMATCH",
+                        "WorkProgress source has no pending authoritative position",
+                        True,
+                    )
+                if source_queue[0] != source.event_id:
+                    return (
+                        "PROGRESS_SOURCE_ORDER_MISMATCH",
+                        "WorkProgress must preserve authoritative source application order",
+                        True,
+                    )
+                if (
+                    progress.summary.knowledge is Knowledge.KNOWN
+                    or progress.blocking_question.knowledge is Knowledge.KNOWN
+                    or progress.artifact_refs.knowledge is Knowledge.KNOWN
+                    or progress.urgency is not WorkUrgency.UNKNOWN
+                    or progress.speakability is not Speakability.NOT_SPEAKABLE
+                ):
+                    return (
+                        "PROGRESS_DETAIL_UNPROVEN",
+                        "current source event schema cannot prove WorkProgress detail or notification hints",
+                        True,
+                    )
+            else:
+                source_type = event.payload["source_event_type"]
+                if source_type != source.event_type:
+                    return (
+                        "ADAPTER_SOURCE_TYPE_MISMATCH",
+                        "adapter source_event_type must match the causal source event",
+                        True,
+                    )
         return None
 
     @staticmethod
@@ -2430,6 +3094,8 @@ class EventSequenceTracker:
         return None
 
     def _lifecycle_error(self, event: EventEnvelope) -> ContractError | None:
+        if not _EVENT_RULES[event.event_type].lifecycle:
+            return None
         initial = _INITIAL_LIFECYCLE_STATES.get(event.stream_ref.kind)
         if initial is None:
             return None
@@ -2443,6 +3109,8 @@ class EventSequenceTracker:
             ).error
         state = event.payload.get("state")
         assert isinstance(state, str)
+        outcome = event.payload.get("outcome")
+        assert outcome is None or isinstance(outcome, str)
         current_state = self._lifecycle_by_object.get(object_key)
         if current_state is None:
             if state == initial:
@@ -2457,7 +3125,7 @@ class EventSequenceTracker:
                 LifecycleKind(event.stream_ref.kind.value),
                 current_state,
                 state,
-                outcome=event.payload.get("outcome"),
+                outcome=outcome,
             )
         except ContractViolation as error:
             return ContractError(
@@ -2487,7 +3155,11 @@ class EventSequenceTracker:
                         del stream.quarantined_by_seq[stream.next_seq]
                         stream.poisoned_seq.add(stream.next_seq)
                         self._results[candidate.event_id] = self._error_result(
-                            EventApplyStatus.REJECTED_CAUSATION,
+                            (
+                                EventApplyStatus.REJECTED_PROJECTION
+                                if causal_error[0] in _PROJECTION_ERROR_REASONS
+                                else EventApplyStatus.REJECTED_CAUSATION
+                            ),
                             causal_error[0],
                             causal_error[1],
                         )
@@ -2505,13 +3177,40 @@ class EventSequenceTracker:
                 stream.applied_by_seq[stream.next_seq] = candidate
                 stream.next_seq += 1
                 state = candidate.payload.get("state")
-                if isinstance(state, str):
+                if _EVENT_RULES[candidate.event_type].lifecycle and isinstance(
+                    state, str
+                ):
                     object_key = (
                         candidate.stream_ref.kind,
                         candidate.stream_ref.id,
                     )
                     self._lifecycle_by_object[object_key] = state
                     self._scope_by_object[object_key] = candidate.scope
+                    if candidate.stream_ref.kind in {
+                        IdentityKind.ROUND,
+                        IdentityKind.TASK,
+                        IdentityKind.ATTEMPT,
+                    }:
+                        self._progress_source_queues.setdefault(
+                            candidate.progress_source_key, deque()
+                        ).append(candidate.event_id)
+                if _EVENT_RULES[candidate.event_type].progress:
+                    progress = WorkProgressEventV2.from_dict(
+                        candidate.payload, scope=candidate.scope
+                    )
+                    progress_key = (
+                        candidate.scope,
+                        progress.work_ref.kind,
+                        progress.work_ref.id,
+                    )
+                    self._next_progress_seq[progress_key] = progress.seq + 1
+                    source_event = self._events[progress.source.event_id]
+                    source_queue = self._progress_source_queues[
+                        source_event.progress_source_key
+                    ]
+                    source_event_id = source_queue.popleft()
+                    assert source_event_id == progress.source.event_id
+                    self._projected_sources.add(source_event_id)
                 self._applied_ids.add(candidate.event_id)
                 self._results[candidate.event_id] = EventApplyResult(
                     EventApplyStatus.APPLIED,
@@ -2569,6 +3268,10 @@ __all__ = [
     "CommandEnvelope",
     "CommandResultLedger",
     "ConnectionEpochRef",
+    "ContextRedaction",
+    "ContextRef",
+    "ContextRevision",
+    "ContextRevisionKind",
     "CONTRACT_VERSION",
     "ContractError",
     "ContractViolation",
@@ -2582,6 +3285,8 @@ __all__ = [
     "IdentityRef",
     "IdentityRegistry",
     "InputCommitState",
+    "Knowledge",
+    "KnownFact",
     "LifecycleKind",
     "MAX_SAFE_INTEGER",
     "OriginRef",
@@ -2596,6 +3301,12 @@ __all__ = [
     "TurnCommit",
     "TurnCommitLedger",
     "V1_CONTRACT_VERSION",
+    "Speakability",
+    "WorkProgressEventV2",
+    "WorkProgressSource",
+    "WorkSourceAuthority",
+    "WorkState",
+    "WorkUrgency",
     "canonical_json",
     "canonical_json_bytes",
     "classify_contract",
