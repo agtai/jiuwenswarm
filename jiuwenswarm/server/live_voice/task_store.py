@@ -41,6 +41,62 @@ from .formal_task_models import (
 
 _SCHEMA_VERSION = 1
 _StoredRecordT = TypeVar("_StoredRecordT")
+_OUTBOX_BINDING_SELECT = """
+    SELECT o.*, a.attempt_id AS canonical_attempt_id,
+           a.task_id AS attempt_task_id,
+           a.executor_ref AS bound_executor_ref,
+           a.source_seq AS bound_source_seq,
+           a.executor_id AS bound_executor_id,
+           a.state AS bound_attempt_state,
+           a.outcome AS bound_attempt_outcome,
+           t.task_id AS canonical_task_id,
+           t.attempt_id AS task_attempt_id,
+           t.scope_key AS task_scope_key,
+           t.scope_json AS task_scope_json,
+           t.spec_json AS task_spec_json,
+           t.state AS bound_task_state,
+           t.outcome AS bound_task_outcome,
+           t.correlation_id AS task_correlation_id,
+           t.event_head AS task_event_head,
+           t.cancel_requested AS task_cancel_requested,
+           t.dispatch_fenced AS task_dispatch_fenced,
+           c.command_id AS canonical_command_id,
+           c.command_type AS bound_command_type,
+           c.scope_key AS command_scope_key,
+           c.fingerprint AS command_fingerprint,
+           c.result_json AS command_result_json,
+           ce.event_id AS cancel_event_id,
+           ce.task_id AS cancel_event_task_id,
+           ce.attempt_id AS cancel_event_attempt_id,
+           ce.scope_json AS cancel_event_scope_json,
+           ce.event_type AS cancel_event_type,
+           ce.state AS cancel_event_state,
+           ce.outcome AS cancel_event_outcome,
+           ce.producer AS cancel_event_producer,
+           ce.source_event_id AS cancel_event_source_event_id,
+           ce.causation_id AS cancel_event_causation_id,
+           ce.correlation_id AS cancel_event_correlation_id,
+           ce.occurred_at AS cancel_event_occurred_at,
+           ce.details_json AS cancel_event_details_json,
+           ce.seq AS cancel_event_seq,
+           (
+             SELECT COUNT(*) FROM task_events AS ce_count
+             WHERE ce_count.task_id=o.task_id
+               AND ce_count.attempt_id=o.attempt_id
+               AND ce_count.event_type='task.cancel_requested'
+               AND ce_count.causation_id=o.command_id
+           ) AS cancel_event_count
+    FROM outbox AS o
+    LEFT JOIN attempts AS a ON a.attempt_id=o.attempt_id
+    LEFT JOIN tasks AS t ON t.task_id=o.task_id
+    LEFT JOIN commands AS c
+      ON c.command_id=o.command_id AND c.scope_key=t.scope_key
+    LEFT JOIN task_events AS ce
+      ON ce.task_id=o.task_id
+     AND ce.attempt_id=o.attempt_id
+     AND ce.event_type='task.cancel_requested'
+     AND ce.causation_id=o.command_id
+"""
 
 
 def _json_dump(value: object) -> str:
@@ -48,7 +104,7 @@ def _json_dump(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _json_load(value: str) -> object:
+def _json_load(value: str | bytes) -> object:
     try:
         return json.loads(value)
     except (json.JSONDecodeError, TypeError) as error:
@@ -68,14 +124,35 @@ def _stored_record(
 ) -> _StoredRecordT:
     try:
         return loader()
-    except FormalTaskViolation:
-        raise
+    except FormalTaskViolation as error:
+        if error.reason == "TASK_STORE_CORRUPT":
+            raise
+        raise FormalTaskViolation(
+            "TASK_STORE_CORRUPT",
+            f"formal Task Store contains an invalid {record_kind} record",
+            ErrorCode.INTERNAL,
+        ) from error
     except (ContractViolation, KeyError, OverflowError, TypeError, ValueError) as error:
         raise FormalTaskViolation(
             "TASK_STORE_CORRUPT",
             f"formal Task Store contains an invalid {record_kind} record",
             ErrorCode.INTERNAL,
         ) from error
+
+
+def _task_binding_from_row(row: sqlite3.Row) -> tuple[ScopeRef, FormalTaskSpec]:
+    def load() -> tuple[ScopeRef, FormalTaskSpec]:
+        scope = ScopeRef.from_dict(_json_load(row["scope_json"]))
+        spec = FormalTaskSpec.from_dict(_json_load(row["spec_json"]))
+        if row["scope_key"] != _scope_key(scope) or spec.context.scope != scope:
+            raise FormalTaskViolation(
+                "TASK_SCOPE_BINDING_MISMATCH",
+                "task scope key or context does not match its canonical scope",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        return scope, spec
+
+    return _stored_record("task", load)
 
 
 class SqliteTaskStore:
@@ -715,25 +792,23 @@ class SqliteTaskStore:
         now = utc_now()
         claim_token = uuid.uuid4().hex
         with self._transaction() as connection:
-            row = connection.execute(
-                """
-                SELECT o.*, a.executor_ref AS bound_executor_ref,
-                       a.source_seq AS bound_source_seq
-                FROM outbox AS o
-                JOIN attempts AS a ON a.attempt_id=o.attempt_id
-                WHERE o.state=?
-                  AND (
-                    o.kind=?
-                    OR (o.kind=? AND a.executor_ref IS NOT NULL)
-                  )
-                ORDER BY o.updated_at, o.created_at, o.outbox_id LIMIT 1
+            candidates = connection.execute(
+                _OUTBOX_BINDING_SELECT
+                + """
+                  WHERE o.state=?
+                  ORDER BY o.updated_at, o.created_at, o.outbox_id
                 """,
-                (
-                    OutboxState.PENDING.value,
-                    OutboxKind.ATTEMPT_DISPATCH.value,
-                    OutboxKind.ATTEMPT_CANCEL.value,
-                ),
-            ).fetchone()
+                (OutboxState.PENDING.value,),
+            )
+            row = None
+            for candidate in candidates:
+                item = self._outbox_from_row(candidate)
+                if (
+                    item.kind is OutboxKind.ATTEMPT_DISPATCH
+                    or item.executor_ref is not None
+                ):
+                    row = candidate
+                    break
             if row is None:
                 return None
             changed = connection.execute(
@@ -756,15 +831,15 @@ class SqliteTaskStore:
             if changed != 1:
                 return None
             claimed = connection.execute(
-                """
-                SELECT o.*, a.executor_ref AS bound_executor_ref,
-                       a.source_seq AS bound_source_seq
-                FROM outbox AS o
-                JOIN attempts AS a ON a.attempt_id=o.attempt_id
-                WHERE o.outbox_id=?
-                """,
+                _OUTBOX_BINDING_SELECT + " WHERE o.outbox_id=?",
                 (row["outbox_id"],),
             ).fetchone()
+            if claimed is None:
+                raise FormalTaskViolation(
+                    "TASK_STORE_CORRUPT",
+                    "claimed formal Task outbox record vanished during reload",
+                    ErrorCode.INTERNAL,
+                )
             return self._outbox_from_row(claimed)
 
     def release_outbox(self, item: PersistentOutboxItem, error: str) -> bool:
@@ -960,9 +1035,45 @@ class SqliteTaskStore:
                     "attempt cannot change its executor reference",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
+            now = utc_now()
+            if item.kind is OutboxKind.ATTEMPT_DISPATCH:
+                pending_cancels = connection.execute(
+                    _OUTBOX_BINDING_SELECT
+                    + " WHERE o.attempt_id=? AND o.kind=? AND o.state=?",
+                    (
+                        item.attempt_id,
+                        OutboxKind.ATTEMPT_CANCEL.value,
+                        OutboxState.PENDING.value,
+                    ),
+                ).fetchall()
+                for cancel_row in pending_cancels:
+                    cancel_item = self._outbox_from_row(cancel_row)
+                    payload = {
+                        "scope": cancel_item.scope.to_dict(),
+                        "spec": cancel_item.spec.to_dict(),
+                        "executor_ref": executor_ref,
+                    }
+                    changed = connection.execute(
+                        """
+                        UPDATE outbox SET payload_json=?, updated_at=?
+                        WHERE outbox_id=? AND state=?
+                        """,
+                        (
+                            _json_dump(payload),
+                            now,
+                            cancel_item.outbox_id,
+                            OutboxState.PENDING.value,
+                        ),
+                    ).rowcount
+                    if changed != 1:
+                        raise FormalTaskViolation(
+                            "TASK_STORE_CORRUPT",
+                            "pending cancel outbox changed during Executor binding",
+                            ErrorCode.INTERNAL,
+                        )
             connection.execute(
                 "UPDATE attempts SET executor_ref=?, updated_at=? WHERE attempt_id=?",
-                (executor_ref, utc_now(), item.attempt_id),
+                (executor_ref, now, item.attempt_id),
             )
             for observation in observations:
                 self._apply_observation(connection, observation)
@@ -971,7 +1082,7 @@ class SqliteTaskStore:
                 UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
                     claim_token=NULL, last_error=NULL, updated_at=? WHERE outbox_id=?
                 """,
-                (OutboxState.DELIVERED.value, utc_now(), item.outbox_id),
+                (OutboxState.DELIVERED.value, now, item.outbox_id),
             )
 
     def apply_observations(self, observations: tuple[ExecutorObservation, ...]) -> None:
@@ -1470,6 +1581,7 @@ class SqliteTaskStore:
                 "task is unavailable in the authorized scope",
                 ErrorCode.NOT_FOUND,
             )
+        _task_binding_from_row(row)
         return row
 
     @staticmethod
@@ -1483,16 +1595,18 @@ class SqliteTaskStore:
             raise FormalTaskViolation(
                 "TASK_NOT_FOUND", "task is unavailable", ErrorCode.NOT_FOUND
             )
+        _task_binding_from_row(row)
         return row
 
     @staticmethod
     def _task_from_row(row: sqlite3.Row) -> PersistentTaskRecord:
         def load() -> PersistentTaskRecord:
             reconciliation_state = row["reconciliation_state"]
+            scope, spec = _task_binding_from_row(row)
             return PersistentTaskRecord(
                 task_id=row["task_id"],
-                scope=ScopeRef.from_dict(_json_load(row["scope_json"])),
-                spec=FormalTaskSpec.from_dict(_json_load(row["spec_json"])),
+                scope=scope,
+                spec=spec,
                 state=FormalTaskState(row["state"]),
                 attempt_id=row["attempt_id"],
                 correlation_id=row["correlation_id"],
@@ -1560,18 +1674,278 @@ class SqliteTaskStore:
     def _outbox_from_row(row: sqlite3.Row) -> PersistentOutboxItem:
         def load() -> PersistentOutboxItem:
             payload = _json_load(row["payload_json"])
-            if type(payload) is not dict:
+            if type(payload) is not dict or set(payload) != {
+                "scope",
+                "spec",
+                "executor_ref",
+            }:
                 raise FormalTaskViolation(
                     "TASK_STORE_CORRUPT",
                     "formal Task Store contains an invalid outbox payload",
                     ErrorCode.INTERNAL,
                 )
             row_keys = set(row.keys())
-            executor_ref = (
-                row["bound_executor_ref"]
-                if "bound_executor_ref" in row_keys
-                else payload["executor_ref"]
-            )
+            kind = OutboxKind(row["kind"])
+            scope = ScopeRef.from_dict(payload["scope"])
+            spec = FormalTaskSpec.from_dict(payload["spec"])
+            if spec.context.scope != scope:
+                raise FormalTaskViolation(
+                    "OUTBOX_BINDING_MISMATCH",
+                    "outbox context does not match its stored scope",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            if {
+                "canonical_attempt_id",
+                "attempt_task_id",
+                "bound_executor_id",
+                "canonical_task_id",
+                "task_attempt_id",
+                "task_scope_key",
+                "task_scope_json",
+                "task_spec_json",
+                "bound_attempt_state",
+                "bound_attempt_outcome",
+                "bound_task_state",
+                "bound_task_outcome",
+                "task_correlation_id",
+                "task_event_head",
+                "task_cancel_requested",
+                "task_dispatch_fenced",
+                "canonical_command_id",
+                "bound_command_type",
+                "command_scope_key",
+                "command_fingerprint",
+                "command_result_json",
+                "cancel_event_id",
+                "cancel_event_task_id",
+                "cancel_event_attempt_id",
+                "cancel_event_scope_json",
+                "cancel_event_type",
+                "cancel_event_state",
+                "cancel_event_outcome",
+                "cancel_event_producer",
+                "cancel_event_source_event_id",
+                "cancel_event_causation_id",
+                "cancel_event_correlation_id",
+                "cancel_event_occurred_at",
+                "cancel_event_details_json",
+                "cancel_event_seq",
+                "cancel_event_count",
+            }.issubset(row_keys):
+                if (
+                    row["canonical_attempt_id"] is None
+                    or row["canonical_task_id"] is None
+                    or row["canonical_command_id"] is None
+                    or row["attempt_task_id"] != row["task_id"]
+                    or row["task_attempt_id"] != row["attempt_id"]
+                ):
+                    raise FormalTaskViolation(
+                        "OUTBOX_BINDING_MISMATCH",
+                        "outbox task and attempt do not have an exact canonical binding",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                task_scope = ScopeRef.from_dict(_json_load(row["task_scope_json"]))
+                task_spec = FormalTaskSpec.from_dict(_json_load(row["task_spec_json"]))
+                if (
+                    scope != task_scope
+                    or row["task_scope_key"] != _scope_key(task_scope)
+                    or spec != task_spec
+                    or row["bound_executor_id"] != spec.executor_id
+                    or payload["executor_ref"] != row["bound_executor_ref"]
+                ):
+                    raise FormalTaskViolation(
+                        "OUTBOX_BINDING_MISMATCH",
+                        "outbox scope or Executor does not match its canonical binding",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                stored_fingerprint = _json_load(row["command_fingerprint"])
+                if kind is OutboxKind.ATTEMPT_DISPATCH:
+                    if type(stored_fingerprint) is not dict or set(
+                        stored_fingerprint
+                    ) != {"command", "resolved_spec"}:
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "dispatch outbox lacks its exact create command binding",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    command_payload = stored_fingerprint["command"]
+                    resolved_spec = FormalTaskSpec.from_dict(
+                        stored_fingerprint["resolved_spec"]
+                    )
+                    if resolved_spec != spec:
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "dispatch command does not bind the resolved task spec",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                else:
+                    command_payload = stored_fingerprint
+                if type(command_payload) is not dict or "request_id" in command_payload:
+                    raise FormalTaskViolation(
+                        "OUTBOX_COMMAND_BINDING_MISMATCH",
+                        "outbox command fingerprint is invalid",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                command = CommandEnvelope.from_dict(
+                    {"request_id": "task-store-validation", **command_payload}
+                )
+                result = ResultEnvelope.from_dict(
+                    _json_load(row["command_result_json"])
+                )
+                expected_command_type = (
+                    "task.create"
+                    if kind is OutboxKind.ATTEMPT_DISPATCH
+                    else "task.cancel"
+                )
+                if (
+                    row["bound_command_type"] != expected_command_type
+                    or row["command_scope_key"] != row["task_scope_key"]
+                    or command.command_id != row["command_id"]
+                    or command.command_type != expected_command_type
+                    or command.scope != scope
+                    or tuple(command.required_capabilities) != (expected_command_type,)
+                    or not result.ok
+                    or result.command_id != row["command_id"]
+                ):
+                    raise FormalTaskViolation(
+                        "OUTBOX_COMMAND_BINDING_MISMATCH",
+                        "outbox does not match its canonical command ledger entry",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                command_result = result.result
+                if kind is OutboxKind.ATTEMPT_DISPATCH:
+                    expected_payload = {
+                        "name": spec.name,
+                        "instruction": spec.instruction,
+                        "executor_id": spec.executor_id,
+                        "side_effect_class": spec.side_effect_class,
+                        "attributes": dict(spec.attributes),
+                    }
+                    if (
+                        command.target_ref.id != f"create:{row['command_id']}"
+                        or command.payload not in ({}, expected_payload)
+                        or command.origin != spec.origin
+                        or type(command_result) is not dict
+                        or set(command_result)
+                        != {"task_id", "attempt_id", "state", "outbox_id"}
+                        or command_result["task_id"] != row["task_id"]
+                        or command_result["attempt_id"] != row["attempt_id"]
+                        or command_result["state"] != FormalTaskState.ACCEPTED.value
+                        or command_result["outbox_id"] != row["outbox_id"]
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "dispatch outbox does not match its create command facts",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                elif (
+                    command.target_ref.id != row["task_id"]
+                    or command.payload
+                    or type(command_result) is not dict
+                    or set(command_result)
+                    != {
+                        "task_id",
+                        "attempt_id",
+                        "cancel_acknowledged",
+                        "applied",
+                        "state",
+                        "outbox_id",
+                    }
+                    or command_result["task_id"] != row["task_id"]
+                    or command_result["attempt_id"] != row["attempt_id"]
+                    or command_result["cancel_acknowledged"] is not True
+                    or command_result["applied"] is not True
+                    or command_result["outbox_id"] != row["outbox_id"]
+                ):
+                    raise FormalTaskViolation(
+                        "OUTBOX_COMMAND_BINDING_MISMATCH",
+                        "cancel outbox does not match its cancel command facts",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                if kind is OutboxKind.ATTEMPT_CANCEL:
+                    if (
+                        int(row["cancel_event_count"]) != 1
+                        or type(row["cancel_event_id"]) is not str
+                        or not row["cancel_event_id"].strip()
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "cancel outbox lacks one exact durable request event",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    cancel_event_scope = ScopeRef.from_dict(
+                        _json_load(row["cancel_event_scope_json"])
+                    )
+                    cancel_event_details = _json_load(row["cancel_event_details_json"])
+                    cancel_event_state = FormalTaskState(row["cancel_event_state"])
+                    cancel_event_seq = int(row["cancel_event_seq"])
+                    if (
+                        row["cancel_event_task_id"] != row["task_id"]
+                        or row["cancel_event_attempt_id"] != row["attempt_id"]
+                        or cancel_event_scope != scope
+                        or row["cancel_event_type"] != "task.cancel_requested"
+                        or cancel_event_state
+                        not in {FormalTaskState.ACCEPTED, FormalTaskState.RUNNING}
+                        or command_result["state"] != cancel_event_state.value
+                        or row["cancel_event_outcome"] is not None
+                        or row["cancel_event_producer"] != "task_core.control"
+                        or row["cancel_event_source_event_id"] is not None
+                        or row["cancel_event_causation_id"] != row["command_id"]
+                        or row["cancel_event_correlation_id"]
+                        != row["task_correlation_id"]
+                        or row["cancel_event_occurred_at"] != result.observed_at
+                        or cancel_event_details != {"command_id": row["command_id"]}
+                        or cancel_event_seq < 1
+                        or cancel_event_seq > int(row["task_event_head"])
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "cancel result does not match its durable request event",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                task_state = FormalTaskState(row["bound_task_state"])
+                attempt_state = FormalAttemptState(row["bound_attempt_state"])
+                cancel_requested = row["task_cancel_requested"]
+                dispatch_fenced = row["task_dispatch_fenced"]
+                if (
+                    cancel_requested not in {0, 1}
+                    or dispatch_fenced not in {0, 1}
+                    or task_state is FormalTaskState.TERMINAL
+                    or row["bound_task_outcome"] is not None
+                    or attempt_state is FormalAttemptState.TERMINAL
+                    or row["bound_attempt_outcome"] is not None
+                ):
+                    raise FormalTaskViolation(
+                        "OUTBOX_LIFECYCLE_MISMATCH",
+                        "pending outbox does not match a deliverable task lifecycle",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                if kind is OutboxKind.ATTEMPT_DISPATCH:
+                    if (
+                        task_state is not FormalTaskState.ACCEPTED
+                        or attempt_state is not FormalAttemptState.ACCEPTED
+                        or row["bound_executor_ref"] is not None
+                        or bool(cancel_requested) != bool(dispatch_fenced)
+                        or (bool(cancel_requested) and int(row["delivery_count"]) == 0)
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_LIFECYCLE_MISMATCH",
+                            "dispatch outbox does not match its task lifecycle",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                elif (
+                    not bool(cancel_requested)
+                    or not bool(dispatch_fenced)
+                    or (task_state is FormalTaskState.ACCEPTED)
+                    != (attempt_state is FormalAttemptState.ACCEPTED)
+                    or (task_state is FormalTaskState.RUNNING)
+                    != (attempt_state is FormalAttemptState.RUNNING)
+                ):
+                    raise FormalTaskViolation(
+                        "OUTBOX_LIFECYCLE_MISMATCH",
+                        "cancel outbox lacks its durable cancellation lifecycle",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
             source_seq = (
                 int(row["bound_source_seq"]) if "bound_source_seq" in row_keys else -1
             )
@@ -1581,9 +1955,9 @@ class SqliteTaskStore:
                 row["task_id"],
                 row["attempt_id"],
                 row["command_id"],
-                ScopeRef.from_dict(payload["scope"]),
-                FormalTaskSpec.from_dict(payload["spec"]),
-                executor_ref,
+                scope,
+                spec,
+                payload["executor_ref"],
                 source_seq,
                 OutboxState(row["state"]),
                 int(row["delivery_count"]),

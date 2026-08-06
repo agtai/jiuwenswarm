@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-import sqlite3
 
 import pytest
 
@@ -27,6 +28,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorObservation,
     ExecutorResolution,
     FormalAttemptState,
+    FormalTaskState,
     FormalTaskViolation,
     PersistentAttemptRecord,
     PersistentOutboxItem,
@@ -1125,6 +1127,552 @@ def test_structurally_corrupt_persisted_scope_fails_closed_without_executor_effe
     assert result.error is not None
     assert result.error.reason == "TASK_STORE_CORRUPT"
     assert store.counts() == before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+async def test_corrupt_task_scope_key_cannot_disclose_or_dispatch(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    secret_instruction = "PRIVATE PROJECT INSTRUCTION: rotate the internal key."
+    invocation = _create(tmp_path, instruction=secret_instruction)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    foreign_scope = ScopeRef(
+        "foreign-user", "foreign-project", "foreign-session", Assurance.AUTHENTICATED
+    )
+    foreign_scope_key = json.dumps(
+        foreign_scope.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE tasks SET scope_key=? WHERE task_id=?",
+            (foreign_scope_key, task_id),
+        )
+    before = store.counts()
+    status = _status(task_id)
+    raw_query = status.envelope.to_dict()
+    raw_query["scope"] = foreign_scope.to_dict()
+    foreign_grant = TaskAuthorizationGrant(
+        principal_id="foreign-user",
+        scope=foreign_scope,
+        operation="task.status",
+        command_id=None,
+        target_task_id=task_id,
+        allowed_capabilities=frozenset({"task.status"}),
+        confirmation_id=None,
+        confirmed=False,
+        expires_at=EXPIRY,
+    )
+
+    hidden = core.query(QueryEnvelope.from_dict(raw_query), foreign_grant, now=NOW)
+
+    assert not hidden.ok
+    assert hidden.error is not None
+    assert hidden.error.reason == "TASK_STORE_CORRUPT"
+    assert secret_instruction not in json.dumps(hidden.to_dict())
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="worker-corrupt")
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert secret_instruction not in str(raised.value)
+    assert store.counts() == before
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox
+            """
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None, None)
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["scope", "executor"])
+async def test_corrupt_outbox_binding_fails_before_executor_effect(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    with sqlite3.connect(database) as connection:
+        row = connection.execute("SELECT payload_json FROM outbox").fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        if corruption == "scope":
+            payload["scope"]["project_id"] = "project-other"
+        else:
+            payload["spec"]["executor_id"] = "foreign-executor"
+        connection.execute(
+            "UPDATE outbox SET payload_json=?",
+            (json.dumps(payload, sort_keys=True),),
+        )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="worker-corrupt")
+
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert store.counts() == before
+    assert store.get_attempt(str(created.result["attempt_id"])).executor_ref is None
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox
+            """
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None, None)
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "cancel_to_dispatch",
+        "dispatch_to_cancel",
+        "dispatch_lifecycle",
+        "foreign_command",
+        "command_payload",
+    ],
+)
+async def test_corrupt_outbox_command_binding_cannot_claim_or_execute(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    secret_instruction = "PRIVATE PRIMARY TASK INSTRUCTION"
+    invocation = _create(tmp_path, instruction=secret_instruction)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    target_outbox_id = str(created.result["outbox_id"])
+    if corruption == "cancel_to_dispatch":
+        held_dispatch = store.claim_outbox("held-dispatch")
+        assert held_dispatch is not None
+        cancel = _cancel(task_id)
+        acknowledged = core.execute(cancel.envelope, cancel.authorization, now=NOW)
+        assert acknowledged.ok and acknowledged.result is not None
+        target_outbox_id = str(acknowledged.result["outbox_id"])
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE outbox SET kind=? WHERE outbox_id=?",
+                ("attempt.dispatch", target_outbox_id),
+            )
+    elif corruption == "dispatch_to_cancel":
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE outbox SET kind=? WHERE outbox_id=?",
+                ("attempt.cancel", target_outbox_id),
+            )
+    elif corruption == "dispatch_lifecycle":
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                """
+                UPDATE tasks SET cancel_requested=1, dispatch_fenced=1
+                WHERE task_id=?
+                """,
+                (task_id,),
+            )
+    elif corruption == "foreign_command":
+        other_invocation = _create(
+            tmp_path,
+            instruction="Different task instruction.",
+            identity_suffix="-foreign-command",
+        )
+        other = core.execute(
+            other_invocation.envelope,
+            other_invocation.authorization,
+            context=other_invocation.context,
+            now=NOW,
+        )
+        assert other.ok and other.result is not None
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE outbox SET state=? WHERE outbox_id=?",
+                ("suppressed", str(other.result["outbox_id"])),
+            )
+            connection.execute(
+                "UPDATE outbox SET command_id=? WHERE outbox_id=?",
+                (other_invocation.envelope.command_id, target_outbox_id),
+            )
+    else:
+        with sqlite3.connect(database) as connection:
+            row = connection.execute(
+                "SELECT fingerprint FROM commands WHERE command_id=?",
+                (invocation.envelope.command_id,),
+            ).fetchone()
+            assert row is not None
+            fingerprint = json.loads(row[0])
+            fingerprint["command"]["payload"]["instruction"] = (
+                "FOREIGN COMMAND INSTRUCTION"
+            )
+            connection.execute(
+                "UPDATE commands SET fingerprint=? WHERE command_id=?",
+                (
+                    json.dumps(fingerprint, sort_keys=True).encode(),
+                    invocation.envelope.command_id,
+                ),
+            )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="worker-corrupt")
+
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert secret_instruction not in str(raised.value)
+    assert store.counts() == before
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox WHERE outbox_id=?
+            """,
+            (target_outbox_id,),
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None, None)
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("durable_state", "corrupt_result_state"),
+    [
+        (FormalTaskState.ACCEPTED, FormalTaskState.RUNNING),
+        (FormalTaskState.RUNNING, FormalTaskState.ACCEPTED),
+    ],
+)
+async def test_corrupt_cancel_result_state_cannot_claim_or_execute(
+    tmp_path: Path,
+    durable_state: FormalTaskState,
+    corrupt_result_state: FormalTaskState,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    secret_instruction = "PRIVATE CANCEL TARGET INSTRUCTION"
+    invocation = _create(tmp_path, instruction=secret_instruction)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    dispatch = store.claim_outbox("dispatch-worker")
+    assert dispatch is not None
+    if durable_state is FormalTaskState.RUNNING:
+        store.complete_outbox(
+            dispatch,
+            executor_ref=f"legacy:{dispatch.attempt_id}",
+            observations=_observations(dispatch),
+        )
+    cancel = _cancel(task_id)
+    acknowledged = core.execute(cancel.envelope, cancel.authorization, now=NOW)
+    assert acknowledged.ok and acknowledged.result is not None
+    assert acknowledged.result["state"] == durable_state.value
+    cancel_outbox_id = str(acknowledged.result["outbox_id"])
+    events = store.events(task_id, _scope())
+    cancel_event = next(
+        event for event in events if event.event_type == "task.cancel_requested"
+    )
+    assert cancel_event.state == durable_state.value
+    assert cancel_event.causation_id == cancel.envelope.command_id
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT result_json FROM commands WHERE command_id=?",
+            (cancel.envelope.command_id,),
+        ).fetchone()
+        assert row is not None
+        result = json.loads(row[0])
+        result["result"]["state"] = corrupt_result_state.value
+        connection.execute(
+            "UPDATE commands SET result_json=? WHERE command_id=?",
+            (
+                json.dumps(result, sort_keys=True),
+                cancel.envelope.command_id,
+            ),
+        )
+    before = store.counts()
+
+    if durable_state is FormalTaskState.ACCEPTED:
+        with pytest.raises(FormalTaskViolation) as raised:
+            store.complete_outbox(
+                dispatch,
+                executor_ref=f"legacy:{dispatch.attempt_id}",
+                observations=_observations(dispatch),
+            )
+        assert store.get_attempt(dispatch.attempt_id).executor_ref is None
+    else:
+        with pytest.raises(FormalTaskViolation) as raised:
+            await core.drain_outbox_once(worker_id="cancel-worker")
+
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert secret_instruction not in str(raised.value)
+    assert store.counts() == before
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox WHERE outbox_id=?
+            """,
+            (cancel_outbox_id,),
+        ).fetchone()
+        dispatch_outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claim_token
+            FROM outbox WHERE outbox_id=?
+            """,
+            (dispatch.outbox_id,),
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None, None)
+    if durable_state is FormalTaskState.ACCEPTED:
+        assert dispatch_outbox == (
+            "claimed",
+            1,
+            "dispatch-worker",
+            dispatch.claim_token,
+        )
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corrupt_executor_ref", [None, "legacy:other-attempt"])
+async def test_corrupt_cancel_outbox_executor_ref_fails_before_executor_effect(
+    tmp_path: Path,
+    corrupt_executor_ref: str | None,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    dispatch = store.claim_outbox("dispatch-worker")
+    assert dispatch is not None
+    store.complete_outbox(
+        dispatch,
+        executor_ref=f"legacy:{attempt_id}",
+        observations=_observations(dispatch),
+    )
+    cancel = _cancel(task_id)
+    acknowledged = core.execute(cancel.envelope, cancel.authorization, now=NOW)
+    assert acknowledged.ok and acknowledged.result is not None
+    cancel_outbox_id = str(acknowledged.result["outbox_id"])
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM outbox WHERE outbox_id=?",
+            (cancel_outbox_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        payload["executor_ref"] = corrupt_executor_ref
+        connection.execute(
+            "UPDATE outbox SET payload_json=? WHERE outbox_id=?",
+            (json.dumps(payload, sort_keys=True), cancel_outbox_id),
+        )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="cancel-worker")
+
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert store.counts() == before
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox WHERE outbox_id=?
+            """,
+            (cancel_outbox_id,),
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None, None)
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_completion_does_not_overwrite_corrupt_cancel_binding(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    dispatch = store.claim_outbox("dispatch-worker")
+    assert dispatch is not None
+    cancel = _cancel(task_id)
+    acknowledged = core.execute(cancel.envelope, cancel.authorization, now=NOW)
+    assert acknowledged.ok and acknowledged.result is not None
+    cancel_outbox_id = str(acknowledged.result["outbox_id"])
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM outbox WHERE outbox_id=?",
+            (cancel_outbox_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[0])
+        assert payload["executor_ref"] is None
+        payload["executor_ref"] = "legacy:foreign-attempt"
+        connection.execute(
+            "UPDATE outbox SET payload_json=? WHERE outbox_id=?",
+            (json.dumps(payload, sort_keys=True), cancel_outbox_id),
+        )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.complete_outbox(
+            dispatch,
+            executor_ref=f"legacy:{attempt_id}",
+            observations=_observations(dispatch),
+        )
+
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert store.counts() == before
+    assert store.get_attempt(attempt_id).executor_ref is None
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            """
+            SELECT outbox_id, state, delivery_count, claimed_by, claim_token,
+                   payload_json
+            FROM outbox ORDER BY outbox_id
+            """
+        ).fetchall()
+    by_id = {row[0]: row for row in rows}
+    assert by_id[dispatch.outbox_id][1:5] == (
+        "claimed",
+        1,
+        "dispatch-worker",
+        dispatch.claim_token,
+    )
+    assert by_id[cancel_outbox_id][1:5] == ("pending", 0, None, None)
+    assert json.loads(by_id[cancel_outbox_id][5])["executor_ref"] == (
+        "legacy:foreign-attempt"
+    )
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("corruption", ["missing_attempt", "cross_binding"])
+async def test_corrupt_outbox_canonical_binding_is_not_hidden(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT outbox_id FROM outbox WHERE task_id=?", (task_id,)
+        ).fetchone()
+        assert row is not None
+        outbox_id = str(row[0])
+    if corruption == "missing_attempt":
+        with sqlite3.connect(database) as connection:
+            connection.execute("DELETE FROM attempts WHERE attempt_id=?", (attempt_id,))
+    else:
+        other_invocation = _create(tmp_path, identity_suffix="-other")
+        other = core.execute(
+            other_invocation.envelope,
+            other_invocation.authorization,
+            context=other_invocation.context,
+            now=NOW,
+        )
+        assert other.ok and other.result is not None
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "UPDATE outbox SET state=? WHERE task_id=?",
+                ("suppressed", str(other.result["task_id"])),
+            )
+            connection.execute(
+                "UPDATE outbox SET attempt_id=? WHERE outbox_id=?",
+                (str(other.result["attempt_id"]), outbox_id),
+            )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="worker-corrupt")
+
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert store.counts() == before
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox WHERE outbox_id=?
+            """,
+            (outbox_id,),
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None, None)
     assert executor.dispatches == []
     assert executor.cancels == []
 
