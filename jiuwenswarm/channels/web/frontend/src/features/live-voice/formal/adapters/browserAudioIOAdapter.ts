@@ -159,6 +159,55 @@ export interface BrowserAudioPlayoutMetadata {
   readonly physical_heard_ack: false;
 }
 
+export type BrowserAudioLocalStopOutcome =
+  | 'local_fence_established'
+  | 'local_fence_established_source_unknown'
+  | 'target_mismatch'
+  | 'no_active_target'
+  | 'already_stopped'
+  | 'local_fence_failed'
+  | 'feature_disabled'
+  | 'adapter_closed';
+
+export type BrowserAudioSourceActionStatus = 'not_attempted' | 'not_applicable' | 'completed' | 'unknown';
+
+export interface BrowserAudioSourceActionConfirmation {
+  readonly status: BrowserAudioSourceActionStatus;
+  readonly attempted_count: number;
+  readonly completed_count: number;
+  readonly failed_count: number;
+}
+
+export interface BrowserAudioConfirmedCursor {
+  readonly unit_id: string;
+  readonly contiguous_through_seq: number | null;
+}
+
+export interface BrowserAudioLocalStopReceipt {
+  readonly kind: 'browser_audio.local_stop.v1';
+  readonly outcome: BrowserAudioLocalStopOutcome;
+  readonly response: Readonly<AudioResponseRef>;
+  readonly reason: string;
+  readonly local_fence_established: boolean;
+  readonly confirmed_cursor_before_stop: readonly Readonly<BrowserAudioConfirmedCursor>[];
+  readonly browser_sources: Readonly<{
+    source_count: number;
+    stop_request: Readonly<BrowserAudioSourceActionConfirmation>;
+    disconnect: Readonly<BrowserAudioSourceActionConfirmation>;
+  }>;
+  readonly timing: Readonly<{
+    status: 'confirmed' | 'unknown';
+    requested_at_monotonic_ms: number | null;
+    confirmed_at_monotonic_ms: number | null;
+    duration_ms: number | null;
+  }>;
+  readonly physical_heard: 'unproven';
+  readonly physical_silence: 'unproven';
+  readonly business_cancel_count_before: number;
+  readonly business_cancel_count_after: number;
+  readonly business_cancel_count_delta: number;
+}
+
 export interface BrowserAudioCaptureStateEvent {
   readonly state: BrowserAudioCaptureState;
   readonly reason: string;
@@ -250,8 +299,17 @@ interface PlaybackSession {
   readonly sources: Map<string, PlaybackSourceRecord>;
   readonly completed: Map<string, Set<number>>;
   readonly acknowledged: Map<string, number>;
+  readonly units: Set<string>;
   nextStartTime: number;
   stopped: boolean;
+}
+
+interface PlaybackSourceCleanupSummary {
+  readonly sourceCount: number;
+  readonly stopCompletedCount: number;
+  readonly stopFailedCount: number;
+  readonly disconnectCompletedCount: number;
+  readonly disconnectFailedCount: number;
 }
 
 const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
@@ -328,6 +386,33 @@ function sameResponse(left: Readonly<AudioResponseRef>, right: Readonly<AudioRes
   return left.interaction_id === right.interaction_id && left.response_id === right.response_id && left.response_generation === right.response_generation;
 }
 
+function normalizeResponse(response: Readonly<AudioResponseRef>): Readonly<AudioResponseRef> {
+  if (typeof response !== 'object' || response === null) {
+    throw new BrowserAudioIOViolation('INVALID_RESPONSE', 'response must be an object');
+  }
+  if (!Number.isSafeInteger(response.response_generation) || response.response_generation < 0) {
+    throw new BrowserAudioIOViolation('INVALID_RESPONSE_GENERATION', 'response_generation must be a non-negative safe integer');
+  }
+  return Object.freeze({
+    interaction_id: requiredText(response.interaction_id, 'interaction_id'),
+    response_id: requiredText(response.response_id, 'response_id'),
+    response_generation: response.response_generation,
+  });
+}
+
+function defaultMonotonicNowMs(): number {
+  return typeof globalThis.performance?.now === 'function' ? globalThis.performance.now() : Number.NaN;
+}
+
+function readMonotonicNow(clock: () => number): number | null {
+  try {
+    const value = clock();
+    return Number.isFinite(value) && value >= 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 function safeBoolean(value: unknown): boolean | null {
   return typeof value === 'boolean' ? value : null;
 }
@@ -387,6 +472,7 @@ export interface BrowserAudioIOAdapterOptions {
   readonly environment?: BrowserAudioEnvironment;
   readonly observer?: BrowserAudioObserver;
   readonly captureWorkletModuleUrl?: string;
+  readonly monotonicNowMs?: () => number;
 }
 
 export class BrowserAudioIOAdapter {
@@ -394,6 +480,7 @@ export class BrowserAudioIOAdapter {
   readonly #environment: BrowserAudioEnvironment;
   readonly #observer: BrowserAudioObserver;
   readonly #captureWorkletModuleUrl: string;
+  readonly #monotonicNowMs: () => number;
   readonly #audioPort = new AudioPort();
   readonly #seenCaptureIds = new Set<string>();
   readonly #onVisibilityChange: BrowserEventListener;
@@ -407,8 +494,11 @@ export class BrowserAudioIOAdapter {
   #captureStopPromise: Promise<boolean> | null = null;
   #playoutContext: BrowserAudioContextLike | null = null;
   #playback: PlaybackSession | null = null;
+  #lastLocallyStoppedResponse: Readonly<AudioResponseRef> | null = null;
+  #playoutSourceCleanupFailure: BrowserAudioIOViolation | null = null;
   #playoutGeneration = 0;
   #pendingPlayoutGeneration: number | null = null;
+  #playbackMutationToken = 0;
   #closed = false;
   #closePromise: Promise<void> | null = null;
   #visibilityListening = false;
@@ -418,6 +508,7 @@ export class BrowserAudioIOAdapter {
     this.#environment = options.environment ?? defaultBrowserAudioEnvironment();
     this.#observer = options.observer ?? {};
     this.#captureWorkletModuleUrl = options.captureWorkletModuleUrl ?? new URL('./liveVoiceCaptureProcessor.js', import.meta.url).href;
+    this.#monotonicNowMs = options.monotonicNowMs ?? defaultMonotonicNowMs;
     this.#onVisibilityChange = () => {
       if (this.#environment.document?.visibilityState === 'hidden') {
         void this.stopCapture('page_hidden').catch(() => {
@@ -739,6 +830,7 @@ export class BrowserAudioIOAdapter {
 
   async unlockPlayout(): Promise<Readonly<BrowserAudioPlayoutMetadata>> {
     if (this.#closed) throw new BrowserAudioIOViolation('ADAPTER_CLOSED', 'browser audio adapter is closed');
+    this.#requirePlayoutSourceCleanupHealthy();
     if (!this.#enabled) throw new BrowserAudioIOViolation('FEATURE_DISABLED', 'browser audio is disabled');
     if (!this.#environment.isSecureContext) throw new BrowserAudioIOViolation('INSECURE_CONTEXT', 'browser audio requires a secure context');
     const createContext = this.#environment.createAudioContext;
@@ -781,6 +873,7 @@ export class BrowserAudioIOAdapter {
         if (playback !== null) this.stopPlayout(playback.response, 'audio_context_not_running');
         this.#emitPlayoutState('failed', 'audio_context_not_running', playback);
       };
+      this.#requireCurrentPlayoutUnlock(generation, context);
       this.#emitPlayoutState('ready', 'playout_unlocked', null);
       this.#requireCurrentPlayoutUnlock(generation, context);
       return Object.freeze({
@@ -797,6 +890,7 @@ export class BrowserAudioIOAdapter {
 
   beginPlayout(response: Readonly<AudioResponseRef>): void {
     if (this.#closed) throw new BrowserAudioIOViolation('ADAPTER_CLOSED', 'browser audio adapter is closed');
+    this.#requirePlayoutSourceCleanupHealthy();
     const context = this.#playoutContext;
     if (context === null || context.state !== 'running') {
       throw new BrowserAudioIOViolation('PLAYOUT_NOT_UNLOCKED', 'playout must be unlocked by a user action');
@@ -813,23 +907,41 @@ export class BrowserAudioIOAdapter {
     } catch (error) {
       throw mapBrowserFailure(error, 'PLAYOUT_BEGIN_FAILED');
     }
+    const mutationToken = ++this.#playbackMutationToken;
     if (prior !== null) {
       this.#audioPort.stopLocal(prior.response);
-      this.#stopPlaybackSources(prior, 'response_replaced');
+      const cleanup = this.#stopPlaybackSources(prior, 'response_replaced', false);
+      if (this.#playbackCleanupUnknown(cleanup)) {
+        this.#audioPort.stopLocal(normalizedResponse);
+        this.#lastLocallyStoppedResponse = normalizedResponse;
+        this.#emitPlayoutState('failed', 'response_replaced_source_unknown', prior);
+        throw new BrowserAudioIOViolation('PLAYOUT_SOURCE_CLEANUP_UNKNOWN', 'the replaced browser sources could not be confirmed stopped and disconnected');
+      }
     }
-    this.#playback = {
+    const playback: PlaybackSession = {
       response: normalizedResponse,
       sources: new Map(),
       completed: new Map(),
       acknowledged: new Map(),
+      units: new Set(),
       nextStartTime: context.currentTime,
       stopped: false,
     };
-    this.#emitPlayoutState('ready', 'response_started', this.#playback);
+    this.#playback = playback;
+    if (prior !== null) {
+      this.#emitPlayoutState('stopped', 'response_replaced', prior);
+      if (this.#playback !== playback || mutationToken !== this.#playbackMutationToken) {
+        throw new BrowserAudioIOViolation('PLAYOUT_REPLACED_DURING_BEGIN', 'playout was replaced by a reentrant observer');
+      }
+    }
+    this.#emitPlayoutState('ready', 'response_started', playback);
+    if (this.#playback !== playback || mutationToken !== this.#playbackMutationToken) {
+      throw new BrowserAudioIOViolation('PLAYOUT_CANCELLED', 'playout was fenced or replaced during observer notification');
+    }
   }
 
   enqueuePlayout(chunk: Readonly<BrowserAudioPcmChunk>): boolean {
-    if (this.#closed) return false;
+    if (this.#closed || this.#playoutSourceCleanupFailure !== null) return false;
     const context = this.#playoutContext;
     const playback = this.#playback;
     if (context === null || context.state !== 'running' || playback === null || playback.stopped) return false;
@@ -869,8 +981,10 @@ export class BrowserAudioIOAdapter {
       throw mapBrowserFailure(error, 'PLAYOUT_ENQUEUE_FAILED');
     }
     if (!accepted) return false;
+    playback.units.add(chunk.unit_id);
     const sourceKey = `${chunk.unit_id}\u0000${chunk.seq}`;
     let source: BrowserAudioBufferSourceLike | null = null;
+    let sourceStartAttempted = false;
     try {
       source = context.createBufferSource();
       source.buffer = buffer;
@@ -879,19 +993,46 @@ export class BrowserAudioIOAdapter {
       playback.sources.set(sourceKey, record);
       source.onended = () => this.#handlePlaybackEnded(playback, record);
       const startAt = Math.max(context.currentTime, playback.nextStartTime);
+      sourceStartAttempted = true;
       source.start(startAt);
       playback.nextStartTime = startAt + chunk.samples.length / chunk.sample_rate_hz;
     } catch {
       playback.sources.delete(sourceKey);
       if (source !== null) {
         source.onended = null;
+        let stopCompletedCount = 0;
+        let stopFailedCount = 0;
+        if (sourceStartAttempted) {
+          try {
+            source.stop();
+            stopCompletedCount = 1;
+          } catch {
+            stopFailedCount = 1;
+          }
+        }
+        let disconnectCompletedCount = 0;
+        let disconnectFailedCount = 0;
         try {
           source.disconnect();
+          disconnectCompletedCount = 1;
         } catch {
-          // Continue clearing the accepted AudioPort chunk and exact playback session.
+          disconnectFailedCount = 1;
         }
+        this.#latchPlayoutSourceCleanupFailure(
+          Object.freeze({
+            sourceCount: 1,
+            stopCompletedCount,
+            stopFailedCount,
+            disconnectCompletedCount,
+            disconnectFailedCount,
+          })
+        );
       }
       this.stopPlayout(playback.response, 'source_setup_failed');
+      if (this.#playoutSourceCleanupFailure !== null) {
+        this.#emitPlayoutState('failed', 'source_setup_cleanup_unknown', playback);
+        throw new BrowserAudioIOViolation('PLAYOUT_SOURCE_CLEANUP_UNKNOWN', 'browser source setup cleanup completion is unknown');
+      }
       throw new BrowserAudioIOViolation('PLAYOUT_SOURCE_FAILED', 'browser playout source setup failed', true);
     }
     this.#emitPlayoutState('playing', 'chunk_scheduled', playback, chunk.unit_id, chunk.seq);
@@ -899,42 +1040,102 @@ export class BrowserAudioIOAdapter {
   }
 
   stopPlayout(response: Readonly<AudioResponseRef>, reason = 'requested'): boolean {
+    return this.stopPlayoutExact(response, reason).local_fence_established;
+  }
+
+  stopPlayoutExact(response: Readonly<AudioResponseRef>, reason = 'requested'): Readonly<BrowserAudioLocalStopReceipt> {
+    const normalizedResponse = normalizeResponse(response);
+    const normalizedReason = requiredText(reason, 'reason');
+    const requestedAt = readMonotonicNow(this.#monotonicNowMs);
+    const businessCancelCountBefore = this.#audioPort.businessCancelCount();
+    if (this.#closed) {
+      return this.#localStopReceipt('adapter_closed', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore);
+    }
+    if (!this.#enabled) {
+      return this.#localStopReceipt('feature_disabled', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore);
+    }
     const playback = this.#playback;
-    if (playback === null || !sameResponse(playback.response, response) || playback.stopped) return false;
+    if (playback === null) {
+      return this.#localStopReceipt(
+        this.#lastLocallyStoppedResponse !== null && sameResponse(this.#lastLocallyStoppedResponse, normalizedResponse)
+          ? 'already_stopped'
+          : 'no_active_target',
+        normalizedResponse,
+        normalizedReason,
+        requestedAt,
+        businessCancelCountBefore
+      );
+    }
+    if (!sameResponse(playback.response, normalizedResponse) || playback.stopped) {
+      return this.#localStopReceipt('target_mismatch', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore);
+    }
+    const confirmedCursor = this.#snapshotConfirmedCursor(playback);
     try {
-      if (!this.#audioPort.stopLocal(response)) return false;
+      if (!this.#audioPort.stopLocal(normalizedResponse)) {
+        return this.#localStopReceipt('local_fence_failed', normalizedResponse, normalizedReason, requestedAt, businessCancelCountBefore, confirmedCursor);
+      }
     } catch (error) {
       throw mapBrowserFailure(error, 'PLAYOUT_STOP_FAILED');
     }
-    this.#stopPlaybackSources(playback, reason);
-    return true;
+    ++this.#playbackMutationToken;
+    this.#lastLocallyStoppedResponse = normalizedResponse;
+    const cleanup = this.#stopPlaybackSources(playback, normalizedReason);
+    return this.#localStopReceipt(
+      this.#playbackCleanupUnknown(cleanup) ? 'local_fence_established_source_unknown' : 'local_fence_established',
+      normalizedResponse,
+      normalizedReason,
+      requestedAt,
+      businessCancelCountBefore,
+      confirmedCursor,
+      cleanup
+    );
   }
 
-  #stopPlaybackSources(playback: PlaybackSession, reason: string): void {
+  #stopPlaybackSources(playback: PlaybackSession, reason: string, emitState = true): Readonly<PlaybackSourceCleanupSummary> {
     playback.stopped = true;
     if (this.#playback === playback) this.#playback = null;
+    const sourceCount = playback.sources.size;
+    let stopCompletedCount = 0;
+    let stopFailedCount = 0;
+    let disconnectCompletedCount = 0;
+    let disconnectFailedCount = 0;
     for (const record of playback.sources.values()) {
       record.stopped = true;
       record.source.onended = null;
       try {
         record.source.stop();
+        stopCompletedCount += 1;
       } catch {
-        // The exact response is already fenced locally; a late browser stop error cannot widen scope.
+        stopFailedCount += 1;
       }
       try {
         record.source.disconnect();
+        disconnectCompletedCount += 1;
       } catch {
-        // Disconnection is best effort after the response fence is active.
+        disconnectFailedCount += 1;
       }
     }
     playback.sources.clear();
-    this.#emitPlayoutState('stopped', reason, playback);
+    const summary = Object.freeze({
+      sourceCount,
+      stopCompletedCount,
+      stopFailedCount,
+      disconnectCompletedCount,
+      disconnectFailedCount,
+    });
+    this.#latchPlayoutSourceCleanupFailure(summary);
+    if (emitState) {
+      if (this.#playoutSourceCleanupFailure !== null) this.#emitPlayoutState('failed', `${reason}_source_unknown`, playback);
+      else this.#emitPlayoutState('stopped', reason, playback);
+    }
+    return summary;
   }
 
   async close(): Promise<void> {
     if (this.#closePromise !== null) return this.#closePromise;
     this.#closed = true;
     ++this.#playoutGeneration;
+    ++this.#playbackMutationToken;
     this.#pendingPlayoutGeneration = null;
     let resolveClose: () => void = () => undefined;
     let rejectClose: (reason?: unknown) => void = () => undefined;
@@ -952,6 +1153,95 @@ export class BrowserAudioIOAdapter {
     return this.#audioPort.businessCancelCount();
   }
 
+  #snapshotConfirmedCursor(playback: PlaybackSession): readonly Readonly<BrowserAudioConfirmedCursor>[] {
+    return Object.freeze(
+      [...playback.units].map(unitId =>
+        Object.freeze({
+          unit_id: unitId,
+          contiguous_through_seq: playback.acknowledged.get(unitId) ?? null,
+        })
+      )
+    );
+  }
+
+  #playbackCleanupUnknown(cleanup: Readonly<PlaybackSourceCleanupSummary>): boolean {
+    return cleanup.stopFailedCount > 0 || cleanup.disconnectFailedCount > 0;
+  }
+
+  #latchPlayoutSourceCleanupFailure(cleanup: Readonly<PlaybackSourceCleanupSummary>): void {
+    if (!this.#playbackCleanupUnknown(cleanup) || this.#playoutSourceCleanupFailure !== null) return;
+    this.#playoutSourceCleanupFailure = new BrowserAudioIOViolation(
+      'PLAYOUT_SOURCE_CLEANUP_UNKNOWN',
+      'browser source stop or disconnect completion is unknown'
+    );
+  }
+
+  #requirePlayoutSourceCleanupHealthy(): void {
+    if (this.#playoutSourceCleanupFailure === null) return;
+    throw new BrowserAudioIOViolation(
+      this.#playoutSourceCleanupFailure.reason,
+      'browser playout is unavailable after source cleanup completion became unknown',
+      this.#playoutSourceCleanupFailure.retriable
+    );
+  }
+
+  #sourceActionConfirmation(sourceCount: number, completedCount: number, failedCount: number): Readonly<BrowserAudioSourceActionConfirmation> {
+    return Object.freeze({
+      status: sourceCount === 0 ? ('not_applicable' as const) : failedCount === 0 ? ('completed' as const) : ('unknown' as const),
+      attempted_count: completedCount + failedCount,
+      completed_count: completedCount,
+      failed_count: failedCount,
+    });
+  }
+
+  #localStopReceipt(
+    outcome: BrowserAudioLocalStopOutcome,
+    response: Readonly<AudioResponseRef>,
+    reason: string,
+    requestedAt: number | null,
+    businessCancelCountBefore: number,
+    confirmedCursor: readonly Readonly<BrowserAudioConfirmedCursor>[] = Object.freeze([]),
+    cleanup: Readonly<PlaybackSourceCleanupSummary> | null = null
+  ): Readonly<BrowserAudioLocalStopReceipt> {
+    const confirmedAt = readMonotonicNow(this.#monotonicNowMs);
+    const timingConfirmed = requestedAt !== null && confirmedAt !== null && confirmedAt >= requestedAt;
+    const businessCancelCountAfter = this.#audioPort.businessCancelCount();
+    const notAttempted = Object.freeze({
+      status: 'not_attempted' as const,
+      attempted_count: 0,
+      completed_count: 0,
+      failed_count: 0,
+    });
+    const stopRequest =
+      cleanup === null ? notAttempted : this.#sourceActionConfirmation(cleanup.sourceCount, cleanup.stopCompletedCount, cleanup.stopFailedCount);
+    const disconnect =
+      cleanup === null ? notAttempted : this.#sourceActionConfirmation(cleanup.sourceCount, cleanup.disconnectCompletedCount, cleanup.disconnectFailedCount);
+    return Object.freeze({
+      kind: 'browser_audio.local_stop.v1' as const,
+      outcome,
+      response,
+      reason,
+      local_fence_established: outcome === 'local_fence_established' || outcome === 'local_fence_established_source_unknown',
+      confirmed_cursor_before_stop: confirmedCursor,
+      browser_sources: Object.freeze({
+        source_count: cleanup?.sourceCount ?? 0,
+        stop_request: stopRequest,
+        disconnect,
+      }),
+      timing: Object.freeze({
+        status: timingConfirmed ? ('confirmed' as const) : ('unknown' as const),
+        requested_at_monotonic_ms: requestedAt,
+        confirmed_at_monotonic_ms: confirmedAt,
+        duration_ms: timingConfirmed ? confirmedAt - requestedAt : null,
+      }),
+      physical_heard: 'unproven' as const,
+      physical_silence: 'unproven' as const,
+      business_cancel_count_before: businessCancelCountBefore,
+      business_cancel_count_after: businessCancelCountAfter,
+      business_cancel_count_delta: businessCancelCountAfter - businessCancelCountBefore,
+    });
+  }
+
   #requireCurrentCaptureToken(token: number): void {
     if (token !== this.#captureToken || this.#pendingCaptureToken !== token) {
       throw new BrowserAudioIOViolation('CAPTURE_CANCELLED', 'capture startup was fenced');
@@ -965,21 +1255,23 @@ export class BrowserAudioIOAdapter {
     if (this.#closed || this.#playoutGeneration !== generation || this.#pendingPlayoutGeneration !== generation || this.#playoutContext !== context) {
       throw new BrowserAudioIOViolation('PLAYOUT_CANCELLED', 'playout unlock was fenced by close or replacement');
     }
+    this.#requirePlayoutSourceCleanupHealthy();
   }
 
   #fencePlayoutForClose(): Readonly<{ context: BrowserAudioContextLike | null; failure: unknown }> {
     const context = this.#playoutContext;
     this.#playoutContext = null;
-    let failure: unknown = null;
+    let failure: unknown = this.#playoutSourceCleanupFailure;
     if (context !== null) context.onstatechange = null;
     const playback = this.#playback;
     if (playback !== null) {
       try {
         this.#audioPort.stopLocal(playback.response);
       } catch (error) {
-        failure = error;
+        failure ??= error;
       }
-      this.#stopPlaybackSources(playback, 'adapter_closed');
+      const cleanup = this.#stopPlaybackSources(playback, 'adapter_closed');
+      if (this.#playbackCleanupUnknown(cleanup)) failure = this.#playoutSourceCleanupFailure;
     }
     return Object.freeze({ context, failure });
   }
@@ -998,8 +1290,12 @@ export class BrowserAudioIOAdapter {
       }
     })();
     await Promise.all([captureCleanup, playoutCleanup]);
+    if (failure !== null) {
+      const mapped = mapBrowserFailure(failure, 'ADAPTER_CLOSE_FAILED');
+      this.#emitPlayoutState('failed', mapped.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' ? 'adapter_closed_source_unknown' : 'adapter_close_failed', null);
+      throw mapped;
+    }
     this.#emitPlayoutState('closed', 'adapter_closed', null);
-    if (failure !== null) throw mapBrowserFailure(failure, 'ADAPTER_CLOSE_FAILED');
   }
 
   #handleCaptureMessage(session: CaptureSession, data: unknown): void {

@@ -98,6 +98,7 @@ class FakeMediaDevices extends FakeEventTarget {
 class FakeNode {
   connected = [];
   disconnectCount = 0;
+  disconnectThrows = false;
 
   connect(destination) {
     this.connected.push(destination);
@@ -106,6 +107,7 @@ class FakeNode {
 
   disconnect() {
     this.disconnectCount += 1;
+    if (this.disconnectThrows) throw new Error('node disconnect failed');
   }
 }
 
@@ -143,13 +145,17 @@ class FakeBufferSource extends FakeNode {
   onended = null;
   starts = [];
   stopCount = 0;
+  stopThrows = false;
+  startThrows = false;
 
   start(when = 0) {
     this.starts.push(when);
+    if (this.startThrows) throw new Error('source start failed');
   }
 
   stop() {
     this.stopCount += 1;
+    if (this.stopThrows) throw new Error('source stop failed');
   }
 
   end() {
@@ -172,6 +178,9 @@ class FakeAudioContext {
   closeCount = 0;
   closeThrows = false;
   bufferSourceThrows = false;
+  bufferSourceStartThrows = false;
+  bufferSourceStopThrows = false;
+  bufferSourceDisconnectThrows = false;
   addModulePromise = null;
   resumePromise = null;
 
@@ -216,6 +225,9 @@ class FakeAudioContext {
   createBufferSource() {
     if (this.bufferSourceThrows) throw new Error('buffer source failed');
     const source = new FakeBufferSource();
+    source.startThrows = this.bufferSourceStartThrows;
+    source.stopThrows = this.bufferSourceStopThrows;
+    source.disconnectThrows = this.bufferSourceDisconnectThrows;
     this.bufferSources.push(source);
     return source;
   }
@@ -252,6 +264,7 @@ function fakeEnvironment(overrides = {}) {
 
 const firstResponse = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 0 });
 const secondResponse = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-2', response_generation: 1 });
+const thirdResponse = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-3', response_generation: 2 });
 const provider = Object.freeze({ provider_id: 'formal-tts', implementation_class: 'formal', fallback_from: null });
 
 function pcmChunk(response, seq, overrides = {}) {
@@ -942,6 +955,111 @@ test('close immediately fences playout while slow capture cleanup continues', as
   assert.equal(playoutContext.closeCount, 1);
 });
 
+test('close keeps a failed final state when active source cleanup is unknown while releasing capture and contexts', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.startCapture();
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  const source = fake.contexts[1].bufferSources[0];
+  const lateEnded = source.onended;
+  source.stopThrows = true;
+  source.disconnectThrows = true;
+  const businessCancelCountBefore = adapter.businessCancelCount();
+
+  await assert.rejects(
+    () => adapter.close(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).state, 'failed');
+  assert.equal(events.at(-1).reason, 'adapter_closed_source_unknown');
+  assert.equal(
+    events.some(event => event.state === 'closed'),
+    false
+  );
+  assert.equal(source.stopCount, 1);
+  assert.equal(source.disconnectCount, 1);
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.equal(fake.contexts[0].closeCount, 1);
+  assert.equal(fake.contexts[1].closeCount, 1);
+  lateEnded();
+  assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
+  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
+  await assert.rejects(
+    () => adapter.unlockPlayout(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'ADAPTER_CLOSED'
+  );
+});
+
+test('playout context close failure keeps admission fenced and final playout state failed', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.unlockPlayout();
+  fake.contexts[0].closeThrows = true;
+
+  await assert.rejects(
+    () => adapter.close(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'ADAPTER_CLOSE_FAILED'
+  );
+
+  assert.equal(fake.contexts[0].closeCount, 1);
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).state, 'failed');
+  assert.equal(events.at(-1).reason, 'adapter_close_failed');
+  assert.equal(
+    events.some(event => event.state === 'closed'),
+    false
+  );
+  await assert.rejects(
+    () => adapter.unlockPlayout(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'ADAPTER_CLOSED'
+  );
+});
+
+test('capture cleanup failure during close still attempts every resource and leaves playout failed', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.startCapture();
+  fake.mediaDevices.stream.track.stopThrows = true;
+
+  await assert.rejects(
+    () => adapter.close(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'CAPTURE_CLEANUP_FAILED'
+  );
+
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.equal(fake.contexts[0].closeCount, 1);
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).state, 'failed');
+  assert.equal(events.at(-1).reason, 'adapter_close_failed');
+  assert.equal(
+    events.some(event => event.state === 'closed'),
+    false
+  );
+  await assert.rejects(
+    () => adapter.startCapture(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'ADAPTER_CLOSED'
+  );
+});
+
 test('device changes are diagnostic only and never switch the active track', async () => {
   const fake = fakeEnvironment();
   const events = [];
@@ -1154,6 +1272,49 @@ test('browser source setup failure clears the accepted chunk without ACK or busi
   assert.equal(adapter.businessCancelCount(), 0);
 });
 
+test('source setup cleanup uncertainty latches the same fail-closed playout admission fault', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  fake.contexts[0].bufferSourceStartThrows = true;
+  fake.contexts[0].bufferSourceStopThrows = true;
+  fake.contexts[0].bufferSourceDisconnectThrows = true;
+
+  assert.throws(
+    () => adapter.enqueuePlayout(pcmChunk(firstResponse, 0)),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' && error.retriable === false
+  );
+
+  const source = fake.contexts[0].bufferSources[0];
+  assert.equal(source.stopCount, 1);
+  assert.equal(source.disconnectCount, 1);
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'source_setup_cleanup_unknown');
+  assert.equal(
+    events.some(event => event.state === 'stopped'),
+    false
+  );
+  assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
+  assert.throws(
+    () => adapter.beginPlayout(secondResponse),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 0)), false);
+  assert.equal(fake.contexts[0].bufferSources.length, 1);
+  assert.equal(adapter.businessCancelCount(), 0);
+  await assert.rejects(
+    () => adapter.close(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(fake.contexts[0].closeCount, 1);
+});
+
 test('exact local stop fences late playout callbacks without widening business cancel', async () => {
   const fake = fakeEnvironment();
   const events = [];
@@ -1172,6 +1333,366 @@ test('exact local stop fences late playout callbacks without widening business c
   assert.equal(source.stopCount, 1);
   source.end();
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
+  assert.equal(adapter.businessCancelCount(), 0);
+});
+
+test('exact local stop confirms the fenced tuple, prior cursors, source calls, timing, and zero business cancel', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  let now = 100;
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    monotonicNowMs: () => {
+      const value = now;
+      now += 4;
+      return value;
+    },
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  const responseWithPrivateField = Object.freeze({ ...firstResponse, private_extension: 'must-not-propagate' });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(responseWithPrivateField);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 1));
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0, { unit_id: 'unit-2' }));
+  const context = fake.contexts[0];
+  context.bufferSources[0].end();
+  const lateEnded = context.bufferSources[1].onended;
+
+  const receipt = adapter.stopPlayoutExact(responseWithPrivateField, 'barge_in_local_only');
+
+  assert.deepEqual(receipt.response, firstResponse);
+  assert.equal(receipt.kind, 'browser_audio.local_stop.v1');
+  assert.equal(receipt.outcome, 'local_fence_established');
+  assert.equal(receipt.local_fence_established, true);
+  assert.deepEqual(receipt.confirmed_cursor_before_stop, [
+    { unit_id: 'unit-1', contiguous_through_seq: 0 },
+    { unit_id: 'unit-2', contiguous_through_seq: null },
+  ]);
+  assert.deepEqual(receipt.browser_sources, {
+    source_count: 2,
+    stop_request: { status: 'completed', attempted_count: 2, completed_count: 2, failed_count: 0 },
+    disconnect: { status: 'completed', attempted_count: 2, completed_count: 2, failed_count: 0 },
+  });
+  assert.deepEqual(receipt.timing, {
+    status: 'confirmed',
+    requested_at_monotonic_ms: 100,
+    confirmed_at_monotonic_ms: 104,
+    duration_ms: 4,
+  });
+  assert.equal(receipt.physical_heard, 'unproven');
+  assert.equal(receipt.physical_silence, 'unproven');
+  assert.equal(receipt.business_cancel_count_before, 0);
+  assert.equal(receipt.business_cancel_count_after, 0);
+  assert.equal(receipt.business_cancel_count_delta, 0);
+  assert.equal(Object.isFrozen(receipt), true);
+  lateEnded();
+  assert.equal(events.filter(event => event.reason === 'render_completed').length, 1);
+
+  const repeated = adapter.stopPlayoutExact(firstResponse);
+  assert.equal(repeated.outcome, 'already_stopped');
+  assert.equal(repeated.local_fence_established, false);
+  assert.equal(repeated.browser_sources.stop_request.status, 'not_attempted');
+  assert.equal(context.bufferSources[1].stopCount, 1);
+  assert.equal(context.bufferSources[2].stopCount, 1);
+  assert.equal(adapter.businessCancelCount(), 0);
+});
+
+test('exact local stop distinguishes mismatch, no target, disabled, and closed without audio effects', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.unlockPlayout();
+  assert.equal(adapter.stopPlayoutExact(firstResponse).outcome, 'no_active_target');
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  const source = fake.contexts[0].bufferSources[0];
+
+  const mismatches = [
+    { ...firstResponse, interaction_id: 'interaction-wrong' },
+    { ...firstResponse, response_id: 'response-wrong' },
+    { ...firstResponse, response_generation: 1 },
+  ].map(response => adapter.stopPlayoutExact(response));
+  assert.deepEqual(
+    mismatches.map(receipt => receipt.outcome),
+    ['target_mismatch', 'target_mismatch', 'target_mismatch']
+  );
+  assert.equal(
+    mismatches.every(receipt => !receipt.local_fence_established),
+    true
+  );
+  assert.equal(
+    mismatches.every(receipt => receipt.browser_sources.source_count === 0),
+    true
+  );
+  assert.equal(source.stopCount, 0);
+  assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
+
+  const close = adapter.close();
+  const closed = adapter.stopPlayoutExact(firstResponse);
+  assert.equal(closed.outcome, 'adapter_closed');
+  assert.equal(closed.local_fence_established, false);
+  assert.equal(source.stopCount, 1);
+  await close;
+
+  const disabledFake = fakeEnvironment();
+  const disabled = new BrowserAudioIOAdapter({ enabled: false, environment: disabledFake.environment });
+  const flagOff = disabled.stopPlayoutExact(firstResponse);
+  assert.equal(flagOff.outcome, 'feature_disabled');
+  assert.equal(flagOff.local_fence_established, false);
+  assert.equal(disabledFake.contexts.length, 0);
+  assert.equal(disabledFake.mediaDevices.constraints.length, 0);
+  assert.equal(disabled.businessCancelCount(), 0);
+});
+
+test('source stop and disconnect failures return stable unknown truth after the local fence', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.startCapture();
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  const source = fake.contexts[1].bufferSources[0];
+  const lateEnded = source.onended;
+  source.stopThrows = true;
+  source.disconnectThrows = true;
+  const businessCancelCountBefore = adapter.businessCancelCount();
+
+  const receipt = adapter.stopPlayoutExact(firstResponse, 'fault_injection');
+
+  assert.equal(receipt.outcome, 'local_fence_established_source_unknown');
+  assert.equal(receipt.local_fence_established, true);
+  assert.deepEqual(receipt.browser_sources, {
+    source_count: 1,
+    stop_request: { status: 'unknown', attempted_count: 1, completed_count: 0, failed_count: 1 },
+    disconnect: { status: 'unknown', attempted_count: 1, completed_count: 0, failed_count: 1 },
+  });
+  assert.equal(receipt.physical_heard, 'unproven');
+  assert.equal(receipt.physical_silence, 'unproven');
+  assert.equal(receipt.business_cancel_count_delta, 0);
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'fault_injection_source_unknown');
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), false);
+  assert.throws(
+    () => adapter.beginPlayout(secondResponse),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' && error.retriable === false
+  );
+  await assert.rejects(
+    () => adapter.unlockPlayout(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(fake.contexts.length, 2);
+  assert.equal(fake.contexts[1].bufferSources.length, 1);
+  assert.equal(events.at(-1).reason, 'fault_injection_source_unknown');
+  lateEnded();
+  assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
+  assert.equal(source.stopCount, 1);
+  assert.equal(source.disconnectCount, 1);
+  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
+  await assert.rejects(
+    () => adapter.close(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' && error.retriable === false
+  );
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'adapter_closed_source_unknown');
+  assert.equal(
+    events.some(event => event.state === 'closed'),
+    false
+  );
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.equal(fake.contexts[0].closeCount, 1);
+  assert.equal(fake.contexts[1].closeCount, 1);
+
+  const replacementFake = fakeEnvironment();
+  const replacementAdapter = new BrowserAudioIOAdapter({ enabled: true, environment: replacementFake.environment });
+  await replacementAdapter.unlockPlayout();
+  replacementAdapter.beginPlayout(firstResponse);
+  assert.equal(replacementAdapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(replacementFake.contexts[0].bufferSources.length, 1);
+  await replacementAdapter.close();
+});
+
+test('a broken monotonic clock cannot prevent exact local fencing or fabricate duration', async () => {
+  const fake = fakeEnvironment();
+  const clockValues = [10, 9];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    monotonicNowMs: () => clockValues.shift(),
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+
+  const receipt = adapter.stopPlayoutExact(firstResponse);
+
+  assert.equal(receipt.local_fence_established, true);
+  assert.deepEqual(receipt.timing, {
+    status: 'unknown',
+    requested_at_monotonic_ms: 10,
+    confirmed_at_monotonic_ms: 9,
+    duration_ms: null,
+  });
+  assert.equal(fake.contexts[0].bufferSources[0].stopCount, 1);
+});
+
+test('stop observer reentrancy can start one replacement without reviving the fenced response', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  let adapter;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onPlayoutState(event) {
+        events.push(event);
+        if (event.reason === 'observer_replacement') {
+          adapter.beginPlayout(secondResponse);
+          adapter.enqueuePlayout(pcmChunk(secondResponse, 0));
+        }
+      },
+    },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  const firstSource = fake.contexts[0].bufferSources[0];
+  const lateEnded = firstSource.onended;
+
+  const receipt = adapter.stopPlayoutExact(firstResponse, 'observer_replacement');
+
+  assert.equal(receipt.outcome, 'local_fence_established');
+  assert.equal(fake.contexts[0].bufferSources.length, 2);
+  assert.equal(firstSource.stopCount, 1);
+  assert.equal(adapter.stopPlayoutExact(firstResponse).outcome, 'target_mismatch');
+  assert.equal(fake.contexts[0].bufferSources[1].stopCount, 0);
+  lateEnded();
+  assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 1)), true);
+  assert.equal(adapter.businessCancelCount(), 0);
+});
+
+test('response replacement observer reentrancy cannot restore an older playout authority', async () => {
+  const fake = fakeEnvironment();
+  let adapter;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onPlayoutState(event) {
+        if (event.reason === 'response_replaced') adapter.beginPlayout(thirdResponse);
+      },
+    },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+
+  assert.throws(
+    () => adapter.beginPlayout(secondResponse),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_REPLACED_DURING_BEGIN'
+  );
+  assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 0)), false);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(thirdResponse, 0)), true);
+  assert.equal(adapter.stopPlayoutExact(firstResponse).outcome, 'target_mismatch');
+  assert.equal(adapter.stopPlayoutExact(secondResponse).outcome, 'target_mismatch');
+  assert.equal(fake.contexts[0].bufferSources[0].stopCount, 1);
+  assert.equal(adapter.businessCancelCount(), 0);
+});
+
+test('response replacement fails closed when prior browser source cleanup is unknown', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  let observerBeginReason = null;
+  let adapter;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onPlayoutState(event) {
+        events.push(event);
+        if (event.reason !== 'response_replaced_source_unknown') return;
+        try {
+          adapter.beginPlayout(thirdResponse);
+        } catch (error) {
+          observerBeginReason = error.reason;
+        }
+      },
+    },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  adapter.enqueuePlayout(pcmChunk(firstResponse, 0));
+  const source = fake.contexts[0].bufferSources[0];
+  const lateEnded = source.onended;
+  source.stopThrows = true;
+  source.disconnectThrows = true;
+  const businessCancelCountBefore = adapter.businessCancelCount();
+
+  assert.throws(
+    () => adapter.beginPlayout(secondResponse),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' && error.retriable === false
+  );
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'response_replaced_source_unknown');
+  assert.equal(observerBeginReason, 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN');
+  assert.throws(
+    () => adapter.beginPlayout(thirdResponse),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 0)), false);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(thirdResponse, 0)), false);
+  assert.equal(fake.contexts[0].bufferSources.length, 1);
+  assert.equal(adapter.stopPlayoutExact(secondResponse).outcome, 'already_stopped');
+  lateEnded();
+  assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
+  assert.equal(source.stopCount, 1);
+  assert.equal(source.disconnectCount, 1);
+  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
+  await assert.rejects(
+    () => adapter.close(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'adapter_closed_source_unknown');
+  assert.equal(fake.contexts[0].closeCount, 1);
+});
+
+test('an invalid reentrant begin does not cancel the playout that emitted the observer event', async () => {
+  const fake = fakeEnvironment();
+  let adapter;
+  let rejectedReason = null;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onPlayoutState(event) {
+        if (event.reason !== 'response_started') return;
+        try {
+          adapter.beginPlayout(null);
+        } catch (error) {
+          rejectedReason = error.reason;
+        }
+      },
+    },
+  });
+  await adapter.unlockPlayout();
+
+  adapter.beginPlayout(firstResponse);
+
+  assert.equal(rejectedReason, 'PLAYOUT_BEGIN_FAILED');
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(fake.contexts[0].bufferSources.length, 1);
   assert.equal(adapter.businessCancelCount(), 0);
 });
 
@@ -1205,6 +1726,101 @@ test('playout remains visibly locked when AudioContext cannot resume', async () 
     () => rejectedAdapter.unlockPlayout(),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'AUDIO_USER_ACTIVATION_REQUIRED'
   );
+});
+
+test('a pending unlock inherits active source cleanup uncertainty before publishing ready success', async () => {
+  const fake = fakeEnvironment();
+  const resume = deferred();
+  const events = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onPlayoutState: event => events.push(event) },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  const context = fake.contexts[0];
+  const source = context.bufferSources[0];
+  context.state = 'suspended';
+  context.resumePromise = resume.promise;
+  source.stopThrows = true;
+  source.disconnectThrows = true;
+  const readyCountBefore = events.filter(event => event.reason === 'playout_unlocked').length;
+  const businessCancelCountBefore = adapter.businessCancelCount();
+
+  const unlock = adapter.unlockPlayout();
+  await nextTask();
+  const receipt = adapter.stopPlayoutExact(firstResponse, 'fault_during_resume');
+  assert.equal(receipt.outcome, 'local_fence_established_source_unknown');
+  resume.resolve();
+
+  await assert.rejects(
+    () => unlock,
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(events.filter(event => event.reason === 'playout_unlocked').length, readyCountBefore);
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'fault_during_resume_source_unknown');
+  assert.equal(context.bufferSources.length, 1);
+  assert.equal(source.stopCount, 1);
+  assert.equal(source.disconnectCount, 1);
+  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
+});
+
+test('a playout-ready observer cleanup fault rejects unlock and latches every later admission closed', async () => {
+  const fake = fakeEnvironment();
+  const events = [];
+  let adapter;
+  let triggerCleanup = false;
+  let cleanupReceipt = null;
+  adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onPlayoutState(event) {
+        events.push(event);
+        if (!triggerCleanup || event.reason !== 'playout_unlocked') return;
+        triggerCleanup = false;
+        cleanupReceipt = adapter.stopPlayoutExact(firstResponse, 'observer_cleanup_fault');
+      },
+    },
+  });
+  await adapter.unlockPlayout();
+  adapter.beginPlayout(firstResponse);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  const source = fake.contexts[0].bufferSources[0];
+  source.stopThrows = true;
+  source.disconnectThrows = true;
+  const businessCancelCountBefore = adapter.businessCancelCount();
+  triggerCleanup = true;
+
+  await assert.rejects(
+    () => adapter.unlockPlayout(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(cleanupReceipt?.outcome, 'local_fence_established_source_unknown');
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'observer_cleanup_fault_source_unknown');
+  assert.equal(fake.contexts[0].bufferSources.length, 1);
+  assert.throws(
+    () => adapter.beginPlayout(secondResponse),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(adapter.enqueuePlayout(pcmChunk(secondResponse, 0)), false);
+  await assert.rejects(
+    () => adapter.unlockPlayout(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  await assert.rejects(
+    () => adapter.close(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN'
+  );
+  assert.equal(adapter.playoutState(), 'failed');
+  assert.equal(events.at(-1).reason, 'adapter_closed_source_unknown');
+  assert.equal(source.stopCount, 1);
+  assert.equal(source.disconnectCount, 1);
+  assert.equal(adapter.businessCancelCount() - businessCancelCountBefore, 0);
 });
 
 test('close fences a pending playout unlock and remains terminal', async () => {
