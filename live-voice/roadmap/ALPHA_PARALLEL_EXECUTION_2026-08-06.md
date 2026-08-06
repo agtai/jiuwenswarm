@@ -98,7 +98,7 @@ Mechanical conflicts inside an owned leaf may be resolved under the lease. Any s
 
 ## Cumulative closure order
 
-Main integrates in real dependency order and reruns the cumulative smoke matrix after every segment:
+Main integrates reviewed commits in real dependency order. Under D-061, it does not rerun the cumulative smoke matrix after each individual cherry-pick; it runs the matrix once after the complete reviewed integration batch has landed. A semantic conflict or integration-glue change still requires its own affected checks before the final cumulative run:
 
 1. stock-Web activation/auth owner and trusted Alpha Authority;
 2. P2 TurnCommit/PresentationAck and real AgentServer→Gateway→Web acknowledgement;

@@ -16,7 +16,7 @@ The short/full distinction and mandatory/conditional distinction are independent
 |---|---|
 | Ordinary module implementation or bug fix | Relevant source/tests, the applicable track and risk tier in the [roadmap](roadmap/POST_V0_DELIVERY_ROADMAP.md), and relevant entries in [decisions](decisions/DECISIONS.md) |
 | Documentation structure or documentation update | [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md) before editing |
-| Product composition, trusted authority, P1/P2/P3 adapter wiring, route truth, shared-file ownership, or cumulative smoke | [Product composition Gate 0](roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md), full solution, ACG, relevant decisions/package reviews, actual source/tests, and current STATUS |
+| Product composition, trusted authority, P1/P2/P3 adapter wiring, route truth, shared-file ownership, or cumulative smoke | [Product composition Gate 0](roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md), [Alpha product integration review](ALPHA_PRODUCT_INTEGRATION_REVIEW_2026-08-07.md), full solution, ACG, relevant decisions/package reviews, actual source/tests, and current STATUS |
 | Current multi-Session Alpha implementation, ownership, integration lease, or review handoff | [Alpha parallel execution plan](roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md), D-060, the relevant package route above, actual source/tests, and current STATUS |
 | Long-term architecture, P1/P2/P3 boundary, protocol, ownership, cancellation, durability, production acceptance | Complete [full solution snapshot](architecture/FULL_SOLUTION_2026-07-30.md), accepted [Architecture Contract Gate](architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), relevant decisions, and roadmap |
 | V0 reproduction or regression acceptance | [V0 acceptance](validation/V0_ACCEPTANCE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), [showcase](demo/DEMO_SHOWCASE.md), and immutable [V0 evidence](evidence/V0_20260802_ee2896a4.md) |
@@ -57,6 +57,7 @@ Start with the named sections above. Expand reading only when Git, STATUS, code 
 | `CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md` | Frozen CR-B runtime/presentation contract, review passes, current-branch correction and bounded automated evidence; STATUS owns current integration state |
 | `AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md` | Detailed shared WorkProgress v2 and AB-B non-blocking runtime boundary, D-032 scenarios, review passes, evidence and real-integration gap |
 | `P3ALPHA_REPLACEMENT_REVIEW_2026-08-05.md` | Detailed formal P3alpha backend boundary, current-branch fixes, scenario/review evidence and product-route blockers |
+| `ALPHA_PRODUCT_INTEGRATION_REVIEW_2026-08-07.md` | Frozen stock-Web activation/acknowledgement integration, four reviewed lifecycle/durability hardening commits, D-053 closure, cumulative smoke and exact remaining unavailable boundaries; STATUS owns current state |
 | `LATEST_FOUNDATIONS_D053_REVIEW_2026-08-06.md` | Exact-SHA retained task-evidence index for the four landed AIO-C/CR-C/TC-C/X-OBS bounded foundations; aggregate integration commands remain an explicit limitation and no acceptance/Gate credit is claimed |
 | `DOCUMENTATION_RULES.md` | Authority, routing, anti-duplication, and synchronization rules |
 | `decisions/DECISIONS.md` | Accepted decisions and their rationale/history |

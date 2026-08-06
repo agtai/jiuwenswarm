@@ -657,3 +657,12 @@
 - 远端边界：上述例外不包含任何 push 或远端 ref 变更。普通 push、force/force-with-lease、远端 branch/tag 创建、更新和删除都必须在操作前取得对精确 remote/ref/commit/方式的单独批准；Task Session 不得 push。
 - 不变量：共享 Authority/Composition/协议文件与最终 activation/Gate 归 Main；同一 integration worktree 同时只有一个 writer；formal/fallback/demo_substitute/unavailable/disabled 如实表达；缺少 Provider、凭据、部署、设备或真实 owner 时 fail closed，不以 mock、contract-only、测试数量或本地 Git 集成宣称 Alpha/production-ready；Replacement Ledger 仍只按真实产品验收更新。
 - 重新评估条件：文件范围无法保持非重叠；两个 lane 必须同时修改同一共享语义；integration lease 不能防止交叉污染；review 往返成本持续高于并行收益；用户改变并发数、合入职责或 Git 授权；本地 immutable Alpha candidate 已关闭；或任何远端更新进入范围。
+
+## D-061 Alpha integration smoke 在完整 reviewed cherry-pick 批次后统一执行
+
+- 日期：2026-08-07
+- 状态：Accepted execution amendment（用户明确要求调整 D-060 的集成验证节奏）
+- 背景：D-060 原计划在每个 segment 合入后重复累计 smoke。当前四个 Task commit 均已在各自 branch 完成风险相称的 focused tests、冷审和独立 review，再逐个合入同一 integration branch；每次 cherry-pick 后重复全量 smoke 会消耗时间，但不会增加独立语义证据。
+- 决策：Main 仍按真实依赖顺序逐个声明 source branch、exact commit、target branch 和 cherry-pick/merge 方式并保持单写 integration lease，但不在每个无冲突 cherry-pick 后运行累计 smoke。完整 reviewed commit 批次全部合入后，只运行一次累计 smoke，覆盖正常产品 route、authority denied/unavailable、correlation/binding mismatch、cleanup/retry、feature-off 零副作用及 fallback/Demo/legacy 回归。
+- 例外：任何语义冲突、手工 conflict resolution 或 integration glue 都必须先完成受影响检查和必要 review；若它改变共享 authority/protocol/lifecycle 语义，不得等待最终 smoke 来代替缺失的 review closure。
+- 不变量：该优化不改变 D-046/D-053 的 task-level 验证、D-060 的单写与远端批准边界、真实 E2E/Immutable Alpha Gate，也不允许以一次 aggregate smoke、mock 或测试数量授予 Replacement Ledger credit。
