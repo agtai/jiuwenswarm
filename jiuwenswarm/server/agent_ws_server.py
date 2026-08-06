@@ -104,6 +104,7 @@ from jiuwenswarm.common.config import (
 )
 from jiuwenswarm.server.sandbox.jiuwenbox_runner import JiuwenBoxRunner
 from jiuwenswarm.common.hooks_config import load_hooks_config
+from jiuwenswarm.server.hooks.precompact import fire_pre_compact_hooks
 from jiuwenswarm.common.security.ws_origin import (
     extract_handshake_request,
     forbidden_origin_response,
@@ -4905,6 +4906,20 @@ class AgentWebSocketServer:
 
             if agent is None:
                 raise ValueError("Failed to get agent")
+
+            hook_results = await fire_pre_compact_hooks("manual", session_id)
+            blocking = next((r for r in hook_results if r.outcome == "blocking"), None)
+            if blocking is not None:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=True,
+                    payload={"result": "blocked", "reason": blocking.error},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await send_wire_payload(ws, wire)
+                return
 
             result_data = await agent.compress_context(session_id=session_id, return_state=True)
 
