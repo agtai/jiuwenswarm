@@ -3,19 +3,24 @@
 """Package-only product consumer for governed Live Voice observability facts.
 
 This module deliberately does not register an exporter or claim the product
-observability route.  It only gives an explicitly activated product composition
-context a bounded, retained lease over the existing diagnostic exporter buffer.
+observability route.  Nonformal or dependency-incomplete activation retains no
+effects.  Only a Main-owned authority-gated issuer can turn a verified bounded
+worker lease into an active formal route; failed issuance closes that lease or
+surfaces its exact retained cleanup owner.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from threading import Lock
+from types import CodeType, FunctionType, MethodType
 from typing import cast
 
 from jiuwenswarm.server.live_voice.observability import (
@@ -29,12 +34,13 @@ from jiuwenswarm.server.live_voice.observability import (
 from jiuwenswarm.server.live_voice.observability_exporter import (
     ExporterBackpressureError,
     ExporterCloseTimeoutError,
-    ExportRecord,
     ExporterSnapshot,
+    ExportRecord,
     LiveVoiceObservabilityExporterBuffer,
     ObservabilityExporterError,
 )
 from jiuwenswarm.server.live_voice.product_composition_contract import (
+    ProductCompositionContractViolation,
     ProductEvidenceId,
     ProductRouteFact,
     ProductRouteReason,
@@ -43,8 +49,8 @@ from jiuwenswarm.server.live_voice.product_composition_contract import (
 )
 from jiuwenswarm.server.live_voice.product_composition_root import (
     ProductCompositionContext,
+    ProductCompositionRootViolation,
 )
-
 
 ObservationExporter = Callable[[ExportRecord], Awaitable[None]]
 _CONSTRUCTION_TOKEN = object()
@@ -77,6 +83,28 @@ class ProductObservabilityLeaseState(StrEnum):
     CLOSING = "closing"
     CLOSED = "closed"
     FAILED = "failed"
+
+
+class ProductObservabilityLeaseCloseError(RuntimeError):
+    """Raised while composition must retain an unfinished worker lease."""
+
+    def __init__(self, result: ProductObservabilityCloseResult) -> None:
+        super().__init__("product observability worker cleanup is incomplete")
+        self.result = result
+
+
+class ProductObservabilityActivationError(RuntimeError):
+    """Raised when failed formalization leaves cleanup ownership retained."""
+
+    def __init__(
+        self,
+        *,
+        cleanup_lease: ProductObservabilityLease,
+        cleanup_result: ProductObservabilityCloseResult | None,
+    ) -> None:
+        super().__init__("product observability activation cleanup is incomplete")
+        self.cleanup_lease = cleanup_lease
+        self.cleanup_result = cleanup_result
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,15 +207,80 @@ class InactiveProductObservabilityActivation:
     active: bool = False
     adapter: None = None
     lease: None = None
+    worker_started: bool = False
 
     def __post_init__(self) -> None:
         if (
             self.active is not False
             or self.adapter is not None
             or self.lease is not None
+            or self.worker_started is not False
             or self.route_fact != _disabled_route_fact()
         ):
             raise ValueError("inactive product observability must be exactly off")
+
+
+@dataclass(frozen=True, slots=True)
+class ProductObservabilityActivationEvidence:
+    """Leaf-issued proof passed to Main only after worker and lease creation."""
+
+    session_id: str
+    correlation_id: str
+    lease: ProductObservabilityLease
+    segment: ProductSegment = ProductSegment.OBSERVABILITY
+    worker_started: bool = True
+    lease_open: bool = True
+    _construction_token: object = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if (
+            self._construction_token is not _CONSTRUCTION_TOKEN
+            or type(self.session_id) is not str
+            or not self.session_id
+            or type(self.correlation_id) is not str
+            or not self.correlation_id
+            or type(self.lease) is not ProductObservabilityLease
+            or self.lease._adapter._session_id != self.session_id
+            or self.lease._adapter._correlation_id != self.correlation_id
+            or self.lease._adapter._lease_state
+            is not ProductObservabilityLeaseState.ACTIVE
+            or self.lease._exporter_buffer.snapshot().state != "running"
+            or self.lease._exporter_buffer.snapshot().worker_running is not True
+            or self.segment is not ProductSegment.OBSERVABILITY
+            or self.worker_started is not True
+            or self.lease_open is not True
+        ):
+            raise ValueError(
+                "activation evidence requires an exact running X-OBS lease"
+            )
+
+
+ProductObservabilityRouteFactIssuer = Callable[
+    [ProductObservabilityActivationEvidence], object
+]
+
+
+@dataclass(frozen=True, slots=True)
+class UnavailableProductObservabilityActivation:
+    """Enabled but nonformal result with no buffer, worker, sink, or lease."""
+
+    route_fact: ProductRouteFact
+    active: bool = False
+    adapter: None = None
+    lease: None = None
+    worker_started: bool = False
+
+    def __post_init__(self) -> None:
+        if (
+            self.active is not False
+            or self.adapter is not None
+            or self.lease is not None
+            or self.worker_started is not False
+            or self.route_fact != _package_only_route_fact()
+        ):
+            raise ValueError(
+                "unavailable product observability cannot retain product effects"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,15 +291,18 @@ class ActiveProductObservabilityActivation:
     adapter: ProductObservabilityAdapter
     lease: ProductObservabilityLease
     active: bool = True
+    worker_started: bool = True
     _construction_token: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if (
             self._construction_token is not _CONSTRUCTION_TOKEN
             or self.active is not True
+            or self.worker_started is not True
             or type(self.adapter) is not ProductObservabilityAdapter
             or type(self.lease) is not ProductObservabilityLease
-            or self.route_fact != _package_only_route_fact()
+            or self.route_fact.segment is not ProductSegment.OBSERVABILITY
+            or self.route_fact.truth is not ProductRouteTruth.FORMAL
             or self.adapter._route_fact is not self.route_fact
             or self.lease._adapter is not self.adapter
             or self.lease._exporter_buffer is not self.adapter._exporter_buffer
@@ -458,6 +554,21 @@ class ProductObservabilityAdapter:
         with self._lock:
             self._lease_state = state
 
+    def _bind_formal_route_fact(
+        self, route_fact: ProductRouteFact, *, construction_token: object
+    ) -> None:
+        if construction_token is not _CONSTRUCTION_TOKEN:
+            raise ValueError("formal route binding requires explicit activation")
+        with self._lock:
+            if (
+                self._lease_state is not ProductObservabilityLeaseState.ACTIVE
+                or self._route_fact != _package_only_route_fact()
+                or route_fact.segment is not ProductSegment.OBSERVABILITY
+                or route_fact.truth is not ProductRouteTruth.FORMAL
+            ):
+                raise ValueError("formal route binding requires one active worker")
+            self._route_fact = route_fact
+
 
 class ProductObservabilityLease:
     """Retained, retryable owner of the existing exporter worker."""
@@ -475,9 +586,23 @@ class ProductObservabilityLease:
         self._exporter_buffer = exporter_buffer
         self._close_lock = asyncio.Lock()
 
-    async def close(
+    async def close(self) -> None:
+        """Close for ``ProductCompositionRoot`` and retain on nonterminal cleanup.
+
+        The composition root treats a normally returned awaitable as terminal
+        cleanup.  Therefore a closing or failed exporter must raise so the root
+        keeps this exact lease for a later retry.
+        """
+
+        result = await self.close_with_result()
+        if result.lease_state is not ProductObservabilityLeaseState.CLOSED:
+            raise ProductObservabilityLeaseCloseError(result)
+
+    async def close_with_result(
         self, *, timeout_seconds: float | None = None
     ) -> ProductObservabilityCloseResult:
+        """Return detailed retained cleanup truth for diagnostics and tests."""
+
         validated_timeout = _close_timeout(timeout_seconds)
         async with self._close_lock:
             self._adapter._begin_close()
@@ -529,42 +654,171 @@ def _close_timeout(value: object) -> float | None:
     return float(value)
 
 
+def _formal_observability_route_fact(value: object) -> ProductRouteFact | None:
+    """Revalidate Main-owned formal evidence without minting it in this leaf."""
+
+    if (
+        not isinstance(value, ProductRouteFact)
+        or value.__class__ is not ProductRouteFact
+    ):
+        return None
+    candidate = cast(ProductRouteFact, value)
+    try:
+        validated = ProductRouteFact(
+            segment=candidate.segment,
+            truth=candidate.truth,
+            reason_id=candidate.reason_id,
+            evidence_ids=candidate.evidence_ids,
+            formal_runtime_observed=candidate.formal_runtime_observed,
+        )
+    except ProductCompositionContractViolation:
+        return None
+    if (
+        validated.segment is not ProductSegment.OBSERVABILITY
+        or validated.truth is not ProductRouteTruth.FORMAL
+    ):
+        return None
+    return validated
+
+
+def _has_native_coroutine_code(value: object) -> bool:
+    candidate = value
+    while type(candidate) is functools.partial:
+        candidate = candidate.func
+    if type(candidate) is MethodType:
+        candidate = candidate.__func__
+    if type(candidate) is not FunctionType:
+        return False
+    code = candidate.__code__
+    return type(code) is CodeType and bool(code.co_flags & inspect.CO_COROUTINE)
+
+
+def _is_async_callable(value: object) -> bool:
+    """Require native coroutine bytecode, ignoring marker-only declarations."""
+
+    if not callable(value):
+        return False
+    if _has_native_coroutine_code(value):
+        return True
+    if type(value) in {FunctionType, MethodType, functools.partial}:
+        return False
+    try:
+        call_implementation = inspect.getattr_static(type(value), "__call__")
+    except Exception:
+        return False
+    return _has_native_coroutine_code(call_implementation)
+
+
+def _async_exporter(value: object) -> ObservationExporter | None:
+    """Admit async functions, methods, partials, and async callable objects."""
+
+    if not callable(value) or not _is_async_callable(value):
+        return None
+    return cast(ObservationExporter, value)
+
+
+def _route_fact_issuer(value: object) -> ProductObservabilityRouteFactIssuer | None:
+    """Admit a synchronous Main-owned issuer, never a pre-issued final fact."""
+
+    if not callable(value) or _is_async_callable(value):
+        return None
+    return cast(ProductObservabilityRouteFactIssuer, value)
+
+
+async def _unavailable_after_failed_formalization(
+    lease: ProductObservabilityLease,
+) -> UnavailableProductObservabilityActivation:
+    """Shield teardown or surface the exact retained owner to Main."""
+
+    try:
+        result = await asyncio.shield(lease.close_with_result())
+    except asyncio.CancelledError as exc:
+        raise ProductObservabilityActivationError(
+            cleanup_lease=lease, cleanup_result=None
+        ) from exc
+    except Exception as exc:
+        raise ProductObservabilityActivationError(
+            cleanup_lease=lease, cleanup_result=None
+        ) from exc
+    if result.lease_state is not ProductObservabilityLeaseState.CLOSED:
+        raise ProductObservabilityActivationError(
+            cleanup_lease=lease, cleanup_result=result
+        )
+    return UnavailableProductObservabilityActivation(
+        route_fact=_package_only_route_fact()
+    )
+
+
 async def activate_product_observability_adapter(
     *,
     enabled: bool = False,
     context: object = None,
     exporter: object = None,
+    formal_route_fact_issuer: object = None,
     capacity: int = 256,
     export_timeout_seconds: float = 1.0,
     close_timeout_seconds: float = 5.0,
-) -> InactiveProductObservabilityActivation | ActiveProductObservabilityActivation:
-    """Explicitly start the bounded package consumer when the feature is on.
+) -> (
+    InactiveProductObservabilityActivation
+    | UnavailableProductObservabilityActivation
+    | ActiveProductObservabilityActivation
+):
+    """Start, lease, then ask Main to issue the final formal route fact.
 
     The feature-off return precedes validation or access of context, exporter,
-    buffer, worker, and sink state.
+    issuer, buffer, worker, and sink state.  Missing dependencies return
+    unavailable with the same zero-allocation behavior.
     """
 
     if enabled is not True:
         return InactiveProductObservabilityActivation(route_fact=_disabled_route_fact())
 
-    if type(context) is not ProductCompositionContext:
-        raise ValueError("context must be an exact ProductCompositionContext")
-    if not callable(exporter):
-        raise ValueError("exporter must be an already-constructed callable")
+    # Main supplies an authority-gated issuer, not a circular final fact that
+    # already claims this segment lease is open.  Missing or asynchronous
+    # issuers return before inspecting exporter/context dependencies.
+    issuer = _route_fact_issuer(formal_route_fact_issuer)
+    if issuer is None:
+        return UnavailableProductObservabilityActivation(
+            route_fact=_package_only_route_fact()
+        )
+
+    # Only exporter callables whose invocation is natively awaitable are
+    # accepted.  A synchronous callable that happens to return an awaitable is
+    # not admitted because its pre-await side effects cannot be isolated.
+    validated_exporter = _async_exporter(exporter)
+    if validated_exporter is None:
+        return UnavailableProductObservabilityActivation(
+            route_fact=_package_only_route_fact()
+        )
+    if (
+        not isinstance(context, ProductCompositionContext)
+        or context.__class__ is not ProductCompositionContext
+    ):
+        return UnavailableProductObservabilityActivation(
+            route_fact=_package_only_route_fact()
+        )
+    validated_context = cast(ProductCompositionContext, context)
+    try:
+        ProductCompositionContext(
+            validated_context.session_id, validated_context.correlation_id
+        )
+    except ProductCompositionRootViolation:
+        return UnavailableProductObservabilityActivation(
+            route_fact=_package_only_route_fact()
+        )
 
     exporter_buffer = LiveVoiceObservabilityExporterBuffer(
-        exporter=cast(ObservationExporter, exporter),
+        exporter=validated_exporter,
         enabled=True,
         capacity=capacity,
         export_timeout_seconds=export_timeout_seconds,
         close_timeout_seconds=close_timeout_seconds,
     )
-    await exporter_buffer.start()
-    route_fact = _package_only_route_fact()
+    started = await exporter_buffer.start()
     adapter = ProductObservabilityAdapter(
-        context=context,
+        context=validated_context,
         exporter_buffer=exporter_buffer,
-        route_fact=route_fact,
+        route_fact=_package_only_route_fact(),
         construction_token=_CONSTRUCTION_TOKEN,
     )
     lease = ProductObservabilityLease(
@@ -572,6 +826,42 @@ async def activate_product_observability_adapter(
         exporter_buffer=exporter_buffer,
         construction_token=_CONSTRUCTION_TOKEN,
     )
+    if started.state != "running" or started.worker_running is not True:
+        return await _unavailable_after_failed_formalization(lease)
+    try:
+        evidence = ProductObservabilityActivationEvidence(
+            session_id=validated_context.session_id,
+            correlation_id=validated_context.correlation_id,
+            lease=lease,
+            _construction_token=_CONSTRUCTION_TOKEN,
+        )
+    except ValueError:
+        return await _unavailable_after_failed_formalization(lease)
+
+    try:
+        issued_route_fact = issuer(evidence)
+    except asyncio.CancelledError:
+        await _unavailable_after_failed_formalization(lease)
+        raise
+    except Exception:
+        return await _unavailable_after_failed_formalization(lease)
+
+    if inspect.iscoroutine(issued_route_fact):
+        issued_route_fact.close()
+    route_fact = _formal_observability_route_fact(issued_route_fact)
+    running = exporter_buffer.snapshot()
+    if (
+        route_fact is None
+        or running.state != "running"
+        or running.worker_running is not True
+    ):
+        return await _unavailable_after_failed_formalization(lease)
+    try:
+        adapter._bind_formal_route_fact(
+            route_fact, construction_token=_CONSTRUCTION_TOKEN
+        )
+    except ValueError:
+        return await _unavailable_after_failed_formalization(lease)
     return ActiveProductObservabilityActivation(
         route_fact=route_fact,
         adapter=adapter,
@@ -583,13 +873,18 @@ async def activate_product_observability_adapter(
 __all__ = [
     "ActiveProductObservabilityActivation",
     "InactiveProductObservabilityActivation",
+    "ProductObservabilityActivationError",
+    "ProductObservabilityActivationEvidence",
     "ProductObservabilityAdapter",
     "ProductObservabilityAdapterSnapshot",
     "ProductObservabilityAdapterStats",
     "ProductObservabilityCloseResult",
     "ProductObservabilityDisposition",
     "ProductObservabilityLease",
+    "ProductObservabilityLeaseCloseError",
     "ProductObservabilityLeaseState",
     "ProductObservabilityReason",
+    "ProductObservabilityRouteFactIssuer",
+    "UnavailableProductObservabilityActivation",
     "activate_product_observability_adapter",
 ]

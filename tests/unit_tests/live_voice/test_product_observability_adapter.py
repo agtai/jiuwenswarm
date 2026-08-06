@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import functools
+import inspect
 import math
 from collections.abc import Awaitable, Callable
 
@@ -16,43 +18,117 @@ from jiuwenswarm.server.live_voice.observability import (
     create_metric,
     create_observation,
 )
-from jiuwenswarm.server.live_voice.observability_exporter import ExportRecord
+from jiuwenswarm.server.live_voice.observability_exporter import (
+    ExportRecord,
+    LiveVoiceObservabilityExporterBuffer,
+)
 from jiuwenswarm.server.live_voice.product_composition_contract import (
     ProductEvidenceId,
+    ProductRouteFact,
     ProductRouteReason,
     ProductRouteTruth,
     ProductSegment,
 )
 from jiuwenswarm.server.live_voice.product_composition_root import (
     ProductCompositionContext,
+    ProductCompositionLeaseCloseError,
+    ProductCompositionRegistration,
+    ProductCompositionRoot,
+    ProductSegmentActivation,
 )
 from jiuwenswarm.server.live_voice.product_observability_adapter import (
     ActiveProductObservabilityActivation,
     InactiveProductObservabilityActivation,
+    ProductObservabilityActivationError,
+    ProductObservabilityActivationEvidence,
     ProductObservabilityAdapter,
     ProductObservabilityCloseResult,
     ProductObservabilityLease,
+    ProductObservabilityLeaseCloseError,
     ProductObservabilityLeaseState,
     ProductObservabilityReason,
+    UnavailableProductObservabilityActivation,
     activate_product_observability_adapter,
 )
-
 
 CONTEXT = ProductCompositionContext("session-observability", "corr-observability")
 
 
-def _route() -> dict[str, object]:
+def _route(implementation_class: str = "formal") -> dict[str, object]:
+    if implementation_class == "formal":
+        return {
+            "implementation_class": "formal",
+            "owner_module": "runtime.conversation",
+            "capability_provider": "jiuwenswarm-runtime",
+            "contract_version": LIVE_VOICE_CONTRACT_VERSION,
+            "reason_code": None,
+        }
+    reason = {
+        "fallback": "ROUTE_FALLBACK",
+        "demo_substitute": "DEMO_SUBSTITUTE",
+        "unsupported": "UNSUPPORTED_CAPABILITY",
+        "unknown": "UNKNOWN_PROVENANCE",
+    }[implementation_class]
     return {
-        "implementation_class": "formal",
-        "owner_module": "runtime.conversation",
-        "capability_provider": "jiuwenswarm-runtime",
-        "contract_version": LIVE_VOICE_CONTRACT_VERSION,
-        "reason_code": None,
+        "implementation_class": implementation_class,
+        "owner_module": (
+            None if implementation_class == "unknown" else "route.compatibility"
+        ),
+        "capability_provider": None,
+        "contract_version": None,
+        "reason_code": reason,
     }
 
 
+def _formal_observability_route_fact() -> ProductRouteFact:
+    # Contract-only issuer output; this is not real product runtime evidence.
+    return ProductRouteFact(
+        segment=ProductSegment.OBSERVABILITY,
+        truth=ProductRouteTruth.FORMAL,
+        reason_id=ProductRouteReason.FORMAL_ROUTE_OBSERVED,
+        evidence_ids=(
+            ProductEvidenceId.TRUSTED_AUTHORITY_RESOLVED,
+            ProductEvidenceId.FORMAL_ACTIVATION_LEASE_OPEN,
+            ProductEvidenceId.RUNTIME_PATH_OBSERVED,
+        ),
+        formal_runtime_observed=True,
+    )
+
+
+def _formal_observability_route_issuer(
+    evidence: ProductObservabilityActivationEvidence,
+) -> ProductRouteFact:
+    # Simulates Main's authority-gated issuer after leaf-owned worker/lease proof.
+    assert type(evidence) is ProductObservabilityActivationEvidence
+    assert evidence.session_id
+    assert evidence.correlation_id
+    assert type(evidence.lease) is ProductObservabilityLease
+    assert evidence.lease._exporter_buffer.snapshot().state == "running"
+    assert evidence.lease._exporter_buffer.snapshot().worker_running is True
+    assert evidence.segment is ProductSegment.OBSERVABILITY
+    assert evidence.worker_started is evidence.lease_open is True
+    return _formal_observability_route_fact()
+
+
+def _formal_authority_route_fact() -> ProductRouteFact:
+    return ProductRouteFact(
+        segment=ProductSegment.AUTHORITY,
+        truth=ProductRouteTruth.FORMAL,
+        reason_id=ProductRouteReason.FORMAL_ROUTE_OBSERVED,
+        evidence_ids=(
+            ProductEvidenceId.TRUSTED_AUTHORITY_RESOLVED,
+            ProductEvidenceId.FORMAL_ACTIVATION_LEASE_OPEN,
+            ProductEvidenceId.RUNTIME_PATH_OBSERVED,
+        ),
+        formal_runtime_observed=True,
+    )
+
+
 def _observation(
-    event_id: str, *, correlation_id: str = CONTEXT.correlation_id
+    event_id: str,
+    *,
+    correlation_id: str = CONTEXT.correlation_id,
+    implementation_class: str = "formal",
 ) -> LiveVoiceObservation:
     return create_observation(
         {
@@ -67,7 +143,7 @@ def _observation(
                 "interaction_id": "interaction-observability",
                 "turn_id": "turn-observability",
             },
-            "route": _route(),
+            "route": _route(implementation_class),
             "source_component": "product.observability.test",
         }
     )
@@ -116,6 +192,7 @@ async def _activate(
         enabled=True,
         context=CONTEXT,
         exporter=exporter,
+        formal_route_fact_issuer=_formal_observability_route_issuer,
         **options,  # type: ignore[arg-type]
     )
     assert isinstance(activation, ActiveProductObservabilityActivation)
@@ -130,6 +207,9 @@ async def test_positive_public_facts_are_copied_into_one_explicit_worker() -> No
         exported.append(record)
 
     activation = await _activate(exporter, capacity=2)
+    segment_activation = ProductSegmentActivation(
+        activation.route_fact, activation.lease
+    )
     observation = _observation("event-product-positive")
     metric = _metric("metric-product-positive")
 
@@ -137,7 +217,7 @@ async def test_positive_public_facts_are_copied_into_one_explicit_worker() -> No
         context=CONTEXT, observation=observation
     )
     metric_result = activation.adapter.consume_metric(context=CONTEXT, metric=metric)
-    closed = await activation.lease.close()
+    closed = await activation.lease.close_with_result()
 
     assert (
         observation_result.reason_id is ProductObservabilityReason.ACCEPTED_FOR_EXPORT
@@ -156,17 +236,94 @@ async def test_positive_public_facts_are_copied_into_one_explicit_worker() -> No
     assert closed.lease_state is ProductObservabilityLeaseState.CLOSED
     assert closed.retained_for_retry is False
     assert activation.route_fact.segment is ProductSegment.OBSERVABILITY
-    assert activation.route_fact.truth is ProductRouteTruth.UNAVAILABLE
-    assert (
-        activation.route_fact.reason_id
-        is ProductRouteReason.OBSERVABILITY_CONSUMER_UNAVAILABLE
-    )
+    assert activation.route_fact.truth is ProductRouteTruth.FORMAL
+    assert activation.route_fact.reason_id is ProductRouteReason.FORMAL_ROUTE_OBSERVED
     assert activation.route_fact.evidence_ids == (
-        ProductEvidenceId.OBSERVABILITY_FOUNDATION,
-        ProductEvidenceId.PACKAGE_CONTRACT_ONLY,
-        ProductEvidenceId.NO_RUNTIME_EVIDENCE,
+        ProductEvidenceId.TRUSTED_AUTHORITY_RESOLVED,
+        ProductEvidenceId.FORMAL_ACTIVATION_LEASE_OPEN,
+        ProductEvidenceId.RUNTIME_PATH_OBSERVED,
     )
-    assert activation.route_fact.formal_runtime_observed is False
+    assert activation.route_fact.formal_runtime_observed is True
+    assert activation.worker_started is True
+    assert segment_activation.lease is activation.lease
+
+
+@pytest.mark.asyncio
+async def test_async_callable_object_is_an_explicit_supported_exporter() -> None:
+    class AsyncCallableExporter:
+        def __init__(self) -> None:
+            self.records: list[ExportRecord] = []
+
+        async def __call__(self, record: ExportRecord) -> None:
+            self.records.append(record)
+
+    exporter = AsyncCallableExporter()
+    activation = await _activate(exporter)
+    observation = _observation("event-async-callable-exporter")
+
+    disposition = activation.adapter.consume_observation(
+        context=CONTEXT, observation=observation
+    )
+    closed = await activation.lease.close_with_result()
+
+    assert disposition.accepted_for_export is True
+    assert exporter.records == [observation]
+    assert closed.lease_state is ProductObservabilityLeaseState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_bound_async_method_and_partial_remain_supported_exporters() -> None:
+    class ExporterOwner:
+        def __init__(self) -> None:
+            self.records: list[ExportRecord] = []
+
+        async def export(self, record: ExportRecord) -> None:
+            self.records.append(record)
+
+    owner = ExporterOwner()
+    exporters = (owner.export, functools.partial(owner.export))
+
+    for index, exporter in enumerate(exporters):
+        activation = await _activate(exporter)
+        result = activation.adapter.consume_observation(
+            context=CONTEXT,
+            observation=_observation(f"event-async-exporter-form-{index}"),
+        )
+        closed = await activation.lease.close_with_result()
+        assert result.accepted_for_export is True
+        assert closed.lease_state is ProductObservabilityLeaseState.CLOSED
+
+    assert len(owner.records) == len(exporters)
+
+
+@pytest.mark.asyncio
+async def test_formal_observer_preserves_nonformal_source_route_identity() -> None:
+    exported: list[ExportRecord] = []
+
+    async def exporter(record: ExportRecord) -> None:
+        exported.append(record)
+
+    activation = await _activate(exporter)
+    source_classes = ("fallback", "demo_substitute", "unsupported", "unknown")
+
+    results = tuple(
+        activation.adapter.consume_observation(
+            context=CONTEXT,
+            observation=_observation(
+                f"event-source-route-{route_class}",
+                implementation_class=route_class,
+            ),
+        )
+        for route_class in source_classes
+    )
+    closed = await activation.lease.close_with_result()
+
+    assert all(result.accepted_for_export for result in results)
+    assert tuple(record.route.implementation_class for record in exported) == (
+        source_classes
+    )
+    assert all(record.route.implementation_class != "formal" for record in exported)
+    assert closed.lease_state is ProductObservabilityLeaseState.CLOSED
 
 
 @pytest.mark.asyncio
@@ -193,17 +350,334 @@ async def test_feature_off_inspects_calls_and_allocates_nothing(
         enabled=False,
         context=_Poison(),
         exporter=_Poison(),
+        formal_route_fact_issuer=_Poison(),
     )
 
     assert isinstance(activation, InactiveProductObservabilityActivation)
     assert activation.active is False
     assert activation.adapter is activation.lease is None
+    assert activation.worker_started is False
     assert activation.route_fact.truth is ProductRouteTruth.DISABLED
     assert activation.route_fact.reason_id is ProductRouteReason.FEATURE_DISABLED
     assert activation.route_fact.evidence_ids == (ProductEvidenceId.FEATURE_FLAG_OFF,)
 
     default_activation = await activate_product_observability_adapter()
     assert isinstance(default_activation, InactiveProductObservabilityActivation)
+
+
+@pytest.mark.asyncio
+async def test_missing_issuer_or_incompatible_dependencies_start_no_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Poison:
+        def __getattribute__(self, _: str) -> object:
+            raise AssertionError("unavailable activation inspected a dependency")
+
+        def __call__(self, _: object) -> object:
+            raise AssertionError("unavailable activation called a dependency")
+
+    class _SyncPoisonExporter:
+        calls = 0
+
+        def __call__(self, _: ExportRecord) -> Awaitable[None]:
+            self.calls += 1
+            raise AssertionError("sync exporter was invoked")
+
+    async def async_issuer(
+        _: ProductObservabilityActivationEvidence,
+    ) -> ProductRouteFact:
+        raise AssertionError("unsupported async issuer was invoked")
+
+    async def async_exporter(_: ExportRecord) -> None:
+        raise AssertionError("pre-allocation exporter was invoked")
+
+    def reject_allocation(*_: object, **__: object) -> object:
+        raise AssertionError("unavailable activation allocated an exporter buffer")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "LiveVoiceObservabilityExporterBuffer",
+        reject_allocation,
+    )
+    sync_poison = _SyncPoisonExporter()
+
+    missing = await activate_product_observability_adapter(
+        enabled=True,
+        context=_Poison(),
+        exporter=_Poison(),
+    )
+    async_issuer_result = await activate_product_observability_adapter(
+        enabled=True,
+        context=_Poison(),
+        exporter=_Poison(),
+        formal_route_fact_issuer=async_issuer,
+    )
+    preissued_final_fact = await activate_product_observability_adapter(
+        enabled=True,
+        context=_Poison(),
+        exporter=_Poison(),
+        formal_route_fact_issuer=_formal_observability_route_fact(),
+    )
+    sync_exporter_result = await activate_product_observability_adapter(
+        enabled=True,
+        context=_Poison(),
+        exporter=sync_poison,
+        formal_route_fact_issuer=_formal_observability_route_issuer,
+    )
+    invalid_context = await activate_product_observability_adapter(
+        enabled=True,
+        context=object(),
+        exporter=async_exporter,
+        formal_route_fact_issuer=_formal_observability_route_issuer,
+    )
+    missing_exporter = await activate_product_observability_adapter(
+        enabled=True,
+        context=_Poison(),
+        exporter=None,
+        formal_route_fact_issuer=_formal_observability_route_issuer,
+    )
+
+    for activation in (
+        missing,
+        async_issuer_result,
+        preissued_final_fact,
+        sync_exporter_result,
+        invalid_context,
+        missing_exporter,
+    ):
+        assert isinstance(activation, UnavailableProductObservabilityActivation)
+        assert activation.active is False
+        assert activation.adapter is activation.lease is None
+        assert activation.worker_started is False
+        assert activation.route_fact.truth is ProductRouteTruth.UNAVAILABLE
+        assert (
+            activation.route_fact.reason_id
+            is ProductRouteReason.OBSERVABILITY_CONSUMER_UNAVAILABLE
+        )
+        # The result can enter ProductCompositionRoot without violating the
+        # invariant that nonformal segments retain no effects.
+        segment = ProductSegmentActivation(activation.route_fact, activation.lease)
+        assert segment.lease is None
+    assert sync_poison.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_marked_sync_exporter_is_rejected_before_every_activation_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exporter_calls: list[ExportRecord] = []
+    issuer_calls: list[ProductObservabilityActivationEvidence] = []
+
+    @inspect.markcoroutinefunction
+    def marked_sync_exporter(record: ExportRecord) -> Awaitable[None]:
+        exporter_calls.append(record)
+
+        async def completion() -> None:
+            return None
+
+        return completion()
+
+    def issuer(evidence: ProductObservabilityActivationEvidence) -> ProductRouteFact:
+        issuer_calls.append(evidence)
+        return _formal_observability_route_fact()
+
+    def reject_allocation(*_: object, **__: object) -> object:
+        raise AssertionError("marked sync exporter allocated a buffer or worker")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "LiveVoiceObservabilityExporterBuffer",
+        reject_allocation,
+    )
+
+    assert inspect.iscoroutinefunction(marked_sync_exporter) is True
+    assert marked_sync_exporter.__code__.co_flags & inspect.CO_COROUTINE == 0
+
+    activation = await activate_product_observability_adapter(
+        enabled=True,
+        context=CONTEXT,
+        exporter=marked_sync_exporter,
+        formal_route_fact_issuer=issuer,
+    )
+
+    assert isinstance(activation, UnavailableProductObservabilityActivation)
+    assert activation.adapter is activation.lease is None
+    assert activation.worker_started is False
+    assert activation.route_fact.truth is ProductRouteTruth.UNAVAILABLE
+    assert exporter_calls == []
+    assert issuer_calls == []
+
+
+@pytest.mark.asyncio
+async def test_spoofed_instance_code_is_rejected_before_every_activation_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def native_async_template(_: ExportRecord) -> None:
+        return None
+
+    class SpoofedSyncExporter:
+        __code__ = native_async_template.__code__
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, _: ExportRecord) -> Awaitable[None]:
+            self.calls += 1
+
+            async def completion() -> None:
+                return None
+
+            return completion()
+
+    issuer_calls: list[ProductObservabilityActivationEvidence] = []
+    exporter = SpoofedSyncExporter()
+
+    def issuer(evidence: ProductObservabilityActivationEvidence) -> ProductRouteFact:
+        issuer_calls.append(evidence)
+        return _formal_observability_route_fact()
+
+    def reject_allocation(*_: object, **__: object) -> object:
+        raise AssertionError("spoofed sync exporter allocated a buffer or worker")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "LiveVoiceObservabilityExporterBuffer",
+        reject_allocation,
+    )
+
+    assert exporter.__code__ is native_async_template.__code__
+    assert exporter.__code__.co_flags & inspect.CO_COROUTINE
+
+    activation = await activate_product_observability_adapter(
+        enabled=True,
+        context=CONTEXT,
+        exporter=exporter,
+        formal_route_fact_issuer=issuer,
+    )
+
+    assert isinstance(activation, UnavailableProductObservabilityActivation)
+    assert activation.adapter is activation.lease is None
+    assert activation.worker_started is False
+    assert activation.route_fact.truth is ProductRouteTruth.UNAVAILABLE
+    assert exporter.calls == 0
+    assert issuer_calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_post_start_evidence_closes_worker_before_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffers: list[LiveVoiceObservabilityExporterBuffer] = []
+    exported: list[ExportRecord] = []
+
+    def tracking_buffer(**options: object) -> LiveVoiceObservabilityExporterBuffer:
+        buffer = LiveVoiceObservabilityExporterBuffer(**options)  # type: ignore[arg-type]
+        buffers.append(buffer)
+        return buffer
+
+    async def exporter(record: ExportRecord) -> None:
+        exported.append(record)
+
+    nonformal = ProductRouteFact(
+        segment=ProductSegment.OBSERVABILITY,
+        truth=ProductRouteTruth.UNAVAILABLE,
+        reason_id=ProductRouteReason.OBSERVABILITY_CONSUMER_UNAVAILABLE,
+        evidence_ids=(
+            ProductEvidenceId.OBSERVABILITY_FOUNDATION,
+            ProductEvidenceId.PACKAGE_CONTRACT_ONLY,
+            ProductEvidenceId.NO_RUNTIME_EVIDENCE,
+        ),
+    )
+    corrupted = _formal_observability_route_fact()
+    object.__setattr__(corrupted, "evidence_ids", ())
+
+    def raise_issuer(_: ProductObservabilityActivationEvidence) -> ProductRouteFact:
+        raise RuntimeError("injected authority issuer failure")
+
+    issuers = (
+        lambda _: nonformal,
+        lambda _: _formal_authority_route_fact(),
+        lambda _: corrupted,
+        raise_issuer,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_observability_adapter."
+        "LiveVoiceObservabilityExporterBuffer",
+        tracking_buffer,
+    )
+
+    activations = tuple(
+        [
+            await activate_product_observability_adapter(
+                enabled=True,
+                context=CONTEXT,
+                exporter=exporter,
+                formal_route_fact_issuer=issuer,
+            )
+            for issuer in issuers
+        ]
+    )
+
+    assert all(
+        isinstance(item, UnavailableProductObservabilityActivation)
+        and item.lease is None
+        and item.worker_started is False
+        for item in activations
+    )
+    assert len(buffers) == len(issuers)
+    assert all(
+        buffer.snapshot().state == "closed"
+        and buffer.snapshot().worker_running is False
+        for buffer in buffers
+    )
+    assert exported == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_evidence_surfaces_retained_owner_when_cleanup_is_incomplete() -> (
+    None
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    exported: list[ExportRecord] = []
+
+    async def exporter(record: ExportRecord) -> None:
+        entered.set()
+        await release.wait()
+        exported.append(record)
+
+    def invalid_issuer(
+        evidence: ProductObservabilityActivationEvidence,
+    ) -> ProductRouteFact:
+        evidence.lease._exporter_buffer.emit_observation(
+            _observation("event-invalid-evidence-cleanup")
+        )
+        return _formal_authority_route_fact()
+
+    with pytest.raises(ProductObservabilityActivationError) as caught:
+        await activate_product_observability_adapter(
+            enabled=True,
+            context=CONTEXT,
+            exporter=exporter,
+            formal_route_fact_issuer=invalid_issuer,
+            export_timeout_seconds=1,
+            close_timeout_seconds=0.02,
+        )
+
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert caught.value.cleanup_result is not None
+    assert (
+        caught.value.cleanup_result.lease_state
+        is ProductObservabilityLeaseState.CLOSING
+    )
+    assert caught.value.cleanup_result.retained_for_retry is True
+    assert caught.value.cleanup_result.exporter.worker_running is True
+    assert caught.value.cleanup_result.exporter.state == "closing"
+
+    release.set()
+    closed = await caught.value.cleanup_lease.close_with_result(timeout_seconds=1)
+    assert closed.lease_state is ProductObservabilityLeaseState.CLOSED
+    assert len(exported) == 1
 
 
 @pytest.mark.asyncio
@@ -222,6 +696,14 @@ async def test_explicit_activation_objects_cannot_be_forged() -> None:
         )
     with pytest.raises(ValueError, match="exactly off"):
         InactiveProductObservabilityActivation(route_fact=activation.route_fact)
+    with pytest.raises(ValueError, match="cannot retain product effects"):
+        UnavailableProductObservabilityActivation(route_fact=activation.route_fact)
+    with pytest.raises(ValueError, match="exact running X-OBS lease"):
+        ProductObservabilityActivationEvidence(
+            session_id=CONTEXT.session_id,
+            correlation_id=CONTEXT.correlation_id,
+            lease=activation.lease,
+        )
     with pytest.raises(ValueError, match="requires explicit activation"):
         ProductObservabilityAdapter(  # type: ignore[arg-type]
             context=CONTEXT,
@@ -236,7 +718,7 @@ async def test_explicit_activation_objects_cannot_be_forged() -> None:
             construction_token=object(),
         )
 
-    await activation.lease.close()
+    await activation.lease.close_with_result()
 
 
 @pytest.mark.asyncio
@@ -270,7 +752,7 @@ async def test_wrong_context_correlation_type_and_invalid_fact_fail_closed() -> 
         ),
         activation.adapter.consume_observation(context=CONTEXT, observation=corrupted),
     )
-    closed = await activation.lease.close()
+    closed = await activation.lease.close_with_result()
 
     assert tuple(result.reason_id for result in results) == (
         ProductObservabilityReason.CONTEXT_BINDING_MISMATCH,
@@ -290,13 +772,14 @@ async def test_wrong_context_correlation_type_and_invalid_fact_fail_closed() -> 
         enabled=True,
         context=mutable_context,
         exporter=exporter,
+        formal_route_fact_issuer=_formal_observability_route_issuer,
     )
     assert isinstance(mutation_activation, ActiveProductObservabilityActivation)
     object.__setattr__(mutable_context, "session_id", "session-mutated")
     mutated = mutation_activation.adapter.consume_observation(
         context=mutable_context, observation=_observation("event-mutated-context")
     )
-    mutation_closed = await mutation_activation.lease.close()
+    mutation_closed = await mutation_activation.lease.close_with_result()
     assert mutated.reason_id is ProductObservabilityReason.CONTEXT_BINDING_MISMATCH
     assert mutation_closed.exporter.stats.accepted_records == 0
 
@@ -328,7 +811,7 @@ async def test_credentials_urls_device_identity_and_unreviewed_content_are_rejec
         activation.adapter.consume_observation(context=CONTEXT, observation=record)
         for record in (credential, url, device, transcript, raw_audio)
     )
-    closed = await activation.lease.close()
+    closed = await activation.lease.close_with_result()
 
     assert all(
         result.reason_id is ProductObservabilityReason.PRIVATE_CONTENT_REJECTED
@@ -367,7 +850,7 @@ async def test_schema_valid_url_query_and_equal_delimited_carriers_export_zero()
         activation.adapter.consume_observation(context=CONTEXT, observation=record)
         for record in records
     )
-    closed = await activation.lease.close()
+    closed = await activation.lease.close_with_result()
 
     assert all(
         result.reason_id is ProductObservabilityReason.PRIVATE_CONTENT_REJECTED
@@ -404,7 +887,7 @@ async def test_full_buffer_is_diagnostic_only_and_does_not_block_business_result
     assert second.reason_id is ProductObservabilityReason.EXPORT_BACKPRESSURED
     assert business_result == before
     release.set()
-    closed = await activation.lease.close()
+    closed = await activation.lease.close_with_result()
     assert closed.exporter.stats.delivered_records == 1
     assert closed.exporter.stats.rejected_full == 1
 
@@ -420,7 +903,7 @@ async def test_failing_exporter_cannot_rewrite_business_or_acceptance() -> None:
     result = activation.adapter.consume_observation(
         context=CONTEXT, observation=_observation("event-export-failure")
     )
-    closed = await activation.lease.close()
+    closed = await activation.lease.close_with_result()
 
     assert result.accepted_for_export is True
     assert business_result == ("completed", "agent-owned")
@@ -455,7 +938,7 @@ async def test_export_timeout_retains_close_for_retry_without_business_effect() 
     )
     await asyncio.wait_for(entered.wait(), timeout=1)
 
-    pending = await activation.lease.close(timeout_seconds=0.02)
+    pending = await activation.lease.close_with_result(timeout_seconds=0.02)
 
     assert result.accepted_for_export is True
     assert business_result == {"status": "completed"}
@@ -465,10 +948,124 @@ async def test_export_timeout_retains_close_for_retry_without_business_effect() 
     assert cancellation_seen.is_set()
 
     release.set()
-    closed = await activation.lease.close(timeout_seconds=1)
+    closed = await activation.lease.close_with_result(timeout_seconds=1)
     assert closed.lease_state is ProductObservabilityLeaseState.CLOSED
     assert closed.exporter.stats.timed_out_records == 1
     assert closed.exporter.stats.close_timeouts == 1
+
+
+@pytest.mark.asyncio
+async def test_composition_close_raises_until_retained_worker_is_terminal() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def exporter(_: ExportRecord) -> None:
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    activation = await _activate(
+        exporter,
+        export_timeout_seconds=0.01,
+        close_timeout_seconds=0.02,
+    )
+    activation.adapter.consume_observation(
+        context=CONTEXT,
+        observation=_observation("event-composition-close-retained"),
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    with pytest.raises(ProductObservabilityLeaseCloseError) as caught:
+        await activation.lease.close()
+
+    assert caught.value.result.lease_state is ProductObservabilityLeaseState.CLOSING
+    assert caught.value.result.retained_for_retry is True
+    assert caught.value.result.exporter.worker_running is True
+
+    release.set()
+    assert await activation.lease.close() is None
+    assert (
+        activation.adapter.snapshot().lease_state
+        is ProductObservabilityLeaseState.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_root_retains_xobs_lease_until_worker_retry_reaches_closed() -> None:
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    holder: dict[str, ActiveProductObservabilityActivation] = {}
+
+    async def exporter(_: ExportRecord) -> None:
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    class _AuthorityLease:
+        async def close(self) -> None:
+            return None
+
+    async def activate_authority(
+        _: ProductCompositionContext,
+    ) -> ProductSegmentActivation:
+        return ProductSegmentActivation(
+            _formal_authority_route_fact(), _AuthorityLease()
+        )
+
+    async def activate_observability(
+        context: ProductCompositionContext,
+    ) -> ProductSegmentActivation:
+        activation = await activate_product_observability_adapter(
+            enabled=True,
+            context=context,
+            exporter=exporter,
+            formal_route_fact_issuer=_formal_observability_route_issuer,
+            export_timeout_seconds=0.01,
+            close_timeout_seconds=0.02,
+        )
+        assert isinstance(activation, ActiveProductObservabilityActivation)
+        holder["activation"] = activation
+        return ProductSegmentActivation(activation.route_fact, activation.lease)
+
+    root = ProductCompositionRoot(
+        enabled=True,
+        registrations=(
+            ProductCompositionRegistration(
+                ProductSegment.AUTHORITY,
+                "adapter.authority.test",
+                activate_authority,
+            ),
+            ProductCompositionRegistration(
+                ProductSegment.OBSERVABILITY,
+                "adapter.observability.test",
+                activate_observability,
+            ),
+        ),
+    )
+    composition = await root.activate(CONTEXT)
+    assert composition.lease is not None
+    activation = holder["activation"]
+    activation.adapter.consume_observation(
+        context=CONTEXT,
+        observation=_observation("event-root-retained-worker"),
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    with pytest.raises(ProductCompositionLeaseCloseError):
+        await composition.lease.close()
+
+    assert composition.lease.pending_adapter_ids == ("adapter.observability.test",)
+    release.set()
+    await composition.lease.close()
+    assert composition.lease.closed is True
+    assert (
+        activation.adapter.snapshot().lease_state
+        is ProductObservabilityLeaseState.CLOSED
+    )
 
 
 @pytest.mark.asyncio
@@ -485,7 +1082,7 @@ async def test_cancelled_close_waiter_cannot_cancel_the_retained_worker() -> Non
         context=CONTEXT, observation=_observation("event-close-cancel")
     )
     await asyncio.wait_for(entered.wait(), timeout=1)
-    close_waiter = asyncio.create_task(activation.lease.close())
+    close_waiter = asyncio.create_task(activation.lease.close_with_result())
     await asyncio.sleep(0)
     close_waiter.cancel()
 
@@ -498,7 +1095,7 @@ async def test_cancelled_close_waiter_cannot_cancel_the_retained_worker() -> Non
     assert pending.exporter.stats.close_cancellations == 1
 
     release.set()
-    closed = await activation.lease.close(timeout_seconds=1)
+    closed = await activation.lease.close_with_result(timeout_seconds=1)
     assert closed.lease_state is ProductObservabilityLeaseState.CLOSED
     assert closed.exporter.stats.delivered_records == 1
 
@@ -516,13 +1113,15 @@ async def test_invalid_close_timeout_preserves_active_adapter_and_valid_close(
     activation = await _activate(exporter)
 
     with pytest.raises(ValueError, match="positive finite"):
-        await activation.lease.close(timeout_seconds=invalid_timeout)  # type: ignore[arg-type]
+        await activation.lease.close_with_result(
+            timeout_seconds=invalid_timeout  # type: ignore[arg-type]
+        )
 
     still_active = activation.adapter.snapshot()
     result = activation.adapter.consume_observation(
         context=CONTEXT, observation=_observation("event-after-invalid-timeout")
     )
-    closed = await activation.lease.close(timeout_seconds=1)
+    closed = await activation.lease.close_with_result(timeout_seconds=1)
 
     assert still_active.lease_state is ProductObservabilityLeaseState.ACTIVE
     assert still_active.exporter.state == "running"
@@ -544,7 +1143,7 @@ async def test_close_result_rejects_active_state() -> None:
             exporter=exporter_snapshot,
             retained_for_retry=True,
         )
-    await activation.lease.close()
+    await activation.lease.close_with_result()
 
 
 @pytest.mark.asyncio
@@ -568,7 +1167,7 @@ async def test_concurrent_consumers_and_closers_have_one_retained_lease() -> Non
         )
     )
     closed_one, closed_two = await asyncio.gather(
-        activation.lease.close(), activation.lease.close()
+        activation.lease.close_with_result(), activation.lease.close_with_result()
     )
     late = activation.adapter.consume_observation(
         context=CONTEXT, observation=_observation("event-after-close")
