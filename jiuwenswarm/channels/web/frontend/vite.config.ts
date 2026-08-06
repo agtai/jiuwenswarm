@@ -6,6 +6,7 @@ import { spawnSync } from 'child_process'
 import { createHash } from 'node:crypto'
 import path from 'path'
 import fs from 'fs'
+import { prepareDevWsTrafficPayloadForPersistence } from './devWsTrafficPrivacy'
 
 type ConfigWithLogger = { logger?: { error?: (msg: string, opts?: { error?: Error }) => void } }
 
@@ -324,14 +325,9 @@ function devWsTrafficLogger(): Plugin {
         })
         req.on('end', () => {
           const now = new Date().toISOString()
-          let payload: unknown = raw
-          if (raw) {
-            try {
-              payload = JSON.parse(raw)
-            } catch {
-              payload = raw
-            }
-          }
+          // The persistence boundary owns raw-audio removal. Invalid/non-object
+          // bodies fail closed to a fixed marker and are never copied to disk.
+          const payload = prepareDevWsTrafficPayloadForPersistence(raw)
           // 写盘前脱敏：前端会把 config.get/config.validate_model 等报文（含
           // api_key/token/secret）原样上报给 vite dev server，vite 再 appendFile
           // 写进 ws-dev.log。此处对 payload 递归脱敏，避免 api_key 明文落盘。

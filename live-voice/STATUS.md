@@ -1,27 +1,28 @@
 # Live Voice current status
 
-> Updated: 2026-08-05
+> Updated: 2026-08-06
 > This is the only mutable source for current branch facts, milestones, track state, blockers and next actions. Detailed tests, reviews and immutable evidence are linked rather than copied here.
 
 ## Resume capsule
 
 - Milestones: V0 `CLOSED`; Week 1 `CLOSED`; D-031 Compatibility Adapter `CLOSED`.
 - Product Gate: Integrated Demo `NOT RUNNABLE`; Replacement Ledger `0/100`.
-- Routes: P1 `fallback + AIO foundation`; P2 `formal foundations only`; P3alpha `Compatibility Adapter + reviewed formal backend foundation`; Integrated `unavailable`.
-- Current priority: add authenticated product composition for the reviewed P3alpha backend while keeping the formal mutation route disabled until that authority exists.
-- Next independent slices: Speech critical-token safety; D-059 now unblocks the real Agent Adapter + CR notification consumer for P2 under its frozen interface Task Packet.
-- Verified code base: `250ffa6` (pre-P3alpha reviewed code base); current P3alpha backend affected verification `PASS`. Detailed evidence is linked below.
+- Routes: P1 `fallback + reviewed AIO/batch-Speech + contract-only Browser↔Gateway media seam`; P2 `reviewed real-Agent/CR + notification arbitration + trusted-context Adapter`; P3alpha `authenticated query/subscription + text/UI progress-return foundation, mutation and formal voice fail-closed`; X-OBS `correlation + bounded export-buffer foundations`; Integrated `default-off Web shell + Gate-0 truth contract, no composition root`.
+- Current priority: compose the landed non-media foundations behind the trusted ProductAuthority boundary while the dedicated Media route/logger proof, Provider/Media, II, P3 confirmation/return, X-OBS and Web wiring advance within frozen non-overlapping boundaries. Every formal route remains default-off or fail-closed until its exact authority and runtime evidence exist.
+- Current integration candidate is based on `5d599c54`. It closes the Agent/CR notification-backpressure source defect and removes raw Speech audio at the current Vite dev-log persistence boundary. On this candidate, `599` cumulative Live Voice/Media Python tests, `16` frontend Speech/privacy tests, `32` Integrated Web tests, affected static/bundle checks, and production builds with the Integrated flag both off and on passed. This is still source/test integration only; no aggregate real-service, real-device or cumulative acceptance Gate has run.
 
 ## Package state capsule
 
 - `CLOSED`: shared ACG/telemetry kernel, every P1/P2/P3alpha A package, deterministic fake verticals, Browser P1 fallback and bounded D-031 Compatibility Adapter.
-- `FOUNDATION ONLY`: AIO-B, CR-B and AB-B are committed; the reviewed TC-B/ED-B/VB-B backend batch joins them in this integration. None is a complete formal product route or earns Replacement Ledger credit.
-- `OPEN`: AIO-C, SR-B/C, SS-B/C, RM-B/C, CR-C, II-B/C, TC-C and VB-C, plus the remaining real Agent, product-composition and return-wiring work inside the B foundations.
-- `CROSS-CUTTING PARTIAL`: X-OBS has vocabulary only, X-E2E has fake verticals only, and X-WEB has the carrier/Chrome/AIO baseline only.
+- `FOUNDATION ONLY`: the prior P1/P2/P3alpha/X-OBS foundations are now joined by the cross-language product-composition Gate (`a7b2a939`), trusted ProductAuthority foundation (`be9374cc`), Provider-neutral Browser↔Gateway media seam (`214a3139`) and fail-closed Task progress-return bridge (`5d599c54`). They define reviewed integration contracts and safe unavailable paths; none is registered as a complete formal product route or earns Replacement Ledger credit.
+- `PARTIAL / STILL OPEN`: AIO-C still lacks real-device latency/failure closure; the current Vite JSON sink is sanitized but the dedicated binary media route and its real logger regression do not exist; TC-C and X-OBS remain product-unwired. SR-C, SS-C, RM-B/C, II-B/C, trusted production identity/resolver, P3 confirmation issuance, atomic voice-progress handoff, final product wiring and real-service evidence remain open.
+- `CROSS-CUTTING PARTIAL`: X-OBS now has correlated Python/TypeScript facts plus bounded buffering, and X-E2E/X-WEB has a guarded diagnostics/composition shell; no exporter consumer/backend or cumulative real journey is wired.
 
 ## Git and release identity
 
 - Development branch: `hx/0803_live_voice`; upstream: `origin/hx/0803_live_voice`. Resolve HEAD, divergence and dirty state dynamically at resume.
+- The six product-foundation feats run from formal batch Speech `c85979bd` through the cumulative Web shell `19dadc13`. The subsequent bounded P1/P2/P3alpha/X-OBS commits `72023158`, `16243d26`, `b8dbb9c4` and `afec02ce` are linearly integrated on the branch; this is source integration, not product-route closure.
+- The reviewed Gate-0/Authority/Media/Progress batch is linearly integrated as `a7b2a939`, `be9374cc`, `214a3139` and `5d599c54`. Its contracts remain default-off, injected or unavailable until the product composition owner supplies the missing runtime authorities and hooks.
 - Reviewed foundations are reconciled as AIO-B `e407af45` → `50b98b4a`, CR-B `4b384970` → `1d721ca0`, and AB-B `a7ec6bad` → `3d357c2e`; their review records own the exact fixes and verification.
 - V0 immutable Released/Frozen baseline: `ee2896a4afb186e693c720476b6de10797e66f72`, Gate 0–6 PASS.
 
@@ -36,7 +37,7 @@ D-046 defines one cumulative engineering route and D-055 makes the current produ
 3. **W3/W4 — Integrated Web Alpha Gate:** real P1/P2/P3alpha verticals, desktop Web platform evidence and the joint non-blocking interaction/progress Gate pass on one immutable candidate.
 4. **Later:** complete P3, D1/D2, production authorization, wider browsers/platforms, operational SLOs, privacy/retention and release hardening.
 
-`W2/W3/W4` are dependency and delivery-order windows, not current calendar promises. The original three-to-four-week estimate assumed at least three useful implementation lanes. D-052 remains the default single-lane policy; the current user-directed P3alpha batch is a bounded exception for non-overlapping TC-B/ED-B/VB-B subtracks under one integration owner. No replacement calendar estimate is accepted yet. The stable package map and historical one-engineer timeboxes are in the [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md).
+`W2/W3/W4` are dependency and delivery-order windows, not current calendar promises. The original three-to-four-week estimate assumed at least three useful implementation lanes. D-052 remains the default single-lane policy, with explicit user-approved bounded exceptions under one Integration Owner: the earlier TC-B/ED-B/VB-B batch and the completed P1/P2/P3alpha/X-OBS batch. These completed exceptions do not automatically authorize new concurrent coding scopes. No replacement calendar estimate is accepted yet. The stable package map and historical one-engineer timeboxes are in the [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md).
 
 The carrier is the JiuwenSwarm desktop Web frontend. D-058 freezes the first Alpha compatibility promise to one desktop Google Chrome baseline. Every candidate must still record exact Chrome/OS/origin/device/network facts; Chrome/Chromium 107 remains only the implementation floor. Edge, other Chromium builds, Firefox, Safari, mobile Web, PWA, WebView2 and native clients are outside the current Alpha promise. Deployed Alpha requires a secure context and Gateway-held Provider credentials.
 
@@ -50,10 +51,10 @@ The carrier is the JiuwenSwarm desktop Web frontend. D-058 freezes the first Alp
 | Track | Current implementation fact | Next bounded work | Dependency / limit |
 |---|---|---|---|
 | Shared contract | ACG v2 critical kernel, fixtures/fakes/conformance and route telemetry are committed and reviewed; strict Python/TypeScript ContextRef and source-backed WorkProgress v2 parity are integrated | keep stable while real consumers integrate | ContextRef authorization/expiry/redaction enforcement remains consumer-owned; no replacement credit from contract/fake evidence alone |
-| P1 Speech I/O | AIO/SR/SS Ports and Browser Speech fallback are committed; AIO-B adds a reviewed Chrome `getUserMedia`/AudioWorklet/Web Audio Adapter, exact 20ms PCM frames, lifecycle tests and one real-device normal-path run | connect the bounded Adapter only through owned SR/RM B/C packages without claiming a complete P1 route | no real SR/SS Provider or Browser↔Gateway media route; permission revoke/device loss/background and AIO-C latency lack real evidence; AIO-B alone earns no P1 credit |
-| P2 Realtime | CR/RM/II/AB A packages and deterministic fake vertical are committed; CR-B owns the bounded runtime/presentation foundation, while AB-B adds bounded non-blocking Agent dispatch and source-backed round WorkProgress over an injected Adapter; D-059 freezes the five previously missing adjacent interfaces | resume the [P2 real Agent + CR Task Packet](roadmap/P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md) and connect the real Harness source through the reviewed foundations | implementation and real-facade evidence remain open; no real media route, browser PresentationAck, authenticated product composition or complete history durability; no P2/Web Gate credit |
-| P3alpha Task | TC/ED/VB A packages and fake vertical are committed; the reviewed backend batch adds durable TC-B Core/Store, a project-bound ED-B Adapter foundation and strict VB-B policy over D-031's carrier | add authenticated product composition, startup/periodic reconciliation and route telemetry; close ED workspace isolation before the clean-workspace Gate | formal mutation route remains disabled; VB-C, TC-C, WorkProgress/CR return wiring and product/real-service acceptance remain open |
-| Integration | three fake verticals and opt-in Browser P1 fallback exist | after one real route passes review, start cumulative integration and service validation | Integrated mode is documented but not runnable |
+| P1 Speech I/O | AIO/batch-Speech foundations have a trusted Speech-authority Adapter and exact LVM1 Browser↔Gateway media contract; the current Vite JSON persistence boundary now removes raw Speech audio across structured and failure carriers | build and prove the dedicated non-logging binary route, select/configure the Provider, then inject the real resolver and wire capture/playout | the sanitizer fixes the known dev-log leak but does not observe a real media route; streaming SR-C/SS-C, Provider/device/latency evidence and P1 credit remain open |
+| P2 Realtime | D-059 real-Agent/CR, notification arbitration and ProductAuthority pre-allocation context foundations are source-integrated; ordinary notifications now use bounded lossy observation while presentation/terminal truth is retained without blocking the producer | compose RM/II/runtime/arbiter under authenticated context and prove PresentationAck/history plus the real Agent/media journey | the source-level queue blocker is closed, but the runtime is not product-wired and has no authenticated external Agent/Tool journey or P2/Web credit |
+| P3alpha Task | Query/subscription foundations now have exact ProductAuthority P3 adapters and a generation-fenced TaskEvent→text/UI progress-return bridge | supply the trusted confirmation issuer and Web session, wire the live subscription/text sink, and design the atomic source/projection handoff required for voice | mutation remains closed; formal voice is `TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE`; no fabricated replay/resequence is permitted |
+| Integration / X-OBS | Gate-0 freezes product segments, route truth, evidence/stop rules, ownership and cumulative smoke order; Authority/Media/Progress packages are linearly source-integrated | add the default-off composition root for accepted non-media registrations; keep formal Media unavailable until the dedicated route/logger proof, then wire exporter/backend and actual-route diagnostics | no real Adapter registration, exporter sink/retention/SLO backend, Chrome/device/service journey or runnable Integrated mode |
 
 V0 and task compatibility code remains fallback, `demo_substitute` or Compatibility Adapter under D-047. Do not add formal authority to `useLiveVoiceDemo`, the frontend TaskBridge or legacy `schedule.*`/JSON state. CR/TC/ED and the target modules must take ownership through incremental replacement.
 
@@ -81,20 +82,25 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 
 - D-052 keeps design, implementation, tests and review in the current GPT/Sol lane. Do not switch or delegate to DeepSeek or another external execution model; historical candidates are reference material only.
 - D-052 currently describes one implementation lane and does not by itself authorize multiple simultaneous coding agents. Parallel coding requires an explicit newer execution decision with non-overlapping package/file ownership and one integration owner.
-- The user-directed formal P3alpha replacement batch is the current bounded exception: TC-B, ED-B and VB-B may proceed as non-overlapping subtracks under one integration owner. It does not authorize additional concurrent coding lanes or broaden any package authority.
+- The user-approved TC-B/ED-B/VB-B batch and the later P1/P2/P3alpha/X-OBS batch were bounded exceptions with non-overlapping file ownership and one Integration Owner. Both are complete at the Git-integration boundary; neither authorizes additional concurrent scopes or broadens package authority.
+- Further work may run in parallel only after the Integration Owner freezes shared authority/contracts and assigns non-overlapping package/file boundaries. Product composition and authority may advance together; Provider/Media, II, VB-C, UI, X-OBS backend and deployment may advance independently where those boundaries hold. Final activation and cumulative Gate evidence remain integration-owned closure work.
 - D-053 requires Tier 2/3 batches to complete self-review, cold complete-diff review and independent `/review` or a recorded equivalent. Tier 1 normally uses the first two unless risk is raised.
 - Related files in one coherent boundary may share review and commit. Every commit and push still requires separate exact approval under root `AGENTS.md`.
 
 ## Known blockers and machine-private conditions
 
 - D-031's bounded validation is complete. Shared Code Agent runtime files currently land inside the selected project; Agent Runtime/workspace isolation must relocate or explicitly govern `.gitignore`, `coding_memory/`, `prompt_attachment/` and `.agent_history/` before a formal clean-workspace Gate can pass.
-- D-031 terminal audio is safe at most once and may be skipped when no immediate safe gap exists; guaranteed/eventual terminal notification remains unimplemented.
+- D-031 terminal audio is safe at most once and may be skipped when no immediate safe gap exists; the new notification arbiter is not wired to D-031/CR, so guaranteed/eventual terminal notification remains unavailable in the product path.
 - D-058 selects the single-desktop-Chrome range and AIO-B design. One controlled Chrome/default-microphone normal path passed, but permission revoke, device loss, background lifecycle and AIO-C latency still lack real evidence. Selected streaming Speech Provider, Browser↔Gateway media transport and deployed secure-origin evidence remain open.
-- Integrated cumulative mode is not implemented. Current V0, stable-sentence and task modes remain separate compatibility/Demo routes.
-- Browser Speech fidelity remains weak for critical Chinese and technical tokens; committed text and critical-token clarification remain required.
+- Integrated cumulative mode is not implemented. The new Web shell is a truthful default-off composition/diagnostics boundary; current V0, stable-sentence and task modes remain separate compatibility/Demo routes.
+- Critical-token clarification and once-only dispatch are implemented and tested only as an unwired package. Browser Speech fidelity remains weak for critical Chinese and technical tokens, so no protected product path may bypass that Gate once composition begins.
 - Existing task scope is single-user request consistency, not production authorization; JSON guarantees are same-process, not exactly-once.
 - Current supplement/cancel behavior is not a production generation or Agent/Tool side-effect fence.
-- D-059 closes the P2 interface-decision blocker only. Canonical Harness round instrumentation, exact scoped cancellation, the formal no-history seam, atomic reservation and retained shutdown are not implemented or accepted until the Worker2 candidate passes review.
+- D-059's real-Agent/Harness/CR foundation passed its three review equivalents after fixes, but remains product-level `PARTIAL` until authenticated composition and cumulative real browser/media/service evidence.
+- `MEDIA_LOGGER_ZERO_PERSISTENCE_UNPROVEN`: the known Vite development JSON logger leak is fixed at its write boundary and covered by pure sanitizer tests, but no dedicated binary transport or real route-to-disk logger regression exists. Formal media remains unavailable until that exact path proves zero audio-payload persistence.
+- Formal batch Speech remains fail-closed because the current Web connection has request-asserted rather than authenticated identity. The ProductAuthority foundation exists, but no real trusted resolver or product injection exists, and the sensitive non-logging transport is still absent.
+- P3alpha query composition is present, but production task mutation remains intentionally closed because there is no trusted confirmation issuer; real project, restart and reconciliation evidence is also outstanding.
+- X-OBS has bounded export buffering but no product consumer, export sink/transport, retention policy or SLO backend, and the cumulative Web shell has not been exercised with real Adapters, Chrome, devices or services.
 - A repository-local `.venv` directory and restored frontend dependencies are present on this machine, but their usability, credentials, Provider configuration, project registration, runtime data, browser permissions/devices and network state are machine-private and are not Git-restored guarantees.
 
 ## Detailed evidence routes
@@ -105,12 +111,21 @@ The [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) owns 
 - CR-B runtime loop, presentation truth and review evidence: [CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md](CR_B_RUNTIME_IMPLEMENTATION_REVIEW_2026-08-05.md).
 - WorkProgress v2 and AB-B runtime foundation review/evidence: [AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md](AB_B_WORK_PROGRESS_IMPLEMENTATION_REVIEW_2026-08-05.md).
 - Frozen P2 real Agent/Harness interface execution contract: [P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md](roadmap/P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md).
+- Formal batch Speech foundation and fail-closed authority review: [P1_FORMAL_SPEECH_IMPLEMENTATION_REVIEW_2026-08-05.md](P1_FORMAL_SPEECH_IMPLEMENTATION_REVIEW_2026-08-05.md).
+- D-059 real Agent/Harness/CR implementation and review: [P2_REAL_AGENT_CR_BLOCKER_REVIEW_2026-08-05.md](P2_REAL_AGENT_CR_BLOCKER_REVIEW_2026-08-05.md).
 - Formal P3alpha backend Core/Store/Executor/policy review and evidence: [P3ALPHA_REPLACEMENT_REVIEW_2026-08-05.md](P3ALPHA_REPLACEMENT_REVIEW_2026-08-05.md).
+- Authenticated P3alpha composition review: [P3_AUTH_COMPOSITION_IMPLEMENTATION_REVIEW_2026-08-05.md](P3_AUTH_COMPOSITION_IMPLEMENTATION_REVIEW_2026-08-05.md).
+- Speech critical-token safety review: [SPEECH_CRITICAL_TOKEN_SAFETY_REVIEW_2026-08-05.md](SPEECH_CRITICAL_TOKEN_SAFETY_REVIEW_2026-08-05.md).
+- Cumulative Web shell/diagnostics review: [X_E2E_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md](X_E2E_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md).
+- Correlated observability foundation review: [X_OBS_IMPLEMENTATION_REVIEW_2026-08-05.md](X_OBS_IMPLEMENTATION_REVIEW_2026-08-05.md).
+- Latest bounded P1/P2/P3alpha/X-OBS code: `72023158`, `16243d26`, `b8dbb9c4`, `afec02ce`; [the repository-local index](LATEST_FOUNDATIONS_D053_REVIEW_2026-08-06.md) records exact SHA/ancestry/file scope and retained task-evidence limits without overstating independent D-053 acceptance.
+- Product composition sequencing, evidence vocabulary and cumulative smoke contract: [Gate-0 record](roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md).
 - V0 immutable evidence: [V0_20260802_ee2896a4.md](evidence/V0_20260802_ee2896a4.md).
 - Environment and operating procedures: [E2E_RUNBOOK.md](runbooks/E2E_RUNBOOK.md).
 
 ## Next actions
 
-1. Build the next P3alpha acceptance slice around the reviewed backend: obtain a real authenticated principal and server-resolved authorization/context, compose policy/Core/Store/ED with startup and periodic reconciliation plus route telemetry, and close ED workspace isolation. Keep VB-C, TC-C and WorkProgress/CR return wiring as explicit later work.
-2. Keep Speech critical-token safety as the next independent P1 slice; it must gate committed input with zero Agent/Tool/Task side effects before clarification, without taking Task authority from VB-B/TC-B.
-3. Resume Worker2 against D-059 and the frozen P2 interface Task Packet; connect CR-B/AB-B only through its reviewed real Agent/Harness source, exact cancel, formal history and atomic composition seams. Connect AIO-B only through owned SR/RM B/C packages. These bounded foundations are not the formal P1/P2 end-to-end routes.
+1. Add the default-off composition root and register the trusted Authority plus accepted P2/P3 text foundations one at a time, running cumulative route/correlation/fallback/flag-off smoke after each; do not activate formal Media yet.
+2. In parallel within frozen ownership, implement and prove the dedicated non-logging Media route, select/configure the Speech Provider, and prepare II, trusted confirmation issuance, P3 text-return injection and X-OBS export boundaries; keep formal voice unavailable until an atomic TaskEvent/projection handoff exists.
+3. Once the dedicated route-to-disk regression closes the remaining Media stop, register P1 Media and run the cumulative real-route smoke before claiming any formal replacement.
+4. Close with one real desktop-Chrome/service journey covering microphone/playout, Provider, JiuwenSwarm Agent/Tool, project Task, exact cancel, PresentationAck/history, restart/reconciliation, exporter evidence and secure deployment before changing the `0/100` ledger or any Gate state.

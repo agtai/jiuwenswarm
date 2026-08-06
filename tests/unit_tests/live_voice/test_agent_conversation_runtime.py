@@ -18,6 +18,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
+    AgentConversationNotification,
     AgentConversationRuntime,
     AgentConversationRuntimeViolation,
     AgentConversationShutdownStatus,
@@ -196,6 +197,8 @@ def runtime(
     *,
     enabled: bool = True,
     max_active_rounds: int = 4,
+    max_requests: int = 256,
+    notification_capacity: int = 64,
     bridge: AgentBridgeRuntime | None = None,
 ) -> AgentConversationRuntime:
     harness = JiuWenSwarmRoundHarness(
@@ -209,6 +212,8 @@ def runtime(
         instance_id="composition-1",
         facade=facade(lower),
         enabled=enabled,
+        max_requests=max_requests,
+        notification_capacity=notification_capacity,
         history_writer=history,
         harness=harness,
         bridge=bridge,
@@ -564,6 +569,282 @@ async def test_capacity_one_unsubscribed_round_can_cancel_and_close() -> None:
 
 
 @pytest.mark.asyncio
+async def test_capacity_one_unsubscribed_composition_reaches_terminal_and_closes() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(
+        lower,
+        history,
+        max_requests=1,
+        notification_capacity=1,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+
+    await asyncio.wait_for(handle.completion, timeout=1)
+    closed = await current.close(timeout_seconds=1)
+
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    snapshot = current.snapshot()
+    response = next(
+        item
+        for item in snapshot.conversation.conversation.responses
+        if item.ref == handle.response_ref
+    )
+    assert response.state.value == "terminal"
+    assert snapshot.queued_notifications == 3
+    assert snapshot.queued_observer_notifications == 1
+    assert snapshot.queued_critical_notifications == 2
+    assert snapshot.notification_observer_capacity == 1
+    assert snapshot.notification_critical_capacity == 2
+    assert snapshot.dropped_observer_notifications == 1
+    assert snapshot.published_notifications == 4
+    assert snapshot.published_notifications == (
+        snapshot.delivered_notifications
+        + snapshot.dropped_observer_notifications
+        + snapshot.queued_notifications
+    )
+    assert snapshot.notification_stream_closed is True
+    assert snapshot.critical_notification_invariant_failures == 0
+
+    notifications = [await current.next_notification() for _ in range(3)]
+    assert [item.publish_seq for item in notifications] == [1, 2, 3]
+    assert notifications[1].presentation_unit is not None
+    terminal = WorkProgressEventV2.from_dict(notifications[2].progress_event.payload)
+    assert terminal.state.value == "terminal"
+    with pytest.raises(AgentConversationRuntimeViolation) as drained:
+        await current.next_notification()
+    assert drained.value.reason == "NOTIFICATION_STREAM_CLOSED"
+    drained_snapshot = current.snapshot()
+    assert drained_snapshot.published_notifications == (
+        drained_snapshot.delivered_notifications
+        + drained_snapshot.dropped_observer_notifications
+        + drained_snapshot.queued_notifications
+    )
+    assert drained_snapshot.last_notification_delivered_seq == 3
+
+
+@pytest.mark.asyncio
+async def test_observer_overflow_is_lossy_but_ordered_critical_notifications_survive() -> (
+    None
+):
+    class BurstFormalAdapter(LowerFormalAdapter):
+        async def process_formal_live_voice_stream_impl(
+            self, request, inputs
+        ) -> AsyncIterator[AgentResponseChunk]:
+            self.calls += 1
+            self.requests.append(request)
+            self.inputs.append(inputs)
+            self.started.set()
+            for index in range(2):
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "chat.delta",
+                        "content": f"partial-{index}",
+                    },
+                    is_complete=False,
+                )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "chat.final", "content": "formal answer"},
+                is_complete=True,
+            )
+
+    lower = BurstFormalAdapter()
+    current = runtime(
+        lower,
+        RecordingHistoryWriter(),
+        max_requests=1,
+        notification_capacity=1,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+
+    await asyncio.wait_for(handle.completion, timeout=1)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+    snapshot = current.snapshot()
+    assert snapshot.queued_notifications == 3
+    assert snapshot.queued_observer_notifications == 1
+    assert snapshot.queued_critical_notifications == 2
+    assert snapshot.dropped_observer_notifications == 3
+    assert snapshot.published_notifications == 6
+    assert snapshot.last_notification_publish_seq == 5
+    assert snapshot.published_notifications == (
+        snapshot.delivered_notifications
+        + snapshot.dropped_observer_notifications
+        + snapshot.queued_notifications
+    )
+
+    retained = [await current.next_notification() for _ in range(3)]
+    assert [item.publish_seq for item in retained] == [3, 4, 5]
+    assert retained[0].agent_event.event_type == "chat.delta"
+    assert retained[0].agent_event.seq == 1
+    assert retained[1].presentation_unit is not None
+    terminal = WorkProgressEventV2.from_dict(retained[2].progress_event.payload)
+    assert terminal.state.value == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_composition_enforces_its_request_bound_with_larger_injected_runtimes() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    bridge = AgentBridgeRuntime(instance_id="larger-injected-bridge", max_requests=2)
+    current = runtime(
+        lower,
+        RecordingHistoryWriter(),
+        max_requests=1,
+        bridge=bridge,
+    )
+    first = await prepare(current)
+    first_handle = await dispatch(current, first)
+    await asyncio.wait_for(first_handle.completion, timeout=1)
+
+    second = commit(
+        turn_id="turn-capacity-2",
+        commit_id="commit-capacity-2",
+        interaction_id="interaction-capacity-2",
+        text="second",
+    )
+    await current.open_interaction(second.interaction_id)
+    await current.start_turn(second.interaction_id, second.turn_id)
+    await current.commit_turn(second)
+    responses_before = current.snapshot().conversation.conversation.responses
+
+    with pytest.raises(AgentConversationRuntimeViolation) as full:
+        await dispatch(
+            current,
+            second,
+            request_id="request-capacity-2",
+            response_id="response-capacity-2",
+        )
+    assert full.value.reason == "COMPOSITION_REQUEST_LEDGER_FULL"
+    assert current.snapshot().conversation.conversation.responses == responses_before
+    assert current.snapshot().retained_admissions == 1
+    assert lower.calls == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_wakes_empty_notification_waiter_with_stable_closed_error() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    assert await current.start() is True
+    waiter = asyncio.create_task(current.next_notification())
+    await asyncio.sleep(0)
+
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+    with pytest.raises(AgentConversationRuntimeViolation) as closed:
+        await asyncio.wait_for(waiter, timeout=1)
+    assert closed.value.reason == "NOTIFICATION_STREAM_CLOSED"
+    with pytest.raises(AgentConversationRuntimeViolation) as stable:
+        await current.next_notification()
+    assert stable.value.reason == "NOTIFICATION_STREAM_CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_waiter_consumes_nothing_and_concurrent_waiters_are_unique() -> (
+    None
+):
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter())
+    selected = await prepare(current)
+    cancelled = asyncio.create_task(current.next_notification())
+    await asyncio.sleep(0)
+    cancelled.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled
+
+    waiters = [asyncio.create_task(current.next_notification()) for _ in range(3)]
+    await asyncio.sleep(0)
+    handle = await dispatch(current, selected)
+    first = await asyncio.wait_for(asyncio.gather(*waiters), timeout=1)
+    await asyncio.wait_for(handle.completion, timeout=1)
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+    tail = await current.next_notification()
+
+    assert sorted(item.publish_seq for item in (*first, tail)) == [0, 1, 2, 3]
+    assert current.snapshot().delivered_notifications == 4
+
+
+def test_invalid_composition_notification_bounds_fail_before_runtime_effects() -> None:
+    lower = LowerFormalAdapter()
+    for kwargs in (
+        {"max_requests": True},
+        {"max_requests": 0},
+        {"notification_capacity": True},
+        {"notification_capacity": 0},
+    ):
+        with pytest.raises(AgentConversationRuntimeViolation) as invalid:
+            AgentConversationRuntime(
+                scope(),
+                instance_id="invalid-notification-bounds",
+                facade=facade(lower),
+                **kwargs,
+            )
+        assert invalid.value.reason == "INVALID_COMPOSITION_CAPACITY"
+    assert lower.calls == 0
+
+
+def test_duplicate_or_exhausted_critical_reserve_fails_closed_without_growth() -> None:
+    current = runtime(LowerFormalAdapter(), RecordingHistoryWriter(), max_requests=1)
+    notification = AgentConversationNotification(
+        kind="work.progress",
+        request_id="request-critical",
+        round_id="round-critical",
+        response_ref=ResponseRef("interaction-critical", "response-critical", 0),
+    )
+
+    current._publish(  # noqa: SLF001 - invariant-level regression
+        notification,
+        critical_key=("terminal", notification.request_id),
+    )
+    with pytest.raises(AgentConversationRuntimeViolation) as duplicate:
+        current._publish(  # noqa: SLF001 - invariant-level regression
+            notification,
+            critical_key=("terminal", notification.request_id),
+        )
+    assert duplicate.value.reason == "DUPLICATE_CRITICAL_NOTIFICATION"
+    current._publish(  # noqa: SLF001 - invariant-level regression
+        AgentConversationNotification(
+            kind="agent.output",
+            request_id=notification.request_id,
+            round_id=notification.round_id,
+            response_ref=notification.response_ref,
+        ),
+        critical_key=("presentation", notification.request_id),
+    )
+    with pytest.raises(AgentConversationRuntimeViolation) as exhausted:
+        current._publish(  # noqa: SLF001 - invariant-level regression
+            AgentConversationNotification(
+                kind="work.progress",
+                request_id="request-over-capacity",
+                round_id="round-over-capacity",
+                response_ref=ResponseRef(
+                    "interaction-over-capacity", "response-over-capacity", 0
+                ),
+            ),
+            critical_key=("terminal", "request-over-capacity"),
+        )
+    assert exhausted.value.reason == "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED"
+    snapshot = current.snapshot()
+    assert snapshot.queued_critical_notifications == 2
+    assert snapshot.published_notifications == 2
+    assert snapshot.critical_notification_invariant_failures == 2
+
+
+@pytest.mark.asyncio
 async def test_cancel_ack_does_not_precede_authoritative_cleanup_terminal() -> None:
     release = asyncio.Event()
     cleanup_release = asyncio.Event()
@@ -702,6 +983,9 @@ async def test_concurrent_replay_dispatches_once_and_conflict_does_not_mutate_cr
     assert current.snapshot().conversation.conversation.responses == responses_before
     for _ in range(4):
         await asyncio.wait_for(current.next_notification(), timeout=1)
+    replay_snapshot = current.snapshot()
+    assert replay_snapshot.published_notifications == 4
+    assert replay_snapshot.critical_notification_invariant_failures == 0
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
@@ -744,6 +1028,10 @@ async def test_uncommitted_and_feature_off_have_zero_authority_effects() -> None
     assert snapshot.started is False
     assert snapshot.bridge.started is False
     assert snapshot.harness.retained_rounds == 0
+    assert snapshot.notification_stream_closed is True
+    assert snapshot.published_notifications == 0
+    assert snapshot.delivered_notifications == 0
+    assert snapshot.dropped_observer_notifications == 0
     assert disabled_lower.calls == 0
     assert (await disabled.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED

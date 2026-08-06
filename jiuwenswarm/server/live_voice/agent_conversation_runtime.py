@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import math
+from collections import deque
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
@@ -106,6 +107,160 @@ class AgentConversationNotification:
     progress_event: EventEnvelope | None = None
     presentation_unit: PresentationUnit | None = None
     error_reason: str | None = None
+    publish_seq: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _QueuedNotification:
+    publish_seq: int
+    notification: AgentConversationNotification
+
+
+class _NotificationBufferClosed(RuntimeError):
+    pass
+
+
+class _BoundedNotificationBuffer:
+    """Lossy observer lane plus a bounded, non-blocking critical reserve."""
+
+    def __init__(self, *, observer_capacity: int, critical_capacity: int) -> None:
+        self._observer_capacity = observer_capacity
+        self._critical_capacity = critical_capacity
+        self._observer: deque[_QueuedNotification] = deque()
+        self._critical: deque[_QueuedNotification] = deque()
+        self._critical_keys: set[tuple[str, str]] = set()
+        self._ready = asyncio.Event()
+        self._next_publish_seq = 0
+        self._delivered_total = 0
+        self._dropped_observer_total = 0
+        self._last_delivered_seq: int | None = None
+        self._critical_invariant_failures = 0
+        self._closed = False
+
+    def publish(
+        self,
+        notification: AgentConversationNotification,
+        *,
+        critical_key: tuple[str, str] | None = None,
+    ) -> None:
+        if self._closed:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_STREAM_CLOSED",
+                "notification publication cannot continue after producer shutdown",
+                ErrorCode.CONFLICT,
+            )
+        if critical_key is not None:
+            if critical_key in self._critical_keys:
+                self._critical_invariant_failures += 1
+                raise AgentConversationRuntimeViolation(
+                    "DUPLICATE_CRITICAL_NOTIFICATION",
+                    "a retained presentation or terminal notification must be unique",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            if len(self._critical_keys) >= self._critical_capacity:
+                self._critical_invariant_failures += 1
+                raise AgentConversationRuntimeViolation(
+                    "CRITICAL_NOTIFICATION_RESERVE_EXHAUSTED",
+                    "the bounded critical notification reserve is exhausted",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        publish_seq = self._next_publish_seq
+        self._next_publish_seq += 1
+        queued = _QueuedNotification(
+            publish_seq=publish_seq,
+            notification=replace(notification, publish_seq=publish_seq),
+        )
+        if critical_key is not None:
+            self._critical_keys.add(critical_key)
+            self._critical.append(queued)
+        else:
+            if len(self._observer) >= self._observer_capacity:
+                self._observer.popleft()
+                self._dropped_observer_total += 1
+            self._observer.append(queued)
+        self._ready.set()
+
+    async def get(self) -> AgentConversationNotification:
+        while True:
+            queued = self._pop_next()
+            if queued is not None:
+                self._delivered_total += 1
+                self._last_delivered_seq = queued.publish_seq
+                return queued.notification
+            if self._closed:
+                raise _NotificationBufferClosed
+            await self._ready.wait()
+
+    def close(self) -> None:
+        self._closed = True
+        self._ready.set()
+
+    def qsize(self) -> int:
+        return len(self._observer) + len(self._critical)
+
+    @property
+    def queued_observer(self) -> int:
+        return len(self._observer)
+
+    @property
+    def queued_critical(self) -> int:
+        return len(self._critical)
+
+    @property
+    def observer_capacity(self) -> int:
+        return self._observer_capacity
+
+    @property
+    def critical_capacity(self) -> int:
+        return self._critical_capacity
+
+    @property
+    def published_total(self) -> int:
+        return self._next_publish_seq
+
+    @property
+    def delivered_total(self) -> int:
+        return self._delivered_total
+
+    @property
+    def dropped_observer_total(self) -> int:
+        return self._dropped_observer_total
+
+    @property
+    def last_publish_seq(self) -> int | None:
+        if self._next_publish_seq == 0:
+            return None
+        return self._next_publish_seq - 1
+
+    @property
+    def last_delivered_seq(self) -> int | None:
+        return self._last_delivered_seq
+
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
+    @property
+    def critical_invariant_failures(self) -> int:
+        return self._critical_invariant_failures
+
+    def _pop_next(self) -> _QueuedNotification | None:
+        queued: _QueuedNotification | None
+        if self._observer and self._critical:
+            if self._observer[0].publish_seq < self._critical[0].publish_seq:
+                queued = self._observer.popleft()
+            else:
+                queued = self._critical.popleft()
+        elif self._observer:
+            queued = self._observer.popleft()
+        elif self._critical:
+            queued = self._critical.popleft()
+        else:
+            self._ready.clear()
+            return None
+        if not self._observer and not self._critical:
+            self._ready.clear()
+        return queued
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +288,17 @@ class AgentConversationRuntimeSnapshot:
     retained_admissions: int
     active_requests: tuple[str, ...]
     queued_notifications: int
+    notification_observer_capacity: int
+    notification_critical_capacity: int
+    queued_observer_notifications: int
+    queued_critical_notifications: int
+    published_notifications: int
+    delivered_notifications: int
+    dropped_observer_notifications: int
+    last_notification_publish_seq: int | None
+    last_notification_delivered_seq: int | None
+    notification_stream_closed: bool
+    critical_notification_invariant_failures: int
     pending_history_intents: int
     conversation: ConversationRuntimeLoopSnapshot
     bridge: AgentBridgeRuntimeSnapshot
@@ -217,12 +383,16 @@ class AgentConversationRuntime:
                 "enabled must be a boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if type(notification_capacity) is not int or notification_capacity <= 0:
-            raise AgentConversationRuntimeViolation(
-                "INVALID_COMPOSITION_CAPACITY",
-                "notification_capacity must be a positive integer",
-                ErrorCode.INVALID_ARGUMENT,
-            )
+        for name, value in (
+            ("max_requests", max_requests),
+            ("notification_capacity", notification_capacity),
+        ):
+            if type(value) is not int or value <= 0:
+                raise AgentConversationRuntimeViolation(
+                    "INVALID_COMPOSITION_CAPACITY",
+                    f"{name} must be a positive integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
         self._scope = scope
         self._instance_id = instance_id
         self._facade = facade
@@ -245,8 +415,10 @@ class AgentConversationRuntime:
             reservation_ttl_seconds=reservation_ttl_seconds,
         )
         self._history_writer = history_writer or SessionFormalHistoryWriter()
-        self._notifications: asyncio.Queue[AgentConversationNotification] = (
-            asyncio.Queue(maxsize=notification_capacity)
+        self._max_requests = max_requests
+        self._notifications = _BoundedNotificationBuffer(
+            observer_capacity=notification_capacity,
+            critical_capacity=2 * max_requests,
         )
         self._commits: dict[str, TurnCommit] = {}
         self._admissions: dict[str, _AdmissionEntry] = {}
@@ -270,6 +442,8 @@ class AgentConversationRuntime:
         self._started = False
         self._accepting = False
         self._closed = not enabled
+        if self._closed:
+            self._notifications.close()
 
     async def start(self) -> bool:
         if not self._enabled:
@@ -370,6 +544,12 @@ class AgentConversationRuntime:
                     ErrorCode.CONFLICT,
                 )
             return self._unwrap_admission(await asyncio.shield(existing.outcome))
+        if len(self._admissions) >= self._max_requests:
+            raise AgentConversationRuntimeViolation(
+                "COMPOSITION_REQUEST_LEDGER_FULL",
+                "bounded composition request ledger is full for this runtime session",
+                ErrorCode.UNAVAILABLE,
+            )
 
         harness_reservation: HarnessRoundReservation | None = None
         bridge_reservation: AgentBridgeDispatchReservation | None = None
@@ -426,13 +606,25 @@ class AgentConversationRuntime:
         return self._unwrap_admission(await asyncio.shield(outcome))
 
     async def next_notification(self) -> AgentConversationNotification:
+        """Read lossy observations plus retained presentation/terminal notices.
+
+        Notifications never own round or response lifecycle. Observer entries may
+        have publish-sequence gaps when a slow consumer exceeds its bounded lane.
+        """
         if not self._enabled:
             raise AgentConversationRuntimeViolation(
                 "FEATURE_DISABLED",
                 "formal Agent composition is disabled",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
-        return await self._notifications.get()
+        try:
+            return await self._notifications.get()
+        except _NotificationBufferClosed as error:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_STREAM_CLOSED",
+                "the notification producer is closed and its retained buffer is empty",
+                ErrorCode.UNAVAILABLE,
+            ) from error
 
     async def acknowledge_presentation(
         self, ack: PresentationAck
@@ -644,6 +836,7 @@ class AgentConversationRuntime:
         if not self._started:
             self._accepting = False
             self._closed = True
+            self._notifications.close()
             detail = (
                 "formal_agent_unavailable"
                 if not self._facade_available()
@@ -681,6 +874,19 @@ class AgentConversationRuntime:
                 if state.terminal_event is None
             ),
             queued_notifications=self._notifications.qsize(),
+            notification_observer_capacity=self._notifications.observer_capacity,
+            notification_critical_capacity=self._notifications.critical_capacity,
+            queued_observer_notifications=self._notifications.queued_observer,
+            queued_critical_notifications=self._notifications.queued_critical,
+            published_notifications=self._notifications.published_total,
+            delivered_notifications=self._notifications.delivered_total,
+            dropped_observer_notifications=(self._notifications.dropped_observer_total),
+            last_notification_publish_seq=self._notifications.last_publish_seq,
+            last_notification_delivered_seq=(self._notifications.last_delivered_seq),
+            notification_stream_closed=self._notifications.closed,
+            critical_notification_invariant_failures=(
+                self._notifications.critical_invariant_failures
+            ),
             pending_history_intents=(
                 len(self._pending_history) + len(self._pending_user_history)
             ),
@@ -835,7 +1041,7 @@ class AgentConversationRuntime:
                     state.total_utf8 += len(content)
             if presentation is None:
                 consumable_event = None
-        await self._publish(
+        self._publish(
             AgentConversationNotification(
                 kind="agent.output",
                 request_id=request.request_id,
@@ -844,7 +1050,12 @@ class AgentConversationRuntime:
                 agent_event=consumable_event,
                 presentation_unit=presentation,
                 error_reason=error_reason,
-            )
+            ),
+            critical_key=(
+                ("presentation", request.request_id)
+                if presentation is not None
+                else None
+            ),
         )
 
     async def _consume_progress(self, delivery: WorkProgressDelivery) -> None:
@@ -891,7 +1102,7 @@ class AgentConversationRuntime:
                 await self._close_interaction_after_terminal(
                     request.response_ref.interaction_id
                 )
-        await self._publish(
+        self._publish(
             AgentConversationNotification(
                 kind="work.progress",
                 request_id=request.request_id,
@@ -900,7 +1111,12 @@ class AgentConversationRuntime:
                 source_event=delivery.source_event,
                 progress_event=delivery.progress_event,
                 error_reason=error_reason,
-            )
+            ),
+            critical_key=(
+                ("terminal", request.request_id)
+                if progress.state is WorkState.TERMINAL
+                else None
+            ),
         )
 
     async def _close_interaction_after_terminal(self, interaction_id: str) -> None:
@@ -916,8 +1132,13 @@ class AgentConversationRuntime:
             )
         self._closing_interactions.discard(interaction_id)
 
-    async def _publish(self, notification: AgentConversationNotification) -> None:
-        await self._notifications.put(notification)
+    def _publish(
+        self,
+        notification: AgentConversationNotification,
+        *,
+        critical_key: tuple[str, str] | None = None,
+    ) -> None:
+        self._notifications.publish(notification, critical_key=critical_key)
 
     async def _shutdown_coordinator(self) -> AgentConversationShutdownResult:
         try:
@@ -933,6 +1154,7 @@ class AgentConversationRuntime:
             await self._bridge.close()
             if self._consumer is not None:
                 await asyncio.shield(self._consumer)
+            self._notifications.close()
             await self._harness.close()
             async with self._ack_lock:
                 history_tasks = tuple(self._history_tasks)
@@ -951,6 +1173,7 @@ class AgentConversationRuntime:
                 AgentConversationShutdownStatus.CLOSED, "teardown_complete"
             )
         except BaseException as error:  # noqa: BLE001
+            self._notifications.close()
             return AgentConversationShutdownResult(
                 AgentConversationShutdownStatus.FAILED,
                 f"teardown_failed:{type(error).__name__}",
