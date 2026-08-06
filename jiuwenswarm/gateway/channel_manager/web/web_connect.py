@@ -46,7 +46,17 @@ logger = logging.getLogger(__name__)
 
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
-_HANDLER_BEFORE_CALLBACK_METHODS = frozenset({ReqMethod.CHAT_SEND.value})
+_LOCAL_HANDLER_ONLY_METHODS = frozenset(
+    {
+        "live_voice.speech.capabilities",
+        "live_voice.speech.recognize_batch",
+        "live_voice.speech.synthesize_batch",
+        "live_voice.speech.cancel",
+    }
+)
+_HANDLER_BEFORE_CALLBACK_METHODS = frozenset(
+    {ReqMethod.CHAT_SEND.value, *_LOCAL_HANDLER_ONLY_METHODS}
+)
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
@@ -1261,6 +1271,8 @@ class WebChannel(BaseWsChannel):
                 ),
             )
             if not handler_already_called:
+                return
+            if method in _LOCAL_HANDLER_ONLY_METHODS:
                 return
 
         handled_by_callback = False

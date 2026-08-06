@@ -1370,6 +1370,7 @@ class WebHandlersBindParams:
     heartbeat_service: Any = None
     cron_controller: Any = None
     updater_service: UpdaterService | None = None
+    speech_service: Any = None
 
 
 def _attribute_session_project(
@@ -1538,6 +1539,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
     updater_service = bind.updater_service
+
+    from jiuwenswarm.gateway.live_voice.speech_rpc import register_speech_rpc_handlers
+
+    register_speech_rpc_handlers(channel, service=bind.speech_service)
 
     from jiuwenswarm.common.schema.message import Message, EventType
 
