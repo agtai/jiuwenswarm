@@ -6,6 +6,12 @@ Do not create, amend, squash, rebase, cherry-pick, merge, or otherwise produce a
 
 Before requesting commit approval, leave changes uncommitted and show the relevant status plus a concise diff/test summary and exclusions. Before requesting push approval, state the exact remote, branch, commits, and whether the push is normal or rewrites history. If approval is missing or ambiguous, stop before the Git operation.
 
+### Bounded Live Voice Alpha parallel exception
+
+The user's accepted [Live Voice Alpha parallel execution plan](live-voice/roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md) is a task-scoped exception to the local-operation portion of the approval gate above. While that plan is active, its Main Integration Session and assigned Task Sessions may stage, commit, amend, squash, rebase, merge, cherry-pick, create or update local branches/refs/worktrees, and perform lease-governed local task integration without another user approval. This exception applies only to the plan's declared Live Voice Alpha scopes and ends when its immutable local Alpha candidate is closed, the user revokes it, or work leaves those scopes. The default gate applies everywhere else.
+
+Every operation that updates a remote ref still requires separate explicit user approval for the exact remote, branch or tag, commits, and update mode. This includes normal push, force/force-with-lease push, and remote branch/tag creation, update, or deletion. A Task Session must never push. Parallel Sessions must honor the plan's file ownership and obtain the single-writer integration lease before modifying the integration worktree; local Git freedom does not authorize semantic conflict resolution outside the assigned owner.
+
 ## Live Voice bootstrap
 
 For every Live Voice task, first read:

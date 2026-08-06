@@ -646,3 +646,14 @@
 - Shutdown 决策：首次 close 创建唯一 retained coordinator，所有 caller 以 shielded、bounded wait 观察同一结果；caller cancellation/timeout 不取消 teardown或消费结果。关闭立即停止 admission，drain/settle 已接受 work/output，超时保持 `closing/cleanup_pending` 并返回明确 pending/timeout，只有 worker/subscription/queue/cleanup 全部 terminal 后才是 closed。Subscription detach 不等于业务取消；临时 WebSocket/media 断线在 interaction 仍 open 时不取消，显式 `interaction.closed` 另发一次精确幂等 `round.cancel`，基础设施 shutdown 本身不隐式取消 round/task。
 - 实施与证据：稳定执行合同记录在 [P2 Real Agent + CR interface Task Packet](../roadmap/P2_REAL_AGENT_CR_INTERFACE_TASK_PACKET_2026-08-05.md)。该批涉及 shared authority/protocol 与并发关闭，按 Tier 3/2 的完整适用 D-032、D-053 三轮 review、真实 facade 正向/反向证据和 feature-off/legacy regressions 闭环。P3 authenticated composition、browser PresentationAck、real media/Speech 与 cumulative Gate 仍独立开放；实现通过也只能先记 formal foundation，不自动获得 Replacement Ledger credit。
 - 重新评估条件：真实 Harness 无法拥有/分配 round identity 或产生 source event；无法在 Agent/Tool effect 前完成 exact reservation/cancel target check；正式 Agent 上下文无法脱离 legacy implicit history/memory hooks；跨进程/重连要求把 P2 round 提升为 durable replay authority；或产品要求 interaction close 后 round 独立继续而不是精确取消。任何变化都必须重新审查 authority、cancel、history、admission 和 shutdown 的组合语义。
+
+## D-060 Live Voice Alpha 采用四实现 Session、单一集成所有权和有界本地 Git 例外
+
+- 日期：2026-08-06
+- 状态：Accepted execution decision（用户明确批准执行，并明确取消本任务中所有本地 Git 操作的逐次批准；任何远端 ref 更新仍需单独精确批准）
+- 背景：剩余 Alpha 工作可分为 P1、P2、P3alpha 和横切四个长期非重叠实现 lane，但 Web auth/activation、共享 Authority/协议、产品 Composition、累计 Gate 和冲突裁决存在跨 lane 依赖。D-052 的单实现 lane 会把可并行的 leaf/package 工作串行化；完全分散合入又会让共享语义和 review 失去单一 owner。
+- 决策：建立四个实现 Session：P1 Speech/Media、P2 Runtime/Interaction/Agent Bridge、P3alpha Task/Confirmation、X-OBS/X-WEB/X-E2E；当前 Main Session 是唯一 Integration Owner，同时推进共享依赖、执行完整 diff 冷审、分配 integration lease、合入已通过候选并运行累计验证。独立 review 按 D-046/D-053 风险在需要时启动，不占用某个实现 lane 的所有权。稳定范围、文件边界和 handoff 记录在 [Alpha parallel execution plan](../roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md)。
+- 本地 Git 例外：在该执行计划范围内，Main 和 Task Sessions 无需再次取得用户批准即可 stage、commit、amend、squash、rebase、merge、cherry-pick、创建或更新本地 branch/ref/worktree，以及在单写 integration lease 下完成本地 task integration。Task Session 在 review 通过后可生成自己的最终 commit；Main 可拉取、整理、修正和本地合入这些 commit。语义修复必须回到 owning Session，或由 Main 明确记录为 integration glue 并重跑受影响 review/tests。
+- 远端边界：上述例外不包含任何 push 或远端 ref 变更。普通 push、force/force-with-lease、远端 branch/tag 创建、更新和删除都必须在操作前取得对精确 remote/ref/commit/方式的单独批准；Task Session 不得 push。
+- 不变量：共享 Authority/Composition/协议文件与最终 activation/Gate 归 Main；同一 integration worktree 同时只有一个 writer；formal/fallback/demo_substitute/unavailable/disabled 如实表达；缺少 Provider、凭据、部署、设备或真实 owner 时 fail closed，不以 mock、contract-only、测试数量或本地 Git 集成宣称 Alpha/production-ready；Replacement Ledger 仍只按真实产品验收更新。
+- 重新评估条件：文件范围无法保持非重叠；两个 lane 必须同时修改同一共享语义；integration lease 不能防止交叉污染；review 往返成本持续高于并行收益；用户改变并发数、合入职责或 Git 授权；本地 immutable Alpha candidate 已关闭；或任何远端更新进入范围。
