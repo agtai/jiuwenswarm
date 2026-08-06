@@ -175,7 +175,7 @@ class FeishuChannel(BaseChannel):
         file_upload=True,
         rich_text=True,
     )
-    _ws_loop_proxy_lock = threading.Lock()#added
+    _ws_loop_proxy_lock = threading.Lock()
     _ws_loop_proxy_installed = False
 
     def __init__(

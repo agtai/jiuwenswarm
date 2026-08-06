@@ -38,9 +38,10 @@ class DiscordChannel(BaseChannel):
     """Discord Bot channel."""
 
     name = "discord"
-    capabilities = ChannelCapabilities(          # ← AJOUTE (3 lignes)
+    capabilities = ChannelCapabilities(         
         max_message_length=2000,
     )
+    
     def __init__(self, config: DiscordChannelConfig, router: RobotMessageRouter):
         super().__init__(config, router)
         self.config: DiscordChannelConfig = config

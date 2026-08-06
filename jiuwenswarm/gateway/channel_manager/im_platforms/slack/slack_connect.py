@@ -55,7 +55,7 @@ class SlackChannel(BaseChannel):
     """Slack Bot channel using Bolt's asynchronous Socket Mode adapter."""
 
     name = "slack"
-    capabilities = ChannelCapabilities(          # ← AJOUTE (4 lignes)
+    capabilities = ChannelCapabilities(         
         threads=True,
         max_message_length=40000,
     )

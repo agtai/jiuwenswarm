@@ -59,7 +59,7 @@ class TelegramChannel(BaseChannel):
     """
 
     name = "telegram"
-    capabilities = ChannelCapabilities(          # ← AJOUTE (4 lignes)
+    capabilities = ChannelCapabilities(          
         rich_text=True,
         max_message_length=4096,
     )
