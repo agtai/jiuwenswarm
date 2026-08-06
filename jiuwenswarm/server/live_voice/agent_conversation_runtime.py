@@ -435,6 +435,8 @@ class AgentConversationRuntime:
         ] = {}
         self._pending_user_history: dict[str, tuple[TurnCommit, str]] = {}
         self._history_tasks: set[asyncio.Task[None]] = set()
+        self._start_lock = asyncio.Lock()
+        self._close_requested = False
         self._ack_lock = asyncio.Lock()
         self._closing_interactions: set[str] = set()
         self._consumer: asyncio.Task[None] | None = None
@@ -446,26 +448,59 @@ class AgentConversationRuntime:
             self._notifications.close()
 
     async def start(self) -> bool:
-        if not self._enabled:
-            return False
-        if not self._facade_available():
-            return False
-        if self._started:
-            return False
-        if self._closed:
-            raise AgentConversationRuntimeViolation(
-                "COMPOSITION_CLOSED",
-                "a closed composition cannot restart",
-                ErrorCode.CONFLICT,
-            )
-        await self._cr.start()
-        await self._bridge.start()
-        self._consumer = asyncio.create_task(
-            self._consume_bridge(), name="live-voice-agent-cr-consumer"
-        )
-        self._started = True
-        self._accepting = True
-        return True
+        async with self._start_lock:
+            if not self._enabled:
+                return False
+            if not self._facade_available():
+                return False
+            if self._closed:
+                raise AgentConversationRuntimeViolation(
+                    "COMPOSITION_CLOSED",
+                    "a closed composition cannot restart",
+                    ErrorCode.CONFLICT,
+                )
+            if self._shutdown is not None:
+                raise AgentConversationRuntimeViolation(
+                    "COMPOSITION_CLOSING",
+                    "a composition with retained teardown cannot restart",
+                    ErrorCode.CONFLICT,
+                )
+            if self._started:
+                return False
+            try:
+                await self._cr.start()
+                await self._bridge.start()
+                self._consumer = asyncio.create_task(
+                    self._consume_bridge(), name="live-voice-agent-cr-consumer"
+                )
+            except BaseException:  # noqa: BLE001
+                self._accepting = False
+                self._shutdown = asyncio.create_task(
+                    self._shutdown_coordinator(),
+                    name="live-voice-agent-cr-startup-rollback",
+                )
+                try:
+                    await asyncio.shield(self._shutdown)
+                except BaseException:  # noqa: BLE001
+                    # A second caller cancellation must not consume rollback
+                    # ownership.  The retained coordinator remains observable
+                    # through close().
+                    pass
+                raise
+            if self._close_requested:
+                self._shutdown = asyncio.create_task(
+                    self._shutdown_coordinator(),
+                    name="live-voice-agent-cr-startup-close",
+                )
+                await asyncio.shield(self._shutdown)
+                raise AgentConversationRuntimeViolation(
+                    "COMPOSITION_CLOSING",
+                    "composition close was requested during startup",
+                    ErrorCode.CONFLICT,
+                )
+            self._started = True
+            self._accepting = True
+            return True
 
     async def open_interaction(self, interaction_id: str) -> None:
         self._require_admission()
@@ -833,27 +868,43 @@ class AgentConversationRuntime:
             return AgentConversationShutdownResult(
                 AgentConversationShutdownStatus.CLOSED, "feature_disabled"
             )
-        if not self._started:
-            self._accepting = False
-            self._closed = True
-            self._notifications.close()
-            detail = (
-                "formal_agent_unavailable"
-                if not self._facade_available()
-                else "not_started"
-            )
+        timeout = float(timeout_seconds)
+        deadline = asyncio.get_running_loop().time() + timeout
+        self._close_requested = True
+        try:
+            await asyncio.wait_for(self._start_lock.acquire(), timeout=timeout)
+        except TimeoutError:
             return AgentConversationShutdownResult(
-                AgentConversationShutdownStatus.CLOSED, detail
-            )
-        if self._shutdown is None:
-            self._accepting = False
-            self._shutdown = asyncio.create_task(
-                self._shutdown_coordinator(), name="live-voice-agent-cr-close"
+                AgentConversationShutdownStatus.PENDING,
+                "startup_transition_still_running",
             )
         try:
-            return await asyncio.wait_for(
-                asyncio.shield(self._shutdown), timeout=float(timeout_seconds)
+            if self._shutdown is None:
+                self._accepting = False
+                if self._started:
+                    closed_detail = "teardown_complete"
+                elif not self._facade_available():
+                    closed_detail = "formal_agent_unavailable"
+                else:
+                    closed_detail = "not_started"
+                self._shutdown = asyncio.create_task(
+                    self._shutdown_coordinator(closed_detail=closed_detail),
+                    name="live-voice-agent-cr-close",
+                )
+            shutdown = self._shutdown
+        finally:
+            self._start_lock.release()
+        assert shutdown is not None
+        if shutdown.done():
+            return await asyncio.shield(shutdown)
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return AgentConversationShutdownResult(
+                AgentConversationShutdownStatus.PENDING,
+                "retained_teardown_still_running",
             )
+        try:
+            return await asyncio.wait_for(asyncio.shield(shutdown), timeout=remaining)
         except TimeoutError:
             return AgentConversationShutdownResult(
                 AgentConversationShutdownStatus.PENDING,
@@ -866,7 +917,8 @@ class AgentConversationRuntime:
             started=self._started,
             accepting=self._accepting,
             closed=self._closed,
-            closing=self._shutdown is not None and not self._closed,
+            closing=(self._shutdown is not None or self._close_requested)
+            and not self._closed,
             retained_admissions=len(self._admissions),
             active_requests=tuple(
                 state.request_id
@@ -1140,7 +1192,9 @@ class AgentConversationRuntime:
     ) -> None:
         self._notifications.publish(notification, critical_key=critical_key)
 
-    async def _shutdown_coordinator(self) -> AgentConversationShutdownResult:
+    async def _shutdown_coordinator(
+        self, *, closed_detail: str = "teardown_complete"
+    ) -> AgentConversationShutdownResult:
         try:
             admission_tasks = tuple(
                 entry.coordinator
@@ -1170,7 +1224,7 @@ class AgentConversationRuntime:
                 )
             self._closed = True
             return AgentConversationShutdownResult(
-                AgentConversationShutdownStatus.CLOSED, "teardown_complete"
+                AgentConversationShutdownStatus.CLOSED, closed_detail
             )
         except BaseException as error:  # noqa: BLE001
             self._notifications.close()

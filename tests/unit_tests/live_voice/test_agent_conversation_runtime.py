@@ -174,6 +174,58 @@ class AlwaysFailAssistantHistoryWriter(RecordingHistoryWriter):
         raise OSError("history remains unavailable")
 
 
+class CountingStartBridge(AgentBridgeRuntime):
+    def __init__(self, *, fail_after_start: bool = False) -> None:
+        super().__init__(instance_id="startup-bridge")
+        self.fail_after_start = fail_after_start
+        self.start_calls = 0
+
+    async def start(self) -> bool:
+        self.start_calls += 1
+        started = await super().start()
+        if self.fail_after_start:
+            raise OSError("bridge startup failed")
+        return started
+
+
+class BlockingStartBridge(CountingStartBridge):
+    def __init__(self) -> None:
+        super().__init__()
+        self.start_entered = asyncio.Event()
+        self.start_release = asyncio.Event()
+
+    async def start(self) -> bool:
+        self.start_calls += 1
+        started = await AgentBridgeRuntime.start(self)
+        self.start_entered.set()
+        await self.start_release.wait()
+        return started
+
+
+class BlockingRollbackBridge(CountingStartBridge):
+    def __init__(self) -> None:
+        super().__init__(fail_after_start=True)
+        self.close_entered = asyncio.Event()
+        self.close_release = asyncio.Event()
+
+    async def close(self) -> None:
+        self.close_entered.set()
+        await self.close_release.wait()
+        await super().close()
+
+
+class BlockingCloseBridge(AgentBridgeRuntime):
+    def __init__(self) -> None:
+        super().__init__(instance_id="blocking-close-bridge")
+        self.close_entered = asyncio.Event()
+        self.close_release = asyncio.Event()
+
+    async def close(self) -> None:
+        self.close_entered.set()
+        await self.close_release.wait()
+        await super().close()
+
+
 def facade(lower: LowerFormalAdapter) -> JiuWenSwarm:
     real = JiuWenSwarm()
     real._adapter = lower  # type: ignore[assignment]
@@ -281,6 +333,311 @@ def cancel_command(
             "extensions": {},
         }
     )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_start_serializes_one_leaf_runtime_activation() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingStartBridge()
+    current = runtime(lower, history, bridge=bridge)
+
+    first, second = await asyncio.gather(current.start(), current.start())
+
+    assert {first, second} == {False, True}
+    assert bridge.start_calls == 1
+    snapshot = current.snapshot()
+    assert snapshot.started is True
+    assert snapshot.accepting is True
+    assert snapshot.conversation.worker_running is True
+    assert snapshot.bridge.started is True
+    assert snapshot.harness.retained_rounds == 0
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_start_failure_rolls_back_every_started_leaf() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = CountingStartBridge(fail_after_start=True)
+    current = runtime(lower, history, bridge=bridge)
+
+    with pytest.raises(OSError, match="bridge startup failed"):
+        await current.start()
+
+    snapshot = current.snapshot()
+    assert snapshot.started is False
+    assert snapshot.accepting is False
+    assert snapshot.closed is True
+    assert snapshot.conversation.started is True
+    assert snapshot.conversation.closed is True
+    assert snapshot.conversation.worker_running is False
+    assert snapshot.bridge.started is True
+    assert snapshot.bridge.closed is True
+    assert snapshot.harness.closed is True
+    assert snapshot.harness.retained_rounds == 0
+    assert snapshot.notification_stream_closed is True
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+    replay = await current.close(timeout_seconds=1)
+    assert replay.status is AgentConversationShutdownStatus.CLOSED
+    assert replay.detail == "teardown_complete"
+    with pytest.raises(AgentConversationRuntimeViolation) as restart:
+        await current.start()
+    assert restart.value.reason == "COMPOSITION_CLOSED"
+
+
+@pytest.mark.asyncio
+async def test_partial_start_rollback_reports_closing_until_leaf_close_finishes() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = BlockingRollbackBridge()
+    current = runtime(lower, history, bridge=bridge)
+    starter = asyncio.create_task(current.start())
+    await asyncio.wait_for(bridge.close_entered.wait(), timeout=1)
+
+    rolling_back = current.snapshot()
+    assert rolling_back.started is False
+    assert rolling_back.accepting is False
+    assert rolling_back.closed is False
+    assert rolling_back.closing is True
+    assert rolling_back.conversation.worker_running is True
+    assert rolling_back.bridge.closed is False
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+    bridge.close_release.set()
+    with pytest.raises(OSError, match="bridge startup failed"):
+        await starter
+
+    settled = current.snapshot()
+    assert settled.started is False
+    assert settled.accepting is False
+    assert settled.closed is True
+    assert settled.closing is False
+    assert settled.conversation.worker_running is False
+    assert settled.bridge.closed is True
+    assert settled.harness.closed is True
+    assert settled.notification_stream_closed is True
+
+
+@pytest.mark.asyncio
+async def test_cancelled_start_waiter_cannot_cancel_retained_startup_rollback() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = BlockingStartBridge()
+    current = runtime(lower, history, bridge=bridge)
+    starter = asyncio.create_task(current.start())
+    await asyncio.wait_for(bridge.start_entered.wait(), timeout=1)
+
+    starter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await starter
+
+    snapshot = current.snapshot()
+    assert snapshot.started is False
+    assert snapshot.accepting is False
+    assert snapshot.closed is True
+    assert snapshot.conversation.closed is True
+    assert snapshot.conversation.worker_running is False
+    assert snapshot.bridge.closed is True
+    assert snapshot.harness.closed is True
+    assert snapshot.harness.retained_rounds == 0
+    assert snapshot.notification_stream_closed is True
+    assert bridge.start_calls == 1
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+    retained = await current.close(timeout_seconds=1)
+    assert retained.status is AgentConversationShutdownStatus.CLOSED
+    assert retained.detail == "teardown_complete"
+
+
+@pytest.mark.asyncio
+async def test_close_during_start_rolls_back_before_runtime_can_accept() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = BlockingStartBridge()
+    current = runtime(lower, history, bridge=bridge)
+    starter = asyncio.create_task(current.start())
+    await asyncio.wait_for(bridge.start_entered.wait(), timeout=1)
+
+    closer = asyncio.create_task(current.close(timeout_seconds=1))
+    await asyncio.sleep(0)
+    assert not closer.done()
+
+    bridge.start_release.set()
+    with pytest.raises(AgentConversationRuntimeViolation) as start_error:
+        await starter
+    assert start_error.value.reason == "COMPOSITION_CLOSING"
+
+    result = await closer
+    assert result.status is AgentConversationShutdownStatus.CLOSED
+    assert result.detail == "teardown_complete"
+
+    snapshot = current.snapshot()
+    assert snapshot.closed is True
+    assert snapshot.accepting is False
+    assert snapshot.conversation.worker_running is False
+    assert snapshot.bridge.closed is True
+    assert snapshot.harness.closed is True
+    assert snapshot.notification_stream_closed is True
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+
+@pytest.mark.asyncio
+async def test_close_timeout_includes_blocked_start_and_retains_rollback() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = BlockingStartBridge()
+    current = runtime(lower, history, bridge=bridge)
+    starter = asyncio.create_task(current.start())
+    await asyncio.wait_for(bridge.start_entered.wait(), timeout=1)
+
+    pending = await current.close(timeout_seconds=0.01)
+    assert pending.status is AgentConversationShutdownStatus.PENDING
+    assert pending.detail == "startup_transition_still_running"
+    assert current.snapshot().closing is True
+
+    bridge.start_release.set()
+    with pytest.raises(AgentConversationRuntimeViolation) as start_error:
+        await starter
+    assert start_error.value.reason == "COMPOSITION_CLOSING"
+
+    retained = await current.close(timeout_seconds=1)
+    assert retained.status is AgentConversationShutdownStatus.CLOSED
+    assert retained.detail == "teardown_complete"
+    snapshot = current.snapshot()
+    assert snapshot.closed is True
+    assert snapshot.conversation.worker_running is False
+    assert snapshot.bridge.closed is True
+    assert snapshot.harness.closed is True
+    assert snapshot.notification_stream_closed is True
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("facade_available", "closed_detail", "admission_reason"),
+    [
+        (True, "not_started", "COMPOSITION_NOT_STARTED"),
+        (
+            False,
+            "formal_agent_unavailable",
+            "FORMAL_AGENT_FACADE_UNAVAILABLE",
+        ),
+    ],
+    ids=("available", "unavailable"),
+)
+async def test_never_started_close_retains_one_result_and_closes_every_leaf(
+    facade_available: bool,
+    closed_detail: str,
+    admission_reason: str,
+) -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"never-started-{facade_available}",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id=f"never-started-composition-{facade_available}",
+        facade=facade(lower) if facade_available else None,
+        history_writer=history,
+        harness=harness,
+    )
+
+    first = await current.close(timeout_seconds=1)
+    assert first.status is AgentConversationShutdownStatus.CLOSED
+    assert first.detail == closed_detail
+    assert await current.close(timeout_seconds=1) == first
+
+    snapshot = current.snapshot()
+    assert snapshot.started is False
+    assert snapshot.accepting is False
+    assert snapshot.closed is True
+    assert snapshot.closing is False
+    assert snapshot.notification_stream_closed is True
+    assert snapshot.queued_notifications == 0
+    assert snapshot.published_notifications == 0
+    assert snapshot.delivered_notifications == 0
+    assert snapshot.conversation.started is False
+    assert snapshot.conversation.accepting is False
+    assert snapshot.conversation.closed is True
+    assert snapshot.conversation.worker_running is False
+    assert snapshot.conversation.conversation.interactions == ()
+    assert snapshot.conversation.conversation.turns == ()
+    assert snapshot.conversation.conversation.responses == ()
+    assert snapshot.bridge.started is False
+    assert snapshot.bridge.accepting is False
+    assert snapshot.bridge.closed is True
+    assert snapshot.bridge.pending_dispatches == 0
+    assert snapshot.bridge.retained_requests == 0
+    assert snapshot.harness.accepting is False
+    assert snapshot.harness.closed is True
+    assert snapshot.harness.reservations == ()
+    assert snapshot.harness.retained_rounds == 0
+
+    with pytest.raises(AgentConversationRuntimeViolation) as rejected:
+        await current.open_interaction("interaction-after-close")
+    assert rejected.value.reason == admission_reason
+    with pytest.raises(HarnessRoundViolation) as harness_rejected:
+        harness.reserve_round(
+            HarnessRoundBinding(
+                request_id="request-after-close",
+                response_id="response-after-close",
+                correlation_id="correlation-after-close",
+                commit=commit(),
+            )
+        )
+    assert harness_rejected.value.reason == "HARNESS_CLOSING"
+    assert lower.calls == 0
+    assert lower.legacy_calls == 0
+    assert not history.users and not history.assistant_intents
+
+
+@pytest.mark.asyncio
+async def test_never_started_close_timeout_retains_retryable_leaf_teardown() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    bridge = BlockingCloseBridge()
+    current = runtime(lower, history, bridge=bridge)
+
+    pending = await current.close(timeout_seconds=0.01)
+    assert bridge.close_entered.is_set()
+    assert pending.status is AgentConversationShutdownStatus.PENDING
+    assert pending.detail == "retained_teardown_still_running"
+    pending_snapshot = current.snapshot()
+    assert pending_snapshot.started is False
+    assert pending_snapshot.accepting is False
+    assert pending_snapshot.closed is False
+    assert pending_snapshot.closing is True
+    assert pending_snapshot.bridge.closed is False
+
+    bridge.close_release.set()
+    closed = await current.close(timeout_seconds=1)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert closed.detail == "not_started"
+    assert await current.close(timeout_seconds=1) == closed
+    settled = current.snapshot()
+    assert settled.closed is True
+    assert settled.closing is False
+    assert settled.notification_stream_closed is True
+    assert settled.conversation.closed is True
+    assert settled.bridge.closed is True
+    assert settled.harness.closed is True
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
 
 
 @pytest.mark.asyncio
