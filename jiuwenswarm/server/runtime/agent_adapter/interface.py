@@ -19,7 +19,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Tuple
+from typing import TYPE_CHECKING, Any, AsyncIterator, Tuple
 
 from datetime import datetime, timedelta, timezone
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
@@ -59,6 +59,11 @@ from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import 
     EVOLUTION_INTERRUPT_METADATA_SOURCES,
     is_interrupt_resume_payload,
 )
+
+if TYPE_CHECKING:
+    from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+        FormalAgentExecution,
+    )
 
 
 class _TeamPlanApprovalPayloadError(ValueError):
@@ -995,6 +1000,26 @@ class JiuWenSwarm:
             return None
         return str(Path(project_dir).resolve())
 
+    def supports_formal_live_voice(self) -> bool:
+        """Report the optional formal Agent capability without creating work.
+
+        An already-bound Code adapter must not be re-described as an ordinary
+        Agent merely because its class inherits shared implementation helpers.
+        When no adapter has been selected yet, only the real Harness SDK is a
+        supported candidate; this check does not instantiate an adapter,
+        worker, timer, or session.
+        """
+
+        adapter = self._adapter
+        if adapter is None:
+            return resolve_sdk_choice() == "harness"
+        return bool(
+            not getattr(adapter, "_is_code_agent", False)
+            and callable(
+                getattr(adapter, "process_formal_live_voice_stream_impl", None)
+            )
+        )
+
     async def process_background_code_task_stream(
         self,
         request: AgentRequest,
@@ -1064,6 +1089,74 @@ class JiuWenSwarm:
             cleanup_session = getattr(adapter, "cleanup_session_adapter", None)
             if callable(cleanup_session):
                 await cleanup_session(background_request.session_id)
+
+    async def process_formal_live_voice_stream(
+        self,
+        execution: "FormalAgentExecution",
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Run one committed Live Voice turn without owning Chat history.
+
+        This is intentionally distinct from :meth:`process_message_stream`.
+        The caller owns TurnCommit, PresentationAck, and history authority; the
+        facade only drives the real lower Agent adapter in a dedicated session.
+        """
+        from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+            FormalAgentExecution,
+        )
+
+        if not isinstance(execution, FormalAgentExecution):
+            raise TypeError("formal Live Voice execution has an unsupported type")
+        execution.context.validate_for(execution.commit)
+        if not self.supports_formal_live_voice():
+            raise RuntimeError(
+                "FORMAL_EXECUTION_UNSUPPORTED: lower Agent adapter has no formal seam"
+            )
+        adapter = self._ensure_adapter(mode="agent")
+        if getattr(adapter, "_is_session_scoped_adapter", False):
+            raise RuntimeError(
+                "FORMAL_EXECUTION_NOT_ISOLATED: expected the root Agent adapter"
+            )
+
+        formal_request = AgentRequest(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            session_id=execution.internal_session_id,
+            req_method=ReqMethod.CHAT_SEND,
+            params={
+                "query": execution.prompt_content(),
+                "mode": "agent",
+                "source": "live_voice.formal",
+                "supports_user_interaction": False,
+            },
+            is_stream=True,
+            metadata={
+                "enable_memory": False,
+                "skip_a2ui": True,
+                "formal_live_voice": True,
+            },
+            enable_memory=False,
+        )
+        inputs, _memory_mode, _raw_query = self._build_inputs(formal_request)
+        if inputs.get("conversation_id") != execution.internal_session_id:
+            raise RuntimeError(
+                "FORMAL_EXECUTION_NOT_ISOLATED: conversation identity changed"
+            )
+        if inputs.get("enable_memory") is not False:
+            raise RuntimeError(
+                "FORMAL_EXECUTION_MEMORY_ENABLED: formal execution forbids memory"
+            )
+        formal_stream = getattr(
+            adapter, "process_formal_live_voice_stream_impl", None
+        )
+        if not callable(formal_stream):
+            raise RuntimeError(
+                "FORMAL_EXECUTION_UNSUPPORTED: lower Agent adapter has no formal seam"
+            )
+        async for chunk in formal_stream(
+            formal_request,
+            inputs,
+        ):
+            yield chunk
 
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
         """构建 adapter 所需的 inputs 字典."""

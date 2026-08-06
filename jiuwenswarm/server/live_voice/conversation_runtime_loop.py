@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
@@ -88,6 +89,21 @@ class ResponseCancelResult:
     replayed: bool
     event: RuntimeEvent
     effect_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PresentedHistoryContent:
+    unit: PresentationUnit
+    content_utf8: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class PresentationHistoryIntent:
+    ref: ResponseRef
+    surface: PresentationSurface
+    contiguous_cursor: int
+    presented_at: str
+    contents: tuple[PresentedHistoryContent, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,6 +462,38 @@ class ConversationRuntimeLoop:
     async def acknowledge_presentation(self, ack: PresentationAck) -> bool:
         return await self._await_future(self.post_presentation_ack(ack))
 
+    def post_presentation_ack_with_history(
+        self,
+        ack: PresentationAck,
+        content_resolver: Callable[[PresentationUnit], bytes],
+    ) -> asyncio.Future[tuple[bool, PresentationHistoryIntent | None]]:
+        if not callable(content_resolver):
+            running = self._require_admission()
+            return self._failed_future(
+                running,
+                ConversationRuntimeLoopViolation(
+                    "INVALID_HISTORY_CONTENT_RESOLVER",
+                    "history content resolver must be callable",
+                    ErrorCode.INVALID_ARGUMENT,
+                ),
+            )
+        return self._post(
+            lambda: self._acknowledge_presentation_with_history(
+                ack, content_resolver
+            ),
+            control=False,
+            ordered_observation=True,
+        )
+
+    async def acknowledge_presentation_with_history(
+        self,
+        ack: PresentationAck,
+        content_resolver: Callable[[PresentationUnit], bytes],
+    ) -> tuple[bool, PresentationHistoryIntent | None]:
+        return await self._await_future(
+            self.post_presentation_ack_with_history(ack, content_resolver)
+        )
+
     def post_barge_in(
         self,
         action_id: str,
@@ -593,6 +641,91 @@ class ConversationRuntimeLoop:
         if accepted:
             self._mark_effect_presented(ack)
         return accepted
+
+    def _acknowledge_presentation_with_history(
+        self,
+        ack: PresentationAck,
+        content_resolver: Callable[[PresentationUnit], bytes],
+    ) -> tuple[bool, PresentationHistoryIntent | None]:
+        if not isinstance(ack, PresentationAck):
+            raise ConversationRuntimeLoopViolation(
+                "INVALID_PRESENTATION_ACK",
+                "presentation acknowledgement has an unsupported type",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        self._require_current_output(ack.ref)
+        prepared: list[PresentedHistoryContent] = []
+        if ack.surface is PresentationSurface.TEXT:
+            snapshot = self._presentation.snapshot()
+            prior_cursor = next(
+                (
+                    cursor
+                    for ref, surface, cursor in snapshot.cursors
+                    if ref == ack.ref and surface is ack.surface
+                ),
+                -1,
+            )
+            records = sorted(
+                (
+                    record
+                    for record in snapshot.records
+                    if record.unit.ref == ack.ref
+                    and record.unit.surface is ack.surface
+                    and prior_cursor < record.unit.seq <= ack.contiguous_cursor
+                ),
+                key=lambda record: record.unit.seq,
+            )
+            for record in records:
+                unit = record.unit
+                content = content_resolver(unit)
+                if not isinstance(content, bytes):
+                    raise ConversationRuntimeLoopViolation(
+                        "INVALID_HISTORY_CONTENT",
+                        "history resolver must return immutable UTF-8 bytes",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                expected_length = unit.source_end_utf8 - unit.source_start_utf8
+                digest = hashlib.sha256(content).hexdigest()
+                if (
+                    len(content) != expected_length
+                    or unit.content_ref != f"sha256:{digest}"
+                ):
+                    raise ConversationRuntimeLoopViolation(
+                        "HISTORY_CONTENT_BINDING_MISMATCH",
+                        "resolved history bytes do not match the presentation unit",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
+                try:
+                    content.decode("utf-8")
+                except UnicodeDecodeError as error:
+                    raise ConversationRuntimeLoopViolation(
+                        "INVALID_HISTORY_CONTENT",
+                        "history content must be valid UTF-8",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    ) from error
+                prepared.append(PresentedHistoryContent(unit, content))
+
+        accepted, records = self._presentation.acknowledge(ack)
+        if not accepted:
+            return False, None
+        self._mark_effect_presented(ack)
+        if ack.surface is not PresentationSurface.TEXT:
+            return True, None
+        if tuple(item.unit for item in prepared) != tuple(
+            record.unit for record in records
+        ):
+            raise ConversationRuntimeLoopViolation(
+                "HISTORY_ACK_SERIALIZATION_MISMATCH",
+                "history intent did not match the serialized ACK mutation",
+                ErrorCode.INTERNAL,
+            )
+        return True, PresentationHistoryIntent(
+            ref=ack.ref,
+            surface=ack.surface,
+            contiguous_cursor=ack.contiguous_cursor,
+            presented_at=ack.presented_at,
+            contents=tuple(prepared),
+        )
 
     def _barge_in(
         self, action_id: str, ref: ResponseRef, cancel_response: bool

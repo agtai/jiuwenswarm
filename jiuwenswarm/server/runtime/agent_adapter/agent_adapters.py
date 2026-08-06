@@ -94,6 +94,17 @@ class AgentAdapter(Protocol):
         """Handle heartbeat requests."""
 
 
+@runtime_checkable
+class FormalLiveVoiceAgentAdapter(Protocol):
+    """Optional lower-adapter capability for the formal Live Voice route."""
+
+    async def process_formal_live_voice_stream_impl(
+        self, request: AgentRequest, inputs: dict[str, Any]
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Execute the narrow isolated Live Voice no-history route."""
+        ...
+
+
 def resolve_sdk_choice() -> str:
     """Resolve SDK choice from environment variable.
 

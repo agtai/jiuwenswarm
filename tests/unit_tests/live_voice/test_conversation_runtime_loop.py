@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Callable
 
 import pytest
@@ -147,6 +148,90 @@ async def produce_enqueue_ack(
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_text_ack_emits_exact_immutable_history_intents_per_cursor(
+    loop_factory,
+) -> None:
+    runtime, ref = await prepared(loop_factory)
+    contents = {"text-0": b"a", "text-1": "β".encode("utf-8")}
+    first = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "text-0",
+        0,
+        0,
+        1,
+        f"sha256:{hashlib.sha256(contents['text-0']).hexdigest()}",
+    )
+    second = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "text-1",
+        1,
+        1,
+        3,
+        f"sha256:{hashlib.sha256(contents['text-1']).hexdigest()}",
+    )
+    for item in (first, second):
+        assert await runtime.produce_unit(item) is True
+        accepted, _effect = await runtime.enqueue_unit(
+            ref, item.surface, item.unit_id
+        )
+        assert accepted is True
+
+    with pytest.raises(ConversationRuntimeLoopViolation) as mismatched:
+        await runtime.acknowledge_presentation_with_history(
+            ack(ref, PresentationSurface.TEXT, "text-0", 0),
+            lambda _unit: b"wrong",
+        )
+    assert mismatched.value.reason == "HISTORY_CONTENT_BINDING_MISMATCH"
+    assert runtime.snapshot().presentation.cursors == ()
+
+    accepted, first_intent = await runtime.acknowledge_presentation_with_history(
+        ack(ref, PresentationSurface.TEXT, "text-0", 0),
+        lambda item: contents[item.unit_id],
+    )
+    assert accepted is True
+    assert first_intent is not None
+    assert first_intent.contiguous_cursor == 0
+    assert tuple(item.content_utf8 for item in first_intent.contents) == (b"a",)
+
+    accepted, second_intent = await runtime.acknowledge_presentation_with_history(
+        ack(
+            ref,
+            PresentationSurface.TEXT,
+            "text-1",
+            1,
+            presented_at="2026-08-05T08:00:02Z",
+        ),
+        lambda item: contents[item.unit_id],
+    )
+    assert accepted is True
+    assert second_intent is not None
+    assert second_intent.contiguous_cursor == 1
+    assert tuple(item.content_utf8 for item in second_intent.contents) == (
+        "β".encode("utf-8"),
+    )
+
+    audio = unit(
+        ref,
+        PresentationSurface.AUDIO,
+        "audio-0",
+        0,
+        0,
+        1,
+        first.content_ref,
+    )
+    assert await runtime.produce_unit(audio) is True
+    assert (await runtime.enqueue_unit(ref, audio.surface, audio.unit_id))[0] is True
+    accepted, audio_intent = await runtime.acknowledge_presentation_with_history(
+        ack(ref, PresentationSurface.AUDIO, "audio-0", 0),
+        lambda _unit: (_ for _ in ()).throw(AssertionError("audio resolved")),
+    )
+    assert accepted is True
+    assert audio_intent is None
 
 
 @pytest.mark.parametrize(

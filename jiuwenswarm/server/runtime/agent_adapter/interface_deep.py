@@ -167,7 +167,12 @@ from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_b
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
-from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
+from jiuwenswarm.server.runtime.session.session_history import (
+    append_history_record,
+    load_history_records,
+    register_formal_no_history_session,
+    unregister_formal_no_history_session,
+)
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.prompt_attachment_loader import PromptAttachmentLoader
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
@@ -345,6 +350,7 @@ def get_runtime_tool_session_id() -> str | None:
     return _CRON_TOOL_SESSION_ID.get()
 
 logger = logging.getLogger(__name__)
+_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS = 5.0
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -7805,6 +7811,178 @@ class JiuWenSwarmDeepAdapter:
             payload={"content": content},
             metadata=request.metadata,
         )
+
+    async def process_formal_live_voice_stream_impl(
+        self, request: AgentRequest, inputs: dict[str, Any]
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Run the isolated ordinary-Agent path used by formal Live Voice.
+
+        This deliberately excludes the legacy Chat orchestration: no slash or
+        Goal dispatch, Team/AutoHarness, A2UI repair, debug/cron/evolution
+        hooks, implicit history, or session-current interrupt API participates.
+        """
+
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id
+            )
+            try:
+                async for chunk in session_adapter.process_formal_live_voice_stream_impl(
+                    request, inputs
+                ):
+                    yield chunk
+                return
+            finally:
+                cleanup = asyncio.create_task(
+                    self.cleanup_session_adapter(request.session_id),
+                    name=f"formal-live-voice-session-cleanup:{request.request_id}",
+                )
+                while not cleanup.done():
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(cleanup),
+                            timeout=_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS,
+                        )
+                    except TimeoutError:
+                        logger.warning(
+                            "formal Live Voice session cleanup is still pending"
+                        )
+                if not await asyncio.shield(cleanup):
+                    raise RuntimeError(
+                        "FORMAL_EXECUTION_SESSION_CLEANUP_INCOMPLETE"
+                    )
+
+        if self._instance is None:
+            raise RuntimeError("formal Live Voice Agent is not initialized")
+        params = request.params if isinstance(request.params, dict) else {}
+        metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        allowed_params = {
+            "query",
+            "mode",
+            "source",
+            "supports_user_interaction",
+        }
+        if (
+            set(params) - allowed_params
+            or params.get("mode") != "agent"
+            or params.get("source") != "live_voice.formal"
+            or params.get("supports_user_interaction") is not False
+            or metadata
+            != {
+                "enable_memory": False,
+                "skip_a2ui": True,
+                "formal_live_voice": True,
+            }
+            or inputs.get("enable_memory") is not False
+            or inputs.get("skip_a2ui") is not True
+            or inputs.get("conversation_id") != request.session_id
+            or not isinstance(request.session_id, str)
+            or not request.session_id.startswith("lv-formal-")
+        ):
+            raise RuntimeError("FORMAL_EXECUTION_INPUT_REJECTED")
+
+        session_id = request.session_id
+        rid = request.request_id
+        cid = request.channel_id
+        register_formal_no_history_session(session_id)
+        history_release_safe = True
+        try:
+            await self._update_runtime_config(
+                self._RuntimeConfig(
+                    session_id=session_id,
+                    mode="agent",
+                    request_id=rid,
+                    channel_id=cid,
+                    request_metadata=metadata,
+                    supports_user_interaction=False,
+                )
+            )
+            token_cid = TOOL_PERMISSION_CHANNEL_ID.set((cid or "").strip())
+            token_perm = setup_permission_context(request)
+            interaction_stream = None
+            cancelled = False
+            stream_exhausted = False
+            has_streamed_content = False
+            allowed_events = {
+                "chat.delta",
+                "chat.reasoning",
+                "chat.final",
+                "chat.tool_call",
+                "chat.tool_update",
+                "chat.tool_result",
+                "chat.error",
+            }
+            try:
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    raise RuntimeError("FORMAL_EXECUTION_OUTPUT_LEASE_UNAVAILABLE")
+                history_release_safe = False
+                await self._instance.send_input(
+                    SendInputRequest(request_id=rid, inputs=dict(inputs), mode=None)
+                )
+                async for raw_chunk in interaction_stream:
+                    parsed = self._parse_stream_chunk(
+                        raw_chunk, _has_streamed_content=has_streamed_content
+                    )
+                    if parsed is None:
+                        continue
+                    event_type = parsed.get("event_type")
+                    if event_type not in allowed_events:
+                        raise RuntimeError(
+                            f"FORMAL_EXECUTION_EVENT_UNSUPPORTED: {event_type!r}"
+                        )
+                    if event_type == "chat.delta":
+                        content = parsed.get("content")
+                        has_streamed_content = has_streamed_content or (
+                            isinstance(content, str) and bool(content)
+                        )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=parsed,
+                        is_complete=event_type in {"chat.final", "chat.error"},
+                    )
+                stream_exhausted = True
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                try:
+                    if interaction_stream is not None:
+                        cleanup = asyncio.create_task(
+                            interaction_stream.close(
+                                abort_active_round=cancelled or not stream_exhausted
+                            ),
+                            name=f"formal-live-voice-output-close:{rid}",
+                        )
+                        while not cleanup.done():
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.shield(cleanup),
+                                    timeout=_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS,
+                                )
+                            except TimeoutError:
+                                # The retained cleanup task still owns the stream.
+                                # Outer shutdown callers are bounded separately and
+                                # must report pending rather than false terminal.
+                                logger.warning(
+                                    "formal Live Voice output cleanup is still pending"
+                                )
+                        await asyncio.shield(cleanup)
+                        history_release_safe = True
+                finally:
+                    TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                    cleanup_permission_context(token_perm)
+        finally:
+            if history_release_safe:
+                unregister_formal_no_history_session(session_id)
+            else:
+                logger.error(
+                    "formal Live Voice no-history guard retained after unsafe cleanup: "
+                    "session_id=%s request_id=%s",
+                    session_id,
+                    rid,
+                )
 
     async def process_message_stream_impl(
         self, request: AgentRequest, inputs: dict[str, Any]

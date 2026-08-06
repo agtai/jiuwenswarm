@@ -22,11 +22,41 @@ _LEGACY_HISTORY_FILENAME = "history.json"
 _JSONL_HISTORY_FILENAME = "history.jsonl"
 _LEGACY_HISTORY_ENV = "JIUWENSWARM_USE_LEGACY_HISTORY_JSON"
 _HEARTBEAT_OK = "HEARTBEAT_OK"
+_FORMAL_LIVE_VOICE_SESSION_PREFIX = "lv-formal-"
+_FORMAL_NO_HISTORY_LOCK = threading.Lock()
+_FORMAL_NO_HISTORY_SESSIONS: dict[str, int] = {}
 
 
 def _is_ephemeral_heartbeat_session(session_id: str) -> bool:
     """Heartbeat sessions are one-shot and should not pollute history.json(l)."""
     return (session_id or "").startswith("heartbeat")
+
+
+def _is_formal_live_voice_no_history_session(session_id: str) -> bool:
+    with _FORMAL_NO_HISTORY_LOCK:
+        return _FORMAL_NO_HISTORY_SESSIONS.get(session_id, 0) > 0
+
+
+def register_formal_no_history_session(session_id: str) -> None:
+    """Register one trusted formal execution across Agent/tool task contexts."""
+
+    sid = str(session_id or "").strip()
+    if not sid.startswith(_FORMAL_LIVE_VOICE_SESSION_PREFIX):
+        raise ValueError("formal no-history session must use the internal namespace")
+    with _FORMAL_NO_HISTORY_LOCK:
+        _FORMAL_NO_HISTORY_SESSIONS[sid] = _FORMAL_NO_HISTORY_SESSIONS.get(sid, 0) + 1
+
+
+def unregister_formal_no_history_session(session_id: str) -> None:
+    """Release one trusted formal execution registration."""
+
+    sid = str(session_id or "").strip()
+    with _FORMAL_NO_HISTORY_LOCK:
+        retained = _FORMAL_NO_HISTORY_SESSIONS.get(sid, 0)
+        if retained <= 1:
+            _FORMAL_NO_HISTORY_SESSIONS.pop(sid, None)
+        else:
+            _FORMAL_NO_HISTORY_SESSIONS[sid] = retained - 1
 
 
 def _has_persistable_assistant_payload(
@@ -472,6 +502,52 @@ def _write_item(session_id: str, item: dict[str, Any]) -> None:
         _append_record_jsonl(target_path, item)
 
 
+def append_formal_history_record_idempotent(
+    *, session_id: str, record: dict[str, Any]
+) -> bool:
+    """Synchronously append one exact formal-route history fact.
+
+    The record ``id`` is the idempotency key.  Unlike the legacy Chat writer,
+    this seam intentionally performs no session metadata, cloud, or memory
+    hooks; Live Voice CR owns the commit and PresentationAck boundaries.
+    """
+
+    sid = str(session_id or "").strip()
+    resolved, error_reason = resolve_session_dir(sid, create=False)
+    if resolved is None:
+        raise ValueError(error_reason or "invalid session_id")
+    serialized = _serialize_value(record)
+    if not isinstance(serialized, dict):
+        raise TypeError("formal history record must be an object")
+    record_id = serialized.get("id")
+    if not isinstance(record_id, str) or not record_id.strip():
+        raise ValueError("formal history record id must be non-empty")
+
+    with _FILE_LOCK:
+        target_path = (
+            _ensure_legacy_json_bootstrap(sid)
+            if use_legacy_history_json()
+            else _ensure_jsonl_bootstrap(sid)
+        )
+        records = (
+            _read_history(target_path)
+            if target_path.suffix.lower() != ".jsonl"
+            else _read_history_jsonl(target_path)
+        )
+        for existing in records:
+            if existing.get("id") != record_id:
+                continue
+            if existing == serialized:
+                return False
+            raise ValueError("formal history idempotency conflict")
+        if target_path.suffix.lower() == ".jsonl":
+            _append_record_jsonl(target_path, serialized)
+        else:
+            records.append(serialized)
+            _write_records_to_path(target_path, records)
+    return True
+
+
 def _ensure_worker_started() -> None:
     global _WORKER_STARTED
     if _WORKER_STARTED:
@@ -510,6 +586,13 @@ def append_history_record(
 ) -> None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
+    if _is_formal_live_voice_no_history_session(sid):
+        logger.debug(
+            "skip formal Live Voice implicit history: session_id=%s event_type=%s",
+            sid,
+            event_type or "",
+        )
+        return
     if _is_ephemeral_heartbeat_session(sid):
         logger.debug("skip heartbeat session history: session_id=%s event_type=%s", sid, event_type)
         return
