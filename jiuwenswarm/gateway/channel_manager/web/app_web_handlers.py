@@ -664,6 +664,12 @@ _FORWARD_REQ_METHODS = frozenset({
     "live_voice.task.status",
     "live_voice.task.cancel",
     "live_voice.task.events",
+    # Default-off AgentServer product-composition lifecycle routes. Gateway
+    # forwards opaque credentials and comparison claims; it owns no authority.
+    "live_voice.composition.p2.activate",
+    "live_voice.composition.p2.close",
+    "live_voice.composition.p3.progress.activate",
+    "live_voice.composition.p3.progress.close",
     "issue.watch_once",
     "issue.state.list",
     "issue.matrix",
@@ -763,6 +769,10 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "live_voice.task.status",
     "live_voice.task.cancel",
     "live_voice.task.events",
+    "live_voice.composition.p2.activate",
+    "live_voice.composition.p2.close",
+    "live_voice.composition.p3.progress.activate",
+    "live_voice.composition.p3.progress.close",
     "issue.watch_once",
     "issue.state.list",
     "issue.matrix",

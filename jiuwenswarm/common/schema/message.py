@@ -217,6 +217,14 @@ class ReqMethod(Enum):
     LIVE_VOICE_TASK_STATUS = "live_voice.task.status"
     LIVE_VOICE_TASK_CANCEL = "live_voice.task.cancel"
     LIVE_VOICE_TASK_EVENTS = "live_voice.task.events"
+    LIVE_VOICE_COMPOSITION_P2_ACTIVATE = "live_voice.composition.p2.activate"
+    LIVE_VOICE_COMPOSITION_P2_CLOSE = "live_voice.composition.p2.close"
+    LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE = (
+        "live_voice.composition.p3.progress.activate"
+    )
+    LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE = (
+        "live_voice.composition.p3.progress.close"
+    )
 
     ISSUE_WATCH_ONCE = "issue.watch_once"
     ISSUE_STATE_LIST = "issue.state.list"
@@ -245,6 +253,7 @@ class EventType(Enum):
     CHAT_ERROR = "chat.error"
     CHAT_INTERRUPT_RESULT = "chat.interrupt_result"
     CHAT_EVOLUTION_STATUS = "chat.evolution_status"
+    LIVE_VOICE_TASK_PROGRESS = "live_voice.task.progress"
     CHAT_SUBTASK_UPDATE = "chat.subtask_update"
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
     PLAN_APPROVAL_REQUIRED = "plan.approval_required"

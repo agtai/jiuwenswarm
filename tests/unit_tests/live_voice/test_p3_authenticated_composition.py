@@ -243,11 +243,12 @@ def _principal(
     *,
     expires_at: str = EXPIRY,
     allowed_project_ids: frozenset[str] = frozenset({"project-1", "project-2"}),
+    allowed_operations: frozenset[str] = P3_OPERATIONS,
 ) -> AuthenticatedPrincipal:
     return AuthenticatedPrincipal(
         principal_id="user-1",
         allowed_project_ids=allowed_project_ids,
-        allowed_operations=P3_OPERATIONS,
+        allowed_operations=allowed_operations,
         expires_at=expires_at,
     )
 
@@ -258,6 +259,7 @@ def _harness(
     contexts=None,
     expires_at: str = EXPIRY,
     allowed_project_ids: frozenset[str] = frozenset({"project-1", "project-2"}),
+    allowed_operations: frozenset[str] = P3_OPERATIONS,
 ) -> _Harness:
     database = tmp_path / "formal-tasks.sqlite3"
     executor = _Executor()
@@ -280,6 +282,7 @@ def _harness(
             principal=_principal(
                 expires_at=expires_at,
                 allowed_project_ids=allowed_project_ids,
+                allowed_operations=allowed_operations,
             ),
         ),
         authority_resolver=authority,
@@ -498,6 +501,196 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
     finally:
         await harness.composition.stop()
     assert harness.closer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_product_registry_uses_real_p3_authority_query_and_subscription_owner(
+    tmp_path: Path,
+) -> None:
+    from jiuwenswarm.server.live_voice.product_composition_registry import (
+        AgentServerProductCompositionRegistry,
+        ProductCompositionSettings,
+    )
+
+    future_expiry = "2100-01-01T00:00:00Z"
+    authorized_context = _context(tmp_path, expires_at=future_expiry)
+    harness = _harness(
+        tmp_path,
+        expires_at=future_expiry,
+        contexts={
+            "session-1": authorized_context,
+        },
+    )
+    pushed: list[dict[str, object]] = []
+
+    async def push(message: dict[str, object]) -> bool:
+        pushed.append(message)
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=False, p3_text_enabled=True),
+        p3_composition=harness.composition,
+        agent_manager=object(),
+        push_text_event=push,
+    )
+    await harness.composition.start()
+    try:
+        create_params = _issued_create_params(harness, "command-product-owner")
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=create_params,
+            request_id="request-product-create",
+            session_id="session-1",
+        )
+        assert created.ok is True
+        task_id = str(created.payload["result"]["task_id"])
+
+        queried = await registry.handle_p3_query(
+            operation="task.list",
+            params=_base(),
+            request_id="request-product-list",
+            session_id="session-1",
+        )
+        activated = await registry.handle_p3_progress_activate(
+            params={
+                **_base(),
+                "task_id": task_id,
+                "correlation_id": str(create_params["correlation_id"]),
+                "origin_id": "web-product-owner",
+                "generation_id": "web-product-generation",
+                "generation": 1,
+            },
+            request_id="request-product-progress",
+            session_id="session-1",
+            channel_id="web",
+        )
+        closed = await registry.handle_p3_progress_close(
+            params={
+                **_base(),
+                "task_id": task_id,
+                "correlation_id": str(create_params["correlation_id"]),
+                "origin_id": "web-product-owner",
+                "generation_id": "web-product-generation",
+                "generation": 1,
+            },
+            request_id="request-product-progress-close",
+            session_id="session-1",
+        )
+
+        assert queried.ok is True
+        assert activated.ok is True
+        assert closed.ok is True
+        assert activated.payload["result"]["voice_progress"] == "unavailable"
+        assert pushed == []
+    finally:
+        await registry.stop()
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_product_registry_uses_real_authority_and_agent_runtime_for_p2(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.live_voice.product_composition_registry import (
+        AgentServerProductCompositionRegistry,
+        ProductCompositionSettings,
+    )
+
+    class Facade:
+        def supports_formal_live_voice(self) -> bool:
+            return True
+
+        async def process_formal_live_voice_stream(self, _execution):
+            if False:
+                yield None
+
+    class Manager:
+        def __init__(self) -> None:
+            self.facade = Facade()
+            self.get_calls: list[tuple[object, ...]] = []
+            self.pins = 0
+            self.unpins = 0
+
+        async def get_agent(self, *args):
+            self.get_calls.append(args)
+            return self.facade
+
+        def pin_agent(self, agent) -> None:
+            assert agent is self.facade
+            self.pins += 1
+
+        def unpin_agent(self, agent) -> None:
+            assert agent is self.facade
+            self.unpins += 1
+
+    future_expiry = "2100-01-01T00:00:00Z"
+    authorized_context = _context(tmp_path, expires_at=future_expiry)
+    harness = _harness(
+        tmp_path,
+        expires_at=future_expiry,
+        contexts={
+            "session-1": authorized_context,
+        },
+        allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
+    )
+    manager = Manager()
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("agent", None),
+    )
+
+    async def push(_message: dict[str, object]) -> bool:
+        raise AssertionError("P2 activation must not use the P3 progress sink")
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(p2_enabled=True, p3_text_enabled=False),
+        p3_composition=harness.composition,
+        agent_manager=manager,
+        push_text_event=push,
+    )
+    params = {
+        **_base(),
+        "correlation_id": "correlation-product-p2",
+        "interaction_id": "interaction-product-p2",
+        "activation_id": "activation-product-p2",
+        "activation_generation": 1,
+    }
+    await harness.composition.start()
+    try:
+        harness.authority.contexts["session-1"] = replace(
+            authorized_context, permissions=()
+        )
+        denied = await registry.handle_p2_activate(
+            params=params,
+            request_id="request-product-p2-denied",
+            session_id="session-1",
+            channel_id="web",
+        )
+        assert denied.ok is False
+        assert manager.get_calls == []
+
+        harness.authority.contexts["session-1"] = authorized_context
+        activated = await registry.handle_p2_activate(
+            params=params,
+            request_id="request-product-p2",
+            session_id="session-1",
+            channel_id="web",
+        )
+        closed = await registry.handle_p2_close(
+            params=params,
+            request_id="request-product-p2-close",
+            session_id="session-1",
+        )
+
+        assert activated.ok is True
+        assert closed.ok is True
+        assert len(manager.get_calls) == 1
+        assert manager.pins == 1
+        assert manager.unpins == 1
+    finally:
+        await registry.stop()
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio
@@ -1380,6 +1573,52 @@ def test_factory_accepts_reconciliation_interval_boundaries(
 
     assert composition is not None
     assert composition._reconcile_interval == interval
+
+
+@pytest.mark.parametrize(
+    ("master_enabled", "p2_enabled", "authorized"),
+    [(False, True, False), (True, False, False), (True, True, True)],
+)
+def test_factory_widens_alpha_principal_to_p2_only_behind_both_product_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    master_enabled: bool,
+    p2_enabled: bool,
+    authorized: bool,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 3600)
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
+        "1" if master_enabled else "0",
+    )
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED",
+        "1" if p2_enabled else "0",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: tmp_path / "product-p2-authority.sqlite3",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.common.auto_harness.service.AutoHarnessService",
+        lambda *_args, **_kwargs: SimpleNamespace(),
+    )
+    composition = create_p3_composition_from_environment(
+        agent_manager=object(), model_resolver=_ModelResolver()
+    )
+    assert composition is not None
+
+    if authorized:
+        principal = composition._authenticator.authenticate(
+            TOKEN, operation="agent.chat", now=NOW
+        )
+        assert principal.allowed_operations >= frozenset({"agent.chat"})
+    else:
+        with pytest.raises(FormalTaskViolation) as denied:
+            composition._authenticator.authenticate(
+                TOKEN, operation="agent.chat", now=NOW
+            )
+        assert denied.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
 
 
 def test_incomplete_enabled_gate_fails_before_store_or_carrier(

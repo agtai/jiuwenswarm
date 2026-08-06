@@ -187,6 +187,7 @@ class _SubscriptionDouble:
         task_id: str = "task-1",
         start_result: bool = True,
         close_gate: asyncio.Event | None = None,
+        close_failures: int = 0,
     ) -> None:
         self.events = deque(events or [])
         self.task_id = task_id
@@ -195,6 +196,7 @@ class _SubscriptionDouble:
         self.next_calls = 0
         self.close_calls = 0
         self.close_gate = close_gate
+        self.close_failures = close_failures
         self._closed = asyncio.Event()
 
     def snapshot(self) -> _SubscriptionSnapshot:
@@ -215,6 +217,9 @@ class _SubscriptionDouble:
         self.close_calls += 1
         if self.close_gate is not None:
             await self.close_gate.wait()
+        if self.close_failures:
+            self.close_failures -= 1
+            raise RuntimeError("injected subscription close failure")
         self._closed.set()
 
 
@@ -941,6 +946,28 @@ async def test_cancelled_close_waiter_does_not_cancel_detach_cleanup() -> None:
     await activation.lease.close()
 
     assert subscription.close_calls == 1
+    assert bridge.snapshot().state is TaskProgressReturnState.CLOSED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.CONSUMER_DETACHED
+
+
+@pytest.mark.asyncio
+async def test_failed_text_detach_remains_retryable_by_the_exact_lease() -> None:
+    subscription = _SubscriptionDouble(close_failures=1)
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.TEXT,
+        subscription=subscription,
+    )
+    activation = await bridge.activate()
+    assert activation.lease is not None
+    await _wait_until(lambda: subscription.next_calls == 1)
+
+    with pytest.raises(RuntimeError, match="injected subscription close failure"):
+        await activation.lease.close()
+
+    assert bridge.snapshot().state is TaskProgressReturnState.DETACHING
+    await activation.lease.close()
+
+    assert subscription.close_calls == 2
     assert bridge.snapshot().state is TaskProgressReturnState.CLOSED
     assert bridge.snapshot().reason_id is TaskProgressReturnReason.CONSUMER_DETACHED
 

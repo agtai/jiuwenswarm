@@ -865,6 +865,10 @@ class AgentWebSocketServer:
         # Authenticated formal Live Voice P3-alpha composition. Construction is
         # deferred until start() so flag-off has no Store or timer effects.
         self._live_voice_p3_composition: Any = None
+        # The central product registry is even more strictly lazy: when its
+        # master flag is off no registry, Adapter, registration, or worker is
+        # constructed or called.
+        self._live_voice_product_composition: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
@@ -984,6 +988,7 @@ class AgentWebSocketServer:
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
         await self._start_live_voice_p3_composition()
+        await self._start_live_voice_product_composition()
 
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import ensure_persistent_checkpointer
 
@@ -1228,6 +1233,73 @@ class AgentWebSocketServer:
         except Exception as exc:  # noqa: BLE001 -- continue transport shutdown
             logger.warning("[LiveVoiceP3] shutdown failed: %s", exc)
 
+    async def _push_live_voice_product_text_event(
+        self, message: dict[str, object]
+    ) -> bool:
+        """Return an observable delivery fact to the P3 text sink."""
+
+        return bool(await self.send_push(message))
+
+    async def _start_live_voice_product_composition(self) -> None:
+        """Construct central registrations only behind the explicit master flag."""
+
+        if self._live_voice_product_composition is not None:
+            return
+        # Keep the feature-off path before importing the registry module or
+        # invoking any factory. This is the process-level zero-allocation gate.
+        enabled = str(
+            os.getenv("JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED") or ""
+        ).strip().lower() in {"1", "true", "yes", "on"}
+        if not enabled:
+            logger.info("[LiveVoiceProduct] central composition disabled")
+            return
+        registry: Any = None
+        try:
+            from jiuwenswarm.server.live_voice.product_composition_registry import (
+                create_product_composition_registry_from_environment,
+            )
+
+            registry = create_product_composition_registry_from_environment(
+                p3_composition=self._live_voice_p3_composition,
+                agent_manager=self._agent_manager,
+                push_text_event=self._push_live_voice_product_text_event,
+            )
+            if registry is None:
+                logger.info("[LiveVoiceProduct] central composition disabled")
+                return
+            self._live_voice_product_composition = registry
+            logger.info(
+                "[LiveVoiceProduct] central composition registered; "
+                "p2=%s p3_text=%s",
+                registry.p2_enabled,
+                registry.p3_text_enabled,
+            )
+        except Exception as exc:  # noqa: BLE001 -- server and legacy routes survive
+            logger.exception(
+                "[LiveVoiceProduct] central registration failed closed: %s", exc
+            )
+            if registry is not None:
+                try:
+                    await registry.stop()
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "[LiveVoiceProduct] failed registry cleanup failed"
+                    )
+            self._live_voice_product_composition = None
+
+    async def _stop_live_voice_product_composition(self) -> bool:
+        registry = self._live_voice_product_composition
+        if registry is None:
+            return True
+        try:
+            await registry.stop()
+        except Exception as exc:  # noqa: BLE001 -- continue owner shutdown
+            logger.warning("[LiveVoiceProduct] shutdown cleanup pending: %s", exc)
+            return False
+        if self._live_voice_product_composition is registry:
+            self._live_voice_product_composition = None
+        return True
+
     def _set_scheduler_agent(self, agent: Any) -> None:
         """Pin the facade whose DeepAgent is retained by the scheduler."""
         previous = getattr(self, "_scheduler_agent", None)
@@ -1312,7 +1384,15 @@ class AgentWebSocketServer:
             await self._server.wait_closed()
             self._server = None
 
-        await self._stop_live_voice_p3_composition()
+        # Product leases consume the authenticated P3 Core/Store and must
+        # detach before that lower owner closes.
+        product_stopped = await self._stop_live_voice_product_composition()
+        if product_stopped:
+            await self._stop_live_voice_p3_composition()
+        else:
+            logger.warning(
+                "[LiveVoiceProduct] retaining P3 owner until product cleanup retries"
+            )
 
         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
             cancel_pending_tasks,
@@ -1383,6 +1463,14 @@ class AgentWebSocketServer:
             for task in connection_tasks:
                 if not task.done():
                     task.cancel()
+            registry = getattr(self, "_live_voice_product_composition", None)
+            if registry is not None:
+                try:
+                    await registry.close_active_routes()
+                except Exception:
+                    logger.exception(
+                        "[LiveVoiceProduct] Gateway disconnect cleanup pending"
+                    )
             # Gateway 进程退出/端口关闭时，必须先取消各 session 内流式生产者（SessionManager）
             # 并中止 DeepAgent 内层循环；否则仅等待 _handle_message 任务结束会一直阻塞到任务自然完成。
             try:
@@ -1670,6 +1758,16 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_TASK_EVENTS,
             }:
                 await self._handle_live_voice_p3_request(ws, request, send_lock)
+                return
+            if request.req_method in {
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_CLOSE,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE,
+            }:
+                await self._handle_live_voice_product_request(
+                    ws, request, send_lock
+                )
                 return
             if request.req_method == ReqMethod.ISSUE_WATCH_ONCE:
                 await self._handle_schedule_request(ws, request, send_lock, "issue_watch_once")
@@ -7335,7 +7433,7 @@ class AgentWebSocketServer:
         async with send_lock:
             await send_wire_payload(ws, wire)
 
-    async def send_push(self, msg) -> None:
+    async def send_push(self, msg) -> bool:
         """AgentServer 主动向 Gateway 推送消息。
 
         payload 格式与 AgentResponse.payload 一致，
@@ -7345,8 +7443,9 @@ class AgentWebSocketServer:
             logger.warning(
                 "[AgentWebSocketServer] send_push 失败: 无活跃 Gateway 连接"
             )
-            return
+            return False
 
+        delivered = False
         try:
             wire = build_server_push_wire(msg)
             async with self._current_send_lock:
@@ -7356,7 +7455,8 @@ class AgentWebSocketServer:
                     "[AgentWebSocketServer] send_push 内容过大已降级为错误帧: channel_id=%s",
                     msg.get("channel_id", ""),
                 )
-                return
+                return False
+            delivered = True
             response_kind = str(msg.get("response_kind") or "").strip()
             if response_kind:
                 logger.info(
@@ -7371,6 +7471,8 @@ class AgentWebSocketServer:
                 )
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
+
+        return delivered
 
     def get_agent(self):
         """获取 default agent 实例（向后兼容）."""
@@ -8287,12 +8389,95 @@ class AgentWebSocketServer:
                 for key, value in (request.params or {}).items()
                 if key not in {"mode", "agent_type", "agent_ref"}
             }
-            result = await composition.handle(
-                operation=operation,
-                params=formal_params,
-                request_id=request.request_id,
-                session_id=request.session_id,
-            )
+            registry = getattr(self, "_live_voice_product_composition", None)
+            if (
+                registry is not None
+                and registry.p3_text_enabled
+                and operation in {"task.get", "task.list", "task.status", "task.events"}
+            ):
+                result = await registry.handle_p3_query(
+                    operation=operation,
+                    params=formal_params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            else:
+                result = await composition.handle(
+                    operation=operation,
+                    params=formal_params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            result_ok = result.ok
+            payload = result.payload
+        response = AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=result_ok,
+            payload=payload,
+            agent_ref=request.agent_ref,
+        )
+        wire = encode_agent_response_for_wire(
+            response,
+            response_id=request.request_id,
+        )
+        async with send_lock:
+            await send_wire_payload(ws, wire)
+
+    async def _handle_live_voice_product_request(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Dispatch only the default-off central P2/P3 lifecycle methods."""
+
+        registry = getattr(self, "_live_voice_product_composition", None)
+        if registry is None:
+            result_ok = False
+            payload: dict[str, object] = {
+                "request_id": request.request_id,
+                "ok": False,
+                "result": None,
+                "error": {
+                    "code": "UNAVAILABLE",
+                    "reason": "PRODUCT_COMPOSITION_DISABLED",
+                    "message": "Live Voice product composition is unavailable",
+                },
+            }
+        else:
+            params = {
+                key: value
+                for key, value in (request.params or {}).items()
+                if key not in {"mode", "agent_type", "agent_ref"}
+            }
+            method = request.req_method
+            if method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE:
+                result = await registry.handle_p2_activate(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    channel_id=request.channel_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_CLOSE:
+                result = await registry.handle_p2_close(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE:
+                result = await registry.handle_p3_progress_activate(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    channel_id=request.channel_id,
+                )
+            else:
+                result = await registry.handle_p3_progress_close(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
             result_ok = result.ok
             payload = result.payload
         response = AgentResponse(

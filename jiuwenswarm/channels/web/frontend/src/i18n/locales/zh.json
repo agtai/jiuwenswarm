@@ -2121,6 +2121,16 @@
         "network": "网络",
         "aio": "AIO foundation（尚未接入路线）",
         "errors": "诊断限制"
+      },
+      "progress": {
+        "title": "已认证的任务文本进度",
+        "disclosure": "这是绑定到当前 Session 的 Task Core 文本/UI 投影；它不是语音进度，也不是 Integrated Gate 证据。",
+        "task": "任务 ID",
+        "state": "观测状态",
+        "correlation": "Authority 关联 ID",
+        "generation": "来源 generation",
+        "sequence": "持久事件序号",
+        "evidence": "绑定证据"
       }
     },
     "task": {

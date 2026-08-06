@@ -116,3 +116,8 @@
 .live-voice-integrated__diagnostic-error {
   color: var(--color-text-secondary);
 }
+
+.live-voice-integrated__progress-note {
+  color: var(--color-text-secondary);
+  line-height: 1.4;
+}

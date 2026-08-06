@@ -8,7 +8,13 @@ import {
   type IntegratedWebRouteManifest,
   type IntegratedWebRouteSelection,
 } from '../../features/live-voice/formal/integratedWebRouteShell';
+import {
+  PRODUCT_TEXT_PROGRESS_EVENT,
+  adoptProductTextProgressEvent,
+  type ProductTextProgressEvent,
+} from '../../features/live-voice/formal/productTextProgress';
 import { WebPlatformDiagnosticsMonitor, type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
+import { webClient } from '../../services/webClient';
 import './LiveVoiceIntegratedRoutePanel.css';
 
 export interface LiveVoiceIntegratedRoutePanelProps {
@@ -63,6 +69,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const reactId = useId();
   const correlationId = useMemo(() => `integrated-web-${reactId.replace(/[^A-Za-z0-9_-]/g, '') || 'route'}`, [reactId]);
   const [platform, setPlatform] = useState<Readonly<WebPlatformDiagnosticsSnapshot> | null>(null);
+  const [progress, setProgress] = useState<Readonly<ProductTextProgressEvent> | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
   const manifest = useMemo(
     () => createManifest(props, correlationId, new Date().toISOString()),
@@ -82,16 +89,32 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     };
   }, []);
 
-  return <LiveVoiceIntegratedRoutePanelView manifest={manifest} platform={platform} onRefresh={() => void monitorRef.current?.refresh()} />;
+  useEffect(() => {
+    setProgress(null);
+    if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || !props.activeSessionId) return;
+    return webClient.on(PRODUCT_TEXT_PROGRESS_EVENT, ({ payload }) => {
+      setProgress(current => adoptProductTextProgressEvent(current, payload, props.activeSessionId));
+    });
+  }, [props.activeSessionId]);
+
+  return (
+    <LiveVoiceIntegratedRoutePanelView
+      manifest={manifest}
+      platform={platform}
+      progress={progress}
+      onRefresh={() => void monitorRef.current?.refresh()}
+    />
+  );
 }
 
 export interface LiveVoiceIntegratedRoutePanelViewProps {
   manifest: Readonly<IntegratedWebRouteManifest>;
   platform: Readonly<WebPlatformDiagnosticsSnapshot> | null;
+  progress?: Readonly<ProductTextProgressEvent> | null;
   onRefresh: () => void;
 }
 
-export function LiveVoiceIntegratedRoutePanelView({ manifest, platform, onRefresh }: LiveVoiceIntegratedRoutePanelViewProps) {
+export function LiveVoiceIntegratedRoutePanelView({ manifest, platform, progress = null, onRefresh }: LiveVoiceIntegratedRoutePanelViewProps) {
   const { t } = useTranslation();
 
   const compositionLabel = t(`liveVoice.integrated.composition.${manifest.composition_state}`);
@@ -142,6 +165,30 @@ export function LiveVoiceIntegratedRoutePanelView({ manifest, platform, onRefres
             ))}
           </div>
         </div>
+
+        {progress && (
+          <div
+            className="live-voice-integrated__section"
+            aria-label={t('liveVoice.integrated.progress.title')}
+            data-testid="live-voice-integrated-product-progress"
+          >
+            <strong>{t('liveVoice.integrated.progress.title')}</strong>
+            <span className="live-voice-integrated__progress-note">
+              {t('liveVoice.integrated.progress.disclosure')}
+            </span>
+            <div className="live-voice-integrated__facts" aria-live="polite">
+              <DiagnosticsFact label={t('liveVoice.integrated.progress.task')} value={progress.task_id} />
+              <DiagnosticsFact label={t('liveVoice.integrated.progress.state')} value={progress.state} />
+              <DiagnosticsFact label={t('liveVoice.integrated.progress.correlation')} value={progress.correlation_id} />
+              <DiagnosticsFact
+                label={t('liveVoice.integrated.progress.generation')}
+                value={`${progress.generation_kind}:${progress.generation_id}:${progress.generation}`}
+              />
+              <DiagnosticsFact label={t('liveVoice.integrated.progress.sequence')} value={String(progress.source_event.seq)} />
+              <DiagnosticsFact label={t('liveVoice.integrated.progress.evidence')} value={progress.evidence_id} />
+            </div>
+          </div>
+        )}
 
         <div className="live-voice-integrated__section" aria-label={t('liveVoice.integrated.platform')}>
           <span className="live-voice-integrated__section-heading">

@@ -12,8 +12,9 @@ import {
   IntegratedWebRouteShell,
   createCurrentIntegratedWebRouteSelection,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/integratedWebRouteShell.js';
+import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
-async function renderPanel({ sessionId = 'persisted-session', platform = null } = {}) {
+async function renderPanel({ sessionId = 'persisted-session', platform = null, progress = null } = {}) {
   const translations = JSON.parse(await readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8'));
   const i18n = i18next.createInstance();
   await i18n.init({
@@ -45,6 +46,7 @@ async function renderPanel({ sessionId = 'persisted-session', platform = null } 
       React.createElement(LiveVoiceIntegratedRoutePanelView, {
         manifest,
         platform,
+        progress,
         onRefresh: () => {},
       })
     )
@@ -68,6 +70,65 @@ test('route panel renders three truthful predecessor classes and the non-success
   assert.equal(html.includes('physical audio being heard'), true);
   assert.equal(html.includes('task completion'), true);
   assert.equal(html.includes('Gate pass'), true);
+});
+
+test('route panel renders only a validated authenticated text progress fact', async () => {
+  const progress = parseProductTextProgressEvent({
+    event_type: 'live_voice.task.progress',
+    session_id: 'persisted-session',
+    task_id: 'task-product-1',
+    project_id: 'project-1',
+    correlation_id: 'correlation-product-1',
+    origin_id: 'web-surface-1',
+    generation_kind: 'web_task_progress_generation',
+    generation_id: 'web-generation-1',
+    generation: 2,
+    evidence_id: 'evidence-product-1',
+    source_event: {
+      event_id: 'source-product-1',
+      event_type: 'task.running',
+      seq: 11,
+      correlation_id: 'correlation-product-1',
+      causation_id: 'cause-product-1',
+      stream_ref: { kind: 'task', id: 'task-product-1' },
+      scope: {
+        subject_id: 'principal-1',
+        session_id: 'persisted-session',
+        project_id: 'project-1',
+        assurance: 'authenticated',
+      },
+      payload: { state: 'running' },
+    },
+    progress_event: {
+      event_id: 'progress-product-1',
+      event_type: 'work.progress',
+      seq: 11,
+      correlation_id: 'correlation-product-1',
+      causation_id: 'source-product-1',
+      stream_ref: { kind: 'task', id: 'task-product-1' },
+      scope: {
+        subject_id: 'principal-1',
+        session_id: 'persisted-session',
+        project_id: 'project-1',
+        assurance: 'authenticated',
+      },
+      payload: {
+        work_ref: { kind: 'task', id: 'task-product-1' },
+        seq: 11,
+        state: 'running',
+      },
+    },
+  });
+  assert.notEqual(progress, null);
+
+  const html = await renderPanel({ progress });
+
+  assert.equal(html.includes('data-testid="live-voice-integrated-product-progress"'), true);
+  assert.equal(html.includes('Authenticated task text progress'), true);
+  assert.equal(html.includes('task-product-1'), true);
+  assert.equal(html.includes('correlation-product-1'), true);
+  assert.equal(html.includes('web_task_progress_generation:web-generation-1:2'), true);
+  assert.equal(html.includes('It is not voice progress or Integrated Gate evidence.'), true);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {

@@ -717,7 +717,23 @@ class TaskProgressReturnBridge:
                     name=f"live-voice-task-progress-close:{self._binding.task_id}",
                 )
             close_task = self._close_task
-        await asyncio.shield(close_task)
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            # A cancelled waiter must not disturb cleanup that is still running.
+            # If the owned task itself was cancelled, release the retry slot.
+            if close_task.done():
+                async with self._lifecycle_lock:
+                    if self._close_task is close_task:
+                        self._close_task = None
+            raise
+        except Exception:
+            # Source detach can fail transiently. Preserve DETACHING truth while
+            # allowing the exact lease owner to retry the same cleanup.
+            async with self._lifecycle_lock:
+                if self._close_task is close_task:
+                    self._close_task = None
+            raise
 
     async def drain_voice(self) -> int:
         current_loop = asyncio.get_running_loop()

@@ -2123,6 +2123,16 @@
         "network": "Network",
         "aio": "AIO foundation (not route-wired)",
         "errors": "Diagnostic limitations"
+      },
+      "progress": {
+        "title": "Authenticated task text progress",
+        "disclosure": "This is a session-bound text/UI projection from Task Core. It is not voice progress or Integrated Gate evidence.",
+        "task": "Task ID",
+        "state": "Observed state",
+        "correlation": "Authority correlation",
+        "generation": "Origin generation",
+        "sequence": "Persistent event sequence",
+        "evidence": "Binding evidence"
       }
     },
     "task": {

@@ -11,6 +11,7 @@ assert a principal, project, scope, authorization grant, or ContextRef.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import math
@@ -29,6 +30,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     InputCommitState,
     QueryEnvelope,
+    ResultEnvelope,
     ScopeRef,
 )
 from jiuwenswarm.common.utils import get_user_workspace_dir
@@ -49,10 +51,17 @@ from .p3_confirmation import (
     p3_confirmation_intent_fingerprint,
 )
 from .p3_model_resolution import P3ModelResolver, ResolvedP3Model
+from .product_authority import (
+    AuthorityResourceBinding,
+    TrustedAuthorityCandidate,
+)
+from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
     ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
+from .task_event_subscription import TaskEventSubscription
+from .task_progress_return import TaskProgressOriginBinding
 from .task_store import SqliteTaskStore
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
@@ -76,6 +85,9 @@ _PROJECTS_ENV = "JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS"
 _EXPIRY_ENV = "JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT"
 _DATABASE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_DATABASE"
 _RECONCILE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS"
+_PRODUCT_COMPOSITION_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
+_PRODUCT_P2_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
+_PRODUCT_P2_OPERATION = "agent.chat"
 
 
 def _parse_utc(value: str, field_name: str) -> datetime:
@@ -747,6 +759,204 @@ class P3AuthenticatedComposition:
     def mutation_authority_ready(self) -> bool:
         return self._confirmation_verifier is not None
 
+    def resolve_product_authority_candidate(
+        self,
+        *,
+        bearer_token: object,
+        operation: str,
+        session_id: str,
+        correlation_id: str,
+        required_capabilities: frozenset[str],
+        task_id: str | None = None,
+    ) -> tuple[TrustedAuthorityCandidate, ResolvedTaskContext]:
+        """Authenticate and resolve one product-composition candidate.
+
+        This is the only production bridge from the Alpha bearer gate and the
+        server-owned Session/Project registry into ``ProductAuthorityService``.
+        The returned candidate is still validated and narrowed by that service;
+        browser fields remain comparison inputs and never become grants.
+        """
+
+        if not self._accepting:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_ROUTE_DISABLED",
+                "formal task route is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if operation not in P3_OPERATIONS | {_PRODUCT_P2_OPERATION}:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "formal product operation is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if required_capabilities != frozenset({operation}):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "formal product capability is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        targeted = operation in {"task.get", "task.status", "task.events"}
+        if targeted != bool(task_id):
+            raise FormalTaskViolation(
+                "INVALID_P3_ROUTE_ARGUMENT",
+                "formal product target is incomplete",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+        now = self._clock()
+        principal = self._authenticator.authenticate(
+            bearer_token,
+            operation=operation,
+            now=now,
+        )
+        authority = self._authority_resolver.resolve(
+            principal,
+            session_id=session_id,
+            now=now,
+            require_clean=False,
+        )
+        authority.context.require_usable(
+            scope=authority.scope,
+            required_permissions=(
+                frozenset({"task.execute", "project.write"})
+                if operation == _PRODUCT_P2_OPERATION
+                else frozenset()
+            ),
+            destructive=False,
+            now=now,
+        )
+        if targeted:
+            self._require_exact_task_context(
+                authority=authority,
+                operation=operation,
+                task_id=str(task_id),
+                now=now,
+            )
+        elif operation == "task.list":
+            self._require_list_task_contexts(authority=authority, now=now)
+
+        resource = (
+            None
+            if task_id is None
+            else AuthorityResourceBinding(
+                kind="task",
+                resource_id=task_id,
+                fingerprint_sha256=hashlib.sha256(
+                    task_id.encode("utf-8")
+                ).hexdigest(),
+            )
+        )
+        return (
+            TrustedAuthorityCandidate(
+                principal_id=principal.principal_id,
+                session_id=authority.scope.session_id or "",
+                project_id=authority.scope.project_id,
+                scope=authority.scope,
+                allowed_operations=frozenset({operation}),
+                allowed_capabilities=required_capabilities,
+                expires_at=principal.expires_at,
+                assurance=Assurance.AUTHENTICATED,
+                source="agent_server.product_composition",
+                correlation_id=correlation_id,
+                resource=resource,
+            ),
+            authority.context,
+        )
+
+    def query(
+        self,
+        query: ProductP3AuthorizedQuery,
+        *,
+        now: str | None = None,
+    ) -> ResultEnvelope:
+        """Revalidate one prepared product query before entering Task Core."""
+
+        if not self._accepting or not isinstance(query, ProductP3AuthorizedQuery):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_ROUTE_DISABLED",
+                "formal task route is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        observed_at = now or self._clock()
+        canonical = query.authority.authority
+        principal = AuthenticatedPrincipal(
+            principal_id=canonical.principal_id,
+            allowed_project_ids=(
+                frozenset()
+                if canonical.project_id is None
+                else frozenset({canonical.project_id})
+            ),
+            allowed_operations=frozenset({canonical.operation}),
+            expires_at=canonical.expires_at,
+        )
+        current = self._authority_resolver.resolve(
+            principal,
+            session_id=canonical.session_id,
+            now=observed_at,
+            require_clean=False,
+        )
+        if current.scope != canonical.scope:
+            raise FormalTaskViolation(
+                "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+                "formal task context no longer matches the authenticated project",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        operation = canonical.operation
+        target_task_id = query.authorization.target_task_id
+        if operation in {"task.get", "task.status", "task.events"}:
+            self._require_exact_task_context(
+                authority=current,
+                operation=operation,
+                task_id=str(target_task_id or ""),
+                now=observed_at,
+            )
+        elif operation == "task.list":
+            self._require_list_task_contexts(authority=current, now=observed_at)
+        else:
+            raise FormalTaskViolation(
+                "UNSUPPORTED_FORMAL_TASK_INTENT",
+                "formal task operation is unsupported",
+                ErrorCode.UNSUPPORTED,
+            )
+        return self._core.query(
+            query.envelope,
+            query.authorization,
+            now=observed_at,
+        )
+
+    def create_product_subscription(
+        self,
+        authorization: TaskAuthorizationGrant,
+        binding: TaskProgressOriginBinding,
+    ) -> TaskEventSubscription:
+        """Create one live-only exact-task reader for text/UI projection."""
+
+        if not self._accepting:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_ROUTE_DISABLED",
+                "formal task route is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            not isinstance(authorization, TaskAuthorizationGrant)
+            or not isinstance(binding, TaskProgressOriginBinding)
+            or authorization.scope != binding.scope
+            or authorization.operation != "task.events"
+            or authorization.target_task_id != binding.task_id
+        ):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "formal task subscription binding is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return TaskEventSubscription(
+            source=self._core.store,
+            authorization=authorization,
+            scope=binding.scope,
+            task_id=binding.task_id,
+            enabled=True,
+        )
+
     async def start(self) -> dict[str, int]:
         async with self._lifecycle_lock:
             if self._accepting:
@@ -1363,7 +1573,12 @@ def create_p3_composition_from_environment(
     principal = AuthenticatedPrincipal(
         principal_id=principal_id,
         allowed_project_ids=project_ids,
-        allowed_operations=P3_OPERATIONS,
+        allowed_operations=(
+            P3_OPERATIONS | {_PRODUCT_P2_OPERATION}
+            if _is_enabled(os.getenv(_PRODUCT_COMPOSITION_ENV))
+            and _is_enabled(os.getenv(_PRODUCT_P2_ENV))
+            else P3_OPERATIONS
+        ),
         expires_at=expires_at,
     )
     authenticator = StaticBearerAuthenticator(token=token, principal=principal)
