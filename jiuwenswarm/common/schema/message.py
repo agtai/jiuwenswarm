@@ -225,6 +225,9 @@ class ReqMethod(Enum):
     LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE = (
         "live_voice.composition.p3.progress.close"
     )
+    LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK = (
+        "live_voice.composition.p3.progress.ack"
+    )
 
     ISSUE_WATCH_ONCE = "issue.watch_once"
     ISSUE_STATE_LIST = "issue.state.list"

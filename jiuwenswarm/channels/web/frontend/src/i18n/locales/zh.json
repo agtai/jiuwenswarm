@@ -2101,6 +2101,10 @@
       "contract": "契约版本",
       "wiring": "适配器状态",
       "reason": "安全原因",
+      "activation": {
+        "status": "产品激活 lease",
+        "scope": "路由 / generation"
+      },
       "composition": {
         "flag_off": "flag 已关闭",
         "shell_only": "仅组合 shell",
@@ -2130,7 +2134,9 @@
         "correlation": "Authority 关联 ID",
         "generation": "来源 generation",
         "sequence": "持久事件序号",
-        "evidence": "绑定证据"
+        "evidence": "绑定证据",
+        "delivery": "Web 投递 ID",
+        "ack": "UI 消费确认"
       }
     },
     "task": {

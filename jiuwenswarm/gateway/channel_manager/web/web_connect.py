@@ -91,6 +91,7 @@ _WEB_FULL_PAYLOAD_EVENT_TYPES = frozenset(
         "runtime.accepted",
         "execution.error",
         "proactive_recommendation",
+        "live_voice.task.progress",
     }
 )
 

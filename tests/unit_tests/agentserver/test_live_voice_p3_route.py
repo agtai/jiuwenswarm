@@ -84,6 +84,12 @@ class _ProductRegistry:
         self.calls.append(("progress.close", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"closed": True}})
 
+    async def handle_p3_progress_ack(self, **kwargs):
+        self.calls.append(("progress.ack", kwargs))
+        return P3RouteResult(
+            True, {"ok": True, "result": {"status": "acknowledged"}}
+        )
+
     async def stop(self) -> None:
         self.stop_calls += 1
         if self.stop_failures:
@@ -184,6 +190,7 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
         "live_voice.composition.p2.close",
         "live_voice.composition.p3.progress.activate",
         "live_voice.composition.p3.progress.close",
+        "live_voice.composition.p3.progress.ack",
     }
     assert methods <= _FORWARD_REQ_METHODS
     assert methods <= _FORWARD_NO_LOCAL_HANDLER_METHODS
@@ -353,6 +360,47 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
                     "correlation_id": "correlation-1",
                 },
                 "request_id": "request-p2",
+                "session_id": "session-1",
+                "channel_id": "web",
+            },
+        )
+    ]
+    assert json.loads(ws.sent[0])["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
+    registry = _ProductRegistry()
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    ws = _WebSocket()
+    request = AgentRequest(
+        request_id="request-progress-ack",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "task_id": "task-1",
+            "delivery_id": "delivery-1",
+            "mode": "agent",
+        },
+    )
+
+    await server._handle_live_voice_product_request(ws, request, asyncio.Lock())
+
+    assert registry.calls == [
+        (
+            "progress.ack",
+            {
+                "params": {
+                    "auth_token": "opaque",
+                    "session_id": "session-1",
+                    "task_id": "task-1",
+                    "delivery_id": "delivery-1",
+                },
+                "request_id": "request-progress-ack",
                 "session_id": "session-1",
                 "channel_id": "web",
             },

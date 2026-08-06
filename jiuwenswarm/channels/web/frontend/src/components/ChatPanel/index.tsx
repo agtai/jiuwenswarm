@@ -1037,14 +1037,6 @@ export function ChatPanel({
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
                 {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
-                {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
-                  <LiveVoiceIntegratedRoutePanel
-                    activeSessionId={activeSessionId}
-                    isConnected={isConnected}
-                    agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
-                    taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
-                  />
-                )}
                 <InputArea
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
@@ -1072,6 +1064,15 @@ export function ChatPanel({
         </div>
       </div>
 
+      {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
+        <LiveVoiceIntegratedRoutePanel
+          activeSessionId={activeSessionId}
+          isConnected={isConnected}
+          agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
+          taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
+        />
+      )}
+
       {hasConversation && (
         <div className="chat-compose">
           <ActiveTeamGroupEntry isProcessing={isProcessing} teamAreaExpanded={teamAreaExpanded} />
@@ -1082,14 +1083,6 @@ export function ChatPanel({
             <GoalBar onSetGoal={onSetGoal} onPauseGoal={onPauseGoal} onResumeGoal={onResumeGoal} onClearGoal={onClearGoal} />
           )}
           {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
-          {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
-            <LiveVoiceIntegratedRoutePanel
-              activeSessionId={activeSessionId}
-              isConnected={isConnected}
-              agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
-              taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
-            />
-          )}
           <InputArea
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}

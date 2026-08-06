@@ -80,6 +80,24 @@ logger = logging.getLogger("jiuwenswarm.gateway")
 # Keep gateway idle-finalize fallback aligned with ACP channel default.
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
+_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED"
+)
+_LIVE_VOICE_P3_AUTH_TOKEN_ENV = "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN"
+_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_METHODS = frozenset(
+    {
+        "live_voice.task.get",
+        "live_voice.task.list",
+        "live_voice.task.status",
+        "live_voice.task.events",
+        "live_voice.composition.p2.activate",
+        "live_voice.composition.p2.close",
+        "live_voice.composition.p3.progress.activate",
+        "live_voice.composition.p3.progress.close",
+        "live_voice.composition.p3.progress.ack",
+    }
+)
+
 # IM 平台官方 API 域名（仅作为 config.yaml 缺字段时的加载兜底，不在 Config 类里硬编码）
 _FEISHU_DEFAULT_API_BASE = "https://open.feishu.cn"
 _DINGTALK_DEFAULT_API_BASE = "https://api.dingtalk.com"    # 新版 v1.0 接口域名
@@ -131,6 +149,38 @@ def _normalize_gateway_message(msg):
         metadata=msg.metadata,
         user_id=getattr(msg, "user_id", None),
     )
+
+
+def _inject_live_voice_web_alpha_credential(msg: Message) -> None:
+    """Keep the bounded Alpha bearer server-side on the stock Web route.
+
+    The browser never supplies or receives the static P3 bearer.  When the
+    explicit Gateway credential-owner flag is enabled, a Web request for a
+    formal Live Voice task/composition method receives the process-owned
+    credential immediately before E2A forwarding.  A client-provided value is
+    always replaced; a missing server credential therefore fails closed at the
+    existing AgentServer authenticator.
+    """
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    is_live_voice_formal = method.startswith("live_voice.task.") or method.startswith(
+        "live_voice.composition."
+    )
+    if msg.channel_id != "web" or not is_live_voice_formal:
+        return
+    params = dict(msg.params or {})
+    params.pop("auth_token", None)
+    if (
+        method in _LIVE_VOICE_WEB_ALPHA_CREDENTIAL_METHODS
+        and str(os.getenv(_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENV) or "")
+        .strip()
+        .lower()
+        in {"1", "true", "yes", "on"}
+    ):
+        token = str(os.getenv(_LIVE_VOICE_P3_AUTH_TOKEN_ENV) or "")
+        if token:
+            params["auth_token"] = token
+    msg.params = params
 
 
 async def _normalize_and_forward_message(msg, channel_manager) -> bool:
@@ -1717,6 +1767,7 @@ async def _run(
             if method_val not in forward_methods:
                 return False
             normalized = _normalize_gateway_message(msg)
+            _inject_live_voice_web_alpha_credential(normalized)
             # session.create 主路径注入 work_mode 归一化(与 fallback _session_create
             # 共用同一 helper resolve_session_work_mode_params,保持主路径/fallback 一致):
             # 成功时写回归一化后的 project_id/project_dir/work_mode 到 params,

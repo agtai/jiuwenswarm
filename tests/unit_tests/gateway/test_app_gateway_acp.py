@@ -10,6 +10,7 @@ from jiuwenswarm.gateway.app_gateway import (
     GatewayServer,
     GatewayServerConfig,
     RouteConfig,
+    _inject_live_voice_web_alpha_credential,
     _normalize_gateway_message,
 )
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
@@ -168,6 +169,96 @@ def test_normalize_gateway_message_preserves_user_id():
 
     assert normalized.user_id == "testuser"
     assert normalized.is_stream is True
+
+
+def test_live_voice_web_alpha_credential_owner_is_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", raising=False)
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "server-secret")
+    msg = Message(
+        id="req-product-off",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert "auth_token" not in msg.params
+    assert msg.params["session_id"] == "session-1"
+
+
+def test_live_voice_web_alpha_credential_owner_replaces_client_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", "true")
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "server-secret")
+    msg = Message(
+        id="req-product-on",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert msg.params["auth_token"] == "server-secret"
+
+
+def test_live_voice_web_alpha_credential_owner_fails_closed_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", "1")
+    monkeypatch.delenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", raising=False)
+    msg = Message(
+        id="req-product-missing",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_TASK_LIST,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert "auth_token" not in msg.params
+
+
+@pytest.mark.parametrize(
+    "method",
+    [ReqMethod.LIVE_VOICE_TASK_CREATE, ReqMethod.LIVE_VOICE_TASK_CANCEL],
+)
+def test_live_voice_web_alpha_credential_owner_never_enables_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    method: ReqMethod,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", "true")
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "server-secret")
+    msg = Message(
+        id="req-product-mutation",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=method,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert "auth_token" not in msg.params
 
 
 @pytest.mark.asyncio

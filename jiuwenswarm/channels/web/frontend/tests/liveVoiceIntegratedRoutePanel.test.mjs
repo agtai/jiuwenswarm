@@ -7,7 +7,11 @@ import React from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { LiveVoiceIntegratedRoutePanelView } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+import {
+  LiveVoiceIntegratedRoutePanelView,
+  isCurrentProgressOwner,
+  progressMatchesOwnedBinding,
+} from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import {
   IntegratedWebRouteShell,
   createCurrentIntegratedWebRouteSelection,
@@ -75,6 +79,7 @@ test('route panel renders three truthful predecessor classes and the non-success
 test('route panel renders only a validated authenticated text progress fact', async () => {
   const progress = parseProductTextProgressEvent({
     event_type: 'live_voice.task.progress',
+    delivery_id: 'delivery-product-1',
     session_id: 'persisted-session',
     task_id: 'task-product-1',
     project_id: 'project-1',
@@ -127,8 +132,100 @@ test('route panel renders only a validated authenticated text progress fact', as
   assert.equal(html.includes('Authenticated task text progress'), true);
   assert.equal(html.includes('task-product-1'), true);
   assert.equal(html.includes('correlation-product-1'), true);
+  assert.equal(html.includes('delivery-product-1'), true);
   assert.equal(html.includes('web_task_progress_generation:web-generation-1:2'), true);
   assert.equal(html.includes('It is not voice progress or Integrated Gate evidence.'), true);
+});
+
+test('browser progress consumption is fenced to the exact owned P3 binding', () => {
+  const event = {
+    session_id: 'session-1',
+    task_id: 'task-1',
+    correlation_id: 'correlation-1',
+    origin_id: 'origin-1',
+    generation_id: 'generation-1',
+    generation: 3,
+  };
+  const binding = { ...event };
+
+  assert.equal(progressMatchesOwnedBinding(event, binding, 'session-1'), true);
+  for (const [field, value] of [
+    ['session_id', 'wrong-session'],
+    ['task_id', 'wrong-task'],
+    ['correlation_id', 'wrong-correlation'],
+    ['origin_id', 'wrong-origin'],
+    ['generation_id', 'wrong-generation-id'],
+    ['generation', 4],
+  ]) {
+    assert.equal(
+      progressMatchesOwnedBinding(
+        { ...event, [field]: value },
+        binding,
+        'session-1'
+      ),
+      false,
+      field
+    );
+  }
+  assert.equal(
+    progressMatchesOwnedBinding(event, binding, 'session-2'),
+    false
+  );
+  assert.equal(progressMatchesOwnedBinding(event, binding, null), false);
+});
+
+test('a delayed prior-session activation cannot own or acknowledge the current session', () => {
+  const sessionAEvent = {
+    session_id: 'session-a',
+    task_id: 'task-a',
+    correlation_id: 'correlation-a',
+    origin_id: 'origin-a',
+    generation_id: 'generation-a',
+    generation: 1,
+  };
+  const delayedSessionABinding = { ...sessionAEvent };
+
+  assert.equal(
+    progressMatchesOwnedBinding(
+      sessionAEvent,
+      delayedSessionABinding,
+      'session-b'
+    ),
+    false
+  );
+  const current = {
+    cancelled: false,
+    owner_epoch: 7,
+    current_owner_epoch: 7,
+    owner_session_id: 'session-a',
+    active_session_id: 'session-a',
+    is_current_owner: true,
+  };
+  assert.equal(isCurrentProgressOwner(current), true);
+  assert.equal(
+    isCurrentProgressOwner({ ...current, active_session_id: 'session-b' }),
+    false
+  );
+  assert.equal(
+    isCurrentProgressOwner({ ...current, current_owner_epoch: 8 }),
+    false
+  );
+  assert.equal(
+    isCurrentProgressOwner({ ...current, is_current_owner: false }),
+    false
+  );
+  assert.equal(isCurrentProgressOwner({ ...current, cancelled: true }), false);
+});
+
+test('ChatPanel retains one integrated route owner across the first-message layout transition', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/index.tsx', import.meta.url), 'utf8');
+  const mounts = source.match(/<LiveVoiceIntegratedRoutePanel\b/g) ?? [];
+  const mountIndex = source.indexOf('<LiveVoiceIntegratedRoutePanel');
+  const conversationComposerIndex = source.indexOf('{hasConversation && (', mountIndex);
+
+  assert.equal(mounts.length, 1);
+  assert.notEqual(mountIndex, -1);
+  assert.equal(conversationComposerIndex > mountIndex, true);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {

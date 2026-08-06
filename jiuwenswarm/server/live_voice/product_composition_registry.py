@@ -103,6 +103,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
         "live_voice.composition.p2.close",
         "live_voice.composition.p3.progress.activate",
         "live_voice.composition.p3.progress.close",
+        "live_voice.composition.p3.progress.ack",
     }
 )
 PRODUCT_P3_QUERY_OPERATIONS = frozenset(
@@ -251,6 +252,12 @@ class _P2Route:
     manifest: ProductCompositionManifest
 
 
+@dataclass(frozen=True, slots=True)
+class _ClosedP2Route:
+    binding: P2InteractionBinding
+    manifest: ProductCompositionManifest
+
+
 @dataclass(slots=True)
 class _ProgressRoute:
     binding: TaskProgressOriginBinding
@@ -262,11 +269,30 @@ class _ProgressRoute:
 
 
 @dataclass(frozen=True, slots=True)
+class _ClosedProgressRoute:
+    binding: TaskProgressOriginBinding
+    channel_id: str
+    manifest: ProductCompositionManifest
+    deliveries: dict[str, _ProgressDelivery]
+
+
+@dataclass(frozen=True, slots=True)
 class _ProgressTarget:
     channel_id: str
     request_id: str
     correlation_id: str
     generation: int
+
+
+@dataclass(slots=True)
+class _ProgressDelivery:
+    delivery_id: str
+    source_event_id: str
+    progress_event_id: str
+    seq: int
+    evidence_id: str
+    delivered: bool = False
+    acknowledged: bool = False
 
 
 def _formal_fact(segment: ProductSegment) -> ProductRouteFact:
@@ -404,6 +430,10 @@ def _server_agent_mode(session_id: str) -> tuple[str, str | None]:
 class AgentServerProductCompositionRegistry:
     """Central default-off registrations and retained route leases."""
 
+    _CLOSED_ROUTE_CAPACITY = 128
+    _PROGRESS_DELIVERY_CAPACITY = 128
+    _PROGRESS_GENERATION_CAPACITY = 128
+
     def __init__(
         self,
         *,
@@ -425,12 +455,19 @@ class AgentServerProductCompositionRegistry:
         self._lock = asyncio.Lock()
         self._stopped = False
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
+        self._closed_p2_routes: dict[tuple[str, str], _ClosedP2Route] = {}
         self._progress_routes: dict[
             tuple[str, str, str, str], _ProgressRoute
+        ] = {}
+        self._closed_progress_routes: dict[
+            tuple[str, str, str, str, int], _ClosedProgressRoute
         ] = {}
         self._progress_generations: dict[tuple[str, str, str, str], int] = {}
         self._progress_targets: dict[
             tuple[str, str, str, str], _ProgressTarget
+        ] = {}
+        self._progress_deliveries: dict[
+            tuple[str, str, str, str], dict[str, _ProgressDelivery]
         ] = {}
         self._pending_p2_agents: dict[tuple[str, str, str, int], Any] = {}
         self._p2_orphan_cleanups: list[_P2FailedCleanupLease] = []
@@ -527,6 +564,125 @@ class AgentServerProductCompositionRegistry:
         ):
             self._root_orphan_cleanups.append(cleanup)
 
+    def _retain_closed_p2_route(
+        self,
+        key: tuple[str, str],
+        route: _ClosedP2Route,
+    ) -> None:
+        if (
+            key not in self._closed_p2_routes
+            and len(self._closed_p2_routes) >= self._CLOSED_ROUTE_CAPACITY
+        ):
+            self._closed_p2_routes.pop(next(iter(self._closed_p2_routes)))
+        self._closed_p2_routes[key] = route
+
+    def _retain_closed_progress_route(
+        self,
+        key: tuple[str, str, str, str, int],
+        route: _ClosedProgressRoute,
+    ) -> None:
+        if (
+            key not in self._closed_progress_routes
+            and len(self._closed_progress_routes) >= self._CLOSED_ROUTE_CAPACITY
+        ):
+            evictable_key = next(
+                (
+                    retained_key
+                    for retained_key, retained in self._closed_progress_routes.items()
+                    if all(
+                        delivery.acknowledged
+                        for delivery in retained.deliveries.values()
+                    )
+                ),
+                None,
+            )
+            if evictable_key is None:
+                raise RuntimeError(
+                    "closed progress route capacity has no safe eviction"
+                )
+            self._closed_progress_routes.pop(evictable_key)
+        self._closed_progress_routes[key] = route
+
+    def _archive_progress_route(
+        self,
+        key: tuple[str, str, str, str],
+        retained: _ProgressRoute,
+    ) -> bool:
+        deliveries = self._progress_deliveries.get(key, {})
+        closed_key = (*key, retained.binding.generation)
+        try:
+            self._retain_closed_progress_route(
+                closed_key,
+                _ClosedProgressRoute(
+                    binding=retained.binding,
+                    channel_id=retained.channel_id,
+                    manifest=retained.manifest,
+                    deliveries=deliveries,
+                ),
+            )
+        except RuntimeError:
+            return False
+        self._progress_routes.pop(key, None)
+        self._progress_targets.pop(key, None)
+        self._progress_deliveries.pop(key, None)
+        return True
+
+    def _admit_progress_generation_key(
+        self,
+        key: tuple[str, str, str, str],
+    ) -> bool:
+        if key in self._progress_generations:
+            return True
+        if len(self._progress_generations) < self._PROGRESS_GENERATION_CAPACITY:
+            return True
+        for retained_key in tuple(self._progress_generations):
+            if retained_key in self._progress_routes:
+                continue
+            closed_keys = tuple(
+                closed_key
+                for closed_key in self._closed_progress_routes
+                if closed_key[:4] == retained_key
+            )
+            if any(
+                not all(
+                    delivery.acknowledged
+                    for delivery in self._closed_progress_routes[closed_key].deliveries.values()
+                )
+                for closed_key in closed_keys
+            ):
+                continue
+            for closed_key in closed_keys:
+                self._closed_progress_routes.pop(closed_key, None)
+            self._progress_generations.pop(retained_key, None)
+            return True
+        return False
+
+    @classmethod
+    def _reserve_progress_delivery(
+        cls,
+        deliveries: dict[str, _ProgressDelivery],
+        delivery: _ProgressDelivery,
+    ) -> _ProgressDelivery:
+        existing = deliveries.get(delivery.delivery_id)
+        if existing is not None:
+            return existing
+        if len(deliveries) >= cls._PROGRESS_DELIVERY_CAPACITY:
+            acknowledged_id = next(
+                (
+                    delivery_id
+                    for delivery_id, retained in deliveries.items()
+                    if retained.acknowledged
+                ),
+                None,
+            )
+            if acknowledged_id is None:
+                raise RuntimeError(
+                    "text progress delivery capacity has no safe eviction"
+                )
+            deliveries.pop(acknowledged_id)
+        deliveries[delivery.delivery_id] = delivery
+        return delivery
+
     async def _emit_text_progress(self, event: TaskProgressTextEvent) -> None:
         binding = event.origin
         key = (
@@ -542,6 +698,47 @@ class AgentServerProductCompositionRegistry:
             or target.generation != binding.generation
         ):
             raise RuntimeError("text progress route is no longer current")
+        source_event = event.source_event.to_dict()
+        progress_event = event.progress_event.to_dict()
+        source_event_id = _required_text(
+            source_event.get("event_id"), "source_event.event_id"
+        )
+        progress_event_id = _required_text(
+            progress_event.get("event_id"), "progress_event.event_id"
+        )
+        seq = source_event.get("seq")
+        if type(seq) is not int or seq < 0 or progress_event.get("seq") != seq:
+            raise RuntimeError("text progress delivery sequence is invalid")
+        delivery_id = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "session_id": binding.session_id,
+                    "task_id": binding.task_id,
+                    "correlation_id": binding.correlation_id,
+                    "origin_id": binding.origin_id,
+                    "generation_id": binding.generation_id,
+                    "generation": binding.generation,
+                    "source_event_id": source_event_id,
+                    "progress_event_id": progress_event_id,
+                    "seq": seq,
+                    "evidence_id": event.evidence_id,
+                }
+            )
+        ).hexdigest()
+        deliveries = self._progress_deliveries.setdefault(key, {})
+        previously_delivered = bool(
+            deliveries.get(delivery_id) and deliveries[delivery_id].delivered
+        )
+        delivery = self._reserve_progress_delivery(
+            deliveries,
+            _ProgressDelivery(
+                delivery_id=delivery_id,
+                source_event_id=source_event_id,
+                progress_event_id=progress_event_id,
+                seq=seq,
+                evidence_id=event.evidence_id,
+            ),
+        )
         delivered = await self._push_text_event(
             {
                 "request_id": target.request_id,
@@ -557,15 +754,19 @@ class AgentServerProductCompositionRegistry:
                     "generation_kind": binding.generation_kind,
                     "generation_id": binding.generation_id,
                     "generation": binding.generation,
-                    "source_event": event.source_event.to_dict(),
-                    "progress_event": event.progress_event.to_dict(),
+                    "delivery_id": delivery_id,
+                    "source_event": source_event,
+                    "progress_event": progress_event,
                     "evidence_id": event.evidence_id,
                 },
                 "is_complete": False,
             }
         )
         if delivered is not True:
+            if not previously_delivered and deliveries.get(delivery_id) is delivery:
+                deliveries.pop(delivery_id, None)
             raise RuntimeError("text progress Web sink is unavailable")
+        delivery.delivered = True
 
     @staticmethod
     async def _reject_voice_progress(_event: object) -> None:
@@ -834,6 +1035,8 @@ class AgentServerProductCompositionRegistry:
                         {
                             "status": "active",
                             "replayed": True,
+                            "session_id": routed_session,
+                            "correlation_id": correlation_id,
                             "interaction_id": interaction_id,
                             "activation_id": activation_id,
                             "activation_generation": generation,
@@ -1030,11 +1233,14 @@ class AgentServerProductCompositionRegistry:
                 lease=activation.lease,
                 manifest=activation.manifest,
             )
+            self._closed_p2_routes.pop(key, None)
             return _success_result(
                 request_id,
                 {
                     "status": "active",
                     "replayed": False,
+                    "session_id": routed_session,
+                    "correlation_id": correlation_id,
                     "interaction_id": binding.interaction_id,
                     "activation_id": binding.activation_id,
                     "activation_generation": binding.activation_generation,
@@ -1123,12 +1329,44 @@ class AgentServerProductCompositionRegistry:
             assert state.canonical is not None
             retained = self._p2_routes.get((routed_session, interaction_id))
             if retained is None:
+                closed = self._closed_p2_routes.get(
+                    (routed_session, interaction_id)
+                )
+                if closed is None:
+                    if authority.lease is not None:
+                        await authority.lease.close()
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P2_ROUTE_NOT_FOUND",
+                        code=ErrorCode.NOT_FOUND,
+                    )
+                if (
+                    closed.binding.correlation_id != correlation_id
+                    or closed.binding.activation_id != activation_id
+                    or closed.binding.activation_generation != generation
+                    or state.canonical.scope != closed.binding.scope
+                ):
+                    if authority.lease is not None:
+                        await authority.lease.close()
+                    return _error_result(
+                        request_id,
+                        reason="ACTIVATION_BINDING_MISMATCH",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
                 if authority.lease is not None:
                     await authority.lease.close()
-                return _error_result(
+                return _success_result(
                     request_id,
-                    reason="PRODUCT_P2_ROUTE_NOT_FOUND",
-                    code=ErrorCode.NOT_FOUND,
+                    {
+                        "status": "closed",
+                        "replayed": True,
+                        "session_id": routed_session,
+                        "correlation_id": correlation_id,
+                        "interaction_id": interaction_id,
+                        "activation_id": activation_id,
+                        "activation_generation": generation,
+                    },
+                    closed.manifest,
                 )
             if (
                 retained.binding.correlation_id != correlation_id
@@ -1160,10 +1398,23 @@ class AgentServerProductCompositionRegistry:
             finally:
                 if authority.lease is not None:
                     await authority.lease.close()
-            self._p2_routes.pop((routed_session, interaction_id), None)
+            key = (routed_session, interaction_id)
+            self._p2_routes.pop(key, None)
+            self._retain_closed_p2_route(
+                key,
+                _ClosedP2Route(retained.binding, retained.manifest),
+            )
             return _success_result(
                 request_id,
-                {"status": "closed", "interaction_id": interaction_id},
+                {
+                    "status": "closed",
+                    "replayed": False,
+                    "session_id": routed_session,
+                    "correlation_id": correlation_id,
+                    "interaction_id": interaction_id,
+                    "activation_id": activation_id,
+                    "activation_generation": generation,
+                },
                 retained.manifest,
             )
 
@@ -1438,8 +1689,58 @@ class AgentServerProductCompositionRegistry:
                 )
             key = (routed_session, task_id, origin_id, generation_id)
             existing = self._progress_routes.get(key)
+            previous_generation = self._progress_generations.get(key)
             state = _AuthorityState()
             preauthorized_authority: ProductSegmentActivation | None = None
+            if (
+                existing is None
+                and previous_generation is not None
+                and generation <= previous_generation
+            ):
+                preauthorized_authority = await self._authority_registration(
+                    state=state,
+                    bearer_token=params.get("auth_token"),
+                    route=route,
+                    operation="task.events",
+                    task_id=task_id,
+                )
+                if (
+                    preauthorized_authority.route_fact.truth
+                    is not ProductRouteTruth.FORMAL
+                ):
+                    return _error_result(
+                        request_id,
+                        reason=state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+                assert state.canonical is not None
+                closed = self._closed_progress_routes.get(
+                    (*key, previous_generation)
+                )
+                if closed is not None and state.canonical.scope != closed.binding.scope:
+                    if preauthorized_authority.lease is not None:
+                        await preauthorized_authority.lease.close()
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_BINDING_MISMATCH",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+                settled_replay = (
+                    closed is not None
+                    and generation == previous_generation
+                    and closed.binding.correlation_id == correlation_id
+                )
+                if preauthorized_authority.lease is not None:
+                    await preauthorized_authority.lease.close()
+                return _error_result(
+                    request_id,
+                    reason=(
+                        "TASK_PROGRESS_ROUTE_SETTLED"
+                        if settled_replay
+                        else "TASK_PROGRESS_STALE_GENERATION"
+                    ),
+                    code=ErrorCode.CONFLICT,
+                )
             if existing is not None:
                 preauthorized_authority = await self._authority_registration(
                     state=state,
@@ -1481,7 +1782,13 @@ class AgentServerProductCompositionRegistry:
                             request_id,
                             reason="TASK_PROGRESS_SETTLED_CLEANUP_PENDING",
                         )
-                    self._progress_targets.pop(key, None)
+                    if not self._archive_progress_route(key, existing):
+                        if preauthorized_authority.lease is not None:
+                            await preauthorized_authority.lease.close()
+                        return _error_result(
+                            request_id,
+                            reason="TASK_PROGRESS_SETTLED_CLEANUP_PENDING",
+                        )
                     if generation <= existing.binding.generation:
                         if preauthorized_authority.lease is not None:
                             await preauthorized_authority.lease.close()
@@ -1490,7 +1797,6 @@ class AgentServerProductCompositionRegistry:
                             reason="TASK_PROGRESS_ROUTE_SETTLED",
                             code=ErrorCode.CONFLICT,
                         )
-                    self._progress_routes.pop(key, None)
                 if (
                     route_is_active
                     and existing.binding.generation == generation
@@ -1503,7 +1809,11 @@ class AgentServerProductCompositionRegistry:
                         {
                             "status": "active",
                             "replayed": True,
+                            "session_id": routed_session,
+                            "correlation_id": correlation_id,
                             "task_id": task_id,
+                            "origin_id": origin_id,
+                            "generation_id": generation_id,
                             "generation": generation,
                         },
                         existing.manifest,
@@ -1526,7 +1836,38 @@ class AgentServerProductCompositionRegistry:
                         request_id,
                         reason="TASK_PROGRESS_REPLACEMENT_CLEANUP_PENDING",
                     )
-                self._progress_routes.pop(key, None)
+                if route_is_active and not self._archive_progress_route(key, existing):
+                    if preauthorized_authority.lease is not None:
+                        await preauthorized_authority.lease.close()
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_REPLACEMENT_CLEANUP_PENDING",
+                    )
+            if preauthorized_authority is None:
+                preauthorized_authority = await self._authority_registration(
+                    state=state,
+                    bearer_token=params.get("auth_token"),
+                    route=route,
+                    operation="task.events",
+                    task_id=task_id,
+                )
+                if (
+                    preauthorized_authority.route_fact.truth
+                    is not ProductRouteTruth.FORMAL
+                ):
+                    return _error_result(
+                        request_id,
+                        reason=state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+            if not self._admit_progress_generation_key(key):
+                if preauthorized_authority is not None:
+                    if preauthorized_authority.lease is not None:
+                        await preauthorized_authority.lease.close()
+                return _error_result(
+                    request_id,
+                    reason="TASK_PROGRESS_ROUTE_CAPACITY_UNAVAILABLE",
+                )
             self._progress_generations[key] = generation
             self._progress_targets[key] = _ProgressTarget(
                 channel_id=channel_id,
@@ -1635,8 +1976,12 @@ class AgentServerProductCompositionRegistry:
                     registrations=registrations,
                 ).activate(ProductCompositionContext(routed_session, correlation_id))
             except ProductCompositionActivationError as exc:
-                self._progress_generations.pop(key, None)
+                if previous_generation is None:
+                    self._progress_generations.pop(key, None)
+                else:
+                    self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
+                self._progress_deliveries.pop(key, None)
                 self._retain_root_cleanup(exc.cleanup_lease)
                 logger.exception("[LiveVoiceProduct] P3 progress failed closed")
                 return _error_result(
@@ -1644,8 +1989,12 @@ class AgentServerProductCompositionRegistry:
                     reason="PRODUCT_P3_PROGRESS_ACTIVATION_FAILED",
                 )
             except Exception:
-                self._progress_generations.pop(key, None)
+                if previous_generation is None:
+                    self._progress_generations.pop(key, None)
+                else:
+                    self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
+                self._progress_deliveries.pop(key, None)
                 logger.exception("[LiveVoiceProduct] P3 progress failed closed")
                 return _error_result(
                     request_id,
@@ -1658,8 +2007,12 @@ class AgentServerProductCompositionRegistry:
                 or not isinstance(progress_lease, TaskProgressReturnLease)
                 or activation.lease is None
             ):
-                self._progress_generations.pop(key, None)
+                if previous_generation is None:
+                    self._progress_generations.pop(key, None)
+                else:
+                    self._progress_generations[key] = previous_generation
                 self._progress_targets.pop(key, None)
+                self._progress_deliveries.pop(key, None)
                 if activation.lease is not None:
                     try:
                         await activation.lease.close()
@@ -1687,6 +2040,8 @@ class AgentServerProductCompositionRegistry:
                 {
                     "status": "active",
                     "replayed": False,
+                    "session_id": routed_session,
+                    "correlation_id": correlation_id,
                     "task_id": task_id,
                     "origin_id": origin_id,
                     "generation_id": generation_id,
@@ -1696,6 +2051,192 @@ class AgentServerProductCompositionRegistry:
                 },
                 activation.manifest,
             )
+
+    async def handle_p3_progress_ack(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        channel_id: str,
+    ) -> P3RouteResult:
+        """Accept an exact Web UI-consumption acknowledgement.
+
+        This acknowledgement proves only that the validated text-progress fact
+        reached the stock Web consumer.  It is not a PresentationAck, history
+        authority, task transition, voice delivery, or proof that a person saw
+        the UI.
+        """
+
+        if not self._settings.p3_text_enabled:
+            return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "task_id",
+                        "correlation_id",
+                        "origin_id",
+                        "generation_id",
+                        "generation",
+                        "delivery_id",
+                        "source_event_id",
+                        "progress_event_id",
+                        "seq",
+                        "evidence_id",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                    }
+                ),
+            )
+            self._ensure_running()
+            routed_session = _required_text(session_id, "routed_session_id")
+            if _required_text(params.get("session_id"), "session_id") != routed_session:
+                raise FormalTaskViolation(
+                    "PRODUCT_COMPOSITION_SESSION_MISMATCH",
+                    "product request does not match its routed session",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            task_id = _required_text(params.get("task_id"), "task_id")
+            correlation_id = _required_text(
+                params.get("correlation_id"), "correlation_id"
+            )
+            origin_id = _required_text(params.get("origin_id"), "origin_id")
+            generation_id = _required_text(
+                params.get("generation_id"), "generation_id"
+            )
+            generation = params.get("generation")
+            seq = params.get("seq")
+            if type(generation) is not int or generation <= 0:
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "generation must be a positive integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if type(seq) is not int or seq < 0:
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "seq must be a non-negative integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            delivery_id = _required_text(params.get("delivery_id"), "delivery_id")
+            source_event_id = _required_text(
+                params.get("source_event_id"), "source_event_id"
+            )
+            progress_event_id = _required_text(
+                params.get("progress_event_id"), "progress_event_id"
+            )
+            evidence_id = _required_text(params.get("evidence_id"), "evidence_id")
+            route = self._route_context(
+                session_id=routed_session,
+                correlation_id=correlation_id,
+                params=params,
+            )
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+        async with self._lock:
+            if self._stopped:
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
+            state = _AuthorityState()
+            authority = await self._authority_registration(
+                state=state,
+                bearer_token=params.get("auth_token"),
+                route=route,
+                operation="task.events",
+                task_id=task_id,
+            )
+            if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
+                return _error_result(
+                    request_id,
+                    reason=state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                    code=ErrorCode.PERMISSION_DENIED,
+                )
+            try:
+                assert state.canonical is not None
+                key = (routed_session, task_id, origin_id, generation_id)
+                retained = self._progress_routes.get(key)
+                closed = self._closed_progress_routes.get((*key, generation))
+                active_matches = retained is not None and (
+                    retained.channel_id == channel_id
+                    and retained.binding.correlation_id == correlation_id
+                    and retained.binding.generation == generation
+                    and state.canonical.scope == retained.binding.scope
+                )
+                closed_matches = closed is not None and (
+                    closed.channel_id == channel_id
+                    and closed.binding.correlation_id == correlation_id
+                    and closed.binding.generation == generation
+                    and state.canonical.scope == closed.binding.scope
+                )
+                if active_matches:
+                    assert retained is not None
+                    deliveries = self._progress_deliveries.get(key, {})
+                    manifest = retained.manifest
+                elif closed_matches:
+                    assert closed is not None
+                    deliveries = closed.deliveries
+                    manifest = closed.manifest
+                elif retained is None and closed is None:
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P3_PROGRESS_ROUTE_NOT_FOUND",
+                        code=ErrorCode.NOT_FOUND,
+                    )
+                else:
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_BINDING_MISMATCH",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+                delivery = deliveries.get(delivery_id)
+                if delivery is None or not delivery.delivered:
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_DELIVERY_UNAVAILABLE",
+                        code=ErrorCode.UNAVAILABLE,
+                    )
+                if (
+                    delivery.source_event_id != source_event_id
+                    or delivery.progress_event_id != progress_event_id
+                    or delivery.seq != seq
+                    or delivery.evidence_id != evidence_id
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_DELIVERY_MISMATCH",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
+                replayed = delivery.acknowledged
+                delivery.acknowledged = True
+                return _success_result(
+                    request_id,
+                    {
+                        "status": "acknowledged",
+                        "replayed": replayed,
+                        "session_id": routed_session,
+                        "task_id": task_id,
+                        "correlation_id": correlation_id,
+                        "origin_id": origin_id,
+                        "generation_id": generation_id,
+                        "generation": generation,
+                        "delivery_id": delivery_id,
+                        "source_event_id": source_event_id,
+                        "progress_event_id": progress_event_id,
+                        "seq": seq,
+                        "evidence_id": evidence_id,
+                        "acknowledgement": "web_ui_text_consumed",
+                    },
+                    manifest,
+                )
+            finally:
+                if authority.lease is not None:
+                    await authority.lease.close()
 
     async def handle_p3_progress_close(
         self,
@@ -1779,12 +2320,42 @@ class AgentServerProductCompositionRegistry:
             assert state.canonical is not None
             retained = self._progress_routes.get(key)
             if retained is None:
+                closed = self._closed_progress_routes.get((*key, generation))
+                if closed is None:
+                    if authority.lease is not None:
+                        await authority.lease.close()
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P3_PROGRESS_ROUTE_NOT_FOUND",
+                        code=ErrorCode.NOT_FOUND,
+                    )
+                if (
+                    closed.binding.correlation_id != correlation_id
+                    or closed.binding.generation != generation
+                    or state.canonical.scope != closed.binding.scope
+                ):
+                    if authority.lease is not None:
+                        await authority.lease.close()
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_BINDING_MISMATCH",
+                        code=ErrorCode.PERMISSION_DENIED,
+                    )
                 if authority.lease is not None:
                     await authority.lease.close()
-                return _error_result(
+                return _success_result(
                     request_id,
-                    reason="PRODUCT_P3_PROGRESS_ROUTE_NOT_FOUND",
-                    code=ErrorCode.NOT_FOUND,
+                    {
+                        "status": "closed",
+                        "replayed": True,
+                        "session_id": routed_session,
+                        "correlation_id": correlation_id,
+                        "task_id": task_id,
+                        "origin_id": origin_id,
+                        "generation_id": generation_id,
+                        "generation": generation,
+                    },
+                    closed.manifest,
                 )
             if (
                 retained.binding.correlation_id != correlation_id
@@ -1815,12 +2386,23 @@ class AgentServerProductCompositionRegistry:
             finally:
                 if authority.lease is not None:
                     await authority.lease.close()
-            self._progress_routes.pop(key, None)
-            self._progress_generations.pop(key, None)
-            self._progress_targets.pop(key, None)
+            if not self._archive_progress_route(key, retained):
+                return _error_result(
+                    request_id,
+                    reason="PRODUCT_P3_PROGRESS_CLEANUP_PENDING",
+                )
             return _success_result(
                 request_id,
-                {"status": "closed", "task_id": task_id},
+                {
+                    "status": "closed",
+                    "replayed": False,
+                    "session_id": routed_session,
+                    "correlation_id": correlation_id,
+                    "task_id": task_id,
+                    "origin_id": origin_id,
+                    "generation_id": generation_id,
+                    "generation": generation,
+                },
                 retained.manifest,
             )
 
@@ -1840,9 +2422,13 @@ class AgentServerProductCompositionRegistry:
                         "[LiveVoiceProduct] progress disconnect cleanup pending"
                     )
                     continue
-                self._progress_routes.pop(progress_key, None)
-                self._progress_generations.pop(progress_key, None)
-                self._progress_targets.pop(progress_key, None)
+                if not self._archive_progress_route(
+                    progress_key, progress_retained
+                ):
+                    failures = True
+                    logger.error(
+                        "[LiveVoiceProduct] progress tombstone capacity pending"
+                    )
             for p2_key, p2_retained in reversed(tuple(self._p2_routes.items())):
                 try:
                     await p2_retained.lease.close()
@@ -1853,6 +2439,10 @@ class AgentServerProductCompositionRegistry:
                     )
                     continue
                 self._p2_routes.pop(p2_key, None)
+                self._retain_closed_p2_route(
+                    p2_key,
+                    _ClosedP2Route(p2_retained.binding, p2_retained.manifest),
+                )
             remaining_orphans: list[_P2FailedCleanupLease] = []
             for cleanup in self._p2_orphan_cleanups:
                 try:

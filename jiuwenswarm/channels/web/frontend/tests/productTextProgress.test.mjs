@@ -3,7 +3,9 @@ import test from 'node:test';
 
 import {
   adoptProductTextProgressEvent,
+  createProductTextProgressDeliveryAck,
   parseProductTextProgressEvent,
+  ProductTextProgressAckOwner,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
 function progressEvent(overrides = {}) {
@@ -21,6 +23,7 @@ function progressEvent(overrides = {}) {
   };
   return {
     event_type: 'live_voice.task.progress',
+    delivery_id: overrides.delivery_id ?? `delivery-${seq}`,
     session_id: sessionId,
     project_id: projectId,
     task_id: taskId,
@@ -64,6 +67,26 @@ test('parses an exact session/task/correlation/causation progress binding', () =
   assert.equal(parsed?.state, 'running');
   assert.equal(parsed?.source_event.seq, 7);
   assert.equal(Object.isFrozen(parsed), true);
+});
+
+test('creates an exact credential-free Web UI delivery acknowledgement', () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+
+  assert.deepEqual(createProductTextProgressDeliveryAck(parsed), {
+    session_id: 'session-1',
+    task_id: 'task-1',
+    correlation_id: 'correlation-1',
+    origin_id: 'web-surface-1',
+    generation_id: 'web-generation-1',
+    generation: 1,
+    delivery_id: 'delivery-7',
+    source_event_id: 'source-7',
+    progress_event_id: 'progress-7',
+    seq: 7,
+    evidence_id: 'evidence-7',
+  });
+  assert.equal('auth_token' in createProductTextProgressDeliveryAck(parsed), false);
 });
 
 test('rejects correlation, task, canonical scope, and causation mismatches', () => {
@@ -144,4 +167,129 @@ test('a higher generation explicitly replaces correlation within one lineage', (
   assert.notEqual(replacement, initial);
   assert.equal(replacement?.generation, 2);
   assert.equal(replacement?.correlation_id, 'correlation-2');
+});
+
+test('retained ACK owner retries the identical delivery after response loss', async () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+  const calls = [];
+  const snapshots = [];
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 0,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (calls.length === 1) throw new Error('response lost after server ACK');
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: true,
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    },
+    on_snapshot: snapshot => snapshots.push(snapshot),
+  });
+  owner.setConnected(true);
+  owner.retain(parsed);
+  for (let attempt = 0; attempt < 50 && owner.status(parsed.delivery_id)?.status !== 'acknowledged'; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.equal(owner.status(parsed.delivery_id)?.status, 'acknowledged');
+  assert.equal(owner.status(parsed.delivery_id)?.attempts, 2);
+  assert.deepEqual(calls[0], calls[1]);
+  assert.equal(snapshots.some(item => item.status === 'failed'), true);
+  owner.close();
+});
+
+test('ACK owner retains every delivery and retries them on reconnect', async () => {
+  const first = parseProductTextProgressEvent(progressEvent({ seq: 7 }));
+  const second = parseProductTextProgressEvent(progressEvent({ seq: 8 }));
+  assert.notEqual(first, null);
+  assert.notEqual(second, null);
+  const calls = [];
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 1000,
+    request: async (_method, params) => {
+      calls.push(params.delivery_id);
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: false,
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    },
+  });
+  owner.retain(first);
+  owner.retain(second);
+  assert.equal(owner.status(first.delivery_id)?.status, 'failed');
+  assert.equal(owner.status(second.delivery_id)?.status, 'failed');
+
+  owner.setConnected(true);
+  for (let attempt = 0; attempt < 50 && calls.length !== 2; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  assert.deepEqual(calls.sort(), [first.delivery_id, second.delivery_id].sort());
+  assert.equal(owner.status(first.delivery_id)?.status, 'acknowledged');
+  assert.equal(owner.status(second.delivery_id)?.status, 'acknowledged');
+  owner.close();
+});
+
+test('ACK capacity never evicts an unacknowledged delivery', () => {
+  const first = parseProductTextProgressEvent(progressEvent({ seq: 7 }));
+  const second = parseProductTextProgressEvent(progressEvent({ seq: 8 }));
+  assert.notEqual(first, null);
+  assert.notEqual(second, null);
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    capacity: 1,
+    request: async () => { throw new Error('offline'); },
+  });
+  owner.retain(first);
+  assert.throws(() => owner.retain(second), /no safe eviction/);
+  assert.equal(owner.status(first.delivery_id)?.retained_deliveries, 1);
+  assert.equal(owner.status(second.delivery_id), null);
+  owner.close();
+});
+
+test('closing an ACK owner fences a late request completion callback', async () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+  const snapshots = [];
+  let resolveRequest;
+  const request = new Promise(resolve => {
+    resolveRequest = resolve;
+  });
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    request: async () => request,
+    on_snapshot: snapshot => snapshots.push(snapshot),
+  });
+  owner.setConnected(true);
+  owner.retain(parsed);
+  await Promise.resolve();
+  const snapshotCountAtClose = snapshots.length;
+
+  owner.close();
+  resolveRequest({
+    ok: true,
+    result: {
+      status: 'acknowledged',
+      replayed: false,
+      ...createProductTextProgressDeliveryAck(parsed),
+      acknowledgement: 'web_ui_text_consumed',
+    },
+  });
+  await request;
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  assert.equal(snapshots.length, snapshotCountAtClose);
+  assert.equal(owner.status(parsed.delivery_id), null);
 });

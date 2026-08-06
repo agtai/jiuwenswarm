@@ -1764,6 +1764,7 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_CLOSE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK,
             }:
                 await self._handle_live_voice_product_request(
                     ws, request, send_lock
@@ -8472,11 +8473,18 @@ class AgentWebSocketServer:
                     session_id=request.session_id,
                     channel_id=request.channel_id,
                 )
-            else:
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE:
                 result = await registry.handle_p3_progress_close(
                     params=params,
                     request_id=request.request_id,
                     session_id=request.session_id,
+                )
+            else:
+                result = await registry.handle_p3_progress_ack(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    channel_id=request.channel_id,
                 )
             result_ok = result.ok
             payload = result.payload

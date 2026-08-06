@@ -2103,6 +2103,10 @@
       "contract": "Contract version",
       "wiring": "Adapter state",
       "reason": "Safe reason",
+      "activation": {
+        "status": "Product activation lease",
+        "scope": "Route / generation"
+      },
       "composition": {
         "flag_off": "flag off",
         "shell_only": "shell only",
@@ -2132,7 +2136,9 @@
         "correlation": "Authority correlation",
         "generation": "Origin generation",
         "sequence": "Persistent event sequence",
-        "evidence": "Binding evidence"
+        "evidence": "Binding evidence",
+        "delivery": "Web delivery ID",
+        "ack": "UI consumption acknowledgement"
       }
     },
     "task": {

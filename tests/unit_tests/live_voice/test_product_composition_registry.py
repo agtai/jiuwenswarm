@@ -7,7 +7,8 @@ import hashlib
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from types import SimpleNamespace
+from typing import Mapping, cast
 
 import pytest
 
@@ -35,6 +36,7 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
+    _ProgressDelivery,
     create_product_composition_registry_from_environment,
 )
 from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
@@ -300,6 +302,26 @@ def _progress_params(**changes: object) -> dict[str, object]:
     return params
 
 
+def _progress_ack_params(event: Mapping[str, object], **changes: object) -> dict[str, object]:
+    source = cast(Mapping[str, object], event["source_event"])
+    progress = cast(Mapping[str, object], event["progress_event"])
+    params = _progress_params(
+        session_id=event["session_id"],
+        task_id=event["task_id"],
+        correlation_id=event["correlation_id"],
+        origin_id=event["origin_id"],
+        generation_id=event["generation_id"],
+        generation=event["generation"],
+        delivery_id=event["delivery_id"],
+        source_event_id=source["event_id"],
+        progress_event_id=progress["event_id"],
+        seq=source["seq"],
+        evidence_id=event["evidence_id"],
+    )
+    params.update(changes)
+    return params
+
+
 def _route(payload: dict[str, object], segment: str) -> dict[str, object]:
     manifest = cast(dict[str, object], payload["product_composition"])
     routes = cast(list[dict[str, object]], manifest["routes"])
@@ -419,7 +441,16 @@ async def test_p2_authority_first_activation_replay_and_exact_close(
     )
     assert closed.ok is True
     assert manager.unpins == 1
+    replayed_close = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-p2-close-replay",
+        session_id="session-product",
+    )
+    assert replayed_close.ok is True
+    assert cast(dict, replayed_close.payload["result"])["replayed"] is True
+    assert manager.unpins == 1
     assert [call["operation"] for call in p3.authority_calls] == [
+        "agent.chat",
         "agent.chat",
         "agent.chat",
         "agent.chat",
@@ -609,6 +640,7 @@ async def test_text_progress_reaches_web_sink_and_preserves_generation_cleanup(
     assert len(pushed) == 1
     event_payload = cast(dict, pushed[0]["payload"])
     assert event_payload["event_type"] == "live_voice.task.progress"
+    assert len(cast(str, event_payload["delivery_id"])) == 64
     assert event_payload["task_id"] == "task-1"
     assert event_payload["correlation_id"] == "correlation-task-1"
     assert event_payload["generation"] == 1
@@ -649,7 +681,350 @@ async def test_text_progress_reaches_web_sink_and_preserves_generation_cleanup(
         session_id="session-product",
     )
     assert closed.ok is True
-    assert len(p3.authority_calls) == 5
+    replayed_close = await registry.handle_p3_progress_close(
+        params=_progress_params(),
+        request_id="request-progress-ack-close-replay",
+        session_id="session-product",
+    )
+    assert replayed_close.ok is True
+    assert cast(dict, replayed_close.payload["result"])["replayed"] is True
+    assert len(p3.authority_calls) == 6
+
+
+@pytest.mark.asyncio
+async def test_text_progress_web_ack_is_exact_authorized_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    registry, p3, _manager, pushed = _registry(tmp_path)
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id="request-progress-ack-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert activated.ok is True
+    event = cast(Mapping[str, object], pushed[0]["payload"])
+
+    denied = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event, auth_token="wrong-token"),
+        request_id="request-progress-ack-denied",
+        session_id="session-product",
+        channel_id="web",
+    )
+    mismatched = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event, progress_event_id="wrong-progress"),
+        request_id="request-progress-ack-mismatch",
+        session_id="session-product",
+        channel_id="web",
+    )
+    wrong_channel = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id="request-progress-ack-channel",
+        session_id="session-product",
+        channel_id="tui",
+    )
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id="request-progress-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    replayed = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id="request-progress-ack-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert denied.ok is False
+    assert mismatched.ok is False
+    assert wrong_channel.ok is False
+    assert acknowledged.ok is True
+    assert replayed.ok is True
+    assert cast(dict, acknowledged.payload["result"])["replayed"] is False
+    assert cast(dict, replayed.payload["result"])["replayed"] is True
+    assert cast(dict, acknowledged.payload["result"])["acknowledgement"] == (
+        "web_ui_text_consumed"
+    )
+    assert len(p3.subscription_calls) == 1
+
+    closed = await registry.handle_p3_progress_close(
+        params=_progress_params(),
+        request_id="request-progress-ack-close",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+
+
+@pytest.mark.asyncio
+async def test_progress_ack_response_loss_replays_after_close_and_reactivation(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id="request-progress-lost-ack-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert activated.ok is True
+    event = cast(Mapping[str, object], pushed[0]["payload"])
+
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id="request-progress-lost-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    closed = await registry.handle_p3_progress_close(
+        params=_progress_params(),
+        request_id="request-progress-lost-ack-close",
+        session_id="session-product",
+    )
+    stale = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id="request-progress-lost-ack-stale-reactivate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    reactivated = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=2),
+        request_id="request-progress-lost-ack-reactivate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    replayed = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id="request-progress-lost-ack-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert acknowledged.ok is True
+    assert closed.ok is True
+    assert stale.ok is False
+    assert cast(dict, stale.payload["error"])["reason"] == (
+        "TASK_PROGRESS_ROUTE_SETTLED"
+    )
+    assert reactivated.ok is True
+    assert replayed.ok is True
+    assert cast(dict, replayed.payload["result"])["replayed"] is True
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_kind", ["close", "disconnect"])
+async def test_progress_push_cleanup_race_retains_exact_ack_owner(
+    tmp_path: Path,
+    cleanup_kind: str,
+) -> None:
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    push_entered = asyncio.Event()
+    push_release = asyncio.Event()
+
+    async def blocked_push(message: dict[str, object]) -> bool:
+        push_entered.set()
+        await push_release.wait()
+        pushed.append(message)
+        return True
+
+    registry._push_text_event = blocked_push
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id=f"request-progress-race-{cleanup_kind}-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    await asyncio.wait_for(push_entered.wait(), timeout=1)
+
+    if cleanup_kind == "close":
+        cleanup = asyncio.create_task(
+            registry.handle_p3_progress_close(
+                params=_progress_params(),
+                request_id="request-progress-race-close",
+                session_id="session-product",
+            )
+        )
+    else:
+        cleanup = asyncio.create_task(registry.close_active_routes())
+    await asyncio.sleep(0)
+    push_release.set()
+    cleanup_result = await cleanup
+    if cleanup_kind == "close":
+        assert cleanup_result.ok is True
+    assert len(pushed) == 1
+
+    event = cast(Mapping[str, object], pushed[0]["payload"])
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id=f"request-progress-race-{cleanup_kind}-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert acknowledged.ok is True
+    assert cast(dict, acknowledged.payload["result"])["replayed"] is False
+
+
+@pytest.mark.asyncio
+async def test_progress_delivery_capacity_never_evicts_unacknowledged_on_failed_send(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id="request-progress-capacity-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert activated.ok is True
+    assert len(pushed) == 1
+
+    key = next(iter(registry._progress_deliveries))
+    deliveries = registry._progress_deliveries[key]
+    first_id = next(iter(deliveries))
+    for index in range(1, registry._PROGRESS_DELIVERY_CAPACITY):
+        delivery_id = f"retained-unacknowledged-{index}"
+        deliveries[delivery_id] = _ProgressDelivery(
+            delivery_id=delivery_id,
+            source_event_id=f"source-{index}",
+            progress_event_id=f"progress-{index}",
+            seq=index,
+            evidence_id=f"evidence-{index}",
+            delivered=True,
+        )
+    original_ids = set(deliveries)
+    route = registry._progress_routes[key]
+    event = SimpleNamespace(
+        origin=route.binding,
+        source_event=SimpleNamespace(
+            to_dict=lambda: {"event_id": "source-capacity", "seq": 1000}
+        ),
+        progress_event=SimpleNamespace(
+            to_dict=lambda: {"event_id": "progress-capacity", "seq": 1000}
+        ),
+        evidence_id="evidence-capacity",
+    )
+
+    with pytest.raises(RuntimeError, match="no safe eviction"):
+        await registry._emit_text_progress(event)
+    assert set(deliveries) == original_ids
+    assert len(pushed) == 1
+
+    deliveries[first_id].acknowledged = True
+    failed_pushes = 0
+
+    async def fail_push(_message: dict[str, object]) -> bool:
+        nonlocal failed_pushes
+        failed_pushes += 1
+        return False
+
+    registry._push_text_event = fail_push
+    with pytest.raises(RuntimeError, match="sink is unavailable"):
+        await registry._emit_text_progress(event)
+
+    assert failed_pushes == 1
+    assert first_id not in deliveries
+    assert set(deliveries) == original_ids - {first_id}
+
+
+@pytest.mark.asyncio
+async def test_progress_generation_admission_is_bounded_without_unsafe_eviction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    first_params = _progress_params(
+        origin_id="web-surface-1",
+        generation_id="web-generation-1",
+    )
+    second_params = _progress_params(
+        origin_id="web-surface-2",
+        generation_id="web-generation-2",
+    )
+    third_params = _progress_params(
+        origin_id="web-surface-3",
+        generation_id="web-generation-3",
+    )
+
+    first = await registry.handle_p3_progress_activate(
+        params=first_params,
+        request_id="request-progress-capacity-first",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert first.ok is True
+    first_event = cast(Mapping[str, object], pushed[0]["payload"])
+    first_closed = await registry.handle_p3_progress_close(
+        params=first_params,
+        request_id="request-progress-capacity-first-close",
+        session_id="session-product",
+    )
+    second = await registry.handle_p3_progress_activate(
+        params=second_params,
+        request_id="request-progress-capacity-second",
+        session_id="session-product",
+        channel_id="web",
+    )
+    denied = await registry.handle_p3_progress_activate(
+        params=third_params,
+        request_id="request-progress-capacity-denied",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert first_closed.ok is True
+    assert second.ok is True
+    assert denied.ok is False
+    assert cast(dict, denied.payload["error"])["reason"] == (
+        "TASK_PROGRESS_ROUTE_CAPACITY_UNAVAILABLE"
+    )
+    assert len(registry._progress_generations) == 2
+    assert any(key[2] == "web-surface-1" for key in registry._closed_progress_routes)
+    assert any(key[2] == "web-surface-2" for key in registry._progress_routes)
+
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(first_event),
+        request_id="request-progress-capacity-first-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    unauthorized = await registry.handle_p3_progress_activate(
+        params={**third_params, "auth_token": "wrong-token"},
+        request_id="request-progress-capacity-unauthorized",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert unauthorized.ok is False
+    assert any(
+        key[2] == "web-surface-1" for key in registry._progress_generations
+    )
+    assert any(key[2] == "web-surface-1" for key in registry._closed_progress_routes)
+    admitted = await registry.handle_p3_progress_activate(
+        params=third_params,
+        request_id="request-progress-capacity-admitted",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert acknowledged.ok is True
+    assert admitted.ok is True
+    assert len(registry._progress_generations) == 2
+    assert all(
+        key[2] != "web-surface-1" for key in registry._progress_generations
+    )
+    assert any(key[2] == "web-surface-2" for key in registry._progress_routes)
+    assert any(key[2] == "web-surface-3" for key in registry._progress_routes)
+    await registry.close_active_routes()
 
 
 @pytest.mark.asyncio
@@ -772,6 +1147,38 @@ async def test_disconnect_cleanup_closes_p2_and_progress_without_stopping_regist
     await registry.close_active_routes()
 
     assert manager.unpins == 1
+    p2_reconciled = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-p2-disconnect-close-replay",
+        session_id="session-product",
+    )
+    progress_reconciled = await registry.handle_p3_progress_close(
+        params=_progress_params(),
+        request_id="request-progress-disconnect-close-replay",
+        session_id="session-product",
+    )
+    assert p2_reconciled.ok is True
+    assert progress_reconciled.ok is True
+    assert cast(dict, p2_reconciled.payload["result"])["replayed"] is True
+    assert cast(dict, progress_reconciled.payload["result"])["replayed"] is True
+    assert manager.unpins == 1
+
+    p2_reactivated = await registry.handle_p2_activate(
+        params=_p2_params(
+            activation_id="activation-2", activation_generation=2
+        ),
+        request_id="request-p2-after-disconnect",
+        session_id="session-product",
+        channel_id="web",
+    )
+    progress_reactivated = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=2),
+        request_id="request-progress-after-disconnect",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert p2_reactivated.ok is True
+    assert progress_reactivated.ok is True
     second = await registry.handle_p3_query(
         operation="task.list",
         params={
@@ -782,6 +1189,7 @@ async def test_disconnect_cleanup_closes_p2_and_progress_without_stopping_regist
         session_id="session-product",
     )
     assert second.ok is True
+    await registry.close_active_routes()
 
 
 @pytest.mark.asyncio
@@ -943,9 +1351,29 @@ async def test_segment_flags_fail_before_authority_or_downstream(
         request_id="request-p3-off",
         session_id="session-product",
     )
+    progress_ack = await registry.handle_p3_progress_ack(
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "task_id": "task-1",
+            "correlation_id": "correlation-task-1",
+            "origin_id": "web-surface",
+            "generation_id": "web-generation",
+            "generation": 1,
+            "delivery_id": "delivery-1",
+            "source_event_id": "event-1",
+            "progress_event_id": "progress-1",
+            "seq": 1,
+            "evidence_id": "evidence-1",
+        },
+        request_id="request-p3-ack-off",
+        session_id="session-product",
+        channel_id="web",
+    )
 
     assert p2.ok is False
     assert query.ok is False
+    assert progress_ack.ok is False
     assert p3.authority_calls == []
     assert p3.query_calls == []
     assert p3.subscription_calls == []
