@@ -19,3 +19,10 @@ export const FEATURE_LIVE_VOICE_STREAMING_SPEECH = import.meta.env.VITE_FEATURE_
 export const FEATURE_LIVE_VOICE_TASK_DEMO = import.meta.env.VITE_FEATURE_LIVE_VOICE_TASK_DEMO === 'true';
 
 export const FEATURE_LIVE_VOICE_INTEGRATED_P1 = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 === 'true';
+
+/**
+ * Cumulative P1/P2/P3alpha Web composition shell and diagnostics. Disabled by
+ * default: enabling the shell discloses route facts but does not make missing
+ * formal adapters runnable or grant release/replacement credit.
+ */
+export const FEATURE_LIVE_VOICE_INTEGRATED_WEB = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB === 'true';

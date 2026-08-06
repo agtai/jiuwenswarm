@@ -16,6 +16,7 @@ import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
 import { LiveVoiceDemoBar } from './LiveVoiceDemoBar';
+import { LiveVoiceIntegratedRoutePanel } from './LiveVoiceIntegratedRoutePanel';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -39,7 +40,7 @@ import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
-import { FEATURE_LIVE_VOICE_DEMO } from '../../featureFlags';
+import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 import type { LiveVoiceTaskExecutionContext, LiveVoiceTaskRequest } from '../../features/live-voice/liveVoiceTaskClient';
 
@@ -1036,6 +1037,14 @@ export function ChatPanel({
                 <InterruptResultBubble />
                 <InteractionSlot onSubmit={onUserAnswer} />
                 {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
+                {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
+                  <LiveVoiceIntegratedRoutePanel
+                    activeSessionId={activeSessionId}
+                    isConnected={isConnected}
+                    agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
+                    taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
+                  />
+                )}
                 <InputArea
                   onSubmit={handleSendMessage}
                   onPersistMedia={onPersistMedia}
@@ -1073,6 +1082,14 @@ export function ChatPanel({
             <GoalBar onSetGoal={onSetGoal} onPauseGoal={onPauseGoal} onResumeGoal={onResumeGoal} onClearGoal={onClearGoal} />
           )}
           {FEATURE_LIVE_VOICE_DEMO && <LiveVoiceDemoBar {...liveVoiceDemoProps} />}
+          {FEATURE_LIVE_VOICE_INTEGRATED_WEB && (
+            <LiveVoiceIntegratedRoutePanel
+              activeSessionId={activeSessionId}
+              isConnected={isConnected}
+              agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
+              taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
+            />
+          )}
           <InputArea
             onSubmit={handleSendMessage}
             onPersistMedia={onPersistMedia}
