@@ -36,6 +36,7 @@ from .formal_task_models import (
     PersistentTaskEvent,
     PersistentTaskRecord,
     ReconciliationState,
+    TaskEventAuthoritySnapshot,
     utc_now,
 )
 
@@ -1517,6 +1518,57 @@ class SqliteTaskStore:
                 (task_id, after_seq),
             ).fetchall()
             return tuple(self._event_from_row(row) for row in rows)
+
+    def event_authority_snapshot(
+        self, task_id: str, scope: ScopeRef, *, max_events: int
+    ) -> TaskEventAuthoritySnapshot:
+        """Read task, attempt, and the exact durable prefix in one SQLite snapshot."""
+
+        if type(max_events) is not int or max_events <= 0:
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_AUTHORITY_CAPACITY",
+                "TaskEvent authority capacity must be a positive integer",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._reader() as connection:
+            # The explicit read transaction pins every following SELECT to one
+            # WAL snapshot. Concurrent appends are recovered later from cursor;
+            # they can neither leak into nor create a hole inside this prefix.
+            connection.execute("BEGIN")
+            task_row = self._require_task_row(connection, task_id, scope)
+            task = self._task_from_row(task_row)
+            if task.event_head + 1 > max_events:
+                raise FormalTaskViolation(
+                    "TASK_EVENT_AUTHORITY_PREFIX_CAPACITY",
+                    "TaskEvent authority prefix exceeds the declared reader capacity",
+                    ErrorCode.UNAVAILABLE,
+                )
+            attempt_row = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (task.attempt_id,)
+            ).fetchone()
+            if attempt_row is None:
+                raise FormalTaskViolation(
+                    "TASK_STORE_CORRUPT",
+                    "formal Task Store is missing the bound attempt",
+                    ErrorCode.INTERNAL,
+                )
+            attempt = self._attempt_from_row(attempt_row)
+            self._hit("event_authority_snapshot.before_events")
+            event_rows = connection.execute(
+                """
+                SELECT * FROM task_events
+                WHERE task_id=? AND seq<=?
+                ORDER BY seq
+                """,
+                (task.task_id, task.event_head),
+            ).fetchall()
+            events = tuple(self._event_from_row(row) for row in event_rows)
+            return TaskEventAuthoritySnapshot(
+                task=task,
+                attempt=attempt,
+                events=events,
+                cursor=task.event_head,
+            )
 
     def nonterminal_attempts(
         self,

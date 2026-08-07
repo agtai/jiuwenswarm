@@ -2,14 +2,13 @@
 
 """Source-backed formal Task progress return without lifecycle authority.
 
-The current ``TaskEventSubscription`` is live-only while the current notification
-arbiter requires a complete, contiguous lifecycle stream.  Those contracts cannot
-yet be joined without an authority-owned atomic cursor/snapshot handoff.  This
-module therefore exposes that absence explicitly for voice and never starts the
-real reader for voice when no prepared authority lease is supplied. Text-origin
-delivery can consume the authorized live-only subscription directly because it
-does not enter the arbiter and preserves every canonical source sequence without
-requiring a fabricated projection prefix.
+The default ``TaskEventSubscription`` is live-only while the notification arbiter
+requires a complete, contiguous lifecycle stream. Voice therefore activates only
+with the concrete SQLite-authority source defined here, which validates an atomic
+prefix/cursor before following the durable suffix. Product composition does not
+yet construct or register that source, so formal product voice remains fail-closed.
+Text-origin delivery can continue to consume the authorized live-only subscription
+directly because it does not enter the arbiter and preserves canonical sequences.
 
 A prepared lease is an injection seam for a future Task/CR owner and for bounded
 package-contract tests.  It is not implemented by the current product composition.
@@ -22,6 +21,7 @@ effect port.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -56,6 +56,7 @@ from .progress_notification_arbiter import (
     ProgressNotificationBinding,
 )
 from .task_event_subscription import TaskEventSubscription
+from .task_store import SqliteTaskStore
 
 _EVENTS_CAPABILITY = frozenset({"task.events"})
 _PROJECTABLE_EVENTS = {
@@ -95,7 +96,8 @@ class TaskProgressHandoffKind(StrEnum):
 
     ``PACKAGE_CONTRACT_TEST`` is accepted only when the constructor's explicit
     test-evidence switch is true.  It can never be mistaken for product evidence.
-    ``AUTHORITY_ATOMIC`` is reserved for the future IO/Task/CR-owned seam.
+    ``AUTHORITY_ATOMIC`` identifies the concrete Task Store prefix/cursor source;
+    product activation still requires the future IO/CR-owned composition seam.
     """
 
     PACKAGE_CONTRACT_TEST = "package_contract_test"
@@ -229,7 +231,7 @@ class TaskProgressReturnSnapshot:
 
 
 class PreparedTaskProgressSource(Protocol):
-    """Future atomic handoff or explicitly labeled package-contract test double."""
+    """Atomic authority handoff or explicitly labeled package-contract evidence."""
 
     subscription: TaskEventSubscription
     handoff_kind: TaskProgressHandoffKind
@@ -242,6 +244,97 @@ class PreparedTaskProgressSource(Protocol):
     async def close(self) -> None: ...
 
 
+class TaskEventAuthorityProgressSource:
+    """Concrete Store-owned atomic prefix/cursor source for formal voice progress."""
+
+    __slots__ = (
+        "_authorization_fingerprint",
+        "_evidence_id",
+        "_scope",
+        "_subscription",
+        "_task_id",
+    )
+
+    def __init__(
+        self,
+        *,
+        store: SqliteTaskStore,
+        authorization: TaskAuthorizationGrant,
+        scope: ScopeRef,
+        task_id: str,
+        queue_capacity: int = 256,
+        validation_capacity: int = 4096,
+        poll_interval: float = 0.05,
+        clock: Callable[[], str] = utc_now,
+    ) -> None:
+        if type(store) is not SqliteTaskStore:
+            raise _violation(
+                "INVALID_TASK_PROGRESS_AUTHORITY_SOURCE",
+                "formal voice progress requires the concrete SQLite Task authority",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(authorization) is not TaskAuthorizationGrant:
+            raise _violation(
+                "INVALID_TASK_PROGRESS_AUTHORITY_SOURCE",
+                "formal voice progress requires trusted TaskEvent authorization",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        self._scope = scope
+        self._task_id = task_id
+        self._authorization_fingerprint = _authorization_fingerprint(authorization)
+        self._subscription = TaskEventSubscription(
+            source=store,
+            authorization=authorization,
+            scope=scope,
+            task_id=task_id,
+            enabled=True,
+            queue_capacity=queue_capacity,
+            validation_capacity=validation_capacity,
+            poll_interval=poll_interval,
+            authority_atomic_replay=True,
+            clock=clock,
+        )
+        scope_fingerprint = hashlib.sha256(
+            canonical_json_bytes(scope.to_dict())
+        ).hexdigest()
+        self._evidence_id = (
+            f"task-event-authority:{task_id}:{scope_fingerprint}:pending"
+        )
+
+    @property
+    def subscription(self) -> TaskEventSubscription:
+        return self._subscription
+
+    @property
+    def handoff_kind(self) -> TaskProgressHandoffKind:
+        return TaskProgressHandoffKind.AUTHORITY_ATOMIC
+
+    @property
+    def evidence_id(self) -> str:
+        return self._evidence_id
+
+    async def start(self) -> bool:
+        started = await self._subscription.start()
+        snapshot = self._subscription.snapshot()
+        if (
+            not started
+            or snapshot.live_only
+            or not snapshot.cursor_replay_supported
+            or snapshot.start_head_seq is None
+        ):
+            return False
+        self._evidence_id = (
+            f"task-event-authority:{self._task_id}:cursor:{snapshot.start_head_seq}"
+        )
+        return True
+
+    async def next_event(self) -> PersistentTaskEvent:
+        return await self._subscription.next_event()
+
+    async def close(self) -> None:
+        await self._subscription.close()
+
+
 GenerationIsCurrent = Callable[[TaskProgressOriginBinding], bool]
 ForegroundSupplier = Callable[[], ForegroundSnapshot]
 VoiceIntentSink = Callable[[TaskProgressNotificationIntent], Awaitable[None]]
@@ -252,6 +345,22 @@ def _violation(
     reason: str, message: str, code: ErrorCode = ErrorCode.PROTOCOL_VIOLATION
 ) -> TaskProgressReturnViolation:
     return TaskProgressReturnViolation(reason, message, code)
+
+
+def _authorization_fingerprint(authorization: TaskAuthorizationGrant) -> bytes:
+    return canonical_json_bytes(
+        {
+            "principal_id": authorization.principal_id,
+            "scope": authorization.scope.to_dict(),
+            "operation": authorization.operation,
+            "command_id": authorization.command_id,
+            "target_task_id": authorization.target_task_id,
+            "allowed_capabilities": sorted(authorization.allowed_capabilities),
+            "confirmation_id": authorization.confirmation_id,
+            "confirmed": authorization.confirmed,
+            "expires_at": authorization.expires_at,
+        }
+    )
 
 
 def _required_text(value: object, field_name: str) -> str:
@@ -592,6 +701,10 @@ class TaskProgressReturnBridge:
 
     async def activate(self) -> TaskProgressReturnActivation:
         async with self._lifecycle_lock:
+            if self._close_requested:
+                self._state = TaskProgressReturnState.CLOSED
+                self._reason = TaskProgressReturnReason.CLOSED_BEFORE_ACTIVATION
+                return self._inactive_activation()
             if not self._enabled:
                 self._state = TaskProgressReturnState.DISABLED
                 self._reason = TaskProgressReturnReason.FEATURE_DISABLED
@@ -649,6 +762,11 @@ class TaskProgressReturnBridge:
                 await asyncio.shield(self._close_source(binding))
                 raise
             except Exception:
+                if self._close_requested:
+                    await self._close_source(binding)
+                    self._state = TaskProgressReturnState.CLOSED
+                    self._reason = TaskProgressReturnReason.CONSUMER_DETACHED
+                    return self._inactive_activation()
                 self._state = TaskProgressReturnState.FAILED
                 self._reason = (
                     TaskProgressReturnReason.HANDOFF_REJECTED
@@ -656,6 +774,11 @@ class TaskProgressReturnBridge:
                     else TaskProgressReturnReason.SOURCE_FAILED
                 )
                 await self._close_source(binding)
+                return self._inactive_activation()
+            if self._close_requested:
+                await self._close_source(binding)
+                self._state = TaskProgressReturnState.CLOSED
+                self._reason = TaskProgressReturnReason.CONSUMER_DETACHED
                 return self._inactive_activation()
             if not started:
                 self._state = TaskProgressReturnState.UNAVAILABLE
@@ -666,10 +789,20 @@ class TaskProgressReturnBridge:
                 )
                 await self._close_source(binding)
                 return self._inactive_activation()
+            if not self._authorize(binding):
+                self._state = TaskProgressReturnState.UNAVAILABLE
+                self._reason = TaskProgressReturnReason.AUTHORIZATION_REJECTED
+                await self._close_source(binding)
+                return self._inactive_activation()
             if not self._generation_current(binding):
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.STALE_GENERATION
                 await self._close_source(binding)
+                return self._inactive_activation()
+            if self._close_requested:
+                await self._close_source(binding)
+                self._state = TaskProgressReturnState.CLOSED
+                self._reason = TaskProgressReturnReason.CONSUMER_DETACHED
                 return self._inactive_activation()
 
             self._state = TaskProgressReturnState.ACTIVE
@@ -696,27 +829,29 @@ class TaskProgressReturnBridge:
                 "task progress lease belongs to another event loop",
                 ErrorCode.CONFLICT,
             )
-        async with self._lifecycle_lock:
-            if self._state in {
-                TaskProgressReturnState.DISABLED,
-                TaskProgressReturnState.UNAVAILABLE,
-                TaskProgressReturnState.CLOSED,
-                TaskProgressReturnState.FAILED,
-            }:
-                return
-            if self._state is TaskProgressReturnState.NEW:
-                self._state = TaskProgressReturnState.CLOSED
-                self._reason = TaskProgressReturnReason.CLOSED_BEFORE_ACTIVATION
-                return
-            self._close_requested = True
-            self._state = TaskProgressReturnState.DETACHING
-            self._reason = TaskProgressReturnReason.CONSUMER_DETACHED
-            if self._close_task is None:
-                self._close_task = current_loop.create_task(
-                    self._close_impl(),
-                    name=f"live-voice-task-progress-close:{self._binding.task_id}",
-                )
-            close_task = self._close_task
+        # Preserve detach intent before any cancellable lock or source wait. An
+        # activation already blocked in source.start() can then observe the flag,
+        # while the retained cleanup task concurrently reaches source.close().
+        self._close_requested = True
+        if self._state in {
+            TaskProgressReturnState.DISABLED,
+            TaskProgressReturnState.UNAVAILABLE,
+            TaskProgressReturnState.CLOSED,
+            TaskProgressReturnState.FAILED,
+        }:
+            return
+        if self._state is TaskProgressReturnState.NEW and self._owner_loop is None:
+            self._state = TaskProgressReturnState.CLOSED
+            self._reason = TaskProgressReturnReason.CLOSED_BEFORE_ACTIVATION
+            return
+        self._state = TaskProgressReturnState.DETACHING
+        self._reason = TaskProgressReturnReason.CONSUMER_DETACHED
+        if self._close_task is None:
+            self._close_task = current_loop.create_task(
+                self._close_impl(),
+                name=f"live-voice-task-progress-close:{self._binding.task_id}",
+            )
+        close_task = self._close_task
         try:
             await asyncio.shield(close_task)
         except asyncio.CancelledError:
@@ -765,6 +900,10 @@ class TaskProgressReturnBridge:
                     )
                     self._reject(TaskProgressReturnReason.STALE_GENERATION)
                 return 0
+            if not self._authorize(self._binding):
+                self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+                await self._close_source(self._binding)
+                return 0
             try:
                 foreground = self._foreground()
                 decisions = self._arbiter.drain(
@@ -801,6 +940,10 @@ class TaskProgressReturnBridge:
                         TaskProgressSourceDecision.STALE_GENERATION
                     )
                     self._reject(TaskProgressReturnReason.STALE_GENERATION)
+                return 0
+            if not self._authorize(self._binding):
+                self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+                await self._close_source(self._binding)
                 return 0
             if not await self._emit_voice_intent(projection, decision):
                 return 0
@@ -875,6 +1018,11 @@ class TaskProgressReturnBridge:
                         TaskProgressReturnState.FAILED,
                         TaskProgressReturnReason.SOURCE_FAILED,
                     )
+                    return
+                if self._close_requested:
+                    return
+                if not self._authorize(binding):
+                    self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
                     return
                 if not await self._consume(event):
                     return
@@ -959,7 +1107,10 @@ class TaskProgressReturnBridge:
             self._reject(TaskProgressReturnReason.STALE_GENERATION)
             return False
         if event.event_type not in _PROJECTABLE_EVENTS:
-            if binding.origin_kind is TaskProgressOriginKind.VOICE:
+            if (
+                binding.origin_kind is TaskProgressOriginKind.VOICE
+                and not self._uses_exact_authority_source()
+            ):
                 self._last_source_decision = TaskProgressSourceDecision.NOT_PROJECTABLE
                 self._reject(TaskProgressReturnReason.SOURCE_EVENT_NOT_PROJECTABLE)
                 return False
@@ -1018,6 +1169,9 @@ class TaskProgressReturnBridge:
             ):
                 return False
             binding = self._binding
+            if not self._authorize(binding):
+                self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+                return False
             try:
                 foreground = self._foreground()
                 decision = self._arbiter.offer(
@@ -1069,6 +1223,15 @@ class TaskProgressReturnBridge:
         decision: NotificationDecision,
     ) -> bool:
         binding = self._binding
+        if self._close_requested or self._state is not TaskProgressReturnState.ACTIVE:
+            return False
+        if not self._authorize(binding):
+            self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+            return False
+        if not self._generation_current(binding):
+            self._last_source_decision = TaskProgressSourceDecision.STALE_GENERATION
+            self._reject(TaskProgressReturnReason.STALE_GENERATION)
+            return False
         intent = TaskProgressNotificationIntent(
             origin=binding,
             task_event=projection.task_event,
@@ -1082,6 +1245,15 @@ class TaskProgressReturnBridge:
         except Exception:
             self._reject(TaskProgressReturnReason.VOICE_SINK_FAILED)
             return False
+        if self._close_requested:
+            return False
+        if not self._authorize(binding):
+            self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+            return False
+        if not self._generation_current(binding):
+            self._last_source_decision = TaskProgressSourceDecision.STALE_GENERATION
+            self._reject(TaskProgressReturnReason.STALE_GENERATION)
+            return False
         if not self._arbiter.acknowledge(
             binding.scope,
             projection.notification_binding.work_ref,
@@ -1093,25 +1265,34 @@ class TaskProgressReturnBridge:
         return True
 
     async def _deliver_text(self, projection: TaskProgressProjection) -> bool:
-        binding = self._binding
-        if not self._generation_current(binding):
-            self._last_source_decision = TaskProgressSourceDecision.STALE_GENERATION
-            self._reject(TaskProgressReturnReason.STALE_GENERATION)
-            return False
-        event = TaskProgressTextEvent(
-            origin=binding,
-            task_event=projection.task_event,
-            source_event=projection.source_event,
-            progress_event=projection.progress_event,
-            evidence_id=_evidence_id(binding, projection.task_event),
-        )
-        try:
-            await self._text_sink(event)
-        except Exception:
-            self._reject(TaskProgressReturnReason.TEXT_SINK_FAILED)
-            return False
-        self._text_events += 1
-        return True
+        async with self._delivery_lock:
+            binding = self._binding
+            if (
+                self._close_requested
+                or self._state is not TaskProgressReturnState.ACTIVE
+            ):
+                return False
+            if not self._authorize(binding):
+                self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+                return False
+            if not self._generation_current(binding):
+                self._last_source_decision = TaskProgressSourceDecision.STALE_GENERATION
+                self._reject(TaskProgressReturnReason.STALE_GENERATION)
+                return False
+            event = TaskProgressTextEvent(
+                origin=binding,
+                task_event=projection.task_event,
+                source_event=projection.source_event,
+                progress_event=projection.progress_event,
+                evidence_id=_evidence_id(binding, projection.task_event),
+            )
+            try:
+                await self._text_sink(event)
+            except Exception:
+                self._reject(TaskProgressReturnReason.TEXT_SINK_FAILED)
+                return False
+            self._text_events += 1
+            return True
 
     async def _close_impl(self) -> None:
         async with self._delivery_lock:
@@ -1156,7 +1337,7 @@ class TaskProgressReturnBridge:
 
     def _authorize(self, binding: TaskProgressOriginBinding) -> bool:
         authorization = self._authorization
-        if not isinstance(authorization, TaskAuthorizationGrant):
+        if type(authorization) is not TaskAuthorizationGrant:
             return False
         try:
             authorization.authorize(
@@ -1179,6 +1360,18 @@ class TaskProgressReturnBridge:
             return False
 
     def _prepared_source_usable(self, prepared: PreparedTaskProgressSource) -> bool:
+        if prepared.__class__ is TaskEventAuthorityProgressSource:
+            authorization = self._authorization
+            return (
+                prepared._subscription is self._subscription
+                and type(prepared._evidence_id) is str
+                and bool(prepared._evidence_id.strip())
+                and prepared._task_id == self._binding.task_id
+                and prepared._scope == self._binding.scope
+                and type(authorization) is TaskAuthorizationGrant
+                and prepared._authorization_fingerprint
+                == _authorization_fingerprint(authorization)
+            )
         try:
             same_subscription = prepared.subscription is self._subscription
             handoff_kind = prepared.handoff_kind
@@ -1195,6 +1388,19 @@ class TaskProgressReturnBridge:
         return (
             handoff_kind is TaskProgressHandoffKind.PACKAGE_CONTRACT_TEST
             and self._allow_package_contract_handoff
+        )
+
+    def _uses_exact_authority_source(self) -> bool:
+        prepared = self._prepared_source
+        return (
+            prepared is not None
+            and prepared.__class__ is TaskEventAuthorityProgressSource
+            and prepared._subscription is self._subscription
+            and prepared._task_id == self._binding.task_id
+            and prepared._scope == self._binding.scope
+            and type(self._authorization) is TaskAuthorizationGrant
+            and prepared._authorization_fingerprint
+            == _authorization_fingerprint(self._authorization)
         )
 
     def _subscription_matches(self, binding: TaskProgressOriginBinding) -> bool:
@@ -1263,6 +1469,7 @@ __all__ = [
     "ForegroundSupplier",
     "GenerationIsCurrent",
     "PreparedTaskProgressSource",
+    "TaskEventAuthorityProgressSource",
     "TaskProgressHandoffKind",
     "TaskProgressNotificationIntent",
     "TaskProgressOriginBinding",

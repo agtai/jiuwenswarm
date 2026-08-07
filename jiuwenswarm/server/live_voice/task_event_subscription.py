@@ -1,10 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Authorized, live-only delivery of canonical formal TaskEvents.
+"""Authorized delivery of canonical formal TaskEvents.
 
-The durable ``task.events`` query owns history.  This module deliberately starts
-at the Store's current event head and only observes later events from the same
-process.  It does not expose a caller cursor or promise reconnect/restart replay.
+The default reader deliberately starts at the Store's current event head and is
+live-only.  The authority replay mode instead consumes one Store-owned atomic
+prefix/cursor snapshot before reading its durable suffix.  Neither mode exposes
+a caller-selected cursor or lets a consumer fabricate lifecycle history.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from .formal_task_models import (
     PersistentTaskEvent,
     PersistentTaskRecord,
     TaskAuthorizationGrant,
+    TaskEventAuthoritySnapshot,
     utc_now,
 )
 
@@ -122,6 +124,14 @@ class TaskEventSource(Protocol):
     ) -> tuple[PersistentTaskEvent, ...]: ...
 
 
+class TaskEventAuthoritySource(TaskEventSource, Protocol):
+    """Store authority surface for an atomic prefix/cursor handoff."""
+
+    def event_authority_snapshot(
+        self, task_id: str, scope: ScopeRef, *, max_events: int
+    ) -> TaskEventAuthoritySnapshot: ...
+
+
 class TaskEventSubscriptionState(StrEnum):
     NEW = "new"
     DISABLED = "disabled"
@@ -161,11 +171,12 @@ def _violation(reason: str, message: str, code: ErrorCode) -> FormalTaskViolatio
 
 
 class TaskEventSubscription:
-    """One bounded, exact-task live feed over the formal SQLite Task Store.
+    """One bounded, exact-task feed over the formal SQLite Task Store.
 
     Authorization and the initial Store head read happen before allocation of the
-    queue or polling worker.  Closing only detaches this reader; it never issues a
-    task command or mutates Store/outbox state.
+    queue or polling worker. Authority replay additionally validates the complete
+    prefix against its snapshot before exposing any event. Closing only detaches
+    this reader; it never issues a task command or mutates Store/outbox state.
     """
 
     def __init__(
@@ -179,6 +190,7 @@ class TaskEventSubscription:
         queue_capacity: int = 32,
         validation_capacity: int = 4096,
         poll_interval: float = 0.05,
+        authority_atomic_replay: bool = False,
         clock: Callable[[], str] = utc_now,
     ) -> None:
         if type(task_id) is not str or not task_id.strip():
@@ -197,6 +209,12 @@ class TaskEventSubscription:
             raise _violation(
                 "INVALID_TASK_EVENT_SUBSCRIPTION_FLAG",
                 "task event subscription flag must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(authority_atomic_replay) is not bool:
+            raise _violation(
+                "INVALID_TASK_EVENT_AUTHORITY_MODE",
+                "TaskEvent authority replay mode must be boolean",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if type(queue_capacity) is not int or queue_capacity <= 0:
@@ -230,6 +248,7 @@ class TaskEventSubscription:
         self._queue_capacity = queue_capacity
         self._validation_capacity = validation_capacity
         self._poll_interval = float(poll_interval)
+        self._authority_atomic_replay = authority_atomic_replay
         self._clock = clock
 
         # Locks contain no background work.  Queue, Events and worker are created
@@ -303,12 +322,156 @@ class TaskEventSubscription:
                 )
 
             try:
+                if self._authority_atomic_replay:
+                    return await self._start_authority_atomic_replay()
                 return await self._start_authorized_baseline()
             except BaseException:
                 # Preserve the original error/cancellation, but do not strand a
                 # resource-free NEW reader on the loop used by a failed start.
                 self._cleanup_preallocation_start_failure(current_loop)
                 raise
+
+    async def _start_authority_atomic_replay(self) -> bool:
+        snapshot_reader = getattr(self._source, "event_authority_snapshot", None)
+        if not callable(snapshot_reader):
+            raise _violation(
+                "TASK_EVENT_AUTHORITY_HANDOFF_UNAVAILABLE",
+                "TaskEvent source does not own an atomic prefix/cursor read",
+                ErrorCode.UNAVAILABLE,
+            )
+        try:
+            snapshot = await asyncio.to_thread(
+                snapshot_reader,
+                self._task_id,
+                self._scope,
+                max_events=min(self._queue_capacity, self._validation_capacity),
+            )
+            self._source_reads += 1
+        except FormalTaskViolation:
+            raise
+        except Exception as error:
+            raise _violation(
+                "TASK_EVENT_SOURCE_FAILURE",
+                "formal TaskEvent authority snapshot failed",
+                ErrorCode.UNAVAILABLE,
+            ) from error
+        if self._settle_start_close_intent():
+            return False
+        self._authorize_current_read()
+        if self._settle_start_close_intent():
+            return False
+        if not isinstance(snapshot, TaskEventAuthoritySnapshot):
+            raise _violation(
+                "TASK_EVENT_SOURCE_PROTOCOL_VIOLATION",
+                "TaskEvent authority returned an invalid snapshot",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        task = snapshot.task
+        attempt = snapshot.attempt
+        self._validate_start_snapshot(task)
+        self._validate_attempt_snapshot(task, attempt)
+        events = snapshot.events
+        if (
+            snapshot.cursor != task.event_head
+            or not events
+            or events[-1].seq != snapshot.cursor
+        ):
+            raise _violation(
+                "TASK_EVENT_AUTHORITY_SNAPSHOT_CURSOR_MISMATCH",
+                "TaskEvent authority cursor does not close its exact prefix",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if len(events) > min(self._queue_capacity, self._validation_capacity):
+            raise _violation(
+                "TASK_EVENT_AUTHORITY_PREFIX_CAPACITY",
+                "TaskEvent authority prefix exceeds the declared bounded reader capacity",
+                ErrorCode.UNAVAILABLE,
+            )
+
+        genesis = events[0]
+        if (
+            genesis.seq != 0
+            or genesis.event_type != "task.accepted"
+            or genesis.state != FormalTaskState.ACCEPTED.value
+            or genesis.outcome is not None
+            or genesis.producer != "task_core"
+            or genesis.source_event_id is not None
+        ):
+            raise _violation(
+                "TASK_EVENT_AUTHORITY_GENESIS_INVALID",
+                "TaskEvent authority prefix lacks the canonical accepted genesis",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        try:
+            genesis_bytes = canonical_json_bytes(genesis.to_dict())
+        except (TypeError, ValueError) as error:
+            raise _violation(
+                "TASK_EVENT_SOURCE_PROTOCOL_VIOLATION",
+                "TaskEvent authority genesis cannot be canonically validated",
+                ErrorCode.PROTOCOL_VIOLATION,
+            ) from error
+
+        # No await occurs while this lock is held. A cross-thread close either
+        # wins before allocation or observes a fully initialized retained feed.
+        with self._close_intent_lock:
+            if self._close_requested:
+                self._state = TaskEventSubscriptionState.CLOSED
+                self._close_reason = self._close_request_reason or "consumer_detached"
+                return False
+            self._queue = asyncio.Queue(maxsize=self._queue_capacity)
+            self._changed = asyncio.Event()
+            self._detach = asyncio.Event()
+            self._state = TaskEventSubscriptionState.ACTIVE
+            self._start_head_seq = snapshot.cursor
+            self._last_seq = 0
+            self._attempt_id = task.attempt_id
+            self._attempt_executor_id = task.spec.executor_id
+            self._correlation_id = task.correlation_id
+            self._task_state = FormalTaskState.ACCEPTED
+            self._task_outcome = None
+            self._attempt_state = FormalAttemptState.ACCEPTED
+            self._attempt_outcome = None
+            self._seen_event_ids = {genesis.event_id: genesis_bytes}
+            self._seen_sequences = {0: genesis_bytes}
+            self._queue.put_nowait(genesis)
+            if len(events) > 1 and not self._accept_batch(events[1:]):
+                assert self._failure is not None
+                raise self._failure
+
+            expected_task_outcome = None if task.outcome is None else task.outcome.value
+            expected_attempt_outcome = (
+                None if attempt.outcome is None else attempt.outcome.value
+            )
+            if (
+                self._last_seq != snapshot.cursor
+                or self._task_state is not task.state
+                or self._task_outcome != expected_task_outcome
+                or self._attempt_state is not attempt.state
+                or self._attempt_outcome != expected_attempt_outcome
+            ):
+                error = _violation(
+                    "TASK_EVENT_AUTHORITY_SNAPSHOT_STATE_MISMATCH",
+                    "TaskEvent authority prefix does not reduce to its task snapshot",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+                self._fail(error)
+                raise error
+        return True
+
+    def _start_authority_tail_if_ready(self) -> None:
+        if (
+            not self._authority_atomic_replay
+            or self._state is not TaskEventSubscriptionState.ACTIVE
+            or self._worker is not None
+            or self._queue is None
+            or not self._queue.empty()
+        ):
+            return
+        assert self._owner_loop is not None
+        self._worker = self._owner_loop.create_task(
+            self._poll_loop(),
+            name=f"live-voice-task-events-authority:{self._task_id}",
+        )
 
     async def _start_authorized_baseline(self) -> bool:
         try:
@@ -445,6 +608,8 @@ class TaskEventSubscription:
                             self._state = TaskEventSubscriptionState.CLOSED
                             self._close_reason = "terminal_event_delivered"
                             self._signal_changed()
+                        else:
+                            self._start_authority_tail_if_ready()
                         return event
                     if self._state in {
                         TaskEventSubscriptionState.DISABLED,
@@ -541,8 +706,8 @@ class TaskEventSubscription:
             tracked_events=len(self._seen_event_ids),
             worker_pending=worker is not None and not worker.done(),
             source_reads=self._source_reads,
-            live_only=True,
-            cursor_replay_supported=False,
+            live_only=not self._authority_atomic_replay,
+            cursor_replay_supported=self._authority_atomic_replay,
             terminal_event_seen=self._terminal_event_seen,
             terminal_event_delivered=self._terminal_event_delivered,
             close_reason=self._close_reason,
@@ -1125,7 +1290,7 @@ class TaskEventSubscription:
         self._discard_queued_events()
         if self._detach is not None:
             self._detach.set()
-        if self._worker is not None and self._worker.done():
+        if self._worker is None or self._worker.done():
             self._state = TaskEventSubscriptionState.CLOSED
         self._signal_changed()
 
@@ -1202,6 +1367,7 @@ class TaskEventSubscription:
 
 
 __all__ = [
+    "TaskEventAuthoritySource",
     "TaskEventSource",
     "TaskEventSubscription",
     "TaskEventSubscriptionSnapshot",

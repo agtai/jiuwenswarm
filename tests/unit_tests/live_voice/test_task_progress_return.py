@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import deque
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import cast
+from unittest.mock import patch
 
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CONTRACT_VERSION,
     Assurance,
+    CommandEnvelope,
+    OriginRef,
     ProducerRef,
     ScopeRef,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
+    ExecutorObservation,
+    ExecutorResolution,
+    FormalAttemptState,
+    FormalTaskSpec,
     PersistentTaskEvent,
+    ResolvedTaskContext,
     TaskAuthorizationGrant,
 )
 from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
@@ -35,13 +46,17 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressReturnBridge,
     TaskProgressReturnReason,
     TaskProgressReturnState,
+    TaskProgressReturnViolation,
     TaskProgressSourceDecision,
     TaskProgressTextEvent,
+    TaskEventAuthorityProgressSource,
     project_task_progress_event,
 )
+from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 
 NOW = "2026-08-06T10:00:00Z"
 EXPIRY = "2026-08-06T11:00:00Z"
+AFTER_EXPIRY = "2026-08-06T12:00:00Z"
 _DEFAULT_AUTHORIZATION = object()
 
 
@@ -63,6 +78,7 @@ def _grant(
     *,
     task_id: str = "task-1",
     scope: ScopeRef | None = None,
+    expires_at: str = EXPIRY,
 ) -> TaskAuthorizationGrant:
     granted_scope = scope or _scope()
     return TaskAuthorizationGrant(
@@ -74,7 +90,7 @@ def _grant(
         allowed_capabilities=frozenset({"task.events"}),
         confirmation_id=None,
         confirmed=False,
-        expires_at=EXPIRY,
+        expires_at=expires_at,
     )
 
 
@@ -198,6 +214,7 @@ class _SubscriptionDouble:
         self.close_gate = close_gate
         self.close_failures = close_failures
         self._closed = asyncio.Event()
+        self._changed = asyncio.Event()
 
     def snapshot(self) -> _SubscriptionSnapshot:
         return _SubscriptionSnapshot(task_id=self.task_id)
@@ -208,10 +225,19 @@ class _SubscriptionDouble:
 
     async def next_event(self) -> PersistentTaskEvent:
         self.next_calls += 1
-        if self.events:
-            return self.events.popleft()
-        await self._closed.wait()
-        raise StopAsyncIteration
+        while True:
+            if self.events:
+                return self.events.popleft()
+            if self._closed.is_set():
+                raise StopAsyncIteration
+            self._changed.clear()
+            if self.events or self._closed.is_set():
+                continue
+            await self._changed.wait()
+
+    def publish(self, event: PersistentTaskEvent) -> None:
+        self.events.append(event)
+        self._changed.set()
 
     async def close(self) -> None:
         self.close_calls += 1
@@ -221,6 +247,7 @@ class _SubscriptionDouble:
             self.close_failures -= 1
             raise RuntimeError("injected subscription close failure")
         self._closed.set()
+        self._changed.set()
 
 
 class _PreparedSourceDouble:
@@ -287,6 +314,105 @@ async def _wait_until(predicate) -> None:
     raise AssertionError("condition was not reached")
 
 
+def _authority_task(
+    tmp_path: Path,
+) -> tuple[SqliteTaskStore, str, str]:
+    store = SqliteTaskStore(tmp_path / "authority-progress.sqlite")
+    scope = _scope()
+    context = ResolvedTaskContext(
+        source="test.project_registry",
+        stable_id=scope.project_id or "project-1",
+        uri=tmp_path.resolve().as_uri(),
+        revision_kind="version",
+        revision_value="revision-1",
+        scope=scope,
+        permissions=("task.execute", "project.write"),
+        expires_at=EXPIRY,
+        redaction_policy_id="test-redaction-v1",
+    )
+    command = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": "request-authority-progress",
+            "command_id": "command-authority-progress",
+            "command_type": "task.create",
+            "issued_at": NOW,
+            "scope": scope.to_dict(),
+            "correlation_id": "correlation-authority-progress",
+            "causation_id": None,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {
+                "kind": "task",
+                "id": "create:command-authority-progress",
+            },
+            "context_refs": [],
+            "required_capabilities": ["task.create"],
+            "payload": {},
+            "extensions": {},
+        }
+    )
+    result = store.create(
+        command,
+        FormalTaskSpec(
+            name="authority progress",
+            instruction="Perform one bounded task.",
+            origin=OriginRef("structured", None, None),
+            context=context,
+            executor_id="executor-1",
+            required_capabilities=("task.create",),
+            side_effect_class="project_mutation",
+            attributes=(),
+        ),
+        observed_at=NOW,
+    )
+    assert result.ok and result.result is not None
+    return (
+        store,
+        str(result.result["task_id"]),
+        command.correlation_id,
+    )
+
+
+def _advance_authority_task_running(store: SqliteTaskStore, task_id: str) -> None:
+    task = store.get_task(task_id, _scope())
+    item = store.claim_outbox("authority-progress-worker")
+    assert item is not None
+    assert item.task_id == task_id
+    executor_ref = f"authority-progress:{task.attempt_id}"
+    store.complete_outbox(
+        item,
+        executor_ref=executor_ref,
+        observations=(
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=task.spec.executor_id,
+                executor_ref=executor_ref,
+                task_id=task_id,
+                attempt_id=task.attempt_id,
+                source_event_id=f"{executor_ref}:0",
+                source_seq=0,
+                attempt_state=FormalAttemptState.ACCEPTED,
+                attempt_outcome=None,
+                occurred_at=NOW,
+                raw_status="accepted",
+            ),
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=task.spec.executor_id,
+                executor_ref=executor_ref,
+                task_id=task_id,
+                attempt_id=task.attempt_id,
+                source_event_id=f"{executor_ref}:1",
+                source_seq=1,
+                attempt_state=FormalAttemptState.RUNNING,
+                attempt_outcome=None,
+                occurred_at=NOW,
+                raw_status="running",
+            ),
+        ),
+    )
+
+
 def _bridge(
     *,
     origin_kind: TaskProgressOriginKind,
@@ -300,6 +426,7 @@ def _bridge(
     voice_events: list[TaskProgressNotificationIntent] | None = None,
     text_events: list[TaskProgressTextEvent] | None = None,
     allow_package_contract_handoff: bool = False,
+    clock=lambda: NOW,
 ) -> TaskProgressReturnBridge:
     selected_binding = binding or _binding(origin_kind)
     selected_voice_events = voice_events if voice_events is not None else []
@@ -327,7 +454,7 @@ def _bridge(
         voice_sink=voice_sink,
         text_sink=text_sink,
         allow_package_contract_handoff=allow_package_contract_handoff,
-        clock=lambda: NOW,
+        clock=clock,
     )
 
 
@@ -828,11 +955,14 @@ async def test_duplicate_is_idempotent_but_gap_and_out_of_order_fail_closed() ->
 
 
 @pytest.mark.asyncio
-async def test_voice_prepared_source_rejects_nonprojectable_advance() -> None:
+@pytest.mark.parametrize("event_type", ["attempt.accepted", "task.unknown"])
+async def test_package_voice_source_rejects_nonprojectable_or_unknown_event(
+    event_type: str,
+) -> None:
     subscription = _SubscriptionDouble()
     control = _event(
         0,
-        "attempt.accepted",
+        event_type,
         "accepted",
         producer="executor-1",
     )
@@ -850,11 +980,354 @@ async def test_voice_prepared_source_rejects_nonprojectable_advance() -> None:
     await _wait_settled(bridge)
 
     assert voice_events == []
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert bridge.snapshot().unprojected_events == 0
     assert (
         bridge.snapshot().reason_id
         is TaskProgressReturnReason.SOURCE_EVENT_NOT_PROJECTABLE
     )
+    assert (
+        bridge.snapshot().last_source_decision_id
+        is TaskProgressSourceDecision.NOT_PROJECTABLE
+    )
     assert prepared.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concrete_authority_source_is_the_only_atomic_voice_handoff(
+    tmp_path: Path,
+) -> None:
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    binding = _binding(
+        TaskProgressOriginKind.VOICE,
+        task_id=task_id,
+        correlation_id=correlation_id,
+    )
+    grant = _grant(task_id=task_id)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=binding.scope,
+        task_id=task_id,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+    voice_events: list[TaskProgressNotificationIntent] = []
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.VOICE,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=binding,
+        voice_events=voice_events,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active is True
+    assert activation.handoff_kind is TaskProgressHandoffKind.AUTHORITY_ATOMIC
+    assert activation.handoff_evidence_id is not None
+    await _wait_settled(bridge)
+    assert voice_events[0].task_event.seq == 0
+    assert voice_events[0].task_event.event_type == "task.accepted"
+    assert len(voice_events) == 1
+    assert bridge.snapshot().unprojected_events == 2
+    assert bridge.snapshot().projected_events == 2
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert bridge.snapshot().reason_id is TaskProgressReturnReason.ARBITER_REJECTED
+    assert source.subscription.snapshot().cursor_replay_supported is True
+
+
+@pytest.mark.asyncio
+async def test_authority_source_subclass_cannot_claim_formal_voice_route(
+    tmp_path: Path,
+) -> None:
+    calls = {"matches": 0, "start": 0, "next": 0}
+
+    class AuthoritySourceSubclass(TaskEventAuthorityProgressSource):
+        def matches(self, _binding: TaskProgressOriginBinding) -> bool:
+            calls["matches"] += 1
+            return True
+
+        async def start(self) -> bool:
+            calls["start"] += 1
+            return True
+
+        async def next_event(self) -> PersistentTaskEvent:
+            calls["next"] += 1
+            return _lifecycle_events()[0]
+
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    binding = _binding(
+        TaskProgressOriginKind.VOICE,
+        task_id=task_id,
+        correlation_id=correlation_id,
+    )
+    grant = _grant(task_id=task_id)
+    arbiter = ProgressNotificationArbiter()
+    voice_events: list[TaskProgressNotificationIntent] = []
+    source = AuthoritySourceSubclass(
+        store=store,
+        authorization=grant,
+        scope=binding.scope,
+        task_id=task_id,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.VOICE,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=binding,
+        arbiter=arbiter,
+        voice_events=voice_events,
+    )
+
+    activation = await bridge.activate()
+
+    assert activation.active is False
+    assert (
+        activation.reason_id is TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE
+    )
+    assert calls == {"matches": 0, "start": 0, "next": 0}
+    assert voice_events == []
+    assert arbiter.snapshot().accepted_events == 0
+    assert source.subscription.snapshot().start_head_seq is None
+
+
+def test_authority_source_rejects_sqlite_store_subclass(tmp_path: Path) -> None:
+    class SqliteStoreSubclass(SqliteTaskStore):
+        pass
+
+    with pytest.raises(TaskProgressReturnViolation) as raised:
+        TaskEventAuthorityProgressSource(
+            store=SqliteStoreSubclass(tmp_path / "forged-authority.sqlite"),
+            authorization=_grant(),
+            scope=_scope(),
+            task_id="task-1",
+        )
+
+    assert raised.value.reason == "INVALID_TASK_PROGRESS_AUTHORITY_SOURCE"
+
+
+@pytest.mark.asyncio
+async def test_concrete_authority_source_rejects_distinct_longer_grant(
+    tmp_path: Path,
+) -> None:
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    binding = _binding(
+        TaskProgressOriginKind.VOICE,
+        task_id=task_id,
+        correlation_id=correlation_id,
+    )
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=_grant(task_id=task_id, expires_at=AFTER_EXPIRY),
+        scope=binding.scope,
+        task_id=task_id,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+    arbiter = ProgressNotificationArbiter()
+    voice_events: list[TaskProgressNotificationIntent] = []
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.VOICE,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=_grant(task_id=task_id),
+        binding=binding,
+        arbiter=arbiter,
+        voice_events=voice_events,
+    )
+
+    activation = await bridge.activate()
+
+    assert activation.active is False
+    assert (
+        activation.reason_id is TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE
+    )
+    assert source.subscription.snapshot().start_head_seq is None
+    assert arbiter.snapshot().accepted_events == 0
+    assert voice_events == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "origin_kind",
+    [TaskProgressOriginKind.VOICE, TaskProgressOriginKind.TEXT],
+)
+async def test_queued_event_after_bridge_grant_expiry_has_zero_effects(
+    origin_kind: TaskProgressOriginKind,
+) -> None:
+    current_time = NOW
+    subscription = _SubscriptionDouble()
+    prepared = (
+        _PreparedSourceDouble(subscription, [])
+        if origin_kind is TaskProgressOriginKind.VOICE
+        else None
+    )
+    arbiter = ProgressNotificationArbiter()
+    voice_events: list[TaskProgressNotificationIntent] = []
+    text_events: list[TaskProgressTextEvent] = []
+    bridge = _bridge(
+        origin_kind=origin_kind,
+        subscription=subscription,
+        prepared_source=prepared,
+        arbiter=arbiter,
+        voice_events=voice_events,
+        text_events=text_events,
+        allow_package_contract_handoff=origin_kind is TaskProgressOriginKind.VOICE,
+        clock=lambda: current_time,
+    )
+
+    assert (await bridge.activate()).active is True
+    await _wait_until(
+        lambda: (
+            (prepared.next_calls if prepared is not None else subscription.next_calls)
+            == 1
+        )
+    )
+    current_time = AFTER_EXPIRY
+    if prepared is not None:
+        prepared.publish(_lifecycle_events()[0])
+    else:
+        subscription.publish(_lifecycle_events()[0])
+    await _wait_settled(bridge)
+
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        bridge.snapshot().reason_id is TaskProgressReturnReason.AUTHORIZATION_REJECTED
+    )
+    assert bridge.snapshot().source_events == 0
+    assert voice_events == []
+    assert text_events == []
+    assert arbiter.snapshot().accepted_events == 0
+    assert (
+        prepared.close_calls if prepared is not None else subscription.close_calls
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_deferred_voice_drain_after_grant_expiry_has_zero_new_effects() -> None:
+    current_time = NOW
+    subscription = _SubscriptionDouble()
+    prepared = _PreparedSourceDouble(subscription, _lifecycle_events())
+    arbiter = ProgressNotificationArbiter()
+    foreground = _busy_foreground()
+    voice_events: list[TaskProgressNotificationIntent] = []
+
+    def foreground_supplier() -> ForegroundSnapshot:
+        return foreground
+
+    async def voice_sink(intent: TaskProgressNotificationIntent) -> None:
+        voice_events.append(intent)
+
+    bridge = TaskProgressReturnBridge(
+        enabled=True,
+        subscription=cast(TaskEventSubscription, subscription),
+        prepared_source=prepared,
+        authorization=_grant(),
+        binding=_binding(TaskProgressOriginKind.VOICE),
+        generation_is_current=lambda _binding: True,
+        arbiter=arbiter,
+        foreground=foreground_supplier,
+        voice_sink=voice_sink,
+        text_sink=lambda _event: _noop(),
+        allow_package_contract_handoff=True,
+        clock=lambda: current_time,
+    )
+    activation = await bridge.activate()
+    assert activation.lease is not None
+    await _wait_settled(bridge)
+    before = arbiter.snapshot()
+    assert before.pending_notifications == 1
+
+    current_time = AFTER_EXPIRY
+    foreground = _foreground()
+    assert await activation.lease.drain_voice() == 0
+
+    assert bridge.snapshot().state is TaskProgressReturnState.FAILED
+    assert (
+        bridge.snapshot().reason_id is TaskProgressReturnReason.AUTHORIZATION_REJECTED
+    )
+    assert voice_events == []
+    assert arbiter.snapshot() == before
+    assert prepared.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_close_during_atomic_snapshot_start_is_retained(
+    tmp_path: Path,
+) -> None:
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    before = store.counts()
+    binding = _binding(
+        TaskProgressOriginKind.VOICE,
+        task_id=task_id,
+        correlation_id=correlation_id,
+    )
+    grant = _grant(task_id=task_id)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=binding.scope,
+        task_id=task_id,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+    arbiter = ProgressNotificationArbiter()
+    voice_events: list[TaskProgressNotificationIntent] = []
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.VOICE,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=binding,
+        arbiter=arbiter,
+        voice_events=voice_events,
+    )
+    snapshot_entered = threading.Event()
+    release_snapshot = threading.Event()
+    original_snapshot = store.event_authority_snapshot
+    original_close = TaskEventAuthorityProgressSource.close
+    close_calls = 0
+
+    def blocked_snapshot(target_task_id: str, scope: ScopeRef, *, max_events: int):
+        snapshot_entered.set()
+        assert release_snapshot.wait(timeout=5)
+        return original_snapshot(target_task_id, scope, max_events=max_events)
+
+    async def counted_close(authority_source: TaskEventAuthorityProgressSource) -> None:
+        nonlocal close_calls
+        close_calls += 1
+        await original_close(authority_source)
+
+    with (
+        patch.object(store, "event_authority_snapshot", side_effect=blocked_snapshot),
+        patch.object(TaskEventAuthorityProgressSource, "close", counted_close),
+    ):
+        activation_task = asyncio.create_task(bridge.activate())
+        assert await asyncio.to_thread(snapshot_entered.wait, 2)
+        close_waiter = asyncio.create_task(bridge.close())
+        await _wait_until(lambda: close_calls == 1)
+        close_waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close_waiter
+        release_snapshot.set()
+        activation = await asyncio.wait_for(activation_task, timeout=2)
+        await _wait_until(
+            lambda: bridge.snapshot().state is TaskProgressReturnState.CLOSED
+        )
+
+    assert activation.active is False
+    assert activation.reason_id is TaskProgressReturnReason.CONSUMER_DETACHED
+    assert close_calls == 1
+    assert bridge.snapshot().worker_pending is False
+    assert source.subscription.snapshot().worker_pending is False
+    assert voice_events == []
+    assert arbiter.snapshot().accepted_events == 0
+    assert store.counts() == before
 
 
 @pytest.mark.asyncio

@@ -36,6 +36,7 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     ReconciliationState,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskEventAuthoritySnapshot,
     utc_now,
 )
 from jiuwenswarm.server.live_voice.persistent_task_core import (
@@ -53,6 +54,13 @@ from jiuwenswarm.server.live_voice.voice_task_policy import (
 
 NOW = "2026-08-05T12:00:00Z"
 EXPIRY = "2026-08-05T13:00:00Z"
+
+
+def test_task_event_authority_snapshot_is_publicly_exported() -> None:
+    from jiuwenswarm.server.live_voice import formal_task_models
+
+    assert "TaskEventAuthoritySnapshot" in formal_task_models.__all__
+    assert formal_task_models.TaskEventAuthoritySnapshot is TaskEventAuthoritySnapshot
 
 
 def _scope() -> ScopeRef:
@@ -1711,6 +1719,105 @@ async def test_task_event_projection_is_pure_and_preserves_source(
     assert event.scope == _scope()
     assert event.to_dict()["scope"] == _scope().to_dict()
     assert store.counts() == before
+
+
+@pytest.mark.asyncio
+async def test_event_authority_snapshot_is_one_exact_contiguous_store_revision(
+    tmp_path: Path,
+) -> None:
+    event_queries: list[str] = []
+
+    def failpoint(name: str) -> None:
+        if name == "event_authority_snapshot.before_events":
+            event_queries.append(name)
+
+    store = SqliteTaskStore(tmp_path / "authority-snapshot.sqlite", failpoint=failpoint)
+    core = PersistentTaskCore(store, _Executor())
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    await core.drain_outbox()
+    task_id = str(created.result["task_id"])
+
+    snapshot = store.event_authority_snapshot(task_id, _scope(), max_events=64)
+
+    assert snapshot.task.task_id == task_id
+    assert snapshot.attempt.attempt_id == snapshot.task.attempt_id
+    assert snapshot.cursor == snapshot.task.event_head
+    assert [event.seq for event in snapshot.events] == list(range(snapshot.cursor + 1))
+    assert all(event.task_id == task_id for event in snapshot.events)
+    assert event_queries == ["event_authority_snapshot.before_events"]
+
+
+@pytest.mark.parametrize("max_events", [0, -1, True])
+def test_event_authority_snapshot_rejects_invalid_capacity(
+    tmp_path: Path, max_events: int
+) -> None:
+    store = SqliteTaskStore(tmp_path / f"authority-invalid-{max_events}.sqlite")
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.event_authority_snapshot("task-1", _scope(), max_events=max_events)
+
+    assert raised.value.reason == "INVALID_TASK_EVENT_AUTHORITY_CAPACITY"
+    assert raised.value.code is ErrorCode.INVALID_ARGUMENT
+
+
+@pytest.mark.asyncio
+async def test_event_authority_snapshot_rejects_oversize_before_event_query(
+    tmp_path: Path,
+) -> None:
+    event_queries: list[str] = []
+
+    def failpoint(name: str) -> None:
+        if name == "event_authority_snapshot.before_events":
+            event_queries.append(name)
+
+    store = SqliteTaskStore(tmp_path / "authority-oversize.sqlite", failpoint=failpoint)
+    core = PersistentTaskCore(store, _Executor())
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    await core.drain_outbox()
+    task_id = str(created.result["task_id"])
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.event_authority_snapshot(task_id, _scope(), max_events=1)
+
+    assert raised.value.reason == "TASK_EVENT_AUTHORITY_PREFIX_CAPACITY"
+    assert raised.value.code is ErrorCode.UNAVAILABLE
+    assert event_queries == []
+
+
+def test_event_authority_snapshot_rejects_a_corrupt_head_without_partial_prefix(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "authority-corrupt.sqlite"
+    store = SqliteTaskStore(database)
+    invocation = _create(tmp_path)
+    created = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE tasks SET event_head=1 WHERE task_id=?", (task_id,))
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        store.event_authority_snapshot(task_id, _scope(), max_events=64)
+    assert raised.value.reason == "TASK_EVENT_AUTHORITY_SNAPSHOT_BINDING_MISMATCH"
 
 
 @pytest.mark.asyncio

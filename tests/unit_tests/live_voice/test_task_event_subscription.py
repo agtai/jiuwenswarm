@@ -422,6 +422,153 @@ async def _wait_until(predicate, *, attempts: int = 300) -> None:
 
 
 @pytest.mark.asyncio
+async def test_authority_snapshot_replays_prefix_then_concurrent_durable_suffix(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "atomic-prefix.sqlite")
+    task = _create_task(store, tmp_path)
+    _advance_running(store, task)
+    subscription = TaskEventSubscription(
+        source=store,
+        authorization=_grant(task.task_id),
+        scope=task.scope,
+        task_id=task.task_id,
+        enabled=True,
+        authority_atomic_replay=True,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+
+    assert await subscription.start() is True
+    assert subscription.snapshot().start_head_seq == 3
+    assert subscription.snapshot().worker_pending is False
+
+    # Append while the authoritative prefix is still queued. The tail reader
+    # starts only after that prefix is consumed, so queue pressure can neither
+    # drop nor race the durable suffix.
+    _advance_terminal(store, task)
+    replay = [await asyncio.wait_for(subscription.next_event(), 1) for _ in range(6)]
+    assert [event.seq for event in replay] == [0, 1, 2, 3, 4, 5]
+    assert [event.event_type for event in replay] == [
+        "task.accepted",
+        "attempt.accepted",
+        "attempt.running",
+        "task.running",
+        "attempt.terminal",
+        "task.terminal",
+    ]
+    snapshot = subscription.snapshot()
+    assert snapshot.start_head_seq == 3
+    assert snapshot.last_seq == 5
+    assert snapshot.live_only is False
+    assert snapshot.cursor_replay_supported is True
+    await subscription.close()
+
+
+@pytest.mark.asyncio
+async def test_authority_restart_replays_terminal_prefix_without_worker(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "atomic-terminal.sqlite")
+    task = _create_task(store, tmp_path)
+    _advance_running(store, task)
+    _advance_terminal(store, task)
+    terminal = store.get_task(task.task_id, task.scope)
+    subscription = TaskEventSubscription(
+        source=store,
+        authorization=_grant(task.task_id),
+        scope=task.scope,
+        task_id=task.task_id,
+        enabled=True,
+        authority_atomic_replay=True,
+        queue_capacity=32,
+        clock=lambda: NOW,
+    )
+
+    assert await subscription.start() is True
+    replay = [await subscription.next_event() for _ in range(terminal.event_head + 1)]
+    assert [event.seq for event in replay] == list(range(terminal.event_head + 1))
+    assert replay[-1].event_type == "task.terminal"
+    assert replay[-1].outcome == "completed"
+    with pytest.raises(StopAsyncIteration):
+        await subscription.next_event()
+    snapshot = subscription.snapshot()
+    assert snapshot.start_head_seq == terminal.event_head
+    assert snapshot.worker_pending is False
+    assert snapshot.terminal_event_delivered is True
+
+
+@pytest.mark.asyncio
+async def test_authority_replay_expiry_and_capacity_fail_before_allocation(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "atomic-bounds.sqlite")
+    task = _create_task(store, tmp_path)
+    _advance_running(store, task)
+
+    expired = TaskEventSubscription(
+        source=store,
+        authorization=_grant(task.task_id, expires_at="2026-08-06T09:59:59Z"),
+        scope=task.scope,
+        task_id=task.task_id,
+        enabled=True,
+        authority_atomic_replay=True,
+        clock=lambda: NOW,
+    )
+    with pytest.raises(FormalTaskViolation):
+        await expired.start()
+    assert expired.snapshot().source_reads == 0
+    assert expired.snapshot().queue_allocated is False
+
+    bounded = TaskEventSubscription(
+        source=store,
+        authorization=_grant(task.task_id),
+        scope=task.scope,
+        task_id=task.task_id,
+        enabled=True,
+        authority_atomic_replay=True,
+        queue_capacity=3,
+        clock=lambda: NOW,
+    )
+    with pytest.raises(FormalTaskViolation) as raised:
+        await bounded.start()
+    assert raised.value.reason == "TASK_EVENT_AUTHORITY_PREFIX_CAPACITY"
+    assert raised.value.code is ErrorCode.UNAVAILABLE
+    assert bounded.snapshot().source_reads == 0
+    assert bounded.snapshot().queue_allocated is False
+    assert bounded.snapshot().worker_pending is False
+
+
+@pytest.mark.asyncio
+async def test_authority_close_before_prefix_delivery_has_zero_task_effect(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "atomic-close.sqlite")
+    task = _create_task(store, tmp_path)
+    _advance_running(store, task)
+    before = store.counts()
+    subscription = TaskEventSubscription(
+        source=store,
+        authorization=_grant(task.task_id),
+        scope=task.scope,
+        task_id=task.task_id,
+        enabled=True,
+        authority_atomic_replay=True,
+        clock=lambda: NOW,
+    )
+
+    assert await subscription.start() is True
+    assert subscription.snapshot().worker_pending is False
+    await subscription.close()
+
+    snapshot = subscription.snapshot()
+    assert snapshot.state is TaskEventSubscriptionState.CLOSED
+    assert snapshot.queued_events == 0
+    assert snapshot.worker_pending is False
+    assert store.counts() == before
+
+
+@pytest.mark.asyncio
 async def test_sqlite_live_feed_starts_at_head_and_delivers_terminal_before_close(
     tmp_path: Path,
 ) -> None:

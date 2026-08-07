@@ -780,6 +780,56 @@ class PersistentTaskEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskEventAuthoritySnapshot:
+    """One exact durable TaskEvent prefix and its authority-owned cursor."""
+
+    task: PersistentTaskRecord
+    attempt: PersistentAttemptRecord
+    events: tuple[PersistentTaskEvent, ...]
+    cursor: int
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.task, PersistentTaskRecord)
+            or not isinstance(self.attempt, PersistentAttemptRecord)
+            or type(self.events) is not tuple
+            or any(not isinstance(event, PersistentTaskEvent) for event in self.events)
+            or type(self.cursor) is not int
+            or self.cursor < 0
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_EVENT_AUTHORITY_SNAPSHOT",
+                "TaskEvent authority snapshot is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            self.cursor != self.task.event_head
+            or self.attempt.task_id != self.task.task_id
+            or self.attempt.attempt_id != self.task.attempt_id
+            or self.attempt.executor_id != self.task.spec.executor_id
+            or len(self.events) != self.cursor + 1
+        ):
+            raise FormalTaskViolation(
+                "TASK_EVENT_AUTHORITY_SNAPSHOT_BINDING_MISMATCH",
+                "TaskEvent authority snapshot does not bind one exact task revision",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        for expected_seq, event in enumerate(self.events):
+            if (
+                event.seq != expected_seq
+                or event.task_id != self.task.task_id
+                or event.attempt_id != self.task.attempt_id
+                or event.scope != self.task.scope
+                or event.correlation_id != self.task.correlation_id
+            ):
+                raise FormalTaskViolation(
+                    "TASK_EVENT_AUTHORITY_SNAPSHOT_SEQUENCE_MISMATCH",
+                    "TaskEvent authority snapshot is not one contiguous canonical prefix",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+
+
+@dataclass(frozen=True, slots=True)
 class PersistentOutboxItem:
     outbox_id: str
     kind: OutboxKind
@@ -960,6 +1010,7 @@ __all__ = [
     "ReconciliationState",
     "ResolvedTaskContext",
     "TaskAuthorizationGrant",
+    "TaskEventAuthoritySnapshot",
     "require_exact_payload",
     "safe_json_value",
     "utc_now",
