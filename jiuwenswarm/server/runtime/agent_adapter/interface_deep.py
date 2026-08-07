@@ -372,6 +372,7 @@ _FORMAL_PASSIVE_RAW_EVENT_TYPES = frozenset(
         "llm_usage",
         "thinking",
         "todo.updated",
+        "tracer_agent",
     }
 )
 _FORMAL_PASSIVE_EVENT_TYPES = frozenset(

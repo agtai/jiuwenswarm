@@ -238,6 +238,33 @@ async def test_formal_deep_seam_rejects_unknown_or_malformed_raw_events(
 
 
 @pytest.mark.asyncio
+async def test_formal_deep_seam_drops_agent_tracer_payload() -> None:
+    lease = OutputLease(
+        [
+            RawChunk(
+                "tracer_agent",
+                {"event_type": "chat.tracer_agent", "content": "must not leak"},
+            ),
+            RawChunk("answer", {"output": {"output": "formal result"}}),
+        ]
+    )
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        )
+    ]
+
+    assert [chunk.payload for chunk in chunks] == [
+        {"event_type": "chat.final", "content": "formal result"}
+    ]
+    assert lease.closed_with == [False]
+
+
+@pytest.mark.asyncio
 async def test_formal_deep_seam_rejects_legacy_controls_before_agent_effect() -> None:
     lease = OutputLease([])
     instance = FormalInstance(lease)
