@@ -3,7 +3,7 @@
 - 最近恢复审计：2026-08-02
 - 适用共享分支：`hx/0803_live_voice`；`d4c3e32a` 在 Gate 3 FAIL，`ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6 并标记 `V0 Released / 已冻结`
 - 最终脱敏证据：[evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)；本文仍是以后重建相同受控环境的操作手册
-- 当前交付解释：D-046 定义 Week 2 cumulative Integrated Demo，D-055 将 Week 3–4 产品载体调整为 Integrated Web Alpha。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；Integrated 模式尚未实现，不得把计划中的组合命令当作可运行事实。
+- 当前交付解释：D-046 定义 Week 2 cumulative Integrated Demo，D-055 将 Week 3–4 产品载体调整为 Integrated Web Alpha。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；默认关闭的产品组合代码不等于完整 P1/P2/P3alpha 路径或可运行验收，是否可运行只看 [STATUS](../STATUS.md) 和本手册是否已经给出精确启动步骤。
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
@@ -219,19 +219,19 @@ $env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 
 ## 7. 启动前端
 
-Vite 也会读取 `JIUWENSWARM_DATA_DIR`，所以前端终端必须使用与本次后端相同的隔离路径。**当前已实现的**默认 V0、稳定句预读和 Task Demo 三种模式一次只能选一种；切换模式时先按 `Ctrl+C` 停止现有 Vite，确认 `5173` 已释放，再在新终端完成变量设置后启动。不得先运行 `npm run dev` 再修改变量。
+Vite 也会读取 `JIUWENSWARM_DATA_DIR`，所以前端终端必须使用与本次后端相同的隔离路径。下述默认 V0、稳定句预读和 Task Demo 三种兼容/Demo 模式一次只能选一种；切换模式时先按 `Ctrl+C` 停止现有 Vite，确认 `5173` 已释放，再在新终端完成变量设置后启动。不得先运行 `npm run dev` 再修改变量，也不得仅打开产品组合 flag 就把这些模式算作累计验收路径。
 
-### 7.1 计划中的 cumulative Integrated / Web Alpha 模式：当前不可运行
+### 7.1 Cumulative Integrated / Web Alpha 激活门槛
 
-Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability，并由 route telemetry 标记每段 `formal/fallback/demo_substitute/unsupported/unknown`。当前代码和下面的命令尚未提供这种组合模式，因此：
+Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability，并由 route telemetry 标记每段 `formal/fallback/demo_substitute/unsupported/unknown`。在 STATUS 标记完整路径可运行、且本节记录精确启动和停止命令之前：
 
 - 不得同时打开现有两个 Post-V0 flag 并把偶然共存称为 Integrated Demo；
 - 不得拼接多个独立运行的截图或结果计算 Replacement Ledger；
 - 不得使用 fake Provider/Executor 作为真实 showcase 成功；
-- 在正式 Integrated route、组合 flag/capability、trace 和关闭路径落地前，[INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 保持 `NOT RUNNABLE YET`，Week 2 score 保持未开始；
+- [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 只能作为 Gate 脚本，运行状态和 Week 2 分数只从 STATUS 读取；
 - 新组合模式落地时，必须在本节记录精确启动变量/配置、互斥与兼容规则、route trace 检查、停止/恢复流程和实际 tested candidate，不能提前写占位命令。
 
-Integrated 模式实现后仍要保留下述 V0 模式用于不可变回归，并允许每个 formal module 单独切回其声明的 fallback。Week 2/Week 4 分别按 [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 和 [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md) 取证。
+完整 Integrated 模式可运行后仍要保留下述 V0 模式用于不可变回归，并允许每个 formal module 单独切回其声明的 fallback。Week 2/Week 4 分别按 [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 和 [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md) 取证。
 
 ### 7.2 默认 V0 模式
 

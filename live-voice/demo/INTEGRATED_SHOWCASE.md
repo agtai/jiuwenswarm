@@ -1,12 +1,12 @@
 # Live Voice cumulative P1/P2/P3alpha showcase
 
-> Status: `NOT RUNNABLE YET`
+> Runtime/Gate state: see [STATUS.md](../STATUS.md)
 > Week 2 pass/fail authority: [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
 > Week 3–4 Web Alpha pass/fail authority: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
 > Environment procedure: [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md)
 > Stable delivery/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
-This script demonstrates the cumulative engineering route after formal modules begin replacing V0 shortcuts. It never replaces acceptance evidence. Until the runbook's Integrated mode is implemented and route telemetry identifies every segment, this script is a planned Gate and must not be presented as a working capability.
+This script defines the cumulative engineering route after formal modules begin replacing V0 shortcuts. It never replaces acceptance evidence. Unless STATUS says the complete route is runnable and the runbook provides an exact activation procedure with route telemetry for every segment, this script remains a Gate procedure and must not be presented as a working capability.
 
 ## 1. Showcase claim
 
@@ -56,7 +56,7 @@ Start a deliberately slow read-only Agent request. While it is working or speaki
 
 ### Turn 3 — create a real detached task
 
-> Current gate: closing the bounded D-031 project-bound carrier does not make this cumulative script runnable. Consult STATUS for the formal Integrated-mode dependencies, and do not substitute the shell-disabled Compatibility Adapter for Task Core/Event/Executor authority.
+> Gate rule: closing the bounded D-031 project-bound carrier does not make this cumulative script runnable. Consult STATUS for the formal Integrated-mode dependencies, and do not substitute the shell-disabled Compatibility Adapter for Task Core/Event/Executor authority.
 
 Issue a task intent without confirmation and show zero task mutation plus a clarification/confirmation request. Then give the exact confirmation in the isolated target. Show the real task ID, command ID, target, Executor and accepted/running facts.
 

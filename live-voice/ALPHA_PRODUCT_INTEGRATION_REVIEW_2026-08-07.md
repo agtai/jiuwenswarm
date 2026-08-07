@@ -4,7 +4,7 @@
 
 ## Candidate identity and integration method
 
-The candidate is on local branch `codex/lv-alpha-integration`, which has no configured upstream. It starts after the D-060 governance commit `b0ecd0215eef4eefe5907fe6a39235145817823c`; latest pushed implementation remains `f742fac0`. No commit from this integration batch was pushed.
+The candidate is on local branch `codex/lv-alpha-integration`, which has no configured upstream. It starts after the D-060 governance commit `b0ecd0215eef4eefe5907fe6a39235145817823c`. At this review snapshot, the latest pushed implementation was `f742fac0`; later Git state belongs only in STATUS. No commit from this integration batch was pushed during the reviewed integration operation.
 
 Main integrated the reviewed commits in dependency order with no cherry-pick conflict:
 

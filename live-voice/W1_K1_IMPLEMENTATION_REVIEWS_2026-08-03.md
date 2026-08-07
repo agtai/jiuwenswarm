@@ -4,7 +4,7 @@
 > Scope: five non-Sol implementation candidates for the ACG v2 critical kernel
 > Current progress and next action remain authoritative only in [STATUS.md](STATUS.md).
 > The accepted ownership change is recorded in [D-049](decisions/DECISIONS.md).
-> [D-052](decisions/DECISIONS.md) supersedes future model-allocation statements in this historical record; it does not change the reviewed code-source history.
+> [D-052](decisions/DECISIONS.md) supersedes the model-allocation statements in this historical record, and D-060 later creates a bounded Alpha parallel exception; neither changes the reviewed code-source history.
 
 ## 1. Reviewed candidates
 

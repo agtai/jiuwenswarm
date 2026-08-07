@@ -126,4 +126,4 @@ The Integration Owner re-reviewed correction commit `116ab8005e68efd4f1aa68cc873
 
 Owner-run verification passed: focused Integrated Web tests 32/32, affected regressions 134/134, default flag-off and explicit flag-on production builds, affected Prettier, `git diff --check`, and an additional non-cooperative `lease.close` bounded-wait probe.
 
-This record does not update mutable project status. Until the integration session reconciles real commits and runs the required evidence, Integrated Demo remains not runnable and Replacement Ledger credit remains `0/100`.
+This record does not update mutable project status. At this worker-review snapshot, integration had not yet reconciled real commits or run the required evidence, so the record granted no runnable Integrated Demo claim or Replacement Ledger credit. Later state belongs only in STATUS.

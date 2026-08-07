@@ -14,12 +14,12 @@
 
 ## 1. Purpose and reading contract
 
-This dated matrix gives people one readable view of what the current Demo routes do, which formal module must replace each route, and how the 28 core-module packages plus three cross-cutting packages fit into Web Alpha. It gives an Agent stable IDs, ownership, dependencies, target windows, package timeboxes, risk tiers and acceptance authorities from which to prepare the next bounded implementation plan.
+This dated matrix gives people one readable view of what the Demo routes did at the freeze date, which formal module must replace each route, and how the 28 core-module packages plus three cross-cutting packages fit into Web Alpha. It gives an Agent stable IDs, ownership, dependencies, target windows, package timeboxes, risk tiers and acceptance authorities from which to prepare a bounded implementation plan; current route facts remain in STATUS.
 
 This file is **not** a second status page or an implementation-ready queue:
 
 - `STATUS.md` alone says whether a package is not started, partial, blocked, committed or verified. Every row here therefore uses `see STATUS` rather than copying live state, HEAD, test counts, scores, blockers or next actions.
-- A target window is an ordering goal (`W2`, `W3`, `W4`, `Later`), not a promised calendar date. A package timebox preserves the original one-engineer/available-dependency estimate and cannot be added mechanically under the current single GPT/Sol lane.
+- A target window is an ordering goal (`W2`, `W3`, `W4`, `Later`), not a promised calendar date. A package timebox preserves the original one-engineer/available-dependency estimate and cannot be added mechanically under either D-052's default allocation or D-060's bounded parallel exception.
 - Risk tiers are the default classification for the package boundary shown here. The actual diff may raise the tier when it introduces authority, security, concurrency, durability or release risk; a row never lowers D-046/D-053 requirements.
 - The immutable [2026-07-30 full solution](../architecture/FULL_SOLUTION_2026-07-30.md) remains the historical architecture snapshot. D-055 changes its Windows carrier interpretation; the [ACG](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md) remains the normative shared contract.
 - A package may start only after STATUS says its dependencies are satisfied and a bounded plan identifies exact source/tests, allowed and forbidden effects, evidence and exclusions. A row in this matrix never means `READY` or `PASS` by itself.
@@ -54,9 +54,9 @@ Package suffixes keep their original meaning:
 
 Stable IDs such as `AIO-B` and `RM-B` are not mechanically renamed with `-Web`. `X-WEB` is the only new platform package and explicitly supersedes historical `X-WIN`.
 
-## 4. Current Demo to formal Web Alpha replacement
+## 4. Dated Demo predecessors to formal Web Alpha replacement
 
-| Current implementation | Class | Current user value | Main limitation | Formal owner and package | Target window | Replacement condition | Disposition after replacement |
+| Implementation at freeze date | Class | User value at freeze date | Main limitation | Formal owner and package | Target window | Replacement condition | Disposition after replacement |
 |---|---|---|---|---|---|---|---|
 | Browser `SpeechRecognition` in the Live Voice Demo | `fallback` | Real microphone speech becomes committed text | No formal streaming cursor/session provenance; technical-term quality depends on browser service | AIO + SR: `AIO-B/C`, `SR-B/C` | W2–W3 | Real selected Speech route passes commit/cancel/permission/quality evidence through formal Ports | Keep as visible fallback |
 | Browser `speechSynthesis` and Demo chunk queue | `fallback` | Truthful Agent responses are spoken | No Provider audio-byte provenance, reliable streaming chunk cursor or formal playout ACK | SS + AIO: `SS-B/C`, `AIO-C` | W2–W3 | Formal TTS and browser playout ACK/stop path passes stale/cancel evidence | Keep as visible fallback |
@@ -68,7 +68,7 @@ Stable IDs such as `AIO-B` and `RM-B` are not mechanically renamed with `-Web`. 
 | Existing route labels and component logs | `demo_substitute` | Shows some route and failure facts | No complete correlated trace, metric or benchmark coverage | X-OBS | W2–W3 | Every scored segment and fault is correlated and reproducible | Evolve into formal observability |
 | Historical Desktop/WebView2 productization plan | `unsupported` | No current product route | Carrier was superseded before Alpha implementation | X-WEB | W2–W4 | Web platform Gate passes on the declared candidate and deployment | Keep historical plan only; do not implement X-WIN |
 
-Current source examples are [useLiveVoiceDemo.ts](../../jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts), [liveVoiceTaskBridge.ts](../../jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskBridge.ts), [agent_ws_server.py](../../jiuwenswarm/server/agent_ws_server.py) and [AutoHarness service.py](../../jiuwenswarm/agents/harness/common/auto_harness/service.py). These links identify predecessors, not future ownership.
+Source examples at the matrix freeze date are [useLiveVoiceDemo.ts](../../jiuwenswarm/channels/web/frontend/src/features/live-voice/useLiveVoiceDemo.ts), [liveVoiceTaskBridge.ts](../../jiuwenswarm/channels/web/frontend/src/features/live-voice/liveVoiceTaskBridge.ts), [agent_ws_server.py](../../jiuwenswarm/server/agent_ws_server.py) and [AutoHarness service.py](../../jiuwenswarm/agents/harness/common/auto_harness/service.py). These links identify predecessors, not current route state or future ownership.
 
 ## 5. P1 Speech I/O work packages
 

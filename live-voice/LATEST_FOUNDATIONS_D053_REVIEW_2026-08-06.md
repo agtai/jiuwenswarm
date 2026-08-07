@@ -1,4 +1,4 @@
-# Latest bounded foundations — exact-SHA D-053 evidence index
+# Bounded foundations — exact-SHA D-053 evidence index
 
 > Record date: 2026-08-06
 >

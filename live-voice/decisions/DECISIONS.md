@@ -483,18 +483,18 @@
 ## D-046 以两周 90% 累计 Demo 和四周 Integrated Alpha 驱动并行交付
 
 - 日期：2026-08-03
-- 状态：Partially superseded（累计路线、范围、评分和风险分级保留；Windows/X-WIN 载体由 D-055 取代，未来模型分工和原并行资源假设由 D-052 取代；`W2/W3/W4` 当前是顺序窗口，不是单线执行下的日历承诺）
+- 状态：Partially superseded（累计路线、范围、评分和风险分级保留；Windows/X-WIN 载体由 D-055 取代，未来模型分工和原并行资源假设先由 D-052 取代，D-060 后来在有界 Alpha 窗口恢复四个非重叠实现 lane；`W2/W3/W4` 当前是顺序窗口，不是日历承诺）
 - 背景：用户明确项目目标不是无限期平台建设，也不是只维护 V0 或只完成 D-031。V0 要第一时间打通真实端到端，随后正式模块沿同一工程路径持续替换 Demo 中的手工代码、固定限制和兼容实现；第 2 周 Demo 达到可审计的 90% 完成度，第 3–4 周完成 P1 + P2 + P3，若完整 P3 风险过高则 P3alpha 可作为承诺结果。完整方案现有 31 个 Alpha 工程包的顺序时间盒约为 47–78 人日，尚未包含完整 P3 扩展；若按每个小切片独立 D-032 checkpoint、单执行流和末期统一集成推进，四周目标在流程上即不可达。
-- 接受时的目标定义：原四周并行范围写作 **Integrated Windows Alpha = P1 + P2 + P3alpha + Context/Progress/Failure/Observability + 三个真实纵向切片 + P2/P3alpha 联合 Gate**。D-055 已把 carrier 映射为 Web/X-WEB，D-052 已取消原并行日历承诺；能力范围仍不是 RC/Production，完整 P3 仍是 stretch，P3alpha 是当前 Alpha 的最低 Task 范围。
+- 接受时的目标定义：原四周并行范围写作 **Integrated Windows Alpha = P1 + P2 + P3alpha + Context/Progress/Failure/Observability + 三个真实纵向切片 + P2/P3alpha 联合 Gate**。D-055 已把 carrier 映射为 Web/X-WEB，D-052 已取消原并行日历承诺；D-060 的有界并行只改变执行分配，不恢复该日历承诺。能力范围仍不是 RC/Production，完整 P3 仍是 stretch，P3alpha 是当前 Alpha 的最低 Task 范围。
 - 两周决策：Week 2 必须运行一个累计 Integrated Demo，而不是分别运行互斥的 V0、稳定句和 Task 样例。完成度按权威 Demo Replacement Ledger 的用户旅程权重计算，不按代码行数、测试数、文件数或模块名计数；总分至少 90/100，且 committed-only、副作用确认、精确 identity/scope、stale fence、unknown/error 不冒充成功、文字 flag-off 回归等 mandatory invariant 全部通过。`fallback`、`Demo substitute`、`unsupported` 和 `unknown` 必须可见；substitute 可以证明类别价值，但不能自动获得正式模块全部分值。
 - 演进决策：V0 `ee2896a4` 保持不可变证据基线。新模块通过 Port/Adapter/capability/feature flag 逐段接管同一累计 Demo，必须由 route telemetry/trace 证明每段实际使用 formal、fallback 或 substitute；不另建第二套假 UX，也不等到所有模块完成后再进行首次集成。
 - 并行决策：共享 ACG critical kernel 在最初 1–2 天冻结并实现，包含 identity/scope、authority、committed input、核心 lifecycle、四种 cancel、generation fence、Event/Error/Capability 和 feature-off primitives。随后 P1（AIO/SR/SS）、P2（CR/RM/II/AB）、P3alpha（TC/ED/VB）与 X-OBS/X-E2E/Windows 集成按依赖并行。ACG 的 ContextRef 全量策略、presentation ACK、完整 restart reconciliation 等扩展仍属于完整目标，但只在消费它们的 B/C 接线前成为局部门槛，不阻塞无关 A 包。
 - D-031 决策：D-031 不再是整个项目无条件第一任务。它是 P3alpha 轨上的 legacy Demo Adapter 候选：若 `TC-B + TaskEvent/projection` 可在 Day 7 前进入累计 Demo，则跳过或缩减 D-031；否则把最小单任务 monitor 限时为 1–2 个工作日。必须保留 single in-flight、精确 identity/target、迟到结果 fence、错误不冒充终态、零 Chat mutation 和播报仲裁，但不得把临时 poll 路径扩成通用多任务、持久 replay、跨进程恢复或第二个 Task Core。
 - D-032 决策：测试与 Sol 回顾按风险分级。Tier 0 文档/机械/纯重构执行受影响检查；Tier 1 普通功能/Adapter/UI 覆盖正向旅程、关键反例/flag-off、受影响集成和回归；Tier 2 状态/并发/副作用边界执行 scoped Sol pre/post review 和全部适用维度；Tier 3 共享协议、authority、安全、durability、Week 2/Week 4 Release Gate 执行完整 D-032、fault/recovery、immutable candidate 和真实路径证据。相关包可以共享一次设计 checkpoint、实现批次、post-review 和 commit；不再要求每个小包独立 pre-review commit/push。根 `AGENTS.md` 的每次 commit 与 push 分别精确批准仍保持不变。
-- 历史模型分工：本决定接受时沿用 D-041；D-052 后续已把设计、实现、测试和审查统一为当前 GPT/Sol 单线。这里保留的跨轨契约、高风险判断和 Gate 责任仍有效，但不再授权非 Sol 模型执行未来包。
+- 历史模型分工：本决定接受时沿用 D-041；D-052 后续把设计、实现、测试和审查统一为当前 GPT/Sol 默认单线，D-060 再为有界 Alpha 范围建立四个 GPT/Sol 实现 Session 和单一集成所有权。这里保留的跨轨契约、高风险判断和 Gate 责任仍有效，但不授权切换到外部模型。
 - 文档影响：`STATUS.md` 只保留短 dashboard、当前 replacement ledger、blocker 和 next actions；2026-08-03 已完成的详细 D-031/ACG/CR-A/SR-A/SS-A/TC-A 设计移入冻结 review record。Roadmap 以 Week 2/Week 4 Gate 和并行轨为权威；V0 acceptance/evidence/showcase 保持历史边界，并新增 Integrated Demo 与 Alpha acceptance/showcase。Runbook 在代码具备组合路由前必须诚实标注 Integrated mode 尚不可运行。
 - 原因：架构规模与明确的 P1/P2/P3alpha 目标匹配，真正的风险是串行 Gate、临时 Adapter 过度建设和最后一刻集成。风险分级不降低 committed-only、精确对象、副作用、fence、truthfulness 和兼容性底线，而是把完整证明集中到真正高风险边界和累计 Gate，使三至四周并行交付具有可执行性。
-- 重新评估条件：Week 1 结束仍只有一个有效执行轨；共享 kernel 超过两天仍不能支持并行；Week 2 route telemetry 无法证明 90% 分值；真实 Provider/Web/Executor 条件不可用；P3alpha 联合 Gate 暴露必须提前实现完整 P3 的依赖；或用户改变范围、资源并行度、日历目标或生产责任。D-052 已触发资源假设重新估算，当前没有接受新的四周日历承诺。
+- 重新评估条件：Week 1 结束仍只有一个有效执行轨；共享 kernel 超过两天仍不能支持并行；Week 2 route telemetry 无法证明 90% 分值；真实 Provider/Web/Executor 条件不可用；P3alpha 联合 Gate 暴露必须提前实现完整 P3 的依赖；或用户改变范围、资源并行度、日历目标或生产责任。D-052 已触发资源假设重新估算，D-060 已改变有界 Alpha 的资源并行度，但当前仍没有接受新的四周日历承诺。
 
 ## D-047 保留必要安全并冻结临时 authority，正式模块只在替换时收缩兼容层
 
@@ -552,14 +552,14 @@
 - 当时影响：`STATUS.md` 记录未提交候选和验证事实，Git HEAD 在获得批准前保持基线 SHA；该操作已完成，不再表示当前候选仍未提交。
 - 重新评估条件：用户要求拆分分支/提交范围，当前工作区出现无法安全区分的无关改动，或 commit 审批要求改变候选边界。
 
-## D-052 后续开发固定由当前 GPT/Sol 单线完成
+## D-052 后续开发默认由当前 GPT/Sol 单线完成
 
 - 日期：2026-08-04
-- 状态：Accepted（替代 D-041、D-048、D-049 中面向未来任务的模型分工；这些决策仍保留其历史背景、代码来源和风险判断）
+- 状态：Partially superseded（替代 D-041、D-048、D-049 中面向未来任务的模型分工；D-060 后来只在接受的 Alpha 范围内建立四个 GPT/Sol 实现 Session 和单一集成 owner，D-052 在该例外外继续作为默认分配）
 - 决策：后续包固定由当前 GPT/Sol 设计、实现、测试和审查，不再提醒、委派或切换到 DeepSeek/其他外部执行模型。Tier 2/3 的 identity、authority、state、cancel、security、concurrency、durability 和 release 判断始终由 GPT/Sol 负责。
 - 历史候选：已有外部候选只作为审查历史或可选择复用的素材；任何片段都要按当前合同、完整 diff 和实际测试重新验证，不得整体 merge/cherry-pick 来代替实现与审查。
-- 影响：dated Week 1 plan 的包边界和风险 Gate 继续有效，但其中历史 owner/model 字段不再决定当前执行。原三到四周估算依赖多条并行实现轨；默认单线执行后必须按实际速度重新估算，不能继续沿用原资源假设。
-- 重新评估条件：只有用户以后明确作出新的模型分工决策，或项目范围、时间和可用资源发生变化。
+- 影响：dated Week 1 plan 的包边界和风险 Gate 继续有效，但其中历史 owner/model 字段不再决定当前执行。原三到四周估算依赖多条并行实现轨；D-060 的有界并行不自动恢复原日历承诺，仍须按真实依赖和速度重新估算。
+- 重新评估条件：用户明确作出新的模型分工决策，或项目范围、时间和可用资源发生变化。D-060 已触发一次有界重新评估，其文件所有权、集成 lease 和远端边界只在该决定范围内有效。
 
 ## D-053 高风险开发批次采用三轮 review
 
@@ -586,7 +586,7 @@
 - 日期：2026-08-05
 - 状态：Accepted（用户已明确将当前 Alpha 产品目标从 Windows Desktop/WebView2 调整为 Web；本条把此前对话中的产品决定同步为仓库权威记录）
 - 背景：当前可运行 V0 和 Post-V0 Demo 已经通过 JiuwenSwarm Web 前端、浏览器麦克风和浏览器音频路径验证产品价值；继续把 Windows `.exe`、WebView2 权限、原生设备生命周期和安装包作为四周 Alpha Gate，会把平台产品化工作放在真实 Speech/Media/Conversation/Task 纵向链之前。用户已经决定当前交付载体改为 Web，但 D-046、roadmap、STATUS 和 Alpha acceptance 仍保留 Windows Alpha 表述，造成当前目标与文档权威不一致。
-- 产品决定：当前范围目标为 **Integrated Web Alpha**。`W2/W3/W4` 表示累计交付顺序；D-052 固定单 GPT/Sol 轨后，原四周并行估算不再是当前日历承诺，必须根据实际速度重新估算。首期载体是 JiuwenSwarm 桌面 Web 前端；实际验收必须使用并记录明确声明的桌面浏览器、操作系统、设备和网络标签，但不把固定验收环境冒充公开兼容矩阵。D-055 不自行承诺 Chrome+Edge 双浏览器覆盖；X-WEB 真实 Gate 前必须明确冻结是单一 Chromium 基线还是 Chrome+Edge 双 Chromium 基线。移动 Web、PWA、Firefox、Safari 和全平台兼容不属于当前 Alpha 范围。
+- 产品决定：当前范围目标为 **Integrated Web Alpha**。`W2/W3/W4` 表示累计交付顺序；D-052 取消了原四周并行估算的日历承诺，D-060 后来的有界并行也不自动恢复该承诺，必须根据实际速度和外部依赖重新估算。首期载体是 JiuwenSwarm 桌面 Web 前端；实际验收必须使用并记录明确声明的桌面浏览器、操作系统、设备和网络标签，但不把固定验收环境冒充公开兼容矩阵。D-055 不自行承诺 Chrome+Edge 双浏览器覆盖；X-WEB 真实 Gate 前必须明确冻结是单一 Chromium 基线还是 Chrome+Edge 双 Chromium 基线。移动 Web、PWA、Firefox、Safari 和全平台兼容不属于当前 Alpha 范围。
 - 安全与部署边界：部署环境必须使用安全上下文；`localhost` 只作为本地开发和受控验收例外。Speech/模型 Provider 凭据只能保存在 Gateway/服务端，浏览器不得持有长期 Provider 密钥。麦克风权限、权限撤销、设备变化、autoplay/user-activation、页面隐藏/后台、CSP、CORS、反向代理、连接失败和文字降级必须在 Web Alpha Gate 中可见且无静默失败。原始音频默认不持久化。
 - 架构保持：P1/P2/P3alpha、ACG v2 wire contract、identity/scope/authority、committed-only、四种取消作用域、generation fence、presented history、Task/Core/Executor 边界、Week 2 90% 评分和风险分级不变。Web 是产品载体变化，不授权 Browser、UI、Provider 或 Transport 成为新的生命周期权威。
 - 工作包影响：`AIO-B/C` 保留稳定 ID，交付解释改为浏览器采集、播放、权限、设备和 exact-response stop；`RM-B` 保留稳定 ID，改为 Browser↔Gateway 实时媒体传输；`X-WEB` 取代 `X-WIN`，负责 Web UI、权限/隐私、部署、诊断和正式 P3alpha 控件接线。Browser Speech Recognition/Synthesis 继续作为显式 fallback，不获得正式 Provider 或 Realtime Media credit。不得为所有包机械增加 `-Web` 后缀。

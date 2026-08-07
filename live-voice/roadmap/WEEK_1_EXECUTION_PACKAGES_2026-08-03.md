@@ -8,7 +8,7 @@
 > Product milestones and risk tiers: [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)
 > Shared contract authority: [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md)
 > Ownership update: [D-049](../decisions/DECISIONS.md) replaces this snapshot's W1-K1 non-Sol owner with direct Sol implementation after five unsuccessful candidate reviews. The original owner text below is retained as dated history; see [the review record](../W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md) and STATUS for current action.
-> Execution-policy update: [D-052](../decisions/DECISIONS.md) makes current GPT/Sol the only executor for future packages; work is no longer switched to DeepSeek. Historical owner/model fields below no longer assign work; package boundaries, dependencies, risk tiers, and scenario oracles remain valid.
+> Execution-policy history: [D-052](../decisions/DECISIONS.md) ended switching work to DeepSeek; [D-060](../decisions/DECISIONS.md) later created a bounded four-lane Alpha exception. Historical owner/model fields below no longer assign work; STATUS and the Alpha parallel plan own current allocation, while package boundaries, dependencies, risk tiers and scenario oracles remain valid.
 > Product-carrier update: [D-055](../decisions/DECISIONS.md) replaces historical Windows/X-WIN productization with Web/X-WEB. Windows wording below remains part of this dated plan and does not define the current Alpha carrier.
 
 This is the dated, execution-level handoff required by D-041, D-046, and D-048. It freezes priority, dependencies, code ownership, package boundaries, scenario oracles, target files, and verification commands for Week 1. It does not report implementation progress. `STATUS.md` remains the only mutable source for package state, tested SHA, blockers, and current next action.
@@ -99,7 +99,7 @@ If only one executor is available, use this order: `K1 → X1 → P2A-CR → P3A
 
 ## 5. Execution and handoff protocol
 
-D-052 makes the current GPT/Sol task the only implementation and review lane. It owns the package diff, tests, evidence, all Tier 2/3 semantic decisions, and `W1-S1`/`W1-S2`/`W1-S3` judgments. Work is not reminded, delegated, or switched to DeepSeek or another external executor; historical external output is reference material only.
+At this Week 1 execution snapshot, D-052 made the current GPT/Sol task the only implementation and review lane. D-060 later superseded that allocation only for its bounded Alpha window; it did not restore DeepSeek switching or change this plan's historical package evidence.
 
 For every package: record the start SHA and dependency Gate, read only routed sources, keep changes uncommitted until approval, report exact commands/results and exclusions, and stop if the package requires an unaccepted semantic change. No package permits weakening an assertion, hiding a mismatch with a snapshot, inferring success from an error string, or broadening scope because current Demo code is easier to reuse.
 

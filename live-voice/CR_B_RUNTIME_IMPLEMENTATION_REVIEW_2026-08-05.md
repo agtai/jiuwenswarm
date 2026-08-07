@@ -3,13 +3,13 @@
 > Batch date: 2026-08-05
 >
 > Source branch/worktree: `codex/cr-b-runtime` / independent worktree based on
-> `e407af45cbb97b23aedab5b5ce9b24880b09667b`; current integration base:
+> `e407af45cbb97b23aedab5b5ce9b24880b09667b`; integration base at review closure:
 > `50b98b4a381cc44c25a63b8c37ec684ecb6adea3` on `hx/0803_live_voice`
 >
-> Current state: **CURRENT-BRANCH INTEGRATION REVIEW PASS AFTER FIX; no real-route or release claim**
+> Review-snapshot state: **CURRENT-BRANCH INTEGRATION REVIEW PASS AFTER FIX; no real-route or release claim**
 >
-> Integration reconciliation: D-031 is already closed on the current base, AIO-B is
-> recorded under D-058, and current state is owned only by `STATUS.md`.
+> Integration reconciliation: D-031 was already closed on the review base, AIO-B was
+> recorded under D-058, and later landed/current state is owned only by `STATUS.md`.
 
 ## 1. Original request and bounded outcome
 

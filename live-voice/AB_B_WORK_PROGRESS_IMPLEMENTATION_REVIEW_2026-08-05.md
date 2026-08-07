@@ -4,14 +4,14 @@
 >
 > Source branch/worktree: `codex/ab-b-work-progress` / independent worktree based on
 > committed CR-B candidate `4b384970ff06ef7adc5fe9ad4b0bd7f745ab412b`;
-> current integration base: `1d721ca07587764f054e905bb4701e5af6d6a6ef` on
+> integration base at review closure: `1d721ca07587764f054e905bb4701e5af6d6a6ef` on
 > `hx/0803_live_voice`
 >
-> Current state: **CURRENT-BRANCH INTEGRATION REVIEW PASS AFTER FIXES; no real-route
+> Review-snapshot state: **CURRENT-BRANCH INTEGRATION REVIEW PASS AFTER FIXES; no real-route
 > or release claim**
 >
 > Integration reconciliation: D-031 is closed under D-057, AIO-B is recorded under
-> D-058, CR-B is integrated, and current state is owned only by `STATUS.md`.
+> D-058, CR-B was integrated at closure, and later landed/current state is owned only by `STATUS.md`.
 
 ## 1. Original request and bounded outcome
 

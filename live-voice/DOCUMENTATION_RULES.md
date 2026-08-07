@@ -85,7 +85,7 @@ Before proposing a documentation commit:
 1. `git diff --check` passes.
 2. Every local Markdown link under `live-voice/` resolves.
 3. `docs/zh/live-voice/` contains no tracked duplicate.
-4. README remains routing-only, STATUS remains the sole concise mutable state, the Web Alpha matrix contains no live status, and frozen review records are prominently marked historical so former queue, owner, schedule or carrier wording cannot override STATUS/D-046/D-052/D-053/D-055.
+4. README remains routing-only, STATUS remains the sole concise mutable state, the Web Alpha matrix contains no live status, and frozen review records are prominently marked historical so former queue, owner, schedule or carrier wording cannot override STATUS or the applicable D-046/D-052/D-053/D-055/D-058–D-061 decisions.
 5. Archive warnings are present.
 6. Current code, tests, decisions, roadmap, and STATUS do not contradict one another.
 7. The proposed commit/push still follows the root approval gate.

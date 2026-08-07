@@ -1,11 +1,11 @@
 # Live Voice W3/W4 Integrated Web Alpha acceptance
 
-> Status: `NOT STARTED`
+> Run state: see [STATUS.md](../STATUS.md)
 > Accepted scope: P1 + P2 + P3alpha; complete P3 is stretch
-> Architecture: historical [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), normative [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), and all applicable current decisions, especially D-046, D-047, D-050, D-052, D-053 and D-055
+> Architecture: historical [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), normative [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), and all applicable current decisions, especially D-046, D-047, D-050, D-052, D-053, D-055 and D-058–D-061
 > Stable package/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
-This contract decides whether the Integrated Web Alpha scope is complete; `W3/W4` is a delivery-order window, not a current single-lane calendar promise. The accepted carrier is the JiuwenSwarm desktop Web frontend. Chrome/Chromium 107 remains the implementation compatibility floor for modified frontend code, while the candidate must separately name the exact accepted single-desktop-Google-Chrome evidence baseline. D-058 does not turn that evidence into a Chrome+Edge or wider compatibility promise. This is not a mobile/PWA, Firefox/Safari, public compatibility-matrix, RC, or Production approval.
+This contract decides whether the Integrated Web Alpha scope is complete; `W3/W4` is a delivery-order window, not a calendar promise under either the default or bounded-parallel execution model. The accepted carrier is the JiuwenSwarm desktop Web frontend. Chrome/Chromium 107 remains the implementation compatibility floor for modified frontend code, while the candidate must separately name the exact accepted single-desktop-Google-Chrome evidence baseline. D-058 does not turn that evidence into a Chrome+Edge or wider compatibility promise. This is not a mobile/PWA, Firefox/Safari, public compatibility-matrix, RC, or Production approval.
 
 ## 1. Candidate boundary
 
