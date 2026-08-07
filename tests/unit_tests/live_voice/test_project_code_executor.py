@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import runpy
+import sqlite3
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ErrorCode,
@@ -15,6 +20,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TerminalOutcome,
 )
+from jiuwenswarm.common.utils import get_agent_workspace_dir
 from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
@@ -31,7 +37,9 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     ResolvedTaskContext,
 )
 from jiuwenswarm.server.live_voice.project_code_executor import (
+    DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
+    FORMAL_RUNTIME_SUPPORT_POLICY,
     PROJECT_CODE_ARTIFACT_KIND,
     PROJECT_CODE_EFFECT_POLICY,
     PROJECT_CODE_EXECUTOR,
@@ -45,6 +53,134 @@ class _ProjectExecutor:
     async def process_background_code_task_stream(self, *_args, **_kwargs):
         if False:
             yield None
+
+
+class _DirectProjectExecutor:
+    def __init__(self, project: Path, behavior: str = "success") -> None:
+        self.project = project
+        self.behavior = behavior
+        self.requests = []
+        self.started = asyncio.Event()
+        self.finished = asyncio.Event()
+
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        self.started.set()
+        project = Path(request.params["project_dir"]).resolve()
+        try:
+            if self.behavior == "wait":
+                await asyncio.Event().wait()
+            elif self.behavior == "agent_error":
+                yield AgentResponseChunk(
+                    request.request_id,
+                    request.channel_id,
+                    payload={"event_type": "chat.error", "error": "private"},
+                    is_complete=True,
+                )
+            elif self.behavior == "incomplete":
+                yield AgentResponseChunk(
+                    request.request_id,
+                    request.channel_id,
+                    payload={"event_type": "chat.delta", "content": "partial"},
+                    is_complete=False,
+                )
+            else:
+                if self.behavior == "head_change":
+                    (project / "forbidden.txt").write_text(
+                        "forbidden", encoding="utf-8"
+                    )
+                    _git(project, "add", "forbidden.txt")
+                    _git(project, "commit", "-m", "forbidden")
+                elif self.behavior == "support_change":
+                    (project / ".gitignore").write_text(
+                        "runtime/\n", encoding="utf-8"
+                    )
+                elif self.behavior == "ignored_only":
+                    (project / "ignored.txt").write_text(
+                        "ignored", encoding="utf-8"
+                    )
+                else:
+                    (project / "result.txt").write_text("done", encoding="utf-8")
+                yield AgentResponseChunk(
+                    request.request_id,
+                    request.channel_id,
+                    payload={"event_type": "chat.final", "content": "done"},
+                    is_complete=True,
+                )
+        finally:
+            self.finished.set()
+
+
+class _AttributionExecutor:
+    def __init__(self) -> None:
+        self.requests = []
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        attempt_id = request.metadata["formal_attempt_id"]
+        if attempt_id == "attempt-1":
+            self.first_started.set()
+            await self.release_first.wait()
+            (Path(request.params["project_dir"]) / "only-attempt-1.txt").write_text(
+                "attempt-1\n", encoding="utf-8"
+            )
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={"event_type": "chat.final", "content": "completed"},
+            is_complete=True,
+        )
+
+
+class _NonCooperativeExecutor:
+    def __init__(self) -> None:
+        self.requests = []
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancel_signals = 0
+
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancel_signals += 1
+            await self.release.wait()
+        (Path(request.params["project_dir"]) / "late-effect.txt").write_text(
+            "late\n", encoding="utf-8"
+        )
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={"event_type": "chat.final", "content": "late completed"},
+            is_complete=True,
+        )
+
+
+def _git(project: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", "-C", str(project), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _git_project(project: Path, *, ignore: str | None = None) -> None:
+    project.mkdir(parents=True, exist_ok=True)
+    _git(project, "init")
+    _git(project, "config", "user.name", "Live Voice Test")
+    _git(project, "config", "user.email", "live-voice-test@example.invalid")
+    (project / "README.md").write_text("baseline\n", encoding="utf-8")
+    if ignore is not None:
+        (project / ".gitignore").write_text(ignore, encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "baseline")
 
 
 def _scope() -> ScopeRef:
@@ -173,6 +309,39 @@ def _binding(project: Path, service: _Service) -> ProjectExecutionBinding:
     )
 
 
+def _direct_binding(
+    project: Path,
+    executor: _DirectProjectExecutor,
+    *,
+    releases: list[str] | None = None,
+) -> ProjectExecutionBinding:
+    return ProjectExecutionBinding(
+        service=None,
+        execution_agent=object(),
+        project_executor=executor,
+        effective_execution_root=str(project.resolve()),
+        execution_target={
+            "project_dir": str(project.resolve()),
+            "project_id": "project-1",
+            "origin_session_id": "session-1",
+            "origin_channel_id": "web",
+        },
+        owner_scope={
+            "channel_id": "formal-task-core",
+            "session_id": "session-1",
+            "app_id": "live-voice",
+        },
+        resolved_revision_kind="version",
+        resolved_revision_value="a77516a0",
+        model_identity="default#0",
+        model_config_version="catalog-v1",
+        context_release=(
+            None if releases is None else lambda: releases.append("released")
+        ),
+        dispatch_fence=_clean_dispatch_fence,
+    )
+
+
 def _item(project: Path, *, kind=OutboxKind.ATTEMPT_DISPATCH, source_seq=-1):
     return PersistentOutboxItem(
         outbox_id="outbox-1",
@@ -187,6 +356,48 @@ def _item(project: Path, *, kind=OutboxKind.ATTEMPT_DISPATCH, source_seq=-1):
         state=OutboxState.CLAIMED,
         delivery_count=1,
     )
+
+
+def _direct_task_attempt(
+    project: Path,
+    *,
+    source_seq: int = 1,
+    task_id: str = "task-1",
+    attempt_id: str = "attempt-1",
+) -> tuple[PersistentTaskRecord, PersistentAttemptRecord]:
+    task = PersistentTaskRecord(
+        task_id,
+        _scope(),
+        _spec(project),
+        FormalTaskState.RUNNING,
+        attempt_id,
+        "correlation-1",
+        False,
+        False,
+        None,
+        None,
+        None,
+    )
+    attempt = PersistentAttemptRecord(
+        attempt_id,
+        task_id,
+        FORMAL_PROJECT_EXECUTOR_ID,
+        f"d0-project:{attempt_id}",
+        FormalAttemptState.RUNNING,
+        None,
+        source_seq,
+    )
+    return task, attempt
+
+
+async def _wait_direct_settled(
+    adapter: DirectProjectCodeExecutorAdapter,
+) -> None:
+    for _ in range(200):
+        if not adapter._running:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("direct Executor worker did not settle")
 
 
 @pytest.mark.asyncio
@@ -608,3 +819,518 @@ def test_shutdown_interruption_is_not_projected_as_user_cancellation() -> None:
 
     assert state is FormalAttemptState.TERMINAL
     assert outcome is TerminalOutcome.INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carrier(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    database = tmp_path / "runtime" / "p3.sqlite3"
+    adapter = DirectProjectCodeExecutorAdapter(resolver, database)
+
+    delivered = await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert delivered.executor_ref == "d0-project:attempt-1"
+    assert [event.source_seq for event in delivered.observations] == [0, 1]
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert [event.source_seq for event in terminal.observations] == [2]
+    assert terminal.observations[0].attempt_outcome is TerminalOutcome.COMPLETED
+    assert resolver.calls == [True]
+    assert len(executor.requests) == 1
+    request = executor.requests[0]
+    assert request.metadata["enable_memory"] is False
+    assert request.metadata["project_task_file_tools_only"] is True
+    assert request.params["source"] == "live_voice.formal_task.d0"
+    assert (
+        Path(request.params["workspace_dir"]).resolve()
+        == get_agent_workspace_dir().resolve()
+    )
+    assert _git(project, "rev-list", "--count", "HEAD") == "1"
+
+    with sqlite3.connect(database) as connection:
+        governance_json = connection.execute(
+            "SELECT governance_json FROM live_voice_formal_project_attempts_v1"
+        ).fetchone()[0]
+    governance = json.loads(governance_json)
+    assert governance["policy"] == dict(FORMAL_RUNTIME_SUPPORT_POLICY)
+    assert all(
+        not Path(path).resolve().is_relative_to(project.resolve())
+        for path in governance["application_paths"].values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_serializes_one_project_and_cannot_borrow_another_attempt_diff(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _AttributionExecutor()
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),  # type: ignore[arg-type]
+        tmp_path / "p3.sqlite3",
+    )
+    first_item = _item(project)
+    second_item = replace(
+        _item(project),
+        outbox_id="outbox-2",
+        task_id="task-2",
+        attempt_id="attempt-2",
+        command_id="command-2",
+    )
+
+    await adapter.dispatch(first_item)
+    await asyncio.wait_for(executor.first_started.wait(), timeout=2)
+    with pytest.raises(FormalTaskViolation) as busy:
+        await adapter.dispatch(second_item)
+    assert busy.value.reason == "EXECUTOR_PROJECT_BUSY"
+    assert [request.metadata["formal_attempt_id"] for request in executor.requests] == [
+        "attempt-1"
+    ]
+
+    executor.release_first.set()
+    await _wait_direct_settled(adapter)
+    assert (project / "only-attempt-1.txt").read_text(encoding="utf-8") == "attempt-1\n"
+
+    await adapter.dispatch(second_item)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(
+        project,
+        task_id="task-2",
+        attempt_id="attempt-2",
+    )
+    second = await adapter.status(task, attempt)
+    assert isinstance(second, ExecutorDeliveryResult)
+    assert second.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert second.observations[-1].error == "NO_EFFECTIVE_TARGET_CHANGE"
+    assert [request.metadata["formal_attempt_id"] for request in executor.requests] == [
+        "attempt-1",
+        "attempt-2",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["cancel", "close"])
+async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isolated(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _NonCooperativeExecutor()
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),  # type: ignore[arg-type]
+        tmp_path / "p3.sqlite3",
+        heartbeat_interval=0.5,
+        cancel_timeout=0.01,
+        close_timeout=0.01,
+    )
+    delivered = await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+    started = asyncio.get_running_loop().time()
+
+    if operation == "cancel":
+        result = await adapter.cancel(
+            replace(
+                _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+                executor_ref=delivered.executor_ref,
+            )
+        )
+        assert result.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+        assert result.observations[-1].error == "TASK_CANCEL_ACKNOWLEDGED_CLEANUP_PENDING"
+    else:
+        await adapter.close(interrupt_running=True)
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert not (project / "late-effect.txt").exists()
+    assert executor.cancel_signals == 1
+
+    task, attempt = _direct_task_attempt(project)
+    terminal_before_release = await adapter.status(task, attempt)
+    assert isinstance(terminal_before_release, ExecutorDeliveryResult)
+    assert terminal_before_release.observations[-1].attempt_outcome is (
+        TerminalOutcome.CANCELLED
+        if operation == "cancel"
+        else TerminalOutcome.INTERRUPTED
+    )
+
+    executor.release.set()
+    await _wait_direct_settled(adapter)
+    terminal_after_release = await adapter.status(task, attempt)
+    assert terminal_after_release == terminal_before_release
+    assert not (project / "late-effect.txt").exists()
+    isolated_root = Path(executor.requests[0].params["project_dir"])
+    assert isolated_root != project.resolve()
+    assert not isolated_root.exists()
+
+
+@pytest.mark.parametrize("field", ["cancel_timeout", "close_timeout"])
+@pytest.mark.parametrize("value", [False, 0, float("inf"), 5.01])
+def test_direct_executor_cleanup_timeouts_are_closed_and_bounded(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    with pytest.raises(ValueError, match=field):
+        DirectProjectCodeExecutorAdapter(
+            _Resolver(_direct_binding(project, executor)),
+            tmp_path / f"{field}.sqlite3",
+            **{field: value},
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_dispatch_retry_reuses_attempt_and_task_cancel_is_exact(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "wait")
+    releases: list[str] = []
+    resolver = _Resolver(_direct_binding(project, executor, releases=releases))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    item = _item(project)
+
+    first = await adapter.dispatch(item)
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+    retried = await adapter.dispatch(item)
+    cancel_item = replace(
+        _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+        executor_ref=first.executor_ref,
+    )
+    cancelled = await adapter.cancel(cancel_item)
+
+    assert first.executor_ref == retried.executor_ref
+    assert resolver.calls == [True]
+    assert len(executor.requests) == 1
+    assert cancelled.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert releases == ["released"]
+
+
+@pytest.mark.asyncio
+async def test_direct_cancel_binding_mismatch_has_zero_attempt_side_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "wait")
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    delivered = await adapter.dispatch(_item(project))
+    cancel_item = replace(
+        _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+        executor_ref=delivered.executor_ref,
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await adapter.cancel(replace(cancel_item, task_id="task-other"))
+
+    assert raised.value.reason == "ATTEMPT_DELIVERY_CONFLICT"
+    assert adapter._journal.get("attempt-1").cancel_requested is False
+    assert len(executor.requests) == 1
+    await adapter.cancel(cancel_item)
+
+
+@pytest.mark.asyncio
+async def test_direct_cancel_flag_crosses_process_lease_without_widening(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "wait")
+    database = tmp_path / "p3.sqlite3"
+    owner = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        heartbeat_interval=0.01,
+    )
+    observer = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        heartbeat_interval=0.01,
+    )
+    delivered = await owner.dispatch(_item(project))
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+    cancel_item = replace(
+        _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+        executor_ref=delivered.executor_ref,
+    )
+
+    with pytest.raises(FormalTaskViolation) as pending:
+        await observer.cancel(cancel_item)
+    assert pending.value.reason == "EXECUTOR_CANCEL_PENDING"
+    await _wait_direct_settled(owner)
+    cancelled = await observer.cancel(cancel_item)
+
+    assert cancelled.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+    assert len(executor.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("behavior", "expected_error"),
+    [
+        ("agent_error", "PROJECT_EXECUTOR_AGENT_ERROR"),
+        ("incomplete", "PROJECT_EXECUTOR_INCOMPLETE"),
+        ("head_change", "FORBIDDEN_GIT_HEAD_CHANGE"),
+        ("support_change", "RUNTIME_SUPPORT_PATH_MUTATED"),
+        ("ignored_only", "NO_EFFECTIVE_TARGET_CHANGE"),
+    ],
+)
+async def test_direct_executor_faults_fail_closed_with_stable_terminal_truth(
+    tmp_path: Path,
+    behavior: str,
+    expected_error: str,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(
+        project, ignore="ignored.txt\n" if behavior == "ignored_only" else None
+    )
+    executor = _DirectProjectExecutor(project, behavior)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert len(terminal.observations) == 1
+    assert terminal.observations[0].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[0].error == expected_error
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_feature_off_allocates_no_binding_or_agent_work(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    await adapter.close()
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await adapter.dispatch(_item(project))
+
+    assert raised.value.reason == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+    assert resolver.calls == []
+    assert executor.requests == []
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_rejects_runtime_support_inside_target_before_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.project_code_executor.get_agent_workspace_dir",
+        lambda: project / "runtime",
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.project_code_executor.get_prompt_attachment_dir",
+        lambda: project / "runtime" / "prompt_attachment",
+    )
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await adapter.dispatch(_item(project))
+
+    assert raised.value.reason == "RUNTIME_SUPPORT_PATH_INSIDE_TARGET"
+    assert resolver.calls == []
+    assert executor.requests == []
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_shutdown_is_interrupted_not_user_cancelled(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "wait")
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+
+    await adapter.close(interrupt_running=True)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[0].attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.observations[0].error == "EXECUTOR_SHUTDOWN_INTERRUPTED"
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_immediate_shutdown_cannot_strand_prestart_attempt(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "wait")
+    releases: list[str] = []
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor, releases=releases)),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await adapter.close(interrupt_running=True)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[0].attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.observations[0].error == "EXECUTOR_SHUTDOWN_INTERRUPTED"
+    assert releases == ["released"]
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_close_waits_for_inflight_dispatch_handoff(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "wait")
+    binding = _direct_binding(project, executor)
+    resolving = asyncio.Event()
+    resolved = asyncio.Event()
+
+    class DelayedResolver:
+        async def resolve(self, _spec, *, for_dispatch: bool):
+            assert for_dispatch is True
+            resolving.set()
+            await resolved.wait()
+            return binding
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        DelayedResolver(),
+        tmp_path / "p3.sqlite3",
+    )
+    dispatch = asyncio.create_task(adapter.dispatch(_item(project)))
+    await asyncio.wait_for(resolving.wait(), timeout=2)
+    closing = asyncio.create_task(adapter.close(interrupt_running=True))
+    await asyncio.sleep(0)
+    resolved.set()
+
+    await dispatch
+    await asyncio.wait_for(closing, timeout=2)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[0].attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.observations[0].error == "EXECUTOR_SHUTDOWN_INTERRUPTED"
+    assert adapter._running == {}
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_heartbeat_failure_interrupts_and_releases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "wait")
+    releases: list[str] = []
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor, releases=releases)),
+        tmp_path / "p3.sqlite3",
+        heartbeat_interval=0.01,
+    )
+
+    def fail_heartbeat(*_args, **_kwargs):
+        raise RuntimeError("private heartbeat failure")
+
+    monkeypatch.setattr(adapter._journal, "heartbeat", fail_heartbeat)
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[0].attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.observations[0].error == "EXECUTOR_HEARTBEAT_FAILED"
+    assert releases == ["released"]
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_restart_recovers_only_expired_attempt_lease(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    clock_values = iter(
+        [
+            "2026-08-07T10:00:00Z",
+            "2026-08-07T10:00:00Z",
+            "2026-08-07T10:00:00Z",
+        ]
+    )
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        clock=lambda: next(clock_values),
+    )
+    item = _item(project)
+    before_tree = _git(project, "status", "--porcelain=v2")
+    created, _ = adapter._journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=before_tree,
+        before_head=_git(project, "rev-parse", "HEAD"),
+        protected_support={name: "baseline" for name in FORMAL_RUNTIME_SUPPORT_POLICY},
+        governance={"policy": dict(FORMAL_RUNTIME_SUPPORT_POLICY)},
+        owner_id="dead-process",
+        now="2026-08-07T10:00:00Z",
+    )
+    assert created is True
+    adapter._journal.start(
+        item.attempt_id,
+        owner_id="dead-process",
+        now="2026-08-07T10:00:00Z",
+    )
+
+    live = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        clock=lambda: "2026-08-07T10:04:59Z",
+    )
+    expired = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        clock=lambda: "2026-08-07T10:05:01Z",
+    )
+
+    assert await live.prepare_startup() == 0
+    assert await expired.prepare_startup() == 1
+    task, attempt = _direct_task_attempt(project)
+    terminal = await expired.status(task, attempt)
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.observations[-1].error == "EXECUTOR_PROCESS_RESTARTED"
