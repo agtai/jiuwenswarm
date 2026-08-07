@@ -333,6 +333,22 @@ class _AdmissionEntry:
 
 
 @dataclass(slots=True)
+class _CommittedTurnSubmissionEntry:
+    fingerprint: bytes
+    commit: TurnCommit
+    outcome: asyncio.Future[_AdmissionOutcome]
+    coordinator: asyncio.Task[None] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnIdentityClaim:
+    interaction_id: str
+    turn_id: str
+    commit: TurnCommit | None
+    product_request_id: str | None
+
+
+@dataclass(slots=True)
 class _ResponseOutputState:
     request_id: str
     commit: TurnCommit
@@ -421,6 +437,10 @@ class AgentConversationRuntime:
             critical_capacity=2 * max_requests,
         )
         self._commits: dict[str, TurnCommit] = {}
+        self._turn_identity_claims: dict[str, _TurnIdentityClaim] = {}
+        self._commit_identity_claims: dict[str, _TurnIdentityClaim] = {}
+        self._committed_turn_submissions: dict[str, _CommittedTurnSubmissionEntry] = {}
+        self._submitted_turn_bindings: dict[tuple[str, str], str] = {}
         self._admissions: dict[str, _AdmissionEntry] = {}
         self._handles: dict[str, AgentConversationHandle] = {}
         self._round_handles: dict[str, HarnessRoundHandle] = {}
@@ -436,6 +456,7 @@ class AgentConversationRuntime:
         self._pending_user_history: dict[str, tuple[TurnCommit, str]] = {}
         self._history_tasks: set[asyncio.Task[None]] = set()
         self._start_lock = asyncio.Lock()
+        self._identity_claim_lock = asyncio.Lock()
         self._close_requested = False
         self._ack_lock = asyncio.Lock()
         self._closing_interactions: set[str] = set()
@@ -508,26 +529,384 @@ class AgentConversationRuntime:
 
     async def start_turn(self, interaction_id: str, turn_id: str) -> None:
         self._require_admission()
-        await self._cr.start_turn(interaction_id, turn_id)
+        async with self._identity_claim_lock:
+            if turn_id in self._turn_identity_claims:
+                raise AgentConversationRuntimeViolation(
+                    "TURN_IDENTITY_ALREADY_CLAIMED",
+                    "turn_id is already owned by another admitted turn",
+                    ErrorCode.CONFLICT,
+                )
+            claim = _TurnIdentityClaim(
+                interaction_id=interaction_id,
+                turn_id=turn_id,
+                commit=None,
+                product_request_id=None,
+            )
+            self._turn_identity_claims[turn_id] = claim
+            try:
+                await self._cr.start_turn(interaction_id, turn_id)
+            except asyncio.CancelledError:
+                # CR loop writes are cancellation-shielded after posting.  Keep
+                # the claim so a product admission cannot race the retained write.
+                raise
+            except BaseException:
+                if self._turn_identity_claims.get(turn_id) is claim:
+                    self._turn_identity_claims.pop(turn_id, None)
+                raise
 
     async def commit_turn(self, commit: TurnCommit) -> bool:
         self._require_admission()
+        async with self._identity_claim_lock:
+            self._validate_turn_commit(commit)
+            prior_turn = self._turn_identity_claims.get(commit.turn_id)
+            if (
+                prior_turn is None
+                or prior_turn.product_request_id is not None
+                or prior_turn.interaction_id != commit.interaction_id
+                or (
+                    prior_turn.commit is not None
+                    and prior_turn.commit.canonical_bytes() != commit.canonical_bytes()
+                )
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "TURN_COMMIT_CONFLICT",
+                    "legacy commit must match its exact start_turn identity claim",
+                    ErrorCode.CONFLICT,
+                )
+            prior_commit = self._commit_identity_claims.get(commit.commit_id)
+            if prior_commit is not None and prior_commit.turn_id != commit.turn_id:
+                raise AgentConversationRuntimeViolation(
+                    "TURN_COMMIT_CONFLICT",
+                    "commit_id is already owned by another admitted turn",
+                    ErrorCode.CONFLICT,
+                )
+            upgraded = _TurnIdentityClaim(
+                interaction_id=commit.interaction_id,
+                turn_id=commit.turn_id,
+                commit=commit,
+                product_request_id=None,
+            )
+            self._turn_identity_claims[commit.turn_id] = upgraded
+            self._commit_identity_claims[commit.commit_id] = upgraded
+            try:
+                accepted, _event = await self._cr.commit_turn(commit)
+            except asyncio.CancelledError:
+                # The posted CR commit remains authoritative even if this waiter
+                # leaves.  Retaining both claims prevents cross-path reuse.
+                raise
+            except BaseException:
+                self._turn_identity_claims[commit.turn_id] = prior_turn
+                if prior_commit is None:
+                    self._commit_identity_claims.pop(commit.commit_id, None)
+                else:
+                    self._commit_identity_claims[commit.commit_id] = prior_commit
+                raise
+            self._commits[commit.turn_id] = commit
+            return accepted
+
+    async def _commit_admitted_turn(
+        self, commit: TurnCommit, *, request_id: str
+    ) -> bool:
+        """Commit a registered product turn under its retained identity claim."""
+
+        async with self._identity_claim_lock:
+            self._validate_turn_commit(commit)
+            claim = self._turn_identity_claims.get(commit.turn_id)
+            if (
+                claim is None
+                or claim.product_request_id != request_id
+                or claim.commit is None
+                or claim.commit.canonical_bytes() != commit.canonical_bytes()
+                or self._commit_identity_claims.get(commit.commit_id) is not claim
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "PRODUCT_TURN_IDENTITY_LOST",
+                    "registered product turn lost its exact identity claim",
+                    ErrorCode.INTERNAL,
+                )
+            await self._cr.start_turn(commit.interaction_id, commit.turn_id)
+            accepted, _event = await self._cr.commit_turn(commit)
+            self._commits[commit.turn_id] = commit
+            return accepted
+
+    def _validate_turn_commit(self, commit: TurnCommit) -> None:
         if not isinstance(commit, TurnCommit) or commit.scope != self._scope:
             raise AgentConversationRuntimeViolation(
                 "INVALID_COMMITTED_TURN",
                 "TurnCommit must match the exact composition scope",
                 ErrorCode.PERMISSION_DENIED,
             )
-        accepted, _event = await self._cr.commit_turn(commit)
-        prior = self._commits.get(commit.turn_id)
-        if prior is not None and prior.canonical_bytes() != commit.canonical_bytes():
+
+    def _claim_product_identity(
+        self, commit: TurnCommit, *, request_id: str
+    ) -> _TurnIdentityClaim:
+        prior_turn = self._turn_identity_claims.get(commit.turn_id)
+        prior_commit = self._commit_identity_claims.get(commit.commit_id)
+        if prior_turn is not None or prior_commit is not None:
             raise AgentConversationRuntimeViolation(
                 "TURN_COMMIT_CONFLICT",
-                "a committed turn cannot change its immutable bytes",
+                "turn_id or commit_id is already owned by another admitted turn",
                 ErrorCode.CONFLICT,
             )
-        self._commits[commit.turn_id] = commit
-        return accepted
+        claim = _TurnIdentityClaim(
+            interaction_id=commit.interaction_id,
+            turn_id=commit.turn_id,
+            commit=commit,
+            product_request_id=request_id,
+        )
+        self._turn_identity_claims[commit.turn_id] = claim
+        self._commit_identity_claims[commit.commit_id] = claim
+        return claim
+
+    def _release_product_identity(self, claim: _TurnIdentityClaim) -> None:
+        if self._turn_identity_claims.get(claim.turn_id) is claim:
+            self._turn_identity_claims.pop(claim.turn_id, None)
+        if (
+            claim.commit is not None
+            and self._commit_identity_claims.get(claim.commit.commit_id) is claim
+        ):
+            self._commit_identity_claims.pop(claim.commit.commit_id, None)
+
+    async def submit_committed_turn(
+        self,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str = "web",
+    ) -> AgentConversationHandle:
+        """Own one retained product submission from TurnCommit through dispatch.
+
+        The request is registered before the first CR write.  Exact concurrent
+        replay observes one retained outcome, while caller cancellation cannot
+        cancel the coordinator or consume that outcome.  The existing
+        Bridge/Harness admission and CR response-acceptance machinery is reused
+        after the turn becomes committed.
+        """
+
+        if not isinstance(commit, TurnCommit) or commit.scope != self._scope:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_COMMITTED_TURN",
+                "TurnCommit must match the exact composition scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if not isinstance(context, FormalContextSnapshot):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_FORMAL_CONTEXT",
+                "formal Agent context must be an immutable snapshot",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        context.validate_for(commit)
+        self._validate_dispatch_channel(channel_id)
+        # This side-effect-free construction validates all reservation identity
+        # fields before start_turn can mutate CR.
+        HarnessRoundBinding(
+            request_id=request_id,
+            response_id=response_id,
+            correlation_id=correlation_id,
+            commit=commit,
+        )
+        fingerprint = self._admission_fingerprint(
+            request_id=request_id,
+            response_id=response_id,
+            correlation_id=correlation_id,
+            commit=commit,
+            context=context,
+            channel_id=channel_id,
+        )
+        product_entry = self._committed_turn_submissions.get(request_id)
+        if product_entry is not None:
+            if product_entry.fingerprint != fingerprint:
+                raise AgentConversationRuntimeViolation(
+                    "COMMITTED_TURN_REQUEST_CONFLICT",
+                    "request_id cannot change its product TurnCommit binding",
+                    ErrorCode.CONFLICT,
+                )
+            return self._unwrap_admission(await asyncio.shield(product_entry.outcome))
+
+        async with self._identity_claim_lock:
+            # A replay may have registered while this caller waited for the
+            # admission fence.  Replays never reopen admission and therefore
+            # remain observable throughout retained close/closed states.
+            product_entry = self._committed_turn_submissions.get(request_id)
+            if product_entry is not None:
+                if product_entry.fingerprint != fingerprint:
+                    raise AgentConversationRuntimeViolation(
+                        "COMMITTED_TURN_REQUEST_CONFLICT",
+                        "request_id cannot change its product TurnCommit binding",
+                        ErrorCode.CONFLICT,
+                    )
+                outcome = product_entry.outcome
+            else:
+                self._require_admission()
+                existing_admission = self._admissions.get(request_id)
+                if existing_admission is not None:
+                    # A legacy dispatch already owns the exact committed CR
+                    # identity and reservations.  Product replay may attach to
+                    # that retained outcome without allocating another claim.
+                    outcome = self._register_committed_turn_submission(
+                        request_id=request_id,
+                        response_id=response_id,
+                        correlation_id=correlation_id,
+                        commit=commit,
+                        context=context,
+                        channel_id=channel_id,
+                        fingerprint=fingerprint,
+                    )
+                else:
+                    turn_key = (commit.interaction_id, commit.turn_id)
+                    bound_request = self._submitted_turn_bindings.get(turn_key)
+                    if bound_request is not None and bound_request != request_id:
+                        raise AgentConversationRuntimeViolation(
+                            "COMMITTED_TURN_ALREADY_SUBMITTED",
+                            "one product TurnCommit cannot be rebound to another request",
+                            ErrorCode.CONFLICT,
+                        )
+                    # One fence owns identity preflight, claim registration,
+                    # reservation, and product ledger writes.  Legacy start and
+                    # commit operations use this same fence and claim registry.
+                    claim = self._claim_product_identity(commit, request_id=request_id)
+                    try:
+                        outcome = self._register_committed_turn_submission(
+                            request_id=request_id,
+                            response_id=response_id,
+                            correlation_id=correlation_id,
+                            commit=commit,
+                            context=context,
+                            channel_id=channel_id,
+                            fingerprint=fingerprint,
+                        )
+                    except BaseException:
+                        self._release_product_identity(claim)
+                        raise
+
+        return self._unwrap_admission(await asyncio.shield(outcome))
+
+    def _register_committed_turn_submission(
+        self,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str,
+        fingerprint: bytes,
+    ) -> asyncio.Future[_AdmissionOutcome]:
+        """Register one preflighted submission while admission fence is held."""
+
+        turn_key = (commit.interaction_id, commit.turn_id)
+        bound_request = self._submitted_turn_bindings.get(turn_key)
+        if bound_request is not None and bound_request != request_id:
+            raise AgentConversationRuntimeViolation(
+                "COMMITTED_TURN_ALREADY_SUBMITTED",
+                "one product TurnCommit cannot be rebound to another request",
+                ErrorCode.CONFLICT,
+            )
+        if len(self._committed_turn_submissions) >= self._max_requests:
+            raise AgentConversationRuntimeViolation(
+                "COMMITTED_TURN_LEDGER_FULL",
+                "bounded product TurnCommit ledger is full for this runtime session",
+                ErrorCode.UNAVAILABLE,
+            )
+
+        existing_admission = self._admissions.get(request_id)
+        if existing_admission is not None:
+            if existing_admission.fingerprint != fingerprint:
+                raise AgentConversationRuntimeViolation(
+                    "COMPOSITION_REQUEST_ID_CONFLICT",
+                    "request_id cannot change its formal dispatch binding",
+                    ErrorCode.CONFLICT,
+                )
+            self._submitted_turn_bindings[turn_key] = request_id
+            self._committed_turn_submissions[request_id] = (
+                _CommittedTurnSubmissionEntry(
+                    fingerprint=fingerprint,
+                    commit=commit,
+                    outcome=existing_admission.outcome,
+                    coordinator=existing_admission.coordinator,
+                )
+            )
+            return existing_admission.outcome
+        if len(self._admissions) >= self._max_requests:
+            raise AgentConversationRuntimeViolation(
+                "COMPOSITION_REQUEST_LEDGER_FULL",
+                "bounded composition request ledger is full for this runtime session",
+                ErrorCode.UNAVAILABLE,
+            )
+
+        # Reserve every bounded execution resource before start_turn mutates CR.
+        # Reservation is not round acceptance and has zero Agent/Tool/Task/history
+        # effect; a capacity or facade failure therefore leaves CR unchanged.
+        harness_reservation: HarnessRoundReservation | None = None
+        bridge_reservation: AgentBridgeDispatchReservation | None = None
+        try:
+            assert self._facade is not None
+            harness_reservation = self._harness.reserve_round(
+                HarnessRoundBinding(
+                    request_id=request_id,
+                    response_id=response_id,
+                    correlation_id=correlation_id,
+                    commit=commit,
+                ),
+                facade=self._facade,
+            )
+            bridge_reservation = self._bridge.reserve_dispatch(
+                request_id=request_id,
+                round_id=harness_reservation.round_id,
+                response_id=response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+                adapter_id=JiuWenSwarmAgentAdapter.adapter_id,
+            )
+            self._harness.begin_round_commit(harness_reservation)
+            self._bridge.begin_dispatch_commit(bridge_reservation)
+        except BaseException:
+            if bridge_reservation is not None:
+                self._bridge.abort_dispatch(
+                    bridge_reservation, reason="product_submission_admission_failed"
+                )
+            if harness_reservation is not None:
+                self._harness.abort_round_reservation(
+                    harness_reservation,
+                    reason="product_submission_admission_failed",
+                )
+            raise
+
+        assert harness_reservation is not None
+        assert bridge_reservation is not None
+        running = asyncio.get_running_loop()
+        outcome: asyncio.Future[_AdmissionOutcome] = running.create_future()
+        admission_entry = _AdmissionEntry(
+            fingerprint=fingerprint,
+            harness_reservation=harness_reservation,
+            bridge_reservation=bridge_reservation,
+            outcome=outcome,
+            coordinator=None,
+        )
+        product_entry = _CommittedTurnSubmissionEntry(
+            fingerprint=fingerprint,
+            commit=commit,
+            outcome=outcome,
+            coordinator=None,
+        )
+        self._admissions[request_id] = admission_entry
+        self._committed_turn_submissions[request_id] = product_entry
+        self._submitted_turn_bindings[turn_key] = request_id
+        coordinator = running.create_task(
+            self._complete_committed_turn_submission(
+                admission_entry,
+                commit=commit,
+                context=context,
+                channel_id=channel_id,
+            ),
+            name=f"live-voice-product-turn:{request_id}",
+        )
+        product_entry.coordinator = coordinator
+        admission_entry.coordinator = coordinator
+        return outcome
 
     async def dispatch_committed_turn(
         self,
@@ -541,20 +920,7 @@ class AgentConversationRuntime:
     ) -> AgentConversationHandle:
         self._require_admission()
         self._require_exact_commit(commit)
-        if not isinstance(channel_id, str) or not channel_id.strip():
-            raise AgentConversationRuntimeViolation(
-                "INVALID_DISPATCH_CHANNEL",
-                "formal Agent channel_id must be non-empty",
-                ErrorCode.INVALID_ARGUMENT,
-            )
-        try:
-            channel_id.encode("utf-8")
-        except UnicodeEncodeError as error:
-            raise AgentConversationRuntimeViolation(
-                "INVALID_DISPATCH_CHANNEL",
-                "formal Agent channel_id must contain Unicode scalar values",
-                ErrorCode.INVALID_ARGUMENT,
-            ) from error
+        self._validate_dispatch_channel(channel_id)
         if self._facade is None:
             raise AgentConversationRuntimeViolation(
                 "FORMAL_AGENT_FACADE_UNAVAILABLE",
@@ -570,15 +936,61 @@ class AgentConversationRuntime:
             context=context,
             channel_id=channel_id,
         )
-        existing = self._admissions.get(request_id)
-        if existing is not None:
-            if existing.fingerprint != fingerprint:
-                raise AgentConversationRuntimeViolation(
-                    "COMPOSITION_REQUEST_ID_CONFLICT",
-                    "request_id cannot change its formal dispatch binding",
-                    ErrorCode.CONFLICT,
+
+        async with self._identity_claim_lock:
+            existing = self._admissions.get(request_id)
+            if existing is not None:
+                if existing.fingerprint != fingerprint:
+                    raise AgentConversationRuntimeViolation(
+                        "COMPOSITION_REQUEST_ID_CONFLICT",
+                        "request_id cannot change its formal dispatch binding",
+                        ErrorCode.CONFLICT,
+                    )
+                outcome = existing.outcome
+            else:
+                # The first admission check may have preceded a concurrent close
+                # while this caller waited for the identity fence.  Only retained
+                # exact replay may bypass this second gate.
+                self._require_admission()
+                self._require_exact_commit(commit)
+                turn_key = (commit.interaction_id, commit.turn_id)
+                bound_request = self._submitted_turn_bindings.get(turn_key)
+                identity_claim = self._turn_identity_claims.get(commit.turn_id)
+                if (bound_request is not None and bound_request != request_id) or (
+                    identity_claim is not None
+                    and identity_claim.product_request_id is not None
+                    and identity_claim.product_request_id != request_id
+                ):
+                    raise AgentConversationRuntimeViolation(
+                        "COMMITTED_TURN_ALREADY_SUBMITTED",
+                        "request-bound TurnCommit cannot dispatch under another request",
+                        ErrorCode.CONFLICT,
+                    )
+                outcome = self._register_legacy_dispatch(
+                    request_id=request_id,
+                    response_id=response_id,
+                    correlation_id=correlation_id,
+                    commit=commit,
+                    context=context,
+                    channel_id=channel_id,
+                    fingerprint=fingerprint,
                 )
-            return self._unwrap_admission(await asyncio.shield(existing.outcome))
+
+        return self._unwrap_admission(await asyncio.shield(outcome))
+
+    def _register_legacy_dispatch(
+        self,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str,
+        fingerprint: bytes,
+    ) -> asyncio.Future[_AdmissionOutcome]:
+        """Register one fenced legacy dispatch without changing turn ownership."""
+
         if len(self._admissions) >= self._max_requests:
             raise AgentConversationRuntimeViolation(
                 "COMPOSITION_REQUEST_LEDGER_FULL",
@@ -629,6 +1041,9 @@ class AgentConversationRuntime:
             coordinator=None,
         )
         self._admissions[request_id] = entry
+        self._submitted_turn_bindings[(commit.interaction_id, commit.turn_id)] = (
+            request_id
+        )
         coordinator = running.create_task(
             self._complete_admission(
                 entry,
@@ -638,7 +1053,7 @@ class AgentConversationRuntime:
             name=f"live-voice-agent-admission:{request_id}",
         )
         entry.coordinator = coordinator
-        return self._unwrap_admission(await asyncio.shield(outcome))
+        return outcome
 
     async def next_notification(self) -> AgentConversationNotification:
         """Read lossy observations plus retained presentation/terminal notices.
@@ -1025,6 +1440,42 @@ class AgentConversationRuntime:
             if not entry.outcome.done():
                 entry.outcome.set_result(_AdmissionOutcome(error=error))
 
+    async def _complete_committed_turn_submission(
+        self,
+        entry: _AdmissionEntry,
+        *,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str,
+    ) -> None:
+        try:
+            await self._commit_admitted_turn(
+                commit,
+                request_id=entry.harness_reservation.binding.request_id,
+            )
+            await self._complete_admission(
+                entry,
+                context=context,
+                channel_id=channel_id,
+            )
+        except BaseException as error:  # noqa: BLE001 - retained outcome truth
+            try:
+                self._bridge.abort_dispatch(
+                    entry.bridge_reservation,
+                    reason="product_turn_commit_failed",
+                )
+            except (AgentBridgeRuntimeViolation, RuntimeError):
+                pass
+            try:
+                self._harness.abort_round_reservation(
+                    entry.harness_reservation,
+                    reason="product_turn_commit_failed",
+                )
+            except (HarnessRoundViolation, RuntimeError):
+                pass
+            if not entry.outcome.done():
+                entry.outcome.set_result(_AdmissionOutcome(error=error))
+
     async def _persist_user_history(self, commit: TurnCommit, channel_id: str) -> None:
         try:
             await self._history_writer.persist_user(commit, channel_id=channel_id)
@@ -1196,6 +1647,15 @@ class AgentConversationRuntime:
         self, *, closed_detail: str = "teardown_complete"
     ) -> AgentConversationShutdownResult:
         try:
+            submission_tasks = tuple(
+                entry.coordinator
+                for entry in self._committed_turn_submissions.values()
+                if entry.coordinator is not None
+            )
+            if submission_tasks:
+                await asyncio.shield(
+                    asyncio.gather(*submission_tasks, return_exceptions=True)
+                )
             admission_tasks = tuple(
                 entry.coordinator
                 for entry in self._admissions.values()
@@ -1307,6 +1767,23 @@ class AgentConversationRuntime:
                 getattr(self._facade, "process_formal_live_voice_stream", None)
             )
         )
+
+    @staticmethod
+    def _validate_dispatch_channel(channel_id: str) -> None:
+        if not isinstance(channel_id, str) or not channel_id.strip():
+            raise AgentConversationRuntimeViolation(
+                "INVALID_DISPATCH_CHANNEL",
+                "formal Agent channel_id must be non-empty",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            channel_id.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_DISPATCH_CHANNEL",
+                "formal Agent channel_id must contain Unicode scalar values",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
 
     @staticmethod
     def _unwrap_admission(outcome: _AdmissionOutcome) -> AgentConversationHandle:

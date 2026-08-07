@@ -299,6 +299,22 @@ async def dispatch(
     )
 
 
+async def submit(
+    current: AgentConversationRuntime,
+    selected: TurnCommit,
+    *,
+    request_id: str = "request-1",
+    response_id: str = "response-1",
+):
+    return await current.submit_committed_turn(
+        request_id=request_id,
+        response_id=response_id,
+        correlation_id=f"correlation-{request_id}",
+        commit=selected,
+        context=FormalContextSnapshot(selected.scope),
+    )
+
+
 def cancel_command(
     handle,
     selected: TurnCommit,
@@ -1349,6 +1365,838 @@ async def test_concurrent_replay_dispatches_once_and_conflict_does_not_mutate_cr
 
 
 @pytest.mark.asyncio
+async def test_product_submit_commits_and_dispatches_once_with_exact_replay() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+
+    one, replay = await asyncio.gather(
+        submit(current, selected),
+        submit(current, selected),
+    )
+
+    assert one is replay
+    await asyncio.wait_for(call_wait(lower, 1), timeout=1)
+    await asyncio.wait_for(history_wait(history), timeout=1)
+    snapshot = current.snapshot()
+    assert tuple(
+        (turn.turn_id, turn.state.value, turn.commit_id)
+        for turn in snapshot.conversation.conversation.turns
+    ) == ((selected.turn_id, "committed", selected.commit_id),)
+    assert tuple(
+        (response.ref, response.turn_id)
+        for response in snapshot.conversation.conversation.responses
+    ) == ((one.response_ref, selected.turn_id),)
+    assert lower.calls == 1
+    assert len(history.users) == 1
+    assert not history.assistant_intents
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_product_bound_turn_rejects_cross_request_legacy_dispatch() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_completion = current._complete_admission
+
+    async def gated_completion(*args, **kwargs) -> None:
+        entered.set()
+        await release.wait()
+        await original_completion(*args, **kwargs)
+
+    current._complete_admission = gated_completion  # type: ignore[method-assign]
+    product = asyncio.create_task(submit(current, selected))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    assert selected.turn_id in current._commits
+    same_request = asyncio.create_task(dispatch(current, selected))
+    await asyncio.sleep(0)
+    assert not same_request.done()
+    before = current.snapshot()
+    ledgers_before = (
+        tuple(current._admissions),
+        tuple(current._committed_turn_submissions),
+        tuple(current._submitted_turn_bindings.items()),
+    )
+
+    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
+        await dispatch(
+            current,
+            selected,
+            request_id="request-cross-path-conflict",
+            response_id="response-cross-path-conflict",
+        )
+    assert conflict.value.reason == "COMMITTED_TURN_ALREADY_SUBMITTED"
+    after = current.snapshot()
+    assert after.conversation == before.conversation
+    assert after.harness == before.harness
+    assert after.bridge == before.bridge
+    assert (
+        tuple(current._admissions),
+        tuple(current._committed_turn_submissions),
+        tuple(current._submitted_turn_bindings.items()),
+    ) == ledgers_before
+    assert tuple(current._admissions) == ("request-1",)
+    assert not after.conversation.conversation.responses
+    assert after.harness.retained_rounds == 0
+    assert after.bridge.reserved_requests == 1
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+    release.set()
+    product_handle = await asyncio.wait_for(product, timeout=1)
+    replay_handle = await asyncio.wait_for(same_request, timeout=1)
+    assert replay_handle is product_handle
+    await asyncio.wait_for(product_handle.completion, timeout=1)
+    await asyncio.wait_for(history_wait(history), timeout=1)
+    snapshot = current.snapshot()
+    assert len(snapshot.conversation.conversation.responses) == 1
+    assert lower.calls == 1
+    assert len(history.users) == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_product_submit_attaches_to_exact_inflight_legacy_dispatch() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = await prepare(current)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_completion = current._complete_admission
+
+    async def gated_completion(*args, **kwargs) -> None:
+        entered.set()
+        await release.wait()
+        await original_completion(*args, **kwargs)
+
+    current._complete_admission = gated_completion  # type: ignore[method-assign]
+    legacy = asyncio.create_task(dispatch(current, selected))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    product = asyncio.create_task(submit(current, selected))
+
+    async def product_is_attached() -> None:
+        while "request-1" not in current._committed_turn_submissions:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(product_is_attached(), timeout=1)
+    assert not legacy.done()
+    assert not product.done()
+    snapshot = current.snapshot()
+    assert tuple(current._admissions) == ("request-1",)
+    assert tuple(current._committed_turn_submissions) == ("request-1",)
+    assert current._submitted_turn_bindings == {
+        (selected.interaction_id, selected.turn_id): "request-1"
+    }
+    assert not snapshot.conversation.conversation.responses
+    assert snapshot.harness.reservations == (
+        ("request-1", HarnessReservationState.COMMITTING),
+    )
+    assert snapshot.bridge.reserved_requests == 1
+    assert snapshot.harness.retained_rounds == 0
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+    release.set()
+    legacy_handle = await asyncio.wait_for(legacy, timeout=1)
+    product_handle = await asyncio.wait_for(product, timeout=1)
+    assert product_handle is legacy_handle
+    await asyncio.wait_for(legacy_handle.completion, timeout=1)
+    await asyncio.wait_for(history_wait(history), timeout=1)
+    assert len(current.snapshot().conversation.conversation.responses) == 1
+    assert lower.calls == 1
+    assert len(history.users) == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_product_submit_waiter_cannot_consume_retained_outcome() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_start_turn = current._cr.start_turn
+
+    async def blocked_start_turn(interaction_id: str, turn_id: str):
+        entered.set()
+        await release.wait()
+        return await original_start_turn(interaction_id, turn_id)
+
+    current._cr.start_turn = blocked_start_turn  # type: ignore[method-assign]
+    caller = asyncio.create_task(submit(current, selected))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(submit(current, selected), timeout=0.01)
+
+    replay = asyncio.create_task(submit(current, selected))
+    assert not replay.done()
+    release.set()
+    handle = await asyncio.wait_for(replay, timeout=1)
+    await asyncio.wait_for(call_wait(lower, 1), timeout=1)
+    assert handle.request_id == "request-1"
+    assert lower.calls == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_product_submit_replays_retained_outcome_after_close() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    admitted = asyncio.Event()
+    release = asyncio.Event()
+    original_completion = current._complete_committed_turn_submission
+
+    async def gated_completion(*args, **kwargs) -> None:
+        admitted.set()
+        await release.wait()
+        await original_completion(*args, **kwargs)
+
+    current._complete_committed_turn_submission = gated_completion  # type: ignore[method-assign]
+    caller = asyncio.create_task(submit(current, selected))
+    await asyncio.wait_for(admitted.wait(), timeout=1)
+    before = current.snapshot()
+    assert before.retained_admissions == 1
+    assert not before.conversation.conversation.turns
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(submit(current, selected), timeout=0.01)
+
+    closing = asyncio.create_task(current.close(timeout_seconds=1))
+    while current.snapshot().accepting:
+        await asyncio.sleep(0)
+    closing_replay = asyncio.create_task(submit(current, selected))
+    await asyncio.sleep(0)
+    assert not closing_replay.done()
+    release.set()
+
+    closing_handle = await asyncio.wait_for(closing_replay, timeout=1)
+    shutdown = await asyncio.wait_for(closing, timeout=1)
+    assert shutdown.status is AgentConversationShutdownStatus.CLOSED
+    handle = await asyncio.wait_for(submit(current, selected), timeout=1)
+    assert handle is closing_handle
+    snapshot = current.snapshot()
+    assert tuple(
+        (turn.turn_id, turn.state.value, turn.commit_id)
+        for turn in snapshot.conversation.conversation.turns
+    ) == ((selected.turn_id, "committed", selected.commit_id),)
+    assert tuple(
+        (response.ref, response.turn_id)
+        for response in snapshot.conversation.conversation.responses
+    ) == ((handle.response_ref, selected.turn_id),)
+    assert lower.calls == 1
+    assert len(history.users) == 1
+    assert not history.assistant_intents
+
+
+@pytest.mark.asyncio
+async def test_product_submit_rejects_reused_commit_id_before_start_turn() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=2)
+    first = commit()
+    conflicting = commit(
+        turn_id="turn-conflicting-commit-id",
+        commit_id=first.commit_id,
+        interaction_id="interaction-conflicting-commit-id",
+        text="different turn",
+    )
+    legal = commit(
+        turn_id="turn-legal-after-conflict",
+        commit_id="commit-legal-after-conflict",
+        interaction_id="interaction-legal-after-conflict",
+        text="legal turn",
+    )
+    await current.start()
+    await current.open_interaction(first.interaction_id)
+    await current.open_interaction(conflicting.interaction_id)
+    await current.open_interaction(legal.interaction_id)
+    first_handle = await submit(current, first)
+    await asyncio.wait_for(first_handle.completion, timeout=1)
+    await asyncio.wait_for(history_wait(history), timeout=1)
+
+    async def first_response_is_terminal() -> None:
+        while (
+            next(
+                response
+                for response in current.snapshot().conversation.conversation.responses
+                if response.ref == first_handle.response_ref
+            ).state.value
+            != "terminal"
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(first_response_is_terminal(), timeout=1)
+    before = current.snapshot()
+    ledgers_before = (
+        tuple(current._admissions),
+        tuple(current._committed_turn_submissions),
+        tuple(current._submitted_turn_bindings.items()),
+    )
+
+    with pytest.raises(AgentConversationRuntimeViolation) as raised:
+        await submit(
+            current,
+            conflicting,
+            request_id="request-conflicting-commit-id",
+            response_id="response-conflicting-commit-id",
+        )
+    assert raised.value.reason == "TURN_COMMIT_CONFLICT"
+    after = current.snapshot()
+    assert after.conversation == before.conversation
+    assert after.harness == before.harness
+    assert after.bridge == before.bridge
+    assert (
+        tuple(current._admissions),
+        tuple(current._committed_turn_submissions),
+        tuple(current._submitted_turn_bindings.items()),
+    ) == ledgers_before
+    assert all(
+        turn.turn_id != conflicting.turn_id
+        for turn in after.conversation.conversation.turns
+    )
+    assert lower.calls == 1
+    assert len(history.users) == 1
+    assert not history.assistant_intents
+
+    with pytest.raises(AgentConversationRuntimeViolation) as replay:
+        await submit(
+            current,
+            conflicting,
+            request_id="request-conflicting-commit-id",
+            response_id="response-conflicting-commit-id",
+        )
+    assert replay.value.reason == "TURN_COMMIT_CONFLICT"
+    replay_snapshot = current.snapshot()
+    assert replay_snapshot.conversation == before.conversation
+    assert replay_snapshot.harness == before.harness
+    assert replay_snapshot.bridge == before.bridge
+    assert (
+        tuple(current._admissions),
+        tuple(current._committed_turn_submissions),
+        tuple(current._submitted_turn_bindings.items()),
+    ) == ledgers_before
+    assert lower.calls == 1
+
+    legal_handle = await submit(
+        current,
+        legal,
+        request_id="request-legal-after-conflict",
+        response_id="response-legal-after-conflict",
+    )
+    await asyncio.wait_for(legal_handle.completion, timeout=1)
+    while len(history.users) < 2:
+        await asyncio.sleep(0)
+    assert lower.calls == 2
+    assert len(history.users) == 2
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_product_submits_claim_commit_id_before_capacity() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=2)
+    first = commit(
+        turn_id="turn-concurrent-1",
+        commit_id="commit-concurrent-shared",
+        interaction_id="interaction-concurrent-1",
+        text="first contender",
+    )
+    second = commit(
+        turn_id="turn-concurrent-2",
+        commit_id=first.commit_id,
+        interaction_id="interaction-concurrent-2",
+        text="second contender",
+    )
+    legal = commit(
+        turn_id="turn-concurrent-legal",
+        commit_id="commit-concurrent-legal",
+        interaction_id="interaction-concurrent-legal",
+        text="legal follower",
+    )
+    await current.start()
+    for selected in (first, second, legal):
+        await current.open_interaction(selected.interaction_id)
+
+    admitted = asyncio.Event()
+    release = asyncio.Event()
+    original_completion = current._complete_committed_turn_submission
+
+    async def gated_completion(*args, **kwargs) -> None:
+        admitted.set()
+        await release.wait()
+        await original_completion(*args, **kwargs)
+
+    current._complete_committed_turn_submission = gated_completion  # type: ignore[method-assign]
+    contenders = (
+        asyncio.create_task(
+            submit(
+                current,
+                first,
+                request_id="request-concurrent-1",
+                response_id="response-concurrent-1",
+            )
+        ),
+        asyncio.create_task(
+            submit(
+                current,
+                second,
+                request_id="request-concurrent-2",
+                response_id="response-concurrent-2",
+            )
+        ),
+    )
+    await asyncio.wait_for(admitted.wait(), timeout=1)
+
+    async def rejected_contender():
+        while not any(task.done() for task in contenders):
+            await asyncio.sleep(0)
+        return next(task for task in contenders if task.done())
+
+    rejected = await asyncio.wait_for(rejected_contender(), timeout=1)
+    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
+        await rejected
+    assert conflict.value.reason == "TURN_COMMIT_CONFLICT"
+    winner = next(task for task in contenders if task is not rejected)
+    assert not winner.done()
+
+    assert len(current._admissions) == 1
+    assert len(current._committed_turn_submissions) == 1
+    assert len(current._submitted_turn_bindings) == 1
+    assert not current._commits
+    winner_request, winner_entry = next(
+        iter(current._committed_turn_submissions.items())
+    )
+    assert tuple(current._admissions) == (winner_request,)
+    assert current._submitted_turn_bindings == {
+        (
+            winner_entry.commit.interaction_id,
+            winner_entry.commit.turn_id,
+        ): winner_request
+    }
+    snapshot = current.snapshot()
+    assert not snapshot.conversation.conversation.turns
+    assert snapshot.harness.reservations == (
+        (winner_request, HarnessReservationState.COMMITTING),
+    )
+    assert snapshot.harness.active_rounds == ()
+    assert snapshot.harness.retained_rounds == 0
+    assert snapshot.bridge.reserved_requests == 1
+    assert snapshot.bridge.retained_requests == 0
+    assert snapshot.bridge.pending_dispatches == 0
+    assert snapshot.bridge.active_requests == ()
+    assert snapshot.bridge.queued_outputs == 0
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+    release.set()
+    winner_handle = await asyncio.wait_for(winner, timeout=1)
+    await asyncio.wait_for(winner_handle.completion, timeout=1)
+    legal_handle = await submit(
+        current,
+        legal,
+        request_id="request-concurrent-legal",
+        response_id="response-concurrent-legal",
+    )
+    await asyncio.wait_for(legal_handle.completion, timeout=1)
+    while len(history.users) < 2:
+        await asyncio.sleep(0)
+    assert lower.calls == 2
+    assert len(history.users) == 2
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_start_claim_blocks_product_before_reservation() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    selected = commit(
+        turn_id="turn-cross-start",
+        commit_id="commit-cross-start",
+        interaction_id="interaction-cross-start",
+    )
+    legal = commit(
+        turn_id="turn-cross-start-legal",
+        commit_id="commit-cross-start-legal",
+        interaction_id="interaction-cross-start-legal",
+    )
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    await current.open_interaction(legal.interaction_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_start_turn = current._cr.start_turn
+
+    async def blocked_start_turn(interaction_id: str, turn_id: str):
+        if turn_id == selected.turn_id:
+            entered.set()
+            await release.wait()
+        return await original_start_turn(interaction_id, turn_id)
+
+    current._cr.start_turn = blocked_start_turn  # type: ignore[method-assign]
+    legacy_start = asyncio.create_task(
+        current.start_turn(selected.interaction_id, selected.turn_id)
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    product = asyncio.create_task(submit(current, selected))
+    await asyncio.sleep(0)
+    assert not product.done()
+    assert tuple(current._turn_identity_claims) == (selected.turn_id,)
+    assert not current._commit_identity_claims
+    assert not current._admissions
+    assert not current._committed_turn_submissions
+    assert not current._submitted_turn_bindings
+    blocked = current.snapshot()
+    assert not blocked.conversation.conversation.turns
+    assert blocked.harness.reservations == ()
+    assert blocked.harness.retained_rounds == 0
+    assert blocked.bridge.reserved_requests == 0
+    assert blocked.bridge.retained_requests == 0
+
+    release.set()
+    await asyncio.wait_for(legacy_start, timeout=1)
+    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
+        await product
+    assert conflict.value.reason == "TURN_COMMIT_CONFLICT"
+    after = current.snapshot()
+    assert tuple(
+        (turn.turn_id, turn.state.value)
+        for turn in after.conversation.conversation.turns
+    ) == ((selected.turn_id, "capturing"),)
+    assert after.harness.reservations == ()
+    assert after.bridge.reserved_requests == 0
+    assert not current._admissions
+    assert not current._committed_turn_submissions
+
+    legal_handle = await submit(
+        current,
+        legal,
+        request_id="request-cross-start-legal",
+        response_id="response-cross-start-legal",
+    )
+    await asyncio.wait_for(legal_handle.completion, timeout=1)
+    assert lower.calls == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_commit_claim_blocks_product_before_reservation() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    legacy = commit(
+        turn_id="turn-cross-legacy-wins",
+        commit_id="commit-cross-shared",
+        interaction_id="interaction-cross-legacy-wins",
+    )
+    product_commit = commit(
+        turn_id="turn-cross-product-loses",
+        commit_id=legacy.commit_id,
+        interaction_id="interaction-cross-product-loses",
+    )
+    legal = commit(
+        turn_id="turn-cross-legacy-legal",
+        commit_id="commit-cross-legacy-legal",
+        interaction_id="interaction-cross-legacy-legal",
+    )
+    await current.start()
+    for selected in (legacy, product_commit, legal):
+        await current.open_interaction(selected.interaction_id)
+    await current.start_turn(legacy.interaction_id, legacy.turn_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_commit_turn = current._cr.commit_turn
+
+    async def blocked_commit_turn(selected: TurnCommit):
+        if selected.turn_id == legacy.turn_id:
+            entered.set()
+            await release.wait()
+        return await original_commit_turn(selected)
+
+    current._cr.commit_turn = blocked_commit_turn  # type: ignore[method-assign]
+    legacy_commit = asyncio.create_task(current.commit_turn(legacy))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    product = asyncio.create_task(
+        submit(
+            current,
+            product_commit,
+            request_id="request-cross-product-loses",
+            response_id="response-cross-product-loses",
+        )
+    )
+    await asyncio.sleep(0)
+    assert not product.done()
+    assert current._commit_identity_claims[legacy.commit_id].turn_id == legacy.turn_id
+    assert not current._admissions
+    assert not current._committed_turn_submissions
+    blocked = current.snapshot()
+    assert tuple(
+        (turn.turn_id, turn.state.value)
+        for turn in blocked.conversation.conversation.turns
+    ) == ((legacy.turn_id, "capturing"),)
+    assert blocked.harness.reservations == ()
+    assert blocked.bridge.reserved_requests == 0
+
+    release.set()
+    assert await asyncio.wait_for(legacy_commit, timeout=1) is True
+    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
+        await product
+    assert conflict.value.reason == "TURN_COMMIT_CONFLICT"
+    after = current.snapshot()
+    assert tuple(
+        (turn.turn_id, turn.state.value, turn.commit_id)
+        for turn in after.conversation.conversation.turns
+    ) == ((legacy.turn_id, "committed", legacy.commit_id),)
+    assert after.harness.reservations == ()
+    assert after.bridge.reserved_requests == 0
+    assert not current._admissions
+    assert not current._committed_turn_submissions
+
+    legal_handle = await submit(
+        current,
+        legal,
+        request_id="request-cross-legacy-legal",
+        response_id="response-cross-legacy-legal",
+    )
+    await asyncio.wait_for(legal_handle.completion, timeout=1)
+    assert lower.calls == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_product_claim_blocks_legacy_commit_before_cr_mutation() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=2)
+    legacy = commit(
+        turn_id="turn-cross-legacy-loses",
+        commit_id="commit-cross-product-shared",
+        interaction_id="interaction-cross-legacy-loses",
+    )
+    product_commit = commit(
+        turn_id="turn-cross-product-wins",
+        commit_id=legacy.commit_id,
+        interaction_id="interaction-cross-product-wins",
+    )
+    legal = commit(
+        turn_id="turn-cross-product-legal",
+        commit_id="commit-cross-product-legal",
+        interaction_id="interaction-cross-product-legal",
+    )
+    await current.start()
+    for selected in (legacy, product_commit, legal):
+        await current.open_interaction(selected.interaction_id)
+    await current.start_turn(legacy.interaction_id, legacy.turn_id)
+    admitted = asyncio.Event()
+    release = asyncio.Event()
+    original_completion = current._complete_committed_turn_submission
+
+    async def gated_completion(*args, **kwargs) -> None:
+        admitted.set()
+        await release.wait()
+        await original_completion(*args, **kwargs)
+
+    current._complete_committed_turn_submission = gated_completion  # type: ignore[method-assign]
+    product = asyncio.create_task(
+        submit(
+            current,
+            product_commit,
+            request_id="request-cross-product-wins",
+            response_id="response-cross-product-wins",
+        )
+    )
+    await asyncio.wait_for(admitted.wait(), timeout=1)
+    before_conflict = current.snapshot()
+
+    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
+        await current.commit_turn(legacy)
+    assert conflict.value.reason == "TURN_COMMIT_CONFLICT"
+    after_conflict = current.snapshot()
+    assert after_conflict.conversation == before_conflict.conversation
+    assert after_conflict.harness == before_conflict.harness
+    assert after_conflict.bridge == before_conflict.bridge
+    assert tuple(
+        (turn.turn_id, turn.state.value, turn.commit_id)
+        for turn in after_conflict.conversation.conversation.turns
+    ) == ((legacy.turn_id, "capturing", None),)
+    assert len(current._admissions) == 1
+    assert len(current._committed_turn_submissions) == 1
+    assert len(current._submitted_turn_bindings) == 1
+    assert not current._commits
+    assert lower.calls == 0
+    assert not history.users and not history.assistant_intents
+
+    release.set()
+    product_handle = await asyncio.wait_for(product, timeout=1)
+    await asyncio.wait_for(product_handle.completion, timeout=1)
+    legal_handle = await submit(
+        current,
+        legal,
+        request_id="request-cross-product-legal",
+        response_id="response-cross-product-legal",
+    )
+    await asyncio.wait_for(legal_handle.completion, timeout=1)
+    while len(history.users) < 2:
+        await asyncio.sleep(0)
+    assert lower.calls == 2
+    assert len(history.users) == 2
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_product_submit_conflict_and_capacity_fail_before_new_cr_effects() -> (
+    None
+):
+    release = asyncio.Event()
+    lower = LowerFormalAdapter(release=release)
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history, max_requests=1)
+    first = commit()
+    second = commit(
+        turn_id="turn-2",
+        commit_id="commit-2",
+        interaction_id="interaction-2",
+    )
+    await current.start()
+    await current.open_interaction(first.interaction_id)
+    await current.open_interaction(second.interaction_id)
+    first_handle = await submit(current, first)
+    await asyncio.wait_for(lower.started.wait(), timeout=1)
+    before = current.snapshot()
+
+    with pytest.raises(AgentConversationRuntimeViolation) as conflict:
+        await current.submit_committed_turn(
+            request_id="request-1",
+            response_id="changed-response",
+            correlation_id="correlation-request-1",
+            commit=first,
+            context=FormalContextSnapshot(first.scope),
+        )
+    assert conflict.value.reason == "COMMITTED_TURN_REQUEST_CONFLICT"
+    assert current.snapshot().conversation == before.conversation
+
+    with pytest.raises(AgentConversationRuntimeViolation) as rebound:
+        await submit(current, first, request_id="request-rebound")
+    assert rebound.value.reason == "COMMITTED_TURN_ALREADY_SUBMITTED"
+    assert current.snapshot().conversation == before.conversation
+
+    with pytest.raises(AgentConversationRuntimeViolation) as full:
+        await submit(
+            current,
+            second,
+            request_id="request-2",
+            response_id="response-2",
+        )
+    assert full.value.reason == "COMMITTED_TURN_LEDGER_FULL"
+    after = current.snapshot()
+    assert after.conversation == before.conversation
+    assert all(
+        turn.turn_id != second.turn_id for turn in after.conversation.conversation.turns
+    )
+    assert after.harness.cancel_effects == 0
+    assert lower.calls == 1
+    assert not history.assistant_intents
+
+    release.set()
+    await first_handle.completion
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_product_submit_reserves_harness_capacity_before_turn_mutation() -> None:
+    release = asyncio.Event()
+    lower = LowerFormalAdapter(release=release)
+    history = RecordingHistoryWriter()
+    current = runtime(
+        lower,
+        history,
+        max_active_rounds=1,
+        max_requests=2,
+    )
+    first = commit()
+    second = commit(
+        turn_id="turn-harness-full",
+        commit_id="commit-harness-full",
+        interaction_id="interaction-harness-full",
+    )
+    await current.start()
+    await current.open_interaction(first.interaction_id)
+    await current.open_interaction(second.interaction_id)
+    first_handle = await submit(current, first)
+    await asyncio.wait_for(lower.started.wait(), timeout=1)
+    before = current.snapshot()
+
+    with pytest.raises(HarnessRoundViolation) as full:
+        await submit(
+            current,
+            second,
+            request_id="request-harness-full",
+            response_id="response-harness-full",
+        )
+    assert full.value.reason == "HARNESS_ADMISSION_FULL"
+    after = current.snapshot()
+    assert after.conversation == before.conversation
+    assert all(
+        turn.turn_id != second.turn_id for turn in after.conversation.conversation.turns
+    )
+    assert lower.calls == 1
+    assert len(history.users) == 1
+    assert not history.assistant_intents
+
+    release.set()
+    await first_handle.completion
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
 async def test_uncommitted_and_feature_off_have_zero_authority_effects() -> None:
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
@@ -1373,7 +2221,7 @@ async def test_uncommitted_and_feature_off_have_zero_authority_effects() -> None
     disabled = runtime(disabled_lower, disabled_history, enabled=False)
     assert await disabled.start() is False
     with pytest.raises(AgentConversationRuntimeViolation) as off:
-        await disabled.dispatch_committed_turn(
+        await disabled.submit_committed_turn(
             request_id="request-off",
             response_id="response-off",
             correlation_id="correlation-off",
@@ -1404,7 +2252,13 @@ async def test_uncommitted_and_feature_off_have_zero_authority_effects() -> None
     assert unavailable_snapshot.bridge.started is False
     assert unavailable_snapshot.harness.retained_rounds == 0
     with pytest.raises(AgentConversationRuntimeViolation) as no_facade:
-        await unavailable.open_interaction("interaction-no-facade")
+        await unavailable.submit_committed_turn(
+            request_id="request-no-facade",
+            response_id="response-no-facade",
+            correlation_id="correlation-no-facade",
+            commit=selected,
+            context=FormalContextSnapshot(selected.scope),
+        )
     assert no_facade.value.reason == "FORMAL_AGENT_FACADE_UNAVAILABLE"
 
     code_lower = LowerFormalAdapter()
