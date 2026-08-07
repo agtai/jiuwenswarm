@@ -19,6 +19,8 @@ const MAX_CONTROL_BYTES = 16_384;
 const MAX_PCM_F32_ABS = 3.4028234663852886e38;
 const MAX_PCM_PAYLOAD_BYTES = (MAX_SAMPLE_RATE_HZ / 50) * 4;
 const MAX_BINARY_FRAME_BYTES = WIRE_HEADER_BYTES + MAX_LEASE_ID_BYTES + MAX_PCM_PAYLOAD_BYTES;
+const MAX_LIFECYCLE_FACT_CAPACITY = 256;
+const REGISTRATION_OWNER_CONSTRUCTION_TOKEN = Symbol('browser-gateway-media-registration-owner');
 
 export type MediaDirection = 'uplink' | 'downlink';
 export type MediaGenerationKind = 'capture' | 'response';
@@ -202,8 +204,10 @@ export interface MediaActivationRequest {
   readonly provider_available: boolean;
   readonly transport_available: boolean;
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
+  readonly on_lifecycle_fact?: (fact: MediaLeafLifecycleFact) => void;
   readonly max_pending_frames?: number;
   readonly max_pending_bytes?: number;
+  readonly lifecycle_fact_capacity?: number;
 }
 
 export interface InactiveMediaActivation {
@@ -219,8 +223,7 @@ export interface InactiveMediaActivation {
 export interface ActiveMediaActivation {
   readonly active: true;
   readonly binding: MediaAuthorityBinding;
-  readonly sender: BoundedMediaSender;
-  readonly receiver: StrictMediaReceiver;
+  readonly owner: BrowserGatewayMediaRegistrationOwner;
   readonly capability: MediaCapability;
 }
 
@@ -244,6 +247,65 @@ export interface MediaCloseResult {
   readonly dropped_frames: number;
   readonly dropped_bytes: number;
   readonly detach: MediaDetach | null;
+  readonly business_cancel_count_delta: 0;
+}
+
+export type MediaLeafLifecycleEvent =
+  | 'activation.ready'
+  | 'sender.enqueue'
+  | 'sender.drain'
+  | 'sender.acknowledge'
+  | 'receiver.attach'
+  | 'receiver.accept_binary'
+  | 'receiver.accept_detach'
+  | 'activation.closed'
+  | 'lifecycle.snapshot';
+
+export interface MediaLeafLifecycleFact {
+  readonly event: MediaLeafLifecycleEvent;
+  readonly lease_id: string;
+  readonly authority_evidence_id: string;
+  readonly connection_id: string;
+  readonly connection_epoch: number;
+  readonly session_id: string;
+  readonly media_session_id: string;
+  readonly interaction_id: string;
+  readonly track_id: string;
+  readonly correlation_id: string;
+  readonly direction: MediaDirection;
+  readonly generation_kind: MediaGenerationKind;
+  readonly generation_id: string;
+  readonly generation_value: number;
+  readonly response_id: string | null;
+  readonly response_generation: number | null;
+  readonly unit_id: string | null;
+  readonly owner_closed: boolean;
+  readonly sender_closed: boolean;
+  readonly receiver_attached: boolean;
+  readonly receiver_closed: boolean;
+  readonly receiver_next_seq: number;
+  readonly receiver_next_cursor: number;
+  readonly receiver_last_ack: number | null;
+  readonly sender_pending_frames: number;
+  readonly sender_pending_bytes: number;
+  readonly pending_lifecycle_facts: number;
+  readonly dropped_lifecycle_facts: number;
+  readonly audit_delivery_failures: number;
+  readonly evidence_scope: 'browser_gateway_media_registration_leaf_only';
+  readonly fact_contains_raw_payload: false;
+  readonly registered_route_observed: false;
+  readonly formal_route_ready: false;
+  readonly route_to_disk_zero_persistence_observed: false;
+  readonly business_cancel_count_delta: 0;
+}
+
+export interface MediaRegistrationOwnerCloseResult {
+  readonly was_active: boolean;
+  readonly reason_id: MediaDetachReason;
+  readonly dropped_frames: number;
+  readonly dropped_bytes: number;
+  readonly sender_detach: MediaDetach | null;
+  readonly receiver_detach: MediaDetach | null;
   readonly business_cancel_count_delta: 0;
 }
 
@@ -388,18 +450,40 @@ export function createBrowserGatewayMediaActivation(
   if (request.transport_available !== true) return inactive('MEDIA_TRANSPORT_UNAVAILABLE');
   const maxFrames = request.max_pending_frames ?? 8;
   const maxBytes = request.max_pending_bytes ?? 131_072;
+  const lifecycleFactCapacity = request.lifecycle_fact_capacity ?? 32;
   if (!Number.isInteger(maxFrames) || maxFrames <= 0 || !Number.isInteger(maxBytes) || maxBytes <= 0) {
     throw new MediaTransportViolation('MEDIA_INVALID_LIMIT', 'queue bounds must be positive integers');
+  }
+  if (
+    !Number.isInteger(lifecycleFactCapacity)
+    || lifecycleFactCapacity <= 0
+    || lifecycleFactCapacity > MAX_LIFECYCLE_FACT_CAPACITY
+  ) {
+    throw new MediaTransportViolation(
+      'MEDIA_INVALID_AUDIT_CAPACITY',
+      `lifecycle fact capacity must be an integer in [1, ${MAX_LIFECYCLE_FACT_CAPACITY}]`,
+    );
   }
   if (typeof request.on_audio_frame !== 'function') {
     throw new MediaTransportViolation('MEDIA_INVALID_CONSUMER', 'audio consumer must be callable');
   }
+  if (request.on_lifecycle_fact !== undefined && typeof request.on_lifecycle_fact !== 'function') {
+    throw new MediaTransportViolation('MEDIA_INVALID_AUDIT_CALLBACK', 'lifecycle fact consumer must be callable');
+  }
   const binding = freezeBinding(request.binding);
+  const owner = new BrowserGatewayMediaRegistrationOwner(
+    binding,
+    maxFrames,
+    maxBytes,
+    request.on_audio_frame,
+    request.on_lifecycle_fact,
+    lifecycleFactCapacity,
+    REGISTRATION_OWNER_CONSTRUCTION_TOKEN,
+  );
   return {
     active: true,
     binding,
-    sender: new BoundedMediaSender(binding, maxFrames, maxBytes),
-    receiver: new StrictMediaReceiver(binding, request.on_audio_frame),
+    owner,
     capability: capability(),
   };
 }
@@ -836,6 +920,7 @@ export class BoundedMediaSender {
         this.terminal('MEDIA_TRANSPORT_SEND_FAILED');
         break;
       }
+      if (this.closedState) break;
       if (disposition === 'backpressured') break;
       if (disposition === 'closed') {
         this.terminal('MEDIA_TRANSPORT_CLOSED');
@@ -923,6 +1008,9 @@ export class StrictMediaReceiver {
 
   get attached(): boolean { return this.attachedState; }
   get closed(): boolean { return this.closedState; }
+  get next_seq(): number { return this.nextSeq; }
+  get next_cursor(): number { return this.nextCursor; }
+  get last_ack(): number | null { return this.lastAck < 0 ? null : this.lastAck; }
 
   private terminal(reasonId: unknown): MediaDetach {
     this.detachState ??= detachFor(
@@ -961,6 +1049,7 @@ export class StrictMediaReceiver {
     } catch {
       return this.terminal('MEDIA_CONSUMER_FAILED');
     }
+    if (this.closedState) return this.detachState ?? this.terminal('MEDIA_LEASE_CLOSED');
     this.lastAck = frame.seq;
     this.nextSeq += 1;
     this.nextCursor += this.binding.frame_format.samples_per_channel;
@@ -1006,6 +1095,237 @@ export class StrictMediaReceiver {
       detach,
       business_cancel_count_delta: 0,
     };
+  }
+}
+
+/**
+ * One bounded, non-formal registration owner for the existing Media contract.
+ *
+ * The owner opens no socket and writes no log or storage.  Its synchronous
+ * close cannot be cancelled or timed out midway, and every close caller
+ * observes the same retained result.  Operations only retain frozen,
+ * payload-free facts in a fixed-capacity lane; an observer runs solely during
+ * an explicit bounded drain and never becomes business or product authority.
+ */
+export class BrowserGatewayMediaRegistrationOwner {
+  readonly binding: MediaAuthorityBinding;
+  readonly #sender: BoundedMediaSender;
+  readonly #receiver: StrictMediaReceiver;
+  readonly #onLifecycleFact: ((fact: MediaLeafLifecycleFact) => void) | undefined;
+  readonly #lifecycleFactCapacity: number;
+  readonly #lifecycleFacts: MediaLeafLifecycleFact[] = [];
+  #closedState = false;
+  #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
+  #droppedLifecycleFactCount = 0;
+  #auditFailureCount = 0;
+
+  constructor(
+    binding: MediaAuthorityBinding,
+    maxPendingFrames: number,
+    maxPendingBytes: number,
+    onAudioFrame: (frame: MediaAudioFrame) => void,
+    onLifecycleFact?: (fact: MediaLeafLifecycleFact) => void,
+    lifecycleFactCapacity = 32,
+    constructionToken?: symbol,
+  ) {
+    if (constructionToken !== REGISTRATION_OWNER_CONSTRUCTION_TOKEN) {
+      throw new MediaTransportViolation(
+        'MEDIA_ACTIVATION_FACTORY_REQUIRED',
+        'registration owners must be created by the activation factory',
+      );
+    }
+    if (typeof onAudioFrame !== 'function') {
+      throw new MediaTransportViolation('MEDIA_INVALID_CONSUMER', 'audio consumer must be callable');
+    }
+    if (onLifecycleFact !== undefined && typeof onLifecycleFact !== 'function') {
+      throw new MediaTransportViolation('MEDIA_INVALID_AUDIT_CALLBACK', 'lifecycle fact consumer must be callable');
+    }
+    if (
+      !Number.isInteger(lifecycleFactCapacity)
+      || lifecycleFactCapacity <= 0
+      || lifecycleFactCapacity > MAX_LIFECYCLE_FACT_CAPACITY
+    ) {
+      throw new MediaTransportViolation(
+        'MEDIA_INVALID_AUDIT_CAPACITY',
+        `lifecycle fact capacity must be an integer in [1, ${MAX_LIFECYCLE_FACT_CAPACITY}]`,
+      );
+    }
+    this.binding = freezeBinding(binding);
+    this.#sender = new BoundedMediaSender(this.binding, maxPendingFrames, maxPendingBytes);
+    this.#receiver = new StrictMediaReceiver(this.binding, onAudioFrame);
+    this.#onLifecycleFact = onLifecycleFact;
+    this.#lifecycleFactCapacity = lifecycleFactCapacity;
+    this.#record('activation.ready');
+  }
+
+  get closed(): boolean { return this.#closedState; }
+  get audit_delivery_failures(): number { return this.#auditFailureCount; }
+  get pending_lifecycle_facts(): number { return this.#lifecycleFacts.length; }
+  get dropped_lifecycle_facts(): number { return this.#droppedLifecycleFactCount; }
+
+  enqueue(frame: MediaAudioFrame): MediaEnqueueResult {
+    if (this.#closedState) {
+      return {
+        accepted: false,
+        reason_id: this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED',
+      };
+    }
+    const result = this.#sender.enqueue(frame);
+    this.#record('sender.enqueue');
+    if (this.#sender.closed) this.close(coerceDetachReason(result.reason_id));
+    return result;
+  }
+
+  drain(trySendBinary: (binary: Uint8Array) => BinarySendDisposition): MediaDrainResult {
+    if (this.#closedState) {
+      return {
+        sent_frames: 0,
+        pending_frames: this.#sender.pending_frames,
+        pending_bytes: this.#sender.pending_bytes,
+        reason_id: this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED',
+      };
+    }
+    const result = this.#sender.drain(trySendBinary);
+    if (this.#closedState) {
+      return {
+        sent_frames: 0,
+        pending_frames: this.#sender.pending_frames,
+        pending_bytes: this.#sender.pending_bytes,
+        reason_id: this.#retainedClose?.reason_id ?? result.reason_id,
+      };
+    }
+    this.#record('sender.drain');
+    if (this.#sender.closed) this.close(coerceDetachReason(result.reason_id));
+    return result;
+  }
+
+  acknowledge(control: MediaAck): MediaDetach | null {
+    if (this.#closedState) return this.#retainedClose?.sender_detach ?? this.#sender.close().detach;
+    const result = this.#sender.acknowledge(control);
+    this.#record('sender.acknowledge');
+    if (result !== null) this.close(result.reason_id);
+    return result;
+  }
+
+  attach(control: MediaAttach): MediaDetach | null {
+    if (this.#closedState) return this.#retainedClose?.receiver_detach ?? this.#receiver.close().detach;
+    const result = this.#receiver.attach(control);
+    this.#record('receiver.attach');
+    if (result !== null) this.close(result.reason_id);
+    return result;
+  }
+
+  acceptBinary(raw: Uint8Array): MediaAck | MediaDetach {
+    if (this.#closedState) return this.#retainedClose?.receiver_detach ?? this.#receiver.close().detach!;
+    const result = this.#receiver.acceptBinary(raw);
+    if (this.#closedState) return this.#retainedClose?.receiver_detach ?? result;
+    this.#record('receiver.accept_binary');
+    if (result.type === 'media.detach') this.close(result.reason_id);
+    return result;
+  }
+
+  acceptDetach(control: MediaDetach): MediaRegistrationOwnerCloseResult {
+    if (this.#retainedClose !== null) return this.#retainedClose;
+    const result = this.#receiver.acceptDetach(control);
+    this.#record('receiver.accept_detach');
+    return this.close(result.reason_id);
+  }
+
+  lifecycleSnapshot(): MediaLeafLifecycleFact {
+    return this.#fact('lifecycle.snapshot');
+  }
+
+  drainLifecycleFacts(limit: number): number {
+    if (!Number.isInteger(limit) || limit <= 0) {
+      throw new MediaTransportViolation(
+        'MEDIA_INVALID_AUDIT_DRAIN_LIMIT',
+        'lifecycle fact drain limit must be a positive integer',
+      );
+    }
+    const callback = this.#onLifecycleFact;
+    if (callback === undefined) return 0;
+    let attempted = 0;
+    while (attempted < limit && this.#lifecycleFacts.length > 0) {
+      const fact = this.#lifecycleFacts.shift()!;
+      try {
+        callback(fact);
+      } catch {
+        this.#auditFailureCount += 1;
+      }
+      attempted += 1;
+    }
+    return attempted;
+  }
+
+  close(reasonId: MediaDetachReason = 'MEDIA_LOCAL_CLOSE'): MediaRegistrationOwnerCloseResult {
+    if (this.#retainedClose !== null) return this.#retainedClose;
+    const canonicalReason = coerceDetachReason(reasonId);
+    this.#closedState = true;
+    const sender = this.#sender.close(canonicalReason);
+    const receiver = this.#receiver.close(canonicalReason);
+    this.#retainedClose = Object.freeze({
+      was_active: sender.was_active || receiver.was_active,
+      reason_id: canonicalReason,
+      dropped_frames: sender.dropped_frames + receiver.dropped_frames,
+      dropped_bytes: sender.dropped_bytes + receiver.dropped_bytes,
+      sender_detach: sender.detach,
+      receiver_detach: receiver.detach,
+      business_cancel_count_delta: 0,
+    });
+    this.#record('activation.closed');
+    return this.#retainedClose;
+  }
+
+  #fact(
+    event: MediaLeafLifecycleEvent,
+    pendingLifecycleFacts = this.#lifecycleFacts.length,
+  ): MediaLeafLifecycleFact {
+    const playout = this.binding.playout;
+    return Object.freeze({
+      event,
+      lease_id: this.binding.lease_id,
+      authority_evidence_id: this.binding.authority_evidence_id,
+      connection_id: this.binding.connection_id,
+      connection_epoch: this.binding.connection_epoch,
+      session_id: this.binding.session_id,
+      media_session_id: this.binding.media_session_id,
+      interaction_id: this.binding.interaction_id,
+      track_id: this.binding.track_id,
+      correlation_id: this.binding.correlation_id,
+      direction: this.binding.direction,
+      generation_kind: this.binding.generation.kind,
+      generation_id: this.binding.generation.id,
+      generation_value: this.binding.generation.value,
+      response_id: playout?.response_id ?? null,
+      response_generation: playout?.response_generation ?? null,
+      unit_id: playout?.unit_id ?? null,
+      owner_closed: this.#closedState,
+      sender_closed: this.#sender.closed,
+      receiver_attached: this.#receiver.attached,
+      receiver_closed: this.#receiver.closed,
+      receiver_next_seq: this.#receiver.next_seq,
+      receiver_next_cursor: this.#receiver.next_cursor,
+      receiver_last_ack: this.#receiver.last_ack,
+      sender_pending_frames: this.#sender.pending_frames,
+      sender_pending_bytes: this.#sender.pending_bytes,
+      pending_lifecycle_facts: pendingLifecycleFacts,
+      dropped_lifecycle_facts: this.#droppedLifecycleFactCount,
+      audit_delivery_failures: this.#auditFailureCount,
+      evidence_scope: 'browser_gateway_media_registration_leaf_only',
+      fact_contains_raw_payload: false,
+      registered_route_observed: false,
+      formal_route_ready: false,
+      route_to_disk_zero_persistence_observed: false,
+      business_cancel_count_delta: 0,
+    });
+  }
+
+  #record(event: MediaLeafLifecycleEvent): void {
+    if (this.#lifecycleFacts.length >= this.#lifecycleFactCapacity) {
+      this.#droppedLifecycleFactCount += 1;
+      return;
+    }
+    this.#lifecycleFacts.push(this.#fact(event, this.#lifecycleFacts.length + 1));
   }
 }
 

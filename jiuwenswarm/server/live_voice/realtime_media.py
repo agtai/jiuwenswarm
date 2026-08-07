@@ -6,11 +6,18 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass, field
-from typing import cast
+from typing import Callable, cast
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ConnectionEpochRef,
     ContractViolation,
+)
+from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
+    MediaAuthorityBinding,
+    MediaFrameFormat,
+    MediaGenerationBinding,
+    MediaPlayoutBinding,
+    MediaTransportViolation as GatewayMediaTransportViolation,
 )
 
 
@@ -75,6 +82,100 @@ class MediaPayloadLifecycleSnapshot:
     snapshot_contains_raw_payload: bool = field(default=False, init=False)
     registered_route_observed: bool = field(default=False, init=False)
     route_to_disk_zero_persistence_observed: bool = field(default=False, init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeMediaLeafAuditFact:
+    """Payload-free lifecycle fact for an IO-owned registered-route audit.
+
+    These facts deliberately remain leaf-only.  Observing them cannot prove
+    that a product handler was registered or that another process, logger, or
+    consumer avoided persistence.
+    """
+
+    event: str
+    lease_id: str
+    authority_evidence_id: str
+    connection_id: str
+    connection_epoch: int
+    session_id: str
+    media_session_id: str
+    interaction_id: str
+    track_id: str
+    correlation_id: str
+    direction: str
+    generation_kind: str
+    generation_id: str
+    generation_value: int
+    response_id: str | None
+    response_generation: int | None
+    unit_id: str | None
+    closed: bool
+    accepted_frames: int
+    accepted_payload_bytes: int
+    delivered_frames: int
+    delivered_payload_bytes: int
+    acknowledged_frames: int
+    acknowledged_payload_bytes: int
+    dropped_frames: int
+    dropped_payload_bytes: int
+    pending_frames: int
+    pending_payload_bytes: int
+    pending_audit_facts: int
+    dropped_audit_facts: int
+    audit_delivery_failures: int
+    evidence_scope: str = field(
+        default="realtime_media_registration_leaf_only", init=False
+    )
+    fact_contains_raw_payload: bool = field(default=False, init=False)
+    registered_route_observed: bool = field(default=False, init=False)
+    formal_route_ready: bool = field(default=False, init=False)
+    route_to_disk_zero_persistence_observed: bool = field(default=False, init=False)
+    business_cancel_count_delta: int = field(default=0, init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RealtimeMediaActivationRequest:
+    """Already-authorized inputs for one bounded registration-owner leaf."""
+
+    enabled: bool
+    binding: MediaAuthorityBinding | None
+    provider_available: bool
+    transport_available: bool
+    capacity: int = 32
+    max_frame_payload_bytes: int = 15_360
+    max_retained_payload_bytes: int | None = None
+    audit_capacity: int = 32
+
+
+@dataclass(frozen=True, slots=True)
+class InactiveRealtimeMediaActivation:
+    active: bool
+    reason_id: str
+    evidence_scope: str = field(
+        default="realtime_media_registration_leaf_only", init=False
+    )
+    registered_route_observed: bool = field(default=False, init=False)
+    formal_route_ready: bool = field(default=False, init=False)
+    route_to_disk_zero_persistence_observed: bool = field(default=False, init=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ActiveRealtimeMediaActivation:
+    active: bool
+    binding: MediaAuthorityBinding
+    owner: "RealtimeMediaRegistrationOwner"
+    evidence_scope: str = field(
+        default="realtime_media_registration_leaf_only", init=False
+    )
+    registered_route_observed: bool = field(default=False, init=False)
+    formal_route_ready: bool = field(default=False, init=False)
+    route_to_disk_zero_persistence_observed: bool = field(default=False, init=False)
+
+
+RealtimeMediaActivation = (
+    InactiveRealtimeMediaActivation | ActiveRealtimeMediaActivation
+)
 
 
 class RealtimeMediaPort:
@@ -399,3 +500,323 @@ class RealtimeMediaPort:
             seq=submitted_seq,
             payload=memoryview(submitted_payload).tobytes(),
         )
+
+
+_REGISTRATION_OWNER_CONSTRUCTION_TOKEN = object()
+_MAX_AUDIT_CAPACITY = 256
+
+
+def _copy_media_authority_binding(
+    binding: MediaAuthorityBinding,
+) -> MediaAuthorityBinding:
+    """Retain an independently validated copy of the existing Media contract."""
+
+    if type(binding) is not MediaAuthorityBinding:
+        raise RealtimeMediaViolation(
+            "MEDIA_AUTHORITY_UNAVAILABLE",
+            "an exact server-authored MediaAuthorityBinding is required",
+        )
+    try:
+        generation = MediaGenerationBinding(
+            kind=binding.generation.kind,
+            id=binding.generation.id,
+            value=binding.generation.value,
+        )
+        frame_format = MediaFrameFormat(
+            sample_rate_hz=binding.frame_format.sample_rate_hz,
+            samples_per_channel=binding.frame_format.samples_per_channel,
+            encoding=binding.frame_format.encoding,
+            byte_order=binding.frame_format.byte_order,
+            channel_count=binding.frame_format.channel_count,
+            frame_duration_ms=binding.frame_format.frame_duration_ms,
+        )
+        playout = (
+            None
+            if binding.playout is None
+            else MediaPlayoutBinding(
+                response_id=binding.playout.response_id,
+                response_generation=binding.playout.response_generation,
+                unit_id=binding.playout.unit_id,
+            )
+        )
+        return MediaAuthorityBinding(
+            lease_id=binding.lease_id,
+            authority_evidence_id=binding.authority_evidence_id,
+            connection_id=binding.connection_id,
+            connection_epoch=binding.connection_epoch,
+            session_id=binding.session_id,
+            media_session_id=binding.media_session_id,
+            interaction_id=binding.interaction_id,
+            track_id=binding.track_id,
+            correlation_id=binding.correlation_id,
+            direction=binding.direction,
+            generation=generation,
+            frame_format=frame_format,
+            playout=playout,
+        )
+    except (AttributeError, GatewayMediaTransportViolation) as exc:
+        raise RealtimeMediaViolation(
+            "MEDIA_INVALID_AUTHORITY_BINDING",
+            "the Media authority binding is not canonical",
+        ) from exc
+
+
+class RealtimeMediaRegistrationOwner:
+    """Retain one exact Media leaf and its idempotent cleanup result.
+
+    This owner is intentionally synchronous.  A caller timeout or cancellation
+    cannot consume or interrupt cleanup once ``close`` begins, and every later
+    call observes the same retained result.
+    """
+
+    def __init__(
+        self,
+        binding: MediaAuthorityBinding,
+        *,
+        capacity: int,
+        max_frame_payload_bytes: int,
+        max_retained_payload_bytes: int | None,
+        audit_capacity: int,
+        on_audit_fact: Callable[[RealtimeMediaLeafAuditFact], None] | None,
+        construction_token: object,
+    ) -> None:
+        if construction_token is not _REGISTRATION_OWNER_CONSTRUCTION_TOKEN:
+            raise RealtimeMediaViolation(
+                "MEDIA_ACTIVATION_FACTORY_REQUIRED",
+                "registration owners must be created by the activation factory",
+            )
+        self._binding = binding
+        self._port = RealtimeMediaPort(
+            ConnectionEpochRef(
+                connection_id=binding.connection_id,
+                connection_epoch=binding.connection_epoch,
+            ),
+            capacity=capacity,
+            allowed_track_id=binding.track_id,
+            max_frame_payload_bytes=max_frame_payload_bytes,
+            max_retained_payload_bytes=max_retained_payload_bytes,
+        )
+        if (
+            type(audit_capacity) is not int
+            or audit_capacity <= 0
+            or audit_capacity > _MAX_AUDIT_CAPACITY
+        ):
+            raise RealtimeMediaViolation(
+                "MEDIA_INVALID_AUDIT_CAPACITY",
+                f"audit capacity must be an integer in [1, {_MAX_AUDIT_CAPACITY}]",
+            )
+        self._audit_capacity = audit_capacity
+        self._audit_facts: list[RealtimeMediaLeafAuditFact] = []
+        self._on_audit_fact = on_audit_fact
+        self._lock = threading.RLock()
+        self._close_result: MediaPortCloseResult | None = None
+        self._dropped_audit_facts = 0
+        self._audit_delivery_failures = 0
+        self._record_audit_fact_locked("activation.ready")
+
+    @property
+    def binding(self) -> MediaAuthorityBinding:
+        return self._binding
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._close_result is not None
+
+    @property
+    def audit_delivery_failures(self) -> int:
+        with self._lock:
+            return self._audit_delivery_failures
+
+    @property
+    def pending_audit_facts(self) -> int:
+        with self._lock:
+            return len(self._audit_facts)
+
+    @property
+    def dropped_audit_facts(self) -> int:
+        with self._lock:
+            return self._dropped_audit_facts
+
+    def enqueue(self, frame: MediaFrame) -> None:
+        with self._lock:
+            self._port.enqueue(frame)
+            self._record_audit_fact_locked("frame.accepted")
+
+    def read(
+        self, track_id: str, *, limit: int | None = None
+    ) -> tuple[MediaFrame, ...]:
+        with self._lock:
+            result = self._port.read(track_id, limit=limit)
+            self._record_audit_fact_locked("frame.delivered")
+        return result
+
+    def acknowledge(self, ack: MediaAck) -> int:
+        with self._lock:
+            acknowledged = self._port.acknowledge(ack)
+            self._record_audit_fact_locked("frame.acknowledged")
+        return acknowledged
+
+    def pending(self) -> int:
+        with self._lock:
+            return self._port.pending(self._binding.track_id)
+
+    def payload_lifecycle_snapshot(self) -> MediaPayloadLifecycleSnapshot:
+        with self._lock:
+            return self._port.payload_lifecycle_snapshot()
+
+    def audit_snapshot(self) -> RealtimeMediaLeafAuditFact:
+        with self._lock:
+            return self._audit_fact_locked("lifecycle.snapshot")
+
+    def close(self) -> MediaPortCloseResult:
+        with self._lock:
+            if self._close_result is not None:
+                return self._close_result
+            self._close_result = self._port.close()
+            self._record_audit_fact_locked("activation.closed")
+            retained = self._close_result
+        return retained
+
+    def drain_audit_facts(self, *, limit: int) -> int:
+        """Explicitly deliver at most ``limit`` retained observer facts.
+
+        Media operations only append to the fixed-capacity lane.  A slow or
+        failing consumer can therefore delay this explicit observer drain but
+        cannot hold the owner lock or freeze enqueue, read, ACK, or cleanup.
+        """
+
+        if type(limit) is not int or limit <= 0:
+            raise RealtimeMediaViolation(
+                "MEDIA_INVALID_AUDIT_DRAIN_LIMIT",
+                "audit drain limit must be a positive integer",
+            )
+        callback = self._on_audit_fact
+        if callback is None:
+            return 0
+        attempted = 0
+        while attempted < limit:
+            with self._lock:
+                if not self._audit_facts:
+                    return attempted
+                fact = self._audit_facts.pop(0)
+            try:
+                callback(fact)
+            except Exception:
+                with self._lock:
+                    self._audit_delivery_failures += 1
+            attempted += 1
+        return attempted
+
+    def _record_audit_fact_locked(self, event: str) -> None:
+        if len(self._audit_facts) >= self._audit_capacity:
+            self._dropped_audit_facts += 1
+            return
+        self._audit_facts.append(
+            self._audit_fact_locked(
+                event,
+                pending_audit_facts=len(self._audit_facts) + 1,
+            )
+        )
+
+    def _audit_fact_locked(
+        self,
+        event: str,
+        *,
+        pending_audit_facts: int | None = None,
+    ) -> RealtimeMediaLeafAuditFact:
+        snapshot = self._port.payload_lifecycle_snapshot()
+        playout = self._binding.playout
+        return RealtimeMediaLeafAuditFact(
+            event=event,
+            lease_id=self._binding.lease_id,
+            authority_evidence_id=self._binding.authority_evidence_id,
+            connection_id=self._binding.connection_id,
+            connection_epoch=self._binding.connection_epoch,
+            session_id=self._binding.session_id,
+            media_session_id=self._binding.media_session_id,
+            interaction_id=self._binding.interaction_id,
+            track_id=self._binding.track_id,
+            correlation_id=self._binding.correlation_id,
+            direction=self._binding.direction.value,
+            generation_kind=self._binding.generation.kind.value,
+            generation_id=self._binding.generation.id,
+            generation_value=self._binding.generation.value,
+            response_id=None if playout is None else playout.response_id,
+            response_generation=(
+                None if playout is None else playout.response_generation
+            ),
+            unit_id=None if playout is None else playout.unit_id,
+            closed=snapshot.closed,
+            accepted_frames=snapshot.accepted_frames,
+            accepted_payload_bytes=snapshot.accepted_payload_bytes,
+            delivered_frames=snapshot.delivered_frames,
+            delivered_payload_bytes=snapshot.delivered_payload_bytes,
+            acknowledged_frames=snapshot.acknowledged_frames,
+            acknowledged_payload_bytes=snapshot.acknowledged_payload_bytes,
+            dropped_frames=snapshot.dropped_frames,
+            dropped_payload_bytes=snapshot.dropped_payload_bytes,
+            pending_frames=snapshot.pending_frames,
+            pending_payload_bytes=snapshot.pending_payload_bytes,
+            pending_audit_facts=(
+                len(self._audit_facts)
+                if pending_audit_facts is None
+                else pending_audit_facts
+            ),
+            dropped_audit_facts=self._dropped_audit_facts,
+            audit_delivery_failures=self._audit_delivery_failures,
+        )
+
+
+def create_realtime_media_activation(
+    request: RealtimeMediaActivationRequest,
+    *,
+    on_audit_fact: Callable[[RealtimeMediaLeafAuditFact], None] | None = None,
+) -> RealtimeMediaActivation:
+    """Create a non-formal Media registration leaf after exact local gates.
+
+    Feature-off returns before inspecting the binding, availability facts, or
+    callback and creates no queue, lock, retained owner, or external effect.
+    """
+
+    if type(request) is not RealtimeMediaActivationRequest:
+        raise RealtimeMediaViolation(
+            "MEDIA_INVALID_ACTIVATION_REQUEST",
+            "activation request must be exact and typed",
+        )
+    if request.enabled is not True:
+        return InactiveRealtimeMediaActivation(
+            active=False, reason_id="MEDIA_FEATURE_DISABLED"
+        )
+    if type(request.binding) is not MediaAuthorityBinding:
+        return InactiveRealtimeMediaActivation(
+            active=False, reason_id="MEDIA_AUTHORITY_UNAVAILABLE"
+        )
+    if request.provider_available is not True:
+        return InactiveRealtimeMediaActivation(
+            active=False, reason_id="MEDIA_PROVIDER_UNAVAILABLE"
+        )
+    if request.transport_available is not True:
+        return InactiveRealtimeMediaActivation(
+            active=False, reason_id="MEDIA_TRANSPORT_UNAVAILABLE"
+        )
+    if on_audit_fact is not None and not callable(on_audit_fact):
+        raise RealtimeMediaViolation(
+            "MEDIA_INVALID_AUDIT_CALLBACK",
+            "audit callback must be callable",
+        )
+    binding = _copy_media_authority_binding(request.binding)
+    owner = RealtimeMediaRegistrationOwner(
+        binding,
+        capacity=request.capacity,
+        max_frame_payload_bytes=request.max_frame_payload_bytes,
+        max_retained_payload_bytes=request.max_retained_payload_bytes,
+        audit_capacity=request.audit_capacity,
+        on_audit_fact=on_audit_fact,
+        construction_token=_REGISTRATION_OWNER_CONSTRUCTION_TOKEN,
+    )
+    return ActiveRealtimeMediaActivation(
+        active=True,
+        binding=binding,
+        owner=owner,
+    )
