@@ -50,10 +50,12 @@ from .formal_task_models import (
 )
 from .progress_notification_arbiter import (
     ForegroundSnapshot,
+    NoProjectionAdvanceDisposition,
     NotificationDecision,
     NotificationDisposition,
     ProgressNotificationArbiter,
     ProgressNotificationBinding,
+    _mint_verified_no_projection_advance,
 )
 from .task_event_subscription import TaskEventSubscription
 from .task_store import SqliteTaskStore
@@ -66,6 +68,14 @@ _PROJECTABLE_EVENTS = {
     "task.decision_required": "decision_required",
     "task.terminal": "terminal",
 }
+_NO_PROJECTION_EVENTS = frozenset(
+    {
+        "attempt.accepted",
+        "attempt.running",
+        "attempt.terminal",
+        "task.cancel_requested",
+    }
+)
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
     "task.running": frozenset({"task_core"}),
@@ -479,7 +489,7 @@ def project_task_progress_event(
         )
 
     source_producer = ProducerRef(
-        component=event.producer,
+        component="task_core",
         instance_id=binding.source_instance_id,
         authority="task_core",
     )
@@ -1114,6 +1124,16 @@ class TaskProgressReturnBridge:
                 self._last_source_decision = TaskProgressSourceDecision.NOT_PROJECTABLE
                 self._reject(TaskProgressReturnReason.SOURCE_EVENT_NOT_PROJECTABLE)
                 return False
+            if (
+                binding.origin_kind is TaskProgressOriginKind.VOICE
+                and event.event_type not in _NO_PROJECTION_EVENTS
+            ):
+                self._last_source_decision = TaskProgressSourceDecision.NOT_PROJECTABLE
+                self._reject(TaskProgressReturnReason.SOURCE_EVENT_NOT_PROJECTABLE)
+                return False
+            if binding.origin_kind is TaskProgressOriginKind.VOICE:
+                if not await self._advance_voice_without_projection(event):
+                    return False
             self._seen_ids[event.event_id] = fingerprint
             self._seen_sequences[event.seq] = fingerprint
             self._next_seq = event.seq + 1
@@ -1160,6 +1180,63 @@ class TaskProgressReturnBridge:
             )
             return False
         return True
+
+    async def _advance_voice_without_projection(
+        self,
+        event: PersistentTaskEvent,
+    ) -> bool:
+        async with self._delivery_lock:
+            binding = self._binding
+            if (
+                self._close_requested
+                or self._state is not TaskProgressReturnState.ACTIVE
+                or not self._uses_exact_authority_source()
+            ):
+                return False
+            if not self._authorize(binding):
+                self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
+                return False
+            if not self._generation_current(binding):
+                self._last_source_decision = TaskProgressSourceDecision.STALE_GENERATION
+                self._reject(TaskProgressReturnReason.STALE_GENERATION)
+                return False
+
+            source_producer = ProducerRef(
+                component="task_core",
+                instance_id=binding.source_instance_id,
+                authority="task_core",
+            )
+            work_ref = IdentityRef(IdentityKind.TASK, binding.task_id)
+            notification_binding = ProgressNotificationBinding(
+                scope=binding.scope,
+                work_ref=work_ref,
+                correlation_id=binding.correlation_id,
+                source_producer=source_producer,
+                source_work_ref=work_ref,
+                source_authority=WorkSourceAuthority.TASK_CORE,
+                progress_producer=binding.progress_producer,
+                progress_adapter=binding.progress_adapter,
+            )
+            advance = _mint_verified_no_projection_advance(event, notification_binding)
+            try:
+                decision = self._arbiter._advance_without_projection(advance)
+            except Exception:
+                self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
+                return False
+            self._arbiter_reason = decision.reason
+            if decision.disposition in {
+                NoProjectionAdvanceDisposition.ADVANCED,
+                NoProjectionAdvanceDisposition.DUPLICATE,
+            }:
+                return True
+            if decision.disposition is NoProjectionAdvanceDisposition.BACKPRESSURE:
+                self._reject(TaskProgressReturnReason.ARBITER_BACKPRESSURE)
+                return False
+            if decision.disposition is NoProjectionAdvanceDisposition.FEATURE_DISABLED:
+                self._reject(TaskProgressReturnReason.ARBITER_FEATURE_DISABLED)
+                return False
+            self._reject(TaskProgressReturnReason.ARBITER_REJECTED)
+            return False
 
     async def _deliver_voice(self, projection: TaskProgressProjection) -> bool:
         async with self._delivery_lock:

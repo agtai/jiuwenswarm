@@ -10,6 +10,7 @@ the exact pending item available for a later drain.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import RLock
@@ -29,7 +30,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     WorkProgressEventV2,
     WorkSourceAuthority,
     WorkState,
+    canonical_json_bytes,
 )
+
+from .formal_task_models import PersistentTaskEvent
 
 
 class ProgressNotificationArbiterViolation(ValueError):
@@ -65,6 +69,14 @@ class SpeechDisposition(StrEnum):
     SPEAK_WHEN_SAFE_CANDIDATE = "speak_when_safe_candidate"
 
 
+class NoProjectionAdvanceDisposition(StrEnum):
+    ADVANCED = "advanced"
+    DUPLICATE = "duplicate"
+    REJECTED = "rejected"
+    BACKPRESSURE = "backpressure"
+    FEATURE_DISABLED = "feature_disabled"
+
+
 @dataclass(frozen=True, slots=True)
 class ForegroundSnapshot:
     """Facts supplied by the current interaction/presentation owners.
@@ -91,6 +103,55 @@ class ProgressNotificationBinding:
     source_authority: WorkSourceAuthority
     progress_producer: ProducerRef
     progress_adapter: str | None
+
+
+_NO_PROJECTION_ADVANCE_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
+class _VerifiedNoProjectionAdvance:
+    """Package-internal capability for one authority-verified source position."""
+
+    source_event: PersistentTaskEvent
+    binding: ProgressNotificationBinding
+
+    def __init__(
+        self,
+        source_event: PersistentTaskEvent,
+        binding: ProgressNotificationBinding,
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _NO_PROJECTION_ADVANCE_TOKEN:
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_NO_PROJECTION_CAPABILITY",
+                "no-projection capability must be minted by its package owner",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        object.__setattr__(self, "source_event", source_event)
+        object.__setattr__(self, "binding", binding)
+
+
+def _mint_verified_no_projection_advance(
+    source_event: PersistentTaskEvent,
+    binding: ProgressNotificationBinding,
+) -> _VerifiedNoProjectionAdvance:
+    """Mint an internal capability after the owning bridge checks its lease."""
+
+    return _VerifiedNoProjectionAdvance(
+        source_event,
+        binding,
+        _token=_NO_PROJECTION_ADVANCE_TOKEN,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class NoProjectionAdvanceDecision:
+    disposition: NoProjectionAdvanceDisposition
+    reason: str
+    code: ErrorCode | None = None
+    source_event_id: str | None = None
+    source_seq: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +186,8 @@ class ProgressNotificationArbiterSnapshot:
     duplicate_events: int
     rejected_events: int
     backpressure_events: int
+    no_projection_advances: int
+    no_projection_duplicates: int
 
 
 @dataclass(slots=True)
@@ -157,6 +220,18 @@ class _InputRejected(ValueError):
 _SourceStreamKey = tuple[str, str, IdentityKind, str]
 _ProgressStreamKey = tuple[str, str, IdentityKind, str]
 _WorkKey = tuple[ScopeRef, IdentityKind, str]
+_NO_PROJECTION_EVENT_TYPES = frozenset(
+    {
+        "attempt.accepted",
+        "attempt.running",
+        "attempt.terminal",
+        "task.cancel_requested",
+    }
+)
+_NO_PROJECTION_SOURCE_DOMAIN = b"live-voice.no-projection.source.v1\0"
+_NO_PROJECTION_PROGRESS_DOMAIN = b"live-voice.no-projection.progress.v1\0"
+_NO_PROJECTION_WORK_DOMAIN = b"live-voice.no-projection.work.v1\0"
+_NO_PROJECTION_OBSERVATION_DOMAIN = b"live-voice.no-projection.observation.v1\0"
 
 
 class ProgressNotificationArbiter:
@@ -202,6 +277,7 @@ class ProgressNotificationArbiter:
         self._observed_progress_fingerprints: dict[str, bytes] = {}
         self._observed_source_to_progress: dict[str, str] = {}
         self._observed_progress_to_source: dict[str, str] = {}
+        self._observed_no_projection_fingerprints: dict[str, bytes] = {}
         self._decisions: dict[str, NotificationDecision] = {}
         self._pending: dict[_WorkKey, _PendingNotification] = {}
         self._accepted_events = 0
@@ -209,6 +285,8 @@ class ProgressNotificationArbiter:
         self._duplicate_events = 0
         self._rejected_events = 0
         self._backpressure_events = 0
+        self._no_projection_advances = 0
+        self._no_projection_duplicates = 0
 
     def offer(
         self,
@@ -234,6 +312,197 @@ class ProgressNotificationArbiter:
         with self._lock:
             return self._offer_locked(source_event, progress_event, foreground, binding)
 
+    def _advance_without_projection(
+        self,
+        advance: object,
+    ) -> NoProjectionAdvanceDecision:
+        """Package-internally record an authority-verified source position.
+
+        No pending notification, delivery decision, work lifecycle transition, or
+        acknowledgement candidate is created.  Feature-off returns before
+        inspecting the capability.
+        """
+
+        if not self._enabled:
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.FEATURE_DISABLED,
+                "feature_disabled",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        with self._lock:
+            return self._advance_without_projection_locked(advance)
+
+    def _advance_without_projection_locked(
+        self,
+        advance: object,
+    ) -> NoProjectionAdvanceDecision:
+        try:
+            event, expected, source_bytes = self._validate_no_projection_advance(
+                advance
+            )
+            evidence_bytes = canonical_json_bytes(
+                {
+                    "scope": expected.scope.to_dict(),
+                    "work_ref": expected.work_ref.to_dict(),
+                    "correlation_id": expected.correlation_id,
+                    "source_event_id": event.event_id,
+                    "source_event_type": event.event_type,
+                    "source_seq": event.seq,
+                    "source_producer": expected.source_producer.to_dict(),
+                    "source_work_ref": expected.source_work_ref.to_dict(),
+                    "source_authority": expected.source_authority.value,
+                    "progress_producer": expected.progress_producer.to_dict(),
+                    "progress_adapter": expected.progress_adapter,
+                    "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
+                }
+            )
+        except _InputRejected as error:
+            self._rejected_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.REJECTED,
+                error.reason,
+                error.code,
+            )
+        except (AttributeError, ContractViolation, TypeError, ValueError):
+            self._rejected_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.REJECTED,
+                "INVALID_NO_PROJECTION_ADVANCE",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+        source_key = (
+            expected.source_producer.component,
+            expected.source_producer.instance_id,
+            expected.source_work_ref.kind,
+            expected.source_work_ref.id,
+        )
+        progress_key = (
+            expected.progress_producer.component,
+            expected.progress_producer.instance_id,
+            expected.work_ref.kind,
+            expected.work_ref.id,
+        )
+        work_key = (expected.scope, expected.work_ref.kind, expected.work_ref.id)
+        source_fingerprint = hashlib.sha256(
+            _NO_PROJECTION_SOURCE_DOMAIN + evidence_bytes
+        ).digest()
+        progress_fingerprint = hashlib.sha256(
+            _NO_PROJECTION_PROGRESS_DOMAIN + evidence_bytes
+        ).digest()
+        work_fingerprint = hashlib.sha256(
+            _NO_PROJECTION_WORK_DOMAIN + evidence_bytes
+        ).digest()
+        source_observation_fingerprint = hashlib.sha256(
+            _NO_PROJECTION_OBSERVATION_DOMAIN + source_bytes
+        ).digest()
+
+        prior_source = self._observed_source_fingerprints.get(event.event_id)
+        if prior_source is not None:
+            if event.event_id in self._observed_source_to_progress:
+                self._rejected_events += 1
+                return NoProjectionAdvanceDecision(
+                    NoProjectionAdvanceDisposition.REJECTED,
+                    "SOURCE_EVENT_PROJECTION_CLASS_CONFLICT",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            if prior_source != source_observation_fingerprint:
+                self._rejected_events += 1
+                return NoProjectionAdvanceDecision(
+                    NoProjectionAdvanceDisposition.REJECTED,
+                    "SOURCE_EVENT_ID_CONFLICT",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            prior_evidence = self._observed_no_projection_fingerprints.get(
+                event.event_id
+            )
+            if prior_evidence != evidence_bytes:
+                self._rejected_events += 1
+                return NoProjectionAdvanceDecision(
+                    NoProjectionAdvanceDisposition.REJECTED,
+                    "NO_PROJECTION_EVIDENCE_CONFLICT",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            self._no_projection_duplicates += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.DUPLICATE,
+                "exact_duplicate",
+                source_event_id=event.event_id,
+                source_seq=event.seq,
+            )
+
+        source_sequence = self._source_streams.get(source_key)
+        progress_sequence = self._progress_streams.get(progress_key)
+        work = self._work_streams.get(work_key)
+        sequence_reason = self._no_projection_sequence_reason(
+            event.seq,
+            source_sequence=source_sequence,
+            progress_sequence=progress_sequence,
+            work=work,
+        )
+        if sequence_reason is not None:
+            self._rejected_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.REJECTED,
+                sequence_reason,
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if work is None or work.last_state is None:
+            self._rejected_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.REJECTED,
+                "WORK_ACCEPTED_REQUIRED",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if work.terminal:
+            self._rejected_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.REJECTED,
+                "WORK_EVENT_AFTER_TERMINAL",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+        if len(self._observed_source_fingerprints) >= self._observation_capacity:
+            self._backpressure_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.BACKPRESSURE,
+                "SOURCE_OBSERVATION_CAPACITY_EXHAUSTED",
+                ErrorCode.UNAVAILABLE,
+            )
+        capacity_reason = self._no_projection_capacity_reason(
+            source_key=source_key,
+            progress_key=progress_key,
+            work_key=work_key,
+        )
+        if capacity_reason is not None:
+            self._backpressure_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.BACKPRESSURE,
+                capacity_reason,
+                ErrorCode.UNAVAILABLE,
+            )
+
+        if source_sequence is None:
+            source_sequence = _SequenceState(0, {})
+            self._source_streams[source_key] = source_sequence
+        if progress_sequence is None:
+            progress_sequence = _SequenceState(0, {})
+            self._progress_streams[progress_key] = progress_sequence
+        self._accept_sequence(source_sequence, event.seq, source_fingerprint)
+        self._accept_sequence(progress_sequence, event.seq, progress_fingerprint)
+        self._accept_sequence(work.sequence, event.seq, work_fingerprint)
+        self._observed_source_fingerprints[event.event_id] = (
+            source_observation_fingerprint
+        )
+        self._observed_no_projection_fingerprints[event.event_id] = evidence_bytes
+        self._no_projection_advances += 1
+        return NoProjectionAdvanceDecision(
+            NoProjectionAdvanceDisposition.ADVANCED,
+            "verified_no_projection_advance",
+            source_event_id=event.event_id,
+            source_seq=event.seq,
+        )
+
     def _offer_locked(
         self,
         source_event: object,
@@ -257,6 +526,13 @@ class ProgressNotificationArbiter:
             self._rejected_events += 1
             return self._rejected(
                 "INVALID_EVENT_ENVELOPE", ErrorCode.PROTOCOL_VIOLATION
+            )
+
+        if source.event_id in self._observed_no_projection_fingerprints:
+            self._rejected_events += 1
+            return self._rejected(
+                "SOURCE_EVENT_PROJECTION_CLASS_CONFLICT",
+                ErrorCode.PROTOCOL_VIOLATION,
             )
 
         observation_reason = self._observe_identity(
@@ -508,7 +784,169 @@ class ProgressNotificationArbiter:
             duplicate_events=self._duplicate_events,
             rejected_events=self._rejected_events,
             backpressure_events=self._backpressure_events,
+            no_projection_advances=self._no_projection_advances,
+            no_projection_duplicates=self._no_projection_duplicates,
         )
+
+    @staticmethod
+    def _validate_no_projection_advance(
+        advance: object,
+    ) -> tuple[PersistentTaskEvent, ProgressNotificationBinding, bytes]:
+        if type(advance) is not _VerifiedNoProjectionAdvance:
+            raise _InputRejected(
+                "INVALID_NO_PROJECTION_ADVANCE",
+                "no-projection ingestion requires an internally minted capability",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        event = advance.source_event
+        if type(event) is not PersistentTaskEvent:
+            raise _InputRejected(
+                "INVALID_NO_PROJECTION_ADVANCE",
+                "no-projection evidence requires an exact PersistentTaskEvent",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        binding = advance.binding
+        if type(binding) is not ProgressNotificationBinding:
+            raise _InputRejected(
+                "INVALID_PROGRESS_BINDING",
+                "no-projection ingestion requires an exact product binding",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        expected = binding
+        if (
+            type(event.scope) is not ScopeRef
+            or type(expected.scope) is not ScopeRef
+            or type(expected.work_ref) is not IdentityRef
+            or type(expected.source_work_ref) is not IdentityRef
+            or type(expected.source_producer) is not ProducerRef
+            or type(expected.progress_producer) is not ProducerRef
+            or type(expected.source_authority) is not WorkSourceAuthority
+            or type(expected.correlation_id) is not str
+            or not expected.correlation_id.strip()
+            or (
+                expected.progress_adapter is not None
+                and (
+                    type(expected.progress_adapter) is not str
+                    or not expected.progress_adapter.strip()
+                )
+            )
+        ):
+            raise _InputRejected(
+                "INVALID_PROGRESS_BINDING",
+                "no-projection binding fields must have exact canonical types",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            canonical_event = PersistentTaskEvent(
+                event_id=event.event_id,
+                task_id=event.task_id,
+                attempt_id=event.attempt_id,
+                scope=event.scope,
+                seq=event.seq,
+                event_type=event.event_type,
+                state=event.state,
+                outcome=event.outcome,
+                producer=event.producer,
+                source_event_id=event.source_event_id,
+                causation_id=event.causation_id,
+                correlation_id=event.correlation_id,
+                occurred_at=event.occurred_at,
+                details=event.details,
+            )
+            expected_scope = ScopeRef.from_dict(expected.scope.to_dict())
+            expected_work = IdentityRef.from_dict(expected.work_ref.to_dict())
+            expected_source_work = IdentityRef.from_dict(
+                expected.source_work_ref.to_dict()
+            )
+            expected_source_producer = ProducerRef.from_dict(
+                expected.source_producer.to_dict()
+            )
+            expected_progress_producer = ProducerRef.from_dict(
+                expected.progress_producer.to_dict()
+            )
+            source_bytes = canonical_json_bytes(canonical_event.to_dict())
+        except (AttributeError, ContractViolation, TypeError, ValueError) as error:
+            raise _InputRejected(
+                "INVALID_NO_PROJECTION_ADVANCE",
+                "no-projection evidence must use canonical v2 values",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        if (
+            canonical_event != event
+            or expected_scope != expected.scope
+            or expected_work != expected.work_ref
+            or expected_source_work != expected.source_work_ref
+            or expected_source_producer != expected.source_producer
+            or expected_progress_producer != expected.progress_producer
+            or event.scope.assurance is not Assurance.AUTHENTICATED
+            or expected.scope.assurance is not Assurance.AUTHENTICATED
+            or expected.work_ref.kind is not IdentityKind.TASK
+            or expected.source_work_ref.kind is not IdentityKind.TASK
+            or expected.source_authority is not WorkSourceAuthority.TASK_CORE
+            or expected.source_producer.component != "task_core"
+            or expected.source_producer.authority != "task_core"
+            or expected.progress_producer.authority != "adapter"
+        ):
+            raise _InputRejected(
+                "INVALID_NO_PROJECTION_ADVANCE",
+                "no-projection evidence is not canonical authority data",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            event.scope != expected.scope
+            or event.task_id != expected.work_ref.id
+            or event.task_id != expected.source_work_ref.id
+            or event.correlation_id != expected.correlation_id
+        ):
+            raise _InputRejected(
+                "NO_PROJECTION_BINDING_MISMATCH",
+                "no-projection evidence must match the exact product binding",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if event.event_type not in _NO_PROJECTION_EVENT_TYPES:
+            raise _InputRejected(
+                "INVALID_NO_PROJECTION_SOURCE_EVENT",
+                "source event is not in the canonical no-projection set",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if event.event_type == "task.cancel_requested":
+            valid_lifecycle = (
+                event.producer == "task_core.control"
+                and event.state
+                in {"accepted", "running", "blocked", "decision_required"}
+                and event.outcome is None
+                and event.source_event_id is None
+            )
+        else:
+            expected_state = event.event_type.removeprefix("attempt.")
+            internal_terminal = event.producer in {
+                "task_core.delivery",
+                "task_core.reconciliation",
+            }
+            executor_event = not event.producer.startswith("task_core")
+            exact_executor_source = (
+                event.source_event_id is not None
+                and event.causation_id == event.source_event_id
+            )
+            valid_lifecycle = (
+                event.state == expected_state
+                and (event.state == "terminal") == (event.outcome is not None)
+                and (
+                    (executor_event and exact_executor_source)
+                    or (
+                        event.event_type == "attempt.terminal"
+                        and internal_terminal
+                        and event.source_event_id is None
+                    )
+                )
+            )
+        if not valid_lifecycle:
+            raise _InputRejected(
+                "INVALID_NO_PROJECTION_SOURCE_EVENT",
+                "source event producer, lifecycle, or source evidence is invalid",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        return canonical_event, expected, source_bytes
 
     def _validate_offer(
         self,
@@ -855,6 +1293,57 @@ class ProgressNotificationArbiter:
             return "PENDING_NOTIFICATION_CAPACITY_EXHAUSTED"
         return None
 
+    def _no_projection_capacity_reason(
+        self,
+        *,
+        source_key: _SourceStreamKey,
+        progress_key: _ProgressStreamKey,
+        work_key: _WorkKey,
+    ) -> str | None:
+        source = self._source_streams.get(source_key)
+        progress = self._progress_streams.get(progress_key)
+        work = self._work_streams.get(work_key)
+        if source is None and len(self._source_streams) >= self._stream_capacity:
+            return "SOURCE_STREAM_CAPACITY_EXHAUSTED"
+        if progress is None and len(self._progress_streams) >= self._stream_capacity:
+            return "PROGRESS_STREAM_CAPACITY_EXHAUSTED"
+        if work is None and len(self._work_streams) >= self._stream_capacity:
+            return "WORK_STREAM_CAPACITY_EXHAUSTED"
+        if source is not None and len(source.fingerprints) >= self._events_per_stream:
+            return "SOURCE_EVENT_CAPACITY_EXHAUSTED"
+        if (
+            progress is not None
+            and len(progress.fingerprints) >= self._events_per_stream
+        ):
+            return "PROGRESS_EVENT_CAPACITY_EXHAUSTED"
+        if (
+            work is not None
+            and len(work.sequence.fingerprints) >= self._events_per_stream
+        ):
+            return "WORK_EVENT_CAPACITY_EXHAUSTED"
+        return None
+
+    @staticmethod
+    def _no_projection_sequence_reason(
+        seq: int,
+        *,
+        source_sequence: _SequenceState | None,
+        progress_sequence: _SequenceState | None,
+        work: _WorkState | None,
+    ) -> str | None:
+        checks = (
+            ("SOURCE", source_sequence),
+            ("PROGRESS_ENVELOPE", progress_sequence),
+            ("WORK_PROJECTION", None if work is None else work.sequence),
+        )
+        for prefix, current in checks:
+            expected = 0 if current is None else current.next_seq
+            if seq > expected:
+                return f"{prefix}_SEQUENCE_GAP"
+            if seq < expected:
+                return f"{prefix}_SEQUENCE_CONFLICT"
+        return None
+
     @staticmethod
     def _sequence_reason(
         source: EventEnvelope,
@@ -1018,6 +1507,8 @@ class ProgressNotificationArbiter:
 __all__ = [
     "ForegroundFact",
     "ForegroundSnapshot",
+    "NoProjectionAdvanceDecision",
+    "NoProjectionAdvanceDisposition",
     "NotificationDecision",
     "NotificationDisposition",
     "ProgressNotificationArbiter",

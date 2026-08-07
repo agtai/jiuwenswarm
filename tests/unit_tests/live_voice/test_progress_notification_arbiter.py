@@ -18,9 +18,13 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     WorkSourceAuthority,
 )
+from jiuwenswarm.server.live_voice import (
+    progress_notification_arbiter as arbiter_module,
+)
 from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
+    NoProjectionAdvanceDisposition,
     NotificationDisposition,
     ProgressNotificationArbiter,
     ProgressNotificationArbiterViolation,
@@ -28,6 +32,7 @@ from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
     SpeechDisposition,
     SpeechPolicy,
 )
+from jiuwenswarm.server.live_voice.formal_task_models import PersistentTaskEvent
 
 
 def scope(
@@ -98,7 +103,8 @@ def source_event(
             "event_id": event_id or f"source:{work_kind}:{work_id}:{seq}",
             "event_type": f"{work_kind}.{state}",
             "producer": {
-                "component": producer_component or f"test.{authority}",
+                "component": producer_component
+                or ("task_core" if work_kind == "task" else f"test.{authority}"),
                 "instance_id": producer_instance or f"{authority}-1",
                 "authority": authority,
             },
@@ -229,6 +235,52 @@ def offer(
     )
 
 
+def no_projection_advance(
+    source: EventEnvelope,
+    progress: EventEnvelope,
+    *,
+    seq: int,
+    event_id: str | None = None,
+    event_type: str = "attempt.running",
+) -> tuple[object, ProgressNotificationBinding]:
+    expected = binding(source, progress)
+    selected_event_id = event_id or f"task-event:no-projection:{seq}"
+    state = {
+        "attempt.accepted": "accepted",
+        "attempt.running": "running",
+        "attempt.terminal": "terminal",
+        "task.cancel_requested": "accepted",
+    }.get(event_type, "running")
+    producer = (
+        "task_core.control" if event_type == "task.cancel_requested" else "executor-1"
+    )
+    source_event_id = (
+        None
+        if event_type == "task.cancel_requested"
+        else f"executor-source:{selected_event_id}"
+    )
+    persistent = PersistentTaskEvent(
+        event_id=selected_event_id,
+        task_id=source.stream_ref.id,
+        attempt_id="attempt-1",
+        scope=source.scope,
+        seq=seq,
+        event_type=event_type,
+        state=state,
+        outcome="completed" if state == "terminal" else None,
+        producer=producer,
+        source_event_id=source_event_id,
+        causation_id=source_event_id or f"control:{selected_event_id}",
+        correlation_id=source.correlation_id,
+        occurred_at="2026-08-06T08:00:00Z",
+        details={},
+    )
+    return (
+        arbiter_module._mint_verified_no_projection_advance(persistent, expected),
+        expected,
+    )
+
+
 def test_constructor_rejects_noncanonical_flags_and_capacities() -> None:
     with pytest.raises(ProgressNotificationArbiterViolation) as invalid_flag:
         ProgressNotificationArbiter(enabled=1)  # type: ignore[arg-type]
@@ -239,6 +291,29 @@ def test_constructor_rejects_noncanonical_flags_and_capacities() -> None:
         assert invalid_capacity.value.reason == "INVALID_ARBITER_CAPACITY"
 
 
+def test_no_projection_capability_is_internal_and_cannot_be_directly_minted() -> None:
+    arbiter = ProgressNotificationArbiter()
+    accepted = source_event(work_kind="task", work_id="task-private-capability")
+    projected = progress_event(accepted)
+    advance, expected = no_projection_advance(accepted, projected, seq=1)
+
+    assert not hasattr(arbiter, "advance_without_projection")
+    assert "VerifiedNoProjectionAdvance" not in arbiter_module.__all__
+    with pytest.raises(TypeError):
+        arbiter_module._VerifiedNoProjectionAdvance(  # type: ignore[call-arg]
+            advance.source_event,
+            expected,
+        )
+    with pytest.raises(ProgressNotificationArbiterViolation) as forged:
+        arbiter_module._VerifiedNoProjectionAdvance(
+            advance.source_event,
+            expected,
+            _token=object(),
+        )
+    assert forged.value.reason == "INVALID_NO_PROJECTION_CAPABILITY"
+    assert advance.source_event.event_id not in repr(advance)
+
+
 def test_feature_off_returns_before_inspecting_inputs_and_has_zero_state() -> None:
     class Explosive:
         def __getattribute__(self, name: str):
@@ -247,12 +322,328 @@ def test_feature_off_returns_before_inspecting_inputs_and_has_zero_state() -> No
     arbiter = ProgressNotificationArbiter(enabled=False)
     decision = arbiter.offer(Explosive(), Explosive(), Explosive(), Explosive())
     assert decision.disposition is NotificationDisposition.FEATURE_DISABLED
+    advance = arbiter._advance_without_projection(Explosive())
+    assert advance.disposition is NoProjectionAdvanceDisposition.FEATURE_DISABLED
     assert decision.progress is None
     assert arbiter.drain(Explosive(), Explosive()) == ()
     assert arbiter.acknowledge(Explosive(), Explosive(), Explosive()) is False
     assert arbiter.snapshot().tracked_work_streams == 0
     assert arbiter.snapshot().pending_notifications == 0
     assert arbiter.snapshot().rejected_events == 0
+
+
+def test_verified_no_projection_advances_all_sequences_without_delivery_state() -> None:
+    arbiter = ProgressNotificationArbiter()
+    accepted = source_event(work_kind="task", work_id="task-no-projection")
+    accepted_progress = progress_event(accepted)
+    first = offer(arbiter, accepted, accepted_progress)
+    assert first.disposition is NotificationDisposition.DISPLAY_NOW
+    assert arbiter.acknowledge(first.scope, first.work_ref, first.event_id)
+
+    for seq, event_type in (
+        (1, "attempt.accepted"),
+        (2, "attempt.running"),
+        (3, "task.cancel_requested"),
+        (4, "attempt.terminal"),
+    ):
+        advance, _ = no_projection_advance(
+            accepted,
+            accepted_progress,
+            seq=seq,
+            event_type=event_type,
+        )
+        result = arbiter._advance_without_projection(advance)
+        assert result.disposition is NoProjectionAdvanceDisposition.ADVANCED
+        assert result.source_seq == seq
+        assert arbiter.drain(scope(), safe_foreground()) == ()
+        assert not arbiter.acknowledge(
+            scope(), accepted.stream_ref, advance.source_event.event_id
+        )
+
+    running = source_event(
+        work_kind="task",
+        work_id="task-no-projection",
+        seq=5,
+        state="running",
+    )
+    projected = progress_event(running)
+    delivered = offer(arbiter, running, projected)
+    assert delivered.disposition is NotificationDisposition.DISPLAY_NOW
+    snapshot = arbiter.snapshot()
+    assert snapshot.accepted_events == 2
+    assert snapshot.no_projection_advances == 4
+    assert snapshot.pending_notifications == 1
+    assert snapshot.terminal_work_streams == 0
+
+
+def test_no_projection_duplicate_is_idempotent_and_cannot_be_reprojected() -> None:
+    arbiter = ProgressNotificationArbiter()
+    accepted = source_event(work_kind="task", work_id="task-duplicate")
+    projected = progress_event(accepted)
+    assert offer(arbiter, accepted, projected).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    advance, expected = no_projection_advance(accepted, projected, seq=1)
+    first = arbiter._advance_without_projection(advance)
+    before = arbiter.snapshot()
+    duplicate = arbiter._advance_without_projection(advance)
+    after = arbiter.snapshot()
+    assert first.disposition is NoProjectionAdvanceDisposition.ADVANCED
+    assert duplicate.disposition is NoProjectionAdvanceDisposition.DUPLICATE
+    assert after.no_projection_advances == before.no_projection_advances
+    assert after.no_projection_duplicates == before.no_projection_duplicates + 1
+    assert after.pending_notifications == before.pending_notifications
+
+    changed_record = arbiter_module._mint_verified_no_projection_advance(
+        replace(advance.source_event, details={"tampered": True}),
+        expected,
+    )
+    record_conflict = arbiter._advance_without_projection(changed_record)
+    assert record_conflict.disposition is NoProjectionAdvanceDisposition.REJECTED
+    assert record_conflict.reason == "SOURCE_EVENT_ID_CONFLICT"
+    assert arbiter.snapshot().no_projection_advances == 1
+
+    forged_source = source_event(
+        work_kind="task",
+        work_id="task-duplicate",
+        seq=1,
+        state="running",
+        event_id=advance.source_event.event_id,
+    )
+    forged_projection = progress_event(forged_source)
+    conflict = offer(arbiter, forged_source, forged_projection)
+    assert conflict.disposition is NotificationDisposition.REJECTED
+    assert conflict.reason == "SOURCE_EVENT_PROJECTION_CLASS_CONFLICT"
+    assert arbiter.snapshot().accepted_events == 1
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    [
+        ("partial", "INVALID_NO_PROJECTION_ADVANCE"),
+        ("unknown", "INVALID_NO_PROJECTION_SOURCE_EVENT"),
+        ("projectable", "INVALID_NO_PROJECTION_SOURCE_EVENT"),
+        ("scope", "NO_PROJECTION_BINDING_MISMATCH"),
+        ("correlation", "NO_PROJECTION_BINDING_MISMATCH"),
+        ("task", "NO_PROJECTION_BINDING_MISMATCH"),
+        ("source_component", "INVALID_NO_PROJECTION_ADVANCE"),
+        ("producer", "INVALID_NO_PROJECTION_SOURCE_EVENT"),
+        ("lifecycle", "INVALID_NO_PROJECTION_SOURCE_EVENT"),
+        ("source_evidence", "INVALID_NO_PROJECTION_SOURCE_EVENT"),
+    ],
+)
+def test_invalid_no_projection_evidence_has_zero_partial_sequence_effect(
+    mutation: str,
+    reason: str,
+) -> None:
+    arbiter = ProgressNotificationArbiter()
+    accepted = source_event(work_kind="task", work_id="task-invalid-advance")
+    projected = progress_event(accepted)
+    assert offer(arbiter, accepted, projected).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    advance, expected = no_projection_advance(accepted, projected, seq=1)
+    event = advance.source_event
+    if mutation == "partial":
+        advance = arbiter_module._mint_verified_no_projection_advance(  # type: ignore[arg-type]
+            {"event_id": event.event_id},
+            expected,
+        )
+    elif mutation == "unknown":
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, event_type="task.unknown"),
+            expected,
+        )
+    elif mutation == "projectable":
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, event_type="task.running"),
+            expected,
+        )
+    elif mutation == "scope":
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, scope=scope(session_id="foreign")),
+            expected,
+        )
+    elif mutation == "correlation":
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, correlation_id="foreign"),
+            expected,
+        )
+    elif mutation == "task":
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, task_id="foreign"),
+            expected,
+        )
+    elif mutation == "source_component":
+        expected = replace(
+            expected,
+            source_producer=ProducerRef(
+                component="task_core.delivery",
+                instance_id=expected.source_producer.instance_id,
+                authority="task_core",
+            ),
+        )
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            event,
+            expected,
+        )
+    elif mutation == "producer":
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, producer="task_core.control"),
+            expected,
+        )
+    elif mutation == "lifecycle":
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, state="accepted"),
+            expected,
+        )
+    else:
+        advance = arbiter_module._mint_verified_no_projection_advance(
+            replace(event, source_event_id=None),
+            expected,
+        )
+    before = arbiter.snapshot()
+    result = arbiter._advance_without_projection(advance)
+    after = arbiter.snapshot()
+    assert result.disposition is NoProjectionAdvanceDisposition.REJECTED
+    assert result.reason == reason
+    assert after.tracked_source_streams == before.tracked_source_streams
+    assert after.tracked_progress_streams == before.tracked_progress_streams
+    assert after.tracked_work_streams == before.tracked_work_streams
+    assert after.retained_source_events == before.retained_source_events
+    assert after.retained_progress_events == before.retained_progress_events
+    assert after.pending_notifications == before.pending_notifications
+    assert after.accepted_events == before.accepted_events
+    assert after.no_projection_advances == before.no_projection_advances
+
+
+def test_no_projection_exact_type_checks_precede_untrusted_field_methods() -> None:
+    class Explosive:
+        def __getattribute__(self, name: str):
+            raise AssertionError(f"untrusted field method accessed: {name}")
+
+    arbiter = ProgressNotificationArbiter()
+    accepted = source_event(work_kind="task", work_id="task-exact-types")
+    projected = progress_event(accepted)
+    assert offer(arbiter, accepted, projected).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    advance, expected = no_projection_advance(accepted, projected, seq=1)
+    before = arbiter.snapshot()
+
+    invalid_event = arbiter_module._mint_verified_no_projection_advance(  # type: ignore[arg-type]
+        Explosive(),
+        expected,
+    )
+    event_result = arbiter._advance_without_projection(invalid_event)
+    invalid_binding = replace(expected, scope=Explosive())  # type: ignore[arg-type]
+    invalid_binding_advance = arbiter_module._mint_verified_no_projection_advance(
+        advance.source_event,
+        invalid_binding,
+    )
+    binding_result = arbiter._advance_without_projection(invalid_binding_advance)
+
+    assert event_result.reason == "INVALID_NO_PROJECTION_ADVANCE"
+    assert binding_result.reason == "INVALID_PROGRESS_BINDING"
+    after = arbiter.snapshot()
+    assert after.no_projection_advances == before.no_projection_advances
+    assert after.retained_source_events == before.retained_source_events
+    assert after.pending_notifications == before.pending_notifications
+
+
+def test_no_projection_gap_conflict_capacity_and_race_are_atomic() -> None:
+    arbiter = ProgressNotificationArbiter(events_per_stream=2)
+    accepted = source_event(work_kind="task", work_id="task-atomic-advance")
+    projected = progress_event(accepted)
+    assert offer(arbiter, accepted, projected).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    gap, _ = no_projection_advance(accepted, projected, seq=2)
+    gap_result = arbiter._advance_without_projection(gap)
+    assert gap_result.reason == "SOURCE_SEQUENCE_GAP"
+    assert arbiter.snapshot().no_projection_advances == 0
+
+    candidates = [
+        no_projection_advance(
+            accepted,
+            projected,
+            seq=1,
+            event_id=f"task-event:race:{index}",
+        )[0]
+        for index in range(2)
+    ]
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(
+            executor.map(
+                arbiter._advance_without_projection,
+                candidates,
+            )
+        )
+    assert (
+        sum(
+            item.disposition is NoProjectionAdvanceDisposition.ADVANCED
+            for item in results
+        )
+        == 1
+    )
+    assert (
+        sum(
+            item.disposition is NoProjectionAdvanceDisposition.REJECTED
+            for item in results
+        )
+        == 1
+    )
+    before_capacity = arbiter.snapshot()
+    capacity, _ = no_projection_advance(accepted, projected, seq=2)
+    full = arbiter._advance_without_projection(capacity)
+    after_capacity = arbiter.snapshot()
+    assert full.disposition is NoProjectionAdvanceDisposition.BACKPRESSURE
+    assert full.reason == "SOURCE_EVENT_CAPACITY_EXHAUSTED"
+    assert (
+        after_capacity.no_projection_advances == before_capacity.no_projection_advances
+    )
+    assert (
+        after_capacity.retained_source_events == before_capacity.retained_source_events
+    )
+
+
+def test_no_projection_cannot_create_or_extend_work_lifecycle() -> None:
+    arbiter = ProgressNotificationArbiter()
+    accepted = source_event(work_kind="task", work_id="task-lifecycle-fence")
+    accepted_progress = progress_event(accepted)
+    initial, _ = no_projection_advance(
+        accepted,
+        accepted_progress,
+        seq=0,
+        event_type="attempt.accepted",
+    )
+    missing = arbiter._advance_without_projection(initial)
+    assert missing.disposition is NoProjectionAdvanceDisposition.REJECTED
+    assert missing.reason == "WORK_ACCEPTED_REQUIRED"
+    assert arbiter.snapshot().tracked_work_streams == 0
+
+    assert offer(arbiter, accepted, accepted_progress).disposition is (
+        NotificationDisposition.DISPLAY_NOW
+    )
+    terminal = source_event(
+        work_kind="task",
+        work_id="task-lifecycle-fence",
+        seq=1,
+        state="terminal",
+        outcome="completed",
+    )
+    terminal_progress = progress_event(terminal)
+    assert offer(arbiter, terminal, terminal_progress).state.value == "terminal"
+    after_terminal, _ = no_projection_advance(
+        terminal,
+        terminal_progress,
+        seq=2,
+        event_type="attempt.terminal",
+    )
+    rejected = arbiter._advance_without_projection(after_terminal)
+    assert rejected.disposition is NoProjectionAdvanceDisposition.REJECTED
+    assert rejected.reason == "WORK_EVENT_AFTER_TERMINAL"
+    assert arbiter.snapshot().no_projection_advances == 0
 
 
 def test_idle_round_progress_displays_and_only_hint_can_be_speech_candidate() -> None:
