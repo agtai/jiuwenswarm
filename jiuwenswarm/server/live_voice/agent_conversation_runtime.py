@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
@@ -42,6 +43,7 @@ from jiuwenswarm.server.live_voice.conversation_runtime import (
 )
 from jiuwenswarm.server.live_voice.conversation_runtime_loop import (
     BargeInResult,
+    ConversationEffect,
     ConversationRuntimeLoop,
     ConversationRuntimeLoopSnapshot,
     ConversationRuntimeLoopViolation,
@@ -67,12 +69,20 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     HistorySurfacePolicy,
     PresentationAck,
+    PresentationState,
     PresentationSurface,
     PresentationUnit,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
+
+
+_MAX_NOTIFICATION_CONSUMER_ID_CHARS = 256
+_MAX_NOTIFICATION_CONSUMER_ID_UTF8_BYTES = 1024
+_MAX_EFFECT_ID_CHARS = 256
+_MAX_EFFECT_ID_UTF8_BYTES = 512
+_MAX_EFFECTS_PER_REQUEST = 3
 
 
 class AgentConversationRuntimeViolation(ValueError):
@@ -111,12 +121,48 @@ class AgentConversationNotification:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentConversationNotificationLease:
+    """Exact infrastructure subscription lease for one transport generation."""
+
+    owner_instance_id: str
+    consumer_id: str
+    connection_epoch: int
+    lease_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class AgentConversationEffectClaim:
+    """Retained exact-consumer delivery of declarative conversation effects."""
+
+    claim_id: str
+    consumer_id: str
+    connection_epoch: int
+    effects: tuple[ConversationEffect, ...]
+    replayed: bool
+    acknowledged: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AgentConversationEffectAckResult:
+    """Exact acknowledgement of one retained effect-delivery claim."""
+
+    claim_id: str
+    effect_ids: tuple[str, ...]
+    accepted: bool
+    replayed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _QueuedNotification:
     publish_seq: int
     notification: AgentConversationNotification
 
 
 class _NotificationBufferClosed(RuntimeError):
+    pass
+
+
+class _NotificationConsumerDetached(RuntimeError):
     pass
 
 
@@ -180,8 +226,15 @@ class _BoundedNotificationBuffer:
             self._observer.append(queued)
         self._ready.set()
 
-    async def get(self) -> AgentConversationNotification:
+    async def get(
+        self,
+        *,
+        lease_active: Callable[[], bool] | None = None,
+        detached: asyncio.Event | None = None,
+    ) -> AgentConversationNotification:
         while True:
+            if lease_active is not None and not lease_active():
+                raise _NotificationConsumerDetached
             queued = self._pop_next()
             if queued is not None:
                 self._delivered_total += 1
@@ -189,11 +242,43 @@ class _BoundedNotificationBuffer:
                 return queued.notification
             if self._closed:
                 raise _NotificationBufferClosed
-            await self._ready.wait()
+            if detached is None:
+                await self._ready.wait()
+                continue
+            ready_wait = asyncio.create_task(self._ready.wait())
+            detached_wait = asyncio.create_task(detached.wait())
+            try:
+                await asyncio.wait(
+                    (ready_wait, detached_wait),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for waiter in (ready_wait, detached_wait):
+                    if not waiter.done():
+                        waiter.cancel()
+                await asyncio.gather(
+                    ready_wait,
+                    detached_wait,
+                    return_exceptions=True,
+                )
 
     def close(self) -> None:
         self._closed = True
         self._ready.set()
+
+    def discard_pending_presentations(self) -> int:
+        """Remove output notices invalidated by retained CR shutdown."""
+
+        retained = deque(
+            queued
+            for queued in self._critical
+            if queued.notification.presentation_unit is None
+        )
+        discarded = len(self._critical) - len(retained)
+        self._critical = retained
+        if not self._observer and not self._critical:
+            self._ready.clear()
+        return discarded
 
     def qsize(self) -> int:
         return len(self._observer) + len(self._critical)
@@ -276,6 +361,7 @@ class PresentationAckResult:
 class AgentConversationShutdownResult:
     status: AgentConversationShutdownStatus
     detail: str
+    final_drain_lease: AgentConversationNotificationLease | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +384,13 @@ class AgentConversationRuntimeSnapshot:
     last_notification_publish_seq: int | None
     last_notification_delivered_seq: int | None
     notification_stream_closed: bool
+    active_notification_consumer: tuple[str, int] | None
+    notification_leases_attached: int
+    notification_leases_detached: int
+    discarded_invalidated_presentations: int
     critical_notification_invariant_failures: int
+    pending_conversation_effects: int
+    unacknowledged_effect_claims: int
     pending_history_intents: int
     conversation: ConversationRuntimeLoopSnapshot
     bridge: AgentBridgeRuntimeSnapshot
@@ -345,6 +437,26 @@ class _PresentationAckEntry:
     ack: PresentationAck
     outcome: asyncio.Future[BaseException | None]
     coordinator: asyncio.Task[None] | None
+
+
+@dataclass(slots=True)
+class _NotificationLeaseRecord:
+    lease: AgentConversationNotificationLease
+    detached: asyncio.Event
+    active: bool = True
+    drain_after_close: bool = False
+
+
+@dataclass(slots=True)
+class _ConversationEffectClaimEntry:
+    claim_id: str
+    lease_id: str
+    limit: int | None
+    outcome: asyncio.Future[BaseException | None]
+    coordinator: asyncio.Task[None] | None
+    effects: tuple[ConversationEffect, ...] = ()
+    acknowledged: bool = False
+    superseded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,10 +578,23 @@ class AgentConversationRuntime:
         ] = {}
         self._pending_user_history: dict[str, tuple[TurnCommit, str]] = {}
         self._history_tasks: set[asyncio.Task[None]] = set()
+        self._notification_consumer_epochs: dict[str, int] = {}
+        self._active_notification_lease: _NotificationLeaseRecord | None = None
+        self._final_notification_drain_lease: _NotificationLeaseRecord | None = None
+        self._notification_leases_attached = 0
+        self._notification_leases_detached = 0
+        self._notification_final_drain_leases_issued = 0
+        self._discarded_invalidated_presentations = 0
+        self._effect_backlog: deque[ConversationEffect] = deque()
+        self._effect_backlog_ids: set[str] = set()
+        self._effect_claims: dict[str, _ConversationEffectClaimEntry] = {}
+        self._max_effect_claims = 4 * max_requests
+        self._max_effect_batch = _MAX_EFFECTS_PER_REQUEST * max_requests
         self._start_lock = asyncio.Lock()
         self._identity_claim_lock = asyncio.Lock()
         self._close_requested = False
         self._ack_lock = asyncio.Lock()
+        self._effect_lock = asyncio.Lock()
         self._closing_interactions: set[str] = set()
         self._consumer: asyncio.Task[None] | None = None
         self._shutdown: asyncio.Task[AgentConversationShutdownResult] | None = None
@@ -959,10 +1084,6 @@ class AgentConversationRuntime:
                     )
                 outcome = existing.outcome
             else:
-                # The first admission check may have preceded a concurrent close
-                # while this caller waited for the identity fence.  Only retained
-                # exact replay may bypass this second gate.
-                self._require_admission()
                 self._require_exact_commit(commit)
                 turn_key = (commit.interaction_id, commit.turn_id)
                 bound_request = self._submitted_turn_bindings.get(turn_key)
@@ -1078,6 +1199,12 @@ class AgentConversationRuntime:
                 "formal Agent composition is disabled",
                 ErrorCode.CAPABILITY_UNAVAILABLE,
             )
+        if self._notification_leases_attached > 0:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_CONSUMER_LEASE_REQUIRED",
+                "unleased reads are disabled after exact lease ownership begins",
+                ErrorCode.PERMISSION_DENIED,
+            )
         try:
             return await self._notifications.get()
         except _NotificationBufferClosed as error:
@@ -1086,6 +1213,246 @@ class AgentConversationRuntime:
                 "the notification producer is closed and its retained buffer is empty",
                 ErrorCode.UNAVAILABLE,
             ) from error
+
+    def attach_notification_consumer(
+        self, *, consumer_id: str, connection_epoch: int
+    ) -> AgentConversationNotificationLease:
+        """Fence an infrastructure notification consumer to one exact epoch.
+
+        Attaching a newer transport generation detaches the previous waiter but
+        never cancels a response, Harness round, Agent, Tool, or Task. Buffered
+        notifications remain owned by this runtime and are available to the new
+        exact lease.
+        """
+
+        self._require_started()
+        if (
+            self._close_requested
+            or self._shutdown is not None
+            or self._notifications.closed
+        ):
+            raise AgentConversationRuntimeViolation(
+                "COMPOSITION_CLOSING",
+                "notification ownership cannot change after retained shutdown",
+                ErrorCode.CONFLICT,
+            )
+        self._validate_notification_consumer(consumer_id, connection_epoch)
+        current = self._active_notification_lease
+        if current is not None and current.active:
+            if (
+                current.lease.consumer_id == consumer_id
+                and current.lease.connection_epoch == connection_epoch
+            ):
+                return current.lease
+        retained_epoch = self._notification_consumer_epochs.get(consumer_id)
+        if retained_epoch is not None and connection_epoch <= retained_epoch:
+            raise AgentConversationRuntimeViolation(
+                "STALE_NOTIFICATION_CONSUMER",
+                "notification consumer epoch must strictly increase on reconnect",
+                ErrorCode.STALE,
+            )
+        if (
+            retained_epoch is None
+            and len(self._notification_consumer_epochs) >= self._max_requests
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_CONSUMER_LEDGER_FULL",
+                "bounded notification consumer ledger is full for this runtime",
+                ErrorCode.UNAVAILABLE,
+            )
+        if current is not None and current.active:
+            self._detach_notification_record(current)
+        self._notification_leases_attached += 1
+        lease = AgentConversationNotificationLease(
+            owner_instance_id=self._instance_id,
+            consumer_id=consumer_id,
+            connection_epoch=connection_epoch,
+            lease_id=f"notification-lease:{self._notification_leases_attached}",
+        )
+        record = _NotificationLeaseRecord(lease=lease, detached=asyncio.Event())
+        self._notification_consumer_epochs[consumer_id] = connection_epoch
+        self._final_notification_drain_lease = None
+        self._active_notification_lease = record
+        return lease
+
+    def detach_notification_consumer(
+        self, lease: AgentConversationNotificationLease
+    ) -> bool:
+        """Detach the exact transport and reserve distinct close-drain ownership."""
+
+        record = self._require_notification_lease(lease, require_active=False)
+        if not record.active:
+            return False
+        self._detach_notification_record(record)
+        self._reserve_final_notification_drain(record)
+        return True
+
+    async def next_notification_for(
+        self, lease: AgentConversationNotificationLease
+    ) -> AgentConversationNotification:
+        """Read without allowing a stale transport generation to consume data."""
+
+        record = self._require_notification_lease(
+            lease,
+            require_active=not (
+                self._notifications.closed
+                and self._active_notification_lease is not None
+                and self._active_notification_lease.drain_after_close
+            ),
+        )
+        try:
+            return await self._notifications.get(
+                lease_active=lambda: (
+                    self._active_notification_lease is record
+                    and (
+                        record.active
+                        or (self._notifications.closed and record.drain_after_close)
+                    )
+                ),
+                detached=record.detached,
+            )
+        except _NotificationConsumerDetached as error:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_CONSUMER_DETACHED",
+                "notification consumer lease is detached or superseded",
+                ErrorCode.STALE,
+            ) from error
+        except _NotificationBufferClosed as error:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_STREAM_CLOSED",
+                "the notification producer is closed and its retained buffer is empty",
+                ErrorCode.UNAVAILABLE,
+            ) from error
+
+    async def claim_conversation_effects(
+        self,
+        lease: AgentConversationNotificationLease,
+        *,
+        claim_id: str,
+        limit: int | None = None,
+    ) -> AgentConversationEffectClaim:
+        """Retain one exact-consumer effect batch until its explicit ACK.
+
+        CR effects remain declarative and retain their exact ResponseRef.  This
+        hook neither executes nor widens playback, response, round, or task
+        cancellation.  Caller cancellation cannot cancel the retained claim.
+        """
+
+        record = self._require_effect_lease(lease)
+        self._validate_effect_claim_id(claim_id)
+        if limit is not None and (
+            type(limit) is not int or not 0 <= limit <= self._max_effect_batch
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_EFFECT_LIMIT",
+                "effect claim limit exceeds the bounded non-negative range",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        async with self._effect_lock:
+            entry = self._effect_claims.get(claim_id)
+            replayed = entry is not None
+            if entry is not None:
+                if entry.lease_id != lease.lease_id or entry.limit != limit:
+                    raise AgentConversationRuntimeViolation(
+                        "EFFECT_CLAIM_CONFLICT",
+                        "an effect claim identifier cannot change owner or limit",
+                        ErrorCode.CONFLICT,
+                    )
+                if entry.superseded:
+                    raise AgentConversationRuntimeViolation(
+                        "EFFECT_CLAIM_SUPERSEDED",
+                        "an unacknowledged effect claim was returned to the outbox",
+                        ErrorCode.STALE,
+                    )
+            else:
+                if len(self._effect_claims) >= self._max_effect_claims:
+                    raise AgentConversationRuntimeViolation(
+                        "EFFECT_CLAIM_LEDGER_FULL",
+                        "the bounded effect claim ledger is full",
+                        ErrorCode.UNAVAILABLE,
+                    )
+                running = asyncio.get_running_loop()
+                entry = _ConversationEffectClaimEntry(
+                    claim_id=claim_id,
+                    lease_id=lease.lease_id,
+                    limit=limit,
+                    outcome=running.create_future(),
+                    coordinator=None,
+                )
+                self._effect_claims[claim_id] = entry
+                entry.coordinator = running.create_task(
+                    self._complete_effect_claim(entry, record),
+                    name=f"live-voice-effect-claim:{claim_id}",
+                )
+        error = await asyncio.shield(entry.outcome)
+        if error is not None:
+            raise error
+        async with self._effect_lock:
+            self._require_effect_lease(lease)
+            self._prune_invalid_output_effects()
+            if entry.superseded:
+                raise AgentConversationRuntimeViolation(
+                    "EFFECT_CLAIM_SUPERSEDED",
+                    "an invalidated effect claim was returned to the outbox",
+                    ErrorCode.STALE,
+                )
+        return AgentConversationEffectClaim(
+            claim_id=claim_id,
+            consumer_id=lease.consumer_id,
+            connection_epoch=lease.connection_epoch,
+            effects=entry.effects,
+            replayed=replayed,
+            acknowledged=entry.acknowledged,
+        )
+
+    async def acknowledge_conversation_effects(
+        self,
+        lease: AgentConversationNotificationLease,
+        *,
+        claim_id: str,
+        effect_ids: tuple[str, ...],
+    ) -> AgentConversationEffectAckResult:
+        """ACK only the exact retained batch owned by the current consumer."""
+
+        self._require_effect_lease(lease)
+        self._validate_effect_claim_id(claim_id)
+        self._validate_effect_ack_ids(effect_ids)
+        async with self._effect_lock:
+            self._require_effect_lease(lease)
+            entry = self._effect_claims.get(claim_id)
+            if entry is None or entry.lease_id != lease.lease_id or entry.superseded:
+                raise AgentConversationRuntimeViolation(
+                    "UNKNOWN_EFFECT_CLAIM",
+                    "effect acknowledgement requires the exact active claim",
+                    ErrorCode.STALE,
+                )
+        error = await asyncio.shield(entry.outcome)
+        if error is not None:
+            raise error
+        async with self._effect_lock:
+            self._require_effect_lease(lease)
+            self._prune_invalid_output_effects()
+            if entry.superseded:
+                raise AgentConversationRuntimeViolation(
+                    "UNKNOWN_EFFECT_CLAIM",
+                    "effect acknowledgement requires the exact active claim",
+                    ErrorCode.STALE,
+                )
+            retained_ids = tuple(effect.effect_id for effect in entry.effects)
+            if effect_ids != retained_ids:
+                raise AgentConversationRuntimeViolation(
+                    "EFFECT_ACK_CONFLICT",
+                    "effect acknowledgement cannot change the retained batch",
+                    ErrorCode.CONFLICT,
+                )
+            replayed = entry.acknowledged
+            entry.acknowledged = True
+            return AgentConversationEffectAckResult(
+                claim_id=claim_id,
+                effect_ids=effect_ids,
+                accepted=True,
+                replayed=replayed,
+            )
 
     async def acknowledge_presentation(
         self, ack: PresentationAck
@@ -1370,6 +1737,13 @@ class AgentConversationRuntime:
         try:
             if self._shutdown is None:
                 self._accepting = False
+                active_notification_lease = self._active_notification_lease
+                if (
+                    active_notification_lease is not None
+                    and active_notification_lease.active
+                ):
+                    self._reserve_final_notification_drain(active_notification_lease)
+                    self._detach_notification_record(active_notification_lease)
                 if self._started:
                     closed_detail = "teardown_complete"
                 elif not self._facade_available():
@@ -1401,6 +1775,7 @@ class AgentConversationRuntime:
             )
 
     def snapshot(self) -> AgentConversationRuntimeSnapshot:
+        active_notification_lease = self._active_notification_lease
         return AgentConversationRuntimeSnapshot(
             enabled=self._enabled,
             started=self._started,
@@ -1425,8 +1800,27 @@ class AgentConversationRuntime:
             last_notification_publish_seq=self._notifications.last_publish_seq,
             last_notification_delivered_seq=(self._notifications.last_delivered_seq),
             notification_stream_closed=self._notifications.closed,
+            active_notification_consumer=(
+                None
+                if active_notification_lease is None
+                or not active_notification_lease.active
+                else (
+                    active_notification_lease.lease.consumer_id,
+                    active_notification_lease.lease.connection_epoch,
+                )
+            ),
+            notification_leases_attached=self._notification_leases_attached,
+            notification_leases_detached=self._notification_leases_detached,
+            discarded_invalidated_presentations=(
+                self._discarded_invalidated_presentations
+            ),
             critical_notification_invariant_failures=(
                 self._notifications.critical_invariant_failures
+            ),
+            pending_conversation_effects=len(self._effect_backlog),
+            unacknowledged_effect_claims=sum(
+                not entry.acknowledged and not entry.superseded
+                for entry in self._effect_claims.values()
             ),
             pending_history_intents=(
                 len(self._pending_history) + len(self._pending_user_history)
@@ -1720,6 +2114,7 @@ class AgentConversationRuntime:
     async def _shutdown_coordinator(
         self, *, closed_detail: str = "teardown_complete"
     ) -> AgentConversationShutdownResult:
+        final_drain_lease = self._final_notification_drain_lease
         try:
             submission_tasks = tuple(
                 entry.coordinator
@@ -1742,7 +2137,6 @@ class AgentConversationRuntime:
             await self._bridge.close()
             if self._consumer is not None:
                 await asyncio.shield(self._consumer)
-            self._notifications.close()
             await self._harness.close()
             ack_tasks = tuple(
                 entry.coordinator
@@ -1757,21 +2151,43 @@ class AgentConversationRuntime:
                     await asyncio.shield(
                         asyncio.gather(*history_tasks, return_exceptions=True)
                     )
-            await self._cr.close()
+            shutdown_effects = await self._cr.close()
+            async with self._effect_lock:
+                self._retain_effects(shutdown_effects)
+                self._prune_invalid_output_effects()
+            self._discarded_invalidated_presentations += (
+                self._notifications.discard_pending_presentations()
+            )
+            if final_drain_lease is not None:
+                final_drain_lease.drain_after_close = True
+                self._active_notification_lease = final_drain_lease
+            self._notifications.close()
+            final_drain_capability = (
+                None if final_drain_lease is None else final_drain_lease.lease
+            )
             if self._pending_history or self._pending_user_history:
                 return AgentConversationShutdownResult(
                     AgentConversationShutdownStatus.FAILED,
                     "history_write_intents_pending",
+                    final_drain_capability,
                 )
             self._closed = True
             return AgentConversationShutdownResult(
-                AgentConversationShutdownStatus.CLOSED, closed_detail
+                AgentConversationShutdownStatus.CLOSED,
+                closed_detail,
+                final_drain_capability,
             )
         except BaseException as error:  # noqa: BLE001
             self._notifications.close()
             return AgentConversationShutdownResult(
                 AgentConversationShutdownStatus.FAILED,
                 f"teardown_failed:{type(error).__name__}",
+                (
+                    None
+                    if final_drain_lease is None
+                    or not final_drain_lease.drain_after_close
+                    else final_drain_lease.lease
+                ),
             )
 
     def _response_record(self, ref: ResponseRef):
@@ -1837,6 +2253,309 @@ class AgentConversationRuntime:
                 "COMPOSITION_NOT_STARTED",
                 "formal Agent composition is not active",
                 ErrorCode.CONFLICT,
+            )
+
+    def _require_notification_lease(
+        self,
+        lease: AgentConversationNotificationLease,
+        *,
+        require_active: bool,
+    ) -> _NotificationLeaseRecord:
+        current = self._active_notification_lease
+        if (
+            not isinstance(lease, AgentConversationNotificationLease)
+            or lease.owner_instance_id != self._instance_id
+            or current is None
+            or current.lease is not lease
+        ):
+            raise AgentConversationRuntimeViolation(
+                "UNTRUSTED_NOTIFICATION_CONSUMER",
+                "notification lease does not match the runtime registry",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if require_active and not current.active:
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_CONSUMER_DETACHED",
+                "notification consumer lease is detached or superseded",
+                ErrorCode.STALE,
+            )
+        return current
+
+    def _detach_notification_record(
+        self,
+        record: _NotificationLeaseRecord,
+        *,
+        drain_after_close: bool = False,
+    ) -> None:
+        if not record.active:
+            return
+        record.active = False
+        record.drain_after_close = drain_after_close
+        self._notification_leases_detached += 1
+        record.detached.set()
+        self._supersede_effect_claims(record)
+
+    def _reserve_final_notification_drain(
+        self, record: _NotificationLeaseRecord
+    ) -> None:
+        self._notification_final_drain_leases_issued += 1
+        drain_lease = AgentConversationNotificationLease(
+            owner_instance_id=self._instance_id,
+            consumer_id=record.lease.consumer_id,
+            connection_epoch=record.lease.connection_epoch,
+            lease_id=(
+                "notification-final-drain:"
+                f"{self._notification_final_drain_leases_issued}"
+            ),
+        )
+        self._final_notification_drain_lease = _NotificationLeaseRecord(
+            lease=drain_lease,
+            detached=asyncio.Event(),
+            active=False,
+        )
+
+    def _require_effect_lease(
+        self, lease: AgentConversationNotificationLease
+    ) -> _NotificationLeaseRecord:
+        record = self._require_notification_lease(lease, require_active=False)
+        if record.active and self._close_requested:
+            raise AgentConversationRuntimeViolation(
+                "COMPOSITION_CLOSING",
+                "effect delivery is fenced while retained shutdown starts",
+                ErrorCode.CONFLICT,
+            )
+        if not (
+            record.active or (self._notifications.closed and record.drain_after_close)
+        ):
+            raise AgentConversationRuntimeViolation(
+                "NOTIFICATION_CONSUMER_DETACHED",
+                "effect delivery requires the exact active or final-drain lease",
+                ErrorCode.STALE,
+            )
+        return record
+
+    async def _complete_effect_claim(
+        self,
+        entry: _ConversationEffectClaimEntry,
+        record: _NotificationLeaseRecord,
+    ) -> None:
+        error: BaseException | None = None
+        try:
+            async with self._effect_lock:
+                if self._shutdown is None and not self._notifications.closed:
+                    self._retain_effects(await self._cr.claim_effects())
+                self._prune_invalid_output_effects()
+                if (
+                    entry.superseded
+                    or self._active_notification_lease is not record
+                    or not (
+                        record.active
+                        or (self._notifications.closed and record.drain_after_close)
+                    )
+                ):
+                    raise AgentConversationRuntimeViolation(
+                        "EFFECT_CLAIM_SUPERSEDED",
+                        "effect claim ownership changed before delivery",
+                        ErrorCode.STALE,
+                    )
+                selected: list[ConversationEffect] = []
+                if entry.limit != 0:
+                    while self._effect_backlog and (
+                        entry.limit is None or len(selected) < entry.limit
+                    ):
+                        effect = self._effect_backlog.popleft()
+                        self._effect_backlog_ids.remove(effect.effect_id)
+                        selected.append(effect)
+                entry.effects = tuple(selected)
+        except BaseException as caught:  # noqa: BLE001 - retained outcome truth
+            error = caught
+        if not entry.outcome.done():
+            entry.outcome.set_result(error)
+
+    def _retain_effects(self, effects: tuple[ConversationEffect, ...]) -> None:
+        assigned_ids = {
+            retained.effect_id
+            for entry in self._effect_claims.values()
+            if not entry.superseded
+            for retained in entry.effects
+        }
+        for effect in effects:
+            if effect.effect_id in self._effect_backlog_ids:
+                continue
+            if effect.effect_id in assigned_ids:
+                continue
+            self._effect_backlog.append(effect)
+            self._effect_backlog_ids.add(effect.effect_id)
+
+    def _supersede_effect_claims(self, record: _NotificationLeaseRecord) -> None:
+        requeued: list[ConversationEffect] = []
+        for entry in self._effect_claims.values():
+            if (
+                entry.lease_id != record.lease.lease_id
+                or entry.acknowledged
+                or entry.superseded
+            ):
+                continue
+            entry.superseded = True
+            requeued.extend(entry.effects)
+        self._requeue_effects_in_order(requeued)
+
+    def _prune_invalid_output_effects(self) -> None:
+        presentation = self._cr.snapshot().presentation
+        deliverable_outputs = {
+            (
+                record.unit.ref,
+                record.unit.surface,
+                record.unit.unit_id,
+                record.unit.seq,
+            )
+            for record in presentation.records
+            if record.state is PresentationState.ENQUEUED
+        }
+
+        def deliverable(effect: ConversationEffect) -> bool:
+            return (
+                effect.effect_type not in {"ui.render", "audio.enqueue"}
+                or (
+                    effect.ref,
+                    effect.surface,
+                    effect.unit_id,
+                    effect.unit_seq,
+                )
+                in deliverable_outputs
+            )
+
+        requeued: list[ConversationEffect] = []
+        for entry in self._effect_claims.values():
+            if entry.superseded or all(deliverable(effect) for effect in entry.effects):
+                continue
+            if not entry.acknowledged:
+                requeued.extend(
+                    effect for effect in entry.effects if deliverable(effect)
+                )
+            entry.superseded = True
+        self._requeue_effects_in_order(requeued)
+        retained = deque(
+            effect for effect in self._effect_backlog if deliverable(effect)
+        )
+        self._effect_backlog = retained
+        self._effect_backlog_ids = {effect.effect_id for effect in retained}
+
+    def _requeue_effects_in_order(self, effects: list[ConversationEffect]) -> None:
+        if not effects:
+            return
+        retained = {effect.effect_id: effect for effect in self._effect_backlog}
+        for effect in effects:
+            retained.setdefault(effect.effect_id, effect)
+        ordered = sorted(retained.values(), key=lambda effect: effect.seq)
+        self._effect_backlog = deque(ordered)
+        self._effect_backlog_ids = set(retained)
+
+    def _validate_effect_ack_ids(self, effect_ids: tuple[str, ...]) -> None:
+        if type(effect_ids) is not tuple or len(effect_ids) > self._max_effect_batch:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_EFFECT_ACK",
+                "effect acknowledgement requires a bounded identifier tuple",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        unique_ids: set[str] = set()
+        for effect_id in effect_ids:
+            if (
+                type(effect_id) is not str
+                or not effect_id
+                or len(effect_id) > _MAX_EFFECT_ID_CHARS
+                or effect_id != effect_id.strip()
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "INVALID_EFFECT_ACK",
+                    "effect identifiers must be canonical bounded strings",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            try:
+                encoded_effect_id = effect_id.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise AgentConversationRuntimeViolation(
+                    "INVALID_EFFECT_ACK",
+                    "effect identifiers must contain Unicode scalar values",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from error
+            if (
+                len(encoded_effect_id) > _MAX_EFFECT_ID_UTF8_BYTES
+                or effect_id in unique_ids
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "INVALID_EFFECT_ACK",
+                    "effect identifiers must be UTF-8 bounded and unique",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            unique_ids.add(effect_id)
+
+    @staticmethod
+    def _validate_effect_claim_id(claim_id: str) -> None:
+        if (
+            type(claim_id) is not str
+            or not claim_id
+            or len(claim_id) > _MAX_NOTIFICATION_CONSUMER_ID_CHARS
+            or claim_id != claim_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_EFFECT_CLAIM",
+                "claim_id must be a canonical bounded string",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            encoded_claim_id = claim_id.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_EFFECT_CLAIM",
+                "claim_id must contain Unicode scalar values",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        if len(encoded_claim_id) > _MAX_NOTIFICATION_CONSUMER_ID_UTF8_BYTES:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_EFFECT_CLAIM",
+                "claim_id exceeds the bounded UTF-8 identity size",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+    @staticmethod
+    def _validate_notification_consumer(
+        consumer_id: str, connection_epoch: int
+    ) -> None:
+        if (
+            type(consumer_id) is not str
+            or not consumer_id
+            or len(consumer_id) > _MAX_NOTIFICATION_CONSUMER_ID_CHARS
+            or consumer_id != consumer_id.strip()
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NOTIFICATION_CONSUMER",
+                "consumer_id must be a canonical bounded string",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            encoded_consumer_id = consumer_id.encode("utf-8")
+        except UnicodeEncodeError as error:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NOTIFICATION_CONSUMER",
+                "consumer_id must contain Unicode scalar values",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        if len(encoded_consumer_id) > _MAX_NOTIFICATION_CONSUMER_ID_UTF8_BYTES:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NOTIFICATION_CONSUMER",
+                "consumer_id exceeds the bounded UTF-8 identity size",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if (
+            type(connection_epoch) is not int
+            or connection_epoch < 0
+            or connection_epoch > 9_007_199_254_740_991
+        ):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_NOTIFICATION_CONSUMER",
+                "connection_epoch must be a non-negative safe integer",
+                ErrorCode.INVALID_ARGUMENT,
             )
 
     def _facade_available(self) -> bool:
