@@ -9,12 +9,18 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   LiveVoiceIntegratedRoutePanelView,
+  PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
   classifyProductP2Notification,
   extractWebErrorReason,
   isCurrentProgressOwner,
+  productP2WebRequestOptions,
   progressMatchesOwnedBinding,
   retainBoundedPresentedProductResponse,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+import {
+  PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+  PRODUCT_P2_SUBMIT_METHOD,
+} from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
 import {
   IntegratedWebRouteShell,
   createCurrentIntegratedWebRouteSelection,
@@ -192,6 +198,25 @@ test('Web response error extraction preserves nested product reason', () => {
   );
   assert.equal(extractWebErrorReason({ reason: ' TOP_LEVEL_REASON ' }), 'TOP_LEVEL_REASON');
   assert.equal(extractWebErrorReason({ error: 'legacy error' }), undefined);
+});
+
+test('P2 notification polling outlives the retained Gateway unary owner', () => {
+  assert.deepEqual(
+    productP2WebRequestOptions(
+      PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+      'notification-request-1'
+    ),
+    {
+      requestId: 'notification-request-1',
+      timeoutMs: PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
+    }
+  );
+  assert.equal(PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS > 600_000, true);
+  assert.deepEqual(
+    productP2WebRequestOptions(PRODUCT_P2_SUBMIT_METHOD, 'submit-request-1'),
+    { requestId: 'submit-request-1' }
+  );
+  assert.deepEqual(productP2WebRequestOptions(PRODUCT_P2_SUBMIT_METHOD), {});
 });
 
 test('presented response ownership stays bounded and evicts conservatively', () => {

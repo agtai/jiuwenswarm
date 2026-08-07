@@ -6,10 +6,10 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
-from dataclasses import asdict
 from typing import Any, AsyncIterator
 from urllib.parse import urlsplit
 
@@ -34,6 +34,8 @@ logger = logging.getLogger(__name__)
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
 AGENT_REQUEST_TIMEOUT_SECONDS: float = 600.0
 _UNARY_REQUEST_TIMEOUT_SECONDS = AGENT_REQUEST_TIMEOUT_SECONDS
+_DISCONNECT_CLOSE_TIMEOUT_SECONDS = 6.0
+_DISCONNECT_TASK_SETTLE_TIMEOUT_SECONDS = 1.0
 _LOG_REDACTED_KEYS = frozenset({"auth_token"})
 
 
@@ -134,6 +136,35 @@ def _e2a_to_wire(envelope: E2AEnvelope) -> dict[str, Any]:
     return envelope.to_dict()
 
 
+def _unary_replay_fingerprint(payload: dict[str, Any]) -> str:
+    """Hash stable request semantics, excluding Gateway-owned delivery metadata."""
+    stable_payload = dict(payload)
+    stable_payload.pop("timestamp", None)
+
+    provenance = payload.get("provenance")
+    if isinstance(provenance, dict):
+        stable_payload["provenance"] = {
+            key: value for key, value in provenance.items() if key != "converted_at"
+        }
+
+    channel_context = payload.get("channel_context")
+    if isinstance(channel_context, dict):
+        # A browser reconnect receives a new physical WebSocket delivery id.
+        # MessageHandler binds each coalesced result back to its own request
+        # metadata, so ws_id must not change the AgentServer operation identity.
+        stable_payload["channel_context"] = {
+            key: value for key, value in channel_context.items() if key != "ws_id"
+        }
+
+    canonical_payload = json.dumps(
+        stable_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical_payload).hexdigest()
+
+
 class WebSocketAgentServerClient(AgentServerClient):
     """
     基于 websockets 的 AgentServer WebSocket 客户端实现。
@@ -144,20 +175,28 @@ class WebSocketAgentServerClient(AgentServerClient):
     - 接收（流式）：多条 E2AResponse 线 JSON（或 legacy chunk），解析为 AgentResponseChunk。
     """
 
-    def __init__(self, *, ping_interval: float | None = 30.0, ping_timeout: float | None = 300.0) -> None:
+    def __init__(
+        self, *, ping_interval: float | None = 30.0, ping_timeout: float | None = 300.0
+    ) -> None:
         self._uri: str | None = None
         self._ws: Any = None
+        self._connection_generation = 0
         self._lock = asyncio.Lock()
         self._reconnect_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server_ready: bool = False
         # 消息分发机制：根据 request_id 路由到对应队列
         self._message_queues: dict[str, asyncio.Queue] = {}
+        self._unary_operations: dict[
+            str, tuple[str, Any, int, asyncio.Task[AgentResponse]]
+        ] = {}
         self._queue_lock = asyncio.Lock()  # 保护队列操作的锁
-        self._cancelled_request_ids: set[str] = set()  # 已取消但等待清理的 request_id
+        self._cancelled_request_ids: dict[str, object] = {}
         self._receiver_task: asyncio.Task | None = None
         self._running = False
+        self._disconnecting = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
@@ -195,17 +234,27 @@ class WebSocketAgentServerClient(AgentServerClient):
         return self._server_ready
 
     async def connect(self, uri: str) -> None:
-        if self._ws is not None:
-            await self.disconnect()
+        async with self._lifecycle_lock:
+            if self._ws is not None:
+                await self._run_disconnect_cleanup()
+            try:
+                await self._connect_transport(uri)
+            except BaseException:
+                await self._run_disconnect_cleanup()
+                raise
+
+    async def _connect_transport(self, uri: str) -> None:
         logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
         self._uri = uri
         self._server_ready = False
         origin = _build_ws_origin(uri)
         try:
             from websockets.legacy.client import connect as legacy_connect
+
             connect_fn = legacy_connect
         except ImportError:
             import websockets
+
             connect_fn = websockets.connect
         self._ws = await connect_fn(
             uri,
@@ -215,6 +264,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             close_timeout=5.0,
             max_size=AGENT_WS_MAX_MESSAGE_BYTES,
         )
+        self._connection_generation += 1
         logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
 
         # 读取 AgentServer 的 connection.ack 事件
@@ -222,10 +272,14 @@ class WebSocketAgentServerClient(AgentServerClient):
             raw = await asyncio.wait_for(self._ws.recv(), timeout=5.0)
             logger.info("[WebSocketAgentServerClient] connect 首帧(raw): %s", raw)
             data = json.loads(raw)
-            logger.info("[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data))
+            logger.info(
+                "[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data)
+            )
             if data.get("type") == "event" and data.get("event") == "connection.ack":
                 self._server_ready = True
-                logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪")
+                logger.info(
+                    "[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪"
+                )
             else:
                 logger.warning(
                     "[WebSocketAgentServerClient] 首帧非 connection.ack: %s",
@@ -234,7 +288,9 @@ class WebSocketAgentServerClient(AgentServerClient):
         except asyncio.TimeoutError:
             logger.warning("[WebSocketAgentServerClient] 等待 connection.ack 超时")
         except Exception as e:
-            logger.warning("[WebSocketAgentServerClient] 读取 connection.ack 失败: %s", e)
+            logger.warning(
+                "[WebSocketAgentServerClient] 读取 connection.ack 失败: %s", e
+            )
 
         # 启动消息接收和分发任务
         self._running = True
@@ -273,7 +329,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                         if request_id in self._cancelled_request_ids:
                             logger.debug(
                                 "[WebSocketAgentServerClient] 收到已取消请求的残余消息，已丢弃: request_id=%s",
-                                request_id
+                                request_id,
                             )
                             continue
 
@@ -285,7 +341,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                             # 提升为 warning 让问题可见，便于排查"到点没推送"类故障。
                             logger.warning(
                                 "[WebSocketAgentServerClient] 收到无目标队列的消息（等待方将超时）: request_id=%s",
-                                request_id
+                                request_id,
                             )
                 except asyncio.CancelledError:
                     break
@@ -333,84 +389,171 @@ class WebSocketAgentServerClient(AgentServerClient):
         async with self._queue_lock:
             for queue in self._message_queues.values():
                 queue.put_nowait(failure)
-        logger.info("[WebSocketAgentServerClient] 接收任务已停止并通知等待队列: %s", detail)
+        logger.info(
+            "[WebSocketAgentServerClient] 接收任务已停止并通知等待队列: %s", detail
+        )
 
     async def disconnect(self) -> None:
-        # 停止接收任务
-        self._running = False
-        if self._receiver_task and not self._receiver_task.done():
-            self._receiver_task.cancel()
+        async with self._lifecycle_lock:
+            await self._run_disconnect_cleanup()
+
+    async def _run_disconnect_cleanup(self) -> None:
+        cleanup = asyncio.create_task(
+            self._disconnect_impl(),
+            name="agent-server-disconnect-cleanup",
+        )
+        cancellation: asyncio.CancelledError | None = None
+        while not cleanup.done():
             try:
-                await self._receiver_task
-            except asyncio.CancelledError:
-                pass
-            self._receiver_task = None
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+        cleanup.result()
+        if cancellation is not None:
+            raise cancellation
 
-        # 清理所有队列
-        self._message_queues.clear()
-
-        # 关闭 WebSocket
-        if self._ws is None:
-            return
+    async def _disconnect_impl(self) -> None:
+        self._disconnecting = True
+        ws = self._ws
         try:
-            await self._ws.close()
-        except Exception as e:
-            logger.warning(
-                "关闭 AgentServer WebSocket 时异常: %s",
-                format_ws_diagnostics(
-                    self._diagnostic_state(),
-                    describe_ws_exception(e),
-                ),
-            )
-        finally:
+            # Detach lifecycle state first so requests fail closed while the
+            # old transport and retained operations are being settled.
+            self._running = False
             self._ws = None
             self._uri = None
-        logger.info("[WebSocketAgentServerClient] 已断开")
+            self._server_ready = False
+            receiver_task = self._receiver_task
+            self._receiver_task = None
+            if receiver_task is not None and not receiver_task.done():
+                receiver_task.cancel()
+                try:
+                    await receiver_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:
+                    logger.warning(
+                        "AgentServer receiver stopped with an error during disconnect: %s",
+                        describe_ws_exception(exc),
+                    )
+
+            disconnect_failure = _ReceiverFailure(
+                ConnectionError("AgentServer client disconnected")
+            )
+            async with self._queue_lock:
+                retained_tasks = [
+                    task for _, _, _, task in self._unary_operations.values()
+                ]
+                for queue in self._message_queues.values():
+                    queue.put_nowait(disconnect_failure)
+
+            # A retained owner may be blocked inside ws.send(), before it can
+            # read the injected queue failure. Close the transport first.
+            if ws is not None:
+                try:
+                    await asyncio.wait_for(
+                        ws.close(), timeout=_DISCONNECT_CLOSE_TIMEOUT_SECONDS
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "关闭 AgentServer WebSocket 时异常: %s",
+                        format_ws_diagnostics(
+                            self._diagnostic_state(ws),
+                            describe_ws_exception(exc),
+                        ),
+                    )
+
+            if retained_tasks:
+                _, pending = await asyncio.wait(
+                    retained_tasks,
+                    timeout=_DISCONNECT_TASK_SETTLE_TIMEOUT_SECONDS,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*retained_tasks, return_exceptions=True)
+
+            async with self._queue_lock:
+                self._message_queues.clear()
+                self._unary_operations.clear()
+                self._cancelled_request_ids.clear()
+        finally:
+            self._disconnecting = False
+
+        if ws is not None:
+            logger.info("[WebSocketAgentServerClient] 已断开")
 
     def _ensure_connected(self) -> None:
         if self._ws is None:
             raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
 
-    async def _ensure_connected_for_request(self) -> None:
+    async def _ensure_connected_for_request(self) -> tuple[Any, int]:
         if self._ws is not None:
-            return
+            return self._ws, self._connection_generation
         uri = self._uri
         if not uri:
             raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
         async with self._reconnect_lock:
             if self._ws is not None:
-                return
-            logger.info(
-                "[WebSocketAgentServerClient] WebSocket 已断开，准备按需重连: %s",
-                format_ws_diagnostics(self._diagnostic_state(), uri=uri),
-            )
-            await self.connect(uri)
+                return self._ws, self._connection_generation
+            async with self._lifecycle_lock:
+                if self._ws is not None:
+                    return self._ws, self._connection_generation
+                if self._uri != uri:
+                    raise RuntimeError("AgentServer WebSocket connection closed")
+                logger.info(
+                    "[WebSocketAgentServerClient] WebSocket 已断开，准备按需重连: %s",
+                    format_ws_diagnostics(self._diagnostic_state(), uri=uri),
+                )
+                try:
+                    await self._connect_transport(uri)
+                except BaseException:
+                    await self._run_disconnect_cleanup()
+                    raise
+                if self._ws is None:
+                    raise RuntimeError("AgentServer WebSocket connection closed")
+                return self._ws, self._connection_generation
 
-    async def _send_wire_payload(self, payload: dict[str, Any]) -> None:
-        ws = self._ws
-        if ws is None:
-            raise RuntimeError("未连接 AgentServer，请先调用 connect(uri)")
+    def _connection_matches(self, expected_ws: Any, expected_generation: int) -> bool:
+        return (
+            self._ws is expected_ws
+            and self._connection_generation == expected_generation
+        )
+
+    async def _send_wire_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        expected_ws: Any,
+        expected_generation: int,
+    ) -> None:
+        if not self._connection_matches(expected_ws, expected_generation):
+            raise RuntimeError("AgentServer WebSocket connection closed")
         try:
-            await ws.send(json.dumps(payload, ensure_ascii=False))
+            await expected_ws.send(json.dumps(payload, ensure_ascii=False))
         except (ConnectionClosed, OSError) as exc:
             logger.info(
                 "[WebSocketAgentServerClient] AgentServer WebSocket 发送失败，连接将重置: %s",
                 format_ws_diagnostics(
-                    self._diagnostic_state(ws),
+                    self._diagnostic_state(expected_ws),
                     describe_ws_exception(exc),
                     request_id=_wire_request_id_key(payload.get("request_id")),
                     channel=payload.get("channel"),
                     method=payload.get("method"),
                 ),
             )
-            await self._stop_receiver_after_fatal_error(exc)
+            if self._connection_matches(expected_ws, expected_generation):
+                await self._stop_receiver_after_fatal_error(exc)
             raise RuntimeError("AgentServer WebSocket connection closed") from exc
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        await self._ensure_connected_for_request()
+        connection_ws, connection_generation = (
+            await self._ensure_connected_for_request()
+        )
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False
         rid = _wire_request_id_key(envelope.request_id)
+        payload = _e2a_to_wire(envelope)
+        fingerprint = _unary_replay_fingerprint(payload)
         logger.info(
             "[E2A][out][nostream] request_id=%s channel=%s method=%s is_stream=%s",
             rid,
@@ -420,30 +563,129 @@ class WebSocketAgentServerClient(AgentServerClient):
         )
         logger.debug(
             "[WebSocketAgentServerClient] 发送请求(非流式) E2A: %s",
-            _to_json(envelope.to_dict()),
+            _to_json(payload),
         )
 
-        if rid in self._message_queues:
-            raise RuntimeError(
-                f"WebSocketAgentServerClient: duplicate in-flight request_id={rid!r}; "
-                "refusing to register queue (would mis-route responses, e.g. stream chunks to unary waiters)."
-            )
+        async with self._queue_lock:
+            if not self._connection_matches(
+                connection_ws,
+                connection_generation,
+            ):
+                raise RuntimeError("AgentServer WebSocket connection closed")
+            retained = self._unary_operations.get(rid)
+            if retained is not None:
+                (
+                    retained_fingerprint,
+                    retained_ws,
+                    retained_generation,
+                    task,
+                ) = retained
+                if (
+                    retained_ws is not connection_ws
+                    or retained_generation != connection_generation
+                ):
+                    raise RuntimeError("AgentServer WebSocket connection closed")
+                if retained_fingerprint != fingerprint:
+                    raise RuntimeError(
+                        "WebSocketAgentServerClient: duplicate in-flight "
+                        f"request_id={rid!r} changed its unary payload"
+                    )
+                logger.info(
+                    "[WebSocketAgentServerClient] coalescing exact in-flight "
+                    "unary replay: request_id=%s",
+                    rid,
+                )
+            else:
+                if rid in self._message_queues:
+                    raise RuntimeError(
+                        "WebSocketAgentServerClient: duplicate in-flight "
+                        f"request_id={rid!r}; refusing to mix unary and stream waiters"
+                    )
+                task = asyncio.create_task(
+                    self._run_retained_unary(
+                        rid,
+                        payload,
+                        connection_ws,
+                        connection_generation,
+                    ),
+                    name=f"agent-server-unary:{rid}",
+                )
+                self._unary_operations[rid] = (
+                    fingerprint,
+                    connection_ws,
+                    connection_generation,
+                    task,
+                )
 
-        # 创建该请求的消息队列
+        return await asyncio.shield(task)
+
+    async def _run_retained_unary(
+        self,
+        rid: str,
+        payload: dict[str, Any],
+        connection_ws: Any,
+        connection_generation: int,
+    ) -> AgentResponse:
+        task = asyncio.current_task()
+        try:
+            return await self._send_unary_once(
+                rid,
+                payload,
+                connection_ws,
+                connection_generation,
+            )
+        except asyncio.CancelledError as exc:
+            if self._disconnecting:
+                raise RuntimeError("AgentServer WebSocket connection closed") from exc
+            raise
+        finally:
+            async with self._queue_lock:
+                retained = self._unary_operations.get(rid)
+                if retained is not None and retained[3] is task:
+                    del self._unary_operations[rid]
+
+    async def _send_unary_once(
+        self,
+        rid: str,
+        payload: dict[str, Any],
+        connection_ws: Any,
+        connection_generation: int,
+    ) -> AgentResponse:
         queue = asyncio.Queue()
-        self._message_queues[rid] = queue
+        async with self._queue_lock:
+            if not self._connection_matches(
+                connection_ws,
+                connection_generation,
+            ):
+                raise RuntimeError("AgentServer WebSocket connection closed")
+            if rid in self._message_queues:
+                raise RuntimeError(
+                    f"WebSocketAgentServerClient: duplicate in-flight request_id={rid!r}; "
+                    "refusing to register queue (would mis-route responses, e.g. stream chunks to unary waiters)."
+                )
+            self._message_queues[rid] = queue
 
         try:
             # 发送请求
             async with self._lock:
-                payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
-                await self._send_wire_payload(payload)
+                logger.info(
+                    "[WebSocketAgentServerClient] 发送请求(非流式) payload: %s",
+                    _to_json(payload),
+                )
+                await self._send_wire_payload(
+                    payload,
+                    expected_ws=connection_ws,
+                    expected_generation=connection_generation,
+                )
 
             try:
-                data = await asyncio.wait_for(queue.get(), timeout=_UNARY_REQUEST_TIMEOUT_SECONDS)
+                data = await asyncio.wait_for(
+                    queue.get(), timeout=_UNARY_REQUEST_TIMEOUT_SECONDS
+                )
                 if isinstance(data, _ReceiverFailure):
-                    raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
+                    raise RuntimeError(
+                        "AgentServer WebSocket connection closed"
+                    ) from data.exc
             except asyncio.TimeoutError as e:
                 logger.warning(
                     "[WebSocketAgentServerClient] 非流式请求超时: request_id=%s timeout=%ss",
@@ -457,12 +699,14 @@ class WebSocketAgentServerClient(AgentServerClient):
             return resp
         finally:
             # 清理队列
-            await self._drain_and_remove_queue(rid)
+            await self._drain_and_remove_queue(rid, queue)
 
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
-        await self._ensure_connected_for_request()
+        connection_ws, connection_generation = (
+            await self._ensure_connected_for_request()
+        )
         envelope.is_stream = True
         rid = _wire_request_id_key(envelope.request_id)
         logger.info(
@@ -477,22 +721,34 @@ class WebSocketAgentServerClient(AgentServerClient):
             _to_json(envelope.to_dict()),
         )
 
-        if rid in self._message_queues:
-            raise RuntimeError(
-                f"WebSocketAgentServerClient: duplicate in-flight request_id={rid!r}; "
-                "refusing to register queue (would mis-route responses, e.g. stream chunks to unary waiters)."
-            )
-
         # 创建该请求的消息队列
         queue = asyncio.Queue()
-        self._message_queues[rid] = queue
+        async with self._queue_lock:
+            if not self._connection_matches(
+                connection_ws,
+                connection_generation,
+            ):
+                raise RuntimeError("AgentServer WebSocket connection closed")
+            if rid in self._message_queues or rid in self._unary_operations:
+                raise RuntimeError(
+                    f"WebSocketAgentServerClient: duplicate in-flight request_id={rid!r}; "
+                    "refusing to register queue (would mis-route responses, e.g. stream chunks to unary waiters)."
+                )
+            self._message_queues[rid] = queue
 
         try:
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(流式) payload: %s", _to_json(payload))
-                await self._send_wire_payload(payload)
+                logger.info(
+                    "[WebSocketAgentServerClient] 发送请求(流式) payload: %s",
+                    _to_json(payload),
+                )
+                await self._send_wire_payload(
+                    payload,
+                    expected_ws=connection_ws,
+                    expected_generation=connection_generation,
+                )
 
             # 从队列中接收流式响应
             chunk_count = 0
@@ -509,7 +765,9 @@ class WebSocketAgentServerClient(AgentServerClient):
                 else:
                     data = await queue.get()
                 if isinstance(data, _ReceiverFailure):
-                    raise RuntimeError("AgentServer WebSocket connection closed") from data.exc
+                    raise RuntimeError(
+                        "AgentServer WebSocket connection closed"
+                    ) from data.exc
                 chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
                 if chunk_count <= 3:
@@ -518,38 +776,54 @@ class WebSocketAgentServerClient(AgentServerClient):
                     logger.info(
                         "[WebSocketAgentServerClient] stream chunk received:"
                         " request_id=%s seq=%s event_type=%s",
-                        rid, chunk_count, _et,
+                        rid,
+                        chunk_count,
+                        _et,
                     )
                 yield chunk
                 if chunk.is_complete:
                     saw_complete = True
-            logger.info("[WebSocketAgentServerClient] 流式响应结束: request_id=%s 共 %s 个 chunk", rid, chunk_count)
+            logger.info(
+                "[WebSocketAgentServerClient] 流式响应结束: request_id=%s 共 %s 个 chunk",
+                rid,
+                chunk_count,
+            )
         except asyncio.CancelledError:
-            logger.info("[WebSocketAgentServerClient] 流式接收被取消: request_id=%s", rid)
+            logger.info(
+                "[WebSocketAgentServerClient] 流式接收被取消: request_id=%s", rid
+            )
             raise
         finally:
             # 清理队列
-            await self._drain_and_remove_queue(rid)
+            await self._drain_and_remove_queue(rid, queue)
 
-    async def _drain_and_remove_queue(self, rid: str) -> None:
-        """清空队列中的残余消息并移除队列，同时标记 request_id 为已取消状态.
+    async def _drain_and_remove_queue(
+        self,
+        rid: str,
+        expected_queue: asyncio.Queue,
+    ) -> None:
+        """Drain one owned queue and remove its registration only on identity match.
 
-        标记为已取消后，后续到达的残余消息会被 _message_receiver_loop 静默丢弃。
-        使用锁保护，确保操作的原子性。
+        A replaced same-id registration belongs to a different connection owner
+        and must remain untouched.
         """
         async with self._queue_lock:
             queue = self._message_queues.get(rid)
-            if queue is None:
-                return
-            # 1. 先标记为已取消，阻止后续消息进入队列
-            self._cancelled_request_ids.add(rid)
-            # 2. 删除队列注册
-            del self._message_queues[rid]
-            # 3. 清空队列中的残余消息（非阻塞）
+            owns_registration = queue is expected_queue
+            if owns_registration:
+                # Mark before deleting so residual frames cannot be routed to a
+                # later same-id owner on this connection.
+                cancellation_token = object()
+                self._cancelled_request_ids[rid] = cancellation_token
+                del self._message_queues[rid]
+
+            # Always drain only the caller-owned queue. A generator from an old
+            # connection may close after a same-id queue is registered on a new
+            # generation and must never delete or drain that replacement.
             drained_count = 0
             while True:
                 try:
-                    queue.get_nowait()
+                    expected_queue.get_nowait()
                     drained_count += 1
                 except asyncio.QueueEmpty:
                     break
@@ -558,10 +832,19 @@ class WebSocketAgentServerClient(AgentServerClient):
                 rid,
                 drained_count,
             )
-            # 4. 异步延迟清理已取消标记（给 AgentServer 一点时间发送残余消息）
-            asyncio.create_task(self._delayed_cleanup_cancelled_request_id(rid))
+            if owns_registration:
+                asyncio.create_task(
+                    self._delayed_cleanup_cancelled_request_id(
+                        rid,
+                        cancellation_token,
+                    )
+                )
 
-    async def _delayed_cleanup_cancelled_request_id(self, rid: str) -> None:
+    async def _delayed_cleanup_cancelled_request_id(
+        self,
+        rid: str,
+        cancellation_token: object,
+    ) -> None:
         """延迟清理已取消的 request_id 标记.
 
         等待一段时间后清理，确保 AgentServer 的残余消息能够被静默丢弃而不打印日志。
@@ -569,7 +852,9 @@ class WebSocketAgentServerClient(AgentServerClient):
         # 等待足够时间让 AgentServer 的残余消息被接收和丢弃
         await asyncio.sleep(2.0)  # 2秒应该足够
         async with self._queue_lock:
-            self._cancelled_request_ids.discard(rid)
+            if self._cancelled_request_ids.get(rid) is not cancellation_token:
+                return
+            del self._cancelled_request_ids[rid]
             logger.debug(
                 "[WebSocketAgentServerClient] 已取消标记已清理: request_id=%s",
                 rid,
@@ -600,7 +885,11 @@ async def mock_agent_server_handler(ws: Any) -> None:
             ch_id = data.get("channel") or data.get("channel_id", "")
             params = data.get("params", {})
             is_stream = data.get("is_stream", False)
-            params_str = json.dumps(params, ensure_ascii=False) if isinstance(params, dict) else str(params)
+            params_str = (
+                json.dumps(params, ensure_ascii=False)
+                if isinstance(params, dict)
+                else str(params)
+            )
 
             if is_stream:
                 for i, part in enumerate(["流式-1 ", "流式-2 ", "流式-3(完)"]):
@@ -644,9 +933,11 @@ async def run_mock_agent_server(
     """
     try:
         from websockets.legacy.server import serve as legacy_serve
+
         server = await legacy_serve(mock_agent_server_handler, host, port)
     except ImportError:
         import websockets
+
         server = await websockets.serve(mock_agent_server_handler, host, port)
     logger.info("[MockAgentServer] 已启动: ws://%s:%s", host, port)
     return server
@@ -695,8 +986,14 @@ async def _run_verification() -> None:
             chunks.append(ch)
         assert len(chunks) == 3
         assert chunks[-1].is_complete
-        full_content = "".join(c.payload.get("content", "") for c in chunks if c.payload)
-        logger.info("[main] 流式验证通过: 共 %s 个 chunk, 拼接内容=%r", len(chunks), full_content)
+        full_content = "".join(
+            c.payload.get("content", "") for c in chunks if c.payload
+        )
+        logger.info(
+            "[main] 流式验证通过: 共 %s 个 chunk, 拼接内容=%r",
+            len(chunks),
+            full_content,
+        )
     finally:
         await client.disconnect()
         server.close()

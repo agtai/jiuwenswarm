@@ -27,6 +27,17 @@ class RawChunk:
     payload: object
 
 
+@dataclass
+class ControllerType:
+    value: str
+
+
+@dataclass
+class ControllerPayload:
+    type: object
+    data: list[object]
+
+
 class OutputLease:
     def __init__(self, chunks, *, close_release=None, close_error=None) -> None:
         self._chunks = iter(chunks)
@@ -135,6 +146,95 @@ async def test_formal_deep_seam_uses_narrow_dispatch_and_non_aborting_detach() -
     assert lease.closed_with == [False]
     assert adapter.formal_runtime_configs[0].mode == "agent"
     assert adapter.formal_runtime_configs[0].supports_user_interaction is False
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_drops_passive_runtime_events_around_tool_output() -> None:
+    lease = OutputLease(
+        [
+            RawChunk("thinking", {}),
+            RawChunk("context.usage", {"rate": 0.5}),
+            RawChunk("todo.updated", {"todos": [{"content": "inspect"}]}),
+            RawChunk("tool_call", {"tool_call": {"name": "bash"}}),
+            RawChunk(
+                "tool_result",
+                {"tool_result": {"tool_name": "bash", "result": "clean"}},
+            ),
+            RawChunk("answer", {"output": {"output": "formal result"}}),
+        ]
+    )
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        )
+    ]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == [
+        "chat.tool_call",
+        "chat.tool_result",
+        "chat.final",
+    ]
+    assert lease.closed_with == [False]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_still_fails_closed_for_active_unsupported_event() -> None:
+    lease = OutputLease([RawChunk("security.alert", {"reason": "blocked"})])
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    with pytest.raises(
+        RuntimeError,
+        match="FORMAL_EXECUTION_EVENT_UNSUPPORTED: 'security.alert'",
+    ):
+        async for _chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        ):
+            pass
+
+    assert lease.closed_with == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_chunk", "expected_event_type"),
+    [
+        (RawChunk("future_output", {"content": "must not leak"}), "future_output"),
+        (RawChunk("future_output", {}), "future_output"),
+        (RawChunk("security.alert", "malformed"), "security.alert"),
+        (
+            RawChunk(
+                "controller_output",
+                ControllerPayload(ControllerType("future_security_gate"), []),
+            ),
+            "controller_output",
+        ),
+        (RawChunk("controller_output", None), "controller_output"),
+        ({"output": "untyped content must not leak"}, "<untyped>"),
+    ],
+)
+async def test_formal_deep_seam_rejects_unknown_or_malformed_raw_events(
+    raw_chunk: object,
+    expected_event_type: str,
+) -> None:
+    lease = OutputLease([raw_chunk])
+    adapter = adapter_with(FormalInstance(lease))
+    request, inputs = formal_request()
+
+    with pytest.raises(
+        RuntimeError,
+        match=f"FORMAL_EXECUTION_EVENT_UNSUPPORTED: {expected_event_type!r}",
+    ):
+        async for _chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        ):
+            pass
+
+    assert lease.closed_with == [True]
 
 
 @pytest.mark.asyncio

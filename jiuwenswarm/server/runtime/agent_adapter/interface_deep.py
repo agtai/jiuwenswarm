@@ -351,6 +351,38 @@ def get_runtime_tool_session_id() -> str | None:
 
 logger = logging.getLogger(__name__)
 _FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS = 5.0
+_FORMAL_ACTIVE_RAW_EVENT_TYPES = frozenset(
+    {
+        "answer",
+        "content_chunk",
+        "controller_output",
+        "delta",
+        "error",
+        "llm_output",
+        "llm_reasoning",
+        "tool_call",
+        "tool_result",
+        "tool_update",
+    }
+)
+_FORMAL_PASSIVE_RAW_EVENT_TYPES = frozenset(
+    {
+        "context.compression_state",
+        "context.usage",
+        "llm_usage",
+        "thinking",
+        "todo.updated",
+    }
+)
+_FORMAL_PASSIVE_EVENT_TYPES = frozenset(
+    {
+        "chat.processing_status",
+        "chat.usage_metadata",
+        "context.compression_state",
+        "context.usage",
+        "todo.updated",
+    }
+)
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -7930,12 +7962,51 @@ class JiuWenSwarmDeepAdapter:
                     SendInputRequest(request_id=rid, inputs=dict(inputs), mode=None)
                 )
                 async for raw_chunk in interaction_stream:
+                    raw_event_type = getattr(raw_chunk, "type", None)
+                    raw_event_type = getattr(raw_event_type, "value", raw_event_type)
+                    if (
+                        not isinstance(raw_event_type, str)
+                        or not hasattr(raw_chunk, "payload")
+                    ):
+                        raise RuntimeError(
+                            "FORMAL_EXECUTION_EVENT_UNSUPPORTED: '<untyped>'"
+                        )
+                    if raw_event_type in _FORMAL_PASSIVE_RAW_EVENT_TYPES:
+                        continue
+                    if raw_event_type not in _FORMAL_ACTIVE_RAW_EVENT_TYPES:
+                        raise RuntimeError(
+                            "FORMAL_EXECUTION_EVENT_UNSUPPORTED: "
+                            f"{raw_event_type!r}"
+                        )
+                    controller_event_type = None
+                    if raw_event_type == "controller_output":
+                        controller_event_type = getattr(
+                            getattr(raw_chunk, "payload", None), "type", None
+                        )
+                        controller_event_type = getattr(
+                            controller_event_type, "value", controller_event_type
+                        )
+                        if controller_event_type not in {
+                            "task_completion",
+                            "task_failed",
+                        }:
+                            raise RuntimeError(
+                                "FORMAL_EXECUTION_EVENT_UNSUPPORTED: "
+                                f"{raw_event_type!r}"
+                            )
                     parsed = self._parse_stream_chunk(
                         raw_chunk, _has_streamed_content=has_streamed_content
                     )
                     if parsed is None:
-                        continue
+                        if controller_event_type == "task_completion":
+                            continue
+                        raise RuntimeError(
+                            "FORMAL_EXECUTION_EVENT_UNSUPPORTED: "
+                            f"{raw_event_type!r}"
+                        )
                     event_type = parsed.get("event_type")
+                    if event_type in _FORMAL_PASSIVE_EVENT_TYPES:
+                        continue
                     if event_type not in allowed_events:
                         raise RuntimeError(
                             f"FORMAL_EXECUTION_EVENT_UNSUPPORTED: {event_type!r}"
@@ -9122,7 +9193,7 @@ class JiuWenSwarmDeepAdapter:
                         )
                         return {"event_type": "chat.error", "error": error}
 
-                if chunk_type == "llm_output":
+                if chunk_type in {"delta", "llm_output"}:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )

@@ -20,6 +20,7 @@ import {
   type ProductTextProgressEvent,
 } from '../../features/live-voice/formal/productTextProgress';
 import {
+  PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   ProductWebP2ActivationOwner,
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
@@ -33,6 +34,7 @@ import {
 } from '../../features/live-voice/formal/productWebActivation';
 import { WebPlatformDiagnosticsMonitor, type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
 import { extractWebErrorReason, webClient } from '../../services/webClient';
+import type { WebRequestOptions } from '../../types';
 import './LiveVoiceIntegratedRoutePanel.css';
 
 export { extractWebErrorReason };
@@ -60,6 +62,23 @@ type ProductTurnInput = {
   committed_at: string;
   text: string;
 };
+
+// Gateway retains a unary AgentServer request for at most 600 seconds. The
+// browser must not abandon a notification poll first and replay its exact ID
+// while that downstream owner is still active.
+export const PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS = 610_000;
+
+export function productP2WebRequestOptions(
+  method: string,
+  requestId?: string
+): WebRequestOptions {
+  return {
+    ...(requestId === undefined ? {} : { requestId }),
+    ...(method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD
+      ? { timeoutMs: PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS }
+      : {}),
+  };
+}
 
 export type ProductP2NotificationDisposition =
   | { readonly kind: 'continue' }
@@ -551,7 +570,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       owner = new ProductWebP2ActivationOwner({
         enabled: true,
         request: (method, params, requestId) =>
-          webClient.request(method, params, { requestId }),
+          webClient.request(
+            method,
+            params,
+            productP2WebRequestOptions(method, requestId)
+          ),
         on_snapshot: snapshot => {
           if (
             !cancelled &&
@@ -653,7 +676,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               successor = new ProductWebP2ActivationOwner({
                 enabled: true,
                 request: (method, params, requestId) =>
-                  webClient.request(method, params, { requestId }),
+                  webClient.request(
+                    method,
+                    params,
+                    productP2WebRequestOptions(method, requestId)
+                  ),
                 on_snapshot: snapshot => {
                   if (
                     activeSessionRef.current === binding.session_id &&
