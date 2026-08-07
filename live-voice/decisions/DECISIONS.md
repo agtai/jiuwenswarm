@@ -483,7 +483,7 @@
 ## D-046 以两周 90% 累计 Demo 和四周 Integrated Alpha 驱动并行交付
 
 - 日期：2026-08-03
-- 状态：Partially superseded（累计路线、范围、评分和风险分级保留；Windows/X-WIN 载体由 D-055 取代，未来模型分工和原并行资源假设先由 D-052 取代，D-060 后来在有界 Alpha 窗口恢复四个非重叠实现 lane；`W2/W3/W4` 当前是顺序窗口，不是日历承诺）
+- 状态：Partially superseded（累计路线、范围、评分和风险分级保留；Windows/X-WIN 载体由 D-055 取代，未来模型分工和原并行资源假设先由 D-052 取代，D-060 后来恢复有界并行，D-062 再将固定四 Session 改为 W2 优先的按批次自适应 worker 图；`W2/W3/W4` 当前是顺序窗口，不是日历承诺）
 - 背景：用户明确项目目标不是无限期平台建设，也不是只维护 V0 或只完成 D-031。V0 要第一时间打通真实端到端，随后正式模块沿同一工程路径持续替换 Demo 中的手工代码、固定限制和兼容实现；第 2 周 Demo 达到可审计的 90% 完成度，第 3–4 周完成 P1 + P2 + P3，若完整 P3 风险过高则 P3alpha 可作为承诺结果。完整方案现有 31 个 Alpha 工程包的顺序时间盒约为 47–78 人日，尚未包含完整 P3 扩展；若按每个小切片独立 D-032 checkpoint、单执行流和末期统一集成推进，四周目标在流程上即不可达。
 - 接受时的目标定义：原四周并行范围写作 **Integrated Windows Alpha = P1 + P2 + P3alpha + Context/Progress/Failure/Observability + 三个真实纵向切片 + P2/P3alpha 联合 Gate**。D-055 已把 carrier 映射为 Web/X-WEB，D-052 已取消原并行日历承诺；D-060 的有界并行只改变执行分配，不恢复该日历承诺。能力范围仍不是 RC/Production，完整 P3 仍是 stretch，P3alpha 是当前 Alpha 的最低 Task 范围。
 - 两周决策：Week 2 必须运行一个累计 Integrated Demo，而不是分别运行互斥的 V0、稳定句和 Task 样例。完成度按权威 Demo Replacement Ledger 的用户旅程权重计算，不按代码行数、测试数、文件数或模块名计数；总分至少 90/100，且 committed-only、副作用确认、精确 identity/scope、stale fence、unknown/error 不冒充成功、文字 flag-off 回归等 mandatory invariant 全部通过。`fallback`、`Demo substitute`、`unsupported` 和 `unknown` 必须可见；substitute 可以证明类别价值，但不能自动获得正式模块全部分值。
@@ -555,7 +555,7 @@
 ## D-052 后续开发默认由当前 GPT/Sol 单线完成
 
 - 日期：2026-08-04
-- 状态：Partially superseded（替代 D-041、D-048、D-049 中面向未来任务的模型分工；D-060 后来只在接受的 Alpha 范围内建立四个 GPT/Sol 实现 Session 和单一集成 owner，D-052 在该例外外继续作为默认分配）
+- 状态：Partially superseded（替代 D-041、D-048、D-049 中面向未来任务的模型分工；D-060/D-062 后来在接受的 W2→Alpha 范围内建立按批次自适应的 GPT/Sol worker 图和单一集成 owner，D-052 在该例外外继续作为默认分配）
 - 决策：后续包固定由当前 GPT/Sol 设计、实现、测试和审查，不再提醒、委派或切换到 DeepSeek/其他外部执行模型。Tier 2/3 的 identity、authority、state、cancel、security、concurrency、durability 和 release 判断始终由 GPT/Sol 负责。
 - 历史候选：已有外部候选只作为审查历史或可选择复用的素材；任何片段都要按当前合同、完整 diff 和实际测试重新验证，不得整体 merge/cherry-pick 来代替实现与审查。
 - 影响：dated Week 1 plan 的包边界和风险 Gate 继续有效，但其中历史 owner/model 字段不再决定当前执行。原三到四周估算依赖多条并行实现轨；D-060 的有界并行不自动恢复原日历承诺，仍须按真实依赖和速度重新估算。
@@ -650,7 +650,7 @@
 ## D-060 Live Voice Alpha 采用四实现 Session、单一集成所有权和有界本地 Git 例外
 
 - 日期：2026-08-06
-- 状态：Accepted execution decision（用户明确批准执行，并明确取消本任务中所有本地 Git 操作的逐次批准；任何远端 ref 更新仍需单独精确批准）
+- 状态：Partially superseded by D-062（四个历史 lane 的文件/语义所有权、单一集成所有权和有界本地 Git 例外保留；固定 Session 数和 Session-only 形式由 D-062 取代；任何远端 ref 更新仍需单独精确批准）
 - 背景：剩余 Alpha 工作可分为 P1、P2、P3alpha 和横切四个长期非重叠实现 lane，但 Web auth/activation、共享 Authority/协议、产品 Composition、累计 Gate 和冲突裁决存在跨 lane 依赖。D-052 的单实现 lane 会把可并行的 leaf/package 工作串行化；完全分散合入又会让共享语义和 review 失去单一 owner。
 - 决策：建立四个实现 Session：P1 Speech/Media、P2 Runtime/Interaction/Agent Bridge、P3alpha Task/Confirmation、X-OBS/X-WEB/X-E2E；当前 Main Session 是唯一 Integration Owner，同时推进共享依赖、执行完整 diff 冷审、分配 integration lease、合入已通过候选并运行累计验证。独立 review 按 D-046/D-053 风险在需要时启动，不占用某个实现 lane 的所有权。稳定范围、文件边界和 handoff 记录在 [Alpha parallel execution plan](../roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md)。
 - 本地 Git 例外：在该执行计划范围内，Main 和 Task Sessions 无需再次取得用户批准即可 stage、commit、amend、squash、rebase、merge、cherry-pick、创建或更新本地 branch/ref/worktree，以及在单写 integration lease 下完成本地 task integration。Task Session 在 review 通过后可生成自己的最终 commit；Main 可拉取、整理、修正和本地合入这些 commit。语义修复必须回到 owning Session，或由 Main 明确记录为 integration glue 并重跑受影响 review/tests。
@@ -666,3 +666,26 @@
 - 决策：Main 仍按真实依赖顺序逐个声明 source branch、exact commit、target branch 和 cherry-pick/merge 方式并保持单写 integration lease，但不在每个无冲突 cherry-pick 后运行累计 smoke。完整 reviewed commit 批次全部合入后，只运行一次累计 smoke，覆盖正常产品 route、authority denied/unavailable、correlation/binding mismatch、cleanup/retry、feature-off 零副作用及 fallback/Demo/legacy 回归。
 - 例外：任何语义冲突、手工 conflict resolution 或 integration glue 都必须先完成受影响检查和必要 review；若它改变共享 authority/protocol/lifecycle 语义，不得等待最终 smoke 来代替缺失的 review closure。
 - 不变量：该优化不改变 D-046/D-053 的 task-level 验证、D-060 的单写与远端批准边界、真实 E2E/Immutable Alpha Gate，也不允许以一次 aggregate smoke、mock 或测试数量授予 Replacement Ledger credit。
+
+## D-062 W2 优先并采用按批次自适应的并行执行图
+
+- 日期：2026-08-07
+- 状态：Accepted execution amendment（用户明确接受 W2 90% Demo → Integrated Web Alpha → complete project 的优先顺序，并要求 Session/subagent 数量按每批实际任务调整，不固定为四个）
+- 里程碑优先级：当前关键路径只服务 W2 累计 Integrated Demo 的真实路线、mandatory invariant、Replacement Ledger、环境依赖和不可变证据。只属于 W3/W4 或 Later、且不是 W2 实际前置条件的工作不得占用关键路径；当 W2 lane 因外部 Provider、设备、Executor、部署或用户决定阻塞且存在闲置容量时，可以有界推进不制造第二 authority 的后续工作。W2 PASS 后当前优先级切换到 Integrated Web Alpha；Alpha PASS 后再切换到完整 P3、D1/D2 和生产化。
+- 自适应执行图：D-060 的 P1、P2、P3alpha、X 四项是一次历史上有效的逻辑分解，不是永久 worker 数量。Main 在每个 coherent batch 开始时按依赖独立性、文件和语义所有权、关键路径、外部阻塞、review/integration 吞吐与实际工具容量，选择最小的有用 lane 图；可以拆分、合并、暂停或结束 lane，不设固定数量，也不得为占满并发而创建无独立产出的任务。Main 自身计入可用并发容量。
+- Worker 形式：一个 lane 可以由独立 Session/worktree、bounded subagent 或 Main 承担。独立 Session/worktree 按包边界持有自己的 branch 和 reviewed final commit。与 Main 共享 worktree 的 subagent 只编辑明确授权且不重叠的文件，不切换 branch、不 stage/commit、不修改历史；Main 在完整 diff review 后统一执行 Git 操作。只读调查、测试和独立 review 优先使用 bounded subagent；执行实现的 worker 不同时充当该批的独立 reviewer。
+- 集成和 Git：Main 继续是共享 Authority/协议/Composition、集成分支、stage/commit、分支历史、累计证据和 Gate 的唯一 owner。共享 integration worktree 任一时刻只有一个持明确 lease 的 filesystem editor；若由 shared-worktree subagent 编辑，Main 和其他 agent 在 lease 返回前不同时编辑。D-060 的有界本地 Git 例外扩展到当前 W2/Alpha execution packet 内的上述 worker 形式，但不扩展任何远端权限。每次 normal/force push 或其他远端 ref 更新仍需用户对精确 remote/ref/commit/方式单独批准，Task worker 永不 push。
+- 验证：D-046/D-053 的风险分级和 D-061 的批次后累计 smoke 保持不变。Tier 0/1 不制造 Tier 2/3 仪式；相关修改按 coherent batch 共享 review 和 commit。缺少真实 Provider、设备、Executor 或用户感知证据时保持 fail-closed，不用更多 agent、mock、测试数量或文档完成度换取 Replacement Ledger credit。
+- 执行合同：当前 W2 范围、依赖、工作量、退出条件和防漂移规则记录在 [90% Demo execution packet](../roadmap/DEMO_90_EXECUTION_2026-08-07.md)。D-060/旧 Alpha parallel plan 的稳定文件边界和 single-writer 规则继续适用，固定 Session 数和当前任务选择由本决定及 STATUS 取代。
+- 重新评估条件：W2 Gate 通过或范围变化；实际 lane 冲突/协调成本持续高于并行收益；工具并发容量改变；共享 worktree 无法保证隔离；用户改变里程碑、并发、Git 或远端授权；或进入 D-060/D-062 以外的工作。
+
+## D-063 用户明确要求最少介入时启用任务级本地自主推进
+
+- 日期：2026-08-07
+- 状态：Accepted execution/Git policy（用户要求把最少介入授权写入权威文档，并对当前 W2→Integrated Web Alpha 任务启用；当前 D-060/D-062 的更窄 worker/integration 边界继续同时适用）
+- 触发和期限：只有用户明确要求“最少介入”“自主推进、只在必须时找我”或等价的 reduced-approval handling 时才启用；普通“继续”不自动启用。授权只覆盖已经接受的目标和 active routed packet，跨 Session、context compaction 和 task resume 保持有效，直到该任务/候选关闭、工作离开授权范围或用户撤销。STATUS 只记录当前是否 active。
+- 本地自主权：在适用检查和 review 完成后，Main 自行选择 coherent commit 边界和消息，可无需逐操作批准地 stage、commit、amend、squash、rebase、merge、cherry-pick，以及创建或更新 local branch/ref/worktree。独立 worktree worker 和 shared-worktree subagent 仍受 active packet 的所有权、review、single-writer、Main-only integration 与 Git 限制；任何 worker 都不因本决定获得自行集成或 push 权限。
+- 不扩张边界：最少介入只减少审批往返，不扩大产品/任务范围，不降低测试、D-053 review、acceptance、truthfulness 或 fail-closed 要求，不允许覆盖无关用户修改，也不授权 destructive/hard-to-recover 操作、凭据披露或迁移、外部 account/provider/billing 变更、公开部署、安全策略选择或未经接受的重大产品语义变更。遇到这些边界时继续所有不受阻工作，并向用户说明精确问题、为何需要介入、需要执行的动作和推荐方案。
+- 远端边界：默认不包含任何 remote ref 更新。只有用户另行授予包含精确 remote、branch/tag、允许的 update mode 和有效窗口的窄授权时，Main 才可在该窗口内执行相应远端操作；否则每次 normal/force push 及远端 branch/tag/ref 创建、更新或删除仍须单独精确批准。Task worker 永不 push。
+- 当前影响：本决定现在对 W2 90% Demo → Integrated Web Alpha 的 active execution 生效；D-060/D-062 已经允许的本地操作不再因 Session 更换或上下文恢复被误判为需要逐次批准。完整 P3/production 或其他新 scope 在进入时必须由 STATUS/用户确认授权是否继续。
+- 重新评估条件：用户撤销或收窄授权；任务或 immutable candidate 关闭；进入未接受范围；需要远端、破坏性、凭据/账户、部署/安全或重大产品选择；发现自动 commit 边界持续混杂无关修改；或 required review/test 无法在不请求用户输入的情况下诚实完成。

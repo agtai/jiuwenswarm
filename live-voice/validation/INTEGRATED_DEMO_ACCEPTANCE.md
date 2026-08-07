@@ -1,12 +1,12 @@
 # Live Voice W2 Integrated Demo acceptance
 
 > Run state, current score and implementation facts: [STATUS.md](../STATUS.md)
-> Authority: D-046, D-055, D-060, D-061 and [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md)
+> Authority: D-046, D-055, D-060, D-061, D-062 and [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md)
 > Showcase: [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md)
 
 This contract decides whether the cumulative P1/P2/P3alpha Demo has reached 90%. It does not modify or rerun the frozen V0 release claim and does not sign the Week 3–4 Integrated Web Alpha.
 
-`W2` names the cumulative delivery-order Gate. It is not a promised calendar week or Day 10 deadline under either D-052's default allocation or D-060's bounded parallel exception; the behavior, scoring and evidence requirements remain unchanged.
+`W2` names the cumulative delivery-order Gate. It is not a promised calendar week or Day 10 deadline under either D-052's default allocation or the D-060/D-062 bounded adaptive-execution exception; lane count and worker form may change by batch, while this Gate's behavior, scoring and evidence requirements remain unchanged.
 
 ## 1. Candidate and evidence rules
 

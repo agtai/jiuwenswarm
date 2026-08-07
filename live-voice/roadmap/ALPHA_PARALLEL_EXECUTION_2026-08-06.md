@@ -1,6 +1,8 @@
 # Live Voice Alpha parallel execution plan
 
 > Accepted 2026-08-06 under D-060. This is a stable execution and ownership contract, not a mutable progress report. Current branch, HEAD, completed work, blockers and next actions remain exclusively in [STATUS](../STATUS.md).
+>
+> **Scheduling amendment:** D-062 supersedes this plan's fixed worker count and Session-only form. Its file/semantic ownership, Main-only boundaries, integration lease and review handoff remain reusable. While W2 is the current milestone, the [90% Demo execution packet](DEMO_90_EXECUTION_2026-08-07.md) owns task selection and the adaptive worker graph.
 
 ## Outcome and guardrails
 

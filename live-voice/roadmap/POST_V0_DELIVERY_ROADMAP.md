@@ -1,11 +1,11 @@
 # Live Voice：W2 90% Demo 与 Integrated Web Alpha 交付路线
 
 > 更新日期：2026-08-07
-> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061](../decisions/DECISIONS.md)
+> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061、D-062](../decisions/DECISIONS.md)
 > 当前实现事实、track 状态和 Demo Replacement Ledger：[STATUS.md](../STATUS.md)
 > 已完成 Week 1 的历史 priority/dependency/boundary 与 package contracts：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
 > Web Alpha 稳定工作包、Demo 替换关系、依赖和目标窗口：[WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
-> 当前执行方式：[D-060、D-061](../decisions/DECISIONS.md) 在有界 Alpha 窗口内以四个不重叠实现 Session、一个 Main Integration Owner 和一次完整 reviewed 批次 smoke 取代 D-052 的默认单线；所有 Session 仍使用当前 GPT/Sol，不切换到 DeepSeek，远端更新继续单独批准。
+> 当前执行方式：[D-060、D-061、D-062](../decisions/DECISIONS.md) 在有界 W2→Alpha 窗口内以按批次自适应的非重叠 worker 图、一个 Main Integration Owner 和一次完整 reviewed 批次 smoke 取代 D-052 的默认单线；worker 可由独立 Session/worktree、bounded subagent 或 Main 承担，不设固定数量，远端更新继续单独批准。
 > 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前范围、顺序窗口和 Gate，不把 Alpha 写成 Production，也不把原并行估算继续写成单线日历承诺。
 
 ## 1. 交付目标
@@ -19,7 +19,7 @@
 
 V0、Week 2 和 Week 4 使用不同的验收合同。一次 V0 PASS 不能证明 Alpha，一次模块 conformance 也不能证明累计 Demo 或真实设备路径。
 
-本文沿用 `W2/W3/W4` 作为依赖和交付顺序窗口。D-060 的有界并行恢复了非重叠 leaf/package 工作的并发，但没有恢复原“两周/四周”日历承诺；只有新的资源与工期决定才能重新冻结日期。
+本文沿用 `W2/W3/W4` 作为依赖和交付顺序窗口。D-060/D-062 的有界自适应并行恢复了非重叠 leaf/package 工作的并发，但没有恢复原“两周/四周”日历承诺；只有新的资源与工期决定才能重新冻结日期。
 
 ## 2. Web Alpha 范围与非目标
 
@@ -50,10 +50,10 @@ Integrated Web Alpha 至少包括：
 - 至少三条能够持续产出的并行实现轨；
 - 一个共享契约/集成 owner，避免各轨创造第二套 authority；
 - 从 Day 1 开始持续接回同一个 Demo；
-- 所有实现和审查 Session 使用当前 GPT/Sol，不再提醒、委派或切换到 DeepSeek/其他外部执行模型；
+- 所有实现和审查 worker 使用当前 GPT/Sol，不再提醒、委派或切换到 DeepSeek/其他外部执行模型；
 - Provider、桌面 Chromium 浏览器、音频设备、Web 部署/代理、Executor 和私有配置在相应真实 Gate 前可用。
 
-D-060 只在接受的 Alpha 范围内提供四个非重叠实现 lane 和一个单写集成 owner；它不改变外部 Provider、浏览器/设备、部署、Executor 或真实 Gate 的依赖，也不把原并行 timebox 恢复为日历承诺。D-060 范围外仍按 D-052 的默认分配执行。
+D-060/D-062 只在接受的 W2→Alpha 范围内提供按实际依赖和容量生成的非重叠 worker 图和一个单写集成 owner；它们不改变外部 Provider、浏览器/设备、部署、Executor 或真实 Gate 的依赖，也不把原并行 timebox 恢复为日历承诺。该范围外仍按 D-052 的默认分配执行。
 
 ## 4. Architecture Contract Gate 的渐进实现
 
@@ -196,7 +196,7 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 - Tier 0/1 不制造完整 11 维 N/A 表；
 - 不要求每个小包独立 checkpoint commit/push；
 - Week 2/Week 4 使用 immutable candidate 统一证明累计结果；
-- Git commit 和 push 仍分别遵守根 `AGENTS.md` 的精确批准门。
+- 默认 Git commit 和 push 仍分别遵守根 `AGENTS.md` 的精确批准门；active D-060/D-062 packet 内的本地操作按其有界例外执行，所有远端 ref 更新仍须单独精确批准。
 
 ## 11. 集成与兼容规则
 
