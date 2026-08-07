@@ -22,12 +22,11 @@ from jiuwenswarm.gateway.channel_manager.im_platforms.errors import (
 from jiuwenswarm.server.runtime.attachments.upload_storage import (
     atomic_write_unique,
 )
-
-
 from jiuwenswarm.gateway.channel_manager.sdk.media_types import (
     detect_file_extension,
     get_mime_type,
 )
+
 
 class DingTalkFileService:
     """钉钉文件服务，处理文件下载和上传。"""
