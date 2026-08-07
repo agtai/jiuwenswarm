@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +28,23 @@ class _WebSocket:
         self.sent.append(payload)
 
 
+class _IterableWebSocket(_WebSocket):
+    def __init__(self, name: str) -> None:
+        super().__init__()
+        self.remote_address = (name, 1)
+        self.closed = asyncio.Event()
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.closed.set()
+
+    async def __aiter__(self):
+        await self.closed.wait()
+        return
+        yield ""  # pragma: no cover - makes this an async generator
+
+
 class _Composition:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -41,6 +59,7 @@ class _LifecycleComposition:
         self.fail_start = fail_start
         self.start_calls = 0
         self.stop_calls = 0
+        self.mutation_authority_ready = False
 
     async def start(self) -> None:
         self.start_calls += 1
@@ -52,11 +71,10 @@ class _LifecycleComposition:
 
 
 class _ProductRegistry:
-    def __init__(
-        self, *, p3_text_enabled: bool = True, stop_failures: int = 0
-    ) -> None:
+    def __init__(self, *, p3_text_enabled: bool = True, stop_failures: int = 0) -> None:
         self.p2_enabled = True
         self.p3_text_enabled = p3_text_enabled
+        self.p3_mutation_enabled = True
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.stop_calls = 0
         self.stop_failures = stop_failures
@@ -76,6 +94,26 @@ class _ProductRegistry:
         self.calls.append(("p2.close", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"closed": True}})
 
+    async def handle_p2_submit(self, **kwargs):
+        self.calls.append(("p2.submit", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
+
+    async def handle_p2_notification_next(self, **kwargs):
+        self.calls.append(("p2.notification.next", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"kind": "agent.output"}})
+
+    async def handle_p2_presentation_ack(self, **kwargs):
+        self.calls.append(("p2.presentation.ack", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
+
+    async def handle_p3_confirmation_issue(self, **kwargs):
+        self.calls.append(("p3.confirmation.issue", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"issued": True}})
+
+    async def handle_p3_mutation(self, **kwargs):
+        self.calls.append(("p3.mutate", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
+
     async def handle_p3_progress_activate(self, **kwargs):
         self.calls.append(("progress.activate", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"active": True}})
@@ -86,9 +124,7 @@ class _ProductRegistry:
 
     async def handle_p3_progress_ack(self, **kwargs):
         self.calls.append(("progress.ack", kwargs))
-        return P3RouteResult(
-            True, {"ok": True, "result": {"status": "acknowledged"}}
-        )
+        return P3RouteResult(True, {"ok": True, "result": {"status": "acknowledged"}})
 
     async def stop(self) -> None:
         self.stop_calls += 1
@@ -97,11 +133,96 @@ class _ProductRegistry:
             raise RuntimeError("injected product cleanup failure")
 
 
+class _ConnectionCleanupRegistry:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def close_active_routes(self) -> None:
+        self.calls += 1
+        if self.calls == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+
+
+class _ConnectionAgentManager:
+    def __init__(self) -> None:
+        self.cancel_calls = 0
+
+    async def cancel_all_inflight_work(self, **_kwargs: object) -> None:
+        self.cancel_calls += 1
+
+
 def _server(composition) -> AgentWebSocketServer:
     server = object.__new__(AgentWebSocketServer)
     server._live_voice_p3_composition = composition
     server._live_voice_product_composition = None
     return server
+
+
+@pytest.mark.asyncio
+async def test_gateway_replacement_waits_for_old_cleanup_before_becoming_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = object.__new__(AgentWebSocketServer)
+    registry = _ConnectionCleanupRegistry()
+    manager = _ConnectionAgentManager()
+    server._gateway_connection_lifecycle_lock = asyncio.Lock()
+    server._gateway_connection_generation = 0
+    server._current_ws = None
+    server._current_send_lock = None
+    server._current_ws_done = None
+    server._live_voice_product_composition = registry
+    server._agent_manager = manager
+    server._session_stream_tasks = {}
+    server._ping_interval = 20
+    server._ping_timeout = 20
+    server._clear_ws_acp_client_capabilities = lambda _ws: None
+
+    async def stop_scheduler() -> None:
+        return None
+
+    async def cancel_team(**_kwargs: object) -> None:
+        return None
+
+    server._stop_scheduler = stop_scheduler
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.cancel_all_team_stream_tasks_across_managers",
+        cancel_team,
+    )
+    old_ws = _IterableWebSocket("old")
+    new_ws = _IterableWebSocket("new")
+
+    old_handler = asyncio.create_task(server._connection_handler(old_ws))
+    for _ in range(20):
+        if server._current_ws is old_ws:
+            break
+        await asyncio.sleep(0)
+    replacement = asyncio.create_task(server._connection_handler(new_ws))
+    await asyncio.wait_for(registry.first_started.wait(), timeout=1)
+
+    assert old_ws.close_calls == 1
+    assert server._current_ws is old_ws
+    assert new_ws.sent == []
+    assert replacement.done() is False
+
+    registry.release_first.set()
+    for _ in range(20):
+        if server._current_ws is new_ws:
+            break
+        await asyncio.sleep(0)
+
+    assert server._current_ws is new_ws
+    assert len(new_ws.sent) == 1
+    assert json.loads(new_ws.sent[0])["event"] == "connection.ack"
+    assert old_handler.done() is True
+    assert registry.calls == 1
+
+    await new_ws.close()
+    await asyncio.wait_for(replacement, timeout=1)
+    assert server._current_ws is None
+    assert registry.calls == 2
 
 
 @pytest.mark.asyncio
@@ -188,6 +309,11 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
     assert methods == {
         "live_voice.composition.p2.activate",
         "live_voice.composition.p2.close",
+        "live_voice.composition.p2.submit",
+        "live_voice.composition.p2.notification.next",
+        "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p3.confirmation.issue",
+        "live_voice.composition.p3.mutate",
         "live_voice.composition.p3.progress.activate",
         "live_voice.composition.p3.progress.close",
         "live_voice.composition.p3.progress.ack",
@@ -254,7 +380,9 @@ async def test_agentserver_retains_failed_product_cleanup_owner_for_retry() -> N
 
 
 @pytest.mark.asyncio
-async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds() -> None:
+async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds() -> (
+    None
+):
     registry = _ProductRegistry(stop_failures=1)
     composition = _LifecycleComposition()
     server = _server(composition)
@@ -369,6 +497,70 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "label", "includes_channel"),
+    [
+        (ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT, "p2.submit", True),
+        (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
+            "p2.notification.next",
+            False,
+        ),
+        (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+            "p2.presentation.ack",
+            False,
+        ),
+        (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
+            "p3.confirmation.issue",
+            False,
+        ),
+        (ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE, "p3.mutate", False),
+    ],
+)
+async def test_product_business_methods_dispatch_only_exact_rpc_context(
+    method: ReqMethod,
+    label: str,
+    includes_channel: bool,
+) -> None:
+    registry = _ProductRegistry()
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    ws = _WebSocket()
+    request = AgentRequest(
+        request_id="request-business",
+        channel_id="web",
+        session_id="session-1",
+        req_method=method,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "mode": "agent",
+            "agent_type": "default",
+            "agent_ref": {"mode": "agent", "id": "default"},
+        },
+    )
+
+    await server._handle_live_voice_product_request(ws, request, asyncio.Lock())
+
+    expected = {
+        "params": {
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+        },
+        "request_id": "request-business",
+        "session_id": "session-1",
+    }
+    if includes_channel:
+        expected["channel_id"] = "web"
+    assert registry.calls == [(label, expected)]
+    assert json.loads(ws.sent[0])["status"] == "succeeded"
+
+
+@pytest.mark.asyncio
 async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
     registry = _ProductRegistry()
     server = _server(object())
@@ -435,12 +627,16 @@ async def test_agentserver_owns_formal_composition_start_and_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     composition = _LifecycleComposition()
+    captured: list[dict[str, object]] = []
     server = _server(None)
     server._agent_manager = object()
+    monkeypatch.delenv(
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED", raising=False
+    )
     monkeypatch.setattr(
         p3_module,
         "create_p3_composition_from_environment",
-        lambda **_kwargs: composition,
+        lambda **kwargs: captured.append(kwargs) or composition,
     )
 
     await server._start_live_voice_p3_composition()
@@ -450,6 +646,48 @@ async def test_agentserver_owns_formal_composition_start_and_stop(
     assert composition.start_calls == 1
     assert composition.stop_calls == 1
     assert server._live_voice_p3_composition is None
+    assert captured[0]["confirmation_verifier"] is None
+    assert server._live_voice_p3_confirmation_owner is None
+    assert server._live_voice_p3_confirmation_forwarder is None
+
+
+@pytest.mark.asyncio
+async def test_agentserver_allocates_product_confirmation_owner_only_when_all_flags_on(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    composition = _LifecycleComposition()
+    composition.mutation_authority_ready = True
+    captured: list[dict[str, object]] = []
+    server = _server(None)
+    server._agent_manager = object()
+    for name in (
+        "JIUWENSWARM_LIVE_VOICE_P3_ENABLED",
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED",
+    ):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        p3_module,
+        "resolve_p3_database_path_from_environment",
+        lambda: tmp_path / "formal_tasks.sqlite3",
+    )
+    monkeypatch.setattr(
+        p3_module,
+        "create_p3_composition_from_environment",
+        lambda **kwargs: captured.append(kwargs) or composition,
+    )
+
+    await server._start_live_voice_p3_composition()
+
+    assert server._live_voice_p3_confirmation_owner is not None
+    assert server._live_voice_p3_confirmation_forwarder is not None
+    assert captured[0]["confirmation_verifier"] is (
+        server._live_voice_p3_confirmation_forwarder
+    )
+    await server._stop_live_voice_p3_composition()
+    assert server._live_voice_p3_confirmation_owner is None
+    assert server._live_voice_p3_confirmation_forwarder is None
 
 
 @pytest.mark.asyncio

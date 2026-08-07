@@ -2087,7 +2087,7 @@
     "transcriptPlaceholder": "说话内容会显示在这里",
     "integrated": {
       "title": "Integrated Web 路由事实",
-      "shellOnly": "当前仅为组合 shell。这些事实不能证明累计 runtime、真实麦克风采集、物理音频已被听到、Agent 取消或任务完成，也不能证明 Integrated Demo 或 Web Alpha Gate 已通过。",
+      "shellOnly": "下方 P2 文本路线仅在 activation 生效时属于正式路径。语音、物理音频、任务完成和 Integrated Demo/Web Alpha Gate 验收仍未证明。",
       "routes": "P1 / P2 / P3alpha 路由选择",
       "platform": "Chrome 与 Web 诊断",
       "refresh": "刷新 Web 诊断",
@@ -2104,6 +2104,24 @@
       "activation": {
         "status": "产品激活 lease",
         "scope": "路由 / generation"
+      },
+      "textRoute": {
+        "label": "正式 P2 文本输入",
+        "placeholder": "通过 CR 和 JiuwenSwarm Agent 提交已确认文本",
+        "submit": "提交已确认轮次",
+        "status": "P2 文本 / 展示确认"
+      },
+      "taskControl": {
+        "title": "正式 P3 任务控制",
+        "disclosure": "必须执行两个独立的用户动作：签发精确且短时有效的确认，然后再执行。接受不代表任务完成。",
+        "create": "创建任务",
+        "cancel": "取消任务",
+        "name": "任务名称",
+        "instruction": "任务指令",
+        "taskId": "精确任务 ID",
+        "confirm": "签发确认",
+        "execute": "执行已确认变更",
+        "status": "P3 确认 / 变更"
       },
       "composition": {
         "flag_off": "flag 已关闭",

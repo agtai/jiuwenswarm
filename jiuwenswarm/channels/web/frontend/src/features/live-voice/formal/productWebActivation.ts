@@ -1,5 +1,10 @@
 export const PRODUCT_P2_ACTIVATE_METHOD = 'live_voice.composition.p2.activate' as const;
 export const PRODUCT_P2_CLOSE_METHOD = 'live_voice.composition.p2.close' as const;
+export const PRODUCT_P2_SUBMIT_METHOD = 'live_voice.composition.p2.submit' as const;
+export const PRODUCT_P2_NOTIFICATION_NEXT_METHOD = 'live_voice.composition.p2.notification.next' as const;
+export const PRODUCT_P2_PRESENTATION_ACK_METHOD = 'live_voice.composition.p2.presentation.ack' as const;
+export const PRODUCT_P3_CONFIRMATION_ISSUE_METHOD = 'live_voice.composition.p3.confirmation.issue' as const;
+export const PRODUCT_P3_MUTATE_METHOD = 'live_voice.composition.p3.mutate' as const;
 export const PRODUCT_P3_TASK_LIST_METHOD = 'live_voice.task.list' as const;
 export const PRODUCT_P3_PROGRESS_ACTIVATE_METHOD = 'live_voice.composition.p3.progress.activate' as const;
 export const PRODUCT_P3_PROGRESS_CLOSE_METHOD = 'live_voice.composition.p3.progress.close' as const;
@@ -64,10 +69,57 @@ const AMBIGUOUS_ACTIVATION_TRANSPORT_CODES = new Set([
   'WS_DISCONNECTED',
   'WS_CLOSED',
 ]);
+const RETAINED_OPERATION_RETRY_DELAYS_MS = Object.freeze([250, 750]);
+const PRODUCT_OPERATION_CAPACITY = 128;
+
+class ProductReplayFence {
+  private readonly bits = new Uint8Array(8192);
+
+  private indices(value: string): readonly number[] {
+    return [0x811c9dc5, 0x9e3779b1, 0x85ebca6b, 0xc2b2ae35].map(seed => {
+      let hash = seed;
+      for (let index = 0; index < value.length; index += 1) {
+        hash = Math.imul(hash ^ value.charCodeAt(index), 0x01000193);
+      }
+      return (hash >>> 0) % (this.bits.length * 8);
+    });
+  }
+
+  add(value: string): void {
+    for (const index of this.indices(value)) this.bits[index >> 3] |= 1 << (index & 7);
+  }
+
+  has(value: string): boolean {
+    return this.indices(value).every(
+      index => (this.bits[index >> 3] & (1 << (index & 7))) !== 0
+    );
+  }
+}
+
+function evictCompletedProductOperation<T>(
+  ledger: Map<string, { requestId: string; result?: T; promise?: Promise<T> }>,
+  replayFence: ProductReplayFence
+): boolean {
+  for (const [fingerprint, entry] of ledger) {
+    if (entry.result === undefined) continue;
+    ledger.delete(fingerprint);
+    replayFence.add(fingerprint);
+    return true;
+  }
+  return false;
+}
+let productRequestSequence = 0;
+
+function allocateProductRequestId(prefix: string): string {
+  productRequestSequence += 1;
+  const random = globalThis.crypto?.randomUUID?.();
+  return `${prefix}-${random ?? `${Date.now()}-${productRequestSequence}`}`;
+}
 
 export type ProductWebRequest = (
   method: string,
-  params: Record<string, unknown>
+  params: Record<string, unknown>,
+  request_id?: string
 ) => Promise<unknown>;
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -76,10 +128,113 @@ function objectValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+export function isRetriableProductOperationError(error: unknown): boolean {
+  const candidate = objectValue(error);
+  return Boolean(
+    candidate?.retriable === true ||
+      (typeof candidate?.code === 'string' &&
+        (AMBIGUOUS_ACTIVATION_TRANSPORT_CODES.has(candidate.code) ||
+          candidate.code === 'WS_NOT_READY' ||
+          candidate.code === 'UNAVAILABLE'))
+  );
+}
+
+const DEFINITIVE_PRODUCT_FAILURE_CODES = new Set([
+  'INVALID_ARGUMENT',
+  'UNAUTHENTICATED',
+  'PERMISSION_DENIED',
+  'NOT_FOUND',
+  'CONFLICT',
+  'UNSUPPORTED',
+  'CAPABILITY_UNAVAILABLE',
+]);
+const DEFINITIVE_PRODUCT_FAILURE_REASONS = new Set([
+  'PRODUCT_OPERATION_LEDGER_FULL',
+  'PRODUCT_COMPOSITION_STOPPED',
+  'PRODUCT_P2_NOTIFICATION_FAILED',
+  'NOTIFICATION_STREAM_CLOSED',
+  'P3_CONFIRMATION_ISSUER_UNAVAILABLE',
+]);
+
+export function isDefinitiveProductOperationError(error: unknown): boolean {
+  const candidate = objectValue(error);
+  return Boolean(
+    (typeof candidate?.code === 'string' &&
+      DEFINITIVE_PRODUCT_FAILURE_CODES.has(candidate.code)) ||
+      (typeof candidate?.reason === 'string' &&
+        DEFINITIVE_PRODUCT_FAILURE_REASONS.has(candidate.reason))
+  );
+}
+
+/** Retry one retained request without changing its caller-owned request ID. */
+export async function retryRetainedProductOperation<T>(input: {
+  operation: () => Promise<T>;
+  is_current: () => boolean;
+  retry_delays_ms?: readonly number[];
+}): Promise<T> {
+  const delays = input.retry_delays_ms ?? RETAINED_OPERATION_RETRY_DELAYS_MS;
+  let failure: unknown;
+  for (let attempt = 0; attempt <= delays.length; attempt += 1) {
+    if (!input.is_current()) {
+      throw failure instanceof Error
+        ? failure
+        : new Error('retained product operation is no longer current');
+    }
+    try {
+      return await input.operation();
+    } catch (error) {
+      failure = error;
+      if (
+        isDefinitiveProductOperationError(error) ||
+        !isRetriableProductOperationError(error) ||
+        attempt === delays.length
+      ) throw error;
+      const delay = delays[attempt];
+      if (!Number.isSafeInteger(delay) || delay < 0) {
+        throw new Error('retained product retry delay is invalid');
+      }
+      await new Promise(resolve => globalThis.setTimeout(resolve, delay));
+    }
+  }
+  throw failure;
+}
+
 function requiredText(value: string, field: string): string {
   const text = value.trim();
   if (!text || text.length > 256) throw new Error(`${field} is invalid`);
   return text;
+}
+
+export type ProductWebP3MutationInput = Readonly<
+  | {
+      operation: 'task.create';
+      session_id: string;
+      command_id: string;
+      issued_at: string;
+      correlation_id: string;
+      name: string;
+      instruction: string;
+      model_intent?: string;
+    }
+  | {
+      operation: 'task.cancel';
+      session_id: string;
+      command_id: string;
+      issued_at: string;
+      correlation_id: string;
+      task_id: string;
+    }
+>;
+
+export interface ProductWebP3ConfirmationReceipt {
+  readonly confirmation_id: string;
+  readonly expires_at: string;
+  readonly operation: 'task.create' | 'task.cancel';
+}
+
+function requiredContent(value: string, field: string): string {
+  if (!value.trim() || value.length > 100_000) throw new Error(`${field} is invalid`);
+  return value;
 }
 
 function freezeBinding(
@@ -140,6 +295,52 @@ function requireResult(
     throw new Error('product P2 close binding mismatch');
   }
   return Object.freeze({ ...result });
+}
+
+function requireP2BoundOperationResult(
+  value: unknown,
+  expectedStatus: 'round_accepted' | 'notification' | 'presentation_acknowledged',
+  binding: Readonly<ProductWebP2ActivationBinding>
+): JsonObject {
+  const payload = objectValue(value);
+  const result = objectValue(payload?.result);
+  if (
+    payload?.ok !== true ||
+    result?.status !== expectedStatus ||
+    result.session_id !== binding.session_id ||
+    result.correlation_id !== binding.correlation_id ||
+    result.interaction_id !== binding.interaction_id ||
+    result.activation_id !== binding.activation_id ||
+    result.activation_generation !== binding.activation_generation
+  ) {
+    throw new Error(`product P2 ${expectedStatus} binding mismatch`);
+  }
+  return Object.freeze({ ...result });
+}
+
+function freezeP3MutationInput(input: ProductWebP3MutationInput): ProductWebP3MutationInput {
+  const common = {
+    session_id: requiredText(input.session_id, 'session_id'),
+    command_id: requiredText(input.command_id, 'command_id'),
+    issued_at: requiredText(input.issued_at, 'issued_at'),
+    correlation_id: requiredText(input.correlation_id, 'correlation_id'),
+  } as const;
+  if (input.operation === 'task.cancel') {
+    return Object.freeze({
+      operation: 'task.cancel' as const,
+      ...common,
+      task_id: requiredText(input.task_id, 'task_id'),
+    });
+  }
+  return Object.freeze({
+    operation: 'task.create' as const,
+    ...common,
+    name: requiredContent(input.name, 'name'),
+    instruction: requiredContent(input.instruction, 'instruction'),
+    ...(input.model_intent === undefined
+      ? {}
+      : { model_intent: requiredText(input.model_intent, 'model_intent') }),
+  });
 }
 
 function selectSingleActiveTask(value: unknown): string {
@@ -280,6 +481,19 @@ export class ProductWebP2ActivationOwner {
   private readonly closeRetryObservers = new Set<
     ProductWebCloseRetryObserver<ProductWebP2ActivationSnapshot>
   >();
+  private readonly submissions = new Map<
+    string,
+    { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }
+  >();
+  private readonly presentationAcks = new Map<
+    string,
+    { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }
+  >();
+  private readonly submissionReplayFence = new ProductReplayFence();
+  private readonly presentationAckReplayFence = new ProductReplayFence();
+  private notificationRequestId: string | null = null;
+  private notificationPromise: Promise<JsonObject> | null = null;
+  private notificationSequence = 0;
 
   constructor(input: {
     enabled: boolean;
@@ -341,6 +555,178 @@ export class ProductWebP2ActivationOwner {
         this.activationPromise = null;
       });
     return this.activationPromise;
+  }
+
+  hasPendingSubmission(): boolean {
+    return [...this.submissions.values()].some(entry => entry.result === undefined);
+  }
+
+  hasPendingNotification(): boolean {
+    return this.notificationRequestId !== null;
+  }
+
+  hasPendingPresentationAck(): boolean {
+    return [...this.presentationAcks.values()].some(entry => entry.result === undefined);
+  }
+
+  async submitText(input: {
+    commit_id: string;
+    turn_id: string;
+    response_id: string;
+    committed_at: string;
+    text: string;
+  }): Promise<JsonObject> {
+    const binding = this.requireActiveBinding();
+    const params = {
+      ...binding,
+      commit_id: requiredText(input.commit_id, 'commit_id'),
+      turn_id: requiredText(input.turn_id, 'turn_id'),
+      response_id: requiredText(input.response_id, 'response_id'),
+      committed_at: requiredText(input.committed_at, 'committed_at'),
+      text: requiredContent(input.text, 'text'),
+    };
+    const fingerprint = JSON.stringify(params);
+    let retained = this.submissions.get(fingerprint);
+    if (retained?.result) return Promise.resolve(retained.result);
+    if (retained?.promise) return retained.promise;
+    if (!retained) {
+      if (this.submissionReplayFence.has(fingerprint)) {
+        return Promise.reject(new Error('completed product submission replay has expired'));
+      }
+      if (this.hasPendingSubmission() || this.hasPendingPresentationAck()) {
+        return Promise.reject(new Error('a previous product turn is still unresolved'));
+      }
+      if (
+        this.submissions.size >= PRODUCT_OPERATION_CAPACITY &&
+        !evictCompletedProductOperation(this.submissions, this.submissionReplayFence)
+      ) {
+        return Promise.reject(new Error('bounded product submission ledger is full'));
+      }
+      retained = { requestId: allocateProductRequestId('live-voice-p2-submit') };
+      this.submissions.set(fingerprint, retained);
+    }
+    const entry = retained;
+    let promise: Promise<JsonObject>;
+    promise = this.request(PRODUCT_P2_SUBMIT_METHOD, params, entry.requestId)
+      .then(value => {
+        const result = requireP2BoundOperationResult(value, 'round_accepted', binding);
+        entry.result = result;
+        return result;
+      })
+      .catch(error => {
+        if (isDefinitiveProductOperationError(error)) this.submissions.delete(fingerprint);
+        throw error;
+      })
+      .finally(() => {
+        if (entry.promise === promise) entry.promise = undefined;
+      });
+    entry.promise = promise;
+    return promise;
+  }
+
+  async nextNotification(): Promise<JsonObject> {
+    const binding = this.requireActiveBinding();
+    if (this.notificationPromise) return this.notificationPromise;
+    if (this.notificationRequestId === null) {
+      this.notificationRequestId = allocateProductRequestId('live-voice-p2-notification');
+      this.notificationSequence += 1;
+    }
+    const requestId = this.notificationRequestId;
+    let promise: Promise<JsonObject>;
+    promise = this.request(
+      PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+      { ...binding, notification_sequence: this.notificationSequence },
+      requestId
+    )
+      .then(value => {
+        const result = requireP2BoundOperationResult(value, 'notification', binding);
+        this.notificationRequestId = null;
+        return result;
+      })
+      .catch(error => {
+        if (isDefinitiveProductOperationError(error)) this.notificationRequestId = null;
+        throw error;
+      })
+      .finally(() => {
+        if (this.notificationPromise === promise) this.notificationPromise = null;
+      });
+    this.notificationPromise = promise;
+    return promise;
+  }
+
+  async acknowledgePresentation(input: {
+    response_id: string;
+    response_generation: number;
+    surface: 'text' | 'audio';
+    unit_id: string;
+    contiguous_cursor: number;
+    presented_at: string;
+  }): Promise<JsonObject> {
+    const binding = this.requireActiveBinding();
+    if (
+      !Number.isSafeInteger(input.response_generation) ||
+      input.response_generation < 0 ||
+      !Number.isSafeInteger(input.contiguous_cursor) ||
+      input.contiguous_cursor < 0 ||
+      (input.surface !== 'text' && input.surface !== 'audio')
+    ) {
+      return Promise.reject(new Error('presentation ACK binding is invalid'));
+    }
+    const params = {
+      ...binding,
+      response_id: requiredText(input.response_id, 'response_id'),
+      response_generation: input.response_generation,
+      surface: input.surface,
+      unit_id: requiredText(input.unit_id, 'unit_id'),
+      contiguous_cursor: input.contiguous_cursor,
+      presented_at: requiredText(input.presented_at, 'presented_at'),
+    };
+    const fingerprint = JSON.stringify(params);
+    let retained = this.presentationAcks.get(fingerprint);
+    if (retained?.result) return Promise.resolve(retained.result);
+    if (retained?.promise) return retained.promise;
+    if (!retained) {
+      if (this.presentationAckReplayFence.has(fingerprint)) {
+        return Promise.reject(new Error('completed presentation ACK replay has expired'));
+      }
+      if (this.hasPendingPresentationAck()) {
+        return Promise.reject(new Error('a previous presentation ACK is still unresolved'));
+      }
+      if (
+        this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY &&
+        !evictCompletedProductOperation(
+          this.presentationAcks,
+          this.presentationAckReplayFence
+        )
+      ) {
+        return Promise.reject(new Error('bounded presentation ACK ledger is full'));
+      }
+      retained = { requestId: allocateProductRequestId('live-voice-p2-ack') };
+      this.presentationAcks.set(fingerprint, retained);
+    }
+    const entry = retained;
+    let promise: Promise<JsonObject>;
+    promise = this.request(PRODUCT_P2_PRESENTATION_ACK_METHOD, params, entry.requestId)
+      .then(value => {
+        const result = requireP2BoundOperationResult(
+          value,
+          'presentation_acknowledged',
+          binding
+        );
+        entry.result = result;
+        return result;
+      })
+      .catch(error => {
+        if (isDefinitiveProductOperationError(error)) {
+          this.presentationAcks.delete(fingerprint);
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (entry.promise === promise) entry.promise = undefined;
+      });
+    entry.promise = promise;
+    return promise;
   }
 
   close(): Promise<ProductWebP2ActivationSnapshot> {
@@ -428,6 +814,185 @@ export class ProductWebP2ActivationOwner {
     const snapshot = this.snapshot();
     this.onSnapshot?.(snapshot);
     return snapshot;
+  }
+
+  private requireActiveBinding(): ProductWebP2ActivationBinding {
+    if (this.status !== 'active' || this.binding === null) {
+      throw new Error('product P2 activation is not active');
+    }
+    return this.binding;
+  }
+}
+
+export type ProductP2PollRecoveryResult<TSuccessor> =
+  | { readonly kind: 'notification'; readonly notification: JsonObject }
+  | { readonly kind: 'recovered'; readonly successor: TSuccessor | null };
+
+/**
+ * Poll one retained P2 notification and own the exact closed-route handoff.
+ *
+ * Ambiguous failures remain retained because `settle_retained_operations`
+ * throws.  An authoritative closed stream clears the retained poll, closes
+ * the exact old activation, and only then permits a new generation.
+ */
+export async function pollProductP2RouteWithRecovery<TSuccessor>(input: {
+  owner: ProductWebP2ActivationOwner;
+  is_current: () => boolean;
+  settle_retained_operations: () => Promise<void>;
+  can_activate_successor: () => boolean;
+  activate_successor: () => Promise<TSuccessor>;
+}): Promise<ProductP2PollRecoveryResult<TSuccessor>> {
+  try {
+    const notification = await retryRetainedProductOperation({
+      operation: () => input.owner.nextNotification(),
+      is_current: input.is_current,
+    });
+    return { kind: 'notification', notification };
+  } catch {
+    await input.settle_retained_operations();
+    await input.owner.closeWithRetry();
+    if (!input.can_activate_successor()) {
+      return { kind: 'recovered', successor: null };
+    }
+    return {
+      kind: 'recovered',
+      successor: await input.activate_successor(),
+    };
+  }
+}
+
+/** Credential-free Web owner for one exact server-issued P3 mutation confirmation. */
+export class ProductWebP3MutationOwner {
+  private readonly enabled: boolean;
+  private readonly request: ProductWebRequest;
+  private pending: {
+    fingerprint: string;
+    input: ProductWebP3MutationInput;
+    issueRequestId: string;
+    receipt?: ProductWebP3ConfirmationReceipt;
+    issuePromise?: Promise<ProductWebP3ConfirmationReceipt>;
+    mutationRequestId?: string;
+    mutationPromise?: Promise<JsonObject>;
+  } | null = null;
+
+  constructor(input: { enabled: boolean; request: ProductWebRequest }) {
+    if (typeof input.request !== 'function') throw new Error('product request owner is required');
+    this.enabled = input.enabled;
+    this.request = input.request;
+  }
+
+  hasPendingMutation(): boolean {
+    return this.pending !== null;
+  }
+
+  async issue(input: ProductWebP3MutationInput): Promise<ProductWebP3ConfirmationReceipt> {
+    if (!this.enabled) throw new Error('product P3 mutation is disabled');
+    const frozen = freezeP3MutationInput(input);
+    const fingerprint = JSON.stringify(frozen);
+    let pending = this.pending;
+    if (pending !== null) {
+      if (pending.fingerprint !== fingerprint) {
+        throw new Error('a different product P3 confirmation is already owned');
+      }
+      if (pending.receipt) return pending.receipt;
+      if (pending.issuePromise) return pending.issuePromise;
+    } else {
+      pending = {
+        fingerprint,
+        input: frozen,
+        issueRequestId: allocateProductRequestId('live-voice-p3-confirmation'),
+      };
+      this.pending = pending;
+    }
+    const retained = pending;
+    let issuePromise: Promise<ProductWebP3ConfirmationReceipt>;
+    issuePromise = this.request(
+      PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
+      { ...frozen },
+      retained.issueRequestId
+    )
+      .then(value => {
+        const payload = objectValue(value);
+        const result = objectValue(payload?.result);
+        if (
+          payload?.ok !== true ||
+          result?.status !== 'confirmation_issued' ||
+          result.operation !== frozen.operation ||
+          typeof result.confirmation_id !== 'string' ||
+          typeof result.expires_at !== 'string'
+        ) {
+          throw new Error('product P3 confirmation response is unavailable');
+        }
+        const receipt = Object.freeze({
+          confirmation_id: requiredText(result.confirmation_id, 'confirmation_id'),
+          expires_at: requiredText(result.expires_at, 'expires_at'),
+          operation: frozen.operation,
+        });
+        if (this.pending === retained) retained.receipt = receipt;
+        return receipt;
+      })
+      .catch(error => {
+        if (this.pending === retained && isDefinitiveProductOperationError(error)) {
+          this.pending = null;
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.pending === retained && retained.issuePromise === issuePromise) {
+          retained.issuePromise = undefined;
+        }
+      });
+    retained.issuePromise = issuePromise;
+    return issuePromise;
+  }
+
+  async mutate(input: ProductWebP3MutationInput): Promise<JsonObject> {
+    if (!this.enabled) throw new Error('product P3 mutation is disabled');
+    const frozen = freezeP3MutationInput(input);
+    const pending = this.pending;
+    if (pending === null || pending.fingerprint !== JSON.stringify(frozen)) {
+      throw new Error('exact product P3 confirmation is required');
+    }
+    if (!pending.receipt) throw new Error('exact product P3 confirmation is required');
+    if (pending.mutationPromise) return pending.mutationPromise;
+    pending.mutationRequestId ??= allocateProductRequestId('live-voice-p3-mutation');
+    const retained = pending;
+    let mutationPromise: Promise<JsonObject>;
+    mutationPromise = this.request(
+      PRODUCT_P3_MUTATE_METHOD,
+      {
+        ...frozen,
+        confirmation_id: pending.receipt.confirmation_id,
+      },
+      pending.mutationRequestId
+    )
+      .then(value => {
+        const payload = objectValue(value);
+        const result = objectValue(payload?.result);
+        if (
+          payload?.ok !== true ||
+          result?.status !== 'mutation_processed' ||
+          result.operation !== frozen.operation
+        ) {
+          throw new Error('product P3 mutation response is unavailable');
+        }
+        const frozenResult = Object.freeze({ ...result });
+        if (this.pending === retained) this.pending = null;
+        return frozenResult;
+      })
+      .catch(error => {
+        if (this.pending === retained && isDefinitiveProductOperationError(error)) {
+          this.pending = null;
+        }
+        throw error;
+      })
+      .finally(() => {
+        if (this.pending === retained && retained.mutationPromise === mutationPromise) {
+          retained.mutationPromise = undefined;
+        }
+      });
+    retained.mutationPromise = mutationPromise;
+    return mutationPromise;
   }
 }
 

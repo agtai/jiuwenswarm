@@ -26,3 +26,6 @@ export const FEATURE_LIVE_VOICE_INTEGRATED_P1 = import.meta.env.VITE_FEATURE_LIV
  * formal adapters runnable or grant release/replacement credit.
  */
 export const FEATURE_LIVE_VOICE_INTEGRATED_WEB = import.meta.env.VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB === 'true';
+
+/** Destructive formal task control stays separately default-off. */
+export const FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = import.meta.env.VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION === 'true';

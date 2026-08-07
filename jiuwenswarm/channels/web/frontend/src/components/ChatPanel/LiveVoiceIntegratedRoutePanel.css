@@ -121,3 +121,40 @@
   color: var(--color-text-secondary);
   line-height: 1.4;
 }
+
+.live-voice-integrated__text-route {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+}
+
+.live-voice-integrated__text-route textarea,
+.live-voice-integrated__text-route input,
+.live-voice-integrated__text-route select {
+  min-height: 64px;
+  resize: vertical;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  padding: 7px;
+  color: var(--color-text-primary);
+  background: var(--color-surface-card);
+}
+
+.live-voice-integrated__text-route input,
+.live-voice-integrated__text-route select {
+  min-height: 34px;
+}
+
+.live-voice-integrated__text-route button {
+  justify-self: end;
+  padding: 5px 10px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+}
+
+.live-voice-integrated__text-route output {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

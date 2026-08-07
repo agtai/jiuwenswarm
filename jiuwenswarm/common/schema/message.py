@@ -219,6 +219,17 @@ class ReqMethod(Enum):
     LIVE_VOICE_TASK_EVENTS = "live_voice.task.events"
     LIVE_VOICE_COMPOSITION_P2_ACTIVATE = "live_voice.composition.p2.activate"
     LIVE_VOICE_COMPOSITION_P2_CLOSE = "live_voice.composition.p2.close"
+    LIVE_VOICE_COMPOSITION_P2_SUBMIT = "live_voice.composition.p2.submit"
+    LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT = (
+        "live_voice.composition.p2.notification.next"
+    )
+    LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK = (
+        "live_voice.composition.p2.presentation.ack"
+    )
+    LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE = (
+        "live_voice.composition.p3.confirmation.issue"
+    )
+    LIVE_VOICE_COMPOSITION_P3_MUTATE = "live_voice.composition.p3.mutate"
     LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE = (
         "live_voice.composition.p3.progress.activate"
     )

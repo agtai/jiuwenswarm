@@ -2089,7 +2089,7 @@
     "transcriptPlaceholder": "Your speech will appear here",
     "integrated": {
       "title": "Integrated Web route facts",
-      "shellOnly": "Composition shell only. These facts do not prove a cumulative runtime, real microphone capture, physical audio being heard, Agent cancellation, task completion, or an Integrated Demo/Web Alpha Gate pass.",
+      "shellOnly": "The P2 text route below is formal only while its activation is active. Speech, physical audio, task completion, and Integrated Demo/Web Alpha Gate acceptance remain unproven.",
       "routes": "P1 / P2 / P3alpha route selection",
       "platform": "Chrome and Web diagnostics",
       "refresh": "Refresh Web diagnostics",
@@ -2106,6 +2106,24 @@
       "activation": {
         "status": "Product activation lease",
         "scope": "Route / generation"
+      },
+      "textRoute": {
+        "label": "Formal P2 text input",
+        "placeholder": "Send committed text through CR and the JiuwenSwarm Agent",
+        "submit": "Submit committed turn",
+        "status": "P2 text / presentation ACK"
+      },
+      "taskControl": {
+        "title": "Formal P3 task control",
+        "disclosure": "Two distinct user actions are required: issue an exact short-lived confirmation, then execute it. Acceptance is not task completion.",
+        "create": "Create task",
+        "cancel": "Cancel task",
+        "name": "Task name",
+        "instruction": "Task instruction",
+        "taskId": "Exact task ID",
+        "confirm": "Issue confirmation",
+        "execute": "Execute confirmed mutation",
+        "status": "P3 confirmation / mutation"
       },
       "composition": {
         "flag_off": "flag off",

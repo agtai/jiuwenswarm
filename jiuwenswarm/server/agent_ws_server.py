@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as _dt
+import inspect
 import json
 import logging
 import math
@@ -849,6 +850,9 @@ class AgentWebSocketServer:
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
+        self._gateway_connection_lifecycle_lock = asyncio.Lock()
+        self._gateway_connection_generation = 0
+        self._current_ws_done: asyncio.Event | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
         # AgentManager 实例
         self._agent_manager = AgentManager()
@@ -865,6 +869,8 @@ class AgentWebSocketServer:
         # Authenticated formal Live Voice P3-alpha composition. Construction is
         # deferred until start() so flag-off has no Store or timer effects.
         self._live_voice_p3_composition: Any = None
+        self._live_voice_p3_confirmation_owner: Any = None
+        self._live_voice_p3_confirmation_forwarder: Any = None
         # The central product registry is even more strictly lazy: when its
         # master flag is off no registry, Adapter, registration, or worker is
         # constructed or called.
@@ -1187,13 +1193,42 @@ class AgentWebSocketServer:
         if self._live_voice_p3_composition is not None:
             return
         composition: Any = None
+        confirmation_owner: Any = None
+        confirmation_forwarder: Any = None
         try:
             from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
                 create_p3_composition_from_environment,
+                resolve_p3_database_path_from_environment,
             )
             from jiuwenswarm.server.live_voice.p3_model_resolution import (
                 ServerModelCatalogResolver,
             )
+
+            product_mutation_enabled = all(
+                str(os.getenv(name) or "").strip().lower()
+                in {"1", "true", "yes", "on"}
+                for name in (
+                    "JIUWENSWARM_LIVE_VOICE_P3_ENABLED",
+                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
+                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED",
+                )
+            )
+            if product_mutation_enabled:
+                from jiuwenswarm.server.live_voice.p3_confirmation import (
+                    BoundedP3ConfirmationOwner,
+                )
+                from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+                    ProductP3ConfirmationForwarder,
+                )
+
+                task_database = resolve_p3_database_path_from_environment()
+                confirmation_owner = BoundedP3ConfirmationOwner(
+                    task_database.with_name("formal_task_confirmations.sqlite3"),
+                    enabled=True,
+                )
+                confirmation_forwarder = ProductP3ConfirmationForwarder(
+                    confirmation_owner
+                )
 
             composition = create_p3_composition_from_environment(
                 agent_manager=self._agent_manager,
@@ -1201,12 +1236,15 @@ class AgentWebSocketServer:
                     catalog_reader=self._live_voice_p3_model_catalog,
                     model_builder=self._build_live_voice_p3_model,
                 ),
+                confirmation_verifier=confirmation_forwarder,
             )
             if composition is None:
                 logger.info("[LiveVoiceP3] formal route disabled")
                 return
             await composition.start()
             self._live_voice_p3_composition = composition
+            self._live_voice_p3_confirmation_owner = confirmation_owner
+            self._live_voice_p3_confirmation_forwarder = confirmation_forwarder
             if composition.mutation_authority_ready:
                 logger.info("[LiveVoiceP3] authenticated formal route ready")
             else:
@@ -1222,16 +1260,23 @@ class AgentWebSocketServer:
                 except Exception:  # noqa: BLE001
                     logger.exception("[LiveVoiceP3] failed composition cleanup failed")
             self._live_voice_p3_composition = None
+            self._live_voice_p3_confirmation_owner = None
+            self._live_voice_p3_confirmation_forwarder = None
 
     async def _stop_live_voice_p3_composition(self) -> None:
         composition = self._live_voice_p3_composition
         self._live_voice_p3_composition = None
         if composition is None:
+            self._live_voice_p3_confirmation_owner = None
+            self._live_voice_p3_confirmation_forwarder = None
             return
         try:
             await composition.stop()
         except Exception as exc:  # noqa: BLE001 -- continue transport shutdown
             logger.warning("[LiveVoiceP3] shutdown failed: %s", exc)
+        finally:
+            self._live_voice_p3_confirmation_owner = None
+            self._live_voice_p3_confirmation_forwarder = None
 
     async def _push_live_voice_product_text_event(
         self, message: dict[str, object]
@@ -1263,6 +1308,12 @@ class AgentWebSocketServer:
                 p3_composition=self._live_voice_p3_composition,
                 agent_manager=self._agent_manager,
                 push_text_event=self._push_live_voice_product_text_event,
+                p3_confirmation_owner=getattr(
+                    self, "_live_voice_p3_confirmation_owner", None
+                ),
+                p3_confirmation_forwarder=(
+                    getattr(self, "_live_voice_p3_confirmation_forwarder", None)
+                ),
             )
             if registry is None:
                 logger.info("[LiveVoiceProduct] central composition disabled")
@@ -1416,8 +1467,23 @@ class AgentWebSocketServer:
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
 
         send_lock = asyncio.Lock()
-        self._current_ws = ws
-        self._current_send_lock = send_lock
+        async with self._gateway_connection_lifecycle_lock:
+            previous_ws = self._current_ws
+            previous_done = self._current_ws_done
+            if previous_ws is not None and previous_ws is not ws:
+                close = getattr(previous_ws, "close", None)
+                if callable(close):
+                    close_result = close()
+                    if inspect.isawaitable(close_result):
+                        await close_result
+                if previous_done is not None:
+                    await previous_done.wait()
+            self._gateway_connection_generation += 1
+            connection_generation = self._gateway_connection_generation
+            connection_done = asyncio.Event()
+            self._current_ws = ws
+            self._current_send_lock = send_lock
+            self._current_ws_done = connection_done
 
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
@@ -1456,13 +1522,19 @@ class AgentWebSocketServer:
         except Exception as e:
             logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
         finally:
-            self._current_ws = None
-            self._current_send_lock = None
             self._clear_ws_acp_client_capabilities(ws)
             connection_tasks = list(tasks)
             for task in connection_tasks:
                 if not task.done():
                     task.cancel()
+            if (
+                self._current_ws is not ws
+                or self._gateway_connection_generation != connection_generation
+            ):
+                if connection_tasks:
+                    await asyncio.gather(*connection_tasks, return_exceptions=True)
+                connection_done.set()
+                return
             registry = getattr(self, "_live_voice_product_composition", None)
             if registry is not None:
                 try:
@@ -1495,6 +1567,11 @@ class AgentWebSocketServer:
             if connection_tasks:
                 await asyncio.gather(*connection_tasks, return_exceptions=True)
             self._session_stream_tasks.clear()
+            if self._current_ws is ws:
+                self._current_ws = None
+                self._current_send_lock = None
+                self._current_ws_done = None
+            connection_done.set()
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
@@ -1762,6 +1839,11 @@ class AgentWebSocketServer:
             if request.req_method in {
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_CLOSE,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK,
@@ -8462,6 +8544,37 @@ class AgentWebSocketServer:
                 )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_CLOSE:
                 result = await registry.handle_p2_close(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT:
+                result = await registry.handle_p2_submit(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    channel_id=request.channel_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT:
+                result = await registry.handle_p2_notification_next(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK:
+                result = await registry.handle_p2_presentation_ack(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE:
+                result = await registry.handle_p3_confirmation_issue(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE:
+                result = await registry.handle_p3_mutation(
                     params=params,
                     request_id=request.request_id,
                     session_id=request.session_id,

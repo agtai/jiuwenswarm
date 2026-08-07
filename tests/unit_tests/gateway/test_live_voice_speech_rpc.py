@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 import base64
 import io
+import time
 import wave
 from typing import Any
 
 import pytest
 
+from jiuwenswarm.common.schema.message import Message
 from jiuwenswarm.gateway.channel_manager.base import RobotMessageRouter
 from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     WebChannel,
@@ -293,6 +295,48 @@ def test_speech_methods_bypass_agent_callback_and_tool_task_authority() -> None:
         SYNTHESIZE_BATCH_METHOD,
         CANCEL_METHOD,
     } == _LOCAL_HANDLER_ONLY_METHODS
+
+
+@pytest.mark.asyncio
+async def test_web_channel_promotes_nested_product_error_without_dropping_reason() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    ws = type("ProductResponseWebSocket", (), {"closed": False})()
+    channel._ws_by_id["ws-product"] = ws
+    frames: list[dict[str, object]] = []
+    channel._enqueue_send = lambda target, frame: frames.append(  # type: ignore[method-assign]
+        {"target": target, **frame}
+    )
+    detail = {
+        "code": "PERMISSION_DENIED",
+        "reason": "TASK_CONTEXT_PERMISSION_MISSING",
+        "message": "current product authority was revoked",
+    }
+
+    await channel.send(
+        Message(
+            id="request-product-error",
+            type="res",
+            channel_id="web",
+            session_id="session-1",
+            params={},
+            timestamp=time.time(),
+            ok=False,
+            payload={"ok": False, "result": None, "error": detail},
+            metadata={"ws_id": "ws-product"},
+        )
+    )
+
+    assert frames == [
+        {
+            "target": ws,
+            "type": "res",
+            "id": "request-product-error",
+            "ok": False,
+            "payload": {"ok": False, "result": None, "error": detail},
+            "error": "current product authority was revoked",
+            "code": "PERMISSION_DENIED",
+        }
+    ]
 
 
 @pytest.mark.asyncio

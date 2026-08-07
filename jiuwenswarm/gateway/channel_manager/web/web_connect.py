@@ -781,10 +781,16 @@ class WebChannel(BaseWsChannel):
             if not msg.ok:
                 # Prefer explicit error; fall back to message (e.g. command.goal
                 # unary failures put the human-readable text in payload.message).
-                error_text = res_payload.get("error") or res_payload.get("message")
+                error_value = res_payload.get("error")
+                error_detail = error_value if isinstance(error_value, dict) else {}
+                error_text = (
+                    error_detail.get("message")
+                    if error_detail
+                    else error_value or res_payload.get("message")
+                )
                 if isinstance(error_text, str) and error_text:
                     frame["error"] = error_text
-                code_text = res_payload.get("code")
+                code_text = error_detail.get("code") or res_payload.get("code")
                 if isinstance(code_text, str) and code_text:
                     frame["code"] = code_text
 

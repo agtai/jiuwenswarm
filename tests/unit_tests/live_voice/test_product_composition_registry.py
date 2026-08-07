@@ -12,9 +12,11 @@ from typing import Mapping, cast
 
 import pytest
 
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ErrorCode,
+    MAX_SAFE_INTEGER,
     ResultEnvelope,
     ScopeRef,
 )
@@ -25,6 +27,16 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     P3AuthenticatedComposition,
+    P3RouteResult,
+    PreparedP3MutationConfirmation,
+)
+from jiuwenswarm.server.live_voice.p3_confirmation import (
+    BoundedP3ConfirmationOwner,
+    P3ConfirmationBinding,
+    P3ConfirmationOwnerContext,
+)
+from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+    ProductP3ConfirmationForwarder,
 )
 from jiuwenswarm.server.live_voice.product_authority import (
     AuthorityResourceBinding,
@@ -69,12 +81,54 @@ def _resource(task_id: str) -> AuthorityResourceBinding:
 
 
 class _Facade:
+    def __init__(self) -> None:
+        self.calls = 0
+
     def supports_formal_live_voice(self) -> bool:
         return True
 
-    async def process_formal_live_voice_stream(self, _execution):
-        if False:
-            yield None
+    async def process_formal_live_voice_stream(self, execution):
+        self.calls += 1
+        yield AgentResponseChunk(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            payload={"event_type": "chat.final", "content": "formal result"},
+            is_complete=True,
+        )
+
+
+class _BlockingFacade(_Facade):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def process_formal_live_voice_stream(self, execution):
+        self.calls += 1
+        self.started.set()
+        await self.release.wait()
+        yield AgentResponseChunk(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            payload={"event_type": "chat.final", "content": "formal result"},
+            is_complete=True,
+        )
+
+
+class _HistoryWriter:
+    def __init__(self) -> None:
+        self.users: list[object] = []
+        self.assistants: list[object] = []
+
+    async def persist_user(self, commit, *, channel_id: str) -> bool:
+        self.users.append((commit, channel_id))
+        return True
+
+    async def persist_assistant(
+        self, intent, *, session_id: str, channel_id: str
+    ) -> tuple[bool, ...]:
+        self.assistants.append((intent, session_id, channel_id))
+        return tuple(True for _ in intent.contents)
 
 
 class _AgentManager:
@@ -251,6 +305,121 @@ class _P3Composition(P3AuthenticatedComposition):
         )
 
 
+class _MutationP3Composition(_P3Composition):
+    def __init__(
+        self,
+        project_dir: Path,
+        verifier: ProductP3ConfirmationForwarder,
+    ) -> None:
+        super().__init__(project_dir)
+        self.verifier = verifier
+        self.prepare_calls: list[tuple[str, dict[str, object]]] = []
+        self.mutation_calls: list[tuple[str, dict[str, object]]] = []
+        self.replay_authority_revoked = False
+
+    async def prepare_mutation_confirmation(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        session_id: str | None,
+    ) -> PreparedP3MutationConfirmation:
+        if params.get("auth_token") != "trusted-token":
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task authentication is required",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        if session_id != SCOPE.session_id or params.get("session_id") != session_id:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_SESSION_MISMATCH",
+                "formal task session does not match",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        self.prepare_calls.append((operation, dict(params)))
+        target = str(params["task_id"]) if operation == "task.cancel" else None
+        intent = hashlib.sha256(
+            repr(
+                (
+                    operation,
+                    params.get("command_id"),
+                    target,
+                    params.get("name"),
+                    params.get("instruction"),
+                    params.get("model_intent"),
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        return PreparedP3MutationConfirmation(
+            binding=P3ConfirmationBinding(
+                principal_id=SCOPE.subject_id,
+                scope=SCOPE,
+                operation=operation,
+                command_id=str(params["command_id"]),
+                target_task_id=target,
+                intent_fingerprint=intent,
+            ),
+            correlation_id=str(params["correlation_id"]),
+            issued_at=str(params["issued_at"]),
+            observed_at=NOW,
+        )
+
+    async def reauthorize_mutation_replay(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        session_id: str | None,
+        expected_binding: P3ConfirmationBinding,
+    ) -> None:
+        if self.replay_authority_revoked:
+            raise FormalTaskViolation(
+                "TASK_CONTEXT_PERMISSION_MISSING",
+                "formal task authority was revoked",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        prepared = await self.prepare_mutation_confirmation(
+            operation=operation,
+            params=params,
+            session_id=session_id,
+        )
+        if prepared.binding != expected_binding:
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_BINDING_MISMATCH",
+                "formal task replay binding changed",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    async def handle(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        prepared = await self.prepare_mutation_confirmation(
+            operation=operation,
+            params=params,
+            session_id=session_id,
+        )
+        self.verifier.verify_and_consume(
+            str(params["confirmation_id"]),
+            prepared.binding,
+            now=NOW,
+        )
+        self.mutation_calls.append((operation, dict(params)))
+        return P3RouteResult(
+            True,
+            {
+                "request_id": request_id,
+                "ok": True,
+                "result": {"accepted": True, "operation": operation},
+                "error": None,
+            },
+        )
+
+
 def _registry(
     tmp_path: Path,
     *,
@@ -302,7 +471,9 @@ def _progress_params(**changes: object) -> dict[str, object]:
     return params
 
 
-def _progress_ack_params(event: Mapping[str, object], **changes: object) -> dict[str, object]:
+def _progress_ack_params(
+    event: Mapping[str, object], **changes: object
+) -> dict[str, object]:
     source = cast(Mapping[str, object], event["source_event"])
     progress = cast(Mapping[str, object], event["progress_event"])
     params = _progress_params(
@@ -408,9 +579,7 @@ async def test_p2_authority_first_activation_replay_and_exact_close(
     assert _route(activated.payload, "p1.speech_media")["reason_id"] == (
         "MEDIA_LOGGER_ZERO_PERSISTENCE_UNPROVEN"
     )
-    assert _route(activated.payload, "p2.agent_interaction")["truth"] == (
-        "formal"
-    )
+    assert _route(activated.payload, "p2.agent_interaction")["truth"] == ("formal")
     assert _route(activated.payload, "p3.control")["reason_id"] == (
         "P3_CONFIRMATION_ISSUER_UNAVAILABLE"
     )
@@ -645,9 +814,7 @@ async def test_text_progress_reaches_web_sink_and_preserves_generation_cleanup(
     assert event_payload["correlation_id"] == "correlation-task-1"
     assert event_payload["generation"] == 1
     assert _route(activated.payload, "p3.progress")["truth"] == "formal"
-    assert cast(dict, activated.payload["result"])["voice_progress"] == (
-        "unavailable"
-    )
+    assert cast(dict, activated.payload["result"])["voice_progress"] == ("unavailable")
 
     denied_replay = await registry.handle_p3_progress_activate(
         params=_progress_params(auth_token="wrong-token"),
@@ -1005,9 +1172,7 @@ async def test_progress_generation_admission_is_bounded_without_unsafe_eviction(
         channel_id="web",
     )
     assert unauthorized.ok is False
-    assert any(
-        key[2] == "web-surface-1" for key in registry._progress_generations
-    )
+    assert any(key[2] == "web-surface-1" for key in registry._progress_generations)
     assert any(key[2] == "web-surface-1" for key in registry._closed_progress_routes)
     admitted = await registry.handle_p3_progress_activate(
         params=third_params,
@@ -1019,9 +1184,7 @@ async def test_progress_generation_admission_is_bounded_without_unsafe_eviction(
     assert acknowledged.ok is True
     assert admitted.ok is True
     assert len(registry._progress_generations) == 2
-    assert all(
-        key[2] != "web-surface-1" for key in registry._progress_generations
-    )
+    assert all(key[2] != "web-surface-1" for key in registry._progress_generations)
     assert any(key[2] == "web-surface-2" for key in registry._progress_routes)
     assert any(key[2] == "web-surface-3" for key in registry._progress_routes)
     await registry.close_active_routes()
@@ -1164,9 +1327,7 @@ async def test_disconnect_cleanup_closes_p2_and_progress_without_stopping_regist
     assert manager.unpins == 1
 
     p2_reactivated = await registry.handle_p2_activate(
-        params=_p2_params(
-            activation_id="activation-2", activation_generation=2
-        ),
+        params=_p2_params(activation_id="activation-2", activation_generation=2),
         request_id="request-p2-after-disconnect",
         session_id="session-product",
         channel_id="web",
@@ -1379,3 +1540,1150 @@ async def test_segment_flags_fail_before_authority_or_downstream(
     assert p3.subscription_calls == []
     assert manager.get_calls == []
     assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_p2_text_submit_notification_and_exact_presentation_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+    submit_params = _p2_params(
+        commit_id="commit-1",
+        turn_id="turn-1",
+        response_id="response-1",
+        committed_at=NOW,
+        text="hello product agent",
+    )
+
+    wrong_generation = await registry.handle_p2_submit(
+        params={**submit_params, "activation_generation": 2},
+        request_id="request-submit-wrong-generation",
+        session_id="session-product",
+        channel_id="web",
+    )
+    submitted = await registry.handle_p2_submit(
+        params=submit_params,
+        request_id="request-submit-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    replayed = await registry.handle_p2_submit(
+        params=submit_params,
+        request_id="request-submit-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert wrong_generation.ok is False
+    assert cast(dict, wrong_generation.payload["error"])["reason"] == (
+        "ACTIVATION_BINDING_MISMATCH"
+    )
+    assert submitted.ok is True
+    assert replayed.payload == submitted.payload
+    assert manager.agent.calls == 1
+
+    presentation: dict[str, object] | None = None
+    response: dict[str, object] | None = None
+    presentation_notification_request_id: str | None = None
+    for index in range(4):
+        notification_request_id = f"request-notification-{index}"
+        polled = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=index + 1),
+                request_id=notification_request_id,
+                session_id="session-product",
+            ),
+            timeout=1,
+        )
+        assert polled.ok is True
+        notification = cast(dict[str, object], polled.payload["result"])
+        candidate = notification["presentation_unit"]
+        if isinstance(candidate, dict):
+            presentation = cast(dict[str, object], candidate)
+            response = cast(dict[str, object], notification["response"])
+            presentation_notification_request_id = notification_request_id
+            break
+    assert presentation is not None
+    assert response is not None
+    assert presentation_notification_request_id is not None
+
+    ack_params = _p2_params(
+        response_id=response["response_id"],
+        response_generation=response["response_generation"],
+        surface=presentation["surface"],
+        unit_id=presentation["unit_id"],
+        contiguous_cursor=presentation["seq"],
+        presented_at=NOW,
+    )
+    acknowledged = await registry.handle_p2_presentation_ack(
+        params=ack_params,
+        request_id="request-ack-1",
+        session_id="session-product",
+    )
+    ack_replay = await registry.handle_p2_presentation_ack(
+        params=ack_params,
+        request_id="request-ack-1",
+        session_id="session-product",
+    )
+
+    assert acknowledged.ok is True
+    assert ack_replay.payload == acknowledged.payload
+    assert cast(dict, acknowledged.payload["result"])["accepted"] is True
+    assert len(history.assistants) == 1
+
+    await registry.close_active_routes()
+    submit_after_disconnect = await registry.handle_p2_submit(
+        params=submit_params,
+        request_id="request-submit-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    notification_after_disconnect = await registry.handle_p2_notification_next(
+        params=_p2_params(
+            notification_sequence=int(
+                presentation_notification_request_id.rpartition("-")[2]
+            )
+            + 1
+        ),
+        request_id=presentation_notification_request_id,
+        session_id="session-product",
+    )
+    ack_after_disconnect = await registry.handle_p2_presentation_ack(
+        params=ack_params,
+        request_id="request-ack-1",
+        session_id="session-product",
+    )
+    submit_conflict_after_disconnect = await registry.handle_p2_submit(
+        params={**submit_params, "commit_id": "commit-conflict"},
+        request_id="request-submit-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    new_submit_after_disconnect = await registry.handle_p2_submit(
+        params={**submit_params, "commit_id": "commit-new"},
+        request_id="request-submit-new",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert submit_after_disconnect.payload == submitted.payload
+    assert notification_after_disconnect.payload == polled.payload
+    assert ack_after_disconnect.payload == acknowledged.payload
+    assert submit_conflict_after_disconnect.ok is False
+    assert (
+        cast(dict, submit_conflict_after_disconnect.payload["error"])["reason"]
+        == "PRODUCT_REQUEST_ID_CONFLICT"
+    )
+    assert new_submit_after_disconnect.ok is False
+    assert cast(dict, new_submit_after_disconnect.payload["error"])["reason"] == (
+        "PRODUCT_P2_ROUTE_NOT_FOUND"
+    )
+    assert manager.agent.calls == 1
+    assert len(history.assistants) == 1
+
+
+@pytest.mark.asyncio
+async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate-cancel",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submit_params = _p2_params(
+        commit_id="commit-cancel",
+        turn_id="turn-cancel",
+        response_id="response-cancel",
+        committed_at=NOW,
+        text="retained after caller cancellation",
+    )
+
+    caller = asyncio.create_task(
+        registry.handle_p2_submit(
+            params=submit_params,
+            request_id="request-submit-cancel",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    blocking.release.set()
+    retained = registry._p2_submit_operations["request-submit-cancel"]
+    first = await asyncio.wait_for(asyncio.shield(retained.task), timeout=1)
+    try:
+        await registry.close_active_routes()
+    except RuntimeError:
+        # The bounded disconnect close may report retained cleanup pending;
+        # exact operation replay must remain available in either state.
+        pass
+
+    replay = await registry.handle_p2_submit(
+        params=submit_params,
+        request_id="request-submit-cancel",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert first.ok is True
+    assert replay.payload == first.payload
+    assert blocking.calls == 1
+    for _ in range(3):
+        try:
+            await registry.close_active_routes()
+            break
+        except RuntimeError:
+            await asyncio.sleep(0)
+
+
+def _mutation_params(**changes: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "auth_token": "trusted-token",
+        "session_id": "session-product",
+        "operation": "task.cancel",
+        "command_id": "command-cancel-1",
+        "issued_at": NOW,
+        "correlation_id": "correlation-cancel-1",
+        "task_id": "task-1",
+    }
+    params.update(changes)
+    return params
+
+
+@pytest.mark.asyncio
+async def test_p3_confirmation_issue_and_mutation_use_current_owner_permit(
+    tmp_path: Path,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=False,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    issue_params = _mutation_params()
+
+    issued = await registry.handle_p3_confirmation_issue(
+        params=issue_params,
+        request_id="request-confirmation-1",
+        session_id="session-product",
+    )
+    replayed_issue = await registry.handle_p3_confirmation_issue(
+        params=issue_params,
+        request_id="request-confirmation-1",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+    confirmation_id = cast(str, receipt["confirmation_id"])
+    mutation_params = _mutation_params(confirmation_id=confirmation_id)
+
+    prepared = await composition.prepare_mutation_confirmation(
+        operation="task.cancel",
+        params={
+            key: value for key, value in mutation_params.items() if key != "operation"
+        },
+        session_id="session-product",
+    )
+    with pytest.raises(FormalTaskViolation) as direct:
+        forwarder.verify_and_consume(confirmation_id, prepared.binding, now=NOW)
+
+    mutated = await registry.handle_p3_mutation(
+        params=mutation_params,
+        request_id="request-mutation-1",
+        session_id="session-product",
+    )
+    replayed_mutation = await registry.handle_p3_mutation(
+        params=mutation_params,
+        request_id="request-mutation-1",
+        session_id="session-product",
+    )
+
+    assert issued.ok is True
+    assert replayed_issue.payload == issued.payload
+    assert receipt["status"] == "confirmation_issued"
+    assert direct.value.reason == "P3_CONFIRMATION_FORWARDING_REQUIRED"
+    assert mutated.ok is True
+    assert replayed_mutation.payload == mutated.payload
+    assert len(composition.mutation_calls) == 1
+    assert _route(mutated.payload, "authority")["truth"] == "formal"
+    assert _route(mutated.payload, "p3.control")["truth"] == "formal"
+
+
+@pytest.mark.asyncio
+async def test_p3_confirmation_owner_mismatch_and_request_conflict_fail_closed(
+    tmp_path: Path,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    issue_params = _mutation_params()
+    issued = await registry.handle_p3_confirmation_issue(
+        params=issue_params,
+        request_id="request-confirmation-1",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+
+    conflict = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(command_id="command-other"),
+        request_id="request-confirmation-1",
+        session_id="session-product",
+    )
+    mismatch = await registry.handle_p3_mutation(
+        params=_mutation_params(
+            confirmation_id=receipt["confirmation_id"],
+            correlation_id="correlation-other",
+        ),
+        request_id="request-mutation-mismatch",
+        session_id="session-product",
+    )
+
+    assert conflict.ok is False
+    assert cast(dict, conflict.payload["error"])["reason"] == (
+        "P3_CONFIRMATION_BINDING_MISMATCH"
+    )
+    assert mismatch.ok is False
+    assert cast(dict, mismatch.payload["error"])["reason"] == (
+        "P3_CONFIRMATION_BINDING_MISMATCH"
+    )
+
+
+@pytest.mark.asyncio
+async def test_denied_p3_requests_do_not_reserve_replay_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
+
+    denied_issue = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(auth_token="invalid-token"),
+        request_id="request-confirmation-denied-capacity",
+        session_id="session-product",
+    )
+    issued = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(),
+        request_id="request-confirmation-valid-capacity",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+
+    denied_mutation = await registry.handle_p3_mutation(
+        params=_mutation_params(
+            auth_token="invalid-token",
+            confirmation_id=receipt["confirmation_id"],
+        ),
+        request_id="request-mutation-denied-capacity",
+        session_id="session-product",
+    )
+    mutated = await registry.handle_p3_mutation(
+        params=_mutation_params(confirmation_id=receipt["confirmation_id"]),
+        request_id="request-mutation-valid-capacity",
+        session_id="session-product",
+    )
+
+    assert denied_issue.ok is False
+    assert cast(dict, denied_issue.payload["error"])["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert issued.ok is True
+    assert len(registry._p3_issue_operations) == 1
+    assert denied_mutation.ok is False
+    assert cast(dict, denied_mutation.payload["error"])["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert mutated.ok is True
+    assert len(registry._p3_mutation_operations) == 1
+    assert len(composition.mutation_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_retained_p3_results_require_current_authority(
+    tmp_path: Path,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    issue_params = _mutation_params()
+    issued = await registry.handle_p3_confirmation_issue(
+        params=issue_params,
+        request_id="request-confirmation-revoked",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+    mutation_params = _mutation_params(confirmation_id=receipt["confirmation_id"])
+    mutated = await registry.handle_p3_mutation(
+        params=mutation_params,
+        request_id="request-mutation-revoked",
+        session_id="session-product",
+    )
+
+    composition.replay_authority_revoked = True
+    denied_issue_replay = await registry.handle_p3_confirmation_issue(
+        params=issue_params,
+        request_id="request-confirmation-revoked",
+        session_id="session-product",
+    )
+    denied_mutation_replay = await registry.handle_p3_mutation(
+        params=mutation_params,
+        request_id="request-mutation-revoked",
+        session_id="session-product",
+    )
+
+    assert issued.ok is True
+    assert mutated.ok is True
+    assert denied_issue_replay.ok is False
+    assert cast(dict, denied_issue_replay.payload["error"])["reason"] == (
+        "TASK_CONTEXT_PERMISSION_MISSING"
+    )
+    assert denied_mutation_replay.ok is False
+    assert cast(dict, denied_mutation_replay.payload["error"])["reason"] == (
+        "TASK_CONTEXT_PERMISSION_MISSING"
+    )
+    assert len(composition.mutation_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_product_operation_capacity_recovers_with_fail_closed_old_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-capacity",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    first_params = _p2_params(
+        commit_id="commit-capacity-1",
+        turn_id="turn-capacity-1",
+        response_id="response-capacity-1",
+        committed_at=NOW,
+        text="first capacity turn",
+    )
+    second_params = _p2_params(
+        commit_id="commit-capacity-2",
+        turn_id="turn-capacity-2",
+        response_id="response-capacity-2",
+        committed_at=NOW,
+        text="second capacity turn",
+    )
+    first = await registry.handle_p2_submit(
+        params=first_params,
+        request_id="request-submit-capacity-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    second = await registry.handle_p2_submit(
+        params=second_params,
+        request_id="request-submit-capacity-2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    expired = await registry.handle_p2_submit(
+        params=first_params,
+        request_id="request-submit-capacity-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert first.ok is True
+    assert second.ok is True
+    assert expired.ok is False
+    assert cast(dict, expired.payload["error"])["reason"] == (
+        "PRODUCT_OPERATION_REPLAY_EXPIRED"
+    )
+    assert manager.agent.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_notification_polls_require_exact_serial_sequence(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-notification-sequence",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+
+    gap = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=2),
+        request_id="request-notification-gap",
+        session_id="session-product",
+    )
+    first_waiter = asyncio.create_task(
+        registry.handle_p2_notification_next(
+            params=_p2_params(notification_sequence=1),
+            request_id="request-notification-sequence-1",
+            session_id="session-product",
+        )
+    )
+    for _ in range(20):
+        if "request-notification-sequence-1" in registry._p2_notification_operations:
+            break
+        await asyncio.sleep(0)
+    concurrent = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=2),
+        request_id="request-notification-sequence-2",
+        session_id="session-product",
+    )
+    reordered = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=1),
+        request_id="request-notification-reordered",
+        session_id="session-product",
+    )
+
+    assert gap.ok is False
+    assert cast(dict, gap.payload["error"])["reason"] == (
+        "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH"
+    )
+    assert concurrent.ok is False
+    assert cast(dict, concurrent.payload["error"])["reason"] == (
+        "PRODUCT_NOTIFICATION_POLL_PENDING"
+    )
+    assert reordered.ok is False
+    assert cast(dict, reordered.payload["error"])["reason"] == (
+        "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH"
+    )
+    assert len(registry._p2_notification_operations) == 1
+
+    await registry.close_active_routes()
+    await asyncio.wait_for(first_waiter, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_p2_activation_generation_never_resurrects_an_older_id(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    first_params = _p2_params(activation_id="activation-a", activation_generation=1)
+    second_params = _p2_params(activation_id="activation-b", activation_generation=2)
+    assert (
+        await registry.handle_p2_activate(
+            params=first_params,
+            request_id="request-activate-a1",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok
+    assert (
+        await registry.handle_p2_close(
+            params=first_params,
+            request_id="request-close-a1",
+            session_id="session-product",
+        )
+    ).ok
+    assert (
+        await registry.handle_p2_activate(
+            params=second_params,
+            request_id="request-activate-b2",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok
+    assert (
+        await registry.handle_p2_close(
+            params=second_params,
+            request_id="request-close-b2",
+            session_id="session-product",
+        )
+    ).ok
+    allocations_before = len(manager.get_calls)
+
+    stale = await registry.handle_p2_activate(
+        params=first_params,
+        request_id="request-delayed-activate-a1",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert stale.ok is False
+    assert cast(dict, stale.payload["error"])["reason"] == (
+        "ACTIVATION_GENERATION_STALE"
+    )
+    assert len(manager.get_calls) == allocations_before
+    assert registry._p2_routes == {}
+
+
+@pytest.mark.asyncio
+async def test_p2_generation_fence_survives_exact_tombstone_eviction(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    first_params: dict[str, object] | None = None
+    for index in range(registry._CLOSED_ROUTE_CAPACITY + 1):
+        params = _p2_params(
+            correlation_id=f"correlation-capacity-{index}",
+            interaction_id=f"interaction-capacity-{index}",
+            activation_id=f"activation-capacity-{index}",
+            activation_generation=1,
+        )
+        if first_params is None:
+            first_params = params
+        activated = await registry.handle_p2_activate(
+            params=params,
+            request_id=f"request-activate-capacity-{index}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        closed = await registry.handle_p2_close(
+            params=params,
+            request_id=f"request-close-capacity-{index}",
+            session_id="session-product",
+        )
+        assert activated.ok is True
+        assert closed.ok is True
+
+    assert first_params is not None
+    assert (
+        ("session-product", "interaction-capacity-0")
+        not in registry._closed_p2_routes
+    )
+    allocations_before = len(manager.get_calls)
+    stale = await registry.handle_p2_activate(
+        params=first_params,
+        request_id="request-delayed-after-tombstone-eviction",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert stale.ok is False
+    assert cast(dict, stale.payload["error"])["reason"] == (
+        "ACTIVATION_GENERATION_STALE"
+    )
+    assert len(manager.get_calls) == allocations_before
+
+
+@pytest.mark.asyncio
+async def test_p2_oversized_generation_allocates_nothing(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+
+    result = await registry.handle_p2_activate(
+        params=_p2_params(activation_generation=2**64),
+        request_id="request-oversized-generation",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert manager.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_p3_issue_preflight_cannot_admit_after_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = composition.prepare_mutation_confirmation
+
+    async def blocked_prepare(**kwargs: object) -> PreparedP3MutationConfirmation:
+        entered.set()
+        await release.wait()
+        return await original(**kwargs)
+
+    monkeypatch.setattr(composition, "prepare_mutation_confirmation", blocked_prepare)
+    issue_task = asyncio.create_task(
+        registry.handle_p3_confirmation_issue(
+            params=_mutation_params(),
+            request_id="request-issue-preflight-stop",
+            session_id="session-product",
+        )
+    )
+    await entered.wait()
+    await registry.stop()
+    release.set()
+    result = await issue_task
+
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "PRODUCT_COMPOSITION_STOPPED"
+    )
+    assert registry._p3_issue_operations == {}
+    assert composition.mutation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_p3_mutation_preflight_cannot_admit_or_consume_after_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    issued = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(),
+        request_id="request-mutation-preflight-issue",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+    mutation_params = _mutation_params(confirmation_id=receipt["confirmation_id"])
+    prepared = await composition.prepare_mutation_confirmation(
+        operation="task.cancel",
+        params=mutation_params,
+        session_id="session-product",
+    )
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original = composition.prepare_mutation_confirmation
+
+    async def blocked_prepare(**kwargs: object) -> PreparedP3MutationConfirmation:
+        entered.set()
+        await release.wait()
+        return await original(**kwargs)
+
+    monkeypatch.setattr(composition, "prepare_mutation_confirmation", blocked_prepare)
+    mutation_task = asyncio.create_task(
+        registry.handle_p3_mutation(
+            params=mutation_params,
+            request_id="request-mutation-preflight-stop",
+            session_id="session-product",
+        )
+    )
+    await entered.wait()
+    await registry.stop()
+    release.set()
+    result = await mutation_task
+
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "PRODUCT_COMPOSITION_STOPPED"
+    )
+    assert registry._p3_mutation_operations == {}
+    assert composition.mutation_calls == []
+    owner.validate_for_forwarding(
+        str(receipt["confirmation_id"]),
+        prepared.binding,
+        P3ConfirmationOwnerContext(
+            session_id="session-product",
+            correlation_id=prepared.correlation_id,
+            owner_generation=registry._p3_confirmation_generation,
+        ),
+        now=prepared.observed_at,
+    )
+    assert registry._p2_routes == {}
+
+
+@pytest.mark.asyncio
+async def test_p2_oversized_notification_cursor_allocates_no_business_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-oversized-operation-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+
+    notification = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=MAX_SAFE_INTEGER + 1),
+        request_id="request-oversized-notification",
+        session_id="session-product",
+    )
+
+    assert notification.ok is False
+    assert cast(dict, notification.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert registry._p2_notification_operations == {}
+    assert manager.agent.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_generation", "contiguous_cursor"),
+    (
+        (MAX_SAFE_INTEGER + 1, 1),
+        (1, MAX_SAFE_INTEGER + 1),
+    ),
+)
+async def test_p2_oversized_ack_cursor_allocates_no_business_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    response_generation: int,
+    contiguous_cursor: int,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-oversized-ack-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    history = _HistoryWriter()
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    route.activation_lease._runtime._history_writer = history
+
+    acknowledgement = await registry.handle_p2_presentation_ack(
+        params=_p2_params(
+            response_id="response-oversized",
+            response_generation=response_generation,
+            surface="text",
+            unit_id="unit-oversized",
+            contiguous_cursor=contiguous_cursor,
+            presented_at=NOW,
+        ),
+        request_id="request-oversized-ack",
+        session_id="session-product",
+    )
+
+    assert acknowledgement.ok is False
+    assert cast(dict, acknowledgement.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert registry._p2_ack_operations == {}
+    assert manager.agent.calls == 0
+    assert history.users == []
+    assert history.assistants == []
+
+
+@pytest.mark.asyncio
+async def test_p3_capacity_recovery_rejects_evicted_exact_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
+    issue_one_params = _mutation_params()
+    issue_two_params = _mutation_params(
+        command_id="command-cancel-2",
+        correlation_id="correlation-cancel-2",
+        task_id="task-2",
+    )
+    issue_one = await registry.handle_p3_confirmation_issue(
+        params=issue_one_params,
+        request_id="request-confirmation-capacity-1",
+        session_id="session-product",
+    )
+    issue_two = await registry.handle_p3_confirmation_issue(
+        params=issue_two_params,
+        request_id="request-confirmation-capacity-2",
+        session_id="session-product",
+    )
+    expired_issue = await registry.handle_p3_confirmation_issue(
+        params=issue_one_params,
+        request_id="request-confirmation-capacity-1",
+        session_id="session-product",
+    )
+    receipt_one = cast(dict[str, object], issue_one.payload["result"])
+    receipt_two = cast(dict[str, object], issue_two.payload["result"])
+    mutation_one_params = _mutation_params(
+        confirmation_id=receipt_one["confirmation_id"]
+    )
+    mutation_two_params = _mutation_params(
+        command_id="command-cancel-2",
+        correlation_id="correlation-cancel-2",
+        task_id="task-2",
+        confirmation_id=receipt_two["confirmation_id"],
+    )
+    mutation_one = await registry.handle_p3_mutation(
+        params=mutation_one_params,
+        request_id="request-mutation-capacity-1",
+        session_id="session-product",
+    )
+    mutation_two = await registry.handle_p3_mutation(
+        params=mutation_two_params,
+        request_id="request-mutation-capacity-2",
+        session_id="session-product",
+    )
+    expired_mutation = await registry.handle_p3_mutation(
+        params=mutation_one_params,
+        request_id="request-mutation-capacity-1",
+        session_id="session-product",
+    )
+
+    assert issue_one.ok is True
+    assert issue_two.ok is True
+    assert expired_issue.ok is False
+    assert cast(dict, expired_issue.payload["error"])["reason"] == (
+        "PRODUCT_OPERATION_REPLAY_EXPIRED"
+    )
+    assert mutation_one.ok is True
+    assert mutation_two.ok is True
+    assert expired_mutation.ok is False
+    assert cast(dict, expired_mutation.payload["error"])["reason"] == (
+        "PRODUCT_OPERATION_REPLAY_EXPIRED"
+    )
+    assert len(composition.mutation_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_p3_conflict_is_not_revealed_before_reauthentication(
+    tmp_path: Path,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    issued = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(),
+        request_id="request-private-conflict",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+    mutated = await registry.handle_p3_mutation(
+        params=_mutation_params(confirmation_id=receipt["confirmation_id"]),
+        request_id="request-private-mutation-conflict",
+        session_id="session-product",
+    )
+
+    denied_issue = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(
+            auth_token="invalid-token", command_id="changed-command"
+        ),
+        request_id="request-private-conflict",
+        session_id="session-product",
+    )
+    denied_mutation = await registry.handle_p3_mutation(
+        params=_mutation_params(
+            auth_token="invalid-token",
+            confirmation_id=receipt["confirmation_id"],
+            task_id="changed-task",
+        ),
+        request_id="request-private-mutation-conflict",
+        session_id="session-product",
+    )
+
+    assert issued.ok is True
+    assert mutated.ok is True
+    assert cast(dict, denied_issue.payload["error"])["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert cast(dict, denied_mutation.payload["error"])["reason"] == (
+        "FORMAL_TASK_AUTHENTICATION_REQUIRED"
+    )
+    assert len(composition.mutation_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_p3_product_mutation_preserves_formal_failure_details(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, True),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    issued = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(),
+        request_id="request-confirmation-denied",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+
+    async def deny_mutation(**_kwargs: object) -> P3RouteResult:
+        return P3RouteResult(
+            False,
+            {
+                "ok": False,
+                "result": None,
+                "error": {
+                    "code": ErrorCode.PERMISSION_DENIED.value,
+                    "reason": "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+                    "message": "formal task authority changed",
+                },
+            },
+        )
+
+    monkeypatch.setattr(composition, "handle", deny_mutation)
+    result = await registry.handle_p3_mutation(
+        params=_mutation_params(confirmation_id=receipt["confirmation_id"]),
+        request_id="request-mutation-denied",
+        session_id="session-product",
+    )
+
+    assert result.ok is False
+    assert result.payload["error"] == {
+        "code": ErrorCode.PERMISSION_DENIED.value,
+        "reason": "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+        "message": "formal task authority changed",
+    }
+    assert composition.mutation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_p3_mutation_flag_off_has_zero_composition_effect(tmp_path: Path) -> None:
+    composition = _P3Composition(tmp_path)
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, False),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=cast(object, lambda _message: None),
+    )
+
+    result = await registry.handle_p3_confirmation_issue(
+        params=_mutation_params(),
+        request_id="request-confirmation-off",
+        session_id="session-product",
+    )
+
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "P3_CONFIRMATION_ISSUER_UNAVAILABLE"
+    )
+    assert composition.authority_calls == []

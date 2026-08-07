@@ -26,13 +26,24 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
-from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode, ScopeRef
+from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    ErrorCode,
+    ScopeRef,
+    TurnCommit,
+)
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FormalContextSnapshot,
+)
 
 from .agent_conversation_runtime import (
+    AgentConversationHandle,
+    AgentConversationNotification,
     AgentConversationShutdownResult,
     AgentConversationShutdownStatus,
+    PresentationAckResult,
 )
 from .interaction_engine import InteractionAction, InteractionEnginePort
+from .presentation_ledger import PresentationAck
 from .product_authority import (
     AuthorityRouteContext,
     P2AuthenticatedContext,
@@ -532,6 +543,7 @@ class P2ActivationLease:
         self._clock = clock
         self._state = P2LeaseState.OPEN
         self._state_lock = threading.RLock()
+        self._operation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._close_coordinator: asyncio.Task[P2LeaseCloseResult] | None = None
 
@@ -571,6 +583,94 @@ class P2ActivationLease:
                 accepted=accepted,
                 cancellation_scope=_CANCELLATION_SCOPES.get(retained.operation),
             )
+
+    async def submit_committed_turn(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        context: FormalContextSnapshot,
+        channel_id: str = "web",
+    ) -> AgentConversationHandle:
+        """Forward one exact committed turn through the retained runtime owner."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            submit = getattr(self._runtime, "submit_committed_turn", None)
+            if not callable(submit):
+                raise _violation(
+                    "PRODUCT_TURN_SUBMISSION_UNAVAILABLE",
+                    "retained runtime has no product TurnCommit owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await submit(
+                request_id=request_id,
+                response_id=response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+                context=context,
+                channel_id=channel_id,
+            )
+            if not isinstance(outcome, AgentConversationHandle):
+                raise _violation(
+                    "PRODUCT_TURN_SUBMISSION_UNAVAILABLE",
+                    "retained runtime returned no canonical Agent handle",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
+    async def next_notification(
+        self, binding: P2InteractionBinding
+    ) -> AgentConversationNotification:
+        """Read one notification only for the current exact activation owner."""
+
+        with self._state_lock:
+            self._require_open_exact_binding(binding)
+        read = getattr(self._runtime, "next_notification", None)
+        if not callable(read):
+            raise _violation(
+                "PRODUCT_NOTIFICATION_UNAVAILABLE",
+                "retained runtime has no product notification owner",
+                ErrorCode.UNAVAILABLE,
+            )
+        notification = await read()
+        if not isinstance(notification, AgentConversationNotification):
+            raise _violation(
+                "PRODUCT_NOTIFICATION_UNAVAILABLE",
+                "retained runtime returned no canonical notification",
+                ErrorCode.UNAVAILABLE,
+            )
+        return notification
+
+    async def acknowledge_presentation(
+        self,
+        binding: P2InteractionBinding,
+        ack: PresentationAck,
+    ) -> PresentationAckResult:
+        """Forward an exact presentation ACK to the retained history owner."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            acknowledge = getattr(self._runtime, "acknowledge_presentation", None)
+            if not callable(acknowledge):
+                raise _violation(
+                    "PRODUCT_PRESENTATION_ACK_UNAVAILABLE",
+                    "retained runtime has no presentation ACK owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await acknowledge(ack)
+            if not isinstance(outcome, PresentationAckResult):
+                raise _violation(
+                    "PRODUCT_PRESENTATION_ACK_UNAVAILABLE",
+                    "retained runtime returned no canonical ACK outcome",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
 
     async def close(
         self, binding: P2InteractionBinding, *, timeout_seconds: float
@@ -638,24 +738,25 @@ class P2ActivationLease:
 
     async def _run_close(self) -> P2LeaseCloseResult:
         try:
-            while True:
-                result = await self._runtime.close(
-                    timeout_seconds=self._close_poll_seconds
-                )
-                if result.status is AgentConversationShutdownStatus.PENDING:
-                    await asyncio.sleep(self._close_poll_seconds)
-                    continue
-                if result.status is AgentConversationShutdownStatus.CLOSED:
-                    with self._state_lock:
-                        self._state = P2LeaseState.CLOSED
-                    return P2LeaseCloseResult(
-                        P2LeaseCloseStatus.CLOSED, "activation_teardown_complete"
+            async with self._operation_lock:
+                while True:
+                    result = await self._runtime.close(
+                        timeout_seconds=self._close_poll_seconds
                     )
-                with self._state_lock:
-                    self._state = P2LeaseState.FAILED
-                return P2LeaseCloseResult(
-                    P2LeaseCloseStatus.FAILED, "runtime_teardown_failed"
-                )
+                    if result.status is AgentConversationShutdownStatus.PENDING:
+                        await asyncio.sleep(self._close_poll_seconds)
+                        continue
+                    if result.status is AgentConversationShutdownStatus.CLOSED:
+                        with self._state_lock:
+                            self._state = P2LeaseState.CLOSED
+                        return P2LeaseCloseResult(
+                            P2LeaseCloseStatus.CLOSED, "activation_teardown_complete"
+                        )
+                    with self._state_lock:
+                        self._state = P2LeaseState.FAILED
+                    return P2LeaseCloseResult(
+                        P2LeaseCloseStatus.FAILED, "runtime_teardown_failed"
+                    )
         except BaseException:  # noqa: BLE001 - retain safe, content-free truth
             with self._state_lock:
                 self._state = P2LeaseState.FAILED

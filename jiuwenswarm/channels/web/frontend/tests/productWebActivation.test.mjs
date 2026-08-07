@@ -4,12 +4,165 @@ import test from 'node:test';
 import {
   PRODUCT_P2_ACTIVATE_METHOD,
   PRODUCT_P2_CLOSE_METHOD,
+  PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+  PRODUCT_P2_PRESENTATION_ACK_METHOD,
+  PRODUCT_P2_SUBMIT_METHOD,
   PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
   PRODUCT_P3_PROGRESS_CLOSE_METHOD,
   PRODUCT_P3_TASK_LIST_METHOD,
+  PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
+  PRODUCT_P3_MUTATE_METHOD,
   ProductWebP2ActivationOwner,
+  ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
+  pollProductP2RouteWithRecovery,
+  retryRetainedProductOperation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
+
+test('retained product retries reuse the exact operation after transport loss', async () => {
+  let calls = 0;
+  const result = await retryRetainedProductOperation({
+    operation: async () => {
+      calls += 1;
+      if (calls < 3) {
+        const error = new Error('response lost');
+        error.code = 'REQUEST_TIMEOUT';
+        error.retriable = true;
+        throw error;
+      }
+      return 'replayed';
+    },
+    is_current: () => true,
+    retry_delays_ms: [0, 0],
+  });
+
+  assert.equal(result, 'replayed');
+  assert.equal(calls, 3);
+});
+
+test('retained product retries stop on authoritative failure or stale ownership', async () => {
+  let authoritativeCalls = 0;
+  await assert.rejects(
+    retryRetainedProductOperation({
+      operation: async () => {
+        authoritativeCalls += 1;
+        throw new Error('denied');
+      },
+      is_current: () => true,
+      retry_delays_ms: [0, 0],
+    }),
+    /denied/
+  );
+
+  let current = true;
+  let transportCalls = 0;
+  await assert.rejects(
+    retryRetainedProductOperation({
+      operation: async () => {
+        transportCalls += 1;
+        current = false;
+        const error = new Error('response lost');
+        error.code = 'REQUEST_TIMEOUT';
+        error.retriable = true;
+        throw error;
+      },
+      is_current: () => current,
+      retry_delays_ms: [0, 0],
+    }),
+    /response lost/
+  );
+
+  assert.equal(authoritativeCalls, 1);
+  assert.equal(transportCalls, 1);
+});
+
+test('closed P2 notification settles definitively so reconnect can reactivate', async () => {
+  let calls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      calls += 1;
+      const error = webError('notification stream closed', 'UNAVAILABLE');
+      error.reason = 'NOTIFICATION_STREAM_CLOSED';
+      throw error;
+    },
+  });
+  await owner.start(binding);
+
+  await assert.rejects(
+    retryRetainedProductOperation({
+      operation: () => owner.nextNotification(),
+      is_current: () => true,
+      retry_delays_ms: [0, 0],
+    }),
+    /notification stream closed/
+  );
+
+  assert.equal(calls, 1);
+  assert.equal(owner.hasPendingNotification(), false);
+});
+
+test('panel recovery coordinator closes an idle poll before activating the next generation', async () => {
+  const calls = [];
+  const request = async (method, params, requestId) => {
+    calls.push([method, params, requestId]);
+    if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active', params);
+    if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
+      const error = webError('notification stream closed', 'UNAVAILABLE');
+      error.reason = 'NOTIFICATION_STREAM_CLOSED';
+      throw error;
+    }
+    if (method === PRODUCT_P2_CLOSE_METHOD) return response('closed', params);
+    throw new Error(`forbidden product effect: ${method}`);
+  };
+  const firstBinding = { ...binding, activation_id: 'activation-g1', activation_generation: 1 };
+  const secondBinding = { ...binding, activation_id: 'activation-g2', activation_generation: 2 };
+  const first = new ProductWebP2ActivationOwner({ enabled: true, request });
+  await first.start(firstBinding);
+  let current = first;
+
+  const outcome = await pollProductP2RouteWithRecovery({
+    owner: first,
+    is_current: () => current === first,
+    settle_retained_operations: async () => {
+      if (first.hasPendingNotification()) await first.nextNotification();
+    },
+    can_activate_successor: () => current === first,
+    activate_successor: async () => {
+      const second = new ProductWebP2ActivationOwner({ enabled: true, request });
+      current = second;
+      await second.start(secondBinding);
+      return second;
+    },
+  });
+
+  assert.equal(outcome.kind, 'recovered');
+  assert.equal(outcome.successor, current);
+  assert.deepEqual(
+    calls.map(([method, params]) => [method, params.activation_generation]),
+    [
+      [PRODUCT_P2_ACTIVATE_METHOD, 1],
+      [PRODUCT_P2_NOTIFICATION_NEXT_METHOD, 1],
+      [PRODUCT_P2_CLOSE_METHOD, 1],
+      [PRODUCT_P2_ACTIVATE_METHOD, 2],
+    ]
+  );
+  const notificationCalls = calls.filter(
+    ([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD
+  );
+  assert.equal(notificationCalls.length, 1);
+  assert.match(notificationCalls[0][2], /^live-voice-p2-notification-/);
+  assert.equal(new Set(notificationCalls.map(([, , requestId]) => requestId)).size, 1);
+  for (const forbidden of [
+    PRODUCT_P2_SUBMIT_METHOD,
+    PRODUCT_P2_PRESENTATION_ACK_METHOD,
+    PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
+    PRODUCT_P3_MUTATE_METHOD,
+  ]) {
+    assert.equal(calls.filter(([method]) => method === forbidden).length, 0, forbidden);
+  }
+});
 
 const binding = Object.freeze({
   session_id: 'session-1',
@@ -70,6 +223,467 @@ test('stock Web activates and closes one exact credential-free binding', async (
     assert.deepEqual(params, binding);
     assert.equal('auth_token' in params, false);
   }
+});
+
+test('P2 owner publishes its construction snapshot without route allocation', () => {
+  const snapshots = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async () => {
+      throw new Error('construction must not allocate a route');
+    },
+    on_snapshot: snapshot => snapshots.push(snapshot),
+  });
+
+  assert.equal(owner.snapshot().status, 'idle');
+  assert.deepEqual(snapshots.map(snapshot => snapshot.status), ['idle']);
+});
+
+test('active stock Web owner submits text, polls output, and ACKs exact presentation', async () => {
+  const calls = [];
+  const bound = (status, extra = {}) => ({
+    ok: true,
+    result: { status, ...binding, ...extra },
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_SUBMIT_METHOD) {
+        return bound('round_accepted', { round_id: 'round-1' });
+      }
+      if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
+        return bound('notification', { kind: 'agent.output' });
+      }
+      if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
+        return bound('presentation_acknowledged', { accepted: true });
+      }
+      return response('closed');
+    },
+  });
+  await owner.start(binding);
+
+  assert.equal((await owner.submitText({
+    commit_id: 'commit-1',
+    turn_id: 'turn-1',
+    response_id: 'response-1',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: '  preserve exact text  ',
+  })).status, 'round_accepted');
+  assert.equal((await owner.nextNotification()).kind, 'agent.output');
+  assert.equal((await owner.acknowledgePresentation({
+    response_id: 'response-1',
+    response_generation: 0,
+    surface: 'text',
+    unit_id: 'unit-1',
+    contiguous_cursor: 0,
+    presented_at: '2026-08-07T10:00:01Z',
+  })).accepted, true);
+
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P2_ACTIVATE_METHOD,
+    PRODUCT_P2_SUBMIT_METHOD,
+    PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+    PRODUCT_P2_PRESENTATION_ACK_METHOD,
+  ]);
+  assert.equal(calls[1][1].text, '  preserve exact text  ');
+  assert.equal(calls[2][1].notification_sequence, 1);
+  for (const [, params] of calls) assert.equal('auth_token' in params, false);
+});
+
+test('active stock Web owner replays exact P2 operations after response loss', async () => {
+  const calls = [];
+  const attempts = new Map();
+  const bound = (status, extra = {}) => ({
+    ok: true,
+    result: { status, ...binding, ...extra },
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      const attempt = (attempts.get(method) ?? 0) + 1;
+      attempts.set(method, attempt);
+      if (attempt === 1) throw webError(`${method} response lost`, 'REQUEST_TIMEOUT', true);
+      if (method === PRODUCT_P2_SUBMIT_METHOD) {
+        return bound('round_accepted', { round_id: 'round-1' });
+      }
+      if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
+        return bound('notification', { kind: 'agent.output' });
+      }
+      return bound('presentation_acknowledged', { accepted: true });
+    },
+  });
+  await owner.start(binding);
+  const turn = {
+    commit_id: 'commit-1',
+    turn_id: 'turn-1',
+    response_id: 'response-1',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: 'hello',
+  };
+  const ack = {
+    response_id: 'response-1',
+    response_generation: 0,
+    surface: 'text',
+    unit_id: 'unit-1',
+    contiguous_cursor: 0,
+    presented_at: '2026-08-07T10:00:01Z',
+  };
+
+  await assert.rejects(owner.submitText(turn), /response lost/);
+  await owner.submitText(turn);
+  await assert.rejects(owner.nextNotification(), /response lost/);
+  await owner.nextNotification();
+  await assert.rejects(owner.acknowledgePresentation(ack), /response lost/);
+  await owner.acknowledgePresentation(ack);
+
+  for (const method of [
+    PRODUCT_P2_SUBMIT_METHOD,
+    PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+    PRODUCT_P2_PRESENTATION_ACK_METHOD,
+  ]) {
+    const operationCalls = calls.filter(([called]) => called === method);
+    assert.equal(operationCalls.length, 2);
+    assert.equal(operationCalls[0][2], operationCalls[1][2]);
+    assert.match(operationCalls[0][2], /^live-voice-p2-/);
+  }
+  const notificationCalls = calls.filter(
+    ([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD
+  );
+  assert.equal(notificationCalls[0][1].notification_sequence, 1);
+  assert.equal(notificationCalls[1][1].notification_sequence, 1);
+});
+
+test('unknown P2 submit locks semantic changes but exact retry stays stable', async () => {
+  const calls = [];
+  let unavailable = true;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (unavailable) throw webError('submit outcome unknown', 'UNAVAILABLE');
+      return response('round_accepted', { round_id: 'round-1' });
+    },
+  });
+  await owner.start(binding);
+  const first = {
+    commit_id: 'commit-unknown-1',
+    turn_id: 'turn-unknown-1',
+    response_id: 'response-unknown-1',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: 'first semantic turn',
+  };
+
+  await assert.rejects(owner.submitText(first), /outcome unknown/);
+  assert.equal(owner.hasPendingSubmission(), true);
+  await assert.rejects(
+    owner.submitText({ ...first, commit_id: 'commit-unknown-2', text: 'changed turn' }),
+    /previous product turn is still unresolved/
+  );
+  unavailable = false;
+  await owner.submitText(first);
+
+  const submits = calls.filter(([method]) => method === PRODUCT_P2_SUBMIT_METHOD);
+  assert.equal(submits.length, 2);
+  assert.equal(submits[0][2], submits[1][2]);
+  assert.equal(owner.hasPendingSubmission(), false);
+});
+
+test('unresolved presentation ACK blocks a second turn and preserves exact retry', async () => {
+  const calls = [];
+  let ackUnavailable = true;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD && ackUnavailable) {
+        throw webError('ACK outcome unknown', 'UNAVAILABLE');
+      }
+      if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
+        return response('presentation_acknowledged', { accepted: true });
+      }
+      return response('round_accepted', { round_id: 'round-2' });
+    },
+  });
+  await owner.start(binding);
+  const ack = {
+    response_id: 'response-1',
+    response_generation: 0,
+    surface: 'text',
+    unit_id: 'unit-1',
+    contiguous_cursor: 0,
+    presented_at: '2026-08-07T10:00:01Z',
+  };
+
+  await assert.rejects(owner.acknowledgePresentation(ack), /outcome unknown/);
+  assert.equal(owner.hasPendingPresentationAck(), true);
+  await assert.rejects(
+    owner.submitText({
+      commit_id: 'commit-2',
+      turn_id: 'turn-2',
+      response_id: 'response-2',
+      committed_at: '2026-08-07T10:00:02Z',
+      text: 'must wait for ACK',
+    }),
+    /previous product turn is still unresolved/
+  );
+  ackUnavailable = false;
+  await owner.acknowledgePresentation(ack);
+
+  const acks = calls.filter(([method]) => method === PRODUCT_P2_PRESENTATION_ACK_METHOD);
+  assert.equal(acks.length, 2);
+  assert.equal(acks[0][2], acks[1][2]);
+  assert.equal(owner.hasPendingPresentationAck(), false);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_SUBMIT_METHOD).length, 0);
+});
+
+test('completed Web submission capacity recovers and old replay fails closed', async () => {
+  let submissionCalls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      submissionCalls += 1;
+      return response('round_accepted', { round_id: `round-${submissionCalls}` });
+    },
+  });
+  await owner.start(binding);
+  const first = {
+    commit_id: 'commit-capacity-0',
+    turn_id: 'turn-capacity-0',
+    response_id: 'response-capacity-0',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: 'capacity 0',
+  };
+  for (let index = 0; index < 129; index += 1) {
+    await owner.submitText({
+      commit_id: `commit-capacity-${index}`,
+      turn_id: `turn-capacity-${index}`,
+      response_id: `response-capacity-${index}`,
+      committed_at: '2026-08-07T10:00:00Z',
+      text: `capacity ${index}`,
+    });
+  }
+
+  await assert.rejects(owner.submitText(first), /replay has expired/);
+  assert.equal(submissionCalls, 129);
+});
+
+test('P2 operations fail before transport unless the exact activation is active', async () => {
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (...args) => calls.push(args),
+  });
+
+  await assert.rejects(owner.submitText({
+    commit_id: 'commit-1',
+    turn_id: 'turn-1',
+    response_id: 'response-1',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: 'hello',
+  }), /not active/);
+  await assert.rejects(owner.nextNotification(), /not active/);
+  assert.deepEqual(calls, []);
+});
+
+test('stock Web P3 owner forwards one exact credential-free confirmed mutation', async () => {
+  const calls = [];
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD) {
+        return {
+          ok: true,
+          result: {
+            status: 'confirmation_issued',
+            operation: 'task.cancel',
+            confirmation_id: 'confirmation-1',
+            expires_at: '2026-08-07T10:02:00Z',
+          },
+        };
+      }
+      return {
+        ok: true,
+        result: { status: 'mutation_processed', operation: 'task.cancel' },
+      };
+    },
+  });
+  const mutation = Object.freeze({
+    operation: 'task.cancel',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  });
+
+  const first = await owner.issue(mutation);
+  const replay = await owner.issue(mutation);
+  assert.equal(first, replay);
+  assert.equal((await owner.mutate(mutation)).status, 'mutation_processed');
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
+    PRODUCT_P3_MUTATE_METHOD,
+  ]);
+  assert.equal(calls[1][1].confirmation_id, 'confirmation-1');
+  for (const [, params] of calls) assert.equal('auth_token' in params, false);
+});
+
+test('stock Web P3 owner reuses stable request IDs after response loss', async () => {
+  const calls = [];
+  let issueAttempts = 0;
+  let mutationAttempts = 0;
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD) {
+        issueAttempts += 1;
+        if (issueAttempts === 1) throw webError('issue response lost', 'REQUEST_TIMEOUT', true);
+        return {
+          ok: true,
+          result: {
+            status: 'confirmation_issued',
+            operation: 'task.cancel',
+            confirmation_id: 'confirmation-1',
+            expires_at: '2026-08-07T10:02:00Z',
+          },
+        };
+      }
+      mutationAttempts += 1;
+      if (mutationAttempts === 1) throw webError('mutation response lost', 'WS_DISCONNECTED', true);
+      return {
+        ok: true,
+        result: { status: 'mutation_processed', operation: 'task.cancel' },
+      };
+    },
+  });
+  const mutation = Object.freeze({
+    operation: 'task.cancel',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  });
+
+  await assert.rejects(owner.issue(mutation), /response lost/);
+  await owner.issue(mutation);
+  await assert.rejects(owner.mutate(mutation), /response lost/);
+  await owner.mutate(mutation);
+
+  assert.equal(calls[0][2], calls[1][2]);
+  assert.equal(calls[2][2], calls[3][2]);
+  assert.notEqual(calls[0][2], calls[2][2]);
+  for (const call of calls) assert.match(call[2], /^live-voice-p3-/);
+});
+
+test('stock Web P3 owner releases definitive rejects but retains unknown outcomes', async () => {
+  const mutation = Object.freeze({
+    operation: 'task.cancel',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  });
+  const deniedIds = [];
+  let denied = true;
+  const definitiveOwner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async (_method, _params, requestId) => {
+      deniedIds.push(requestId);
+      if (denied) {
+        denied = false;
+        throw webError('permission revoked', 'PERMISSION_DENIED');
+      }
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: 'task.cancel',
+          confirmation_id: 'confirmation-2',
+          expires_at: '2026-08-07T10:02:00Z',
+        },
+      };
+    },
+  });
+
+  await assert.rejects(definitiveOwner.issue(mutation), /permission revoked/);
+  assert.equal(definitiveOwner.hasPendingMutation(), false);
+  await definitiveOwner.issue(mutation);
+  assert.notEqual(deniedIds[0], deniedIds[1]);
+
+  const unknownIds = [];
+  let unavailable = true;
+  const retainedOwner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async (_method, _params, requestId) => {
+      unknownIds.push(requestId);
+      if (unavailable) {
+        unavailable = false;
+        throw webError('result unknown', 'UNAVAILABLE');
+      }
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: 'task.cancel',
+          confirmation_id: 'confirmation-3',
+          expires_at: '2026-08-07T10:02:00Z',
+        },
+      };
+    },
+  });
+
+  await assert.rejects(retainedOwner.issue(mutation), /result unknown/);
+  assert.equal(retainedOwner.hasPendingMutation(), true);
+  await retainedOwner.issue(mutation);
+  assert.equal(unknownIds[0], unknownIds[1]);
+});
+
+test('stock Web P3 owner rejects mutation changes and feature-off effects', async () => {
+  const calls = [];
+  const disabled = new ProductWebP3MutationOwner({
+    enabled: false,
+    request: async (...args) => calls.push(args),
+  });
+  const mutation = {
+    operation: 'task.cancel',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  };
+  await assert.rejects(disabled.issue(mutation), /disabled/);
+  assert.deepEqual(calls, []);
+
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: 'task.cancel',
+          confirmation_id: 'confirmation-1',
+          expires_at: '2026-08-07T10:02:00Z',
+        },
+      };
+    },
+  });
+  await owner.issue(mutation);
+  await assert.rejects(owner.mutate({ ...mutation, task_id: 'task-other' }), /exact/);
+  assert.equal(calls.length, 1);
 });
 
 test('close waits for an in-flight activation and still performs retained cleanup', async () => {

@@ -529,6 +529,16 @@ class P3RouteResult:
     payload: dict[str, object]
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedP3MutationConfirmation:
+    """Server-resolved facts for confirmation issuance or forwarding."""
+
+    binding: P3ConfirmationBinding
+    correlation_id: str
+    issued_at: str
+    observed_at: str
+
+
 class ClosableBindingResolver(Protocol):
     async def close(self) -> None: ...
 
@@ -841,9 +851,7 @@ class P3AuthenticatedComposition:
             else AuthorityResourceBinding(
                 kind="task",
                 resource_id=task_id,
-                fingerprint_sha256=hashlib.sha256(
-                    task_id.encode("utf-8")
-                ).hexdigest(),
+                fingerprint_sha256=hashlib.sha256(task_id.encode("utf-8")).hexdigest(),
             )
         )
         return (
@@ -1182,6 +1190,175 @@ class P3AuthenticatedComposition:
             binding,
             now=now,
         )
+
+    async def prepare_mutation_confirmation(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        session_id: str | None,
+    ) -> PreparedP3MutationConfirmation:
+        """Resolve one mutation without issuing, consuming, or executing it.
+
+        Product Main uses the returned binding twice: first to issue the durable
+        confirmation and later to prove that the exact mutation still resolves
+        to the same principal, scope, target, context revision, and model.
+        """
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            if operation not in P3_MUTATIONS:
+                raise FormalTaskViolation(
+                    "INVALID_P3_CONFIRMATION_OPERATION",
+                    "confirmation preparation supports task.create or task.cancel",
+                    ErrorCode.UNSUPPORTED,
+                )
+            now = self._clock()
+            principal = self._authenticator.authenticate(
+                params.get("auth_token"),
+                operation=operation,
+                now=now,
+            )
+            clean = self._validate_params(
+                operation,
+                params,
+                session_id=session_id,
+                now=now,
+            )
+            authority = await self._run_blocking(
+                self._authority_resolver.resolve,
+                principal,
+                session_id=clean["session_id"],
+                now=now,
+                require_clean=operation == "task.create",
+            )
+            authority.context.require_usable(
+                scope=authority.scope,
+                required_permissions=frozenset({"task.execute", "project.write"}),
+                destructive=True,
+                now=now,
+            )
+            if operation == "task.cancel":
+                await self._run_blocking(
+                    self._require_exact_task_context,
+                    authority=authority,
+                    operation=operation,
+                    task_id=str(clean["task_id"]),
+                    now=now,
+                )
+            model: ResolvedP3Model | None = None
+            if operation == "task.create":
+                if self._model_resolver is None:
+                    raise FormalTaskViolation(
+                        "P3_MODEL_CATALOG_UNAVAILABLE",
+                        "formal task model resolver is unavailable",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                model = await self._run_blocking(
+                    self._model_resolver.resolve,
+                    clean.get("model_intent"),
+                    instantiate=False,
+                )
+            target_task_id = (
+                str(clean["task_id"]) if operation == "task.cancel" else None
+            )
+            binding = P3ConfirmationBinding(
+                principal_id=principal.principal_id,
+                scope=authority.scope,
+                operation=operation,
+                command_id=str(clean["command_id"]),
+                target_task_id=target_task_id,
+                intent_fingerprint=p3_confirmation_intent_fingerprint(
+                    operation=operation,
+                    command_id=str(clean["command_id"]),
+                    target_task_id=target_task_id,
+                    context=(authority.context if operation == "task.create" else None),
+                    name=clean.get("name"),
+                    instruction=clean.get("instruction"),
+                    model=model,
+                ),
+            )
+            return PreparedP3MutationConfirmation(
+                binding=binding,
+                correlation_id=str(clean["correlation_id"]),
+                issued_at=str(clean["issued_at"]),
+                observed_at=now,
+            )
+        finally:
+            if entered:
+                await self._leave_operation()
+
+    async def reauthorize_mutation_replay(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        session_id: str | None,
+        expected_binding: P3ConfirmationBinding,
+    ) -> None:
+        """Reauthenticate result replay without re-running or consuming mutation."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            if operation not in P3_MUTATIONS:
+                raise FormalTaskViolation(
+                    "INVALID_P3_CONFIRMATION_OPERATION",
+                    "mutation replay supports task.create or task.cancel",
+                    ErrorCode.UNSUPPORTED,
+                )
+            if not isinstance(expected_binding, P3ConfirmationBinding):
+                raise FormalTaskViolation(
+                    "P3_CONFIRMATION_BINDING_MISMATCH",
+                    "mutation replay requires its retained authority binding",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            now = self._clock()
+            principal = self._authenticator.authenticate(
+                params.get("auth_token"),
+                operation=operation,
+                now=now,
+            )
+            clean = self._validate_params(
+                operation,
+                params,
+                session_id=session_id,
+                now=now,
+            )
+            authority = await self._run_blocking(
+                self._authority_resolver.resolve,
+                principal,
+                session_id=clean["session_id"],
+                now=now,
+                require_clean=False,
+            )
+            authority.context.require_usable(
+                scope=authority.scope,
+                required_permissions=frozenset({"task.execute", "project.write"}),
+                destructive=True,
+                now=now,
+            )
+            target_task_id = (
+                str(clean["task_id"]) if operation == "task.cancel" else None
+            )
+            if (
+                principal.principal_id != expected_binding.principal_id
+                or authority.scope != expected_binding.scope
+                or operation != expected_binding.operation
+                or str(clean["command_id"]) != expected_binding.command_id
+                or target_task_id != expected_binding.target_task_id
+            ):
+                raise FormalTaskViolation(
+                    "P3_CONFIRMATION_BINDING_MISMATCH",
+                    "mutation replay no longer matches current authority",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+        finally:
+            if entered:
+                await self._leave_operation()
 
     async def handle(
         self,
@@ -1615,11 +1792,18 @@ def create_p3_composition_from_environment(
     )
 
 
+def resolve_p3_database_path_from_environment() -> Path:
+    """Resolve the application-owned P3 database path without opening it."""
+
+    return _resolve_database_path(str(os.getenv(_DATABASE_ENV) or "").strip())
+
+
 __all__ = [
     "AgentManagerProjectBindingResolver",
     "AuthenticatedPrincipal",
     "LoggingP3TelemetrySink",
     "P3AuthenticatedComposition",
+    "PreparedP3MutationConfirmation",
     "P3ConfirmationBinding",
     "P3RouteResult",
     "P3RouteTelemetry",
@@ -1628,4 +1812,5 @@ __all__ = [
     "SqliteP3ConfirmationLedger",
     "StaticBearerAuthenticator",
     "create_p3_composition_from_environment",
+    "resolve_p3_database_path_from_environment",
 ]

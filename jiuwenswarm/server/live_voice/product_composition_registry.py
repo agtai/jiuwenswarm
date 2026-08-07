@@ -14,20 +14,41 @@ import asyncio
 import hashlib
 import logging
 import os
+import secrets
+from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CONTRACT_VERSION,
     ErrorCode,
+    MAX_SAFE_INTEGER,
     ProducerRef,
+    ResponseRef,
+    TurnCommit,
     canonical_json_bytes,
+)
+from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FormalContextSnapshot,
 )
 
 from .agent_conversation_runtime import AgentConversationRuntime
 from .formal_task_models import FormalTaskViolation, ResolvedTaskContext
 from .interaction_engine import InteractionEnginePort
-from .p3_authenticated_composition import P3AuthenticatedComposition, P3RouteResult
+from .p3_authenticated_composition import (
+    P3AuthenticatedComposition,
+    P3RouteResult,
+)
+from .p3_confirmation import (
+    BoundedP3ConfirmationOwner,
+    P3_CONFIRMATION_MAX_TTL,
+    P3ConfirmationBinding,
+    P3ConfirmationOwnerContext,
+    TrustedP3ConfirmationIssue,
+)
+from .p3_product_confirmation import ProductP3ConfirmationForwarder
 from .product_authority import (
     AuthorityDecisionStatus,
     AuthorityRouteContext,
@@ -48,6 +69,7 @@ from .product_composition_contract import (
     ProductRouteReason,
     ProductRouteTruth,
     ProductSegment,
+    create_product_composition_manifest,
 )
 from .product_composition_root import (
     ProductCompositionActivationError,
@@ -66,6 +88,7 @@ from .product_p2_interaction_adapter import (
     P2FailedActivationCleanup,
     P2InteractionActivationRequest,
     P2InteractionBinding,
+    P2LeaseState,
     P2LeaseCloseStatus,
     ProductP2InteractionAdapter,
 )
@@ -75,6 +98,7 @@ from .product_p3_text_adapter import (
     ProductP3QueryRequest,
     ProductP3TextAdapter,
 )
+from .presentation_ledger import PresentationAck, PresentationSurface
 from .progress_notification_arbiter import (
     ForegroundFact,
     ForegroundSnapshot,
@@ -91,16 +115,20 @@ from .task_progress_return import (
 
 logger = logging.getLogger(__name__)
 
-PRODUCT_COMPOSITION_ENABLE_ENV = (
-    "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
-)
+PRODUCT_COMPOSITION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 PRODUCT_P2_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 PRODUCT_P3_TEXT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED"
+PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED"
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
         "live_voice.composition.p2.activate",
         "live_voice.composition.p2.close",
+        "live_voice.composition.p2.submit",
+        "live_voice.composition.p2.notification.next",
+        "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p3.confirmation.issue",
+        "live_voice.composition.p3.mutate",
         "live_voice.composition.p3.progress.activate",
         "live_voice.composition.p3.progress.close",
         "live_voice.composition.p3.progress.ack",
@@ -137,12 +165,14 @@ def product_composition_enabled_from_environment() -> bool:
 class ProductCompositionSettings:
     p2_enabled: bool
     p3_text_enabled: bool
+    p3_mutation_enabled: bool = False
 
     @classmethod
     def from_environment(cls) -> ProductCompositionSettings:
         return cls(
             p2_enabled=_is_enabled(os.getenv(PRODUCT_P2_ENABLE_ENV)),
             p3_text_enabled=_is_enabled(os.getenv(PRODUCT_P3_TEXT_ENABLE_ENV)),
+            p3_mutation_enabled=_is_enabled(os.getenv(PRODUCT_P3_MUTATION_ENABLE_ENV)),
         )
 
 
@@ -248,14 +278,18 @@ class _P3FailedCleanupLease:
 @dataclass(slots=True)
 class _P2Route:
     binding: P2InteractionBinding
+    activation_lease: P2ActivationLease
     lease: ProductCompositionLease
     manifest: ProductCompositionManifest
+    notification_replay_floor: int = 0
+    notification_admitted_sequence: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class _ClosedP2Route:
     binding: P2InteractionBinding
     manifest: ProductCompositionManifest
+    notification_replay_floor: int = 0
 
 
 @dataclass(slots=True)
@@ -293,6 +327,15 @@ class _ProgressDelivery:
     evidence_id: str
     delivered: bool = False
     acknowledged: bool = False
+
+
+@dataclass(slots=True)
+class _RetainedProductOperation:
+    fingerprint: bytes
+    task: asyncio.Task[P3RouteResult]
+    p2_binding: P2InteractionBinding | None = None
+    p3_binding: P3ConfirmationBinding | None = None
+    operation_sequence: int | None = None
 
 
 def _formal_fact(segment: ProductSegment) -> ProductRouteFact:
@@ -352,6 +395,24 @@ def _required_text(value: object, field: str, *, maximum: int = 256) -> str:
             ErrorCode.INVALID_ARGUMENT,
         )
     return value.strip()
+
+
+def _required_content(value: object, field: str, *, maximum: int) -> str:
+    if type(value) is not str or not value.strip() or len(value) > maximum:
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+            f"{field} must be non-empty bounded text",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+            f"{field} must contain Unicode scalar values",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from exc
+    return value
 
 
 def _optional_claim(value: object, field: str) -> str | None:
@@ -433,6 +494,7 @@ class AgentServerProductCompositionRegistry:
     _CLOSED_ROUTE_CAPACITY = 128
     _PROGRESS_DELIVERY_CAPACITY = 128
     _PROGRESS_GENERATION_CAPACITY = 128
+    _PRODUCT_OPERATION_CAPACITY = 128
 
     def __init__(
         self,
@@ -441,6 +503,8 @@ class AgentServerProductCompositionRegistry:
         p3_composition: P3AuthenticatedComposition,
         agent_manager: Any,
         push_text_event: Callable[[dict[str, object]], Awaitable[bool]],
+        p3_confirmation_owner: BoundedP3ConfirmationOwner | None = None,
+        p3_confirmation_forwarder: ProductP3ConfirmationForwarder | None = None,
     ) -> None:
         if not isinstance(settings, ProductCompositionSettings):
             raise ValueError("product composition settings are required")
@@ -452,42 +516,59 @@ class AgentServerProductCompositionRegistry:
         self._p3_composition = p3_composition
         self._agent_manager = agent_manager
         self._push_text_event = push_text_event
+        self._p3_confirmation_owner = p3_confirmation_owner
+        self._p3_confirmation_forwarder = p3_confirmation_forwarder
+        self._p3_confirmation_generation = (
+            secrets.randbits(63) + 1
+            if settings.p3_mutation_enabled
+            and p3_confirmation_owner is not None
+            and p3_confirmation_forwarder is not None
+            else None
+        )
         self._lock = asyncio.Lock()
+        self._p3_operation_lock = asyncio.Lock()
         self._stopped = False
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
         self._closed_p2_routes: dict[tuple[str, str], _ClosedP2Route] = {}
-        self._progress_routes: dict[
-            tuple[str, str, str, str], _ProgressRoute
-        ] = {}
+        self._progress_routes: dict[tuple[str, str, str, str], _ProgressRoute] = {}
         self._closed_progress_routes: dict[
             tuple[str, str, str, str, int], _ClosedProgressRoute
         ] = {}
         self._progress_generations: dict[tuple[str, str, str, str], int] = {}
-        self._progress_targets: dict[
-            tuple[str, str, str, str], _ProgressTarget
-        ] = {}
+        self._progress_targets: dict[tuple[str, str, str, str], _ProgressTarget] = {}
         self._progress_deliveries: dict[
             tuple[str, str, str, str], dict[str, _ProgressDelivery]
         ] = {}
         self._pending_p2_agents: dict[tuple[str, str, str, int], Any] = {}
         self._p2_orphan_cleanups: list[_P2FailedCleanupLease] = []
         self._root_orphan_cleanups: list[ProductCompositionLease] = []
+        self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
+        self._p2_notification_operations: dict[str, _RetainedProductOperation] = {}
+        self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
+        self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
+        self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
+        # Fixed-size fail-closed membership fence: evicted request IDs can be
+        # rejected forever during this registry lifetime without unbounded RAM.
+        self._evicted_operation_replay_fence = bytearray(1 << 20)
+        # Conservative max sketches preserve closed-generation high-water after
+        # exact tombstones are evicted. Collisions can only fail closed.
+        self._closed_p2_generation_fence = tuple(
+            array("Q", [0]) * (1 << 15) for _ in range(4)
+        )
 
         disabled_service = ProductAuthorityService(enabled=False, resolver=None)
         self._p2_adapter = ProductP2InteractionAdapter(
             enabled=settings.p2_enabled,
             authority_adapter=P2AuthorityAdapter(disabled_service),
             runtime_factory=self._create_p2_runtime,
-            interaction_engine_factory=lambda _context, _binding: (
-                InteractionEnginePort(
-                    frozenset(
-                        {
-                            "playback.stop",
-                            "response.cancel",
-                            "round.cancel",
-                            "task.cancel",
-                        }
-                    )
+            interaction_engine_factory=lambda _context, _binding: InteractionEnginePort(
+                frozenset(
+                    {
+                        "playback.stop",
+                        "response.cancel",
+                        "round.cancel",
+                        "task.cancel",
+                    }
                 )
             ),
         )
@@ -515,6 +596,10 @@ class AgentServerProductCompositionRegistry:
     @property
     def p2_enabled(self) -> bool:
         return self._settings.p2_enabled
+
+    @property
+    def p3_mutation_enabled(self) -> bool:
+        return self._settings.p3_mutation_enabled
 
     def _create_p2_runtime(
         self,
@@ -556,9 +641,7 @@ class AgentServerProductCompositionRegistry:
         )
         return self._progress_generations.get(key) == binding.generation
 
-    def _retain_root_cleanup(
-        self, cleanup: ProductCompositionLease | None
-    ) -> None:
+    def _retain_root_cleanup(self, cleanup: ProductCompositionLease | None) -> None:
         if cleanup is not None and all(
             retained is not cleanup for retained in self._root_orphan_cleanups
         ):
@@ -569,12 +652,49 @@ class AgentServerProductCompositionRegistry:
         key: tuple[str, str],
         route: _ClosedP2Route,
     ) -> None:
+        self._record_closed_p2_generation(key, route.binding.activation_generation)
         if (
             key not in self._closed_p2_routes
             and len(self._closed_p2_routes) >= self._CLOSED_ROUTE_CAPACITY
         ):
             self._closed_p2_routes.pop(next(iter(self._closed_p2_routes)))
         self._closed_p2_routes[key] = route
+
+    def _closed_p2_generation_indices(
+        self,
+        key: tuple[str, str],
+    ) -> tuple[int, int, int, int]:
+        digest = hashlib.sha256(f"{key[0]}\0{key[1]}".encode("utf-8")).digest()
+        capacity = len(self._closed_p2_generation_fence[0])
+        return (
+            int.from_bytes(digest[0:4], "big") % capacity,
+            int.from_bytes(digest[4:8], "big") % capacity,
+            int.from_bytes(digest[8:12], "big") % capacity,
+            int.from_bytes(digest[12:16], "big") % capacity,
+        )
+
+    def _record_closed_p2_generation(
+        self,
+        key: tuple[str, str],
+        generation: int,
+    ) -> None:
+        bounded_generation = min(generation, (1 << 64) - 1)
+        for fence, index in zip(
+            self._closed_p2_generation_fence,
+            self._closed_p2_generation_indices(key),
+            strict=True,
+        ):
+            fence[index] = max(fence[index], bounded_generation)
+
+    def _closed_p2_generation_high_water(self, key: tuple[str, str]) -> int:
+        return min(
+            fence[index]
+            for fence, index in zip(
+                self._closed_p2_generation_fence,
+                self._closed_p2_generation_indices(key),
+                strict=True,
+            )
+        )
 
     def _retain_closed_progress_route(
         self,
@@ -646,7 +766,9 @@ class AgentServerProductCompositionRegistry:
             if any(
                 not all(
                     delivery.acknowledged
-                    for delivery in self._closed_progress_routes[closed_key].deliveries.values()
+                    for delivery in self._closed_progress_routes[
+                        closed_key
+                    ].deliveries.values()
                 )
                 for closed_key in closed_keys
             ):
@@ -922,6 +1044,84 @@ class AgentServerProductCompositionRegistry:
                 ErrorCode.UNAVAILABLE,
             )
 
+    def _advance_notification_replay_floor(
+        self,
+        entry: _RetainedProductOperation,
+    ) -> None:
+        """Fence an evicted notification poll from consuming a later result."""
+
+        binding = entry.p2_binding
+        sequence = entry.operation_sequence
+        if binding is None or sequence is None:
+            return
+        key = (binding.session_id, binding.interaction_id)
+        active = self._p2_routes.get(key)
+        if active is not None and active.binding == binding:
+            active.notification_replay_floor = max(
+                active.notification_replay_floor,
+                sequence,
+            )
+        closed = self._closed_p2_routes.get(key)
+        if closed is not None and closed.binding == binding:
+            self._closed_p2_routes[key] = _ClosedP2Route(
+                closed.binding,
+                closed.manifest,
+                max(closed.notification_replay_floor, sequence),
+            )
+
+    def _evict_completed_product_operation(
+        self,
+        ledger: dict[str, _RetainedProductOperation],
+        *,
+        notification: bool = False,
+        namespace: str | None = None,
+    ) -> bool:
+        """Reclaim one completed entry without duplicating an in-flight effect."""
+
+        for retained_request_id, entry in tuple(ledger.items()):
+            if not entry.task.done():
+                continue
+            ledger.pop(retained_request_id, None)
+            if notification:
+                self._advance_notification_replay_floor(entry)
+            elif namespace is not None:
+                self._mark_evicted_product_request(namespace, retained_request_id)
+            return True
+        return False
+
+    def _evicted_product_request_indices(
+        self,
+        namespace: str,
+        request_id: str,
+    ) -> tuple[int, int, int, int]:
+        digest = hashlib.sha256(f"{namespace}\0{request_id}".encode("utf-8")).digest()
+        bit_capacity = len(self._evicted_operation_replay_fence) * 8
+        return (
+            int.from_bytes(digest[0:4], "big") % bit_capacity,
+            int.from_bytes(digest[4:8], "big") % bit_capacity,
+            int.from_bytes(digest[8:12], "big") % bit_capacity,
+            int.from_bytes(digest[12:16], "big") % bit_capacity,
+        )
+
+    def _mark_evicted_product_request(self, namespace: str, request_id: str) -> None:
+        for index in self._evicted_product_request_indices(namespace, request_id):
+            self._evicted_operation_replay_fence[index >> 3] |= 1 << (index & 7)
+
+    def _require_product_request_not_evicted(
+        self,
+        namespace: str,
+        request_id: str,
+    ) -> None:
+        if all(
+            self._evicted_operation_replay_fence[index >> 3] & (1 << (index & 7))
+            for index in self._evicted_product_request_indices(namespace, request_id)
+        ):
+            raise FormalTaskViolation(
+                "PRODUCT_OPERATION_REPLAY_EXPIRED",
+                "the completed operation replay has expired",
+                ErrorCode.CONFLICT,
+            )
+
     async def handle_p2_activate(
         self,
         *,
@@ -963,14 +1163,16 @@ class AgentServerProductCompositionRegistry:
             interaction_id = _required_text(
                 params.get("interaction_id"), "interaction_id"
             )
-            activation_id = _required_text(
-                params.get("activation_id"), "activation_id"
-            )
+            activation_id = _required_text(params.get("activation_id"), "activation_id")
             generation = params.get("activation_generation")
-            if type(generation) is not int or generation <= 0:
+            if (
+                type(generation) is not int
+                or generation <= 0
+                or generation > MAX_SAFE_INTEGER
+            ):
                 raise FormalTaskViolation(
                     "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
-                    "activation_generation must be a positive integer",
+                    "activation_generation must be a positive safe integer",
                     ErrorCode.INVALID_ARGUMENT,
                 )
             route = self._route_context(
@@ -988,9 +1190,7 @@ class AgentServerProductCompositionRegistry:
 
         async with self._lock:
             if self._stopped:
-                return _error_result(
-                    request_id, reason="PRODUCT_COMPOSITION_STOPPED"
-                )
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
             key = (routed_session, interaction_id)
             existing = self._p2_routes.get(key)
             if existing is not None:
@@ -1002,15 +1202,10 @@ class AgentServerProductCompositionRegistry:
                     operation="agent.chat",
                     task_id=None,
                 )
-                if (
-                    replay_authority.route_fact.truth
-                    is not ProductRouteTruth.FORMAL
-                ):
+                if replay_authority.route_fact.truth is not ProductRouteTruth.FORMAL:
                     return _error_result(
                         request_id,
-                        reason=(
-                            replay_state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE"
-                        ),
+                        reason=(replay_state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE"),
                         code=ErrorCode.PERMISSION_DENIED,
                     )
                 assert replay_state.canonical is not None
@@ -1023,32 +1218,63 @@ class AgentServerProductCompositionRegistry:
                         reason="ACTIVATION_BINDING_MISMATCH",
                         code=ErrorCode.PERMISSION_DENIED,
                     )
-                if (
-                    expected.correlation_id == correlation_id
-                    and expected.activation_id == activation_id
-                    and expected.activation_generation == generation
-                ):
+                if existing.activation_lease.snapshot().state is P2LeaseState.OPEN:
+                    if (
+                        expected.correlation_id == correlation_id
+                        and expected.activation_id == activation_id
+                        and expected.activation_generation == generation
+                    ):
+                        if replay_authority.lease is not None:
+                            await replay_authority.lease.close()
+                        return _success_result(
+                            request_id,
+                            {
+                                "status": "active",
+                                "replayed": True,
+                                "session_id": routed_session,
+                                "correlation_id": correlation_id,
+                                "interaction_id": interaction_id,
+                                "activation_id": activation_id,
+                                "activation_generation": generation,
+                            },
+                            existing.manifest,
+                        )
                     if replay_authority.lease is not None:
                         await replay_authority.lease.close()
-                    return _success_result(
+                    return _error_result(
                         request_id,
-                        {
-                            "status": "active",
-                            "replayed": True,
-                            "session_id": routed_session,
-                            "correlation_id": correlation_id,
-                            "interaction_id": interaction_id,
-                            "activation_id": activation_id,
-                            "activation_generation": generation,
-                        },
-                        existing.manifest,
+                        reason="ACTIVATION_BINDING_CONFLICT",
+                        code=ErrorCode.CONFLICT,
                     )
                 if replay_authority.lease is not None:
                     await replay_authority.lease.close()
+                try:
+                    await existing.lease.close()
+                except ProductCompositionLeaseCloseError as exc:
+                    self._retain_root_cleanup(exc.lease)
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P2_CLEANUP_PENDING",
+                        code=ErrorCode.UNAVAILABLE,
+                        manifest=existing.manifest,
+                    )
+                self._p2_routes.pop(key, None)
+                self._retain_closed_p2_route(
+                    key,
+                    _ClosedP2Route(
+                        existing.binding,
+                        existing.manifest,
+                        existing.notification_replay_floor,
+                    ),
+                )
+
+            closed = self._closed_p2_routes.get(key)
+            if generation <= self._closed_p2_generation_high_water(key):
                 return _error_result(
                     request_id,
-                    reason="ACTIVATION_BINDING_CONFLICT",
+                    reason="ACTIVATION_GENERATION_STALE",
                     code=ErrorCode.CONFLICT,
+                    manifest=None if closed is None else closed.manifest,
                 )
 
             state = _AuthorityState()
@@ -1132,9 +1358,7 @@ class AgentServerProductCompositionRegistry:
                             None,
                         )
                         if cleanup is None:
-                            unpin = getattr(
-                                self._agent_manager, "unpin_agent", None
-                            )
+                            unpin = getattr(self._agent_manager, "unpin_agent", None)
                             if callable(unpin):
                                 unpin(agent)
                         else:
@@ -1157,6 +1381,7 @@ class AgentServerProductCompositionRegistry:
                         agent=agent,
                     )
                     holder["binding"] = result.lease.binding
+                    holder["activation_lease"] = result.lease
                     return ProductSegmentActivation(
                         _formal_fact(ProductSegment.P2_AGENT_INTERACTION),
                         wrapper,
@@ -1213,7 +1438,12 @@ class AgentServerProductCompositionRegistry:
                     reason="PRODUCT_P2_ACTIVATION_FAILED",
                 )
             binding = holder.get("binding")
-            if not isinstance(binding, P2InteractionBinding) or activation.lease is None:
+            activation_lease = holder.get("activation_lease")
+            if (
+                not isinstance(binding, P2InteractionBinding)
+                or not isinstance(activation_lease, P2ActivationLease)
+                or activation.lease is None
+            ):
                 reason = state.reason or "PRODUCT_P2_UNAVAILABLE"
                 if activation.lease is not None:
                     try:
@@ -1230,6 +1460,7 @@ class AgentServerProductCompositionRegistry:
                 )
             self._p2_routes[key] = _P2Route(
                 binding=binding,
+                activation_lease=activation_lease,
                 lease=activation.lease,
                 manifest=activation.manifest,
             )
@@ -1246,6 +1477,724 @@ class AgentServerProductCompositionRegistry:
                     "activation_generation": binding.activation_generation,
                 },
                 activation.manifest,
+            )
+
+    @staticmethod
+    def _parse_p2_route_binding(
+        params: Mapping[str, object],
+        *,
+        session_id: str | None,
+    ) -> tuple[str, str, str, str, int, AuthorityRouteContext]:
+        routed_session = _required_text(session_id, "routed_session_id")
+        if _required_text(params.get("session_id"), "session_id") != routed_session:
+            raise FormalTaskViolation(
+                "PRODUCT_COMPOSITION_SESSION_MISMATCH",
+                "product request does not match its routed session",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        correlation_id = _required_text(params.get("correlation_id"), "correlation_id")
+        interaction_id = _required_text(params.get("interaction_id"), "interaction_id")
+        activation_id = _required_text(params.get("activation_id"), "activation_id")
+        generation = params.get("activation_generation")
+        if (
+            type(generation) is not int
+            or generation <= 0
+            or generation > MAX_SAFE_INTEGER
+        ):
+            raise FormalTaskViolation(
+                "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                "activation_generation must be a positive safe integer",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        route = AgentServerProductCompositionRegistry._route_context(
+            session_id=routed_session,
+            correlation_id=correlation_id,
+            params=params,
+        )
+        return (
+            routed_session,
+            correlation_id,
+            interaction_id,
+            activation_id,
+            generation,
+            route,
+        )
+
+    async def _require_active_p2_route_locked(
+        self,
+        *,
+        params: Mapping[str, object],
+        routed_session: str,
+        correlation_id: str,
+        interaction_id: str,
+        activation_id: str,
+        generation: int,
+        route: AuthorityRouteContext,
+    ) -> _P2Route:
+        retained = self._p2_routes.get((routed_session, interaction_id))
+        if retained is None:
+            raise FormalTaskViolation(
+                "PRODUCT_P2_ROUTE_NOT_FOUND",
+                "product P2 route is not active",
+                ErrorCode.NOT_FOUND,
+            )
+        await self._require_p2_binding_authority_locked(
+            params=params,
+            routed_session=routed_session,
+            correlation_id=correlation_id,
+            interaction_id=interaction_id,
+            activation_id=activation_id,
+            generation=generation,
+            route=route,
+            binding=retained.binding,
+        )
+        return retained
+
+    async def _require_p2_binding_authority_locked(
+        self,
+        *,
+        params: Mapping[str, object],
+        routed_session: str,
+        correlation_id: str,
+        interaction_id: str,
+        activation_id: str,
+        generation: int,
+        route: AuthorityRouteContext,
+        binding: P2InteractionBinding,
+    ) -> None:
+        """Reauthenticate an exact active or tombstoned operation binding."""
+
+        state = _AuthorityState()
+        authority = await self._authority_registration(
+            state=state,
+            bearer_token=params.get("auth_token"),
+            route=route,
+            operation="agent.chat",
+            task_id=None,
+        )
+        try:
+            if authority.route_fact.truth is not ProductRouteTruth.FORMAL:
+                raise FormalTaskViolation(
+                    state.reason or "TRUSTED_AUTHORITY_UNAVAILABLE",
+                    "trusted P2 authority is unavailable",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            assert state.canonical is not None
+            if (
+                binding.session_id != routed_session
+                or binding.interaction_id != interaction_id
+                or binding.correlation_id != correlation_id
+                or binding.activation_id != activation_id
+                or binding.activation_generation != generation
+                or binding.scope != state.canonical.scope
+            ):
+                raise FormalTaskViolation(
+                    "ACTIVATION_BINDING_MISMATCH",
+                    "product P2 request does not match the current activation",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+        finally:
+            if authority.lease is not None:
+                await authority.lease.close()
+
+    async def _run_p2_submit(
+        self,
+        *,
+        retained: _P2Route,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        channel_id: str,
+    ) -> P3RouteResult:
+        try:
+            handle = await retained.activation_lease.submit_committed_turn(
+                retained.binding,
+                request_id=request_id,
+                response_id=response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+                context=FormalContextSnapshot(retained.binding.scope),
+                channel_id=channel_id,
+            )
+            return _success_result(
+                request_id,
+                {
+                    "status": "round_accepted",
+                    "session_id": retained.binding.session_id,
+                    "correlation_id": retained.binding.correlation_id,
+                    "interaction_id": retained.binding.interaction_id,
+                    "activation_id": retained.binding.activation_id,
+                    "activation_generation": retained.binding.activation_generation,
+                    "request_id": handle.request_id,
+                    "round_id": handle.round_id,
+                    "response": {
+                        "interaction_id": handle.response_ref.interaction_id,
+                        "response_id": handle.response_ref.response_id,
+                        "response_generation": handle.response_ref.response_generation,
+                    },
+                },
+                retained.manifest,
+            )
+        except Exception as exc:  # noqa: BLE001 - retained stable outcome
+            return _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "PRODUCT_P2_SUBMISSION_FAILED"),
+                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                message=str(exc),
+                manifest=retained.manifest,
+            )
+
+    async def handle_p2_submit(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        channel_id: str,
+    ) -> P3RouteResult:
+        """Submit browser text as a server-scoped canonical TurnCommit."""
+
+        if not self._settings.p2_enabled:
+            return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "correlation_id",
+                        "interaction_id",
+                        "activation_id",
+                        "activation_generation",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                        "commit_id",
+                        "turn_id",
+                        "response_id",
+                        "committed_at",
+                        "text",
+                    }
+                ),
+            )
+            self._ensure_running()
+            parsed = self._parse_p2_route_binding(params, session_id=session_id)
+            commit_id = _required_text(params.get("commit_id"), "commit_id")
+            turn_id = _required_text(params.get("turn_id"), "turn_id")
+            response_id = _required_text(params.get("response_id"), "response_id")
+            committed_at = _required_text(
+                params.get("committed_at"), "committed_at", maximum=64
+            )
+            text_value = _required_content(params.get("text"), "text", maximum=100_000)
+            routed_session, correlation_id, interaction_id, _, _, _ = parsed
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+        try:
+            fingerprint = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        **{
+                            key: value
+                            for key, value in params.items()
+                            if key != "auth_token"
+                        },
+                        "channel_id": channel_id,
+                    }
+                )
+            ).digest()
+            async with self._lock:
+                existing = self._p2_submit_operations.get(request_id)
+                if existing is not None:
+                    if existing.p2_binding is None:
+                        raise RuntimeError("retained P2 submission lost its binding")
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=existing.p2_binding,
+                    )
+                    if existing.fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "submission request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                else:
+                    retained = await self._require_active_p2_route_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                    )
+                    self._require_product_request_not_evicted("p2.submit", request_id)
+                    if (
+                        len(self._p2_submit_operations)
+                        >= self._PRODUCT_OPERATION_CAPACITY
+                        and not self._evict_completed_product_operation(
+                            self._p2_submit_operations,
+                            namespace="p2.submit",
+                        )
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCT_OPERATION_LEDGER_FULL",
+                            "bounded submission replay ledger is full",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    commit = TurnCommit.from_dict(
+                        {
+                            "contract_version": CONTRACT_VERSION,
+                            "commit_id": commit_id,
+                            "turn_id": turn_id,
+                            "interaction_id": interaction_id,
+                            "text": text_value,
+                            "hypothesis_provenance": {
+                                "provider": "product.web.text",
+                                "kind": "committed_text",
+                            },
+                            "scope": retained.binding.scope.to_dict(),
+                            "context_refs": [],
+                            "committed_at": committed_at,
+                        }
+                    )
+                    task = asyncio.create_task(
+                        self._run_p2_submit(
+                            retained=retained,
+                            request_id=request_id,
+                            response_id=response_id,
+                            correlation_id=correlation_id,
+                            commit=commit,
+                            channel_id=channel_id,
+                        ),
+                        name=f"live-voice-product-p2-submit:{request_id}",
+                    )
+                    existing = _RetainedProductOperation(
+                        fingerprint,
+                        task,
+                        p2_binding=retained.binding,
+                    )
+                    self._p2_submit_operations[request_id] = existing
+            return await asyncio.shield(existing.task)
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+        except Exception as exc:  # noqa: BLE001 - stable product failure
+            return _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "PRODUCT_P2_SUBMISSION_FAILED"),
+                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                message=str(exc),
+            )
+
+    @staticmethod
+    def _serialize_p2_notification(notification: Any) -> dict[str, object]:
+        ref = notification.response_ref
+        unit = notification.presentation_unit
+        agent_event = notification.agent_event
+        return {
+            "status": "notification",
+            "kind": notification.kind,
+            "request_id": notification.request_id,
+            "round_id": notification.round_id,
+            "response": {
+                "interaction_id": ref.interaction_id,
+                "response_id": ref.response_id,
+                "response_generation": ref.response_generation,
+            },
+            "agent_event": (
+                None
+                if agent_event is None
+                else {
+                    "seq": agent_event.seq,
+                    "event_type": agent_event.event_type,
+                    "text": agent_event.text,
+                    "capability": agent_event.capability,
+                    "error_reason": agent_event.error_reason,
+                }
+            ),
+            "source_event": (
+                None
+                if notification.source_event is None
+                else notification.source_event.to_dict()
+            ),
+            "progress_event": (
+                None
+                if notification.progress_event is None
+                else notification.progress_event.to_dict()
+            ),
+            "presentation_unit": (
+                None
+                if unit is None
+                else {
+                    "surface": unit.surface.value,
+                    "unit_id": unit.unit_id,
+                    "seq": unit.seq,
+                    "source_start_utf8": unit.source_start_utf8,
+                    "source_end_utf8": unit.source_end_utf8,
+                    "content_ref": unit.content_ref,
+                }
+            ),
+            "error_reason": notification.error_reason,
+            "publish_seq": notification.publish_seq,
+        }
+
+    async def _next_p2_notification(
+        self,
+        retained: _P2Route,
+        request_id: str,
+    ) -> P3RouteResult:
+        try:
+            notification = await retained.activation_lease.next_notification(
+                retained.binding
+            )
+            return _success_result(
+                request_id,
+                {
+                    **self._serialize_p2_notification(notification),
+                    "session_id": retained.binding.session_id,
+                    "correlation_id": retained.binding.correlation_id,
+                    "interaction_id": retained.binding.interaction_id,
+                    "activation_id": retained.binding.activation_id,
+                    "activation_generation": (retained.binding.activation_generation),
+                },
+                retained.manifest,
+            )
+        except Exception as exc:  # noqa: BLE001 - retained stable outcome
+            return _error_result(
+                request_id,
+                reason=getattr(exc, "reason", "PRODUCT_P2_NOTIFICATION_FAILED"),
+                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                message=str(exc),
+                manifest=retained.manifest,
+            )
+
+    async def handle_p2_notification_next(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        if not self._settings.p2_enabled:
+            return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "correlation_id",
+                        "interaction_id",
+                        "activation_id",
+                        "activation_generation",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                        "notification_sequence",
+                    }
+                ),
+            )
+            self._ensure_running()
+            parsed = self._parse_p2_route_binding(params, session_id=session_id)
+            notification_sequence = params.get("notification_sequence")
+            if (
+                type(notification_sequence) is not int
+                or notification_sequence <= 0
+                or notification_sequence > MAX_SAFE_INTEGER
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "notification_sequence must be a positive safe integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            fingerprint = canonical_json_bytes(
+                {key: value for key, value in params.items() if key != "auth_token"}
+            )
+            async with self._lock:
+                entry = self._p2_notification_operations.get(request_id)
+                if entry is not None:
+                    if entry.p2_binding is None:
+                        raise RuntimeError("retained P2 notification lost its binding")
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=entry.p2_binding,
+                    )
+                    if entry.fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "notification request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                else:
+                    retained = await self._require_active_p2_route_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                    )
+                    if notification_sequence <= retained.notification_replay_floor:
+                        raise FormalTaskViolation(
+                            "PRODUCT_NOTIFICATION_REPLAY_EXPIRED",
+                            "the completed notification replay has expired",
+                            ErrorCode.CONFLICT,
+                        )
+                    expected_sequence = retained.notification_admitted_sequence + 1
+                    if notification_sequence != expected_sequence:
+                        raise FormalTaskViolation(
+                            "PRODUCT_NOTIFICATION_SEQUENCE_MISMATCH",
+                            "notification polls must use the next exact sequence",
+                            ErrorCode.CONFLICT,
+                        )
+                    if retained.notification_admitted_sequence > 0:
+                        previous = next(
+                            (
+                                candidate
+                                for candidate in self._p2_notification_operations.values()
+                                if candidate.p2_binding == retained.binding
+                                and candidate.operation_sequence
+                                == retained.notification_admitted_sequence
+                            ),
+                            None,
+                        )
+                        if previous is not None and not previous.task.done():
+                            raise FormalTaskViolation(
+                                "PRODUCT_NOTIFICATION_POLL_PENDING",
+                                "the previous notification poll is still pending",
+                                ErrorCode.CONFLICT,
+                            )
+                    if (
+                        len(self._p2_notification_operations)
+                        >= self._PRODUCT_OPERATION_CAPACITY
+                        and not self._evict_completed_product_operation(
+                            self._p2_notification_operations,
+                            notification=True,
+                        )
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCT_OPERATION_LEDGER_FULL",
+                            "bounded notification replay ledger is full",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    if notification_sequence <= retained.notification_replay_floor:
+                        raise FormalTaskViolation(
+                            "PRODUCT_NOTIFICATION_REPLAY_EXPIRED",
+                            "the completed notification replay has expired",
+                            ErrorCode.CONFLICT,
+                        )
+                    task = asyncio.create_task(
+                        self._next_p2_notification(retained, request_id),
+                        name=f"live-voice-product-p2-notification:{request_id}",
+                    )
+                    entry = _RetainedProductOperation(
+                        fingerprint,
+                        task,
+                        p2_binding=retained.binding,
+                        operation_sequence=notification_sequence,
+                    )
+                    self._p2_notification_operations[request_id] = entry
+                    retained.notification_admitted_sequence = notification_sequence
+            return await asyncio.shield(entry.task)
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+    async def handle_p2_presentation_ack(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        if not self._settings.p2_enabled:
+            return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "correlation_id",
+                        "interaction_id",
+                        "activation_id",
+                        "activation_generation",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                        "response_id",
+                        "response_generation",
+                        "surface",
+                        "unit_id",
+                        "contiguous_cursor",
+                        "presented_at",
+                    }
+                ),
+            )
+            self._ensure_running()
+            parsed = self._parse_p2_route_binding(params, session_id=session_id)
+            response_id = _required_text(params.get("response_id"), "response_id")
+            unit_id = _required_text(params.get("unit_id"), "unit_id")
+            presented_at = _required_text(
+                params.get("presented_at"), "presented_at", maximum=64
+            )
+            response_generation = params.get("response_generation")
+            cursor = params.get("contiguous_cursor")
+            if (
+                type(response_generation) is not int
+                or response_generation < 0
+                or response_generation > MAX_SAFE_INTEGER
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "response_generation must be a non-negative safe integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if (
+                type(cursor) is not int
+                or cursor < 0
+                or cursor > MAX_SAFE_INTEGER
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "contiguous_cursor must be a non-negative safe integer",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            try:
+                surface = PresentationSurface(str(params.get("surface")))
+            except ValueError as exc:
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "surface must be text or audio",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from exc
+            fingerprint = canonical_json_bytes(
+                {key: value for key, value in params.items() if key != "auth_token"}
+            )
+            async with self._lock:
+                entry = self._p2_ack_operations.get(request_id)
+                if entry is not None:
+                    if entry.p2_binding is None:
+                        raise RuntimeError("retained P2 ACK lost its binding")
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=entry.p2_binding,
+                    )
+                    if entry.fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "presentation ACK request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                else:
+                    retained = await self._require_active_p2_route_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                    )
+                    self._require_product_request_not_evicted("p2.ack", request_id)
+                    if (
+                        len(self._p2_ack_operations)
+                        >= self._PRODUCT_OPERATION_CAPACITY
+                        and not self._evict_completed_product_operation(
+                            self._p2_ack_operations,
+                            namespace="p2.ack",
+                        )
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCT_OPERATION_LEDGER_FULL",
+                            "bounded presentation ACK replay ledger is full",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    ack = PresentationAck(
+                        ref=ResponseRef(parsed[2], response_id, response_generation),
+                        surface=surface,
+                        unit_id=unit_id,
+                        contiguous_cursor=cursor,
+                        presented_at=presented_at,
+                    )
+
+                    async def acknowledge() -> P3RouteResult:
+                        try:
+                            outcome = await retained.activation_lease.acknowledge_presentation(
+                                retained.binding, ack
+                            )
+                            return _success_result(
+                                request_id,
+                                {
+                                    "status": "presentation_acknowledged",
+                                    "session_id": retained.binding.session_id,
+                                    "correlation_id": (retained.binding.correlation_id),
+                                    "interaction_id": (retained.binding.interaction_id),
+                                    "activation_id": retained.binding.activation_id,
+                                    "activation_generation": (
+                                        retained.binding.activation_generation
+                                    ),
+                                    "accepted": outcome.accepted,
+                                    "replayed": outcome.replayed,
+                                    "history_records_written": (
+                                        outcome.history_records_written
+                                    ),
+                                    "history_pending": outcome.history_pending,
+                                },
+                                retained.manifest,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            return _error_result(
+                                request_id,
+                                reason=getattr(
+                                    exc,
+                                    "reason",
+                                    "PRODUCT_P2_PRESENTATION_ACK_FAILED",
+                                ),
+                                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                                message=str(exc),
+                                manifest=retained.manifest,
+                            )
+
+                    task = asyncio.create_task(
+                        acknowledge(),
+                        name=f"live-voice-product-p2-ack:{request_id}",
+                    )
+                    entry = _RetainedProductOperation(
+                        fingerprint,
+                        task,
+                        p2_binding=retained.binding,
+                    )
+                    self._p2_ack_operations[request_id] = entry
+            return await asyncio.shield(entry.task)
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
     async def handle_p2_close(
@@ -1287,14 +2236,16 @@ class AgentServerProductCompositionRegistry:
             interaction_id = _required_text(
                 params.get("interaction_id"), "interaction_id"
             )
-            activation_id = _required_text(
-                params.get("activation_id"), "activation_id"
-            )
+            activation_id = _required_text(params.get("activation_id"), "activation_id")
             generation = params.get("activation_generation")
-            if type(generation) is not int or generation <= 0:
+            if (
+                type(generation) is not int
+                or generation <= 0
+                or generation > MAX_SAFE_INTEGER
+            ):
                 raise FormalTaskViolation(
                     "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
-                    "activation_generation must be a positive integer",
+                    "activation_generation must be a positive safe integer",
                     ErrorCode.INVALID_ARGUMENT,
                 )
             route = self._route_context(
@@ -1309,9 +2260,7 @@ class AgentServerProductCompositionRegistry:
 
         async with self._lock:
             if self._stopped:
-                return _error_result(
-                    request_id, reason="PRODUCT_COMPOSITION_STOPPED"
-                )
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
             state = _AuthorityState()
             authority = await self._authority_registration(
                 state=state,
@@ -1329,9 +2278,7 @@ class AgentServerProductCompositionRegistry:
             assert state.canonical is not None
             retained = self._p2_routes.get((routed_session, interaction_id))
             if retained is None:
-                closed = self._closed_p2_routes.get(
-                    (routed_session, interaction_id)
-                )
+                closed = self._closed_p2_routes.get((routed_session, interaction_id))
                 if closed is None:
                     if authority.lease is not None:
                         await authority.lease.close()
@@ -1402,7 +2349,11 @@ class AgentServerProductCompositionRegistry:
             self._p2_routes.pop(key, None)
             self._retain_closed_p2_route(
                 key,
-                _ClosedP2Route(retained.binding, retained.manifest),
+                _ClosedP2Route(
+                    retained.binding,
+                    retained.manifest,
+                    retained.notification_replay_floor,
+                ),
             )
             return _success_result(
                 request_id,
@@ -1416,6 +2367,486 @@ class AgentServerProductCompositionRegistry:
                     "activation_generation": generation,
                 },
                 retained.manifest,
+            )
+
+    def _p3_control_ready(self) -> bool:
+        return bool(
+            self._settings.p3_mutation_enabled
+            and self._p3_confirmation_owner is not None
+            and self._p3_confirmation_forwarder is not None
+            and self._p3_confirmation_generation is not None
+        )
+
+    @staticmethod
+    def _p3_control_manifest() -> ProductCompositionManifest:
+        return create_product_composition_manifest(
+            enabled=True,
+            route_facts=(
+                _formal_fact(ProductSegment.AUTHORITY),
+                _formal_fact(ProductSegment.P3_CONTROL),
+            ),
+        )
+
+    @staticmethod
+    def _validate_product_p3_mutation_params(
+        params: Mapping[str, object],
+        *,
+        issue: bool,
+        session_id: str | None,
+    ) -> tuple[str, dict[str, object]]:
+        operation = _required_text(params.get("operation"), "operation")
+        if operation not in {"task.create", "task.cancel"}:
+            raise FormalTaskViolation(
+                "INVALID_P3_CONFIRMATION_OPERATION",
+                "product mutation must be task.create or task.cancel",
+                ErrorCode.UNSUPPORTED,
+            )
+        required = {
+            "auth_token",
+            "session_id",
+            "operation",
+            "command_id",
+            "issued_at",
+            "correlation_id",
+        }
+        optional: set[str] = set()
+        if not issue:
+            required.add("confirmation_id")
+        if operation == "task.create":
+            required.update({"name", "instruction"})
+            optional.add("model_intent")
+        else:
+            required.add("task_id")
+        _require_exact_params(params, frozenset(required | optional))
+        routed_session = _required_text(session_id, "routed_session_id")
+        if _required_text(params.get("session_id"), "session_id") != routed_session:
+            raise FormalTaskViolation(
+                "PRODUCT_COMPOSITION_SESSION_MISMATCH",
+                "product request does not match its routed session",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        forwarded = {key: value for key, value in params.items() if key != "operation"}
+        return operation, forwarded
+
+    async def _run_p3_confirmation_issue(
+        self,
+        *,
+        operation: str,
+        forwarded: dict[str, object],
+        request_id: str,
+        session_id: str,
+    ) -> P3RouteResult:
+        manifest = self._p3_control_manifest()
+        owner = self._p3_confirmation_owner
+        generation = self._p3_confirmation_generation
+        if owner is None or generation is None:
+            return _error_result(
+                request_id,
+                reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                manifest=manifest,
+            )
+        async with self._p3_operation_lock:
+            try:
+                confirmation_id = hashlib.sha256(
+                    f"{generation}:{request_id}".encode("utf-8")
+                ).hexdigest()
+                mutation_params = dict(forwarded)
+                mutation_params["confirmation_id"] = confirmation_id
+                prepared = await self._p3_composition.prepare_mutation_confirmation(
+                    operation=operation,
+                    params=mutation_params,
+                    session_id=session_id,
+                )
+                owner_context = P3ConfirmationOwnerContext(
+                    session_id=session_id,
+                    correlation_id=prepared.correlation_id,
+                    owner_generation=generation,
+                )
+                observed = datetime.fromisoformat(
+                    prepared.observed_at.replace("Z", "+00:00")
+                ).astimezone(UTC)
+                expires_at = (
+                    (observed + P3_CONFIRMATION_MAX_TTL)
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z")
+                )
+                receipt = await asyncio.to_thread(
+                    owner.issue,
+                    TrustedP3ConfirmationIssue(
+                        binding=prepared.binding,
+                        owner=owner_context,
+                        expires_at=expires_at,
+                        confirmation_id=confirmation_id,
+                    ),
+                    now=prepared.observed_at,
+                )
+                return _success_result(
+                    request_id,
+                    {
+                        "status": "confirmation_issued",
+                        "confirmation_id": receipt.confirmation_id,
+                        "expires_at": receipt.expires_at,
+                        "replayed": receipt.replayed,
+                        "operation": operation,
+                    },
+                    manifest,
+                )
+            except Exception as exc:  # noqa: BLE001 - retained stable outcome
+                return _error_result(
+                    request_id,
+                    reason=getattr(exc, "reason", "P3_CONFIRMATION_ISSUE_FAILED"),
+                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                    message=str(exc),
+                    manifest=manifest,
+                )
+
+    async def _preflight_p3_confirmation_issue(
+        self,
+        *,
+        operation: str,
+        forwarded: dict[str, object],
+        session_id: str,
+    ) -> P3ConfirmationBinding:
+        """Reject untrusted issue attempts before reserving replay capacity."""
+
+        async with self._p3_operation_lock:
+            mutation_params = dict(forwarded)
+            mutation_params["confirmation_id"] = secrets.token_urlsafe(24)
+            prepared = await self._p3_composition.prepare_mutation_confirmation(
+                operation=operation,
+                params=mutation_params,
+                session_id=session_id,
+            )
+            return prepared.binding
+
+    async def handle_p3_confirmation_issue(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        if not self._p3_control_ready():
+            return _error_result(
+                request_id, reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE"
+            )
+        try:
+            self._ensure_running()
+            operation, forwarded = self._validate_product_p3_mutation_params(
+                params, issue=True, session_id=session_id
+            )
+            routed_session = _required_text(session_id, "routed_session_id")
+            fingerprint = hashlib.sha256(
+                canonical_json_bytes(
+                    {key: value for key, value in params.items() if key != "auth_token"}
+                )
+            ).digest()
+            async with self._lock:
+                existing = self._p3_issue_operations.get(request_id)
+            if existing is not None:
+                if existing.p3_binding is None:
+                    raise RuntimeError("retained P3 issue lost its authority binding")
+                await self._p3_composition.reauthorize_mutation_replay(
+                    operation=operation,
+                    params={**forwarded, "confirmation_id": "retained-replay"},
+                    session_id=routed_session,
+                    expected_binding=existing.p3_binding,
+                )
+                if existing.fingerprint != fingerprint:
+                    raise FormalTaskViolation(
+                        "PRODUCT_REQUEST_ID_CONFLICT",
+                        "confirmation request_id cannot change binding",
+                        ErrorCode.CONFLICT,
+                    )
+            else:
+                p3_binding = await self._preflight_p3_confirmation_issue(
+                    operation=operation,
+                    forwarded=forwarded,
+                    session_id=routed_session,
+                )
+                async with self._lock:
+                    # ``stop()`` sets the flag before snapshotting retained work.
+                    # Recheck in the admission critical section so a request that
+                    # was awaiting authority cannot appear after that snapshot.
+                    self._ensure_running()
+                    existing = self._p3_issue_operations.get(request_id)
+                    if existing is not None:
+                        if existing.fingerprint != fingerprint:
+                            raise FormalTaskViolation(
+                                "PRODUCT_REQUEST_ID_CONFLICT",
+                                "confirmation request_id cannot change binding",
+                                ErrorCode.CONFLICT,
+                            )
+                        if existing.p3_binding != p3_binding:
+                            raise FormalTaskViolation(
+                                "P3_CONFIRMATION_BINDING_MISMATCH",
+                                "confirmation replay no longer matches current authority",
+                                ErrorCode.PERMISSION_DENIED,
+                            )
+                    else:
+                        self._require_product_request_not_evicted(
+                            "p3.issue", request_id
+                        )
+                        if (
+                            len(self._p3_issue_operations)
+                            >= self._PRODUCT_OPERATION_CAPACITY
+                            and not self._evict_completed_product_operation(
+                                self._p3_issue_operations,
+                                namespace="p3.issue",
+                            )
+                        ):
+                            raise FormalTaskViolation(
+                                "PRODUCT_OPERATION_LEDGER_FULL",
+                                "bounded confirmation replay ledger is full",
+                                ErrorCode.UNAVAILABLE,
+                            )
+                        task = asyncio.create_task(
+                            self._run_p3_confirmation_issue(
+                                operation=operation,
+                                forwarded=forwarded,
+                                request_id=request_id,
+                                session_id=routed_session,
+                            ),
+                            name=f"live-voice-product-p3-confirmation:{request_id}",
+                        )
+                        existing = _RetainedProductOperation(
+                            fingerprint, task, p3_binding=p3_binding
+                        )
+                        self._p3_issue_operations[request_id] = existing
+            assert existing is not None
+            return await asyncio.shield(existing.task)
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+    async def _run_p3_mutation(
+        self,
+        *,
+        operation: str,
+        forwarded: dict[str, object],
+        request_id: str,
+        session_id: str,
+    ) -> P3RouteResult:
+        manifest = self._p3_control_manifest()
+        owner = self._p3_confirmation_owner
+        forwarder = self._p3_confirmation_forwarder
+        generation = self._p3_confirmation_generation
+        if owner is None or forwarder is None or generation is None:
+            return _error_result(
+                request_id,
+                reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                manifest=manifest,
+            )
+        async with self._p3_operation_lock:
+            try:
+                prepared = await self._p3_composition.prepare_mutation_confirmation(
+                    operation=operation,
+                    params=forwarded,
+                    session_id=session_id,
+                )
+                owner_context = P3ConfirmationOwnerContext(
+                    session_id=session_id,
+                    correlation_id=prepared.correlation_id,
+                    owner_generation=generation,
+                )
+                confirmation_id = _required_text(
+                    forwarded.get("confirmation_id"), "confirmation_id"
+                )
+                validated = await asyncio.to_thread(
+                    owner.validate_for_forwarding,
+                    confirmation_id,
+                    prepared.binding,
+                    owner_context,
+                    now=prepared.observed_at,
+                )
+                with forwarder.permit(validated):
+                    result = await self._p3_composition.handle(
+                        operation=operation,
+                        params=forwarded,
+                        request_id=request_id,
+                        session_id=session_id,
+                    )
+                if not result.ok:
+                    error = result.payload.get("error")
+                    if isinstance(error, Mapping):
+                        reason = str(
+                            error.get("reason") or "PRODUCT_P3_MUTATION_FAILED"
+                        )
+                        message = str(
+                            error.get("message")
+                            or "formal product P3 mutation failed closed"
+                        )
+                        try:
+                            code = ErrorCode(str(error.get("code")))
+                        except ValueError:
+                            code = ErrorCode.UNAVAILABLE
+                    else:
+                        reason = "PRODUCT_P3_MUTATION_FAILED"
+                        message = "formal product P3 mutation failed closed"
+                        code = ErrorCode.UNAVAILABLE
+                    return _error_result(
+                        request_id,
+                        reason=reason,
+                        code=code,
+                        message=message,
+                        manifest=manifest,
+                    )
+                return _success_result(
+                    request_id,
+                    {
+                        "status": "mutation_processed",
+                        "operation": operation,
+                        "formal_task_result": result.payload.get("result"),
+                    },
+                    manifest,
+                )
+            except Exception as exc:  # noqa: BLE001 - retained stable outcome
+                return _error_result(
+                    request_id,
+                    reason=getattr(exc, "reason", "PRODUCT_P3_MUTATION_FAILED"),
+                    code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                    message=str(exc),
+                    manifest=manifest,
+                )
+
+    async def _preflight_p3_mutation(
+        self,
+        *,
+        operation: str,
+        forwarded: dict[str, object],
+        session_id: str,
+    ) -> P3ConfirmationBinding:
+        """Validate current authority and owner binding before ledger admission."""
+
+        owner = self._p3_confirmation_owner
+        generation = self._p3_confirmation_generation
+        if owner is None or generation is None:
+            raise FormalTaskViolation(
+                "P3_CONFIRMATION_ISSUER_UNAVAILABLE",
+                "the product confirmation owner is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        async with self._p3_operation_lock:
+            prepared = await self._p3_composition.prepare_mutation_confirmation(
+                operation=operation,
+                params=forwarded,
+                session_id=session_id,
+            )
+            confirmation_id = _required_text(
+                forwarded.get("confirmation_id"), "confirmation_id"
+            )
+            await asyncio.to_thread(
+                owner.validate_for_forwarding,
+                confirmation_id,
+                prepared.binding,
+                P3ConfirmationOwnerContext(
+                    session_id=session_id,
+                    correlation_id=prepared.correlation_id,
+                    owner_generation=generation,
+                ),
+                now=prepared.observed_at,
+            )
+            return prepared.binding
+
+    async def handle_p3_mutation(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        if not self._p3_control_ready():
+            return _error_result(
+                request_id, reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE"
+            )
+        try:
+            self._ensure_running()
+            operation, forwarded = self._validate_product_p3_mutation_params(
+                params, issue=False, session_id=session_id
+            )
+            routed_session = _required_text(session_id, "routed_session_id")
+            fingerprint = hashlib.sha256(
+                canonical_json_bytes(
+                    {key: value for key, value in params.items() if key != "auth_token"}
+                )
+            ).digest()
+            async with self._lock:
+                existing = self._p3_mutation_operations.get(request_id)
+            if existing is not None:
+                if existing.p3_binding is None:
+                    raise RuntimeError("retained P3 mutation lost its authority binding")
+                await self._p3_composition.reauthorize_mutation_replay(
+                    operation=operation,
+                    params=forwarded,
+                    session_id=routed_session,
+                    expected_binding=existing.p3_binding,
+                )
+                if existing.fingerprint != fingerprint:
+                    raise FormalTaskViolation(
+                        "PRODUCT_REQUEST_ID_CONFLICT",
+                        "mutation request_id cannot change binding",
+                        ErrorCode.CONFLICT,
+                    )
+            else:
+                p3_binding = await self._preflight_p3_mutation(
+                    operation=operation,
+                    forwarded=forwarded,
+                    session_id=routed_session,
+                )
+                async with self._lock:
+                    # Keep stop/admission atomic with respect to the retained
+                    # task snapshot; no mutation may be admitted after stop.
+                    self._ensure_running()
+                    existing = self._p3_mutation_operations.get(request_id)
+                    if existing is not None:
+                        if existing.fingerprint != fingerprint:
+                            raise FormalTaskViolation(
+                                "PRODUCT_REQUEST_ID_CONFLICT",
+                                "mutation request_id cannot change binding",
+                                ErrorCode.CONFLICT,
+                            )
+                        if existing.p3_binding != p3_binding:
+                            raise FormalTaskViolation(
+                                "P3_CONFIRMATION_BINDING_MISMATCH",
+                                "mutation replay no longer matches current authority",
+                                ErrorCode.PERMISSION_DENIED,
+                            )
+                    else:
+                        self._require_product_request_not_evicted(
+                            "p3.mutate", request_id
+                        )
+                        if (
+                            len(self._p3_mutation_operations)
+                            >= self._PRODUCT_OPERATION_CAPACITY
+                            and not self._evict_completed_product_operation(
+                                self._p3_mutation_operations,
+                                namespace="p3.mutate",
+                            )
+                        ):
+                            raise FormalTaskViolation(
+                                "PRODUCT_OPERATION_LEDGER_FULL",
+                                "bounded mutation replay ledger is full",
+                                ErrorCode.UNAVAILABLE,
+                            )
+                        task = asyncio.create_task(
+                            self._run_p3_mutation(
+                                operation=operation,
+                                forwarded=forwarded,
+                                request_id=request_id,
+                                session_id=routed_session,
+                            ),
+                            name=f"live-voice-product-p3-mutation:{request_id}",
+                        )
+                        existing = _RetainedProductOperation(
+                            fingerprint, task, p3_binding=p3_binding
+                        )
+                        self._p3_mutation_operations[request_id] = existing
+            assert existing is not None
+            return await asyncio.shield(existing.task)
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
     async def handle_p3_query(
@@ -1610,9 +3041,7 @@ class AgentServerProductCompositionRegistry:
                     manifest=activation.manifest,
                 )
             payload = envelope.to_dict()
-            payload["product_composition"] = _serialize_manifest(
-                activation.manifest
-            )
+            payload["product_composition"] = _serialize_manifest(activation.manifest)
             return P3RouteResult(bool(envelope.ok), payload)
         finally:
             if activation.lease is not None:
@@ -1662,9 +3091,7 @@ class AgentServerProductCompositionRegistry:
                 params.get("correlation_id"), "correlation_id"
             )
             origin_id = _required_text(params.get("origin_id"), "origin_id")
-            generation_id = _required_text(
-                params.get("generation_id"), "generation_id"
-            )
+            generation_id = _required_text(params.get("generation_id"), "generation_id")
             generation = params.get("generation")
             if type(generation) is not int or generation <= 0:
                 raise FormalTaskViolation(
@@ -1684,9 +3111,7 @@ class AgentServerProductCompositionRegistry:
 
         async with self._lock:
             if self._stopped:
-                return _error_result(
-                    request_id, reason="PRODUCT_COMPOSITION_STOPPED"
-                )
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
             key = (routed_session, task_id, origin_id, generation_id)
             existing = self._progress_routes.get(key)
             previous_generation = self._progress_generations.get(key)
@@ -1714,9 +3139,7 @@ class AgentServerProductCompositionRegistry:
                         code=ErrorCode.PERMISSION_DENIED,
                     )
                 assert state.canonical is not None
-                closed = self._closed_progress_routes.get(
-                    (*key, previous_generation)
-                )
+                closed = self._closed_progress_routes.get((*key, previous_generation))
                 if closed is not None and state.canonical.scope != closed.binding.scope:
                     if preauthorized_authority.lease is not None:
                         await preauthorized_authority.lease.close()
@@ -1907,9 +3330,7 @@ class AgentServerProductCompositionRegistry:
                     confirmation_id=None,
                     confirmation_binding=None,
                 )
-                grant = P3AuthorityAdapter(service).to_task_grant(
-                    p3_authority, None
-                )
+                grant = P3AuthorityAdapter(service).to_task_grant(p3_authority, None)
                 if grant is None:
                     return ProductSegmentActivation(
                         _unavailable_fact(
@@ -1930,9 +3351,7 @@ class AgentServerProductCompositionRegistry:
                         source_instance_id="agent_server.p3_core",
                         progress_producer=ProducerRef(
                             component="product_p3_text",
-                            instance_id=(
-                                f"{routed_session}:{origin_id}:{generation}"
-                            ),
+                            instance_id=(f"{routed_session}:{origin_id}:{generation}"),
                             authority="adapter",
                         ),
                         progress_adapter="agent_server.product_p3_text.v1",
@@ -2105,9 +3524,7 @@ class AgentServerProductCompositionRegistry:
                 params.get("correlation_id"), "correlation_id"
             )
             origin_id = _required_text(params.get("origin_id"), "origin_id")
-            generation_id = _required_text(
-                params.get("generation_id"), "generation_id"
-            )
+            generation_id = _required_text(params.get("generation_id"), "generation_id")
             generation = params.get("generation")
             seq = params.get("seq")
             if type(generation) is not int or generation <= 0:
@@ -2277,9 +3694,7 @@ class AgentServerProductCompositionRegistry:
                 params.get("correlation_id"), "correlation_id"
             )
             origin_id = _required_text(params.get("origin_id"), "origin_id")
-            generation_id = _required_text(
-                params.get("generation_id"), "generation_id"
-            )
+            generation_id = _required_text(params.get("generation_id"), "generation_id")
             generation = params.get("generation")
             if type(generation) is not int or generation <= 0:
                 raise FormalTaskViolation(
@@ -2299,9 +3714,7 @@ class AgentServerProductCompositionRegistry:
 
         async with self._lock:
             if self._stopped:
-                return _error_result(
-                    request_id, reason="PRODUCT_COMPOSITION_STOPPED"
-                )
+                return _error_result(request_id, reason="PRODUCT_COMPOSITION_STOPPED")
             key = (routed_session, task_id, origin_id, generation_id)
             state = _AuthorityState()
             authority = await self._authority_registration(
@@ -2422,9 +3835,7 @@ class AgentServerProductCompositionRegistry:
                         "[LiveVoiceProduct] progress disconnect cleanup pending"
                     )
                     continue
-                if not self._archive_progress_route(
-                    progress_key, progress_retained
-                ):
+                if not self._archive_progress_route(progress_key, progress_retained):
                     failures = True
                     logger.error(
                         "[LiveVoiceProduct] progress tombstone capacity pending"
@@ -2434,14 +3845,16 @@ class AgentServerProductCompositionRegistry:
                     await p2_retained.lease.close()
                 except Exception:
                     failures = True
-                    logger.exception(
-                        "[LiveVoiceProduct] P2 disconnect cleanup pending"
-                    )
+                    logger.exception("[LiveVoiceProduct] P2 disconnect cleanup pending")
                     continue
                 self._p2_routes.pop(p2_key, None)
                 self._retain_closed_p2_route(
                     p2_key,
-                    _ClosedP2Route(p2_retained.binding, p2_retained.manifest),
+                    _ClosedP2Route(
+                        p2_retained.binding,
+                        p2_retained.manifest,
+                        p2_retained.notification_replay_floor,
+                    ),
                 )
             remaining_orphans: list[_P2FailedCleanupLease] = []
             for cleanup in self._p2_orphan_cleanups:
@@ -2450,9 +3863,7 @@ class AgentServerProductCompositionRegistry:
                 except Exception:
                     failures = True
                     remaining_orphans.append(cleanup)
-                    logger.exception(
-                        "[LiveVoiceProduct] orphan P2 cleanup pending"
-                    )
+                    logger.exception("[LiveVoiceProduct] orphan P2 cleanup pending")
             self._p2_orphan_cleanups = remaining_orphans
             remaining_roots: list[ProductCompositionLease] = []
             for cleanup in self._root_orphan_cleanups:
@@ -2471,6 +3882,21 @@ class AgentServerProductCompositionRegistry:
     async def stop(self) -> None:
         self._stopped = True
         await self.close_active_routes()
+        retained_tasks = tuple(
+            entry.task
+            for ledger in (
+                self._p2_submit_operations,
+                self._p2_notification_operations,
+                self._p2_ack_operations,
+                self._p3_issue_operations,
+                self._p3_mutation_operations,
+            )
+            for entry in ledger.values()
+        )
+        if retained_tasks:
+            await asyncio.shield(
+                asyncio.gather(*retained_tasks, return_exceptions=True)
+            )
 
 
 def create_product_composition_registry_from_environment(
@@ -2478,6 +3904,8 @@ def create_product_composition_registry_from_environment(
     p3_composition: P3AuthenticatedComposition | None,
     agent_manager: Any,
     push_text_event: Callable[[dict[str, object]], Awaitable[bool]],
+    p3_confirmation_owner: BoundedP3ConfirmationOwner | None = None,
+    p3_confirmation_forwarder: ProductP3ConfirmationForwarder | None = None,
 ) -> AgentServerProductCompositionRegistry | None:
     """Construct no registry or Adapter unless the master gate is explicit."""
 
@@ -2494,6 +3922,8 @@ def create_product_composition_registry_from_environment(
         p3_composition=p3_composition,
         agent_manager=agent_manager,
         push_text_event=push_text_event,
+        p3_confirmation_owner=p3_confirmation_owner,
+        p3_confirmation_forwarder=p3_confirmation_forwarder,
     )
 
 
@@ -2503,6 +3933,7 @@ __all__ = [
     "PRODUCT_COMPOSITION_METHODS",
     "PRODUCT_P2_ENABLE_ENV",
     "PRODUCT_P3_QUERY_OPERATIONS",
+    "PRODUCT_P3_MUTATION_ENABLE_ENV",
     "PRODUCT_P3_TEXT_ENABLE_ENV",
     "ProductCompositionSettings",
     "create_product_composition_registry_from_environment",

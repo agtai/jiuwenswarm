@@ -92,6 +92,11 @@ _LIVE_VOICE_WEB_ALPHA_CREDENTIAL_METHODS = frozenset(
         "live_voice.task.events",
         "live_voice.composition.p2.activate",
         "live_voice.composition.p2.close",
+        "live_voice.composition.p2.submit",
+        "live_voice.composition.p2.notification.next",
+        "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p3.confirmation.issue",
+        "live_voice.composition.p3.mutate",
         "live_voice.composition.p3.progress.activate",
         "live_voice.composition.p3.progress.close",
         "live_voice.composition.p3.progress.ack",
@@ -1039,10 +1044,17 @@ class GatewayServer:
                 "payload": payload,
             }
             if not msg.ok:
-                frame["error"] = str(payload.get("error") or "request failed")
+                error_value = payload.get("error")
+                error_detail = error_value if isinstance(error_value, dict) else {}
+                frame["error"] = str(
+                    error_detail.get("message")
+                    or error_value
+                    or payload.get("message")
+                    or "request failed"
+                )
                 # 提升 payload.code 为顶层 code(与本地 handler 的 send_response
                 # 错误帧结构一致,设计文档 §1.3 前端按顶层 code 分流)
-                code_val = payload.get("code")
+                code_val = error_detail.get("code") or payload.get("code")
                 if isinstance(code_val, str) and code_val.strip():
                     frame["code"] = code_val.strip()
             await ws.send(json.dumps(frame, ensure_ascii=False))

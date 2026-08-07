@@ -9,8 +9,11 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   LiveVoiceIntegratedRoutePanelView,
+  classifyProductP2Notification,
+  extractWebErrorReason,
   isCurrentProgressOwner,
   progressMatchesOwnedBinding,
+  retainBoundedPresentedProductResponse,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import {
   IntegratedWebRouteShell,
@@ -18,7 +21,12 @@ import {
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/integratedWebRouteShell.js';
 import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
-async function renderPanel({ sessionId = 'persisted-session', platform = null, progress = null } = {}) {
+async function renderPanel({
+  sessionId = 'persisted-session',
+  platform = null,
+  progress = null,
+  viewProps = {},
+} = {}) {
   const translations = JSON.parse(await readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8'));
   const i18n = i18next.createInstance();
   await i18n.init({
@@ -52,6 +60,7 @@ async function renderPanel({ sessionId = 'persisted-session', platform = null, p
         platform,
         progress,
         onRefresh: () => {},
+        ...viewProps,
       })
     )
   );
@@ -69,11 +78,11 @@ test('route panel renders three truthful predecessor classes and the non-success
   assert.equal(html.includes('ui-route-test'), true);
   assert.equal(html.includes('compat.browser-speech'), true);
   assert.equal(html.includes('browser-speech'), true);
-  assert.equal(html.includes('Composition shell only.'), true);
-  assert.equal(html.includes('real microphone capture'), true);
-  assert.equal(html.includes('physical audio being heard'), true);
+  assert.equal(html.includes('P2 text route below is formal only'), true);
+  assert.equal(html.includes('Speech'), true);
+  assert.equal(html.includes('physical audio'), true);
   assert.equal(html.includes('task completion'), true);
-  assert.equal(html.includes('Gate pass'), true);
+  assert.equal(html.includes('Gate acceptance'), true);
 });
 
 test('route panel renders only a validated authenticated text progress fact', async () => {
@@ -135,6 +144,114 @@ test('route panel renders only a validated authenticated text progress fact', as
   assert.equal(html.includes('delivery-product-1'), true);
   assert.equal(html.includes('web_task_progress_generation:web-generation-1:2'), true);
   assert.equal(html.includes('It is not voice progress or Integrated Gate evidence.'), true);
+});
+
+test('P2 notification classification surfaces errors and terminal-without-final', () => {
+  assert.deepEqual(
+    classifyProductP2Notification({
+      kind: 'agent.error',
+      error_reason: 'HARNESS_FAILED',
+    }),
+    { kind: 'failed', reason: 'HARNESS_FAILED' }
+  );
+  assert.deepEqual(
+    classifyProductP2Notification({
+      kind: 'work.progress',
+      response: { response_id: 'response-1', response_generation: 0 },
+      progress_event: {
+        payload: { state: 'terminal', outcome: 'completed' },
+      },
+    }),
+    {
+      kind: 'failed',
+      reason: 'PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL:completed',
+    }
+  );
+  assert.deepEqual(
+    classifyProductP2Notification(
+      {
+        kind: 'work.progress',
+        progress_event: { payload: { state: 'terminal', outcome: 'completed' } },
+      },
+      true
+    ),
+    { kind: 'continue' }
+  );
+});
+
+test('Web response error extraction preserves nested product reason', () => {
+  assert.equal(
+    extractWebErrorReason({
+      error: {
+        code: 'PERMISSION_DENIED',
+        reason: 'TASK_CONTEXT_PERMISSION_MISSING',
+        message: 'revoked',
+      },
+    }),
+    'TASK_CONTEXT_PERMISSION_MISSING'
+  );
+  assert.equal(extractWebErrorReason({ reason: ' TOP_LEVEL_REASON ' }), 'TOP_LEVEL_REASON');
+  assert.equal(extractWebErrorReason({ error: 'legacy error' }), undefined);
+});
+
+test('presented response ownership stays bounded and evicts conservatively', () => {
+  const responses = new Map();
+  for (let index = 0; index < 129; index += 1) {
+    retainBoundedPresentedProductResponse(responses, `response-${index}`);
+  }
+  assert.equal(responses.size, 128);
+  assert.equal(responses.has('response-0'), false);
+  assert.equal(responses.has('response-128'), true);
+});
+
+test('unknown retained P2 operation locks editing and second submission', async () => {
+  const html = await renderPanel({
+    viewProps: {
+      p2Activation: {
+        status: 'active',
+        binding: {
+          session_id: 'persisted-session',
+          correlation_id: 'ui-route-test',
+          interaction_id: 'interaction-1',
+          activation_id: 'activation-1',
+          activation_generation: 1,
+        },
+        reason: null,
+      },
+      productInput: 'retained exact text',
+      productTextStatus: 'failed',
+      productOperationRetained: true,
+      onProductInput: () => {},
+      onProductSubmit: () => {},
+    },
+  });
+
+  assert.match(html, /<textarea[^>]*disabled=""[^>]*>retained exact text<\/textarea>/);
+  assert.match(html, /<button[^>]*type="submit"[^>]*disabled=""/);
+});
+
+test('route panel renders a distinct two-action formal P3 task control', async () => {
+  const html = await renderPanel({
+    viewProps: {
+      p3MutationEnabled: true,
+      p3MutationOperation: 'task.create',
+      p3TaskName: 'task name',
+      p3TaskInstruction: 'task instruction',
+      p3MutationStatus: 'confirmed',
+      onP3MutationOperation: () => {},
+      onP3TaskName: () => {},
+      onP3TaskInstruction: () => {},
+      onP3TargetTaskId: () => {},
+      onP3Issue: () => {},
+      onP3Execute: () => {},
+    },
+  });
+
+  assert.equal(html.includes('data-testid="live-voice-integrated-p3-mutation"'), true);
+  assert.equal(html.includes('Issue confirmation'), false);
+  assert.equal(html.includes('Execute confirmed mutation'), true);
+  assert.equal(html.includes('Acceptance is not task completion.'), true);
+  assert.equal((html.match(/disabled=""/g) ?? []).length >= 3, true);
 });
 
 test('browser progress consumption is fenced to the exact owned P3 binding', () => {
