@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 import json
 import logging
@@ -26,8 +27,12 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaGenerationBinding,
     MediaGenerationKind,
     MediaPlayoutBinding,
+    MediaPlaybackStopOutcome,
     MediaTransportViolation,
+    create_playback_stop_receipt,
+    deserialize_media_control,
     encode_audio_frame,
+    serialize_media_control,
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
     DEDICATED_MEDIA_ROUTE_CONTRACT_VERSION,
@@ -40,7 +45,50 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
     DedicatedMediaRouteTruth,
     InactiveDedicatedMediaRoute,
     create_dedicated_media_route,
+    run_dedicated_media_downlink_socket_leaf,
+    run_dedicated_media_socket_leaf,
 )
+
+
+class _FakeDedicatedSocket:
+    def __init__(self, incoming: list[object], *, fail_send_at: int | None = None):
+        self.incoming = list(incoming)
+        self.sent: list[str | bytes] = []
+        self.close_calls: list[tuple[int, str]] = []
+        self.fail_send_at = fail_send_at
+
+    async def recv(self) -> str | bytes:
+        if not self.incoming:
+            raise ConnectionError("peer transport closed")
+        value = self.incoming.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value  # type: ignore[return-value]
+
+    async def send(self, message: str | bytes) -> None:
+        if self.fail_send_at is not None and len(self.sent) == self.fail_send_at:
+            raise ConnectionError("private send failure")
+        self.sent.append(message)
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.close_calls.append((code, reason))
+
+
+class _BlockingDedicatedSocket(_FakeDedicatedSocket):
+    def __init__(self) -> None:
+        super().__init__([])
+        self.receiving = asyncio.Event()
+
+    async def recv(self) -> str | bytes:
+        self.receiving.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+
+class _BlockingCloseDedicatedSocket(_FakeDedicatedSocket):
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.close_calls.append((code, reason))
+        await asyncio.Event().wait()
 
 
 def _binding(
@@ -712,3 +760,426 @@ def test_origin_canonicalization_is_exact_and_conservative() -> None:
     assert (
         DEDICATED_MEDIA_ROUTE_CONTRACT_VERSION == "live-voice.media.dedicated-route.v1"
     )
+
+
+def _downlink_binding() -> MediaAuthorityBinding:
+    return replace(
+        _binding(),
+        direction=MediaDirection.DOWNLINK,
+        track_id="playout-track-dedicated-01",
+        generation=MediaGenerationBinding(
+            MediaGenerationKind.RESPONSE,
+            "response-dedicated-01",
+            7,
+        ),
+        playout=MediaPlayoutBinding(
+            "response-dedicated-01",
+            7,
+            "unit-dedicated-01",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_detach() -> None:
+    effects = {
+        "audio": 0,
+        "agent": 0,
+        "tool": 0,
+        "task": 0,
+        "history": 0,
+        "logger": 0,
+        "persistence": 0,
+    }
+    binding = _binding()
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+        through_seq=0,
+    )
+    socket = _FakeDedicatedSocket(
+        [
+            encode_audio_frame(binding, _frame()),
+            serialize_media_control(peer_detach),
+        ]
+    )
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding),
+        socket=socket,
+        on_audio_frame=lambda _frame: effects.__setitem__(
+            "audio", effects["audio"] + 1
+        ),
+    )
+
+    controls = [deserialize_media_control(item) for item in socket.sent]
+    assert controls == [
+        MediaAttach(binding),
+        MediaAck(binding.lease_id, binding.generation.value, 0),
+    ]
+    assert result.activated is True
+    assert result.socket_touched is True
+    assert result.attach_sent is True
+    assert result.accepted_frames == 1
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert result.close_result is not None
+    assert result.close_result.business_cancel_count_delta == 0
+    assert result.business_cancel_count_delta == 0
+    assert result.registered_route_observed is False
+    assert result.route_to_disk_zero_persistence_observed is False
+    assert result.formal_route_ready is False
+    assert socket.close_calls == [(1000, "live-voice media leaf closed")]
+    assert effects["audio"] == 1
+    assert all(effects[name] == 0 for name in effects if name != "audio")
+
+
+@pytest.mark.asyncio
+async def test_socket_leaf_flag_off_returns_before_socket_or_consumer_inspection() -> None:
+    class _ForbiddenSocket:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"feature-off inspected socket.{name}")
+
+    effects = {"consumer": 0}
+    result = await run_dedicated_media_socket_leaf(
+        DedicatedMediaRouteRequest(
+            enabled=False,
+            expected_origin=None,
+            request_origin=None,
+            binding=None,
+            provider_available=True,
+            binary_transport_available=True,
+        ),
+        socket=_ForbiddenSocket(),  # type: ignore[arg-type]
+        on_audio_frame=lambda _frame: effects.__setitem__("consumer", 1),
+    )
+
+    assert result.activated is False
+    assert result.socket_touched is False
+    assert result.attach_sent is False
+    assert result.accepted_frames == 0
+    assert result.close_result is None
+    assert result.reason_id is DedicatedMediaRouteReason.FEATURE_DISABLED
+    assert effects == {"consumer": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("incoming", "reason_id", "accepted_frames"),
+    [
+        (b"not-lvm1", MediaDetachReason.MALFORMED_FRAME, 0),
+        (
+            encode_audio_frame(
+                _binding(generation_value=8),
+                _frame(),
+            ),
+            MediaDetachReason.STALE_GENERATION,
+            0,
+        ),
+        (
+            serialize_media_control(
+                MediaAck(_binding().lease_id, _binding().generation.value, 0)
+            ),
+            MediaDetachReason.TRANSPORT_PROTOCOL_ERROR,
+            0,
+        ),
+    ],
+)
+async def test_socket_leaf_malformed_stale_and_wrong_control_fail_closed(
+    incoming: str | bytes,
+    reason_id: MediaDetachReason,
+    accepted_frames: int,
+) -> None:
+    effects = {
+        "audio": 0,
+        "agent": 0,
+        "tool": 0,
+        "task": 0,
+        "history": 0,
+        "logger": 0,
+        "persistence": 0,
+    }
+    socket = _FakeDedicatedSocket([incoming])
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(_binding()),
+        socket=socket,
+        on_audio_frame=lambda _frame: effects.__setitem__("audio", 1),
+    )
+
+    assert result.reason_id is reason_id
+    assert result.accepted_frames == accepted_frames
+    assert isinstance(deserialize_media_control(socket.sent[-1]), MediaDetach)
+    assert deserialize_media_control(socket.sent[-1]).reason_id is reason_id  # type: ignore[union-attr]
+    _assert_zero_forbidden(effects)
+
+
+@pytest.mark.asyncio
+async def test_socket_leaf_send_failure_retains_local_fence_without_retry() -> None:
+    socket = _FakeDedicatedSocket([], fail_send_at=0)
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(_binding()),
+        socket=socket,
+        on_audio_frame=lambda _frame: None,
+    )
+
+    assert result.attach_sent is False
+    assert result.reason_id is MediaDetachReason.TRANSPORT_SEND_FAILED
+    assert socket.sent == []
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exact_stop() -> None:
+    binding = _downlink_binding()
+    stop = create_playback_stop_receipt(
+        binding,
+        outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
+        confirmed_through_seq=0,
+    )
+    socket = _FakeDedicatedSocket(
+        [
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 0)
+            ),
+            serialize_media_control(stop),
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 1)
+            ),
+        ]
+    )
+    effects = {
+        "playback_stop": 0,
+        "agent": 0,
+        "tool": 0,
+        "task": 0,
+        "history": 0,
+        "persistence": 0,
+    }
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=[_frame(), _frame(1, 160)],
+        on_playback_stop=lambda _receipt: effects.__setitem__(
+            "playback_stop", effects["playback_stop"] + 1
+        ),
+        max_pending_frames=1,
+        max_pending_bytes=2048,
+    )
+
+    assert deserialize_media_control(socket.sent[0]) == MediaAttach(binding)
+    binaries = [item for item in socket.sent if isinstance(item, bytes)]
+    assert len(binaries) == 2
+    terminal = deserialize_media_control(socket.sent[-1])
+    assert isinstance(terminal, MediaDetach)
+    assert terminal.reason_id is MediaDetachReason.PEER_CLOSE
+    assert terminal.business_cancel_count_delta == 0
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert result.sent_frames == 2
+    assert result.acknowledged_through_seq == 0
+    assert result.playback_stop_receipts == 1
+    assert result.business_cancel_count_delta == 0
+    assert result.close_result is not None
+    assert result.close_result.dropped_frames == 1
+    assert effects == {
+        "playback_stop": 1,
+        "agent": 0,
+        "tool": 0,
+        "task": 0,
+        "history": 0,
+        "persistence": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_downlink_feature_off_does_not_iterate_frames_or_touch_socket() -> None:
+    class _Forbidden:
+        def __getattribute__(self, name: str) -> object:
+            raise AssertionError(f"feature-off inspected {name}")
+
+        def __iter__(self):
+            raise AssertionError("feature-off iterated frames")
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(None, enabled=False),
+        socket=_Forbidden(),  # type: ignore[arg-type]
+        frames=_Forbidden(),  # type: ignore[arg-type]
+        on_playback_stop=lambda _receipt: (_ for _ in ()).throw(
+            AssertionError("feature-off invoked playback stop")
+        ),
+    )
+
+    assert result.activated is False
+    assert result.reason_id is DedicatedMediaRouteReason.FEATURE_DISABLED
+    assert result.socket_touched is False
+    assert result.sent_frames == 0
+    assert result.playback_stop_receipts == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("max_pending_frames", "max_pending_bytes"),
+    [
+        (257, 2048),
+        (1.5, 2048),
+        (True, 2048),
+        ((1 << 53), 2048),
+        (1, 8 * 1024 * 1024 + 1),
+        (1, 1.5),
+        (1, True),
+        (1, 1 << 53),
+    ],
+)
+async def test_downlink_public_limits_fail_before_socket_or_iterator_effects(
+    max_pending_frames: object,
+    max_pending_bytes: object,
+) -> None:
+    class _UnconsumedFrames:
+        def __iter__(self):
+            raise AssertionError("invalid limits must precede iterator consumption")
+
+    socket = _FakeDedicatedSocket([])
+    effects = {"playback_stop": 0}
+
+    with pytest.raises(MediaTransportViolation) as invalid:
+        await run_dedicated_media_downlink_socket_leaf(
+            _request(_downlink_binding()),
+            socket=socket,
+            frames=_UnconsumedFrames(),
+            on_playback_stop=lambda _receipt: effects.__setitem__(
+                "playback_stop", 1
+            ),
+            max_pending_frames=max_pending_frames,  # type: ignore[arg-type]
+            max_pending_bytes=max_pending_bytes,  # type: ignore[arg-type]
+        )
+
+    assert invalid.value.reason_id == "MEDIA_INVALID_BACKPRESSURE_LIMIT"
+    assert socket.sent == []
+    assert socket.close_calls == []
+    assert effects == {"playback_stop": 0}
+
+
+@pytest.mark.asyncio
+async def test_downlink_practical_limit_boundaries_are_accepted() -> None:
+    binding = _downlink_binding()
+    socket = _FakeDedicatedSocket(
+        [serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0))]
+    )
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=[_frame()],
+        on_playback_stop=lambda _receipt: None,
+        max_pending_frames=256,
+        max_pending_bytes=8 * 1024 * 1024,
+    )
+
+    assert result.sent_frames == 1
+    assert result.reason_id is MediaDetachReason.LOCAL_CLOSE
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_downlink_wrong_ack_generation_detaches_before_stop_or_other_scope_effects() -> None:
+    binding = _downlink_binding()
+    socket = _FakeDedicatedSocket(
+        [
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value + 1, 0)
+            )
+        ]
+    )
+    effects = {"stop": 0, "agent": 0, "tool": 0, "task": 0, "history": 0}
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=[_frame()],
+        on_playback_stop=lambda _receipt: effects.__setitem__("stop", 1),
+        max_pending_frames=1,
+        max_pending_bytes=2048,
+    )
+
+    assert result.reason_id is MediaDetachReason.STALE_GENERATION
+    assert result.acknowledged_through_seq is None
+    assert result.playback_stop_receipts == 0
+    assert effects == {"stop": 0, "agent": 0, "tool": 0, "task": 0, "history": 0}
+
+
+@pytest.mark.asyncio
+async def test_downlink_stop_cannot_confirm_an_unsent_cursor() -> None:
+    binding = _downlink_binding()
+    impossible_stop = create_playback_stop_receipt(
+        binding,
+        outcome=MediaPlaybackStopOutcome.LOCAL_FENCE_ESTABLISHED,
+        confirmed_through_seq=1,
+    )
+    socket = _FakeDedicatedSocket([serialize_media_control(impossible_stop)])
+    effects = {"stop": 0, "agent": 0, "tool": 0, "task": 0, "history": 0}
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=[_frame()],
+        on_playback_stop=lambda _receipt: effects.__setitem__("stop", 1),
+        max_pending_frames=1,
+        max_pending_bytes=2048,
+    )
+
+    assert result.reason_id is MediaDetachReason.ACK_UNSENT
+    assert result.sent_frames == 1
+    assert result.playback_stop_receipts == 0
+    assert effects == {"stop": 0, "agent": 0, "tool": 0, "task": 0, "history": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["uplink", "downlink"])
+async def test_socket_leaf_cancellation_closes_transport_without_retry(
+    direction: str,
+) -> None:
+    socket = _BlockingDedicatedSocket()
+    binding = _binding() if direction == "uplink" else _downlink_binding()
+    if direction == "uplink":
+        operation = run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+        )
+    else:
+        operation = run_dedicated_media_downlink_socket_leaf(
+            _request(binding),
+            socket=socket,
+            frames=[_frame()],
+            on_playback_stop=lambda _receipt: None,
+            max_pending_frames=1,
+            max_pending_bytes=2048,
+        )
+    task = asyncio.create_task(operation)
+    await socket.receiving.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(socket.close_calls) == 1
+    assert len(socket.sent) == (1 if direction == "uplink" else 2)
+
+
+@pytest.mark.asyncio
+async def test_socket_leaf_cleanup_is_bounded_when_physical_close_never_confirms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 0.01)
+    socket = _BlockingCloseDedicatedSocket([b"not-lvm1"])
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(_binding()),
+        socket=socket,
+        on_audio_frame=lambda _frame: None,
+    )
+
+    assert result.reason_id is MediaDetachReason.MALFORMED_FRAME
+    assert len(socket.close_calls) == 1

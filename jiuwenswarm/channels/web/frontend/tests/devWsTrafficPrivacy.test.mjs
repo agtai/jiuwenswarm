@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -157,5 +160,49 @@ test('exact raw-audio key is redacted for every JSON value type', () => {
       data_base64: RAW_AUDIO_REDACTION,
     });
     assert.deepEqual(source, { data_base64: value });
+  }
+});
+
+test('actual persistence-boundary output contains no raw-audio sentinel anywhere on disk', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'live-voice-route-to-disk-'));
+  const logFile = join(directory, 'ws-dev.log');
+  const sentinel = 'RAW_AUDIO_SENTINEL_8f2c6bb7d6af4ea78bf07a3e9ebf8505';
+  try {
+    const envelopes = [
+      {
+        direction: 'outgoing',
+        data: {
+          method: 'live_voice.speech.recognize_batch',
+          params: { audio: { format: 'wav_pcm16_mono', data_base64: sentinel } },
+        },
+      },
+      {
+        direction: 'incoming',
+        data: {
+          type: 'res',
+          payload: JSON.stringify({ audio: { data_base64: sentinel } }),
+        },
+      },
+      {
+        direction: 'incoming',
+        data: { rawData: `{"audio":{"data_base64":"${sentinel}"`, parse: 'failed' },
+      },
+    ];
+
+    for (const envelope of envelopes) {
+      const payload = prepareDevWsTrafficPayloadForPersistence(JSON.stringify(envelope));
+      appendFileSync(logFile, `${JSON.stringify({ ts: '2026-08-07T00:00:00.000Z', payload })}\n`, 'utf8');
+    }
+
+    const persistedFiles = readdirSync(directory, { recursive: true })
+      .map(entry => join(directory, String(entry)))
+      .filter(path => statSync(path).isFile());
+    assert.deepEqual(persistedFiles, [logFile]);
+    const persisted = persistedFiles.map(path => readFileSync(path, 'utf8')).join('\n');
+    assert.equal(persisted.includes(sentinel), false);
+    assert.equal(persisted.includes(RAW_AUDIO_REDACTION), true);
+    assert.equal(persisted.includes(RAW_TRANSPORT_DATA_REDACTION), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });

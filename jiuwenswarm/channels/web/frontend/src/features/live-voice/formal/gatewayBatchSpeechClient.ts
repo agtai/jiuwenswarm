@@ -1,5 +1,6 @@
 import {
   LIVE_VOICE_AUDIO_FRAME_DURATION_MS,
+  createAudioRenderPlan,
   createCapturedAudioFrame,
   type AudioProviderRef,
   type AudioRenderPlan,
@@ -16,8 +17,51 @@ export const SPEECH_CANCEL_METHOD = 'live_voice.speech.cancel';
 
 const MAX_BATCH_AUDIO_BYTES = 4 * 1024 * 1024;
 const MAX_SYNTHESIS_AUDIO_BYTES = 8 * 1024 * 1024;
+const MAX_RECOGNITION_TEXT_CHARS = 16_000;
+const MAX_SYNTHESIS_TEXT_CHARS = 4_000;
+const MAX_BATCH_TIMEOUT_MS = 30_000;
+const MAX_CLOSE_TIMEOUT_MS = 5_000;
 const MAX_IDENTITY_TOMBSTONES = 512;
 const DEFAULT_TIMEOUT_MS = 15_000;
+const SPEECH_CAPABILITY_CONTROL_OPERATION = 'speech.capabilities.get' as const;
+const SPEECH_CANCEL_OPERATION = 'speech.batch.cancel' as const;
+const GATEWAY_SPEECH_OPERATIONS = Object.freeze([
+  SPEECH_CAPABILITY_CONTROL_OPERATION,
+  'speech.recognize.batch',
+  'speech.synthesize.batch',
+  SPEECH_CANCEL_OPERATION,
+] as const);
+const SPEECH_CAPABILITY_DESCRIPTOR_KEYS = Object.freeze([
+  'component',
+  'contract_major',
+  'supported_operations',
+  'supported_event_types',
+  'batch_modes',
+  'stream_modes',
+  'supports_cancel_ack',
+  'supports_replay',
+  'declared_limits',
+  'fallback_identity',
+  'availability',
+]);
+const SPEECH_DECLARED_LIMIT_KEYS = Object.freeze([
+  'max_input_audio_bytes',
+  'max_output_audio_bytes',
+  'max_recognition_text_chars',
+  'max_text_chars',
+  'max_timeout_ms',
+  'recognition_input',
+  'synthesis_output',
+  'resampling',
+  'credential_boundary',
+  'max_operation_capacity',
+  'operation_replay_window',
+  'identity_tombstone_window',
+  'close_timeout_max_ms',
+  'authorization',
+]);
+
+export type GatewaySpeechOperation = typeof GATEWAY_SPEECH_OPERATIONS[number];
 
 export interface GatewaySpeechTransport {
   /** Implementations must keep Speech params memory-only and must not log or persist raw audio. */
@@ -94,7 +138,26 @@ export interface LocalSpeechCapability {
     synthesis: 'browser-speech-synthesis';
     automatic: false;
   }>;
-  readonly gateway?: unknown;
+  readonly degradation: Readonly<{
+    state: 'formal_available' | 'formal_unavailable' | 'formal_disabled';
+    reason_id: 'FEATURE_DISABLED' | 'PROVIDER_UNAVAILABLE' | 'SPEECH_OPERATION_UNAVAILABLE' | null;
+    browser_fallback_is_formal: false;
+    browser_fallback_automatic: false;
+  }>;
+  readonly gateway?: Readonly<GatewaySpeechCapabilityEvidence>;
+}
+
+export interface GatewaySpeechCapabilityEvidence {
+  readonly contract_version: typeof LIVE_VOICE_SPEECH_CONTRACT_VERSION;
+  readonly provider_id: string;
+  readonly provider_available: boolean;
+  readonly provider_configured: boolean;
+  readonly authorization_available: boolean;
+  readonly service_closed: boolean;
+  readonly supported_operations: readonly GatewaySpeechOperation[];
+  readonly evidence_scope: 'sanitized_gateway_batch_speech_capability';
+  readonly browser_fallback_is_formal: false;
+  readonly browser_fallback_automatic: false;
 }
 
 interface ContractErrorPayload {
@@ -157,6 +220,52 @@ function objectValue(value: unknown, field: string): Record<string, unknown> {
     throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_GATEWAY_RESPONSE', `${field} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function closedGatewayObject(
+  value: unknown,
+  expectedKeys: readonly string[],
+  field: string,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new GatewayBatchSpeechError(
+      'PROTOCOL_VIOLATION',
+      'INVALID_SPEECH_CAPABILITY',
+      `${field} must be the closed Gateway descriptor object`,
+    );
+  }
+  const record = value as Record<string, unknown>;
+  const actual = Object.keys(record).sort();
+  const expected = [...expectedKeys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new GatewayBatchSpeechError(
+      'PROTOCOL_VIOLATION',
+      'INVALID_SPEECH_CAPABILITY',
+      `${field} fields do not match the closed Gateway descriptor`,
+    );
+  }
+  return record;
+}
+
+function positiveCapabilityInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) > 0;
+}
+
+function exactArgumentRecord(
+  value: unknown,
+  expectedKeys: readonly string[],
+  field: string,
+): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${field} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const expected = [...expectedKeys].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new TypeError(`${field} fields are not closed`);
+  }
+  return record;
 }
 
 function createDefaultId(): string {
@@ -367,8 +476,8 @@ function sameResponse(left: Readonly<AudioResponseRef>, right: Readonly<AudioRes
 
 export class GatewayBatchSpeechClient {
   readonly #enabled: boolean;
-  readonly #transport: GatewaySpeechTransport;
-  readonly #scope: Readonly<GatewaySpeechScope>;
+  readonly #transport: GatewaySpeechTransport | null;
+  readonly #scope: Readonly<GatewaySpeechScope> | null;
   readonly #createId: () => string;
   #token = 0;
   #activeRecognition: ActiveRecognition | null = null;
@@ -384,7 +493,15 @@ export class GatewayBatchSpeechClient {
       createId?: () => string;
     }>
   ) {
-    this.#enabled = options.enabled;
+    this.#enabled = options.enabled === true;
+    if (!this.#enabled) {
+      // Feature-off deliberately avoids reading transport, scope, or identity
+      // hooks so compatibility fallback has zero Gateway allocation/effects.
+      this.#transport = null;
+      this.#scope = null;
+      this.#createId = createDefaultId;
+      return;
+    }
     this.#transport = options.transport;
     this.#scope = Object.freeze({ ...options.scope });
     this.#createId = options.createId ?? createDefaultId;
@@ -405,23 +522,129 @@ export class GatewayBatchSpeechClient {
       synthesis: 'browser-speech-synthesis' as const,
       automatic: false as const,
     });
+    const disabledDegradation = Object.freeze({
+      state: 'formal_disabled' as const,
+      reason_id: 'FEATURE_DISABLED' as const,
+      browser_fallback_is_formal: false as const,
+      browser_fallback_automatic: false as const,
+    });
     if (!this.#enabled) {
-      return Object.freeze({ enabled: false, formal_available: false, recognition_batch: false, synthesis_batch: false, fallback });
+      return Object.freeze({
+        enabled: false,
+        formal_available: false,
+        recognition_batch: false,
+        synthesis_batch: false,
+        fallback,
+        degradation: disabledDegradation,
+      });
     }
-    const gateway = await this.#transport.request(SPEECH_CAPABILITIES_METHOD, { session_id: this.#scope.session_id });
+    const scope = this.#scope!;
+    const gateway = await this.#transport!.request(SPEECH_CAPABILITIES_METHOD, { session_id: scope.session_id });
     const payload = objectValue(gateway, 'capability');
     const provider = objectValue(payload.provider, 'capability.provider');
-    const descriptor = objectValue(payload.capability, 'capability.capability');
-    if (!Array.isArray(descriptor.supported_operations)) {
+    const descriptor = closedGatewayObject(
+      payload.capability,
+      SPEECH_CAPABILITY_DESCRIPTOR_KEYS,
+      'capability.capability',
+    );
+    const declaredLimits = closedGatewayObject(
+      descriptor.declared_limits,
+      SPEECH_DECLARED_LIMIT_KEYS,
+      'capability.capability.declared_limits',
+    );
+    const gatewayFallback = objectValue(payload.fallback, 'capability.fallback');
+    const advertisedOperations = descriptor.supported_operations;
+    const providerAvailable = provider.available;
+    const providerConfigured = provider.provider_configured;
+    const authorizationAvailable = provider.authorization_available;
+    const serviceClosed = provider.service_closed;
+    if (
+      payload.contract_version !== LIVE_VOICE_SPEECH_CONTRACT_VERSION
+      || descriptor.component !== 'speech.batch.gateway'
+      || descriptor.contract_major !== 'v2'
+      || !Array.isArray(advertisedOperations)
+      || advertisedOperations.some((operation) => typeof operation !== 'string')
+      || advertisedOperations.some((operation) => !(GATEWAY_SPEECH_OPERATIONS as readonly string[]).includes(operation))
+      || new Set(advertisedOperations).size !== advertisedOperations.length
+      || !advertisedOperations.includes(SPEECH_CAPABILITY_CONTROL_OPERATION)
+      || !advertisedOperations.includes(SPEECH_CANCEL_OPERATION)
+      || !Array.isArray(descriptor.supported_event_types)
+      || descriptor.supported_event_types.length !== 0
+      || !Array.isArray(descriptor.batch_modes)
+      || descriptor.batch_modes.length !== 1
+      || descriptor.batch_modes[0] !== 'batch'
+      || !Array.isArray(descriptor.stream_modes)
+      || descriptor.stream_modes.length !== 0
+      || descriptor.supports_cancel_ack !== true
+      || descriptor.supports_replay !== false
+      || descriptor.fallback_identity !== 'browser-speech-compatibility'
+      || typeof providerAvailable !== 'boolean'
+      || typeof providerConfigured !== 'boolean'
+      || typeof authorizationAvailable !== 'boolean'
+      || typeof serviceClosed !== 'boolean'
+      || providerAvailable !== (providerConfigured && authorizationAvailable && !serviceClosed)
+      || descriptor.availability !== (providerAvailable ? 'available' : 'unavailable')
+      || (providerAvailable === true && provider.implementation_class !== 'formal')
+      || (providerAvailable === false && provider.implementation_class !== 'unsupported')
+      || (providerAvailable === false && advertisedOperations.some(
+        (operation) => operation === 'speech.recognize.batch' || operation === 'speech.synthesize.batch',
+      ))
+      || declaredLimits.max_input_audio_bytes !== MAX_BATCH_AUDIO_BYTES
+      || declaredLimits.max_output_audio_bytes !== MAX_SYNTHESIS_AUDIO_BYTES
+      || declaredLimits.max_recognition_text_chars !== MAX_RECOGNITION_TEXT_CHARS
+      || declaredLimits.max_text_chars !== MAX_SYNTHESIS_TEXT_CHARS
+      || declaredLimits.max_timeout_ms !== MAX_BATCH_TIMEOUT_MS
+      || declaredLimits.recognition_input !== 'wav_pcm16_mono'
+      || declaredLimits.synthesis_output !== 'wav_pcm16_mono'
+      || declaredLimits.resampling !== 'unsupported'
+      || declaredLimits.credential_boundary !== 'gateway_only'
+      || !positiveCapabilityInteger(declaredLimits.max_operation_capacity)
+      || declaredLimits.operation_replay_window !== declaredLimits.max_operation_capacity
+      || !positiveCapabilityInteger(declaredLimits.identity_tombstone_window)
+      || declaredLimits.close_timeout_max_ms !== MAX_CLOSE_TIMEOUT_MS
+      || declaredLimits.authorization !== 'authenticated_server_owned_exact_binding'
+      || gatewayFallback.recognition !== 'browser-speech-recognition'
+      || gatewayFallback.synthesis !== 'browser-speech-synthesis'
+      || gatewayFallback.automatic !== false
+    ) {
       throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_SPEECH_CAPABILITY', 'Gateway returned invalid Speech operations');
     }
+    const providerId = requiredText(provider.provider_id, 'capability.provider.provider_id');
+    const supported = Object.freeze(
+      GATEWAY_SPEECH_OPERATIONS.filter((operation) => advertisedOperations.includes(operation)),
+    );
+    const recognitionBatch = providerAvailable === true && supported.includes('speech.recognize.batch');
+    const synthesisBatch = providerAvailable === true && supported.includes('speech.synthesize.batch');
+    const formalAvailable = recognitionBatch || synthesisBatch;
+    const sanitizedGateway = Object.freeze({
+      contract_version: LIVE_VOICE_SPEECH_CONTRACT_VERSION,
+      provider_id: providerId,
+      provider_available: providerAvailable,
+      provider_configured: providerConfigured,
+      authorization_available: authorizationAvailable,
+      service_closed: serviceClosed,
+      supported_operations: supported,
+      evidence_scope: 'sanitized_gateway_batch_speech_capability' as const,
+      browser_fallback_is_formal: false as const,
+      browser_fallback_automatic: false as const,
+    });
     return Object.freeze({
       enabled: true,
-      formal_available: provider.available === true,
-      recognition_batch: provider.available === true && descriptor.supported_operations.includes('speech.recognize.batch'),
-      synthesis_batch: provider.available === true && descriptor.supported_operations.includes('speech.synthesize.batch'),
+      formal_available: formalAvailable,
+      recognition_batch: recognitionBatch,
+      synthesis_batch: synthesisBatch,
       fallback,
-      gateway: payload,
+      degradation: Object.freeze({
+        state: formalAvailable ? 'formal_available' as const : 'formal_unavailable' as const,
+        reason_id: formalAvailable
+          ? null
+          : providerAvailable
+            ? 'SPEECH_OPERATION_UNAVAILABLE' as const
+            : 'PROVIDER_UNAVAILABLE' as const,
+        browser_fallback_is_formal: false as const,
+        browser_fallback_automatic: false as const,
+      }),
+      gateway: sanitizedGateway,
     });
   }
 
@@ -448,7 +671,7 @@ export class GatewayBatchSpeechClient {
     const requestId = this.#createId();
     let raw: unknown;
     try {
-      raw = await this.#transport.request(
+      raw = await this.#transport!.request(
         SPEECH_RECOGNIZE_BATCH_METHOD,
         {
           contract_version: LIVE_VOICE_SPEECH_CONTRACT_VERSION,
@@ -456,8 +679,8 @@ export class GatewayBatchSpeechClient {
           operation_id: operation.operationId,
           operation: 'speech.recognize.batch',
           correlation_id: operation.correlationId,
-          session_id: this.#scope.session_id,
-          scope: this.#scope,
+          session_id: this.#scope!.session_id,
+          scope: this.#scope!,
           timeout_ms: timeoutMs,
           capture: { ...capture, final: true },
           audio: {
@@ -531,6 +754,31 @@ export class GatewayBatchSpeechClient {
     if (input.authoritativeAgentText !== true) {
       throw new GatewayBatchSpeechError('PERMISSION_DENIED', 'AUTHORITATIVE_AGENT_TEXT_REQUIRED', 'formal synthesis requires authoritative Agent text');
     }
+    let renderPlan: Readonly<AudioRenderPlan>;
+    try {
+      const raw = exactArgumentRecord(
+        input.renderPlan,
+        ['display_text', 'spoken_text', 'transforms'],
+        'render_plan',
+      );
+      if (!Array.isArray(raw.transforms)) throw new TypeError('render transforms must be an array');
+      const transforms = raw.transforms.map((item) => exactArgumentRecord(
+        item,
+        ['transform', 'source_start', 'source_end', 'rendered_text'],
+        'render_plan.transform',
+      ));
+      renderPlan = createAudioRenderPlan(
+        raw.display_text as string,
+        raw.spoken_text as string,
+        transforms as unknown as Readonly<AudioRenderPlan>['transforms'],
+      );
+    } catch {
+      throw new GatewayBatchSpeechError(
+        'INVALID_ARGUMENT',
+        'INVALID_RENDER_PLAN',
+        'formal synthesis requires a closed authoritative render plan',
+      );
+    }
     const operation = this.#beginOperation(input.operationId, input.correlationId);
     const prior = this.#responses.get(response.interaction_id);
     if (prior !== undefined) void this.#cancelBestEffort(prior);
@@ -540,7 +788,7 @@ export class GatewayBatchSpeechClient {
     const requestId = this.#createId();
     let raw: unknown;
     try {
-      raw = await this.#transport.request(
+      raw = await this.#transport!.request(
         SPEECH_SYNTHESIZE_BATCH_METHOD,
         {
           contract_version: LIVE_VOICE_SPEECH_CONTRACT_VERSION,
@@ -548,12 +796,16 @@ export class GatewayBatchSpeechClient {
           operation_id: operation.operationId,
           operation: 'speech.synthesize.batch',
           correlation_id: operation.correlationId,
-          session_id: this.#scope.session_id,
-          scope: this.#scope,
+          session_id: this.#scope!.session_id,
+          scope: this.#scope!,
           timeout_ms: timeoutMs,
           response: { ...response },
           unit_id: requiredText(input.unitId, 'unit_id'),
-          render_plan: { ...input.renderPlan, transforms: input.renderPlan.transforms.map(item => ({ ...item })) },
+          render_plan: {
+            display_text: renderPlan.display_text,
+            spoken_text: renderPlan.spoken_text,
+            transforms: renderPlan.transforms.map(item => ({ ...item })),
+          },
           authoritative_agent_text: true,
           locale: requiredText(input.locale, 'locale'),
           voice: input.voice ?? null,
@@ -665,7 +917,7 @@ export class GatewayBatchSpeechClient {
 
   async #cancelBestEffort(target: ActiveOperation): Promise<void> {
     try {
-      await this.#transport.request(
+      await this.#transport!.request(
         SPEECH_CANCEL_METHOD,
         {
           contract_version: LIVE_VOICE_SPEECH_CONTRACT_VERSION,
@@ -673,8 +925,8 @@ export class GatewayBatchSpeechClient {
           operation_id: this.#createId(),
           operation: 'speech.batch.cancel',
           correlation_id: target.correlationId,
-          session_id: this.#scope.session_id,
-          scope: this.#scope,
+          session_id: this.#scope!.session_id,
+          scope: this.#scope!,
           target_operation_id: target.operationId,
         },
         { timeoutMs: 2000 }

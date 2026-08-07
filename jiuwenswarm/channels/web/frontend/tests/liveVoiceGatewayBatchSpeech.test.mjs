@@ -81,6 +81,48 @@ function provider(voice) {
   };
 }
 
+function capabilityDescriptor(
+  supportedOperations = [
+    'speech.capabilities.get',
+    'speech.recognize.batch',
+    'speech.batch.cancel',
+  ],
+  overrides = {},
+) {
+  const { declared_limits: declaredLimitOverrides = {}, ...descriptorOverrides } = overrides;
+  const declaredLimits = {
+    max_input_audio_bytes: 4 * 1024 * 1024,
+    max_output_audio_bytes: 8 * 1024 * 1024,
+    max_recognition_text_chars: 16_000,
+    max_text_chars: 4_000,
+    max_timeout_ms: 30_000,
+    recognition_input: 'wav_pcm16_mono',
+    synthesis_output: 'wav_pcm16_mono',
+    resampling: 'unsupported',
+    credential_boundary: 'gateway_only',
+    max_operation_capacity: 128,
+    operation_replay_window: 128,
+    identity_tombstone_window: 512,
+    close_timeout_max_ms: 5_000,
+    authorization: 'authenticated_server_owned_exact_binding',
+    ...declaredLimitOverrides,
+  };
+  return {
+    component: 'speech.batch.gateway',
+    contract_major: 'v2',
+    supported_operations: supportedOperations,
+    supported_event_types: [],
+    batch_modes: ['batch'],
+    stream_modes: [],
+    supports_cancel_ack: true,
+    supports_replay: false,
+    fallback_identity: 'browser-speech-compatibility',
+    availability: 'available',
+    ...descriptorOverrides,
+    declared_limits: declaredLimits,
+  };
+}
+
 function recognitionEnvelope(params, generation = params.capture.capture_generation) {
   return {
     contract_version: 'live-voice.contract.v2',
@@ -205,6 +247,27 @@ test('flag-off preserves Browser Speech fallback without any Gateway side effect
   });
   assert.equal(capability.recognition_batch, false);
   assert.equal(capability.synthesis_batch, false);
+  assert.deepEqual(capability.degradation, {
+    state: 'formal_disabled',
+    reason_id: 'FEATURE_DISABLED',
+    browser_fallback_is_formal: false,
+    browser_fallback_automatic: false,
+  });
+});
+
+test('flag-off constructor does not inspect transport, scope, or identity hooks', async () => {
+  const client = new GatewayBatchSpeechClient({
+    enabled: false,
+    get transport() { throw new Error('must not inspect transport'); },
+    get scope() { throw new Error('must not inspect scope'); },
+    get createId() { throw new Error('must not inspect ids'); },
+  });
+
+  const capability = await client.capabilities();
+
+  assert.equal(capability.enabled, false);
+  assert.equal(capability.formal_available, false);
+  assert.equal(capability.fallback.automatic, false);
 });
 
 test('Gateway capability maps recognition and synthesis independently without credentials', async () => {
@@ -214,8 +277,15 @@ test('Gateway capability maps recognition and synthesis independently without cr
       assert.deepEqual(params, { session_id: 'session-1' });
       return {
         contract_version: 'live-voice.contract.v2',
-        capability: { supported_operations: ['speech.recognize.batch'] },
-        provider: { available: true, provider_id: 'provider-test' },
+        capability: capabilityDescriptor(),
+        provider: {
+          available: true,
+          provider_id: 'provider-test',
+          implementation_class: 'formal',
+          provider_configured: true,
+          authorization_available: true,
+          service_closed: false,
+        },
         fallback: { recognition: 'browser-speech-recognition', synthesis: 'browser-speech-synthesis', automatic: false },
       };
     },
@@ -228,6 +298,203 @@ test('Gateway capability maps recognition and synthesis independently without cr
   assert.equal(capability.recognition_batch, true);
   assert.equal(capability.synthesis_batch, false);
   assert.equal(JSON.stringify(capability).includes('api_key'), false);
+  assert.deepEqual(capability.gateway, {
+    contract_version: 'live-voice.contract.v2',
+    provider_id: 'provider-test',
+    provider_available: true,
+    provider_configured: true,
+    authorization_available: true,
+    service_closed: false,
+    supported_operations: [
+      'speech.capabilities.get',
+      'speech.recognize.batch',
+      'speech.batch.cancel',
+    ],
+    evidence_scope: 'sanitized_gateway_batch_speech_capability',
+    browser_fallback_is_formal: false,
+    browser_fallback_automatic: false,
+  });
+});
+
+test('unconfigured Provider degrades truthfully to explicit non-formal Browser fallback', async () => {
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    transport: {
+      async request() {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          capability: capabilityDescriptor(
+            ['speech.capabilities.get', 'speech.batch.cancel'],
+            { availability: 'unavailable' },
+          ),
+          provider: {
+            available: false,
+            provider_id: 'openai-compatible-batch',
+            implementation_class: 'unsupported',
+            provider_configured: false,
+            authorization_available: true,
+            service_closed: false,
+            api_key: 'must-not-escape',
+          },
+          fallback: {
+            recognition: 'browser-speech-recognition',
+            synthesis: 'browser-speech-synthesis',
+            automatic: false,
+          },
+        };
+      },
+    },
+    scope,
+    createId: ids(),
+  });
+
+  const capability = await client.capabilities();
+
+  assert.equal(capability.formal_available, false);
+  assert.equal(capability.recognition_batch, false);
+  assert.equal(capability.synthesis_batch, false);
+  assert.equal(capability.degradation.state, 'formal_unavailable');
+  assert.equal(capability.degradation.reason_id, 'PROVIDER_UNAVAILABLE');
+  assert.equal(capability.fallback.automatic, false);
+  assert.equal(capability.gateway.provider_configured, false);
+  assert.equal(JSON.stringify(capability).includes('must-not-escape'), false);
+});
+
+test('malformed capability cannot relabel automatic Browser fallback as formal', async () => {
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    transport: {
+      async request() {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          capability: capabilityDescriptor(),
+          provider: {
+            available: true,
+            provider_id: 'provider-test',
+            implementation_class: 'formal',
+            provider_configured: true,
+            authorization_available: true,
+            service_closed: false,
+          },
+          fallback: {
+            recognition: 'browser-speech-recognition',
+            synthesis: 'browser-speech-synthesis',
+            automatic: true,
+          },
+        };
+      },
+    },
+    scope,
+    createId: ids(),
+  });
+
+  await assert.rejects(
+    client.capabilities(),
+    error => error instanceof GatewayBatchSpeechError && error.reason === 'INVALID_SPEECH_CAPABILITY',
+  );
+});
+
+test('capability drift, duplicates, and contradictory availability fail without formal relabel', async () => {
+  const base = {
+    contract_version: 'live-voice.contract.v2',
+    capability: capabilityDescriptor(),
+    provider: {
+      available: true,
+      provider_id: 'provider-test',
+      implementation_class: 'formal',
+      provider_configured: true,
+      authorization_available: true,
+      service_closed: false,
+    },
+    fallback: {
+      recognition: 'browser-speech-recognition',
+      synthesis: 'browser-speech-synthesis',
+      automatic: false,
+    },
+  };
+  const cases = [
+    { capability: capabilityDescriptor([...base.capability.supported_operations, 'speech.private.unknown']) },
+    { capability: capabilityDescriptor([...base.capability.supported_operations, 'speech.recognize.batch']) },
+    { capability: capabilityDescriptor(['speech.recognize.batch', 'speech.batch.cancel']) },
+    { capability: capabilityDescriptor(['speech.capabilities.get', 'speech.recognize.batch']) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { component: 'speech.private.gateway' }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { contract_major: 'v1' }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { availability: 'unavailable' }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { batch_modes: [] }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { stream_modes: ['stream'] }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { supports_cancel_ack: false }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { supports_replay: true }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { fallback_identity: 'automatic-browser' }) },
+    { capability: capabilityDescriptor(base.capability.supported_operations, { private_mode: 'must-reject' }) },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { recognition_input: 'raw_pcm_f32' },
+      }),
+    },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { synthesis_output: 'mp3' },
+      }),
+    },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { resampling: 'provider_owned' },
+      }),
+    },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { credential_boundary: 'browser' },
+      }),
+    },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { authorization: 'request_asserted' },
+      }),
+    },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { operation_replay_window: 127 },
+      }),
+    },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { private_credential_mode: 'must-reject' },
+      }),
+    },
+    { provider: { ...base.provider, provider_configured: false } },
+    { provider: { ...base.provider, authorization_available: false } },
+    { provider: { ...base.provider, service_closed: true } },
+    { provider: { ...base.provider, available: false, implementation_class: 'unsupported' } },
+    {
+      provider: {
+        ...base.provider,
+        available: false,
+        implementation_class: 'unsupported',
+        provider_configured: false,
+      },
+    },
+  ];
+
+  for (const changed of cases) {
+    let calls = 0;
+    const payload = {
+      ...base,
+      capability: changed.capability ?? base.capability,
+      provider: changed.provider ?? base.provider,
+    };
+    const client = new GatewayBatchSpeechClient({
+      enabled: true,
+      transport: { async request() { calls += 1; return payload; } },
+      scope,
+      createId: ids(),
+    });
+
+    await assert.rejects(
+      client.capabilities(),
+      error => error instanceof GatewayBatchSpeechError && error.reason === 'INVALID_SPEECH_CAPABILITY',
+    );
+    assert.equal(calls, 1);
+  }
 });
 
 test('AIO token can skip or restart after Adapter recreation while unique capture ids fence late results', async () => {
@@ -310,6 +577,49 @@ test('mismatched Provider rate and malformed capture fail closed before AIO appl
   );
   assert.throws(() => capturedFramesToPcm16Wav([frame(0, 1)]), /first AIO-B frame/);
   assert.equal(calls, 1);
+});
+
+test('malformed authoritative render plans fail before Provider transport', async () => {
+  let calls = 0;
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    transport: { async request() { calls += 1; throw new Error('must not run'); } },
+    scope,
+    createId: ids(),
+  });
+
+  const validTransform = {
+    transform: 'normalize',
+    source_start: 0,
+    source_end: 1,
+    rendered_text: 'H',
+  };
+  const invalidPlans = [
+    { display_text: '', spoken_text: '', transforms: [] },
+    { display_text: ' ', spoken_text: 'Hello', transforms: [] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: null },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [null] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [{ ...validTransform, transform: '' }] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [{ ...validTransform, rendered_text: '' }] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [{ ...validTransform, source_start: -1 }] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [{ ...validTransform, source_start: 2, source_end: 1 }] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [{ ...validTransform, source_end: 6 }] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [{ ...validTransform, private_field: true }] },
+    { display_text: 'Hello', spoken_text: 'Hello', transforms: [], private_field: true },
+  ];
+
+  for (const renderPlan of invalidPlans) {
+    await assert.rejects(client.synthesizeAuthoritative({
+      response: { interaction_id: 'interaction-1', response_id: 'response-empty', response_generation: 0 },
+      unitId: 'unit-1',
+      renderPlan,
+      authoritativeAgentText: true,
+      locale: 'en-US',
+      requiredSampleRateHz: 16000,
+      correlationId: 'correlation-empty',
+    }), error => error instanceof GatewayBatchSpeechError && error.reason === 'INVALID_RENDER_PLAN');
+  }
+  assert.equal(calls, 0);
 });
 
 test('response identity uses structural comparison and rejects delimiter collisions', async () => {

@@ -4,9 +4,9 @@
 
 This module is deliberately not a registered WebSocket handler.  It accepts an
 already server-authored :class:`MediaAuthorityBinding`, enforces a same-origin
-request context, and exposes only typed attach/detach controls plus closed LVM1
-binary input.  It has no JSON logger, persistence callback, socket, task, or
-retry surface.
+request context, and exposes typed LVM1 sessions plus runners for an injected,
+already-accepted socket.  It has no JSON logger, persistence callback, socket
+factory, background task, or retry surface.
 
 An active object proves only the package contract.  Product route truth remains
 ``unavailable`` until the Integration Owner registers the real handler and an
@@ -15,15 +15,18 @@ actual route-to-disk regression proves zero raw-audio persistence.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Callable, TypeAlias
+from typing import Awaitable, Callable, Iterable, Protocol, TypeAlias
 from urllib.parse import urlsplit
 
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MEDIA_CONTRACT_VERSION,
+    BinarySendDisposition,
+    BoundedMediaSender,
     MediaAck,
     MediaAttach,
     MediaAudioFrame,
@@ -32,8 +35,12 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaDetach,
     MediaDetachReason,
     MediaDirection,
+    MediaPlaybackStopReceipt,
     MediaTransportViolation,
     StrictMediaReceiver,
+    deserialize_media_control,
+    serialize_media_control,
+    validate_playback_stop_receipt,
 )
 
 
@@ -43,6 +50,9 @@ MEDIA_LOGGER_ZERO_PERSISTENCE_UNPROVEN = "MEDIA_LOGGER_ZERO_PERSISTENCE_UNPROVEN
 
 _DOMAIN_LABEL = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?")
 _ROUTE_CONSTRUCTION_TOKEN = object()
+_SOCKET_CLOSE_TIMEOUT_SECONDS = 1.0
+_MAX_PENDING_FRAMES = 256
+_MAX_PENDING_BYTES = 8 * 1024 * 1024
 
 
 class DedicatedMediaRouteTruth(StrEnum):
@@ -203,6 +213,66 @@ class DedicatedMediaRouteSnapshot:
     package_json_logger_hook_present: bool = field(default=False, init=False)
     package_raw_audio_persistence_hook_present: bool = field(default=False, init=False)
     consumer_privacy_verified: bool = field(default=False, init=False)
+
+
+class DedicatedMediaSocket(Protocol):
+    """Minimal already-accepted socket surface supplied by central registration."""
+
+    def recv(self) -> Awaitable[str | bytes | bytearray | memoryview]: ...
+
+    def send(self, message: str | bytes) -> Awaitable[None]: ...
+
+    def close(self, code: int = 1000, reason: str = "") -> Awaitable[None]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DedicatedMediaSocketLeafResult:
+    """Runtime facts for one unregistered, injected socket leaf."""
+
+    activated: bool
+    socket_touched: bool
+    attach_sent: bool
+    accepted_frames: int
+    close_result: MediaCloseResult | None
+    reason_id: DedicatedMediaRouteReason | MediaDetachReason
+    sent_frames: int = 0
+    acknowledged_through_seq: int | None = None
+    playback_stop_receipts: int = 0
+    business_cancel_count_delta: int = field(default=0, init=False)
+    evidence_scope: str = field(
+        default="dedicated_media_socket_leaf_only", init=False
+    )
+    registered_route_observed: bool = field(default=False, init=False)
+    route_to_disk_zero_persistence_observed: bool = field(default=False, init=False)
+    formal_route_ready: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.business_cancel_count_delta) is not int:
+            raise MediaTransportViolation(
+                "MEDIA_CANCEL_SCOPE_VIOLATION",
+                "media socket leaf cannot mutate business cancellation",
+            )
+        if self.activated is False and (
+            self.socket_touched
+            or self.attach_sent
+            or self.accepted_frames != 0
+            or self.sent_frames != 0
+            or self.acknowledged_through_seq is not None
+            or self.playback_stop_receipts != 0
+            or self.close_result is not None
+            or not isinstance(self.reason_id, DedicatedMediaRouteReason)
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_ROUTE_EVIDENCE",
+                "inactive socket leaves require zero transport effects",
+            )
+        if self.activated is True and not isinstance(
+            self.reason_id, MediaDetachReason
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_ROUTE_EVIDENCE",
+                "active socket leaf reason must use the media close vocabulary",
+            )
 
 
 def _inactive(
@@ -425,6 +495,412 @@ class _DedicatedMediaRouteSession:
         )
 
 
+async def run_dedicated_media_socket_leaf(
+    request: DedicatedMediaRouteRequest,
+    *,
+    socket: DedicatedMediaSocket,
+    on_audio_frame: Callable[[MediaAudioFrame], None],
+) -> DedicatedMediaSocketLeafResult:
+    """Run one injected uplink WebSocket after the central handshake.
+
+    The central route remains responsible for registration, subprotocol
+    negotiation, trusted binding lookup, and passing the observed Origin into
+    ``request``.  This leaf performs no logging, persistence, task creation, or
+    retry.  Feature-off returns before inspecting or touching ``socket``.
+    """
+
+    activation = create_dedicated_media_route(
+        request,
+        on_audio_frame=on_audio_frame,
+    )
+    if isinstance(activation, InactiveDedicatedMediaRoute):
+        return DedicatedMediaSocketLeafResult(
+            activated=False,
+            socket_touched=False,
+            attach_sent=False,
+            accepted_frames=0,
+            close_result=None,
+            reason_id=activation.reason_id,
+        )
+
+    session = activation.session
+    binding = session.binding
+    attach_sent = False
+    socket_touched = False
+
+    async def close_socket() -> None:
+        nonlocal socket_touched
+        try:
+            close = socket.close
+        except Exception:
+            return
+        if not callable(close):
+            return
+        socket_touched = True
+        try:
+            await asyncio.wait_for(
+                close(1000, "live-voice media leaf closed"),
+                timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            # The local exact-binding fence is retained even if the transport
+            # cannot confirm physical closure.
+            pass
+
+    async def send_control(control: MediaAck | MediaDetach | MediaAttach) -> bool:
+        nonlocal socket_touched
+        try:
+            send = socket.send
+        except Exception:
+            return False
+        if not callable(send):
+            return False
+        socket_touched = True
+        try:
+            await send(serialize_media_control(control))
+        except asyncio.CancelledError:
+            session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            await asyncio.shield(close_socket())
+            raise
+        except Exception:
+            return False
+        return True
+
+    async def send_close_detach(closed: MediaCloseResult) -> bool:
+        if closed.detach is None:
+            return False
+        return await send_control(closed.detach)
+
+    def result(closed: MediaCloseResult) -> DedicatedMediaSocketLeafResult:
+        snapshot = session.snapshot()
+        return DedicatedMediaSocketLeafResult(
+            activated=True,
+            socket_touched=socket_touched,
+            attach_sent=attach_sent,
+            accepted_frames=snapshot.accepted_frames,
+            close_result=closed,
+            reason_id=closed.reason_id,
+        )
+
+    attach = MediaAttach(binding)
+    attach_failure = session.accept_server_attach(attach)
+    assert attach_failure is None
+    if not await send_control(attach):
+        closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
+        await close_socket()
+        return result(closed)
+    attach_sent = True
+
+    while True:
+        try:
+            recv = socket.recv
+        except Exception:
+            recv = None
+        if not callable(recv):
+            closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+            await send_close_detach(closed)
+            await close_socket()
+            return result(closed)
+        socket_touched = True
+        try:
+            message = await recv()
+        except asyncio.CancelledError:
+            session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            await asyncio.shield(close_socket())
+            raise
+        except Exception:
+            closed = session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            await close_socket()
+            return result(closed)
+
+        if isinstance(message, str):
+            try:
+                control = deserialize_media_control(message)
+            except MediaTransportViolation:
+                closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+                await send_close_detach(closed)
+                await close_socket()
+                return result(closed)
+            if not isinstance(control, MediaDetach):
+                closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+                await send_close_detach(closed)
+                await close_socket()
+                return result(closed)
+            closed = session.accept_detach(control)
+            await close_socket()
+            return result(closed)
+
+        if not isinstance(message, (bytes, bytearray, memoryview)):
+            closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+            await send_close_detach(closed)
+            await close_socket()
+            return result(closed)
+
+        control = session.accept_binary(message)
+        if not await send_control(control):
+            closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
+            await close_socket()
+            return result(closed)
+        if isinstance(control, MediaDetach):
+            closed = session.close(control.reason_id)
+            await close_socket()
+            return result(closed)
+
+
+async def run_dedicated_media_downlink_socket_leaf(
+    request: DedicatedMediaRouteRequest,
+    *,
+    socket: DedicatedMediaSocket,
+    frames: Iterable[MediaAudioFrame],
+    on_playback_stop: Callable[[MediaPlaybackStopReceipt], None],
+    max_pending_frames: int = 8,
+    max_pending_bytes: int = 131_072,
+) -> DedicatedMediaSocketLeafResult:
+    """Send one exact downlink lease over an injected, already-accepted socket."""
+
+    if not isinstance(request, DedicatedMediaRouteRequest):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_ROUTE_REQUEST", "route request must be typed"
+        )
+    if request.enabled is not True:
+        return DedicatedMediaSocketLeafResult(
+            activated=False,
+            socket_touched=False,
+            attach_sent=False,
+            accepted_frames=0,
+            close_result=None,
+            reason_id=DedicatedMediaRouteReason.FEATURE_DISABLED,
+        )
+    if not _is_same_origin(request.expected_origin, request.request_origin):
+        reason = DedicatedMediaRouteReason.ORIGIN_REJECTED
+    elif not isinstance(request.binding, MediaAuthorityBinding):
+        reason = DedicatedMediaRouteReason.AUTHORITY_UNAVAILABLE
+    elif request.binding.direction is not MediaDirection.DOWNLINK:
+        reason = DedicatedMediaRouteReason.DIRECTION_UNAVAILABLE
+    elif request.provider_available is not True:
+        reason = DedicatedMediaRouteReason.PROVIDER_UNAVAILABLE
+    elif request.binary_transport_available is not True:
+        reason = DedicatedMediaRouteReason.TRANSPORT_UNAVAILABLE
+    else:
+        reason = None
+    if reason is not None:
+        return DedicatedMediaSocketLeafResult(
+            activated=False,
+            socket_touched=False,
+            attach_sent=False,
+            accepted_frames=0,
+            close_result=None,
+            reason_id=reason,
+        )
+    if not callable(on_playback_stop):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "playback stop consumer must be callable"
+        )
+    if (
+        type(max_pending_frames) is not int
+        or not 0 < max_pending_frames <= _MAX_PENDING_FRAMES
+        or type(max_pending_bytes) is not int
+        or not 0 < max_pending_bytes <= _MAX_PENDING_BYTES
+    ):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_BACKPRESSURE_LIMIT",
+            "downlink queue limits exceed the bounded practical range",
+        )
+
+    binding = request.binding
+    assert binding is not None
+    sender = BoundedMediaSender(
+        binding,
+        max_pending_frames=max_pending_frames,
+        max_pending_bytes=max_pending_bytes,
+    )
+    try:
+        frame_iterator = iter(frames)
+    except TypeError as error:
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "downlink frames must be iterable"
+        ) from error
+    socket_touched = False
+    attach_sent = False
+    sent_frames = 0
+    acknowledged_through_seq: int | None = None
+    playback_stop_receipts = 0
+
+    async def close_socket() -> None:
+        nonlocal socket_touched
+        try:
+            close = socket.close
+        except Exception:
+            return
+        if not callable(close):
+            return
+        socket_touched = True
+        try:
+            await asyncio.wait_for(
+                close(1000, "live-voice media downlink leaf closed"),
+                timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            pass
+
+    async def send_message(message: str | bytes) -> bool:
+        nonlocal socket_touched
+        try:
+            send = socket.send
+        except Exception:
+            return False
+        if not callable(send):
+            return False
+        socket_touched = True
+        try:
+            await send(message)
+        except asyncio.CancelledError:
+            sender.close(MediaDetachReason.TRANSPORT_CLOSED)
+            await asyncio.shield(close_socket())
+            raise
+        except Exception:
+            return False
+        return True
+
+    def coerce_reason(value: object) -> MediaDetachReason:
+        try:
+            return MediaDetachReason(value)
+        except (TypeError, ValueError):
+            return MediaDetachReason.TRANSPORT_PROTOCOL_ERROR
+
+    def result(closed: MediaCloseResult) -> DedicatedMediaSocketLeafResult:
+        return DedicatedMediaSocketLeafResult(
+            activated=True,
+            socket_touched=socket_touched,
+            attach_sent=attach_sent,
+            accepted_frames=0,
+            close_result=closed,
+            reason_id=closed.reason_id,
+            sent_frames=sent_frames,
+            acknowledged_through_seq=acknowledged_through_seq,
+            playback_stop_receipts=playback_stop_receipts,
+        )
+
+    async def terminate(
+        reason_id: MediaDetachReason,
+        *,
+        send_detach: bool = True,
+    ) -> DedicatedMediaSocketLeafResult:
+        closed = sender.close(reason_id)
+        if send_detach and closed.detach is not None:
+            await send_message(serialize_media_control(closed.detach))
+        await close_socket()
+        return result(closed)
+
+    if not await send_message(serialize_media_control(MediaAttach(binding))):
+        return await terminate(
+            MediaDetachReason.TRANSPORT_SEND_FAILED,
+            send_detach=False,
+        )
+    attach_sent = True
+    source_exhausted = False
+    pending_frame: MediaAudioFrame | None = None
+
+    while True:
+        while not source_exhausted:
+            if pending_frame is None:
+                try:
+                    pending_frame = next(frame_iterator)
+                except StopIteration:
+                    source_exhausted = True
+                    break
+                except Exception:
+                    return await terminate(MediaDetachReason.CONSUMER_FAILED)
+            if not isinstance(pending_frame, MediaAudioFrame):
+                return await terminate(MediaDetachReason.INVALID_FRAME)
+            enqueued = sender.enqueue(pending_frame)
+            if enqueued.accepted:
+                pending_frame = None
+                continue
+            if enqueued.reason_id == "MEDIA_BACKPRESSURE_LIMIT":
+                break
+            return await terminate(coerce_reason(enqueued.reason_id))
+
+        outbound: list[bytes] = []
+
+        def retain_outbound(binary: bytes) -> BinarySendDisposition:
+            outbound.append(binary)
+            return BinarySendDisposition.SENT
+
+        drained = sender.drain(retain_outbound)
+        if sender.closed:
+            return await terminate(coerce_reason(drained.reason_id))
+        for binary in outbound:
+            if not await send_message(binary):
+                return await terminate(
+                    MediaDetachReason.TRANSPORT_SEND_FAILED,
+                    send_detach=False,
+                )
+            sent_frames += 1
+
+        if source_exhausted and sender.pending_frames == 0:
+            return await terminate(MediaDetachReason.LOCAL_CLOSE)
+
+        try:
+            recv = socket.recv
+        except Exception:
+            recv = None
+        if not callable(recv):
+            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+        socket_touched = True
+        try:
+            message = await recv()
+        except asyncio.CancelledError:
+            sender.close(MediaDetachReason.TRANSPORT_CLOSED)
+            await asyncio.shield(close_socket())
+            raise
+        except Exception:
+            return await terminate(
+                MediaDetachReason.TRANSPORT_CLOSED,
+                send_detach=False,
+            )
+        if not isinstance(message, str):
+            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+        try:
+            control = deserialize_media_control(message)
+        except MediaTransportViolation:
+            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+        if isinstance(control, MediaAck):
+            detach = sender.acknowledge(control)
+            if detach is not None:
+                return await terminate(detach.reason_id)
+            acknowledged_through_seq = control.through_seq
+            continue
+        if isinstance(control, MediaPlaybackStopReceipt):
+            try:
+                exact_stop = validate_playback_stop_receipt(binding, control)
+                if (
+                    exact_stop.confirmed_through_seq is not None
+                    and exact_stop.confirmed_through_seq >= sent_frames
+                ):
+                    return await terminate(MediaDetachReason.ACK_UNSENT)
+                on_playback_stop(exact_stop)
+            except MediaTransportViolation as error:
+                return await terminate(coerce_reason(error.reason_id))
+            except Exception:
+                return await terminate(MediaDetachReason.CONSUMER_FAILED)
+            playback_stop_receipts += 1
+            return await terminate(MediaDetachReason.PEER_CLOSE)
+        if isinstance(control, MediaDetach):
+            if (
+                control.lease_id != binding.lease_id
+                or control.generation != binding.generation.value
+            ):
+                mismatch = (
+                    MediaDetachReason.STALE_GENERATION
+                    if control.generation != binding.generation.value
+                    else MediaDetachReason.BINDING_MISMATCH
+                )
+                return await terminate(mismatch)
+            return await terminate(control.reason_id, send_detach=False)
+        return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+
+
 __all__ = [
     "DEDICATED_MEDIA_ROUTE_CONTRACT_VERSION",
     "MEDIA_CONTRACT_VERSION",
@@ -437,6 +913,10 @@ __all__ = [
     "DedicatedMediaRouteReason",
     "DedicatedMediaRouteSnapshot",
     "DedicatedMediaRouteTruth",
+    "DedicatedMediaSocket",
+    "DedicatedMediaSocketLeafResult",
     "InactiveDedicatedMediaRoute",
     "create_dedicated_media_route",
+    "run_dedicated_media_socket_leaf",
+    "run_dedicated_media_downlink_socket_leaf",
 ]
