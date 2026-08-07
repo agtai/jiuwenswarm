@@ -47,6 +47,7 @@ class StreamingResponder:
         self._buffer = ""
         self._message_id: str | None = None
         self._flush_task: asyncio.Task | None = None
+        self._last_sent: str | None = None
         self._lock = asyncio.Lock()
 
     @property
@@ -84,6 +85,6 @@ class StreamingResponder:
                 return
             if self._message_id is None:
                 self._message_id = await self._send(text)
-            elif text != getattr(self, "_last_sent", None):
+            elif text != self._last_sent:
                 await self._edit(self._message_id, text)
             self._last_sent = text
