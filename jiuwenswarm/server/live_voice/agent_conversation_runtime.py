@@ -340,6 +340,13 @@ class _CommittedTurnSubmissionEntry:
     coordinator: asyncio.Task[None] | None
 
 
+@dataclass(slots=True)
+class _PresentationAckEntry:
+    ack: PresentationAck
+    outcome: asyncio.Future[BaseException | None]
+    coordinator: asyncio.Task[None] | None
+
+
 @dataclass(frozen=True, slots=True)
 class _TurnIdentityClaim:
     interaction_id: str
@@ -448,6 +455,10 @@ class AgentConversationRuntime:
         self._ack_results: dict[
             tuple[ResponseRef, PresentationSurface, int],
             tuple[PresentationAck, PresentationAckResult],
+        ] = {}
+        self._ack_entries: dict[
+            tuple[ResponseRef, PresentationSurface, int],
+            _PresentationAckEntry,
         ] = {}
         self._pending_history: dict[
             tuple[ResponseRef, PresentationSurface, int],
@@ -1079,13 +1090,6 @@ class AgentConversationRuntime:
     async def acknowledge_presentation(
         self, ack: PresentationAck
     ) -> PresentationAckResult:
-        self._require_started()
-        async with self._ack_lock:
-            return await self._acknowledge_presentation(ack)
-
-    async def _acknowledge_presentation(
-        self, ack: PresentationAck
-    ) -> PresentationAckResult:
         if not isinstance(ack, PresentationAck):
             raise AgentConversationRuntimeViolation(
                 "INVALID_PRESENTATION_ACK",
@@ -1093,30 +1097,73 @@ class AgentConversationRuntime:
                 ErrorCode.INVALID_ARGUMENT,
             )
         key = (ack.ref, ack.surface, ack.contiguous_cursor)
-        prior = self._ack_results.get(key)
-        if prior is not None:
-            prior_ack, prior_result = prior
-            if prior_ack != ack:
-                raise AgentConversationRuntimeViolation(
-                    "PRESENTATION_ACK_CONFLICT",
-                    "an exact ACK cursor cannot change its binding",
-                    ErrorCode.CONFLICT,
-                )
-            return replace(prior_result, replayed=True)
-        if self._shutdown is not None:
-            raise AgentConversationRuntimeViolation(
-                "COMPOSITION_CLOSING",
-                "a new presentation ACK cannot start after retained shutdown",
-                ErrorCode.CONFLICT,
-            )
-        state = self._outputs.get(ack.ref)
-        if state is None or state.handle.response_ref != ack.ref:
-            raise AgentConversationRuntimeViolation(
-                "UNKNOWN_AGENT_RESPONSE",
-                "ACK requires the exact active Agent response generation",
-                ErrorCode.STALE,
-            )
+        entry = self._ack_entries.get(key)
+        replayed = entry is not None
+        if entry is not None:
+            self._require_exact_ack(entry, ack)
+            return await self._await_presentation_ack(key, entry, replayed=True)
 
+        self._require_started()
+        async with self._ack_lock:
+            entry = self._ack_entries.get(key)
+            if entry is not None:
+                self._require_exact_ack(entry, ack)
+                replayed = True
+            else:
+                if self._shutdown is not None:
+                    raise AgentConversationRuntimeViolation(
+                        "COMPOSITION_CLOSING",
+                        "a new presentation ACK cannot start after retained shutdown",
+                        ErrorCode.CONFLICT,
+                    )
+                state = self._outputs.get(ack.ref)
+                if state is None or state.handle.response_ref != ack.ref:
+                    raise AgentConversationRuntimeViolation(
+                        "UNKNOWN_AGENT_RESPONSE",
+                        "ACK requires the exact active Agent response generation",
+                        ErrorCode.STALE,
+                    )
+                running = asyncio.get_running_loop()
+                entry = _PresentationAckEntry(
+                    ack=ack,
+                    outcome=running.create_future(),
+                    coordinator=None,
+                )
+                self._ack_entries[key] = entry
+                entry.coordinator = running.create_task(
+                    self._complete_presentation_ack(key, entry, state),
+                    name=(
+                        "live-voice-presentation-ack:"
+                        f"{ack.ref.response_id}:{ack.contiguous_cursor}"
+                    ),
+                )
+        return await self._await_presentation_ack(key, entry, replayed=replayed)
+
+    async def _complete_presentation_ack(
+        self,
+        key: tuple[ResponseRef, PresentationSurface, int],
+        entry: _PresentationAckEntry,
+        state: _ResponseOutputState,
+    ) -> None:
+        try:
+            async with self._ack_lock:
+                result = await self._apply_presentation_ack(entry.ack, key, state)
+                self._ack_results[key] = (entry.ack, result)
+        except BaseException as error:  # noqa: BLE001
+            if self._ack_entries.get(key) is entry:
+                self._ack_entries.pop(key, None)
+            if not entry.outcome.done():
+                entry.outcome.set_result(error)
+        else:
+            if not entry.outcome.done():
+                entry.outcome.set_result(None)
+
+    async def _apply_presentation_ack(
+        self,
+        ack: PresentationAck,
+        key: tuple[ResponseRef, PresentationSurface, int],
+        state: _ResponseOutputState,
+    ) -> PresentationAckResult:
         def resolve(unit: PresentationUnit) -> bytes:
             content = state.unit_contents.get(unit.unit_id)
             if content is None:
@@ -1156,8 +1203,35 @@ class AgentConversationRuntime:
             history_records_written=written,
             history_pending=history_pending,
         )
-        self._ack_results[key] = (ack, result)
         return result
+
+    async def _await_presentation_ack(
+        self,
+        key: tuple[ResponseRef, PresentationSurface, int],
+        entry: _PresentationAckEntry,
+        *,
+        replayed: bool,
+    ) -> PresentationAckResult:
+        error = await asyncio.shield(entry.outcome)
+        if error is not None:
+            raise error
+        retained = self._ack_results.get(key)
+        if retained is None or retained[0] != entry.ack:
+            raise AgentConversationRuntimeViolation(
+                "PRESENTATION_ACK_OUTCOME_MISSING",
+                "a completed presentation ACK lost its retained outcome",
+                ErrorCode.INTERNAL,
+            )
+        return replace(retained[1], replayed=replayed)
+
+    @staticmethod
+    def _require_exact_ack(entry: _PresentationAckEntry, ack: PresentationAck) -> None:
+        if entry.ack != ack:
+            raise AgentConversationRuntimeViolation(
+                "PRESENTATION_ACK_CONFLICT",
+                "an exact ACK cursor cannot change its binding",
+                ErrorCode.CONFLICT,
+            )
 
     async def retry_history(
         self, ref: ResponseRef, *, contiguous_cursor: int
@@ -1670,6 +1744,13 @@ class AgentConversationRuntime:
                 await asyncio.shield(self._consumer)
             self._notifications.close()
             await self._harness.close()
+            ack_tasks = tuple(
+                entry.coordinator
+                for entry in self._ack_entries.values()
+                if entry.coordinator is not None and not entry.coordinator.done()
+            )
+            if ack_tasks:
+                await asyncio.shield(asyncio.gather(*ack_tasks, return_exceptions=True))
             async with self._ack_lock:
                 history_tasks = tuple(self._history_tasks)
                 if history_tasks:

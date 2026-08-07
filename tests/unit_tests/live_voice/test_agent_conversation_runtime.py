@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from types import SimpleNamespace
 
 import pytest
@@ -41,7 +41,9 @@ from jiuwenswarm.server.live_voice.jiuwenswarm_round_harness import (
 )
 from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationAck,
+    PresentationLedgerViolation,
     PresentationSurface,
+    PresentationUnit,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
@@ -730,9 +732,11 @@ async def history_wait(history: RecordingHistoryWriter) -> None:
 
 
 @pytest.mark.asyncio
-async def test_source_terminal_permanently_invalidates_unacked_final() -> None:
+async def test_source_terminal_retains_exact_enqueued_final_for_ack_history_retry() -> (
+    None
+):
     lower = LowerFormalAdapter()
-    history = RecordingHistoryWriter()
+    history = RecordingHistoryWriter(fail_assistant_once=True)
     current = runtime(lower, history)
     selected = await prepare(current)
     handle = await dispatch(current, selected)
@@ -740,25 +744,57 @@ async def test_source_terminal_permanently_invalidates_unacked_final() -> None:
         await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
     ]
     final = next(item for item in notifications if item.presentation_unit is not None)
+    snapshot = current.snapshot()
     response = next(
         item
-        for item in current.snapshot().conversation.conversation.responses
+        for item in snapshot.conversation.conversation.responses
         if item.ref == handle.response_ref
     )
     assert response.state.value == "terminal"
     assert response.fenced is True
-    with pytest.raises(ConversationRuntimeLoopViolation) as stale:
-        await current.acknowledge_presentation(
-            PresentationAck(
-                ref=handle.response_ref,
-                surface=PresentationSurface.TEXT,
-                unit_id=final.presentation_unit.unit_id,
-                contiguous_cursor=0,
-                presented_at="2026-08-05T08:00:03Z",
-            )
-        )
-    assert stale.value.reason == "STALE_RESPONSE_OUTPUT"
-    assert not history.assistant_intents
+    presentation = snapshot.conversation.presentation
+    record = next(
+        item
+        for item in presentation.records
+        if item.unit.unit_id == final.presentation_unit.unit_id
+    )
+    assert record.state.value == "enqueued"
+    assert not any(
+        ref == handle.response_ref and surface is PresentationSurface.TEXT
+        for ref, surface, _reason in presentation.closed_surfaces
+    )
+
+    ack = PresentationAck(
+        ref=handle.response_ref,
+        surface=PresentationSurface.TEXT,
+        unit_id=final.presentation_unit.unit_id,
+        contiguous_cursor=0,
+        presented_at="2026-08-05T08:00:03Z",
+    )
+    result = await current.acknowledge_presentation(ack)
+    assert result.accepted is True
+    assert result.replayed is False
+    assert result.history_records_written == 0
+    assert result.history_pending is True
+    assert current.snapshot().pending_history_intents == 1
+    assert len(history.assistant_intents) == 1
+    assert history.assistant_intents[0][0].contents[0].content_utf8 == b"formal answer"
+
+    pending_replay = await current.acknowledge_presentation(ack)
+    assert pending_replay.replayed is True
+    assert pending_replay.history_pending is True
+    assert len(history.assistant_intents) == 1
+
+    assert await current.retry_history(handle.response_ref, contiguous_cursor=0) == (
+        True,
+    )
+    assert current.snapshot().pending_history_intents == 0
+    assert len(history.assistant_intents) == 2
+    retried_replay = await current.acknowledge_presentation(ack)
+    assert retried_replay.replayed is True
+    assert retried_replay.history_records_written == 1
+    assert retried_replay.history_pending is False
+    assert history.assistant_intents[1][0].contents[0].content_utf8 == b"formal answer"
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
@@ -2405,6 +2441,91 @@ async def test_concurrent_exact_ack_writes_history_once_and_replays() -> None:
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_ack_waiter_retains_history_through_close_and_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    notifications = [
+        await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
+    ]
+    final = next(item for item in notifications if item.presentation_unit is not None)
+    current_ack = PresentationAck(
+        ref=handle.response_ref,
+        surface=PresentationSurface.TEXT,
+        unit_id=final.presentation_unit.unit_id,
+        contiguous_cursor=0,
+        presented_at="2026-08-05T08:00:03Z",
+    )
+    with pytest.raises(PresentationLedgerViolation) as wrong_unit:
+        await current.acknowledge_presentation(
+            PresentationAck(
+                ref=handle.response_ref,
+                surface=PresentationSurface.TEXT,
+                unit_id="wrong-unit",
+                contiguous_cursor=0,
+                presented_at=current_ack.presented_at,
+            )
+        )
+    assert wrong_unit.value.reason == "PRESENTATION_ACK_UNIT_MISMATCH"
+    assert not history.assistant_intents
+
+    ack_posted = asyncio.Event()
+    release_result = asyncio.Event()
+
+    async def delay_after_post(
+        posted_ack: PresentationAck,
+        resolver: Callable[[PresentationUnit], bytes],
+    ):
+        outcome = current._cr.post_presentation_ack_with_history(  # noqa: SLF001
+            posted_ack, resolver
+        )
+        ack_posted.set()
+        await release_result.wait()
+        return await asyncio.shield(outcome)
+
+    monkeypatch.setattr(
+        current._cr,  # noqa: SLF001
+        "acknowledge_presentation_with_history",
+        delay_after_post,
+    )
+    waiter = asyncio.create_task(current.acknowledge_presentation(current_ack))
+    await asyncio.wait_for(ack_posted.wait(), timeout=1)
+
+    async def wait_until_presented() -> None:
+        while (
+            current.snapshot().conversation.presentation.records[0].state.value
+            != "presented"
+        ):
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_until_presented(), timeout=1)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert not history.assistant_intents
+
+    pending = await current.close(timeout_seconds=0.01)
+    assert pending.status is AgentConversationShutdownStatus.PENDING
+    assert current.snapshot().closed is False
+    release_result.set()
+    closed = await current.close(timeout_seconds=1)
+    assert closed.status is AgentConversationShutdownStatus.CLOSED
+    assert len(history.assistant_intents) == 1
+    assert history.assistant_intents[0][0].contents[0].content_utf8 == b"formal answer"
+
+    replay = await current.acknowledge_presentation(current_ack)
+    assert replay.accepted is True
+    assert replay.replayed is True
+    assert replay.history_records_written == 1
+    assert replay.history_pending is False
+    assert len(history.assistant_intents) == 1
 
 
 @pytest.mark.asyncio

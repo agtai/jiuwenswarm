@@ -258,12 +258,11 @@ class ConversationRuntimeLoop:
             event = self._runtime.transition_interaction(interaction_id, target)
             if control:
                 for record in records:
-                    if record.state is ResponseState.TERMINAL:
-                        continue
                     self._fence_presentation(
                         record.ref, reason=f"interaction_{target.value}"
                     )
-                    self._emit_playback_stop_once(record.ref)
+                    if record.state is not ResponseState.TERMINAL:
+                        self._emit_playback_stop_once(record.ref)
             return event
 
         return await self._submit(apply, control=control)
@@ -335,9 +334,10 @@ class ConversationRuntimeLoop:
             )
             ref, event = self._runtime.accept_response(turn_id, response_id)
             self._presentation.begin_response(ref, policy)
-            if prior is not None and prior.state is not ResponseState.TERMINAL:
+            if prior is not None:
                 self._fence_presentation(prior.ref, reason="response_replaced")
-                self._emit_playback_stop_once(prior.ref)
+                if prior.state is not ResponseState.TERMINAL:
+                    self._emit_playback_stop_once(prior.ref)
             return ref, event
 
         return await self._submit(apply, control=True)
@@ -371,7 +371,10 @@ class ConversationRuntimeLoop:
                     ErrorCode.STALE,
                 )
             event = self._runtime.transition_response(ref, target, outcome=outcome)
-            if target is ResponseState.TERMINAL:
+            if (
+                target is ResponseState.TERMINAL
+                and outcome is not TerminalOutcome.COMPLETED
+            ):
                 self._fence_presentation(ref, reason="response_terminal")
             return event
 
@@ -478,9 +481,7 @@ class ConversationRuntimeLoop:
                 ),
             )
         return self._post(
-            lambda: self._acknowledge_presentation_with_history(
-                ack, content_resolver
-            ),
+            lambda: self._acknowledge_presentation_with_history(ack, content_resolver),
             control=False,
             ordered_observation=True,
         )
@@ -636,7 +637,7 @@ class ConversationRuntimeLoop:
                 "presentation acknowledgement has an unsupported type",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        self._require_current_output(ack.ref)
+        self._require_acknowledgeable_output(ack.ref)
         accepted, _ = self._presentation.acknowledge(ack)
         if accepted:
             self._mark_effect_presented(ack)
@@ -653,7 +654,7 @@ class ConversationRuntimeLoop:
                 "presentation acknowledgement has an unsupported type",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        self._require_current_output(ack.ref)
+        self._require_acknowledgeable_output(ack.ref)
         prepared: list[PresentedHistoryContent] = []
         if ack.surface is PresentationSurface.TEXT:
             snapshot = self._presentation.snapshot()
@@ -947,6 +948,36 @@ class ConversationRuntimeLoop:
                 "presentation output requires a generating or speaking response",
                 ErrorCode.CONFLICT,
             )
+        return record
+
+    def _require_acknowledgeable_output(self, ref: ResponseRef) -> ResponseRecord:
+        record = self._response_record(ref)
+        interaction = next(
+            (
+                item
+                for item in self._runtime.snapshot().interactions
+                if item.interaction_id == ref.interaction_id
+            ),
+            None,
+        )
+        if interaction is None or interaction.state is not InteractionState.OPEN:
+            raise ConversationRuntimeLoopViolation(
+                "STALE_RESPONSE_OUTPUT",
+                "presentation acknowledgement requires an open interaction",
+                ErrorCode.STALE,
+            )
+        if record.state is not ResponseState.TERMINAL:
+            return self._require_current_output(ref)
+        latest = self._latest_response_record(ref.interaction_id)
+        if latest is None or latest.ref != ref:
+            raise ConversationRuntimeLoopViolation(
+                "STALE_RESPONSE_OUTPUT",
+                "presentation acknowledgement requires the latest exact response",
+                ErrorCode.STALE,
+            )
+        # Terminal fences all future output through _require_current_output and
+        # ResponseFence.  PresentationLedger remains the narrower authority for
+        # an exact pre-terminal ENQUEUED unit on an open, non-invalidated surface.
         return record
 
     def _response_record(self, ref: ResponseRef) -> ResponseRecord:

@@ -176,9 +176,7 @@ async def test_text_ack_emits_exact_immutable_history_intents_per_cursor(
     )
     for item in (first, second):
         assert await runtime.produce_unit(item) is True
-        accepted, _effect = await runtime.enqueue_unit(
-            ref, item.surface, item.unit_id
-        )
+        accepted, _effect = await runtime.enqueue_unit(ref, item.surface, item.unit_id)
         assert accepted is True
 
     with pytest.raises(ConversationRuntimeLoopViolation) as mismatched:
@@ -232,6 +230,236 @@ async def test_text_ack_emits_exact_immutable_history_intents_per_cursor(
     )
     assert accepted is True
     assert audio_intent is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_allows_only_exact_pre_enqueued_ack_with_history(
+    loop_factory,
+) -> None:
+    runtime, ref = await prepared(loop_factory)
+    content = b"done"
+    enqueued = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "terminal-text-0",
+        0,
+        0,
+        len(content),
+        f"sha256:{hashlib.sha256(content).hexdigest()}",
+    )
+    produced_only = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "terminal-text-1",
+        1,
+        len(content),
+        len(content) + 1,
+        f"sha256:{hashlib.sha256(b'!').hexdigest()}",
+    )
+    assert await runtime.produce_unit(enqueued) is True
+    assert (await runtime.enqueue_unit(ref, enqueued.surface, enqueued.unit_id))[
+        0
+    ] is True
+    assert await runtime.produce_unit(produced_only) is True
+    await runtime.transition_response(
+        ref, ResponseState.TERMINAL, outcome=TerminalOutcome.COMPLETED
+    )
+    terminal = runtime.snapshot()
+    assert terminal.presentation.closed_surfaces == ()
+    assert [record.state for record in terminal.presentation.records] == [
+        PresentationState.ENQUEUED,
+        PresentationState.PRODUCED,
+    ]
+
+    with pytest.raises(ConversationRuntimeLoopViolation) as future_output:
+        await runtime.produce_unit(
+            unit(
+                ref,
+                PresentationSurface.TEXT,
+                "terminal-text-2",
+                2,
+                len(content) + 1,
+                len(content) + 2,
+                "sha256:future",
+            )
+        )
+    assert future_output.value.reason == "STALE_RESPONSE_OUTPUT"
+    with pytest.raises(ConversationRuntimeLoopViolation) as future_enqueue:
+        await runtime.enqueue_unit(ref, produced_only.surface, produced_only.unit_id)
+    assert future_enqueue.value.reason == "STALE_RESPONSE_OUTPUT"
+
+    with pytest.raises(PresentationLedgerViolation) as wrong_unit:
+        await runtime.acknowledge_presentation(
+            ack(ref, enqueued.surface, produced_only.unit_id, 0)
+        )
+    assert wrong_unit.value.reason == "PRESENTATION_ACK_UNIT_MISMATCH"
+    with pytest.raises(PresentationLedgerViolation) as beyond:
+        await runtime.acknowledge_presentation(
+            ack(ref, enqueued.surface, produced_only.unit_id, 2)
+        )
+    assert beyond.value.reason == "ACK_BEYOND_PRODUCED_CURSOR"
+    with pytest.raises(PresentationLedgerViolation) as not_enqueued:
+        await runtime.acknowledge_presentation(
+            ack(ref, enqueued.surface, produced_only.unit_id, 1)
+        )
+    assert not_enqueued.value.reason == "PRESENTATION_ACK_NOT_ENQUEUED"
+    with pytest.raises(ConversationRuntimeLoopViolation) as wrong_generation:
+        await runtime.acknowledge_presentation(
+            ack(
+                ResponseRef(ref.interaction_id, ref.response_id, 1),
+                enqueued.surface,
+                enqueued.unit_id,
+                0,
+            )
+        )
+    assert wrong_generation.value.reason == "STALE_RESPONSE_REFERENCE"
+
+    accepted, intent = await runtime.acknowledge_presentation_with_history(
+        ack(ref, enqueued.surface, enqueued.unit_id, 0),
+        lambda selected: content if selected == enqueued else b"!",
+    )
+    assert accepted is True
+    assert intent is not None
+    assert tuple(item.content_utf8 for item in intent.contents) == (content,)
+    replayed, replay_intent = await runtime.acknowledge_presentation_with_history(
+        ack(ref, enqueued.surface, enqueued.unit_id, 0),
+        lambda _selected: (_ for _ in ()).throw(AssertionError("replay resolved")),
+    )
+    assert replayed is False
+    assert replay_intent is None
+
+
+@pytest.mark.asyncio
+async def test_replacement_invalidates_terminal_unacked_presentation(
+    loop_factory,
+) -> None:
+    runtime, first = await prepared(loop_factory)
+    pending = unit(
+        first,
+        PresentationSurface.TEXT,
+        "terminal-replaced",
+        0,
+        0,
+        4,
+        "sha256:old",
+    )
+    assert await runtime.produce_unit(pending) is True
+    assert (await runtime.enqueue_unit(first, pending.surface, pending.unit_id))[
+        0
+    ] is True
+    await runtime.transition_response(
+        first, ResponseState.TERMINAL, outcome=TerminalOutcome.COMPLETED
+    )
+
+    second, _ = await runtime.accept_response("turn-1", "response-2")
+    replaced = runtime.snapshot()
+    old = next(
+        record for record in replaced.presentation.records if record.unit.ref == first
+    )
+    assert old.state is PresentationState.INVALIDATED
+    assert old.invalidated_reason == "response_replaced"
+    assert any(
+        ref == first and reason == "response_replaced"
+        for ref, _surface, reason in replaced.presentation.closed_surfaces
+    )
+    with pytest.raises(ConversationRuntimeLoopViolation) as stale:
+        await runtime.acknowledge_presentation(
+            ack(first, pending.surface, pending.unit_id, 0)
+        )
+    assert stale.value.reason == "STALE_RESPONSE_OUTPUT"
+    assert second.response_generation == first.response_generation + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        TerminalOutcome.CANCELLED,
+        TerminalOutcome.FAILED,
+        TerminalOutcome.INTERRUPTED,
+        TerminalOutcome.UNKNOWN,
+    ],
+)
+async def test_noncompleted_terminal_invalidates_unacked_presentation(
+    loop_factory,
+    outcome: TerminalOutcome,
+) -> None:
+    runtime, ref = await prepared(loop_factory)
+    pending = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "terminal-cancelled",
+        0,
+        0,
+        4,
+        "sha256:cancelled",
+    )
+    assert await runtime.produce_unit(pending) is True
+    assert (await runtime.enqueue_unit(ref, pending.surface, pending.unit_id))[
+        0
+    ] is True
+    await runtime.transition_response(ref, ResponseState.TERMINAL, outcome=outcome)
+
+    with pytest.raises(PresentationLedgerViolation) as closed:
+        await runtime.acknowledge_presentation(
+            ack(ref, pending.surface, pending.unit_id, 0)
+        )
+    assert closed.value.reason == "PRESENTATION_SURFACE_CLOSED"
+    record = runtime.snapshot().presentation.records[0]
+    assert record.state is PresentationState.INVALIDATED
+    assert record.invalidated_reason == "response_terminal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target", [InteractionState.CLOSING, InteractionState.CLOSED])
+async def test_interaction_close_invalidates_completed_terminal_before_ack_history(
+    loop_factory,
+    target: InteractionState,
+) -> None:
+    runtime, ref = await prepared(loop_factory)
+    content = b"done"
+    pending = unit(
+        ref,
+        PresentationSurface.TEXT,
+        "terminal-before-close",
+        0,
+        0,
+        len(content),
+        f"sha256:{hashlib.sha256(content).hexdigest()}",
+    )
+    assert await runtime.produce_unit(pending) is True
+    assert (await runtime.enqueue_unit(ref, pending.surface, pending.unit_id))[
+        0
+    ] is True
+    await runtime.transition_response(
+        ref, ResponseState.TERMINAL, outcome=TerminalOutcome.COMPLETED
+    )
+    assert runtime.snapshot().presentation.records[0].state is (
+        PresentationState.ENQUEUED
+    )
+
+    await runtime.transition_interaction("interaction-1", target)
+    closed = runtime.snapshot()
+    record = closed.presentation.records[0]
+    assert record.state is PresentationState.INVALIDATED
+    assert record.invalidated_reason == f"interaction_{target.value}"
+    assert all(item.effect.effect_type != "playback.stop" for item in closed.effects)
+
+    resolved = 0
+
+    def resolve(_selected: PresentationUnit) -> bytes:
+        nonlocal resolved
+        resolved += 1
+        return content
+
+    with pytest.raises(ConversationRuntimeLoopViolation) as stale:
+        await runtime.acknowledge_presentation_with_history(
+            ack(ref, pending.surface, pending.unit_id, 0),
+            resolve,
+        )
+    assert stale.value.reason == "STALE_RESPONSE_OUTPUT"
+    assert resolved == 0
+    assert await runtime.presented_history(ref) == ()
 
 
 @pytest.mark.parametrize(
