@@ -1,6 +1,6 @@
 # ACP 快速启动
 
-本文将介绍如何在本机启动 `jiuwenswarm` 主进程，并通过 VS Code ACP Client 连接使用。
+`jiuwenswarm` 实现了 [Agent Client Protocol (ACP)](https://agentclientprotocol.com/)，可从任意支持 ACP 的编辑器接入（VS Code、Zed、Neovim 等）。本文将介绍如何在本机启动 `jiuwenswarm` 主进程，并通过 ACP 客户端连接使用。
 
 ## 前置要求
 
@@ -138,4 +138,60 @@ python -m jiuwenswarm.app
 完成上述配置后，在 ACP Client 中连接 jiuwenswarm Agent 即可开始使用。
 
 ![ACP配置完成](../assets/images/ACP配置完成.png)
+
+---
+
+## Zed 配置
+
+Zed 内置 ACP 支持（External Agents）。
+
+1. 先启动主进程：`python -m jiuwenswarm.app`
+2. 在 Zed 的 `settings.json` 中添加（或通过 Agent Settings → External Agents → Add Custom Agent）：
+
+```json
+{
+  "agent_servers": {
+    "JiuwenSwarm": {
+      "type": "custom",
+      "command": "jiuwenswarm-acp",
+      "args": []
+    }
+  }
+}
+```
+
+3. 打开 Agent Panel，选择 `JiuwenSwarm` 新建会话。
+
+> 若 Zed 的 PATH 中找不到 `jiuwenswarm-acp`，请填写完整路径（参考上文说明）。调试连接可在 Command Palette 中执行 `dev: open acp logs`。
+
+---
+
+## Neovim 配置（CodeCompanion.nvim）
+
+[CodeCompanion.nvim](https://codecompanion.olimorris.dev/) 支持 ACP Agent，将 `jiuwenswarm-acp` 注册为自定义 ACP adapter：
+
+```lua
+require("codecompanion").setup({
+  adapters = {
+    acp = {
+      jiuwenswarm = function()
+        return require("codecompanion.adapters").extend("claude_code", {
+          name = "jiuwenswarm",
+          formatted_name = "JiuwenSwarm",
+          commands = {
+            default = { "jiuwenswarm-acp" },
+          },
+          defaults = {},
+          env = {},
+        })
+      end,
+    },
+  },
+  interactions = {
+    chat = { adapter = "jiuwenswarm" },
+  },
+})
+```
+
+先启动主进程（`python -m jiuwenswarm.app`），再打开 CodeCompanion 对话。不同版本插件的配置键可能不同（旧版本使用 `strategies` 而非 `interactions`），请以插件文档为准。
 
