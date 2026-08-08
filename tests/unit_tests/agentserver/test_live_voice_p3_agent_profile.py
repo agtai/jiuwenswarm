@@ -72,6 +72,9 @@ async def test_formal_task_agent_uses_dedicated_clean_profile_and_closes(
     }
     assert "formal_task" in str(creates[0]["cache_key"])
 
+    assert await manager.cleanup_live_voice_formal_task_agent(
+        str(tmp_path), expected_agent=agent
+    )
     await manager.cleanup_live_voice_formal_task_agents()
     await manager.cleanup_live_voice_formal_task_agents()
 

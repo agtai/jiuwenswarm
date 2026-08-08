@@ -675,7 +675,12 @@ def _seed_attempt_worktree(root: Path, worktree: Path, expected_content: str) ->
     _git_output(worktree, "add", "-A", "--")
 
 
-def _mirror_git_visible_content(root: Path, worktree: Path) -> None:
+def _mirror_git_visible_content(
+    root: Path,
+    worktree: Path,
+    *,
+    raw_paths: tuple[bytes, ...] | None = None,
+) -> None:
     """Preserve the selected checkout's exact bytes across linked worktrees.
 
     Git may apply a different checkout conversion (notably ``core.autocrlf``)
@@ -684,15 +689,19 @@ def _mirror_git_visible_content(root: Path, worktree: Path) -> None:
     preserves the authority checkout's actual Git-visible working-tree bytes.
     """
 
-    raw_paths = _git_output(
-        root,
-        "ls-files",
-        "--cached",
-        "--others",
-        "--exclude-standard",
-        "-z",
-    ).split(b"\0")
-    for raw_relative in (item for item in raw_paths if item):
+    selected_paths = (
+        _git_output(
+            root,
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ).split(b"\0")
+        if raw_paths is None
+        else raw_paths
+    )
+    for raw_relative in (item for item in selected_paths if item):
         relative = Path(raw_relative.decode("utf-8", errors="strict"))
         if relative.is_absolute() or ".." in relative.parts:
             raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
@@ -743,7 +752,7 @@ def _require_safe_mirror_path(root: Path, relative: Path) -> None:
         raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH") from error
 
 
-def _attempt_patch(worktree: Path) -> tuple[bytes, str]:
+def _attempt_patch(worktree: Path) -> tuple[bytes, str, tuple[bytes, ...]]:
     expected_tree = _project_content_fingerprint(worktree)
     raw_untracked = _git_output(
         worktree,
@@ -767,13 +776,29 @@ def _attempt_patch(worktree: Path) -> tuple[bytes, str]:
     patch = _git_output(worktree, "diff", "--binary", "--full-index", "--")
     if not patch:
         raise RuntimeError("NO_EFFECTIVE_TARGET_CHANGE")
-    return patch, expected_tree
+    changed_paths = tuple(
+        path
+        for path in _git_output(
+            worktree,
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "--",
+        ).split(b"\0")
+        if path
+    )
+    if not changed_paths:
+        raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED")
+    return patch, expected_tree, changed_paths
 
 
 def _apply_attempt_patch(
     root: Path,
     patch: bytes,
     *,
+    source_worktree: Path,
+    changed_paths: tuple[bytes, ...],
     expected_tree: str,
     before_tree: str,
     before_head: str,
@@ -785,13 +810,35 @@ def _apply_attempt_patch(
         or _target_support_fingerprints(root) != dict(protected_support)
     ):
         raise RuntimeError("EXECUTION_TARGET_CHANGED_DURING_ATTEMPT")
-    _git_run_with_input(root, ("apply", "--check", "--binary", "-"), patch)
-    _git_run_with_input(root, ("apply", "--binary", "-"), patch)
-    if _project_content_fingerprint(root) == expected_tree:
-        return
-    with contextlib.suppress(Exception):
-        _git_run_with_input(root, ("apply", "--reverse", "--binary", "-"), patch)
-    raise RuntimeError("PROJECT_CHANGE_ATTRIBUTION_FAILED")
+    before_content = _project_content_fingerprint(root)
+    with tempfile.TemporaryDirectory(
+        prefix="jiuwenswarm-live-voice-d0-rollback-"
+    ) as snapshot_raw:
+        snapshot = Path(snapshot_raw)
+        _mirror_git_visible_content(root, snapshot, raw_paths=changed_paths)
+        try:
+            _git_run_with_input(root, ("apply", "--check", "--binary", "-"), patch)
+            _git_run_with_input(root, ("apply", "--binary", "-"), patch)
+            _mirror_git_visible_content(
+                source_worktree,
+                root,
+                raw_paths=changed_paths,
+            )
+            if _project_content_fingerprint(root) != expected_tree:
+                raise RuntimeError("PROJECT_CHANGE_ATTRIBUTION_FAILED")
+        except Exception as error:
+            try:
+                _mirror_git_visible_content(snapshot, root, raw_paths=changed_paths)
+                if (
+                    _git_head(root) != before_head
+                    or _project_tree_fingerprint(root) != before_tree
+                    or _project_content_fingerprint(root) != before_content
+                    or _target_support_fingerprints(root) != dict(protected_support)
+                ):
+                    raise RuntimeError("PROJECT_CHANGE_ROLLBACK_FAILED")
+            except Exception as rollback_error:
+                raise RuntimeError("PROJECT_CHANGE_ROLLBACK_FAILED") from rollback_error
+            raise error
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -1786,7 +1833,7 @@ class DirectProjectCodeExecutorAdapter:
                 != before_support
             ):
                 raise RuntimeError("RUNTIME_SUPPORT_PATH_MUTATED")
-            patch, expected_tree = await asyncio.to_thread(
+            patch, expected_tree, changed_paths = await asyncio.to_thread(
                 _attempt_patch, created_worktree
             )
             interruption = self._interruptions.get(item.attempt_id)
@@ -1834,6 +1881,8 @@ class DirectProjectCodeExecutorAdapter:
                     _apply_attempt_patch,
                     target_root,
                     patch,
+                    source_worktree=created_worktree,
+                    changed_paths=changed_paths,
                     expected_tree=expected_tree,
                     before_tree=record.before_tree,
                     before_head=record.before_head,
@@ -1873,7 +1922,12 @@ class DirectProjectCodeExecutorAdapter:
             )
             if code not in {
                 "PROJECT_EXECUTOR_AGENT_ERROR",
+                "PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED",
+                "PROJECT_EXECUTOR_AGENT_SETUP_MUTATED_TARGET",
+                "PROJECT_EXECUTOR_AGENT_POST_TERMINAL_MUTATION",
+                "PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET",
                 "PROJECT_EXECUTOR_INCOMPLETE",
+                "PROJECT_CHANGE_ROLLBACK_FAILED",
                 "FORBIDDEN_GIT_HEAD_CHANGE",
                 "RUNTIME_SUPPORT_PATH_MUTATED",
                 "NO_EFFECTIVE_TARGET_CHANGE",

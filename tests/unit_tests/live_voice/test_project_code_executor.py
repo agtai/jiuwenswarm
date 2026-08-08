@@ -99,6 +99,8 @@ class _DirectProjectExecutor:
                     (project / ".gitignore").write_text("runtime/\n", encoding="utf-8")
                 elif self.behavior == "ignored_only":
                     (project / "ignored.txt").write_text("ignored", encoding="utf-8")
+                elif self.behavior == "lf_success":
+                    (project / "result.txt").write_bytes(b"done\n")
                 else:
                     (project / "result.txt").write_text("done", encoding="utf-8")
                 yield AgentResponseChunk(
@@ -393,7 +395,10 @@ def _direct_task_attempt(
 async def _wait_direct_settled(
     adapter: DirectProjectCodeExecutorAdapter,
 ) -> None:
-    for _ in range(200):
+    # Windows worktree removal can occasionally exceed two seconds while Git
+    # and filesystem scanners release handles. Keep this bounded, but do not
+    # turn platform cleanup latency into a product-state failure.
+    for _ in range(500):
         if not adapter._running:
             return
         await asyncio.sleep(0.01)
@@ -875,7 +880,7 @@ async def test_direct_executor_preserves_authority_checkout_line_endings(
     _git_project(project)
     baseline = (project / "README.md").read_bytes()
     _git(project, "config", "core.autocrlf", "true")
-    executor = _DirectProjectExecutor(project)
+    executor = _DirectProjectExecutor(project, "lf_success")
     adapter = DirectProjectCodeExecutorAdapter(
         _Resolver(_direct_binding(project, executor)),
         tmp_path / "p3.sqlite3",
@@ -890,7 +895,41 @@ async def test_direct_executor_preserves_authority_checkout_line_endings(
     assert isinstance(terminal, ExecutorDeliveryResult)
     assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
     assert (project / "README.md").read_bytes() == baseline
-    assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+    assert (project / "result.txt").read_bytes() == b"done\n"
+
+
+def test_attempt_apply_attribution_failure_restores_exact_authority_bytes(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    attempt = tmp_path / "attempt"
+    _git_project(project)
+    _git_project(attempt)
+    _git(project, "config", "core.autocrlf", "true")
+    baseline = (project / "README.md").read_bytes()
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    protected_support = project_code_executor._target_support_fingerprints(project)
+
+    (attempt / "README.md").write_bytes(b"attempt-only-lf\n")
+    patch, _expected_tree, changed_paths = project_code_executor._attempt_patch(
+        attempt
+    )
+
+    with pytest.raises(RuntimeError, match="PROJECT_CHANGE_ATTRIBUTION_FAILED"):
+        project_code_executor._apply_attempt_patch(
+            project,
+            patch,
+            source_worktree=attempt,
+            changed_paths=changed_paths,
+            expected_tree="forced-mismatch",
+            before_tree=before_tree,
+            before_head=before_head,
+            protected_support=protected_support,
+        )
+
+    assert (project / "README.md").read_bytes() == baseline
+    assert project_code_executor._project_tree_fingerprint(project) == before_tree
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")

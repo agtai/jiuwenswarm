@@ -1316,6 +1316,102 @@ def test_confirmation_consumption_and_exact_replay_survive_ledger_restart(
 
 
 @pytest.mark.asyncio
+async def test_real_mutation_replay_reauthorizes_current_scope_without_reexecution(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        params = _create_params("command-authorized-replay")
+        prepared = await harness.composition.prepare_mutation_confirmation(
+            operation="task.create",
+            params=params,
+            session_id="session-1",
+        )
+        params["confirmation_id"] = harness.confirmations.issue(
+            prepared.binding, expires_at=EXPIRY, now=NOW
+        )
+        result = await harness.composition.handle(
+            operation="task.create",
+            params=params,
+            request_id="request-authorized-replay",
+            session_id="session-1",
+        )
+        assert result.ok is True
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        before_counts = _store_counts(harness.database)
+        before_dispatches = list(harness.executor.dispatches)
+        with sqlite3.connect(harness.database) as connection:
+            before_confirmations = connection.execute(
+                "SELECT COUNT(*) FROM p3_confirmations"
+            ).fetchone()[0]
+
+        original_context = harness.authority.contexts["session-1"]
+        harness.authority.contexts["session-1"] = replace(
+            original_context,
+            revision_value="revision-after-task-output",
+        )
+        await harness.composition.reauthorize_mutation_replay(
+            operation="task.create",
+            params=params,
+            session_id="session-1",
+            expected_binding=prepared.binding,
+        )
+
+        negative_calls = [
+            ("task.create", {**params, "auth_token": "revoked"}, "session-1"),
+            ("task.create", {**params, "command_id": "command-drift"}, "session-1"),
+            ("task.create", {**params, "session_id": "session-2"}, "session-2"),
+        ]
+        for operation, changed, session_id in negative_calls:
+            with pytest.raises(FormalTaskViolation):
+                await harness.composition.reauthorize_mutation_replay(
+                    operation=operation,
+                    params=changed,
+                    session_id=session_id,
+                    expected_binding=prepared.binding,
+                )
+
+        harness.authority.contexts["session-1"] = _context(
+            tmp_path,
+            project_id="project-2",
+            session_id="session-1",
+        )
+        with pytest.raises(FormalTaskViolation, match="current authority"):
+            await harness.composition.reauthorize_mutation_replay(
+                operation="task.create",
+                params=params,
+                session_id="session-1",
+                expected_binding=prepared.binding,
+            )
+        harness.authority.contexts["session-1"] = original_context
+
+        cancel_binding = replace(
+            prepared.binding,
+            operation="task.cancel",
+            command_id="command-cancel",
+            target_task_id="task-1",
+        )
+        with pytest.raises(FormalTaskViolation, match="current authority"):
+            await harness.composition.reauthorize_mutation_replay(
+                operation="task.cancel",
+                params=_mutation_params("task-2"),
+                session_id="session-1",
+                expected_binding=cancel_binding,
+            )
+
+        assert _store_counts(harness.database) == before_counts
+        assert harness.executor.dispatches == before_dispatches
+        assert harness.executor.cancels == []
+        with sqlite3.connect(harness.database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM p3_confirmations"
+            ).fetchone()[0] == before_confirmations
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
 async def test_cross_task_confirmation_rejected_without_cancel_effect(
     tmp_path: Path,
 ) -> None:
@@ -2156,7 +2252,7 @@ async def test_dirty_dispatch_fails_before_model_agent_or_carrier(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_handoff_fence_rechecks_clean_state_after_agent_setup(
+async def test_dispatch_handoff_fence_rechecks_clean_state_before_attempt_agent_setup(
     tmp_path: Path,
 ) -> None:
     class Authority:
@@ -2191,18 +2287,11 @@ async def test_dispatch_handoff_fence_rechecks_clean_state_after_agent_setup(
 
     class Manager:
         def __init__(self) -> None:
-            self.agent = Agent()
-            self.pins = 0
-            self.unpins = 0
+            self.calls = 0
 
         async def get_live_voice_formal_task_agent(self, _project_dir: str):
-            return self.agent
-
-        def pin_agent(self, _agent) -> None:
-            self.pins += 1
-
-        def unpin_agent(self, _agent) -> None:
-            self.unpins += 1
+            self.calls += 1
+            return Agent()
 
     authority = Authority()
     manager = Manager()
@@ -2230,10 +2319,211 @@ async def test_dispatch_handoff_fence_rechecks_clean_state_after_agent_setup(
         await binding.dispatch_fence()
     assert raised.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
     assert authority.calls == 2
-    assert manager.pins == 1
-    assert binding.context_release is not None
-    binding.context_release()
-    assert manager.unpins == 1
+    assert manager.calls == 0
+    assert binding.context_release is None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_creates_and_retires_agent_at_exact_attempt_root(
+    tmp_path: Path,
+) -> None:
+    authority_root = tmp_path / "authority"
+    attempt_root = tmp_path / "attempt"
+    for root in (authority_root, attempt_root):
+        root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        (root / "tracked.txt").write_text("baseline\n", encoding="utf-8")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True)
+        subprocess.run(
+            [
+                "git", "-c", "user.name=P3 Test", "-c",
+                "user.email=p3@example.invalid", "commit", "-qm", "seed",
+            ],
+            cwd=root,
+            check=True,
+        )
+
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(authority_root),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    class Agent:
+        def get_project_execution_root(self) -> str:
+            return str(attempt_root)
+
+        def get_instance(self):
+            return object()
+
+        async def process_background_code_task_stream(self, request):
+            assert request.params["project_dir"] == str(attempt_root)
+            yield SimpleNamespace(is_complete=True, value="completed")
+
+    class Manager:
+        def __init__(self) -> None:
+            self.agent = Agent()
+            self.created: list[str] = []
+            self.cleaned: list[tuple[str, object]] = []
+
+        async def get_live_voice_formal_task_agent(self, project_dir: str):
+            self.created.append(project_dir)
+            return self.agent
+
+        async def cleanup_live_voice_formal_task_agent(
+            self, project_dir: str, *, expected_agent: object
+        ) -> bool:
+            self.cleaned.append((project_dir, expected_agent))
+            return True
+
+    manager = Manager()
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),
+        agent_manager=manager,
+        service=object(),
+        model_resolver=_ModelResolver(),
+        principal=_principal(),
+        clock=lambda: NOW,
+    )
+    binding = await resolver.resolve(
+        SimpleNamespace(
+            context=object(),
+            attributes=(
+                ("model_identity", "default#0"),
+                ("model_config_version", "catalog-v1"),
+            ),
+        ),
+        for_dispatch=True,
+    )
+    request = SimpleNamespace(params={"project_dir": str(attempt_root)})
+
+    chunks = [
+        chunk
+        async for chunk in binding.project_executor.process_background_code_task_stream(
+            request
+        )
+    ]
+
+    assert [chunk.value for chunk in chunks] == ["completed"]
+    assert manager.created == [str(attempt_root)]
+    assert manager.cleaned == [(str(attempt_root), manager.agent)]
+    assert binding.effective_execution_root == str(authority_root)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mutation_phase", "expected_reason"),
+    [
+        ("setup", "PROJECT_EXECUTOR_AGENT_SETUP_MUTATED_TARGET"),
+        ("post_terminal", "PROJECT_EXECUTOR_AGENT_POST_TERMINAL_MUTATION"),
+        ("cleanup", "PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET"),
+    ],
+)
+async def test_attempt_agent_lifecycle_changes_never_become_authority_output(
+    tmp_path: Path,
+    mutation_phase: str,
+    expected_reason: str,
+) -> None:
+    authority_root = tmp_path / "authority"
+    attempt_root = tmp_path / "attempt"
+    for root in (authority_root, attempt_root):
+        root.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+        (root / "tracked.txt").write_bytes(b"baseline\n")
+        subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True)
+        subprocess.run(
+            [
+                "git", "-c", "user.name=P3 Test", "-c",
+                "user.email=p3@example.invalid", "commit", "-qm", "seed",
+            ],
+            cwd=root,
+            check=True,
+        )
+    authority_bytes = (authority_root / "tracked.txt").read_bytes()
+    authority_status = subprocess.run(
+        ["git", "status", "--porcelain=v2", "-z"],
+        cwd=authority_root,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(authority_root),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    class Agent:
+        def get_project_execution_root(self) -> str:
+            return str(attempt_root)
+
+        def get_instance(self):
+            if mutation_phase == "setup":
+                (attempt_root / "setup.txt").write_text("setup\n", encoding="utf-8")
+            return object()
+
+        async def process_background_code_task_stream(self, _request):
+            (attempt_root / "result.txt").write_text("task\n", encoding="utf-8")
+            yield SimpleNamespace(is_complete=True)
+            if mutation_phase == "post_terminal":
+                (attempt_root / "late.txt").write_text("late\n", encoding="utf-8")
+
+    class Manager:
+        def __init__(self) -> None:
+            self.agent = Agent()
+
+        async def get_live_voice_formal_task_agent(self, _project_dir: str):
+            return self.agent
+
+        async def cleanup_live_voice_formal_task_agent(
+            self, _project_dir: str, *, expected_agent: object
+        ) -> bool:
+            assert expected_agent is self.agent
+            if mutation_phase == "cleanup":
+                (attempt_root / "cleanup.txt").write_text(
+                    "cleanup\n", encoding="utf-8"
+                )
+            return True
+
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),
+        agent_manager=Manager(),
+        service=object(),
+        model_resolver=_ModelResolver(),
+        principal=_principal(),
+        clock=lambda: NOW,
+    )
+    binding = await resolver.resolve(
+        SimpleNamespace(
+            context=object(),
+            attributes=(
+                ("model_identity", "default#0"),
+                ("model_config_version", "catalog-v1"),
+            ),
+        ),
+        for_dispatch=True,
+    )
+    chunks = []
+    with pytest.raises(RuntimeError, match=expected_reason):
+        async for chunk in binding.project_executor.process_background_code_task_stream(
+            SimpleNamespace(params={"project_dir": str(attempt_root)})
+        ):
+            chunks.append(chunk)
+
+    assert len(chunks) == (0 if mutation_phase == "setup" else 1)
+    assert (authority_root / "tracked.txt").read_bytes() == authority_bytes
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v2", "-z"],
+        cwd=authority_root,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout == authority_status
 
 
 @pytest.mark.asyncio

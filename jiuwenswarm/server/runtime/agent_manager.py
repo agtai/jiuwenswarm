@@ -697,6 +697,63 @@ class AgentManager:
             if lock_key[0] == channel_key:
                 self._agent_create_locks.pop(lock_key, None)
 
+    async def cleanup_live_voice_formal_task_agent(
+        self,
+        project_dir: str,
+        *,
+        expected_agent: "JiuWenSwarm",
+    ) -> bool:
+        """Retire one attempt-root Agent without widening to sibling tasks."""
+
+        channel_key = "live_voice_formal_task"
+        project_key = _normalize_project_dir(project_dir)
+        if not project_key:
+            return False
+        cache_key = _make_agent_cache_key("code", "formal_task", project_key)
+        create_lock = self._get_agent_create_lock(channel_key, cache_key)
+        async with create_lock:
+            channel_agents = self.agents.get(channel_key)
+            if not isinstance(channel_agents, dict):
+                return False
+            agent = channel_agents.get(cache_key)
+            if agent is not expected_agent:
+                return False
+            try:
+                current = asyncio.current_task()
+            except RuntimeError:
+                current = None
+            if self._agent_pins.get(id(agent), 0) > 0 or self._has_agent_borrowers(
+                agent, exclude=current
+            ):
+                return False
+
+            channel_agents.pop(cache_key, None)
+            create_params = self._agent_create_params.get(channel_key)
+            saved_params = (
+                create_params.pop(cache_key, None)
+                if isinstance(create_params, dict)
+                else None
+            )
+            self._agent_pins.pop(id(agent), None)
+            self._agent_borrowers.pop(id(agent), None)
+            try:
+                await agent.cleanup()
+            except Exception:
+                channel_agents.setdefault(cache_key, agent)
+                if saved_params is not None:
+                    self._agent_create_params.setdefault(channel_key, {})[
+                        cache_key
+                    ] = saved_params
+                logger.exception(
+                    "[AgentManager] formal Live Voice attempt Agent cleanup failed"
+                )
+                return False
+            if not channel_agents:
+                self.agents.pop(channel_key, None)
+            if isinstance(create_params, dict) and not create_params:
+                self._agent_create_params.pop(channel_key, None)
+            return True
+
     def get_agent_nowait(
         self,
         channel_id: str = "",

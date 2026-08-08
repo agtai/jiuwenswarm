@@ -18,7 +18,7 @@ import math
 import os
 import subprocess
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -60,6 +60,7 @@ from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
+    _project_content_fingerprint,
 )
 from .task_event_subscription import TaskEventSubscription
 from .task_progress_return import TaskProgressOriginBinding
@@ -544,6 +545,94 @@ class ClosableBindingResolver(Protocol):
     async def close(self) -> None: ...
 
 
+class _AttemptScopedProjectExecutor:
+    """Create and retire the formal Code Agent at the isolated attempt root."""
+
+    def __init__(self, agent_manager: Any) -> None:
+        self._agent_manager = agent_manager
+
+    async def process_background_code_task_stream(
+        self, request: Any
+    ) -> AsyncIterator[Any]:
+        requested_root = (request.params or {}).get("project_dir")
+        if not isinstance(requested_root, str):
+            raise RuntimeError("EXECUTION_TARGET_NOT_BOUND")
+        try:
+            attempt_root = Path(requested_root).resolve(strict=True)
+        except OSError as error:
+            raise RuntimeError("EXECUTION_TARGET_NOT_BOUND") from error
+        if not attempt_root.is_dir():
+            raise RuntimeError("EXECUTION_TARGET_NOT_BOUND")
+
+        async def fingerprint(failure_reason: str) -> str:
+            try:
+                return await asyncio.to_thread(
+                    _project_content_fingerprint, attempt_root
+                )
+            except Exception as error:
+                raise RuntimeError(failure_reason) from error
+
+        before_setup = await fingerprint("EXECUTION_TARGET_NOT_BOUND")
+        agent = await self._agent_manager.get_live_voice_formal_task_agent(
+            str(attempt_root)
+        )
+        if agent is None:
+            raise RuntimeError("EXECUTOR_CAPABILITY_UNAVAILABLE")
+        cleanup = getattr(
+            self._agent_manager, "cleanup_live_voice_formal_task_agent", None
+        )
+        if not callable(cleanup):
+            raise RuntimeError("EXECUTOR_CAPABILITY_UNAVAILABLE")
+        terminal_content: str | None = None
+        stream_error: BaseException | None = None
+        try:
+            get_root = getattr(agent, "get_project_execution_root", None)
+            if not callable(get_root) or _path_key(get_root()) != _path_key(attempt_root):
+                raise RuntimeError("EXECUTION_TARGET_NOT_BOUND")
+            agent.get_instance()
+            if await fingerprint(
+                "PROJECT_EXECUTOR_AGENT_SETUP_MUTATED_TARGET"
+            ) != before_setup:
+                raise RuntimeError("PROJECT_EXECUTOR_AGENT_SETUP_MUTATED_TARGET")
+            async for chunk in agent.process_background_code_task_stream(request):
+                if terminal_content is not None:
+                    raise RuntimeError(
+                        "PROJECT_EXECUTOR_AGENT_POST_TERMINAL_MUTATION"
+                    )
+                if bool(getattr(chunk, "is_complete", False)):
+                    terminal_content = await fingerprint(
+                        "PROJECT_EXECUTOR_AGENT_POST_TERMINAL_MUTATION"
+                    )
+                yield chunk
+            if terminal_content is not None and (
+                await fingerprint("PROJECT_EXECUTOR_AGENT_POST_TERMINAL_MUTATION")
+                != terminal_content
+            ):
+                raise RuntimeError("PROJECT_EXECUTOR_AGENT_POST_TERMINAL_MUTATION")
+        except BaseException as error:
+            stream_error = error
+            raise
+        finally:
+            before_cleanup = (
+                await fingerprint("PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET")
+                if terminal_content is not None
+                else None
+            )
+            try:
+                cleaned = await cleanup(str(attempt_root), expected_agent=agent)
+            except Exception as error:
+                raise RuntimeError("PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED") from error
+            if not cleaned:
+                raise RuntimeError("PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED")
+            if before_cleanup is not None and (
+                await fingerprint("PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET")
+                != before_cleanup
+            ):
+                raise RuntimeError(
+                    "PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET"
+                ) from stream_error
+
+
 class AgentManagerProjectBindingResolver:
     """Revalidate persisted context and bind the isolated formal Code Agent."""
 
@@ -595,7 +684,6 @@ class AgentManagerProjectBindingResolver:
         model_config_version = attributes.get("model_config_version")
         execution_agent: Any = None
         project_executor: Any = None
-        release: Callable[[], None] | None = None
         dispatch_fence: Callable[[], Awaitable[None]] | None = None
         effective_root = snapshot.project_dir
         if for_dispatch:
@@ -612,34 +700,8 @@ class AgentManagerProjectBindingResolver:
                     "formal task model is unavailable",
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
-            agent = await self._agent_manager.get_live_voice_formal_task_agent(
-                snapshot.project_dir
-            )
-            if agent is None:
-                raise FormalTaskViolation(
-                    "EXECUTOR_CAPABILITY_UNAVAILABLE",
-                    "formal project Code Agent is unavailable",
-                    ErrorCode.CAPABILITY_UNAVAILABLE,
-                )
-            get_root = getattr(agent, "get_project_execution_root", None)
-            effective_root = get_root() if callable(get_root) else snapshot.project_dir
-            self._agent_manager.pin_agent(agent)
-            released = False
-
-            def release_agent() -> None:
-                nonlocal released
-                if released:
-                    return
-                released = True
-                self._agent_manager.unpin_agent(agent)
-
-            release = release_agent
-            try:
-                execution_agent = agent.get_instance()
-                project_executor = agent
-            except Exception:
-                release()
-                raise
+            project_executor = _AttemptScopedProjectExecutor(self._agent_manager)
+            execution_agent = project_executor
 
             async def require_dispatch_fence() -> None:
                 current = await asyncio.to_thread(
@@ -667,35 +729,30 @@ class AgentManagerProjectBindingResolver:
                 )
 
             dispatch_fence = require_dispatch_fence
-        try:
-            return ProjectExecutionBinding(
-                service=self._service,
-                execution_agent=execution_agent,
-                project_executor=project_executor,
-                effective_execution_root=effective_root,
-                execution_target={
-                    "project_dir": snapshot.project_dir,
-                    "project_id": snapshot.project_id,
-                    "origin_session_id": snapshot.session_id,
-                    "origin_channel_id": "web",
-                },
-                owner_scope={
-                    "channel_id": "formal-task-core",
-                    "session_id": snapshot.session_id,
-                    "app_id": "live-voice",
-                },
-                resolved_revision_kind="version",
-                resolved_revision_value=snapshot.revision,
-                model=model,
-                model_identity=model_identity,
-                model_config_version=model_config_version,
-                context_release=release,
-                dispatch_fence=dispatch_fence,
-            )
-        except Exception:
-            if release is not None:
-                release()
-            raise
+        return ProjectExecutionBinding(
+            service=self._service,
+            execution_agent=execution_agent,
+            project_executor=project_executor,
+            effective_execution_root=effective_root,
+            execution_target={
+                "project_dir": snapshot.project_dir,
+                "project_id": snapshot.project_id,
+                "origin_session_id": snapshot.session_id,
+                "origin_channel_id": "web",
+            },
+            owner_scope={
+                "channel_id": "formal-task-core",
+                "session_id": snapshot.session_id,
+                "app_id": "live-voice",
+            },
+            resolved_revision_kind="version",
+            resolved_revision_value=snapshot.revision,
+            model=model,
+            model_identity=model_identity,
+            model_config_version=model_config_version,
+            context_release=None,
+            dispatch_fence=dispatch_fence,
+        )
 
     async def close(self) -> None:
         if self._closed:
