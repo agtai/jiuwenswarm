@@ -12,6 +12,7 @@ import {
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
   classifyProductP2Notification,
   ProductResponseSurfaceFence,
+  coordinateRetainedProductP2Close,
   executeProductVoiceBargeIn,
   executeProductPresentationWithFence,
   settleRetainedProductVoiceResponseCancel,
@@ -27,6 +28,7 @@ import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   PRODUCT_P2_ACTIVATE_METHOD,
   PRODUCT_P2_BARGE_IN_METHOD,
+  PRODUCT_P2_CLOSE_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
   ProductWebP2ActivationOwner,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
@@ -586,6 +588,9 @@ test('unknown response cancel is replayed exactly after reconnect before fence p
           },
         };
       }
+      if (method === PRODUCT_P2_CLOSE_METHOD) {
+        return { ok: true, result: { status: 'closed', ...binding } };
+      }
       throw new Error(`forbidden method ${method}`);
     },
   });
@@ -611,16 +616,31 @@ test('unknown response cancel is replayed exactly after reconnect before fence p
   assert.equal(cancelAccepted, 0);
 
   connected = true;
-  await settleRetainedProductVoiceResponseCancel({
-    operation: retained,
-    is_current: () => connected,
-    on_accepted: () => { cancelAccepted += 1; },
-  });
+  const inflight = new WeakMap();
+  const closeInput = {
+    inflight,
+    owner,
+    settle_retained_cancel: () => settleRetainedProductVoiceResponseCancel({
+      operation: retained,
+      is_current: () => connected,
+      on_accepted: () => { cancelAccepted += 1; },
+    }),
+    close: () => owner.closeWithRetry({ retry_delay_ms: 0 }),
+  };
+  const sessionSwitchClose = coordinateRetainedProductP2Close(closeInput);
+  const unmountClose = coordinateRetainedProductP2Close(closeInput);
+  assert.equal(sessionSwitchClose, unmountClose);
+  await sessionSwitchClose;
+  assert.equal(owner.snapshot().status, 'closed');
   assert.equal(cancelAccepted, 1);
   const cancelCalls = calls.filter(([method]) => method === PRODUCT_P2_BARGE_IN_METHOD);
   assert.equal(cancelCalls.length, 2);
   assert.deepEqual(cancelCalls[0][1], cancelCalls[1][1]);
   assert.equal(cancelCalls[0][2], cancelCalls[1][2]);
+  assert.deepEqual(
+    calls.slice(-2).map(([method]) => method),
+    [PRODUCT_P2_BARGE_IN_METHOD, PRODUCT_P2_CLOSE_METHOD],
+  );
   assert.equal(
     calls.some(([method]) => /submit|round|task/.test(method)),
     false,

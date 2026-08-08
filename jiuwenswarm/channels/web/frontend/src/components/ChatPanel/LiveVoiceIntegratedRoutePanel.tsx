@@ -119,6 +119,30 @@ export async function settleRetainedProductVoiceResponseCancel(input: Readonly<{
   input.on_accepted();
 }
 
+export function coordinateRetainedProductP2Close<
+  TOwner extends object,
+  TResult,
+>(input: Readonly<{
+  inflight: WeakMap<TOwner, Promise<TResult>>;
+  owner: TOwner;
+  settle_retained_cancel: () => Promise<void>;
+  close: () => Promise<TResult>;
+}>): Promise<TResult> {
+  const existing = input.inflight.get(input.owner);
+  if (existing !== undefined) return existing;
+  let retained: Promise<TResult>;
+  retained = (async () => {
+    await input.settle_retained_cancel();
+    return input.close();
+  })().finally(() => {
+    if (input.inflight.get(input.owner) === retained) {
+      input.inflight.delete(input.owner);
+    }
+  });
+  input.inflight.set(input.owner, retained);
+  return retained;
+}
+
 type ProductTurnInput = {
   commit_id: string;
   turn_id: string;
@@ -501,6 +525,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const pendingVoiceResponseCancelRef = useRef<
     RetainedProductVoiceResponseCancel | null
   >(null);
+  const p2CloseCoordinatorRef = useRef(
+    new WeakMap<ProductWebP2ActivationOwner, Promise<ProductWebP2ActivationSnapshot>>()
+  );
   const responseSurfaceFenceRef = useRef(new ProductResponseSurfaceFence());
   const presentedProductResponsesRef = useRef(new Map<string, true>());
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
@@ -695,6 +722,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   };
 
+  const closeProductP2Owner = (
+    owner: ProductWebP2ActivationOwner,
+    options?: Parameters<ProductWebP2ActivationOwner['closeWithRetry']>[0],
+  ): Promise<ProductWebP2ActivationSnapshot> => coordinateRetainedProductP2Close({
+    inflight: p2CloseCoordinatorRef.current,
+    owner,
+    settle_retained_cancel: async () => {
+      if (pendingVoiceResponseCancelRef.current?.owner === owner) {
+        await settleRetainedP2Operations(owner, true);
+      }
+    },
+    close: () => owner.closeWithRetry(options),
+  });
+
   useEffect(() => {
     const monitor = new WebPlatformDiagnosticsMonitor({
       enabled: FEATURE_LIVE_VOICE_INTEGRATED_WEB,
@@ -869,7 +910,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }
           try {
             await settleRetainedP2Operations(previous);
-            await previous.closeWithRetry();
+            await closeProductP2Owner(previous);
           } catch {
             scheduleRecovery();
             return;
@@ -904,7 +945,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               }
               await settleRetainedP2Operations(previous, true);
             }
-            await previous.closeWithRetry({
+            await closeProductP2Owner(previous, {
               on_retry: snapshot => {
                 if (!cancelled && activationOwnerRef.current === previous) {
                   setP2Activation(snapshot);
@@ -970,7 +1011,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         // retained owner if the bounded cleanup remains pending.
         if (requiresProductActivationCleanup(error)) {
           try {
-            await owner.closeWithRetry();
+            await closeProductP2Owner(owner);
             if (!cancelled && activationOwnerRef.current === owner) {
               activationOwnerRef.current = null;
               setP2RecoveryEpoch(epoch => epoch + 1);
@@ -999,8 +1040,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (activationOwnerRef.current === closing) activationOwnerRef.current = null;
         return;
       }
-      void closing
-        .closeWithRetry()
+      void closeProductP2Owner(closing)
         .then(() => {
           if (activationOwnerRef.current === closing) activationOwnerRef.current = null;
         })
