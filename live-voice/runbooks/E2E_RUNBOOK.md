@@ -294,6 +294,8 @@ $env:JIUWENSWARM_LIVE_VOICE_W2_REPOSITORY_PATH = $candidateRoot
 
 默认 P3 数据库位于当前 `JIUWENSWARM_DATA_DIR/live_voice/p3alpha`。若本次必须指定文件，只能把 `JIUWENSWARM_LIVE_VOICE_P3_DATABASE` 设置为该目录内的新绝对路径；不得指向源码仓库或数据目录外。P3 project 必须是可丢弃或已备份的真实 Git project；D0 Executor 会产生真实代码副作用，取消不会回滚已发生的修改。
 
+Windows 上还必须在冻结 P3 fixture baseline 前检查 Git 的行尾策略。D0 Executor 会在 detached worktree 中按原始字节核对 baseline；若系统级 `core.autocrlf=true` 把相同 blob 检出为 CRLF，而已登记 baseline 是 LF，即使 `git status` 干净也会 fail closed 为 `PROJECT_WORKTREE_BASELINE_MISMATCH`。本次可丢弃 fixture 使用仓库本地 `core.autocrlf=false`，并要求目标 tracked 文件在 `git ls-files --eol` 中保持预期 worktree 行尾。若现有目标已是 `w/crlf` 或策略不一致，不得在正式 attempt 中临时修补；应在新的可丢弃 fixture 中先固定本地配置或提交明确 `.gitattributes`，重新建立干净 baseline，再注册 project。正式正向任务必须要求一个精确、Git-visible、非忽略的目标变更；只读指令或最终零变化应按合同失败，不能当作 P3 成功。
+
 Gateway 终端设置同一数据目录、candidate/environment/Session/mode/repository 值，再设置：
 
 ```powershell
@@ -305,6 +307,8 @@ $env:LIVE_VOICE_SPEECH_STT_MODEL = '<本次真实 STT model>'
 $env:LIVE_VOICE_SPEECH_TTS_MODEL = '<本次真实 TTS model>'
 $env:LIVE_VOICE_SPEECH_TTS_VOICE = '<本次真实 voice>'
 $env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN = '<与 AgentServer 完全相同的本机私有 bearer；不得记录值>'
 $env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED = 'true'
 $env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_EVIDENCE_PATH = (Join-Path $w2EvidenceRoot '<当前 policy slot 的 gateway artifact_id>.jsonl')
 $env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_EVIDENCE_PRIVATE_KEY_PATH = '<policy 绑定的 Gateway leaf 私钥绝对路径；不得位于 evidence 目录或 Git>'
@@ -323,6 +327,12 @@ $env:JIUWENSWARM_LIVE_VOICE_W2_MODE_ID = $modeId
 $env:JIUWENSWARM_LIVE_VOICE_W2_REPOSITORY_PATH = $candidateRoot
 & .\.venv\Scripts\python.exe -c "import jiuwenswarm.common.config as c; real=c.get_config; c.get_config=lambda:(lambda x:(x.setdefault('channels',{}).setdefault('slack',{}).__setitem__('enabled',False),x)[1])(real()); import jiuwenswarm.gateway.app_gateway as g; g.main()"
 ```
+
+D-064 当前 W2 候选的非敏感配置冻结为：Provider 标签 `openai-compatible`、API base `https://api.openai.com/v1`、STT `gpt-4o-mini-transcribe`、TTS `gpt-4o-mini-tts`、voice `marin`。API key 只能通过 Gateway 启动终端的隐藏输入注入该进程环境，不得粘贴到本文件、PowerShell 历史、浏览器、Git、日志或 evidence。正式 evidence 前先用同一配置执行一次最短 STT/TTS 探针，确认认证、模型/voice 可用、响应确为完整 mono PCM16 WAV，并记录非敏感的实际采样率；探针失败时废弃该 attempt，不得静默换 alias、snapshot 或 voice。
+
+Gateway 必须启用 bounded Web Alpha credential owner，并使用与 AgentServer 完全相同的 P3 bearer。浏览器提交的 `auth_token` 会被无条件删除；若 Gateway flag 关闭、token 缺失或两端不一致，正式 task/composition 请求必须在 AgentServer 鉴权前 fail closed，不能继续执行本次 attempt。
+
+正式 Batch Speech Adapter 只接受完整的 mono PCM16 WAV。若 TTS Provider 返回的 WAV 采样率与浏览器实际 AIO-B playout rate 不同，Gateway 在 Provider 响应边界内执行确定性的 server-owned 线性 PCM16 mono 重采样，并把 capability 精确声明为 `server_linear_pcm16_mono`；同采样率输入保持原始字节。非 PCM16 mono、截断 RIFF、输出超限或未知 resampling capability 必须 fail closed，不能由浏览器、Provider 标签或隐藏 graph adaptation 伪装成目标采样率。典型 OpenAI/Qwen 24 kHz TTS 输出因此可以显式转换到本机 Chrome 常见的 48 kHz AIO-B rate；最终 candidate 仍必须实听并记录实际 Provider、输入/输出 rate 和物理 playout 结果。
 
 每个 root-authorized slot 使用一组新进程和一个新 JSONL 文件；正常关闭 owner 后必须出现 `closed:true` footer，且 `rejected_invalid`、`rejected_capacity`、`failed_writes` 全为零。三个 showcase 不得写入同一 runtime artifact。任一进程若报告 candidate mismatch、dirty worktree、证据注册失败、Provider 配置错误或 P3 authority/project 错误，立即停止本次 attempt；不能关闭证据再继续算分。需要修代码或配置时关闭全部进程，产生新 commit/SHA、新证据目录、新 policy 和新 attempt。
 

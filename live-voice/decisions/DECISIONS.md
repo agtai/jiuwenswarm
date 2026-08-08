@@ -689,3 +689,13 @@
 - 远端边界：默认不包含任何 remote ref 更新。只有用户另行授予包含精确 remote、branch/tag、允许的 update mode 和有效窗口的窄授权时，Main 才可在该窗口内执行相应远端操作；否则每次 normal/force push 及远端 branch/tag/ref 创建、更新或删除仍须单独精确批准。Task worker 永不 push。
 - 当前影响：本决定现在对 W2 90% Demo → Integrated Web Alpha 的 active execution 生效；D-060/D-062 已经允许的本地操作不再因 Session 更换或上下文恢复被误判为需要逐次批准。完整 P3/production 或其他新 scope 在进入时必须由 STATUS/用户确认授权是否继续。
 - 重新评估条件：用户撤销或收窄授权；任务或 immutable candidate 关闭；进入未接受范围；需要远端、破坏性、凭据/账户、部署/安全或重大产品选择；发现自动 commit 边界持续混杂无关修改；或 required review/test 无法在不请求用户输入的情况下诚实完成。
+
+## D-064 W2 真实 Speech 验证采用 Gateway 托管的 OpenAI-compatible Batch Speech
+
+- 日期：2026-08-08
+- 状态：Accepted W2 runtime selection（用户选择采购 OpenAI API credit，并指定 `gpt-4o-mini-transcribe` + `gpt-4o-mini-tts` 完成当前真实验证；这是 W2 候选的 Provider 选择，不是长期独家供应商或 production 授权）
+- 候选配置：Gateway 使用 `LIVE_VOICE_SPEECH_PROVIDER=openai-compatible`、`LIVE_VOICE_SPEECH_API_BASE=https://api.openai.com/v1`、STT `gpt-4o-mini-transcribe`、TTS `gpt-4o-mini-tts`，初始 voice 使用 `marin`。真实启动前先执行最短 STT/TTS 探针；若 Provider 拒绝 alias、voice 或 WAV 格式，停止本 attempt，记录精确非敏感错误，再冻结 Provider 实际接受的 snapshot/voice，不得在一次 evidence attempt 内静默换模型。
+- 凭据和计费边界：API key 只进入 Gateway 启动进程的机器私有环境，不进入浏览器、AgentServer、Git、日志、证据或聊天。购买 credit、账户、billing 和 key 创建仍由用户控制；本决定不授权自动充值、外部账户变更或凭据迁移。正式产品浏览器只向 Gateway 的受控 Speech RPC 提交已绑定音频/文本，不直接调用 Provider。
+- 音频边界：Provider TTS 必须返回完整 mono PCM16 WAV。实际采样率与浏览器 AIO-B playout rate 不同时，Gateway 只能使用显式 capability `server_linear_pcm16_mono` 执行确定性的 server-owned 线性重采样；同采样率保持原字节。未知 capability、截断/非 PCM16/非 mono、超限或不一致结果全部 fail closed。真实 Gate 记录 Provider、模型、voice、输入/输出 rate、转换 capability、延迟和人工实听，不从配置标签推导成功。
+- 可替换性：JiuwenSwarm 保留统一 Speech Provider seam；后续可以接入本地 Qwen3-ASR/TTS、JiuwenSwarm 内建实现或其他兼容服务，但必须作为新的受审 Provider Adapter 完成能力、质量、延迟、资源、隐私、失败模式和真实设备 evidence，不能把本次 OpenAI W2 结果自动转移为本地模型 credit。
+- 重新评估条件：模型/alias/voice 不再可用；API 不能返回所需 WAV 合同；延迟、成本、区域、隐私或网络不满足当前 Gate；本地 Qwen 路线准备好受审；或进入 production provider/SLO/retention/HA 选择。
