@@ -27,6 +27,7 @@ const MAX_CAPTURE_FRAMES = 1_500;
 export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
 const ROUTE_READY_TIMEOUT_MS = 3_000;
 const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
+const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
 
 export type ProductP1VoiceStatus =
   | 'idle'
@@ -169,7 +170,12 @@ export class ProductP1VoiceRouteOwner {
   readonly #retainedMediaAuthorities = new Map<string, Readonly<ProductP1MediaCloseBinding>>();
   #closePromise: Promise<void> | null = null;
   #failureCleanupPromise: Promise<void> | null = null;
+  #failureCleanupReason: string | null = null;
   #pendingPlayout: PendingProductPlayout | null = null;
+  #captureStartupAudioReady = false;
+  #captureStartupFailure: (Error & { readonly reason: string }) | null = null;
+  #captureReadinessPending = false;
+  #pendingMediaActivation: Promise<unknown> | null = null;
 
   constructor(input: Readonly<{
     enabled: boolean;
@@ -193,10 +199,40 @@ export class ProductP1VoiceRouteOwner {
       observer: {
         onCaptureFrame: frame => this.#acceptCaptureFrame(frame),
         onCaptureState: event => {
-          if (event.state === 'failed' && !this.#closed) {
-            void this.#fail(Object.assign(new Error('formal browser capture failed'), {
-              reason: event.reason,
-            }));
+          let failure: (Error & { readonly reason: string }) | null = null;
+          if (
+            event.state === 'failed'
+            && (!this.#captureReadinessPending || this.#captureStartupAudioReady)
+          ) {
+            failure = Object.assign(new Error('formal browser capture failed'), {
+              reason: 'AUDIO_CAPTURE_FAILED',
+            });
+          } else if (
+            event.state === 'active'
+            && event.reason === 'track_muted'
+          ) {
+            failure = Object.assign(new Error('formal browser capture was muted'), {
+              reason: 'AUDIO_INPUT_MUTED',
+            });
+          } else if (['stopping', 'stopped'].includes(event.state)) {
+            failure = Object.assign(new Error('formal browser capture stopped unexpectedly'), {
+              reason: 'AUDIO_CAPTURE_STOPPED',
+            });
+          }
+          if (
+            failure === null
+            || this.#failureCleanupPromise !== null
+            || this.#closed
+          ) return;
+          if (this.#captureReadinessPending) {
+            if (!['starting', 'playing'].includes(this.#status)) return;
+            this.#captureStartupFailure ??= failure;
+            this.#reason = this.#captureStartupFailure.reason;
+            this.#status = 'cleanup_pending';
+            void this.#audio.close().catch(() => undefined);
+            this.#publish();
+          } else if (['capturing', 'playing'].includes(this.#status)) {
+            void this.#fail(failure);
           }
         },
         onPlayoutState: event => this.#observePlayout(event),
@@ -233,6 +269,10 @@ export class ProductP1VoiceRouteOwner {
     if (!['zh-CN', 'en-US'].includes(locale)) throw new Error('locale is invalid');
     const operationGeneration = ++this.#operationGeneration;
     this.#setStatus('starting', null);
+    this.#captureStartupAudioReady = false;
+    this.#captureStartupFailure = null;
+    this.#captureReadinessPending = true;
+    this.#failureCleanupReason = null;
     this.#frames = [];
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
@@ -253,11 +293,13 @@ export class ProductP1VoiceRouteOwner {
       const metadata = await this.#audio.startCapture(
         input.device_id ? { deviceId: input.device_id } : {},
       );
-      this.#requireCurrent(operationGeneration);
+      this.#captureStartupAudioReady = true;
+      this.#requireHealthyCaptureReadiness(operationGeneration);
       if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
         throw new Error('capture and playout sample rates do not match');
       }
-      const activationValue = await this.#request(PRODUCT_P1_MEDIA_ACTIVATE_METHOD, {
+      const activationOperation = Promise.resolve().then(async () => {
+        const activationValue = await this.#request(PRODUCT_P1_MEDIA_ACTIVATE_METHOD, {
           session_id: this.#sessionId,
           interaction_id: this.#interactionId,
           correlation_id: this.#correlationId,
@@ -269,48 +311,57 @@ export class ProductP1VoiceRouteOwner {
           sample_rate_hz: metadata.frame_format.sample_rate_hz,
           locale: this.#locale,
         });
-      const activationEnvelope = objectValue(activationValue, 'media_activation');
-      if (activationEnvelope.status !== 'active') {
-        const inactive = exactObject(
+        const activationEnvelope = objectValue(activationValue, 'media_activation');
+        if (activationEnvelope.status !== 'active') {
+          const inactive = exactObject(
+            activationEnvelope,
+            ['status', 'reason_id'],
+            'media_activation',
+          );
+          if (!['disabled', 'unavailable'].includes(String(inactive.status))) {
+            throw new Error('media activation returned an unknown status');
+          }
+          throw routeUnavailable(inactive.reason_id);
+        }
+        const activation = exactObject(
           activationEnvelope,
-          ['status', 'reason_id'],
+          [
+            'status', 'reason_id', 'subject_id', 'endpoint_path', 'subprotocol',
+            'ticket_ttl_ms', 'binding', 'privacy',
+          ],
           'media_activation',
         );
-        if (!['disabled', 'unavailable'].includes(String(inactive.status))) {
-          throw new Error('media activation returned an unknown status');
+        if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
+          throw routeUnavailable(activation.reason_id);
         }
-        throw routeUnavailable(inactive.reason_id);
-      }
-      const activation = exactObject(
-        activationEnvelope,
-        [
-          'status', 'reason_id', 'subject_id', 'endpoint_path', 'subprotocol',
-          'ticket_ttl_ms', 'binding', 'privacy',
-        ],
-        'media_activation',
-      );
-      this.#requireCurrent(operationGeneration);
-      if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
-        throw routeUnavailable(activation.reason_id);
-      }
-      this.#mediaCloseBinding = Object.freeze({
-        session_id: sessionId,
-        subject_id: requiredText(activation.subject_id, 'subject_id'),
-        correlation_id: correlationId,
-        interaction_id: interactionId,
-        activation_id: activationId,
-        activation_generation: activationGeneration,
+        this.#mediaCloseBinding = Object.freeze({
+          session_id: sessionId,
+          subject_id: requiredText(activation.subject_id, 'subject_id'),
+          correlation_id: correlationId,
+          interaction_id: interactionId,
+          activation_id: activationId,
+          activation_generation: activationGeneration,
+        });
+        const privacy = exactObject(
+          activation.privacy,
+          ['raw_audio_persisted', 'raw_audio_logged', 'memory_only'],
+          'media_activation.privacy',
+        );
+        if (
+          privacy.raw_audio_persisted !== false
+          || privacy.raw_audio_logged !== false
+          || privacy.memory_only !== true
+        ) throw new Error('media activation did not prove its privacy boundary');
+        return activation;
       });
-      const privacy = exactObject(
-        activation.privacy,
-        ['raw_audio_persisted', 'raw_audio_logged', 'memory_only'],
-        'media_activation.privacy',
-      );
-      if (
-        privacy.raw_audio_persisted !== false
-        || privacy.raw_audio_logged !== false
-        || privacy.memory_only !== true
-      ) throw new Error('media activation did not prove its privacy boundary');
+      this.#pendingMediaActivation = activationOperation;
+      let activation: Record<string, unknown>;
+      try {
+        activation = await activationOperation;
+      } finally {
+        if (this.#pendingMediaActivation === activationOperation) this.#pendingMediaActivation = null;
+      }
+      this.#requireHealthyCaptureReadiness(operationGeneration);
       const attach = deserializeMediaControl(JSON.stringify({
         type: 'media.attach',
         contract_version: 'live-voice.media.v1',
@@ -356,20 +407,28 @@ export class ProductP1VoiceRouteOwner {
           assurance: 'authenticated',
         },
       });
-      const deadline = Date.now() + ROUTE_READY_TIMEOUT_MS;
-      while (!route.leaf.attached && !route.leaf.closed && Date.now() < deadline) await waitTurn();
-      this.#requireCurrent(operationGeneration);
-      if (!route.leaf.attached || route.leaf.closed) throw new Error('dedicated media route did not attach');
-      this.#drainCaptureFrames();
+      await this.#awaitCaptureReadiness(route, operationGeneration);
+      this.#captureStartupAudioReady = false;
+      this.#captureStartupFailure = null;
+      this.#captureReadinessPending = false;
       this.#setStatus('capturing', null);
     } catch (error) {
-      await this.#fail(error);
-      throw error;
+      const failure = this.#captureStartupFailure ?? error;
+      this.#captureStartupAudioReady = false;
+      this.#captureStartupFailure = null;
+      this.#captureReadinessPending = false;
+      await this.#fail(failure);
+      throw failure;
     }
   }
 
   async stopAndRecognize(): Promise<Readonly<ProductP1Recognition>> {
-    if (this.#status !== 'capturing' || this.#route === null || this.#speech === null) {
+    if (
+      this.#failureCleanupPromise !== null
+      || this.#status !== 'capturing'
+      || this.#route === null
+      || this.#speech === null
+    ) {
       throw new Error('formal P1 capture is not active');
     }
     const operationGeneration = ++this.#operationGeneration;
@@ -572,10 +631,17 @@ export class ProductP1VoiceRouteOwner {
   async close(): Promise<void> {
     if (this.#closed) return;
     if (this.#closePromise !== null) return this.#closePromise;
+    this.#operationGeneration += 1;
     this.#status = 'cleanup_pending';
     this.#reason = 'FORMAL_P1_CLEANUP_IN_PROGRESS';
+    const localAudioClose = this.#audio.close();
     this.#publish();
     const retained = (async () => {
+      try { await localAudioClose; } catch { /* authoritative release retries below */ }
+      const pendingActivation = this.#pendingMediaActivation;
+      if (pendingActivation !== null) {
+        try { await pendingActivation; } catch { /* no authority was issued or binding is retained */ }
+      }
       if (this.#failureCleanupPromise !== null) {
         try { await this.#failureCleanupPromise; } catch { /* retry below */ }
       }
@@ -595,6 +661,24 @@ export class ProductP1VoiceRouteOwner {
   }
 
   async #startConcurrentCapture(operationGeneration: number): Promise<void> {
+    this.#captureStartupAudioReady = false;
+    this.#captureStartupFailure = null;
+    this.#captureReadinessPending = true;
+    try {
+      await this.#startConcurrentCaptureOwned(operationGeneration);
+      this.#captureStartupAudioReady = false;
+      this.#captureStartupFailure = null;
+      this.#captureReadinessPending = false;
+    } catch (error) {
+      const failure = this.#captureStartupFailure ?? error;
+      this.#captureStartupAudioReady = false;
+      this.#captureStartupFailure = null;
+      this.#captureReadinessPending = false;
+      throw failure;
+    }
+  }
+
+  async #startConcurrentCaptureOwned(operationGeneration: number): Promise<void> {
     const sessionId = requiredText(this.#sessionId, 'session_id');
     const interactionId = requiredText(this.#interactionId, 'interaction_id');
     const correlationId = requiredText(this.#correlationId, 'correlation_id');
@@ -612,54 +696,66 @@ export class ProductP1VoiceRouteOwner {
     const metadata = await this.#audio.startCapture(
       this.#deviceId ? { deviceId: this.#deviceId } : {},
     );
-    this.#requireCurrent(operationGeneration);
+    this.#captureStartupAudioReady = true;
+    this.#requireHealthyCaptureReadiness(operationGeneration);
     if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
       throw new Error('concurrent capture and playout sample rates do not match');
     }
-    const activationValue = await this.#request(PRODUCT_P1_MEDIA_ACTIVATE_METHOD, {
-      session_id: sessionId,
-      interaction_id: interactionId,
-      correlation_id: correlationId,
-      activation_id: activationId,
-      activation_generation: activationGeneration,
-      capture_id: metadata.capture_id,
-      capture_generation: metadata.capture_generation,
-      track_id: metadata.track_id,
-      sample_rate_hz: metadata.frame_format.sample_rate_hz,
-      locale: this.#locale,
+    const activationOperation = Promise.resolve().then(async () => {
+      const activationValue = await this.#request(PRODUCT_P1_MEDIA_ACTIVATE_METHOD, {
+        session_id: sessionId,
+        interaction_id: interactionId,
+        correlation_id: correlationId,
+        activation_id: activationId,
+        activation_generation: activationGeneration,
+        capture_id: metadata.capture_id,
+        capture_generation: metadata.capture_generation,
+        track_id: metadata.track_id,
+        sample_rate_hz: metadata.frame_format.sample_rate_hz,
+        locale: this.#locale,
+      });
+      const activation = exactObject(
+        activationValue,
+        [
+          'status', 'reason_id', 'subject_id', 'endpoint_path', 'subprotocol',
+          'ticket_ttl_ms', 'binding', 'privacy',
+        ],
+        'media_activation',
+      );
+      if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
+        throw routeUnavailable(activation.reason_id);
+      }
+      const subjectId = requiredText(activation.subject_id, 'subject_id');
+      this.#retainedMediaAuthorities.set(priorAuthority.subject_id, priorAuthority);
+      this.#mediaCloseBinding = Object.freeze({
+        session_id: sessionId,
+        subject_id: subjectId,
+        correlation_id: correlationId,
+        interaction_id: interactionId,
+        activation_id: activationId,
+        activation_generation: activationGeneration,
+      });
+      const privacy = exactObject(
+        activation.privacy,
+        ['raw_audio_persisted', 'raw_audio_logged', 'memory_only'],
+        'media_activation.privacy',
+      );
+      if (
+        privacy.raw_audio_persisted !== false
+        || privacy.raw_audio_logged !== false
+        || privacy.memory_only !== true
+      ) throw new Error('concurrent media activation did not prove its privacy boundary');
+      return Object.freeze({ activation, subjectId });
     });
-    const activation = exactObject(
-      activationValue,
-      [
-        'status', 'reason_id', 'subject_id', 'endpoint_path', 'subprotocol',
-        'ticket_ttl_ms', 'binding', 'privacy',
-      ],
-      'media_activation',
-    );
-    this.#requireCurrent(operationGeneration);
-    if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
-      throw routeUnavailable(activation.reason_id);
+    this.#pendingMediaActivation = activationOperation;
+    let activated: Readonly<{ activation: Record<string, unknown>; subjectId: string }>;
+    try {
+      activated = await activationOperation;
+    } finally {
+      if (this.#pendingMediaActivation === activationOperation) this.#pendingMediaActivation = null;
     }
-    const subjectId = requiredText(activation.subject_id, 'subject_id');
-    this.#retainedMediaAuthorities.set(priorAuthority.subject_id, priorAuthority);
-    this.#mediaCloseBinding = Object.freeze({
-      session_id: sessionId,
-      subject_id: subjectId,
-      correlation_id: correlationId,
-      interaction_id: interactionId,
-      activation_id: activationId,
-      activation_generation: activationGeneration,
-    });
-    const privacy = exactObject(
-      activation.privacy,
-      ['raw_audio_persisted', 'raw_audio_logged', 'memory_only'],
-      'media_activation.privacy',
-    );
-    if (
-      privacy.raw_audio_persisted !== false
-      || privacy.raw_audio_logged !== false
-      || privacy.memory_only !== true
-    ) throw new Error('concurrent media activation did not prove its privacy boundary');
+    const { activation, subjectId } = activated;
+    this.#requireHealthyCaptureReadiness(operationGeneration);
     const attach = deserializeMediaControl(JSON.stringify({
       type: 'media.attach',
       contract_version: 'live-voice.media.v1',
@@ -705,13 +801,7 @@ export class ProductP1VoiceRouteOwner {
         assurance: 'authenticated',
       },
     });
-    const deadline = Date.now() + ROUTE_READY_TIMEOUT_MS;
-    while (!route.leaf.attached && !route.leaf.closed && Date.now() < deadline) await waitTurn();
-    this.#requireCurrent(operationGeneration);
-    if (!route.leaf.attached || route.leaf.closed) {
-      throw new Error('concurrent dedicated media route did not attach');
-    }
-    this.#drainCaptureFrames();
+    await this.#awaitCaptureReadiness(route, operationGeneration);
   }
 
   #openDownlinkRoute(
@@ -962,6 +1052,68 @@ export class ProductP1VoiceRouteOwner {
     this.#drainCaptureFrames();
   }
 
+  #requireHealthyCaptureReadiness(operationGeneration: number): void {
+    this.#requireCurrent(operationGeneration);
+    if (this.#captureStartupFailure !== null) throw this.#captureStartupFailure;
+  }
+
+  async #awaitCaptureReadiness(
+    route: ActiveBrowserDedicatedMediaRoute,
+    operationGeneration: number,
+  ): Promise<void> {
+    const routeDeadline = Date.now() + ROUTE_READY_TIMEOUT_MS;
+    while (!route.leaf.attached && !route.leaf.closed && Date.now() < routeDeadline) await waitTurn();
+    this.#requireHealthyCaptureReadiness(operationGeneration);
+    if (route.leaf.closed) {
+      throw Object.assign(new Error('formal dedicated media route closed before capture readiness'), {
+        reason: 'AUDIO_CAPTURE_MEDIA_ROUTE_CLOSED',
+      });
+    }
+    if (!route.leaf.attached) {
+      throw Object.assign(new Error('formal dedicated media route did not attach'), {
+        reason: 'AUDIO_CAPTURE_MEDIA_ROUTE_NOT_ATTACHED',
+      });
+    }
+    this.#drainCaptureFrames();
+    const firstFrameDeadline = Date.now() + CAPTURE_FIRST_FRAME_TIMEOUT_MS;
+    let pending = route.leaf.flush();
+    while (
+      (
+        this.#frames.length === 0
+        || this.#mediaSentFrames === 0
+        || pending.pending_frames !== 0
+      )
+      && !route.leaf.closed
+      && Date.now() < firstFrameDeadline
+    ) {
+      await waitTurn();
+      this.#requireHealthyCaptureReadiness(operationGeneration);
+      this.#drainCaptureFrames();
+      pending = route.leaf.flush();
+    }
+    this.#requireHealthyCaptureReadiness(operationGeneration);
+    if (this.#audio.captureState() !== 'active') {
+      throw Object.assign(new Error('formal browser capture stopped before readiness'), {
+        reason: 'AUDIO_CAPTURE_STOPPED',
+      });
+    }
+    if (!route.leaf.attached || route.leaf.closed) {
+      throw Object.assign(new Error('formal dedicated media route closed before capture readiness'), {
+        reason: 'AUDIO_CAPTURE_MEDIA_ROUTE_CLOSED',
+      });
+    }
+    if (this.#frames.length === 0 || this.#mediaSentFrames === 0) {
+      throw Object.assign(new Error('formal browser capture had no accepted media frames'), {
+        reason: 'AUDIO_CAPTURE_NO_FRAMES',
+      });
+    }
+    if (pending.pending_frames !== 0) {
+      throw Object.assign(new Error('formal media route did not acknowledge capture readiness'), {
+        reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
+      });
+    }
+  }
+
   #drainCaptureFrames(): void {
     const route = this.#route;
     if (route === null || !route.leaf.attached || route.leaf.closed) return;
@@ -982,6 +1134,10 @@ export class ProductP1VoiceRouteOwner {
     }
     const failureReason = stableFailureReason(error);
     if (this.#failureCleanupPromise === null) {
+      this.#failureCleanupReason = failureReason;
+      this.#operationGeneration += 1;
+      this.#reason = failureReason;
+      this.#status = 'cleanup_pending';
       const retained = Promise.resolve().then(() => (
         this.#releaseResources('formal_route_failed')
       )).finally(() => {
@@ -990,10 +1146,11 @@ export class ProductP1VoiceRouteOwner {
         }
       });
       this.#failureCleanupPromise = retained;
+      this.#publish();
     }
     try {
       await this.#failureCleanupPromise;
-      this.#reason = failureReason;
+      this.#reason = this.#failureCleanupReason ?? failureReason;
       this.#status = 'failed';
     } catch {
       // The exact media binding is retained so close() can retry revocation;

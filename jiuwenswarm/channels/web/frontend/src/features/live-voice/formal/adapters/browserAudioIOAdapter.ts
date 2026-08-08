@@ -739,6 +739,9 @@ export class BrowserAudioIOAdapter {
       if ((track.readyState !== undefined && track.readyState !== 'live') || context.state !== 'running') {
         throw new BrowserAudioIOViolation('CAPTURE_STARTUP_LOST', 'audio input or AudioContext was lost during startup');
       }
+      if (track.muted === true) {
+        throw new BrowserAudioIOViolation('AUDIO_INPUT_MUTED', 'audio input is muted during capture startup');
+      }
       this.#capture = session;
       this.#pendingCaptureToken = null;
       this.#pendingCaptureResources = null;
@@ -746,13 +749,6 @@ export class BrowserAudioIOAdapter {
       this.#emitCaptureState('active', 'capture_started', metadata);
       if (this.#capture !== session || token !== this.#captureToken) {
         throw new BrowserAudioIOViolation('CAPTURE_CANCELLED', 'capture was fenced during active handoff');
-      }
-      if (track.muted === true && reportedTrackMuted !== true) {
-        reportedTrackMuted = true;
-        this.#emitCaptureState('active', 'track_muted', metadata);
-      }
-      if (this.#capture !== session || token !== this.#captureToken) {
-        throw new BrowserAudioIOViolation('CAPTURE_CANCELLED', 'capture was fenced during muted-track handoff');
       }
       return metadata;
     } catch (error) {

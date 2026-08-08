@@ -24,6 +24,10 @@ class FakeEventTarget {
   removeEventListener(type, listener) {
     this.listeners.get(type)?.delete(listener);
   }
+
+  emit(type) {
+    for (const listener of [...(this.listeners.get(type) ?? [])]) listener();
+  }
 }
 
 class FakeNode {
@@ -99,18 +103,28 @@ class FakeSocket {
   onclose = null;
   sent = [];
   binding = null;
+  closeOnFirstBinary = false;
+  acknowledgeBinary = true;
 
   send(value) {
     this.sent.push(value);
-    if (typeof value !== 'string' && this.binding !== null) {
+    if (typeof value !== 'string' && this.binding !== null && this.acknowledgeBinary) {
       queueMicrotask(() => this.onmessage?.({
         data: JSON.stringify({
           type: 'media.ack',
+          contract_version: 'live-voice.media.v1',
           lease_id: this.binding.lease_id,
           generation: this.binding.generation.value,
           through_seq: 0,
         }),
       }));
+      if (this.closeOnFirstBinary) {
+        this.closeOnFirstBinary = false;
+        queueMicrotask(() => {
+          this.readyState = 3;
+          this.onclose?.({});
+        });
+      }
     }
   }
   close() { this.readyState = 3; }
@@ -135,6 +149,7 @@ function audioEnvironment(createId = () => 'capture-1') {
   const mediaDevices = new FakeEventTarget();
   mediaDevices.getUserMedia = async () => {
     const track = new FakeTrack();
+    track.muted = environment.initialTrackMuted;
     environment.track = track;
     return {
       getAudioTracks: () => [track],
@@ -151,10 +166,11 @@ function audioEnvironment(createId = () => 'capture-1') {
       environment.contexts.push(context);
       return context;
     },
-    createAudioWorkletNode: () => {
+    createAudioWorkletNode: (_context, _name, options) => {
       const node = new FakeNode();
       node.port = { onmessage: null, close() {} };
       node.onprocessorerror = null;
+      node.captureGeneration = options.processorOptions.captureGeneration;
       environment.worklet = node;
       return node;
     },
@@ -162,8 +178,53 @@ function audioEnvironment(createId = () => 'capture-1') {
     worklet: null,
     track: null,
     contexts: [],
+    initialTrackMuted: false,
   };
   return environment;
+}
+
+async function startCaptureWithFirstFrame(owner, environment, input, overrides = {}) {
+  const starting = owner.startCapture(input);
+  for (let turn = 0; turn < 100 && typeof environment.worklet?.port.onmessage !== 'function'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(typeof environment.worklet?.port.onmessage, 'function');
+  // Installing the handler precedes the adapter's atomic session handoff.
+  // Wait one task so the frame cannot race that assignment in this fake.
+  await new Promise(resolve => setImmediate(resolve));
+  environment.worklet.port.onmessage({ data: {
+    kind: 'frame',
+    capture_generation: environment.worklet.captureGeneration,
+    seq: 0,
+    sample_rate_hz: 48_000,
+    sample_cursor: 0,
+    context_time_s: 0,
+    samples: new Float32Array(960).fill(0.25),
+    ...overrides,
+  } });
+  await starting;
+}
+
+async function sendFirstFrameToNextWorklet(environment, priorWorklet, overrides = {}) {
+  for (let turn = 0; turn < 100 && (
+    environment.worklet === priorWorklet
+    || typeof environment.worklet?.port.onmessage !== 'function'
+  ); turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.notEqual(environment.worklet, priorWorklet);
+  assert.equal(typeof environment.worklet?.port.onmessage, 'function');
+  await new Promise(resolve => setImmediate(resolve));
+  environment.worklet.port.onmessage({ data: {
+    kind: 'frame',
+    capture_generation: environment.worklet.captureGeneration,
+    seq: 0,
+    sample_rate_hz: 48_000,
+    sample_cursor: 0,
+    context_time_s: 0,
+    samples: new Float32Array(960).fill(0.25),
+    ...overrides,
+  } });
 }
 
 function wavBase64(sampleRate = 48_000, sampleCount = 960) {
@@ -219,10 +280,11 @@ test('formal P1 binds media activation to the exact product P2 activation', asyn
   const calls = [];
   const binding = serverBinding();
   const socket = new FakeSocket();
+  const environment = audioEnvironment();
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
-    audio_environment: audioEnvironment(),
+    audio_environment: environment,
     socket_factory: (url, protocols) => {
       assert.equal(url, 'wss://voice.example.test/ws/live-voice/media/private-ticket');
       assert.deepEqual(protocols, ['live-voice.media.v1']);
@@ -260,7 +322,7 @@ test('formal P1 binds media activation to the exact product P2 activation', asyn
     },
   });
 
-  await owner.startCapture({
+  await startCaptureWithFirstFrame(owner, environment, {
     session_id: 'session-1',
     interaction_id: 'interaction-1',
     correlation_id: 'correlation-1',
@@ -285,6 +347,519 @@ test('formal P1 binds media activation to the exact product P2 activation', asyn
   await owner.close();
   assert.equal(owner.status().status, 'closed');
   assert.equal(calls[1][0], PRODUCT_P1_MEDIA_CLOSE_METHOD);
+});
+
+test('formal P1 requires one real AIO frame before publishing capture readiness', async () => {
+  const calls = [];
+  const statuses = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    on_status: status => statuses.push(status),
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await assert.rejects(owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  }), error => error?.reason === 'AUDIO_CAPTURE_NO_FRAMES');
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_NO_FRAMES' });
+  assert.equal(statuses.includes('capturing'), false);
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(environment.track.readyState, 'ended');
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+});
+
+test('formal P1 remains starting until a delayed first frame is accepted', async () => {
+  const statuses = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    on_status: status => statuses.push(status),
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  const starting = owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  });
+  for (let turn = 0; turn < 100 && typeof environment.worklet?.port.onmessage !== 'function'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(owner.status(), { status: 'starting', reason: null });
+  assert.equal(statuses.includes('capturing'), false);
+  environment.worklet.port.onmessage({ data: {
+    kind: 'frame', capture_generation: environment.worklet.captureGeneration,
+    seq: 0, sample_rate_hz: 48_000, sample_cursor: 0, context_time_s: 0,
+    samples: new Float32Array(960),
+  } });
+  await starting;
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(statuses.filter(status => status === 'capturing').length, 1);
+  await owner.close();
+});
+
+test('formal P1 rejects a media leaf that closes in the first-frame readiness window', async () => {
+  const calls = [];
+  const statuses = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  socket.closeOnFirstBinary = true;
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    on_status: status => statuses.push(status),
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await assert.rejects(startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  }), error => error?.reason === 'AUDIO_CAPTURE_MEDIA_ROUTE_CLOSED');
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_MEDIA_ROUTE_CLOSED' });
+  assert.equal(statuses.includes('capturing'), false);
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+});
+
+test('formal P1 rejects a first frame that the Gateway never acknowledges', async () => {
+  const calls = [];
+  const statuses = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  socket.acknowledgeBinary = false;
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    on_status: status => statuses.push(status),
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await assert.rejects(startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  }), error => error?.reason === 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED' });
+  assert.equal(statuses.includes('capturing'), false);
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+});
+
+test('formal P1 rejects an initially muted input before media or Speech effects', async () => {
+  const calls = [];
+  const environment = audioEnvironment();
+  environment.initialTrackMuted = true;
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => { throw new Error('socket must not be allocated'); },
+    request: async (method) => { calls.push(method); throw new Error('request must not be called'); },
+  });
+
+  await assert.rejects(owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  }), error => error?.reason === 'AUDIO_INPUT_MUTED');
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_MUTED' });
+  assert.deepEqual(calls, []);
+  assert.equal(environment.track.readyState, 'ended');
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+});
+
+test('formal P1 latches a starting-window track end and revokes issued media authority', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const environment = audioEnvironment();
+  let socketAllocations = 0;
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => { socketAllocations += 1; throw new Error('socket must not be allocated'); },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      environment.track.readyState = 'ended';
+      environment.track.emit('ended');
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await assert.rejects(owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  }), error => error?.reason === 'AUDIO_CAPTURE_STOPPED');
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_STOPPED' });
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(socketAllocations, 0);
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+});
+
+test('formal P1 releases local audio while media activation remains pending, then compensates authority', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const environment = audioEnvironment();
+  let socketAllocations = 0;
+  let resolveActivation;
+  let markActivationRequested;
+  const activationGate = new Promise(resolve => { resolveActivation = resolve; });
+  const activationRequested = new Promise(resolve => { markActivationRequested = resolve; });
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => { socketAllocations += 1; throw new Error('socket must not be allocated'); },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      markActivationRequested();
+      return activationGate;
+    },
+  });
+
+  const starting = owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  });
+  await activationRequested;
+  environment.track.muted = true;
+  environment.track.emit('mute');
+  assert.deepEqual(owner.status(), { status: 'cleanup_pending', reason: 'AUDIO_INPUT_MUTED' });
+  await assert.rejects(owner.stopAndRecognize(), /capture is not active/);
+  for (let turn = 0; turn < 100 && !environment.contexts.every(context => context.state === 'closed'); turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(environment.track.readyState, 'ended');
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+  assert.deepEqual(calls.map(([method]) => method), [PRODUCT_P1_MEDIA_ACTIVATE_METHOD]);
+  assert.equal(socketAllocations, 0);
+
+  resolveActivation({
+    status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+    subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+    subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+    privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+  });
+  await assert.rejects(starting, error => error?.reason === 'AUDIO_INPUT_MUTED');
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_MUTED' });
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(calls.some(([method]) => method === 'live_voice.speech.recognize_batch'), false);
+  assert.equal(socketAllocations, 0);
+});
+
+test('formal P1 close waits for pending activation registration and revokes the late exact authority', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const environment = audioEnvironment();
+  let socketAllocations = 0;
+  let resolveActivation;
+  let markActivationRequested;
+  const activationGate = new Promise(resolve => { resolveActivation = resolve; });
+  const activationRequested = new Promise(resolve => { markActivationRequested = resolve; });
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => { socketAllocations += 1; throw new Error('socket must not be allocated'); },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      markActivationRequested();
+      return activationGate;
+    },
+  });
+
+  const starting = owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  });
+  await activationRequested;
+  let closeSettled = false;
+  const closing = owner.close().then(() => { closeSettled = true; });
+  for (let turn = 0; turn < 100 && !environment.contexts.every(context => context.state === 'closed'); turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.deepEqual(owner.status(), {
+    status: 'cleanup_pending',
+    reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+  });
+  assert.equal(closeSettled, false);
+  assert.equal(environment.track.readyState, 'ended');
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+  assert.equal(socketAllocations, 0);
+
+  resolveActivation({
+    status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+    subject_id: 'media-subject-late', endpoint_path: '/ws/live-voice/media/private-ticket',
+    subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+    privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+  });
+  const [startResult, closeResult] = await Promise.allSettled([starting, closing]);
+  assert.equal(startResult.status, 'rejected');
+  assert.equal(closeResult.status, 'fulfilled');
+  assert.deepEqual(owner.status(), { status: 'closed', reason: null });
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(calls[1][1].subject_id, 'media-subject-late');
+  assert.equal(socketAllocations, 0);
+});
+
+test('formal P1 runtime mute closes exact capture and fences stale Worklet frames', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  });
+  const staleFrame = environment.worklet.port.onmessage;
+  environment.track.muted = true;
+  environment.track.emit('mute');
+  assert.deepEqual(owner.status(), { status: 'cleanup_pending', reason: 'AUDIO_INPUT_MUTED' });
+  await assert.rejects(owner.stopAndRecognize(), /capture is not active/);
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_MUTED' });
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(calls.some(([method]) => method === 'live_voice.speech.recognize_batch'), false);
+  const failed = owner.status();
+  staleFrame({ data: {
+    kind: 'frame', capture_generation: 1, seq: 1, sample_rate_hz: 48_000,
+    sample_cursor: 960, context_time_s: 0.02, samples: new Float32Array(960),
+  } });
+  await Promise.resolve();
+  assert.deepEqual(owner.status(), failed);
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+});
+
+test('formal P1 unexpected track end closes exact capture and fences stale Worklet frames', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  });
+  const staleFrame = environment.worklet.port.onmessage;
+  environment.track.readyState = 'ended';
+  environment.track.emit('ended');
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_STOPPED' });
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  const failed = owner.status();
+  staleFrame({ data: {
+    kind: 'frame', capture_generation: 1, seq: 1, sample_rate_hz: 48_000,
+    sample_cursor: 960, context_time_s: 0.02, samples: new Float32Array(960),
+  } });
+  await Promise.resolve();
+  assert.deepEqual(owner.status(), failed);
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+});
+
+test('formal P1 AudioContext loss closes exact capture without Speech or business effects', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  });
+  const captureContext = environment.contexts.at(-1);
+  captureContext.state = 'suspended';
+  captureContext.onstatechange?.({});
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_STOPPED' });
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+    PRODUCT_P1_MEDIA_CLOSE_METHOD,
+  ]);
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
 });
 
 test('formal P1 completes capture, STT, authoritative TTS, and browser playout', async () => {
@@ -393,7 +968,7 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
     },
   });
 
-  await owner.startCapture({
+  await startCaptureWithFirstFrame(owner, environment, {
     session_id: 'session-1',
     interaction_id: 'interaction-1',
     correlation_id: 'correlation-1',
@@ -401,15 +976,6 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
     activation_generation: 7,
     locale: 'zh-CN',
   });
-  environment.worklet.port.onmessage({ data: {
-    kind: 'frame',
-    capture_generation: 1,
-    seq: 0,
-    sample_rate_hz: 48_000,
-    sample_cursor: 0,
-    context_time_s: 0,
-    samples: new Float32Array(960).fill(0.25),
-  } });
   const recognition = await owner.stopAndRecognize();
   assert.deepEqual(recognition, {
     text: 'formal text',
@@ -519,13 +1085,9 @@ test('a successor P1 turn revokes the exact prior media and Speech authority fir
     session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
     activation_id: 'activation-1', activation_generation: 1,
   };
-  await owner.startCapture(first);
-  environment.worklet.port.onmessage({ data: {
-    kind: 'frame', capture_generation: 1, seq: 0, sample_rate_hz: 48_000,
-    sample_cursor: 0, context_time_s: 0, samples: new Float32Array(960),
-  } });
+  await startCaptureWithFirstFrame(owner, environment, first, { samples: new Float32Array(960) });
   await owner.stopAndRecognize();
-  await owner.startCapture({
+  await startCaptureWithFirstFrame(owner, environment, {
     session_id: 'session-1', interaction_id: 'interaction-2', correlation_id: 'correlation-2',
     activation_id: 'activation-2', activation_generation: 2,
   });
@@ -642,14 +1204,10 @@ test('P1 playout source failure fences cleanup and every late source callback', 
     },
   });
 
-  await owner.startCapture({
+  await startCaptureWithFirstFrame(owner, environment, {
     session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
     activation_id: 'activation-1', activation_generation: 1,
   });
-  environment.worklet.port.onmessage({ data: {
-    kind: 'frame', capture_generation: 1, seq: 0, sample_rate_hz: 48_000,
-    sample_cursor: 0, context_time_s: 0, samples: new Float32Array(960),
-  } });
   await owner.stopAndRecognize();
   await assert.rejects(owner.playAgentText({
     response: { interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 0 },
@@ -734,10 +1292,11 @@ test('Agent output during capture cannot hide the reachable stop control or star
   const calls = [];
   const binding = serverBinding();
   const socket = new FakeSocket();
+  const environment = audioEnvironment();
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
-    audio_environment: audioEnvironment(),
+    audio_environment: environment,
     socket_factory: () => {
       queueMicrotask(() => socket.open(binding));
       return socket;
@@ -759,7 +1318,7 @@ test('Agent output during capture cannot hide the reachable stop control or star
       };
     },
   });
-  await owner.startCapture({
+  await startCaptureWithFirstFrame(owner, environment, {
     session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
     activation_id: 'activation-1', activation_generation: 7,
   });
@@ -803,10 +1362,11 @@ test('formal P1 fences successor capture while retained close is in flight', asy
   let markCloseStarted;
   const closeGate = new Promise(resolve => { releaseClose = resolve; });
   const closeStarted = new Promise(resolve => { markCloseStarted = resolve; });
+  const environment = audioEnvironment();
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
-    audio_environment: audioEnvironment(),
+    audio_environment: environment,
     socket_factory: () => {
       queueMicrotask(() => socket.open(binding));
       return socket;
@@ -833,7 +1393,7 @@ test('formal P1 fences successor capture while retained close is in flight', asy
     session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
     activation_id: 'activation-1', activation_generation: 7,
   };
-  await owner.startCapture(capture);
+  await startCaptureWithFirstFrame(owner, environment, capture);
 
   const closing = owner.close();
   await closeStarted;
@@ -844,11 +1404,17 @@ test('formal P1 fences successor capture while retained close is in flight', asy
   assert.equal(owner.status().status, 'closed');
 });
 
-test('formal P1 dedicated downlink overlaps the next real capture and ACKs only rendered audio', async () => {
+async function runConcurrentCaptureJourney(options = {}) {
   const calls = [];
+  const statuses = [];
   const bindingsByPath = new Map();
   const sockets = [];
   let activationCount = 0;
+  let concurrentFailureSnapshot = null;
+  let concurrentAudioReleased = false;
+  let concurrentClosePromise = null;
+  let concurrentCloseSnapshot = null;
+  let concurrentCloseAudioReleased = false;
   const environment = audioEnvironment((() => {
     let value = 0;
     return () => `capture-${++value}`;
@@ -893,14 +1459,19 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
     send(value) {
       this.sent.push(value);
       if (this.serverBinding.direction === 'uplink' && typeof value !== 'string') {
-        queueMicrotask(() => this.onmessage?.({
-          data: serializeMediaControl({
-            type: 'media.ack',
-            lease_id: this.serverBinding.lease_id,
-            generation: this.serverBinding.generation.value,
-            through_seq: 0,
-          }),
-        }));
+        if (
+          options.ackSecondCapture !== false
+          || this.serverBinding.generation.id !== 'capture-2'
+        ) {
+          queueMicrotask(() => this.onmessage?.({
+            data: serializeMediaControl({
+              type: 'media.ack',
+              lease_id: this.serverBinding.lease_id,
+              generation: this.serverBinding.generation.value,
+              through_seq: 0,
+            }),
+          }));
+        }
       } else if (this.serverBinding.direction === 'downlink' && typeof value === 'string') {
         const control = JSON.parse(value);
         if (control.type === 'media.ack') {
@@ -922,6 +1493,7 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
+    on_status: status => statuses.push(status),
     audio_environment: environment,
     socket_factory: url => {
       const binding = bindingsByPath.get(new URL(url).pathname);
@@ -949,6 +1521,27 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
         const binding = makeUplinkBinding(params, activationCount);
         const path = `/ws/live-voice/media/uplink-${activationCount}`;
         bindingsByPath.set(path, binding);
+        if (activationCount === 2 && options.failSecondCaptureWithMute === true) {
+          environment.track.muted = true;
+          environment.track.emit('mute');
+          concurrentFailureSnapshot = owner.status();
+          for (let turn = 0; turn < 100 && !environment.contexts.every(
+            context => context.state === 'closed',
+          ); turn += 1) {
+            await new Promise(resolve => setImmediate(resolve));
+          }
+          concurrentAudioReleased = environment.contexts.every(context => context.state === 'closed');
+        }
+        if (activationCount === 2 && options.closeSecondCaptureWhilePending === true) {
+          concurrentClosePromise = owner.close();
+          concurrentCloseSnapshot = owner.status();
+          for (let turn = 0; turn < 100 && !environment.contexts.every(
+            context => context.state === 'closed',
+          ); turn += 1) {
+            await new Promise(resolve => setImmediate(resolve));
+          }
+          concurrentCloseAudioReleased = environment.contexts.every(context => context.state === 'closed');
+        }
         return {
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
@@ -1041,17 +1634,45 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
     },
   });
 
-  await owner.startCapture({
+  await startCaptureWithFirstFrame(owner, environment, {
     session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
     activation_id: 'activation-1', activation_generation: 7, locale: 'zh-CN',
   });
-  environment.worklet.port.onmessage({ data: {
-    kind: 'frame', capture_generation: 1, seq: 0, sample_rate_hz: 48_000,
-    sample_cursor: 0, context_time_s: 0, samples: new Float32Array(960).fill(0.25),
-  } });
   await owner.stopAndRecognize();
-  await owner.playAgentText({ response, unit_id: 'unit-duplex-1', text: 'duplex Agent response' });
+  const capturingBeforeConcurrent = statuses.filter(status => status === 'capturing').length;
+  const priorWorklet = environment.worklet;
+  const playing = owner.playAgentText({ response, unit_id: 'unit-duplex-1', text: 'duplex Agent response' });
+  if (options.sendSecondFrame !== false) {
+    await sendFirstFrameToNextWorklet(environment, priorWorklet);
+  }
+  let playError = null;
+  try {
+    await playing;
+  } catch (error) {
+    playError = error;
+  }
+  if (concurrentClosePromise !== null) await concurrentClosePromise;
 
+  return {
+    owner,
+    calls,
+    statuses,
+    sockets,
+    activationCount,
+    playError,
+    capturingBeforeConcurrent,
+    concurrentFailureSnapshot,
+    concurrentAudioReleased,
+    concurrentCloseSnapshot,
+    concurrentCloseAudioReleased,
+  };
+}
+
+test('formal P1 dedicated downlink overlaps the next real capture and ACKs only rendered audio', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const { owner, calls, sockets, activationCount, playError } = journey;
+
+  assert.equal(playError, null);
   assert.equal(owner.status().status, 'capturing');
   assert.equal(activationCount, 2);
   const downlinkSocket = sockets.find(socket => socket.serverBinding.direction === 'downlink');
@@ -1065,6 +1686,127 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
   assert.ok(calls.some(([method, params]) => (
     method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'
   )));
+});
+
+test('formal P1 concurrent capture cannot publish readiness without a real frame', async () => {
+  const journey = await runConcurrentCaptureJourney({ sendSecondFrame: false });
+  const { owner, calls, statuses, playError, capturingBeforeConcurrent } = journey;
+
+  assert.equal(playError?.reason, 'AUDIO_CAPTURE_NO_FRAMES');
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_NO_FRAMES' });
+  assert.equal(
+    statuses.filter(status => status === 'capturing').length,
+    capturingBeforeConcurrent,
+  );
+  assert.equal(
+    calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    1,
+  );
+  assert.ok(calls.some(([method, params]) => (
+    method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'
+  )));
+  await owner.close();
+});
+
+test('formal P1 concurrent capture cannot publish readiness without the Gateway ACK', async () => {
+  const journey = await runConcurrentCaptureJourney({ ackSecondCapture: false });
+  const { owner, calls, statuses, playError, capturingBeforeConcurrent } = journey;
+
+  assert.equal(playError?.reason, 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED');
+  assert.deepEqual(owner.status(), {
+    status: 'failed',
+    reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
+  });
+  assert.equal(
+    statuses.filter(status => status === 'capturing').length,
+    capturingBeforeConcurrent,
+  );
+  assert.equal(
+    calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    1,
+  );
+  assert.ok(calls.some(([method, params]) => (
+    method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'
+  )));
+  await owner.close();
+});
+
+test('formal P1 concurrent playing-window mute releases audio and compensates exact authority', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    sendSecondFrame: false,
+    failSecondCaptureWithMute: true,
+  });
+  const {
+    owner,
+    calls,
+    sockets,
+    statuses,
+    playError,
+    capturingBeforeConcurrent,
+    concurrentFailureSnapshot,
+    concurrentAudioReleased,
+  } = journey;
+
+  assert.deepEqual(concurrentFailureSnapshot, {
+    status: 'cleanup_pending',
+    reason: 'AUDIO_INPUT_MUTED',
+  });
+  assert.equal(concurrentAudioReleased, true);
+  assert.equal(playError?.reason, 'AUDIO_INPUT_MUTED');
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_MUTED' });
+  assert.equal(
+    statuses.filter(status => status === 'capturing').length,
+    capturingBeforeConcurrent,
+  );
+  assert.equal(
+    calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    1,
+  );
+  assert.ok(calls.some(([method, params]) => (
+    method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'
+  )));
+  assert.equal(
+    sockets.some(socket => socket.serverBinding?.generation.id === 'capture-2'),
+    false,
+  );
+  await owner.close();
+});
+
+test('formal P1 concurrent close waits for pending activation and revokes both exact authorities', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    sendSecondFrame: false,
+    closeSecondCaptureWhilePending: true,
+  });
+  const {
+    owner,
+    calls,
+    sockets,
+    playError,
+    concurrentCloseSnapshot,
+    concurrentCloseAudioReleased,
+  } = journey;
+
+  assert.deepEqual(concurrentCloseSnapshot, {
+    status: 'cleanup_pending',
+    reason: 'FORMAL_P1_CLEANUP_IN_PROGRESS',
+  });
+  assert.equal(concurrentCloseAudioReleased, true);
+  assert.notEqual(playError, null);
+  assert.deepEqual(owner.status(), { status: 'closed', reason: null });
+  assert.ok(calls.some(([method, params]) => (
+    method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'
+  )));
+  assert.ok(calls.some(([method, params]) => (
+    method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'
+  )));
+  assert.equal(
+    calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length,
+    1,
+  );
+  assert.equal(
+    sockets.some(socket => socket.serverBinding?.generation.id === 'capture-2'),
+    false,
+  );
 });
 
 for (const [status, reason] of [

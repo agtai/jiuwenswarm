@@ -402,7 +402,7 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(adapter.businessCancelCount(), 0);
 });
 
-test('capture handoff reports an input track that is already muted', async () => {
+test('capture handoff rejects an input track that is already muted and releases every resource', async () => {
   const fake = fakeEnvironment();
   const events = [];
   fake.mediaDevices.stream.track.muted = true;
@@ -412,13 +412,15 @@ test('capture handoff reports an input track that is already muted', async () =>
     observer: { onCaptureState: event => events.push(event) },
   });
 
-  await adapter.startCapture();
-  assert.deepEqual(
-    events.map(event => event.reason),
-    ['start_requested', 'capture_started', 'track_muted']
+  await assert.rejects(
+    () => adapter.startCapture(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'AUDIO_INPUT_MUTED'
   );
-  assert.equal(adapter.captureState(), 'active');
-  await adapter.stopCapture('test_complete');
+  assert.deepEqual(events.map(event => event.reason), ['start_requested', 'audio_input_muted']);
+  assert.equal(adapter.captureState(), 'failed');
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.equal(fake.contexts[0].state, 'closed');
+  assert.equal(fake.document.listenerCount('visibilitychange'), 0);
 });
 
 test('capture handoff does not duplicate a simultaneously delivered mute event', async () => {
@@ -528,7 +530,6 @@ test('an active-handoff observer stop prevents capture startup from reporting su
   const reasons = [];
   let adapter;
   let stopPromise = null;
-  fake.mediaDevices.stream.track.muted = true;
   adapter = new BrowserAudioIOAdapter({
     enabled: true,
     environment: fake.environment,
