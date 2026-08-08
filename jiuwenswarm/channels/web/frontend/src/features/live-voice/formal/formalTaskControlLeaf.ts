@@ -4,6 +4,7 @@ export const FORMAL_TASK_CONTROL_LIMITS = Object.freeze({
   max_text_chars: 4_096,
   max_tasks: 256,
   max_events_per_response: 256,
+  max_retained_event_identities: 65_536,
   max_mutation_receipts: 512,
   max_progress_receipts: 512,
   max_pending_mutations: 64,
@@ -12,6 +13,7 @@ export const FORMAL_TASK_CONTROL_LIMITS = Object.freeze({
 export type FormalTaskControlOperation = (typeof FORMAL_TASK_CONTROL_OPERATIONS)[number];
 export type FormalTaskCancelScope = 'playback.stop' | 'response.cancel' | 'round.cancel' | 'task.cancel';
 export type FormalTaskState = 'accepted' | 'running' | 'blocked' | 'decision_required' | 'terminal';
+export type FormalTerminalOutcome = 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
 
 export interface FormalTaskControlBinding {
   readonly subject_id: string;
@@ -26,7 +28,7 @@ export interface FormalTaskControlRecord {
   readonly attempt_id: string | null;
   readonly correlation_id: string;
   readonly state: FormalTaskState | null;
-  readonly outcome: string | null;
+  readonly outcome: FormalTerminalOutcome | null;
   readonly event_head: number | null;
   readonly last_event_id: string | null;
   readonly last_event_seq: number | null;
@@ -60,7 +62,7 @@ export interface FormalTaskProgressOrigin {
   readonly progress_event_id: string;
   readonly progress_causation_id: string;
   readonly state: FormalTaskState;
-  readonly outcome: string | null;
+  readonly outcome: FormalTerminalOutcome | null;
 }
 
 export interface FormalTaskEventsQueryContext {
@@ -71,6 +73,7 @@ export interface FormalTaskEventsQueryContext {
 export interface FormalTaskAdoptionContext {
   readonly connection_generation: number;
   readonly command_id: string | null;
+  readonly query_task_id: string | null;
   readonly events_query: FormalTaskEventsQueryContext | null;
 }
 
@@ -90,6 +93,16 @@ function objectValue(value: unknown): JsonObject | null {
   return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as JsonObject) : null;
 }
 
+function canonicalJson(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
+  if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = objectValue(value);
+  if (record === null) throw new Error('task event contains a non-JSON identity value');
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
+}
+
 function text(value: unknown, field: string): string {
   if (
     typeof value !== 'string'
@@ -107,7 +120,7 @@ function adoptionContext(
 ): Readonly<FormalTaskAdoptionContext> {
   const context = objectValue(value);
   const contextKeys = context === null ? [] : Object.keys(context).sort();
-  const expectedContextKeys = ['command_id', 'connection_generation', 'events_query'];
+  const expectedContextKeys = ['command_id', 'connection_generation', 'events_query', 'query_task_id'];
   if (
     context === null
     || !Number.isSafeInteger(context.connection_generation)
@@ -118,9 +131,11 @@ function adoptionContext(
     throw new Error('formal task adoption context is invalid');
   }
   const commandId = context.command_id === null ? null : text(context.command_id, 'adoption.command_id');
+  const queryTaskId = context.query_task_id === null ? null : text(context.query_task_id, 'adoption.query_task_id');
   const events = context.events_query === null ? null : objectValue(context.events_query);
   if (
     (operation === 'task.create' || operation === 'task.cancel') !== (commandId !== null)
+    || (operation === 'task.get' || operation === 'task.status') !== (queryTaskId !== null)
     || (operation === 'task.events') !== (events !== null)
     || (events !== null && Object.keys(events).some(key => !['task_id', 'after_seq'].includes(key)))
   ) {
@@ -140,6 +155,7 @@ function adoptionContext(
   return Object.freeze({
     connection_generation: Number(context.connection_generation),
     command_id: commandId,
+    query_task_id: queryTaskId,
     events_query: eventsQuery,
   });
 }
@@ -154,9 +170,24 @@ interface SubmittedMutationBinding {
 }
 
 const PROJECT_CODE_EXECUTOR_ID = 'jiuwenswarm_code_agent.project_code';
+type FormalAttemptState = 'accepted' | 'running' | 'terminal';
+
+interface FormalTaskEventCheckpoint {
+  readonly task_state: FormalTaskState;
+  readonly task_outcome: FormalTerminalOutcome | null;
+  readonly attempt_state: FormalAttemptState | null;
+  readonly attempt_outcome: FormalTerminalOutcome | null;
+  readonly expected_task_type: 'task.running' | 'task.terminal' | null;
+  readonly expected_task_producers: readonly string[];
+  readonly expected_task_source: string | null;
+  readonly expected_task_cause: string | null;
+  readonly expected_task_outcome: FormalTerminalOutcome | null;
+}
 const EVENT_TYPE_STATE = Object.freeze({
   'task.accepted': 'accepted',
   'task.running': 'running',
+  'task.blocked': 'blocked',
+  'task.decision_required': 'decision_required',
   'task.terminal': 'terminal',
   'attempt.accepted': 'accepted',
   'attempt.running': 'running',
@@ -173,14 +204,21 @@ function validTaskStateTransition(
   return ['running', 'blocked', 'decision_required', 'terminal'].includes(next);
 }
 
+function validTaskEventTransition(previous: FormalTaskState, next: FormalTaskState): boolean {
+  if (previous === 'accepted') return ['running', 'blocked', 'decision_required', 'terminal'].includes(next);
+  if (previous === 'running') return ['blocked', 'decision_required', 'terminal'].includes(next);
+  if (previous === 'blocked') return ['running', 'decision_required', 'terminal'].includes(next);
+  if (previous === 'decision_required') return ['running', 'blocked', 'terminal'].includes(next);
+  return false;
+}
+
 function validateEventProvenance(
   event: JsonObject,
   seq: number,
   state: FormalTaskState,
-  outcome: string | null,
-  previousState: FormalTaskState | null,
-  previousOutcome: string | null,
-): void {
+  outcome: FormalTerminalOutcome | null,
+  previous: FormalTaskEventCheckpoint | null,
+): FormalTaskEventCheckpoint {
   const eventType = text(event.event_type, 'event.event_type');
   const producer = text(event.producer, 'event.producer');
   const sourceEventId = event.source_event_id === null
@@ -194,34 +232,148 @@ function validateEventProvenance(
   }
   if (
     (expectedState !== undefined && state !== expectedState)
-    || (cancelRequested && (previousState === null || state !== previousState || outcome !== previousOutcome))
-    || !validTaskStateTransition(previousState, state)
-    || (previousState === 'terminal' && outcome !== previousOutcome)
     || (seq === 0 && eventType !== 'task.accepted')
+    || (seq !== 0 && eventType === 'task.accepted')
   ) {
     throw new Error('task event lifecycle is self-contradictory');
   }
   const taskProducerValid = (
     (eventType === 'task.accepted' && producer === 'task_core')
     || (eventType === 'task.running' && producer === 'task_core')
+    || (eventType === 'task.blocked' && producer === 'task_core')
+    || (eventType === 'task.decision_required' && producer === 'task_core')
     || (eventType === 'task.cancel_requested' && producer === 'task_core.control')
-    || (eventType === 'task.terminal' && ['task_core', 'task_core.reconciliation'].includes(producer))
+    || (eventType === 'task.terminal' && ['task_core', 'task_core.delivery', 'task_core.reconciliation'].includes(producer))
   );
   const attemptProducerValid = eventType.startsWith('attempt.')
-    && [PROJECT_CODE_EXECUTOR_ID, 'task_core.reconciliation'].includes(producer);
+    && (
+      [PROJECT_CODE_EXECUTOR_ID, 'task_core.reconciliation'].includes(producer)
+      || (eventType === 'attempt.terminal' && producer === 'task_core.delivery')
+    );
   if (!taskProducerValid && !attemptProducerValid) {
     throw new Error('task event producer is not authoritative for its event type');
   }
   if (
     ((eventType === 'task.accepted' || eventType === 'task.cancel_requested') && sourceEventId !== null)
-    || (sourceEventId !== null && causationId !== sourceEventId)
     || (
-      sourceEventId === null
-      && (eventType === 'task.running' || (eventType.startsWith('attempt.') && producer === PROJECT_CODE_EXECUTOR_ID))
+      eventType.startsWith('attempt.')
+      && producer === PROJECT_CODE_EXECUTOR_ID
+      && (sourceEventId === null || causationId !== sourceEventId)
+    )
+    || (
+      eventType.startsWith('attempt.')
+      && producer !== PROJECT_CODE_EXECUTOR_ID
+      && sourceEventId !== null
     )
   ) {
     throw new Error('task event source and causation provenance mismatch');
   }
+
+  if (previous?.expected_task_type !== null && previous?.expected_task_type !== undefined) {
+    if (
+      eventType !== previous.expected_task_type
+      || !previous.expected_task_producers.includes(producer)
+      || sourceEventId !== previous.expected_task_source
+      || causationId !== previous.expected_task_cause
+      || outcome !== previous.expected_task_outcome
+    ) {
+      throw new Error('attempt lifecycle event lacks its exact consecutive task lifecycle event');
+    }
+  }
+
+  if (eventType.startsWith('task.')) {
+    if (cancelRequested) {
+      if (
+        previous === null
+        || previous.task_state === 'terminal'
+        || state !== previous.task_state
+        || outcome !== previous.task_outcome
+      ) {
+        throw new Error('task event lifecycle is self-contradictory');
+      }
+      return previous;
+    }
+    if (eventType === 'task.accepted') {
+      if (previous !== null || outcome !== null) {
+        throw new Error('task event lifecycle is self-contradictory');
+      }
+      return Object.freeze({
+        task_state: 'accepted',
+        task_outcome: null,
+        attempt_state: 'accepted',
+        attempt_outcome: null,
+        expected_task_type: null,
+        expected_task_producers: Object.freeze([]),
+        expected_task_source: null,
+        expected_task_cause: null,
+        expected_task_outcome: null,
+      });
+    }
+    if (previous === null || !validTaskEventTransition(previous.task_state, state)) {
+      throw new Error('task event lifecycle is self-contradictory');
+    }
+    const coupled = previous.expected_task_type !== null;
+    if (
+      (['running', 'blocked', 'decision_required'].includes(state) && previous.attempt_state !== 'running')
+      || (
+        state === 'terminal'
+        && (
+          previous.attempt_state !== 'terminal'
+          || previous.attempt_outcome !== outcome
+          || !coupled
+        )
+      )
+    ) {
+      throw new Error('task lifecycle disagrees with its canonical attempt truth');
+    }
+    return Object.freeze({
+      task_state: state,
+      task_outcome: outcome,
+      attempt_state: previous.attempt_state,
+      attempt_outcome: previous.attempt_outcome,
+      expected_task_type: null,
+      expected_task_producers: Object.freeze([]),
+      expected_task_source: null,
+      expected_task_cause: null,
+      expected_task_outcome: null,
+    });
+  }
+
+  if (previous === null) throw new Error('attempt event precedes canonical task truth');
+  const priorAttempt = previous.attempt_state;
+  const validAttemptTransition = (
+    (state === 'accepted' && priorAttempt === 'accepted')
+    || (state === 'running' && priorAttempt === 'accepted')
+    || (state === 'terminal' && ['accepted', 'running'].includes(priorAttempt ?? ''))
+  );
+  if (
+    !validAttemptTransition
+    || (['accepted', 'running'].includes(state) && producer !== PROJECT_CODE_EXECUTOR_ID)
+    || (state === 'terminal' && priorAttempt === 'accepted' && producer === PROJECT_CODE_EXECUTOR_ID)
+    || (state === 'terminal' && ![PROJECT_CODE_EXECUTOR_ID, 'task_core.delivery', 'task_core.reconciliation'].includes(producer))
+  ) {
+    throw new Error('attempt event lifecycle is self-contradictory');
+  }
+  const terminal = state === 'terminal';
+  return Object.freeze({
+    task_state: previous.task_state,
+    task_outcome: previous.task_outcome,
+    attempt_state: state as FormalAttemptState,
+    attempt_outcome: outcome,
+    expected_task_type: terminal ? 'task.terminal' : state === 'running' ? 'task.running' : null,
+    expected_task_producers: Object.freeze(
+      !terminal
+        ? ['task_core']
+        : producer === PROJECT_CODE_EXECUTOR_ID
+          ? ['task_core']
+          : producer === 'task_core.delivery'
+            ? ['task_core.delivery']
+            : ['task_core', 'task_core.reconciliation'],
+    ),
+    expected_task_source: state === 'accepted' ? null : sourceEventId,
+    expected_task_cause: state === 'accepted' ? null : causationId,
+    expected_task_outcome: terminal ? outcome : null,
+  });
 }
 
 function nonNegativeInteger(value: unknown, field: string): number {
@@ -251,6 +403,13 @@ function canonicalTaskState(value: unknown): FormalTaskState {
   return value as FormalTaskState;
 }
 
+function canonicalTerminalOutcome(value: unknown, field: string): FormalTerminalOutcome {
+  if (!(['completed', 'failed', 'cancelled', 'interrupted', 'unknown'] as const).includes(value as FormalTerminalOutcome)) {
+    throw new Error(`${field} is outside the closed terminal outcome vocabulary`);
+  }
+  return value as FormalTerminalOutcome;
+}
+
 function requireScope(value: unknown, binding: FormalTaskControlBinding): void {
   const scope = objectValue(value);
   if (
@@ -270,7 +429,7 @@ function parseTask(value: unknown, binding: FormalTaskControlBinding): FormalTas
   if (task === null) throw new Error('task result is invalid');
   requireScope(task.scope, binding);
   const state = canonicalTaskState(task.state);
-  const outcome = task.outcome === null ? null : text(task.outcome, 'task.outcome');
+  const outcome = task.outcome === null ? null : canonicalTerminalOutcome(task.outcome, 'task.outcome');
   if ((state === 'terminal') !== (outcome !== null)) {
     throw new Error('task terminal outcome mismatch');
   }
@@ -283,6 +442,40 @@ function parseTask(value: unknown, binding: FormalTaskControlBinding): FormalTas
     event_head: nonNegativeInteger(task.event_head, 'task.event_head'),
     last_event_id: null,
     last_event_seq: null,
+  });
+}
+
+function mergeObservedTask(
+  existing: FormalTaskControlRecord | undefined,
+  next: FormalTaskControlRecord,
+): FormalTaskControlRecord {
+  if (existing === undefined) return next;
+  if (
+    existing.correlation_id !== next.correlation_id
+    || (existing.attempt_id !== null && existing.attempt_id !== next.attempt_id)
+    || (existing.event_head !== null && next.event_head !== null && next.event_head < existing.event_head)
+  ) {
+    throw new Error('formal task query conflicts with retained task identity or event head');
+  }
+  if (
+    existing.state !== null
+    && next.state !== null
+    && (
+      !validTaskStateTransition(existing.state, next.state)
+      || (existing.state === 'terminal' && existing.outcome !== next.outcome)
+      || (
+        existing.event_head === next.event_head
+        && (existing.state !== next.state || existing.outcome !== next.outcome)
+      )
+    )
+  ) {
+    throw new Error('formal task query conflicts with retained lifecycle truth');
+  }
+  const sameHead = existing.event_head === next.event_head;
+  return Object.freeze({
+    ...next,
+    last_event_id: sameHead ? existing.last_event_id : null,
+    last_event_seq: sameHead ? existing.last_event_seq : null,
   });
 }
 
@@ -368,10 +561,11 @@ export function mapFormalTaskCancel(scope: FormalTaskCancelScope, taskId: string
   return Object.freeze({ operation: 'task.cancel', task_id: text(taskId, 'task_id') });
 }
 
-export function prepareFormalTaskMutation(
+function normalizeFormalTaskMutation(
   bindingInput: FormalTaskControlBinding,
   mutationInput: FormalTaskMutationInput,
-  confirmationInput: FormalTaskConfirmationReceipt
+  confirmationInput: FormalTaskConfirmationReceipt,
+  requireFreshConfirmation: boolean,
 ): PreparedFormalTaskMutation {
   const binding = freezeBinding(bindingInput);
   const operation = mutationInput.operation;
@@ -392,7 +586,7 @@ export function prepareFormalTaskMutation(
     confirmation.command_id !== commandId ||
     confirmation.target_task_id !== taskId ||
     !Number.isFinite(Date.parse(confirmation.expires_at)) ||
-    Date.parse(confirmation.expires_at) <= Date.now()
+    (requireFreshConfirmation && Date.parse(confirmation.expires_at) <= Date.now())
   ) {
     throw new Error('formal task confirmation binding mismatch');
   }
@@ -401,6 +595,14 @@ export function prepareFormalTaskMutation(
     mutation: Object.freeze({ operation, command_id: commandId, task_id: taskId }),
     confirmation,
   });
+}
+
+export function prepareFormalTaskMutation(
+  bindingInput: FormalTaskControlBinding,
+  mutationInput: FormalTaskMutationInput,
+  confirmationInput: FormalTaskConfirmationReceipt
+): PreparedFormalTaskMutation {
+  return normalizeFormalTaskMutation(bindingInput, mutationInput, confirmationInput, true);
 }
 
 export class FormalTaskControlLeaf {
@@ -415,6 +617,9 @@ export class FormalTaskControlLeaf {
   readonly #pendingConfirmations = new Set<string>();
   readonly #submittedMutations = new Map<string, SubmittedMutationBinding>();
   readonly #progressReceipts = new Map<string, string>();
+  readonly #eventIdentities = new Map<string, Readonly<{ task_id: string; fingerprint: string }>>();
+  readonly #eventSequences = new Map<string, Readonly<{ event_id: string; fingerprint: string }>>();
+  readonly #eventCheckpoints = new Map<string, FormalTaskEventCheckpoint>();
 
   constructor(input: { enabled: boolean; binding: FormalTaskControlBinding }) {
     this.#enabled = input.enabled === true;
@@ -473,6 +678,44 @@ export class FormalTaskControlLeaf {
     }
     const next = new FormalTaskControlLeaf({ enabled: this.#enabled, binding });
     next.#tasks.set(taskId, task);
+    const checkpoint = this.#eventCheckpoints.get(taskId);
+    if (checkpoint !== undefined) next.#eventCheckpoints.set(taskId, checkpoint);
+    for (const [eventId, identity] of this.#eventIdentities) {
+      if (identity.task_id === taskId) next.#eventIdentities.set(eventId, identity);
+    }
+    for (const [sequenceKey, identity] of this.#eventSequences) {
+      if (sequenceKey.startsWith(`${taskId}\0`)) next.#eventSequences.set(sequenceKey, identity);
+    }
+    this.disconnect();
+    return next;
+  }
+
+  /** Move the complete durable query replica to a newer transport generation. */
+  rebindQueryReplica(bindingInput: FormalTaskControlBinding): FormalTaskControlLeaf {
+    const candidate = freezeBinding(bindingInput);
+    if (
+      candidate.subject_id !== this.#binding.subject_id
+      || candidate.session_id !== this.#binding.session_id
+      || candidate.project_id !== this.#binding.project_id
+      || candidate.generation <= this.#binding.generation
+    ) {
+      throw new Error('formal task query rebind cannot cross scope or move backwards');
+    }
+    if (this.#pendingMutationCommands.size > 0 || this.#pendingConfirmations.size > 0) {
+      throw new Error('formal task query rebind is unavailable while a mutation is pending');
+    }
+    const next = new FormalTaskControlLeaf({
+      enabled: this.#enabled,
+      binding: Object.freeze({ ...this.#binding, generation: candidate.generation }),
+    });
+    for (const [taskId, task] of this.#tasks) next.#tasks.set(taskId, task);
+    for (const commandId of this.#mutationReceipts) next.#mutationReceipts.add(commandId);
+    for (const confirmationId of this.#confirmationReceipts) next.#confirmationReceipts.add(confirmationId);
+    for (const [commandId, submitted] of this.#submittedMutations) next.#submittedMutations.set(commandId, submitted);
+    for (const [receipt, source] of this.#progressReceipts) next.#progressReceipts.set(receipt, source);
+    for (const [eventId, identity] of this.#eventIdentities) next.#eventIdentities.set(eventId, identity);
+    for (const [sequenceKey, identity] of this.#eventSequences) next.#eventSequences.set(sequenceKey, identity);
+    for (const [taskId, checkpoint] of this.#eventCheckpoints) next.#eventCheckpoints.set(taskId, checkpoint);
     this.disconnect();
     return next;
   }
@@ -540,6 +783,86 @@ export class FormalTaskControlLeaf {
     }
   }
 
+  /** Re-adopt one exact server-processed result without replaying its business request. */
+  adoptRetainedMutationResult(
+    prepared: PreparedFormalTaskMutation,
+    response: unknown,
+    connectionGeneration: number,
+  ): FormalTaskControlSnapshot {
+    if (!this.#enabled) throw new Error('formal task control is disabled');
+    if (!this.#connected) throw new Error('formal task control is disconnected');
+    if (connectionGeneration !== this.#connectionGeneration) {
+      throw new Error('formal task mutation result belongs to a stale connection');
+    }
+    const normalized = normalizeFormalTaskMutation(
+      prepared.binding,
+      prepared.mutation,
+      prepared.confirmation,
+      false,
+    );
+    if (!sameBinding(normalized.binding, this.#binding)) {
+      throw new Error('formal task mutation binding mismatch');
+    }
+    const commandId = normalized.mutation.command_id;
+    const confirmationId = normalized.confirmation.confirmation_id;
+    const targetTask = normalized.mutation.task_id === null
+      ? null
+      : this.#tasks.get(normalized.mutation.task_id);
+    if (
+      normalized.mutation.operation === 'task.cancel'
+      && (targetTask === null || targetTask === undefined || targetTask.attempt_id === null)
+    ) {
+      throw new Error('formal task cancellation requires an observed exact task attempt');
+    }
+    const retained: SubmittedMutationBinding = Object.freeze({
+      operation: normalized.mutation.operation,
+      command_id: commandId,
+      target_task_id: normalized.mutation.task_id,
+      target_attempt_id: targetTask?.attempt_id ?? null,
+      adopted_task_id: null,
+      adopted_attempt_id: null,
+    });
+    const existing = this.#submittedMutations.get(commandId);
+    if (
+      existing !== undefined
+      && (
+        existing.operation !== retained.operation
+        || existing.target_task_id !== retained.target_task_id
+        || existing.target_attempt_id !== retained.target_attempt_id
+      )
+    ) {
+      throw new Error('retained formal task mutation conflicts with submitted truth');
+    }
+    const addsCommand = !this.#mutationReceipts.has(commandId);
+    const addsConfirmation = !this.#confirmationReceipts.has(confirmationId);
+    if (
+      (addsCommand || addsConfirmation || existing === undefined)
+      && (
+        this.#mutationReceipts.size >= FORMAL_TASK_CONTROL_LIMITS.max_mutation_receipts
+        || this.#confirmationReceipts.size >= FORMAL_TASK_CONTROL_LIMITS.max_mutation_receipts
+        || this.#submittedMutations.size >= FORMAL_TASK_CONTROL_LIMITS.max_mutation_receipts
+      )
+    ) {
+      throw new Error('formal task mutation receipt capacity is exhausted');
+    }
+    if (addsCommand) this.#mutationReceipts.add(commandId);
+    if (addsConfirmation) this.#confirmationReceipts.add(confirmationId);
+    if (existing === undefined) this.#submittedMutations.set(commandId, retained);
+    try {
+      return this.adopt(normalized.mutation.operation, response, {
+        connection_generation: connectionGeneration,
+        command_id: commandId,
+        query_task_id: null,
+        events_query: null,
+      });
+    } catch (error) {
+      if (addsCommand) this.#mutationReceipts.delete(commandId);
+      if (addsConfirmation) this.#confirmationReceipts.delete(confirmationId);
+      if (existing === undefined) this.#submittedMutations.delete(commandId);
+      throw error;
+    }
+  }
+
   adopt(
     operation: FormalTaskControlOperation,
     response: unknown,
@@ -569,20 +892,30 @@ export class FormalTaskControlLeaf {
       for (const value of result.tasks) {
         const task = parseTask(value, this.#binding);
         if (next.has(task.task_id)) throw new Error('task.list contains a duplicate task');
-        next.set(task.task_id, task);
+        next.set(task.task_id, mergeObservedTask(this.#tasks.get(task.task_id), task));
+      }
+      for (const taskId of this.#tasks.keys()) {
+        if (!next.has(taskId)) {
+          throw new Error('task.list omits retained durable task truth');
+        }
       }
       this.#tasks.clear();
       for (const [taskId, task] of next) this.#tasks.set(taskId, task);
     } else if (operation === 'task.get' || operation === 'task.status') {
       const task = parseTask(result.task, this.#binding);
       const attempt = objectValue(result.attempt);
-      if (attempt === null || attempt.task_id !== task.task_id || attempt.attempt_id !== task.attempt_id) {
+      if (
+        context.query_task_id !== task.task_id
+        || attempt === null
+        || attempt.task_id !== task.task_id
+        || attempt.attempt_id !== task.attempt_id
+      ) {
         throw new Error('formal task/attempt result binding mismatch');
       }
       if (!this.#tasks.has(task.task_id) && this.#tasks.size >= FORMAL_TASK_CONTROL_LIMITS.max_tasks) {
         throw new Error('formal task capacity is exhausted');
       }
-      this.#tasks.set(task.task_id, task);
+      this.#tasks.set(task.task_id, mergeObservedTask(this.#tasks.get(task.task_id), task));
     } else if (operation === 'task.events') {
       if (context.events_query === null) throw new Error('task.events adoption context is missing');
       this.#adoptEvents(result, context.events_query);
@@ -661,16 +994,23 @@ export class FormalTaskControlLeaf {
     ) {
       throw new Error('formal progress belongs to a stale connection');
     }
-    const record = this.#tasks.get(text(origin.task_id, 'progress.task_id'));
+    const taskId = text(origin.task_id, 'progress.task_id');
+    const state = canonicalTaskState(origin.state);
+    const outcome = origin.outcome === null
+      ? null
+      : canonicalTerminalOutcome(origin.outcome, 'progress.outcome');
+    if ((state === 'terminal') !== (outcome !== null)) {
+      throw new Error('formal progress terminal outcome mismatch');
+    }
+    const record = this.#tasks.get(taskId);
     if (
       record === undefined ||
       origin.correlation_id !== record.correlation_id ||
       origin.source_event_id !== record.last_event_id ||
       origin.source_event_seq !== record.last_event_seq ||
       origin.progress_causation_id !== origin.source_event_id ||
-      origin.state !== record.state ||
-      origin.outcome !== record.outcome ||
-      (origin.state === 'terminal') !== (origin.outcome !== null)
+      state !== record.state ||
+      outcome !== record.outcome
     ) {
       throw new Error('formal progress origin binding mismatch');
     }
@@ -739,10 +1079,13 @@ export class FormalTaskControlLeaf {
     }
     let selected: FormalTaskControlRecord | null = null;
     let previous = afterSeq;
-    let previousState: FormalTaskState | null = afterSeq === -1 ? null : existing?.state ?? null;
-    let previousOutcome: string | null = afterSeq === -1 ? null : existing?.outcome ?? null;
+    let checkpoint = afterSeq === -1 ? null : this.#eventCheckpoints.get(taskId) ?? null;
+    if (afterSeq !== -1 && checkpoint === null) {
+      throw new Error('task.events cursor has no retained lifecycle checkpoint');
+    }
     let selectedCorrelationId: string | undefined = existing?.correlation_id;
-    const eventIds = new Set<string>();
+    const projectedEventIdentities = new Map(this.#eventIdentities);
+    const projectedEventSequences = new Map(this.#eventSequences);
     for (const value of result.events) {
       const event = objectValue(value);
       if (event === null) throw new Error('task event is invalid');
@@ -757,35 +1100,66 @@ export class FormalTaskControlLeaf {
         eventTaskId !== taskId ||
         (expectedCorrelationId !== undefined && eventCorrelationId !== expectedCorrelationId) ||
         seq !== previous + 1 ||
-        eventIds.has(eventId) ||
         (selected !== null && (selected.task_id !== eventTaskId || selected.attempt_id !== attemptId))
       ) {
         throw new Error('task event sequence or origin binding mismatch');
       }
-      eventIds.add(eventId);
       const state = canonicalTaskState(event.state);
-      const outcome = event.outcome === null ? null : text(event.outcome, 'event.outcome');
+      const outcome = event.outcome === null ? null : canonicalTerminalOutcome(event.outcome, 'event.outcome');
       if ((state === 'terminal') !== (outcome !== null)) {
         throw new Error('task event terminal outcome mismatch');
       }
-      validateEventProvenance(event, seq, state, outcome, previousState, previousOutcome);
+      checkpoint = validateEventProvenance(event, seq, state, outcome, checkpoint);
+      const fingerprint = canonicalJson(event);
+      const retainedIdentity = projectedEventIdentities.get(eventId);
+      const sequenceKey = `${eventTaskId}\0${seq}`;
+      const retainedSequence = projectedEventSequences.get(sequenceKey);
+      if (
+        retainedIdentity !== undefined
+        && (
+          retainedIdentity.task_id !== eventTaskId
+          || retainedIdentity.fingerprint !== fingerprint
+          || afterSeq !== -1
+        )
+      ) {
+        throw new Error('task event_id was reused outside its exact retained identity');
+      }
+      if (retainedIdentity === undefined) {
+        if (projectedEventIdentities.size >= FORMAL_TASK_CONTROL_LIMITS.max_retained_event_identities) {
+          throw new Error('formal task event identity capacity is exhausted');
+        }
+        projectedEventIdentities.set(eventId, Object.freeze({ task_id: eventTaskId, fingerprint }));
+      }
+      if (
+        retainedSequence !== undefined
+        && (retainedSequence.event_id !== eventId || retainedSequence.fingerprint !== fingerprint)
+      ) {
+        throw new Error('task event sequence was reused with different canonical content');
+      }
+      if (retainedSequence === undefined) {
+        if (projectedEventSequences.size >= FORMAL_TASK_CONTROL_LIMITS.max_retained_event_identities) {
+          throw new Error('formal task event identity capacity is exhausted');
+        }
+        projectedEventSequences.set(sequenceKey, Object.freeze({ event_id: eventId, fingerprint }));
+      }
       selected = Object.freeze({
         task_id: eventTaskId,
         attempt_id: attemptId,
         correlation_id: eventCorrelationId,
-        state,
-        outcome,
+        state: checkpoint.task_state,
+        outcome: checkpoint.task_outcome,
         event_head: head,
         last_event_id: eventId,
         last_event_seq: seq,
       });
       selectedCorrelationId = eventCorrelationId;
       previous = seq;
-      previousState = state;
-      previousOutcome = outcome;
     }
     if (selected !== null) {
       if (selected.last_event_seq !== head) throw new Error('task.events head mismatch');
+      if (checkpoint?.expected_task_type !== null) {
+        throw new Error('attempt lifecycle event lacks its consecutive task lifecycle event');
+      }
       if (
         existing !== undefined &&
         ((existing.attempt_id !== null && existing.attempt_id !== selected.attempt_id) ||
@@ -808,6 +1182,12 @@ export class FormalTaskControlLeaf {
       ) {
         throw new Error('task.events replay conflicts with observed task truth');
       }
+      if (checkpoint === null) throw new Error('task.events result has no canonical task truth');
+      this.#eventIdentities.clear();
+      for (const [eventId, identity] of projectedEventIdentities) this.#eventIdentities.set(eventId, identity);
+      this.#eventSequences.clear();
+      for (const [sequenceKey, identity] of projectedEventSequences) this.#eventSequences.set(sequenceKey, identity);
+      this.#eventCheckpoints.set(taskId, checkpoint);
       this.#tasks.set(selected.task_id, selected);
     } else {
       this.#tasks.set(

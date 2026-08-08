@@ -268,6 +268,16 @@ function requiredContent(value: string, field: string): string {
   return value;
 }
 
+export interface ProductWebP3RetainedMutationResult {
+  readonly receipt: ProductWebP3ConfirmationReceipt;
+  readonly result: JsonObject;
+}
+
+function requiredTaskName(value: string): string {
+  if (!value.trim() || value.length > 1_024) throw new Error('name is invalid');
+  return value;
+}
+
 function freezeBinding(
   input: Readonly<ProductWebP2ActivationBinding>
 ): ProductWebP2ActivationBinding {
@@ -390,7 +400,7 @@ function freezeP3MutationInput(input: ProductWebP3MutationInput): ProductWebP3Mu
           commit_id: requiredText(input.commit_id ?? '', 'commit_id'),
         }
       : {}),
-    name: requiredContent(input.name, 'name'),
+    name: requiredTaskName(input.name),
     instruction: requiredContent(input.instruction, 'instruction'),
     ...(input.model_intent === undefined
       ? {}
@@ -1051,7 +1061,7 @@ function exactProductIdentity(value: string, field: string): string {
 }
 
 function freezeP3TaskQueryInput(input: ProductWebP3TaskQueryInput): ProductWebP3TaskQueryInput {
-  if (!(input.operation in PRODUCT_P3_TASK_QUERY_METHODS)) {
+  if (!Object.prototype.hasOwnProperty.call(PRODUCT_P3_TASK_QUERY_METHODS, input.operation)) {
     throw new Error('product P3 query operation is unsupported');
   }
   if (input.operation === 'task.list') {
@@ -1205,6 +1215,7 @@ export class ProductWebP3TaskQueryOwner {
 export class ProductWebP3MutationOwner {
   private readonly enabled: boolean;
   private readonly request: ProductWebRequest;
+  private readonly now: () => number;
   private pending: {
     fingerprint: string;
     input: ProductWebP3MutationInput;
@@ -1213,12 +1224,14 @@ export class ProductWebP3MutationOwner {
     issuePromise?: Promise<ProductWebP3ConfirmationReceipt>;
     mutationRequestId?: string;
     mutationPromise?: Promise<JsonObject>;
+    mutationResult?: JsonObject;
   } | null = null;
 
-  constructor(input: { enabled: boolean; request: ProductWebRequest }) {
+  constructor(input: { enabled: boolean; request: ProductWebRequest; now?: () => number }) {
     if (typeof input.request !== 'function') throw new Error('product request owner is required');
     this.enabled = input.enabled;
     this.request = input.request;
+    this.now = input.now ?? Date.now;
   }
 
   hasPendingMutation(): boolean {
@@ -1233,6 +1246,16 @@ export class ProductWebP3MutationOwner {
     if (pending !== null) {
       if (pending.fingerprint !== fingerprint) {
         throw new Error('a different product P3 confirmation is already owned');
+      }
+      if (
+        pending.receipt
+        && Date.parse(pending.receipt.expires_at) <= this.now()
+        && pending.mutationRequestId === undefined
+        && pending.mutationPromise === undefined
+        && pending.mutationResult === undefined
+      ) {
+        pending.receipt = undefined;
+        pending.issueRequestId = allocateProductRequestId('live-voice-p3-confirmation');
       }
       if (pending.receipt) return pending.receipt;
       if (pending.issuePromise) return pending.issuePromise;
@@ -1262,8 +1285,11 @@ export class ProductWebP3MutationOwner {
           result.command_id !== frozen.command_id ||
           result.target_task_id !== targetTaskId ||
           typeof result.confirmation_id !== 'string' ||
-          typeof result.expires_at !== 'string'
+          typeof result.expires_at !== 'string' ||
+          !Number.isFinite(Date.parse(result.expires_at)) ||
+          Date.parse(result.expires_at) <= this.now()
         ) {
+          if (this.pending === retained) this.pending = null;
           throw new Error('product P3 confirmation response is unavailable');
         }
         const receipt = Object.freeze({
@@ -1303,6 +1329,7 @@ export class ProductWebP3MutationOwner {
       throw new Error('exact product P3 confirmation is required');
     }
     if (!pending.receipt) throw new Error('exact product P3 confirmation is required');
+    if (pending.mutationResult) return pending.mutationResult;
     if (pending.mutationPromise) return pending.mutationPromise;
     pending.mutationRequestId ??= allocateProductRequestId('live-voice-p3-mutation');
     const retained = pending;
@@ -1319,18 +1346,22 @@ export class ProductWebP3MutationOwner {
         const payload = objectValue(value);
         const result = objectValue(payload?.result);
         const targetTaskId = frozen.operation === 'task.cancel' ? frozen.task_id : null;
+        const formalTaskResult = objectValue(result?.formal_task_result);
         if (
           payload?.ok !== true ||
           result?.status !== 'mutation_processed' ||
           result.operation !== frozen.operation ||
           result.command_id !== frozen.command_id ||
           result.target_task_id !== targetTaskId ||
-          objectValue(result.formal_task_result) === null
+          formalTaskResult === null
         ) {
           throw new Error('product P3 mutation response is unavailable');
         }
-        const frozenResult = Object.freeze({ ...result });
-        if (this.pending === retained) this.pending = null;
+        const frozenResult = Object.freeze({
+          ...result,
+          formal_task_result: Object.freeze({ ...formalTaskResult }),
+        });
+        if (this.pending === retained) retained.mutationResult = frozenResult;
         return frozenResult;
       })
       .catch(error => {
@@ -1346,6 +1377,32 @@ export class ProductWebP3MutationOwner {
       });
     retained.mutationPromise = mutationPromise;
     return mutationPromise;
+  }
+
+  retainedResult(input: ProductWebP3MutationInput): ProductWebP3RetainedMutationResult | null {
+    const frozen = freezeP3MutationInput(input);
+    const pending = this.pending;
+    if (
+      pending === null
+      || pending.fingerprint !== JSON.stringify(frozen)
+      || pending.receipt === undefined
+      || pending.mutationResult === undefined
+    ) {
+      return null;
+    }
+    return Object.freeze({ receipt: pending.receipt, result: pending.mutationResult });
+  }
+
+  acknowledge(input: ProductWebP3MutationInput): void {
+    const frozen = freezeP3MutationInput(input);
+    if (
+      this.pending === null
+      || this.pending.fingerprint !== JSON.stringify(frozen)
+      || this.pending.mutationResult === undefined
+    ) {
+      throw new Error('exact adopted product P3 mutation result is required');
+    }
+    this.pending = null;
   }
 }
 

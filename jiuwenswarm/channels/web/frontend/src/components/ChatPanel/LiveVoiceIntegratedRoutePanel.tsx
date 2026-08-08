@@ -195,12 +195,11 @@ export function resolveProductTaskCreateOrigin(
   return Object.freeze({ source: 'structured' as const });
 }
 
-function sameFormalTaskBinding(left: FormalTaskControlSnapshot['binding'], right: FormalTaskControlSnapshot['binding']): boolean {
+function sameFormalTaskScopeGeneration(left: FormalTaskControlSnapshot['binding'], right: FormalTaskControlSnapshot['binding']): boolean {
   return (
     left.subject_id === right.subject_id
     && left.session_id === right.session_id
     && left.project_id === right.project_id
-    && left.correlation_id === right.correlation_id
     && left.generation === right.generation
   );
 }
@@ -228,27 +227,54 @@ export async function executeProductP3TaskQuery(
   });
   let leaf = input.leaf;
   if (binding === null) {
-    if (input.query.operation === 'task.list') {
-      leaf?.disconnect();
-      return Object.freeze({ leaf: null, snapshot: null, event_count: null });
-    }
     if (leaf === null) {
-      throw new Error('task.events cannot establish an exact task binding');
+      if (input.query.operation === 'task.list') {
+        return Object.freeze({ leaf: null, snapshot: null, event_count: null });
+      }
+      throw new Error('task query cannot establish an exact task binding');
     }
-    if (leaf.snapshot().binding.session_id !== input.expected_session_id || leaf.snapshot().binding.generation !== receipt.connection_generation) {
+    const retainedBinding = leaf.snapshot().binding;
+    if (
+      retainedBinding.session_id !== input.expected_session_id
+      || receipt.connection_generation < retainedBinding.generation
+    ) {
       throw new Error('formal task query cannot reuse a foreign Session replica');
     }
-    leaf.reconnect(leaf.snapshot().binding);
-  } else if (leaf === null || !sameFormalTaskBinding(leaf.snapshot().binding, binding)) {
-    leaf?.disconnect();
+    if (receipt.connection_generation > retainedBinding.generation) {
+      leaf = leaf.rebindQueryReplica({
+        ...retainedBinding,
+        generation: receipt.connection_generation,
+      });
+    } else {
+      leaf.reconnect(retainedBinding);
+    }
+  } else if (leaf === null) {
     leaf = new FormalTaskControlLeaf({ enabled: true, binding });
   } else {
-    leaf.reconnect(binding);
+    const retainedBinding = leaf.snapshot().binding;
+    if (!sameFormalTaskScopeGeneration(
+      { ...retainedBinding, generation: binding.generation },
+      binding,
+    )) {
+      throw new Error('formal task query cannot replace a retained scope replica');
+    }
+    if (binding.generation < retainedBinding.generation) {
+      throw new Error('formal task query cannot move behind its retained generation');
+    }
+    if (binding.generation > retainedBinding.generation) {
+      leaf = leaf.rebindQueryReplica(binding);
+    } else {
+      leaf.reconnect(retainedBinding);
+    }
   }
   const eventsQuery = input.query.operation === 'task.events' ? { task_id: input.query.task_id, after_seq: input.query.after_seq } : null;
   const snapshot = leaf.adopt(receipt.operation, receipt.response, {
     connection_generation: leaf.snapshot().connection_generation,
     command_id: null,
+    query_task_id:
+      input.query.operation === 'task.get' || input.query.operation === 'task.status'
+        ? input.query.task_id
+        : null,
     events_query: eventsQuery,
   });
   const payload = recordValue(receipt.response.result);
@@ -1316,6 +1342,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       return;
     }
+    const mutationLeaf = formalTaskControlLeafRef.current;
+    if (mutationLeaf !== null && !mutationLeaf.snapshot().connected) {
+      mutationLeaf.reconnect(mutationLeaf.snapshot().binding);
+    }
     if (queryOwner && sessionId) {
       const wasDisconnected = !queryOwner.snapshot().connected;
       queryOwner.reconnect(sessionId);
@@ -1658,7 +1688,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingP3MutationRef.current = mutation;
     setP3MutationStatus('issuing');
     try {
-      const receipt = await owner.issue(mutation);
+      const retainedResult = owner.retainedResult(mutation);
+      const receipt = retainedResult?.receipt ?? await owner.issue(mutation);
+      if (
+        p3MutationOwnerRef.current !== owner
+        || activeSessionRef.current !== mutation.session_id
+        || pendingP3MutationRef.current !== mutation
+      ) {
+        return;
+      }
       let leaf = formalTaskControlLeafRef.current;
       const retainedTargetLeaf =
         mutation.operation === 'task.cancel'
@@ -1683,13 +1721,39 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         });
       }
       formalTaskControlLeafRef.current = leaf;
+      const formalMutation = Object.freeze({
+        operation: mutation.operation,
+        command_id: mutation.command_id,
+        task_id: mutation.operation === 'task.cancel' ? mutation.task_id : null,
+      });
+      if (retainedResult !== null) {
+        leaf.adoptRetainedMutationResult(
+          Object.freeze({
+            binding: receipt.task_control_binding,
+            mutation: formalMutation,
+            confirmation: receipt,
+          }),
+          retainedResult.result,
+          leaf.snapshot().connection_generation,
+        );
+        owner.acknowledge(mutation);
+        if (mutation.operation === 'task.create') {
+          const formalResult = recordValue(retainedResult.result.formal_task_result);
+          const createdTaskId = formalResult?.task_id;
+          if (typeof createdTaskId !== 'string' || !createdTaskId.trim()) {
+            throw new Error('retained formal task.create result did not return an exact task');
+          }
+          setCreatedProgressTaskId(createdTaskId);
+          setP3QueryTaskId(createdTaskId);
+        }
+        pendingP3MutationRef.current = null;
+        pendingFormalP3MutationRef.current = null;
+        setP3MutationStatus('accepted');
+        return;
+      }
       pendingFormalP3MutationRef.current = prepareFormalTaskMutation(
         receipt.task_control_binding,
-        {
-          operation: mutation.operation,
-          command_id: mutation.command_id,
-          task_id: mutation.operation === 'task.cancel' ? mutation.task_id : null,
-        },
+        formalMutation,
         receipt,
       );
       if (p3MutationOwnerRef.current === owner) {
@@ -1709,14 +1773,26 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const leaf = formalTaskControlLeafRef.current;
     const prepared = pendingFormalP3MutationRef.current;
     if (!owner || !mutation || !leaf || !prepared) return;
+    if (
+      activeSessionRef.current !== mutation.session_id
+      || prepared.binding.session_id !== mutation.session_id
+      || prepared.mutation.operation !== mutation.operation
+      || prepared.mutation.command_id !== mutation.command_id
+      || prepared.mutation.task_id !== (mutation.operation === 'task.cancel' ? mutation.task_id : null)
+    ) {
+      setP3MutationStatus('failed');
+      return;
+    }
     setP3MutationStatus('mutating');
     try {
       const result = await leaf.submitMutation(prepared, () => owner.mutate(mutation));
       leaf.adopt(mutation.operation, result, {
         connection_generation: leaf.snapshot().connection_generation,
         command_id: mutation.command_id,
+        query_task_id: null,
         events_query: null,
       });
+      owner.acknowledge(mutation);
       if (p3MutationOwnerRef.current === owner) {
         if (mutation.operation === 'task.create') {
           const formalResult = recordValue(result.formal_task_result);
@@ -2352,6 +2428,7 @@ export function LiveVoiceIntegratedRoutePanelView({
                       disabled={p3MutationLocked}
                       onChange={event => onP3TaskName(event.target.value)}
                       placeholder={t('liveVoice.integrated.taskControl.name')}
+                      maxLength={1024}
                     />
                     <textarea
                       value={p3TaskInstruction}
@@ -2432,7 +2509,10 @@ export function LiveVoiceIntegratedRoutePanelView({
                   <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.task')} value={task.task_id} />
                   <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.attempt')} value={task.attempt_id ?? 'unknown'} />
                   <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.taskState')} value={task.state ?? 'unknown'} />
-                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.outcome')} value={task.outcome ?? 'unknown'} />
+                  <DiagnosticsFact
+                    label={t('liveVoice.integrated.taskQuery.outcome')}
+                    value={task.state === null ? 'unavailable' : task.state === 'terminal' ? (task.outcome ?? 'unavailable') : 'not_terminal'}
+                  />
                   <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.correlation')} value={task.correlation_id} />
                   <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.cursor')} value={String(task.last_event_seq ?? -1)} />
                 </div>

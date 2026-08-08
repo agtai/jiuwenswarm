@@ -37,12 +37,16 @@ function task(overrides = {}) {
 }
 
 function event(seq, overrides = {}) {
-  const eventType = overrides.event_type ?? (seq === 0 ? 'task.accepted' : 'task.running');
+  const eventType = overrides.event_type ?? (
+    seq === 0 ? 'task.accepted' : seq === 1 ? 'attempt.running' : seq === 2 ? 'task.running' : 'task.cancel_requested'
+  );
   const sourceEventId = Object.hasOwn(overrides, 'source_event_id')
     ? overrides.source_event_id
     : seq === 0
       ? null
-      : `executor-source-${seq}`;
+      : seq <= 2
+        ? 'executor-source-1'
+        : null;
   return {
     event_id: overrides.event_id ?? `task-1:event:${seq}`,
     task_id: overrides.task_id ?? 'task-1',
@@ -52,7 +56,7 @@ function event(seq, overrides = {}) {
     event_type: eventType,
     state: overrides.state ?? (seq === 0 ? 'accepted' : 'running'),
     outcome: overrides.outcome ?? null,
-    producer: overrides.producer ?? 'task_core',
+    producer: overrides.producer ?? (seq === 1 ? 'jiuwenswarm_code_agent.project_code' : seq >= 3 ? 'task_core.control' : 'task_core'),
     source_event_id: sourceEventId,
     causation_id: overrides.causation_id ?? (sourceEventId ?? `cause-${seq}`),
     correlation_id: overrides.correlation_id ?? binding.correlation_id,
@@ -71,12 +75,31 @@ function confirmation(overrides = {}) {
   };
 }
 
-function adoption(leaf, { command_id = null, events_query = null, connection_generation } = {}) {
+function adoption(leaf, { command_id = null, query_task_id = null, events_query = null, connection_generation } = {}) {
   return {
     connection_generation: connection_generation ?? leaf.snapshot().connection_generation,
     command_id,
+    query_task_id,
     events_query,
   };
+}
+
+function runningPrefix() {
+  return [event(0), event(1), event(2)];
+}
+
+function terminalEvents(outcome = 'completed') {
+  return [
+    ...runningPrefix(),
+    event(3, {
+      event_type: 'attempt.terminal', state: 'terminal', outcome,
+      producer: 'jiuwenswarm_code_agent.project_code', source_event_id: 'executor-source-3', causation_id: 'executor-source-3',
+    }),
+    event(4, {
+      event_type: 'task.terminal', state: 'terminal', outcome,
+      producer: 'task_core', source_event_id: 'executor-source-3', causation_id: 'executor-source-3',
+    }),
+  ];
 }
 
 function eventsResult(events, headSeq, taskId, afterSeq) {
@@ -126,17 +149,17 @@ test('create get list status cancel and events retain authoritative task truth',
   leaf.adopt('task.get', {
     ok: true,
     result: { task: task(), attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } },
-  }, adoption(leaf));
+  }, adoption(leaf, { query_task_id: 'task-1' }));
   leaf.adopt('task.status', {
     ok: true,
     result: { task: task(), attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } },
-  }, adoption(leaf));
+  }, adoption(leaf, { query_task_id: 'task-1' }));
   leaf.adopt('task.list', { ok: true, result: { tasks: [task()] } }, adoption(leaf));
   leaf.adopt(
     'task.events',
     {
       ok: true,
-      result: eventsResult([event(0), event(1)], 1, 'task-1', -1),
+      result: eventsResult(runningPrefix(), 2, 'task-1', -1),
     },
     adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } })
   );
@@ -159,7 +182,7 @@ test('create get list status cancel and events retain authoritative task truth',
 
   assert.equal(calls, 1);
   assert.equal(leaf.snapshot().tasks.length, 1);
-  assert.equal(leaf.snapshot().tasks[0].last_event_id, 'task-1:event:1');
+  assert.equal(leaf.snapshot().tasks[0].last_event_id, 'task-1:event:2');
   assert.deepEqual(leaf.snapshot().mutation_receipts, ['command-1', 'command-cancel']);
   await assert.rejects(
     leaf.submitMutation(prepared, async () => {}),
@@ -246,17 +269,17 @@ test('progress adoption requires exact TaskEvent causation and result origin', (
     'task.events',
     {
       ok: true,
-      result: eventsResult([event(0), event(1)], 1, 'task-1', -1),
+      result: eventsResult(runningPrefix(), 2, 'task-1', -1),
     },
     adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } })
   );
   const progress = {
     task_id: 'task-1',
     correlation_id: binding.correlation_id,
-    source_event_id: 'task-1:event:1',
-    source_event_seq: 1,
+    source_event_id: 'task-1:event:2',
+    source_event_seq: 2,
     progress_event_id: 'progress-1',
-    progress_causation_id: 'task-1:event:1',
+    progress_causation_id: 'task-1:event:2',
     state: 'running',
     outcome: null,
   };
@@ -280,7 +303,11 @@ test('foreign scope, correlation, event gaps, and task-attempt mismatch fail clo
     },
   ]) {
     const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
-    assert.throws(() => leaf.adopt('tasks' in response.result ? 'task.list' : 'task.get', response, adoption(leaf)), /mismatch/);
+    assert.throws(() => leaf.adopt(
+      'tasks' in response.result ? 'task.list' : 'task.get',
+      response,
+      adoption(leaf, { query_task_id: 'tasks' in response.result ? null : 'task-1' }),
+    ), /mismatch/);
     assert.equal(leaf.snapshot().tasks.length, 0);
   }
 
@@ -303,18 +330,18 @@ test('foreign scope, correlation, event gaps, and task-attempt mismatch fail clo
 test('event suffix and empty cursor replay preserve exact observed truth', () => {
   const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
   leaf.adopt('task.events', { ok: true, result: eventsResult([event(0)], 0, 'task-1', -1) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }));
-  leaf.adopt('task.events', { ok: true, result: eventsResult([event(1)], 1, 'task-1', 0) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 0 } }));
+  leaf.adopt('task.events', { ok: true, result: eventsResult([event(1), event(2)], 2, 'task-1', 0) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 0 } }));
   const afterSuffix = leaf.snapshot().tasks[0];
-  assert.equal(afterSuffix.last_event_seq, 1);
-  assert.equal(afterSuffix.event_head, 1);
-  leaf.adopt('task.events', { ok: true, result: eventsResult([], 1, 'task-1', 1) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 1 } }));
+  assert.equal(afterSuffix.last_event_seq, 2);
+  assert.equal(afterSuffix.event_head, 2);
+  leaf.adopt('task.events', { ok: true, result: eventsResult([], 2, 'task-1', 2) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 2 } }));
   assert.deepEqual(leaf.snapshot().tasks[0], afterSuffix);
-  assert.throws(() => leaf.adopt('task.events', { ok: true, result: eventsResult([], 2, 'task-1', 1) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 1 } })), /omits events/);
+  assert.throws(() => leaf.adopt('task.events', { ok: true, result: eventsResult([], 3, 'task-1', 2) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 2 } })), /omits events/);
   assert.throws(
-    () => leaf.adopt('task.events', { ok: true, result: eventsResult([event(2)], 2, 'task-foreign', 1) }, adoption(leaf, { events_query: { task_id: 'task-foreign', after_seq: 1 } })),
+    () => leaf.adopt('task.events', { ok: true, result: eventsResult([event(3)], 3, 'task-foreign', 2) }, adoption(leaf, { events_query: { task_id: 'task-foreign', after_seq: 2 } })),
     /cursor does not bind|origin binding mismatch/
   );
-  assert.throws(() => leaf.adopt('task.events', { ok: true, result: eventsResult([], 1, 'task-1', 2) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 2 } })), /cursor exceeds/);
+  assert.throws(() => leaf.adopt('task.events', { ok: true, result: eventsResult([], 2, 'task-1', 3) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 3 } })), /cursor exceeds/);
   assert.throws(
     () => leaf.adopt('task.events', { ok: true, result: eventsResult([event(0)], 0, 'task-1', -1) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } })),
     /head cannot move backwards/
@@ -501,7 +528,7 @@ test('foreign and self-contradictory event provenance or lifecycle has zero repl
       { ok: true, result: eventsResult([event(0), terminal, conflicting], 2, 'task-1', -1) },
       adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } })
     ),
-    /self-contradictory/
+    /self-contradictory|authoritative/
   );
   assert.deepEqual(leaf.snapshot().tasks, []);
 });
@@ -550,7 +577,7 @@ test('closed practical limits accept their boundary and reject overflow before s
   const progressLeaf = new FormalTaskControlLeaf({ enabled: true, binding });
   progressLeaf.adopt(
     'task.events',
-    { ok: true, result: eventsResult([event(0), event(1)], 1, 'task-1', -1) },
+    { ok: true, result: eventsResult(runningPrefix(), 2, 'task-1', -1) },
     adoption(progressLeaf, { events_query: { task_id: 'task-1', after_seq: -1 } })
   );
   const progressGeneration = progressLeaf.snapshot().connection_generation;
@@ -558,10 +585,10 @@ test('closed practical limits accept their boundary and reject overflow before s
     progressLeaf.adoptProgress({
       task_id: 'task-1',
       correlation_id: binding.correlation_id,
-      source_event_id: 'task-1:event:1',
-      source_event_seq: 1,
+      source_event_id: 'task-1:event:2',
+      source_event_seq: 2,
       progress_event_id: `progress-${index}`,
-      progress_causation_id: 'task-1:event:1',
+      progress_causation_id: 'task-1:event:2',
       state: 'running',
       outcome: null,
     }, progressGeneration);
@@ -571,10 +598,10 @@ test('closed practical limits accept their boundary and reject overflow before s
     () => progressLeaf.adoptProgress({
       task_id: 'task-1',
       correlation_id: binding.correlation_id,
-      source_event_id: 'task-1:event:1',
-      source_event_seq: 1,
+      source_event_id: 'task-1:event:2',
+      source_event_seq: 2,
       progress_event_id: 'progress-overflow',
-      progress_causation_id: 'task-1:event:1',
+      progress_causation_id: 'task-1:event:2',
       state: 'running',
       outcome: null,
     }, progressGeneration),
@@ -638,6 +665,239 @@ test('closed practical limits accept their boundary and reject overflow before s
   assert.equal(pendingCalls, FORMAL_TASK_CONTROL_LIMITS.max_pending_mutations);
   releasePending();
   await Promise.all(pending);
+});
+
+test('an exact retained server result can be adopted after its confirmation expires', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const retained = {
+    binding,
+    mutation: { operation: 'task.create', command_id: 'retained-command', task_id: null },
+    confirmation: {
+      confirmation_id: 'retained-confirmation',
+      operation: 'task.create',
+      command_id: 'retained-command',
+      target_task_id: null,
+      expires_at: '2026-08-07T10:00:00Z',
+    },
+  };
+  const response = {
+    status: 'mutation_processed',
+    operation: 'task.create',
+    command_id: 'retained-command',
+    target_task_id: null,
+    formal_task_result: {
+      command_id: 'retained-command', task_id: 'retained-task', attempt_id: 'retained-attempt',
+    },
+  };
+
+  leaf.adoptRetainedMutationResult(retained, response, leaf.snapshot().connection_generation);
+
+  assert.equal(leaf.snapshot().tasks[0].task_id, 'retained-task');
+  assert.deepEqual(leaf.snapshot().mutation_receipts, ['retained-command']);
+  assert.throws(() => leaf.adoptRetainedMutationResult(
+    { ...retained, confirmation: { ...retained.confirmation, expires_at: 'not-a-date' } },
+    response,
+    leaf.snapshot().connection_generation,
+  ), /confirmation binding mismatch/);
+});
+
+test('terminal outcomes are a closed vocabulary at every query event and progress boundary', () => {
+  const queryCases = [
+    ['task.list', { ok: true, result: { tasks: [task({ state: 'terminal', outcome: 'forged-success' })] } }, {}],
+    ['task.get', { ok: true, result: { task: task({ state: 'terminal', outcome: 'forged-success' }), attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } } }, { query_task_id: 'task-1' }],
+    ['task.status', { ok: true, result: { task: task({ state: 'terminal', outcome: 'forged-success' }), attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } } }, { query_task_id: 'task-1' }],
+    ['task.events', { ok: true, result: eventsResult([
+      event(0),
+      event(1, { event_type: 'task.terminal', state: 'terminal', outcome: 'forged-success' }),
+    ], 1, 'task-1', -1) }, { events_query: { task_id: 'task-1', after_seq: -1 } }],
+  ];
+  for (const [operation, response, context] of queryCases) {
+    const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+    const before = leaf.snapshot();
+    assert.throws(() => leaf.adopt(operation, response, adoption(leaf, context)), /terminal outcome vocabulary/);
+    assert.deepEqual(leaf.snapshot(), before);
+  }
+
+  const progressLeaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  progressLeaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(terminalEvents(), 4, 'task-1', -1) },
+    adoption(progressLeaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const beforeProgress = progressLeaf.snapshot();
+  assert.throws(() => progressLeaf.adoptProgress({
+    task_id: 'task-1',
+    correlation_id: binding.correlation_id,
+    source_event_id: 'task-1:event:4',
+    source_event_seq: 4,
+    progress_event_id: 'progress-forged',
+    progress_causation_id: 'task-1:event:4',
+    state: 'terminal',
+    outcome: 'forged-success',
+  }, beforeProgress.connection_generation), /terminal outcome vocabulary/);
+  assert.deepEqual(progressLeaf.snapshot(), beforeProgress);
+});
+
+test('event identities remain unique across exact cursor suffixes', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(runningPrefix(), 2, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const before = leaf.snapshot();
+  assert.throws(() => leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([
+      event(3, { event_id: 'task-1:event:0', event_type: 'task.blocked', state: 'blocked', producer: 'task_core' }),
+    ], 3, 'task-1', 2) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 2 } }),
+  ), /event_id was reused/);
+  assert.deepEqual(leaf.snapshot(), before);
+});
+
+test('full event replay rejects reused sequence with a replacement event identity', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(runningPrefix(), 2, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const before = leaf.snapshot();
+  const replaced = runningPrefix();
+  replaced[1] = event(1, { event_id: 'replacement-event-1', details: { replacement: true } });
+  assert.throws(() => leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(replaced, 2, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  ), /sequence was reused/);
+  assert.deepEqual(leaf.snapshot(), before);
+});
+
+test('delivery failures and blocked decision transitions preserve separate task and attempt truth', () => {
+  const delivery = new FormalTaskControlLeaf({ enabled: true, binding });
+  delivery.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([
+      event(0),
+      event(1, {
+        event_type: 'attempt.terminal', state: 'terminal', outcome: 'failed',
+        producer: 'task_core.delivery', source_event_id: null, causation_id: 'outbox-1',
+      }),
+      event(2, {
+        event_type: 'task.terminal', state: 'terminal', outcome: 'failed',
+        producer: 'task_core.delivery', source_event_id: null, causation_id: 'outbox-1',
+      }),
+    ], 2, 'task-1', -1) },
+    adoption(delivery, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(delivery.snapshot().tasks[0].outcome, 'failed');
+
+  const lifecycle = new FormalTaskControlLeaf({ enabled: true, binding });
+  lifecycle.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([
+      ...runningPrefix(),
+      event(3, { event_type: 'task.blocked', state: 'blocked', producer: 'task_core' }),
+      event(4, { event_type: 'task.decision_required', state: 'decision_required', producer: 'task_core' }),
+      event(5, { event_type: 'task.running', state: 'running', producer: 'task_core' }),
+    ], 5, 'task-1', -1) },
+    adoption(lifecycle, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(lifecycle.snapshot().tasks[0].state, 'running');
+});
+
+test('attempt terminal requires its consecutive authoritative task terminal', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const uncoupled = terminalEvents().slice(0, -1);
+  assert.throws(() => leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(uncoupled, 3, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  ), /consecutive task lifecycle/);
+  assert.deepEqual(leaf.snapshot().tasks, []);
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(terminalEvents(), 4, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(leaf.snapshot().tasks[0].outcome, 'completed');
+  const terminal = leaf.snapshot();
+  assert.throws(() => leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([
+      event(5, { event_type: 'task.terminal', state: 'terminal', outcome: 'completed', producer: 'task_core' }),
+    ], 5, 'task-1', 4) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 4 } }),
+  ), /lifecycle/);
+  assert.deepEqual(leaf.snapshot(), terminal);
+});
+
+test('canonical terminal truth rejects every later control event', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(terminalEvents(), 4, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const terminal = leaf.snapshot();
+  const lateCancel = event(5, {
+    event_type: 'task.cancel_requested', state: 'terminal', outcome: 'completed',
+    producer: 'task_core.control', source_event_id: null, causation_id: 'late-cancel',
+  });
+  assert.throws(() => leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([lateCancel], 5, 'task-1', 4) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: 4 } }),
+  ), /lifecycle/);
+  assert.deepEqual(leaf.snapshot(), terminal);
+
+  const replay = new FormalTaskControlLeaf({ enabled: true, binding });
+  assert.throws(() => replay.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([...terminalEvents(), lateCancel], 5, 'task-1', -1) },
+    adoption(replay, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  ), /lifecycle/);
+  assert.deepEqual(replay.snapshot().tasks, []);
+});
+
+test('task queries cannot roll back or retarget retained task truth', () => {
+  for (const operation of ['task.get', 'task.status', 'task.list']) {
+    const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+    leaf.adopt('task.list', { ok: true, result: { tasks: [task({ event_head: 5 })] } }, adoption(leaf));
+    const before = leaf.snapshot();
+    const response = operation === 'task.list'
+      ? { ok: true, result: { tasks: [task({ state: 'accepted', event_head: 0 })] } }
+      : { ok: true, result: { task: task({ state: 'accepted', event_head: 0 }), attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } } };
+    assert.throws(() => leaf.adopt(
+      operation,
+      response,
+      adoption(leaf, { query_task_id: operation === 'task.list' ? null : 'task-1' }),
+    ), /retained/);
+    assert.deepEqual(leaf.snapshot(), before);
+  }
+
+  const swapped = new FormalTaskControlLeaf({ enabled: true, binding });
+  swapped.adopt('task.list', { ok: true, result: { tasks: [task({ event_head: 5 })] } }, adoption(swapped));
+  const beforeSwap = swapped.snapshot();
+  assert.throws(() => swapped.adopt('task.status', {
+    ok: true,
+    result: {
+      task: task({ attempt_id: 'attempt-forged', event_head: 6 }),
+      attempt: { task_id: 'task-1', attempt_id: 'attempt-forged' },
+    },
+  }, adoption(swapped, { query_task_id: 'task-1' })), /retained task identity/);
+  assert.deepEqual(swapped.snapshot(), beforeSwap);
+
+  const target = new FormalTaskControlLeaf({ enabled: true, binding });
+  assert.throws(() => target.adopt('task.get', {
+    ok: true,
+    result: {
+      task: task({ task_id: 'task-B' }),
+      attempt: { task_id: 'task-B', attempt_id: 'attempt-1' },
+    },
+  }, adoption(target, { query_task_id: 'task-A' })), /binding mismatch/);
+  assert.deepEqual(target.snapshot().tasks, []);
 });
 
 test('query binding is derived only from exact authenticated Task Core scope and correlation', () => {

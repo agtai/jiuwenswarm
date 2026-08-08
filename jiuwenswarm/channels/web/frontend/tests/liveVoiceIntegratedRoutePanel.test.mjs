@@ -292,6 +292,7 @@ test('route panel renders a distinct two-action formal P3 task control', async (
   assert.equal(html.includes('Issue confirmation'), false);
   assert.equal(html.includes('Execute confirmed mutation'), true);
   assert.equal(html.includes('Acceptance is not task completion.'), true);
+  assert.equal(html.includes('maxLength="1024"') || html.includes('maxlength="1024"'), true);
   assert.equal((html.match(/disabled=""/g) ?? []).length >= 3, true);
 });
 
@@ -403,6 +404,143 @@ test('all four structured P3 queries adopt exact Task Core facts without busines
   );
 });
 
+test('empty task.list cannot bypass retained durable task truth', async () => {
+  const leaf = new FormalTaskControlLeaf({
+    enabled: true,
+    binding: {
+      subject_id: 'subject-1', session_id: 'persisted-session', project_id: 'project-1',
+      correlation_id: 'task-correlation-1', generation: 1,
+    },
+  });
+  leaf.adopt('task.list', { ok: true, result: { tasks: [formalQueryTask()] } }, {
+    connection_generation: 1, command_id: null, query_task_id: null, events_query: null,
+  });
+  const before = leaf.snapshot();
+  const owner = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'persisted-session',
+    request: async (_method, _params, requestId) => formalQueryEnvelope(requestId, { tasks: [] }),
+  });
+
+  await assert.rejects(executeProductP3TaskQuery({
+    owner,
+    leaf,
+    query: { operation: 'task.list' },
+    expected_session_id: 'persisted-session',
+  }), /omits retained durable task truth/);
+  assert.deepEqual(leaf.snapshot(), before);
+});
+
+test('query reconnect carries retained truth into the new transport generation', async () => {
+  let responseTasks = [formalQueryTask({ event_head: 4 })];
+  const owner = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'persisted-session',
+    request: async (_method, _params, requestId) => formalQueryEnvelope(requestId, { tasks: responseTasks }),
+  });
+  const initial = await executeProductP3TaskQuery({
+    owner, leaf: null, query: { operation: 'task.list' }, expected_session_id: 'persisted-session',
+  });
+  initial.leaf.disconnect();
+  owner.disconnect();
+  owner.reconnect('persisted-session');
+  responseTasks = [];
+
+  await assert.rejects(executeProductP3TaskQuery({
+    owner, leaf: initial.leaf, query: { operation: 'task.list' }, expected_session_id: 'persisted-session',
+  }), /omits retained durable task truth/);
+  assert.equal(initial.leaf.snapshot().tasks[0].event_head, 4);
+
+  responseTasks = [formalQueryTask({ event_head: 5 })];
+  const advanced = await executeProductP3TaskQuery({
+    owner, leaf: initial.leaf, query: { operation: 'task.list' }, expected_session_id: 'persisted-session',
+  });
+  assert.notEqual(advanced.leaf, initial.leaf);
+  assert.equal(advanced.leaf.snapshot().binding.generation, 2);
+  assert.equal(advanced.snapshot.tasks[0].event_head, 5);
+});
+
+test('get and status reject a substituted response target before replica adoption', async () => {
+  for (const operation of ['task.get', 'task.status']) {
+    const task = formalQueryTask({ task_id: 'task-B' });
+    const owner = new ProductWebP3TaskQueryOwner({
+      enabled: true,
+      connected: true,
+      session_id: 'persisted-session',
+      request: async (_method, _params, requestId) => formalQueryEnvelope(requestId, {
+        task,
+        attempt: { task_id: task.task_id, attempt_id: task.attempt_id },
+      }),
+    });
+    await assert.rejects(executeProductP3TaskQuery({
+      owner,
+      leaf: null,
+      query: { operation, task_id: 'task-A' },
+      expected_session_id: 'persisted-session',
+    }), /binding mismatch/);
+  }
+});
+
+test('query helper cannot replace retained truth by changing response correlation attempt or head', async () => {
+  for (const drift of ['correlation', 'attempt', 'head']) {
+    let calls = 0;
+    const owner = new ProductWebP3TaskQueryOwner({
+      enabled: true,
+      connected: true,
+      session_id: 'persisted-session',
+      request: async (_method, _params, requestId) => {
+        calls += 1;
+        const task = calls === 1
+          ? formalQueryTask({ event_head: 4 })
+          : formalQueryTask({
+              ...(drift === 'correlation' ? { correlation_id: 'forged-correlation' } : {}),
+              ...(drift === 'attempt' ? { attempt_id: 'forged-attempt' } : {}),
+              ...(drift === 'head' ? { event_head: 3 } : { event_head: 5 }),
+            });
+        return formalQueryEnvelope(requestId, {
+          task,
+          attempt: { task_id: task.task_id, attempt_id: task.attempt_id },
+        });
+      },
+    });
+    const initial = await executeProductP3TaskQuery({
+      owner, leaf: null, query: { operation: 'task.get', task_id: 'task-1' }, expected_session_id: 'persisted-session',
+    });
+    const before = initial.leaf.snapshot();
+    await assert.rejects(executeProductP3TaskQuery({
+      owner, leaf: initial.leaf, query: { operation: 'task.get', task_id: 'task-1' }, expected_session_id: 'persisted-session',
+    }), /retained|conflicts/);
+    assert.deepEqual(initial.leaf.snapshot(), before);
+  }
+});
+
+test('task.list response reordering cannot replace its retained replica', async () => {
+  let reversed = false;
+  const taskOne = formalQueryTask();
+  const taskTwo = formalQueryTask({ task_id: 'task-2', attempt_id: 'attempt-2', correlation_id: 'task-correlation-2' });
+  const owner = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'persisted-session',
+    request: async (_method, _params, requestId) => formalQueryEnvelope(
+      requestId,
+      { tasks: reversed ? [taskTwo, taskOne] : [taskOne, taskTwo] },
+    ),
+  });
+  const initial = await executeProductP3TaskQuery({
+    owner, leaf: null, query: { operation: 'task.list' }, expected_session_id: 'persisted-session',
+  });
+  reversed = true;
+  const replay = await executeProductP3TaskQuery({
+    owner, leaf: initial.leaf, query: { operation: 'task.list' }, expected_session_id: 'persisted-session',
+  });
+
+  assert.equal(replay.leaf, initial.leaf);
+  assert.deepEqual(replay.snapshot.tasks.map(task => task.task_id), ['task-1', 'task-2']);
+});
+
 test('formal P3 query UI exposes exact read operations and truthful retained facts', async () => {
   const leaf = new FormalTaskControlLeaf({
     enabled: true,
@@ -423,6 +561,7 @@ test('formal P3 query UI exposes exact read operations and truthful retained fac
     {
       connection_generation: 1,
       command_id: null,
+      query_task_id: null,
       events_query: null,
     },
   );
@@ -470,6 +609,34 @@ test('formal P3 query UI exposes exact read operations and truthful retained fac
     },
   });
   assert.equal(disabled.includes('data-testid="live-voice-integrated-p3-query"'), false);
+});
+
+test('formal P3 task cards distinguish nonterminal absence from terminal unknown', async () => {
+  const leaf = new FormalTaskControlLeaf({
+    enabled: true,
+    binding: {
+      subject_id: 'subject-1', session_id: 'persisted-session', project_id: 'project-1',
+      correlation_id: 'task-correlation-1', generation: 1,
+    },
+  });
+  const snapshot = leaf.adopt('task.list', {
+    ok: true,
+    result: { tasks: [
+      formalQueryTask({ task_id: 'task-running', state: 'running', event_head: 1 }),
+      formalQueryTask({ task_id: 'task-unknown', attempt_id: 'attempt-2', state: 'terminal', outcome: 'unknown', event_head: 2 }),
+    ] },
+  }, { connection_generation: 1, command_id: null, query_task_id: null, events_query: null });
+  const html = await renderPanel({
+    viewProps: {
+      p3QueryEnabled: true,
+      p3QueryConnected: true,
+      p3QuerySnapshot: snapshot,
+      onP3QueryOperation: () => {}, onP3QueryTaskId: () => {},
+      onP3EventsAfterSeq: () => {}, onP3Query: () => {},
+    },
+  });
+  assert.equal(html.includes('not_terminal'), true);
+  assert.equal(html.includes('unknown'), true);
 });
 
 test('browser progress consumption is fenced to the exact owned P3 binding', () => {

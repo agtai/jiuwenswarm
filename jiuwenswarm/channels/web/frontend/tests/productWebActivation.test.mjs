@@ -34,14 +34,14 @@ function p3TaskControlBinding() {
   };
 }
 
-function p3ConfirmationResult(confirmationId = 'confirmation-1') {
+function p3ConfirmationResult(confirmationId = 'confirmation-1', expiresAt = '2100-01-01T00:00:00Z') {
   return {
     status: 'confirmation_issued',
     operation: 'task.cancel',
     command_id: 'command-1',
     target_task_id: 'task-1',
     confirmation_id: confirmationId,
-    expires_at: '2026-08-07T10:02:00Z',
+    expires_at: expiresAt,
     task_control_binding: p3TaskControlBinding(),
   };
 }
@@ -537,6 +537,7 @@ test('stock Web P3 owner forwards one exact credential-free confirmed mutation',
   const calls = [];
   const owner = new ProductWebP3MutationOwner({
     enabled: true,
+    now: () => Date.parse('2026-08-07T10:00:30Z'),
     request: async (method, params) => {
       calls.push([method, params]);
       if (method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD) {
@@ -564,6 +565,9 @@ test('stock Web P3 owner forwards one exact credential-free confirmed mutation',
   const replay = await owner.issue(mutation);
   assert.equal(first, replay);
   assert.equal((await owner.mutate(mutation)).status, 'mutation_processed');
+  assert.equal(owner.hasPendingMutation(), true);
+  owner.acknowledge(mutation);
+  assert.equal(owner.hasPendingMutation(), false);
   assert.deepEqual(calls.map(([method]) => method), [
     PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
     PRODUCT_P3_MUTATE_METHOD,
@@ -807,6 +811,115 @@ test('stock Web P3 owner reuses stable request IDs after response loss', async (
   assert.equal(calls[2][2], calls[3][2]);
   assert.notEqual(calls[0][2], calls[2][2]);
   for (const call of calls) assert.match(call[2], /^live-voice-p3-/);
+});
+
+test('stock Web P3 owner retains a successful result until exact local adoption', async () => {
+  let releaseMutation;
+  let mutableFormalResult;
+  let mutationCalls = 0;
+  let now = Date.parse('2026-08-07T10:00:30Z');
+  const mutation = Object.freeze({
+    operation: 'task.cancel',
+    session_id: 'session-1',
+    command_id: 'command-retained',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  });
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    now: () => now,
+    request: async method => {
+      if (method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD) {
+        return { ok: true, result: { ...p3ConfirmationResult(), command_id: 'command-retained' } };
+      }
+      mutationCalls += 1;
+      return new Promise(resolve => {
+        releaseMutation = () => {
+          const response = { ...p3MutationResult(), command_id: 'command-retained' };
+          mutableFormalResult = response.formal_task_result;
+          resolve({ ok: true, result: response });
+        };
+      });
+    },
+  });
+  await owner.issue(mutation);
+  const late = owner.mutate(mutation);
+  releaseMutation();
+  const result = await late;
+  mutableFormalResult.task_id = 'forged-after-success';
+  now = Date.parse('2026-08-07T10:03:00Z');
+  assert.equal(owner.hasPendingMutation(), true);
+  assert.equal(await owner.mutate(mutation), result);
+  assert.deepEqual(owner.retainedResult(mutation)?.result, result);
+  assert.equal(owner.retainedResult(mutation)?.result.formal_task_result.task_id, 'task-1');
+  assert.equal(mutationCalls, 1);
+  await assert.rejects(owner.issue({ ...mutation, command_id: 'command-second' }), /different/);
+  owner.acknowledge(mutation);
+  assert.equal(owner.hasPendingMutation(), false);
+});
+
+test('expired unused P3 confirmation is evicted and reissued without mutation', async () => {
+  let now = Date.parse('2026-08-07T10:00:30Z');
+  const calls = [];
+  let issueCount = 0;
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    now: () => now,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      assert.equal(method, PRODUCT_P3_CONFIRMATION_ISSUE_METHOD);
+      issueCount += 1;
+      return {
+        ok: true,
+        result: p3ConfirmationResult(
+          `confirmation-${issueCount}`,
+          issueCount === 1 ? '2026-08-07T10:02:00Z' : '2026-08-07T10:05:00Z',
+        ),
+      };
+    },
+  });
+  const mutation = Object.freeze({
+    operation: 'task.cancel', session_id: 'session-1', command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z', correlation_id: 'correlation-1', task_id: 'task-1',
+  });
+  const first = await owner.issue(mutation);
+  now = Date.parse('2026-08-07T10:03:00Z');
+  const second = await owner.issue(mutation);
+  assert.notEqual(first.confirmation_id, second.confirmation_id);
+  assert.notEqual(calls[0][2], calls[1][2]);
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
+    PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
+  ]);
+  assert.equal(owner.hasPendingMutation(), true);
+});
+
+test('invalid confirmation expiry is definitive locally and permits a fresh issue', async () => {
+  let calls = 0;
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    now: () => Date.parse('2026-08-07T10:00:30Z'),
+    request: async () => {
+      calls += 1;
+      return {
+        ok: true,
+        result: p3ConfirmationResult(
+          `confirmation-${calls}`,
+          calls === 1 ? 'not-a-date' : '2026-08-07T10:05:00Z',
+        ),
+      };
+    },
+  });
+  const mutation = Object.freeze({
+    operation: 'task.cancel', session_id: 'session-1', command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z', correlation_id: 'correlation-1', task_id: 'task-1',
+  });
+
+  await assert.rejects(owner.issue(mutation), /confirmation response/);
+  assert.equal(owner.hasPendingMutation(), false);
+  assert.equal((await owner.issue(mutation)).confirmation_id, 'confirmation-2');
+  assert.equal(calls, 2);
 });
 
 test('stock Web P3 owner releases definitive rejects but retains unknown outcomes', async () => {
@@ -1526,7 +1639,38 @@ test('product P3 query feature-off and invalid closed inputs allocate zero reque
   });
   await assert.rejects(enabled.query({ operation: 'task.events', task_id: 'task-1', after_seq: -2 }), /after_seq/);
   await assert.rejects(enabled.query({ operation: 'task.list', task_id: 'foreign' }), /does not accept/);
+  await assert.rejects(enabled.query({ operation: 'constructor' }), /unsupported/);
+  await assert.rejects(enabled.query({ operation: 'toString' }), /unsupported/);
   assert.equal(calls, 0);
+});
+
+test('P3 create name matches the backend 1024-character bound before transport', async () => {
+  const base = {
+    operation: 'task.create', session_id: 'session-1', command_id: 'command-name',
+    issued_at: '2026-08-07T10:00:00Z', correlation_id: 'correlation-1', source: 'structured',
+    instruction: 'do work',
+  };
+  let boundaryCalls = 0;
+  const boundary = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async () => {
+      boundaryCalls += 1;
+      return {
+        ok: true,
+        result: { ...p3ConfirmationResult(), operation: 'task.create', target_task_id: null, command_id: 'command-name' },
+      };
+    },
+  });
+  await boundary.issue({ ...base, name: 'n'.repeat(1024) });
+  assert.equal(boundaryCalls, 1);
+
+  let overflowCalls = 0;
+  const overflow = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async () => { overflowCalls += 1; },
+  });
+  await assert.rejects(overflow.issue({ ...base, name: 'n'.repeat(1025) }), /name/);
+  assert.equal(overflowCalls, 0);
 });
 
 test('product P3 query disconnect fences the delayed response and reconnect uses a new generation', async () => {
