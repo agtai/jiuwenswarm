@@ -47,6 +47,7 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SpeechRpcContext,
     UnavailableBatchSpeechProvider,
     create_environment_batch_speech_provider,
+    inspect_pcm16_mono_wav,
 )
 
 
@@ -60,33 +61,11 @@ def _wav(sample_rate: int = 16_000, frames: int = 320) -> bytes:
     return output.getvalue()
 
 
-def _wav_samples(sample_rate: int, samples: list[int]) -> bytes:
+def _pcm16_samples(samples: list[int]) -> bytes:
     pcm = array("h", samples)
     if sys.byteorder != "little":
         pcm.byteswap()
-    output = io.BytesIO()
-    with wave.open(output, "wb") as audio:
-        audio.setnchannels(1)
-        audio.setsampwidth(2)
-        audio.setframerate(sample_rate)
-        audio.writeframes(pcm.tobytes())
-    return output.getvalue()
-
-
-def _wav_with_format(
-    sample_rate: int,
-    *,
-    channel_count: int,
-    sample_width: int,
-    frame_count: int,
-) -> bytes:
-    output = io.BytesIO()
-    with wave.open(output, "wb") as audio:
-        audio.setnchannels(channel_count)
-        audio.setsampwidth(sample_width)
-        audio.setframerate(sample_rate)
-        audio.writeframes(b"\x00" * frame_count * channel_count * sample_width)
-    return output.getvalue()
+    return pcm.tobytes()
 
 
 def _read_wav_samples(audio: bytes) -> tuple[int, int, int, list[int]]:
@@ -1134,13 +1113,18 @@ async def test_identity_and_operation_state_stays_within_declared_windows() -> N
 async def test_openai_compatible_adapter_uses_server_credentials_and_batch_endpoints() -> (
     None
 ):
-    seen: list[tuple[str, str | None]] = []
+    seen: list[tuple[str, str | None, object | None]] = []
 
     def responder(request: httpx.Request) -> httpx.Response:
-        seen.append((request.url.path, request.headers.get("authorization")))
+        payload = (
+            json.loads(request.content)
+            if request.url.path.endswith("/audio/speech")
+            else None
+        )
+        seen.append((request.url.path, request.headers.get("authorization"), payload))
         if request.url.path.endswith("/audio/transcriptions"):
             return httpx.Response(200, json={"text": "provider text", "language": "en"})
-        return httpx.Response(200, content=_wav())
+        return httpx.Response(200, content=_pcm16_samples([0, 1, -1]))
 
     config = OpenAICompatibleSpeechConfig(
         "https://speech.example.test/v1",
@@ -1165,139 +1149,166 @@ async def test_openai_compatible_adapter_uses_server_credentials_and_batch_endpo
 
     assert transcript.text == "provider text"
     assert audio.audio_wav.startswith(b"RIFF")
-    assert seen == [
-        ("/v1/audio/transcriptions", "Bearer server-secret"),
-        ("/v1/audio/speech", "Bearer server-secret"),
-    ]
+    assert seen[0][0:2] == (
+        "/v1/audio/transcriptions",
+        "Bearer server-secret",
+    )
+    assert seen[1] == (
+        "/v1/audio/speech",
+        "Bearer server-secret",
+        {
+            "model": "tts-model",
+            "voice": "voice-model",
+            "input": "hello",
+            "response_format": "pcm",
+        },
+    )
     assert "server-secret" not in repr(config)
     assert "server-secret" not in repr(provider.capability())
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source_rate", "target_rate", "source_samples", "expected_samples"),
-    [
-        pytest.param(
-            24_000,
-            48_000,
-            [0, 1_000, 2_000, 3_000],
-            [0, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_000],
-            id="24khz-to-48khz",
-        ),
-        pytest.param(
-            48_000,
-            24_000,
-            [0, 1_000, 2_000, 3_000],
-            [0, 2_000],
-            id="48khz-to-24khz",
-        ),
-    ],
-)
-async def test_openai_compatible_adapter_resamples_pcm16_wav_deterministically(
-    source_rate: int,
-    target_rate: int,
-    source_samples: list[int],
-    expected_samples: list[int],
-) -> None:
-    provider = _openai_provider_returning(_wav_samples(source_rate, source_samples))
-
-    result = await provider.synthesize(
-        ProviderSynthesisRequest("s", "hello", "en-US", None, target_rate)
-    )
-
-    rate, channels, width, samples = _read_wav_samples(result.audio_wav)
-    assert (rate, channels, width) == (target_rate, 1, 2)
-    assert samples == expected_samples
-    assert len(result.audio_wav) <= MAX_SYNTHESIS_AUDIO_BYTES
-
-
-@pytest.mark.asyncio
-async def test_openai_compatible_adapter_preserves_valid_same_rate_wav_bytes() -> None:
-    source = _wav_samples(48_000, [-32_768, -1, 0, 1, 32_767])
-    provider = _openai_provider_returning(source)
+async def test_openai_compatible_adapter_wraps_and_resamples_24khz_pcm_to_48khz() -> (
+    None
+):
+    provider = _openai_provider_returning(_pcm16_samples([0, 1_000, 2_000, 3_000]))
 
     result = await provider.synthesize(
         ProviderSynthesisRequest("s", "hello", "en-US", None, 48_000)
     )
 
-    assert result.audio_wav == source
+    rate, channels, width, samples = _read_wav_samples(result.audio_wav)
+    assert (rate, channels, width) == (48_000, 1, 2)
+    assert samples == [0, 500, 1_000, 1_500, 2_000, 2_500, 3_000, 3_000]
+    assert len(result.audio_wav) <= MAX_SYNTHESIS_AUDIO_BYTES
+    inspected = inspect_pcm16_mono_wav(
+        result.audio_wav,
+        expected_sample_rate_hz=48_000,
+    )
+    assert inspected.frame_count == 8
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source_rate", "target_rate", "source_samples", "expected_frame_count"),
-    [
-        pytest.param(24_000, 48_000, [-3, 0, 7], 6, id="odd-source-frames"),
-        pytest.param(48_000, 24_000, [123], 1, id="single-source-frame"),
-    ],
-)
-async def test_openai_compatible_adapter_resamples_odd_and_minimal_input(
-    source_rate: int,
-    target_rate: int,
-    source_samples: list[int],
-    expected_frame_count: int,
-) -> None:
-    provider = _openai_provider_returning(_wav_samples(source_rate, source_samples))
+async def test_openai_compatible_adapter_resamples_24khz_pcm_to_16khz() -> None:
+    provider = _openai_provider_returning(_pcm16_samples([0, 1_000, 2_000, 3_000]))
 
     result = await provider.synthesize(
-        ProviderSynthesisRequest("s", "hello", "en-US", None, target_rate)
+        ProviderSynthesisRequest("s", "hello", "en-US", None, 16_000)
     )
 
     rate, channels, width, samples = _read_wav_samples(result.audio_wav)
-    assert (rate, channels, width) == (target_rate, 1, 2)
-    assert len(samples) == expected_frame_count
+    assert (rate, channels, width) == (16_000, 1, 2)
+    assert samples == [0, 1_500, 3_000]
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_adapter_resamples_one_pcm16_sample() -> None:
+    provider = _openai_provider_returning(_pcm16_samples([-12_345]))
+
+    result = await provider.synthesize(
+        ProviderSynthesisRequest("s", "hello", "en-US", None, 48_000)
+    )
+
+    rate, channels, width, samples = _read_wav_samples(result.audio_wav)
+    assert (rate, channels, width) == (48_000, 1, 2)
+    assert samples == [-12_345, -12_345]
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_adapter_wraps_same_rate_pcm_as_canonical_wav() -> None:
+    source = _pcm16_samples([-32_768, -1, 0, 1, 32_767])
+    provider = _openai_provider_returning(source)
+
+    result = await provider.synthesize(
+        ProviderSynthesisRequest("s", "hello", "en-US", None, 24_000)
+    )
+
+    expected_header = (
+        b"RIFF"
+        + (36 + len(source)).to_bytes(4, "little")
+        + b"WAVEfmt "
+        + (16).to_bytes(4, "little")
+        + (1).to_bytes(2, "little")
+        + (1).to_bytes(2, "little")
+        + (24_000).to_bytes(4, "little")
+        + (48_000).to_bytes(4, "little")
+        + (2).to_bytes(2, "little")
+        + (16).to_bytes(2, "little")
+        + b"data"
+        + len(source).to_bytes(4, "little")
+    )
+    assert result.audio_wav == expected_header + source
+    inspected = inspect_pcm16_mono_wav(
+        result.audio_wav,
+        expected_sample_rate_hz=24_000,
+    )
+    assert inspected.frame_count == 5
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_adapter_resamples_odd_and_minimal_frame_input() -> (
+    None
+):
+    provider = _openai_provider_returning(_pcm16_samples([-3, 0, 7]))
+
+    result = await provider.synthesize(
+        ProviderSynthesisRequest("s", "hello", "en-US", None, 48_000)
+    )
+
+    rate, channels, width, samples = _read_wav_samples(result.audio_wav)
+    assert (rate, channels, width) == (48_000, 1, 2)
+    assert len(samples) == 6
     assert samples
 
 
 @pytest.mark.asyncio
 async def test_openai_compatible_adapter_rejects_resampled_output_over_limit() -> None:
-    scale = 192_000 // 8_000
+    scale = 48_000 // 24_000
     max_output_frames = (MAX_SYNTHESIS_AUDIO_BYTES - 44) // 2
     source_frames = max_output_frames // scale + 1
-    source = _wav(8_000, source_frames)
-    assert len(source) < MAX_SYNTHESIS_AUDIO_BYTES
+    source = b"\x00\x00" * source_frames
+    assert len(source) <= MAX_SYNTHESIS_AUDIO_BYTES - 44
     provider = _openai_provider_returning(source)
 
     with pytest.raises(BatchSpeechError) as oversized:
         await provider.synthesize(
-            ProviderSynthesisRequest("s", "hello", "en-US", None, 192_000)
+            ProviderSynthesisRequest("s", "hello", "en-US", None, 48_000)
         )
 
     assert oversized.value.error.reason == "SPEECH_PROVIDER_RESPONSE_LIMIT"
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_adapter_accepts_exact_raw_pcm_limit_at_24khz() -> None:
+    source = b"\x00" * (MAX_SYNTHESIS_AUDIO_BYTES - 44)
+    provider = _openai_provider_returning(source)
+
+    result = await provider.synthesize(
+        ProviderSynthesisRequest("s", "hello", "en-US", None, 24_000)
+    )
+
+    assert len(result.audio_wav) == MAX_SYNTHESIS_AUDIO_BYTES
+    inspected = inspect_pcm16_mono_wav(
+        result.audio_wav,
+        expected_sample_rate_hz=24_000,
+    )
+    assert inspected.frame_count == len(source) // 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("source", "reason"),
     [
+        pytest.param(b"", "SPEECH_PROVIDER_INVALID_PCM", id="empty-pcm"),
+        pytest.param(b"\x00", "SPEECH_PROVIDER_INVALID_PCM", id="odd-pcm-byte"),
         pytest.param(
-            _wav(24_000, 3)[:-1],
-            "SPEECH_PROVIDER_INVALID_WAV",
-            id="odd-truncated-payload",
-        ),
-        pytest.param(
-            _wav_with_format(
-                24_000,
-                channel_count=2,
-                sample_width=2,
-                frame_count=3,
-            ),
-            "SPEECH_PROVIDER_UNSUPPORTED_AUDIO_FORMAT",
-            id="stereo-pcm",
-        ),
-        pytest.param(
-            _wav_with_format(
-                24_000,
-                channel_count=1,
-                sample_width=1,
-                frame_count=3,
-            ),
-            "SPEECH_PROVIDER_UNSUPPORTED_AUDIO_FORMAT",
-            id="unsigned-8-bit-pcm",
+            b"\x00" * (MAX_SYNTHESIS_AUDIO_BYTES - 44 + 1),
+            "SPEECH_PROVIDER_RESPONSE_LIMIT",
+            id="oversized-pcm",
         ),
     ],
 )
-async def test_openai_compatible_adapter_rejects_invalid_provider_wav_before_resampling(
+async def test_openai_compatible_adapter_rejects_invalid_provider_pcm(
     source: bytes,
     reason: str,
 ) -> None:

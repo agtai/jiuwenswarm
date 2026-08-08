@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import struct
 import sys
 import time
 import wave
@@ -84,6 +85,8 @@ VOICE_COMMIT_RECEIPT_TTL_SECONDS = 300.0
 
 _PCM16_SAMPLE_WIDTH_BYTES = 2
 _PCM_WAV_HEADER_BYTES = 44
+_OPENAI_PCM_SAMPLE_RATE_HZ = 24_000
+_MAX_SYNTHESIS_PCM_BYTES = MAX_SYNTHESIS_AUDIO_BYTES - _PCM_WAV_HEADER_BYTES
 
 _LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 _PROVIDER_ID = "openai-compatible-batch-speech"
@@ -354,6 +357,60 @@ def _round_divide_signed(numerator: int, denominator: int) -> int:
     return -((-numerator + denominator // 2) // denominator)
 
 
+def _canonical_pcm16_mono_wav(
+    pcm: bytes,
+    *,
+    sample_rate_hz: int,
+) -> bytes:
+    """Build the one bounded canonical RIFF layout used by this Adapter."""
+
+    if not pcm or len(pcm) % _PCM16_SAMPLE_WIDTH_BYTES != 0:
+        raise _fail(
+            ErrorCode.PROTOCOL_VIOLATION,
+            "SPEECH_PROVIDER_INVALID_PCM",
+            "speech Provider PCM must contain complete signed 16-bit samples",
+        )
+    if len(pcm) > _MAX_SYNTHESIS_PCM_BYTES:
+        raise _fail(
+            ErrorCode.PROTOCOL_VIOLATION,
+            "SPEECH_PROVIDER_RESPONSE_LIMIT",
+            "speech Provider PCM exceeds the package limit",
+        )
+    if sample_rate_hz <= 0 or sample_rate_hz > 0x7FFFFFFF:
+        raise _fail(
+            ErrorCode.PROTOCOL_VIOLATION,
+            "SPEECH_PROVIDER_UNSUPPORTED_AUDIO_FORMAT",
+            "speech Provider PCM sample rate is outside the canonical WAV range",
+        )
+
+    data_size = len(pcm)
+    byte_rate = sample_rate_hz * _PCM16_SAMPLE_WIDTH_BYTES
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        1,
+        sample_rate_hz,
+        byte_rate,
+        _PCM16_SAMPLE_WIDTH_BYTES,
+        16,
+        b"data",
+        data_size,
+    )
+    audio = header + pcm
+    if len(header) != _PCM_WAV_HEADER_BYTES or len(audio) > MAX_SYNTHESIS_AUDIO_BYTES:
+        raise _fail(
+            ErrorCode.PROTOCOL_VIOLATION,
+            "SPEECH_PROVIDER_RESPONSE_LIMIT",
+            "canonical speech Provider WAV exceeds the package limit",
+        )
+    return audio
+
+
 def _resample_pcm16_mono_wav(
     audio: bytes,
     *,
@@ -375,7 +432,7 @@ def _resample_pcm16_mono_wav(
     )
     if source_info.sample_rate_hz == target_sample_rate_hz:
         return audio
-    if target_sample_rate_hz <= 0 or target_sample_rate_hz > 0xFFFFFFFF:
+    if target_sample_rate_hz <= 0 or target_sample_rate_hz > 0x7FFFFFFF:
         raise _fail(
             ErrorCode.INVALID_ARGUMENT,
             "INVALID_REQUIRED_SAMPLE_RATE",
@@ -433,19 +490,10 @@ def _resample_pcm16_mono_wav(
     output_samples = array("h", target_samples)
     if sys.byteorder != "little":
         output_samples.byteswap()
-    output = io.BytesIO()
-    with wave.open(output, "wb") as target_wav:
-        target_wav.setnchannels(1)
-        target_wav.setsampwidth(_PCM16_SAMPLE_WIDTH_BYTES)
-        target_wav.setframerate(target_rate)
-        target_wav.writeframes(output_samples.tobytes())
-    resampled = output.getvalue()
-    if len(resampled) > MAX_SYNTHESIS_AUDIO_BYTES:
-        raise _fail(
-            ErrorCode.PROTOCOL_VIOLATION,
-            "SPEECH_PROVIDER_RESPONSE_LIMIT",
-            "resampled speech Provider output exceeds the package limit",
-        )
+    resampled = _canonical_pcm16_mono_wav(
+        output_samples.tobytes(),
+        sample_rate_hz=target_rate,
+    )
     inspect_pcm16_mono_wav(
         resampled,
         expected_sample_rate_hz=target_rate,
@@ -686,17 +734,14 @@ class OpenAICompatibleBatchSpeechProvider:
                 "model": model,
                 "voice": voice,
                 "input": request.spoken_text,
-                "response_format": "wav",
+                "response_format": "pcm",
             },
-            max_response_bytes=MAX_SYNTHESIS_AUDIO_BYTES,
+            max_response_bytes=_MAX_SYNTHESIS_PCM_BYTES,
         )
-        audio = bytes(response.content)
-        if not audio or len(audio) > MAX_SYNTHESIS_AUDIO_BYTES:
-            raise _fail(
-                ErrorCode.PROTOCOL_VIOLATION,
-                "SPEECH_PROVIDER_AUDIO_LIMIT",
-                "speech Provider returned empty or oversized audio",
-            )
+        audio = _canonical_pcm16_mono_wav(
+            bytes(response.content),
+            sample_rate_hz=_OPENAI_PCM_SAMPLE_RATE_HZ,
+        )
         audio = _resample_pcm16_mono_wav(
             audio,
             target_sample_rate_hz=request.required_sample_rate_hz,
