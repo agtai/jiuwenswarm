@@ -49,9 +49,12 @@ function p3MutationResult() {
     command_id: 'command-1',
     target_task_id: 'task-1',
     formal_task_result: {
-      command_id: 'command-1',
       task_id: 'task-1',
       attempt_id: 'attempt-1',
+      cancel_acknowledged: true,
+      applied: true,
+      state: 'running',
+      outbox_id: 'outbox-cancel-1',
     },
   };
 }

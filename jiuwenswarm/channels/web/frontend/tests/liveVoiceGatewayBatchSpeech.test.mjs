@@ -98,7 +98,7 @@ function capabilityDescriptor(
     max_timeout_ms: 30_000,
     recognition_input: 'wav_pcm16_mono',
     synthesis_output: 'wav_pcm16_mono',
-    resampling: 'unsupported',
+    resampling: 'server_linear_pcm16_mono',
     credential_boundary: 'gateway_only',
     max_operation_capacity: 128,
     operation_replay_window: 128,
@@ -383,6 +383,42 @@ test('Gateway capability maps recognition and synthesis independently without cr
   });
 });
 
+test('Gateway capability accepts the closed legacy resampling mode', async () => {
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    transport: {
+      async request() {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          capability: capabilityDescriptor(undefined, {
+            declared_limits: { resampling: 'unsupported' },
+          }),
+          provider: {
+            available: true,
+            provider_id: 'provider-test',
+            implementation_class: 'formal',
+            provider_configured: true,
+            authorization_available: true,
+            service_closed: false,
+          },
+          fallback: {
+            recognition: 'browser-speech-recognition',
+            synthesis: 'browser-speech-synthesis',
+            automatic: false,
+          },
+        };
+      },
+    },
+    scope,
+    createId: ids(),
+  });
+
+  const capability = await client.capabilities();
+
+  assert.equal(capability.formal_available, true);
+  assert.equal(capability.recognition_batch, true);
+});
+
 test('unconfigured Provider degrades truthfully to explicit non-formal Browser fallback', async () => {
   const client = new GatewayBatchSpeechClient({
     enabled: true,
@@ -506,6 +542,11 @@ test('capability drift, duplicates, and contradictory availability fail without 
     {
       capability: capabilityDescriptor(base.capability.supported_operations, {
         declared_limits: { resampling: 'provider_owned' },
+      }),
+    },
+    {
+      capability: capabilityDescriptor(base.capability.supported_operations, {
+        declared_limits: { resampling: 'server_sinc_pcm16_mono' },
       }),
     },
     {

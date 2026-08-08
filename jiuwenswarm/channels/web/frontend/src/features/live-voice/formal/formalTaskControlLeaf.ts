@@ -150,6 +150,8 @@ interface SubmittedMutationBinding {
   readonly target_attempt_id: string | null;
   readonly adopted_task_id: string | null;
   readonly adopted_attempt_id: string | null;
+  readonly adopted_state: FormalTaskState | null;
+  readonly adopted_outbox_id: string | null;
 }
 
 const PROJECT_CODE_EXECUTOR_ID = 'jiuwenswarm_code_agent.project_code';
@@ -426,6 +428,8 @@ export class FormalTaskControlLeaf {
       target_attempt_id: targetTask?.attempt_id ?? null,
       adopted_task_id: null,
       adopted_attempt_id: null,
+      adopted_state: null,
+      adopted_outbox_id: null,
     });
     this.#pendingMutationCommands.add(commandId);
     this.#pendingConfirmations.add(confirmationId);
@@ -457,10 +461,16 @@ export class FormalTaskControlLeaf {
     }
     const payload = objectValue(response);
     const productMutation =
-      (operation === 'task.create' || operation === 'task.cancel') && payload?.status === 'mutation_processed' && payload.operation === operation
-        ? objectValue(payload.formal_task_result)
+      (operation === 'task.create' || operation === 'task.cancel')
+      && payload?.status === 'mutation_processed'
+        ? payload
         : null;
-    const result = productMutation ?? objectValue(payload?.result);
+    if (productMutation !== null && productMutation.operation !== operation) {
+      throw new Error('formal task mutation response operation binding mismatch');
+    }
+    const result = productMutation === null
+      ? objectValue(payload?.result)
+      : objectValue(productMutation.formal_task_result);
     if (result === null || (productMutation === null && payload?.ok !== true)) {
       throw new Error(`formal ${operation} result is unavailable`);
     }
@@ -492,13 +502,56 @@ export class FormalTaskControlLeaf {
       this.#adoptEvents(result, context.events_query);
     } else {
       if (context.command_id === null) throw new Error('formal task mutation adoption context is missing');
-      const responseCommandId = text(result.command_id, 'result.command_id');
+      const responseCommandId = productMutation === null
+        ? text(result.command_id, 'result.command_id')
+        : text(productMutation.command_id, 'product mutation command_id');
       if (responseCommandId !== context.command_id) {
         throw new Error('formal task mutation response command binding mismatch');
       }
       const submitted = this.#submittedMutations.get(responseCommandId);
       if (submitted === undefined || submitted.operation !== operation) {
         throw new Error('formal task mutation response has no exact submitted binding');
+      }
+      let responseState: FormalTaskState | null = null;
+      let responseOutboxId: string | null = null;
+      if (productMutation !== null) {
+        const responseTargetTaskId = productMutation.target_task_id === null
+          ? null
+          : text(productMutation.target_task_id, 'product mutation target_task_id');
+        if (responseTargetTaskId !== submitted.target_task_id) {
+          throw new Error('formal task mutation response target binding mismatch');
+        }
+        if (
+          Object.prototype.hasOwnProperty.call(result, 'operation')
+          || Object.prototype.hasOwnProperty.call(result, 'command_id')
+          || Object.prototype.hasOwnProperty.call(result, 'target_task_id')
+        ) {
+          throw new Error('formal task mutation result contains misplaced authority fields');
+        }
+        responseState = canonicalTaskState(result.state);
+        responseOutboxId = !Object.prototype.hasOwnProperty.call(result, 'outbox_id') || result.outbox_id === null
+          ? null
+          : text(result.outbox_id, 'result.outbox_id');
+        if (operation === 'task.create' && (responseState !== 'accepted' || responseOutboxId === null)) {
+          throw new Error('formal task.create result is not an accepted durable task');
+        }
+        if (operation === 'task.cancel') {
+          if (result.cancel_acknowledged !== true) {
+            throw new Error('formal task.cancel result is not acknowledged');
+          }
+          if (typeof result.applied !== 'boolean') {
+            throw new Error('formal task.cancel applied result is invalid');
+          }
+          if (!result.applied && responseOutboxId !== null) {
+            throw new Error('formal task.cancel unapplied result cannot own an outbox');
+          }
+          if (
+            result.applied
+            && ((responseState === 'terminal') !== (responseOutboxId === null))
+          ) {
+            throw new Error('formal task.cancel applied result has an invalid durable outbox');
+          }
+        }
       }
       const taskId = text(result.task_id, 'result.task_id');
       const attemptId = text(result.attempt_id, 'result.attempt_id');
@@ -521,7 +574,12 @@ export class FormalTaskControlLeaf {
       }
       if (
         (submitted.adopted_task_id !== null || submitted.adopted_attempt_id !== null)
-        && (submitted.adopted_task_id !== taskId || submitted.adopted_attempt_id !== attemptId)
+        && (
+          submitted.adopted_task_id !== taskId
+          || submitted.adopted_attempt_id !== attemptId
+          || submitted.adopted_state !== responseState
+          || submitted.adopted_outbox_id !== responseOutboxId
+        )
       ) {
         throw new Error('formal task mutation replay conflicts with its adopted result');
       }
@@ -532,12 +590,14 @@ export class FormalTaskControlLeaf {
         ...submitted,
         adopted_task_id: taskId,
         adopted_attempt_id: attemptId,
+        adopted_state: responseState,
+        adopted_outbox_id: responseOutboxId,
       });
       if (existing === undefined) {
         const task: FormalTaskControlRecord = Object.freeze({
           task_id: taskId,
           attempt_id: attemptId,
-          state: null,
+          state: responseState,
           outcome: null,
           event_head: null,
           last_event_id: null,

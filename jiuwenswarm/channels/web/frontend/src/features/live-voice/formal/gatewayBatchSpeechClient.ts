@@ -612,7 +612,10 @@ export class GatewayBatchSpeechClient {
       || declaredLimits.max_timeout_ms !== MAX_BATCH_TIMEOUT_MS
       || declaredLimits.recognition_input !== 'wav_pcm16_mono'
       || declaredLimits.synthesis_output !== 'wav_pcm16_mono'
-      || declaredLimits.resampling !== 'unsupported'
+      || (
+        declaredLimits.resampling !== 'unsupported'
+        && declaredLimits.resampling !== 'server_linear_pcm16_mono'
+      )
       || declaredLimits.credential_boundary !== 'gateway_only'
       || !positiveCapabilityInteger(declaredLimits.max_operation_capacity)
       || declaredLimits.operation_replay_window !== declaredLimits.max_operation_capacity

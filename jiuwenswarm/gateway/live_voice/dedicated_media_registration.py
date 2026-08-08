@@ -209,10 +209,13 @@ def _wav_bytes(pcm: bytes, sample_rate_hz: int) -> bytes:
     return bytes(header) + pcm
 
 
-def _downlink_frames(audio_wav: bytes, sample_rate_hz: int) -> tuple[MediaAudioFrame, ...]:
+def _downlink_frames(
+    audio_wav: bytes, sample_rate_hz: int
+) -> tuple[MediaAudioFrame, ...]:
     if len(audio_wav) > _MAX_DOWNLINK_WAV_BYTES:
         raise MediaTransportViolation(
-            "MEDIA_DOWNLINK_LIMIT_EXCEEDED", "synthesis audio exceeds the downlink limit"
+            "MEDIA_DOWNLINK_LIMIT_EXCEEDED",
+            "synthesis audio exceeds the downlink limit",
         )
     try:
         with wave.open(io.BytesIO(audio_wav), "rb") as source:
@@ -264,7 +267,6 @@ class _MediaAuthority:
     expected_origin: str
     product_activation_id: str
     product_activation_generation: int
-    user_id: str
     binding: MediaAuthorityBinding
     locale: str
     issued_at: float
@@ -294,7 +296,6 @@ class _MediaAuthority:
 @dataclass(frozen=True, slots=True)
 class _ProductActivationAuthority:
     session_id: str
-    user_id: str
     connection_id: str
     correlation_id: str
     interaction_id: str
@@ -325,7 +326,7 @@ class DedicatedMediaProductRegistry:
         self._product_activations: OrderedDict[
             tuple[str, str, str], _ProductActivationAuthority
         ] = OrderedDict()
-        self._revoked: OrderedDict[str, tuple[str, str, str, str, int, str, str]] = (
+        self._revoked: OrderedDict[str, tuple[str, str, str, str, int, str]] = (
             OrderedDict()
         )
         self._lock = threading.RLock()
@@ -441,18 +442,20 @@ class DedicatedMediaProductRegistry:
             raise MediaTransportViolation(
                 "MEDIA_INVALID_ACTIVATION", "locale is not enabled for W2"
             )
-        authenticated_user_id = _required_id(user_id, "user_id")
+        # The Web ``user_id`` is a browser/header/query comparison claim.  The
+        # exact server-minted WebSocket connection owns this transport
+        # capability; a client claim can neither mint nor transfer authority.
+        owner_connection_id = _required_id(connection_id, "connection_id")
 
         now = self._monotonic()
         with self._lock:
             self._prune(now)
             trusted_activation = self._product_activations.get(
-                (session_id, authenticated_user_id, interaction_id)
+                (session_id, owner_connection_id, interaction_id)
             )
             if (
                 trusted_activation is None
-                or trusted_activation.connection_id
-                != _required_id(connection_id, "connection_id")
+                or trusted_activation.connection_id != owner_connection_id
                 or trusted_activation.correlation_id != correlation_id
                 or trusted_activation.activation_id != activation_id
                 or trusted_activation.activation_generation != activation_generation
@@ -467,7 +470,7 @@ class DedicatedMediaProductRegistry:
         binding = MediaAuthorityBinding(
             lease_id=f"media-lease-{secrets.token_hex(16)}",
             authority_evidence_id=f"media-authority-{secrets.token_hex(16)}",
-            connection_id=_required_id(connection_id, "connection_id"),
+            connection_id=owner_connection_id,
             connection_epoch=0,
             session_id=session_id,
             media_session_id=f"media-session-{secrets.token_hex(16)}",
@@ -489,7 +492,6 @@ class DedicatedMediaProductRegistry:
             expected_origin=request_origin,
             product_activation_id=activation_id,
             product_activation_generation=activation_generation,
-            user_id=authenticated_user_id,
             binding=binding,
             locale=locale,
             issued_at=now,
@@ -623,7 +625,6 @@ class DedicatedMediaProductRegistry:
             params.get("activation_generation"), "activation_generation"
         )
         owner_connection_id = _required_id(connection_id, "connection_id")
-        authenticated_user_id = _required_id(user_id, "user_id")
         binding = (
             session_id,
             correlation_id,
@@ -631,7 +632,6 @@ class DedicatedMediaProductRegistry:
             activation_id,
             activation_generation,
             owner_connection_id,
-            authenticated_user_id,
         )
         now = self._monotonic()
         with self._lock:
@@ -652,7 +652,6 @@ class DedicatedMediaProductRegistry:
                     record.product_activation_id,
                     record.product_activation_generation,
                     record.binding.connection_id,
-                    record.user_id,
                 )
                 if actual != binding:
                     raise MediaTransportViolation(
@@ -667,10 +666,8 @@ class DedicatedMediaProductRegistry:
                     and candidate.binding.correlation_id == correlation_id
                     and candidate.binding.interaction_id == interaction_id
                     and candidate.product_activation_id == activation_id
-                    and candidate.product_activation_generation
-                    == activation_generation
+                    and candidate.product_activation_generation == activation_generation
                     and candidate.binding.connection_id == owner_connection_id
-                    and candidate.user_id == authenticated_user_id
                 ]
                 owned_records = [self._records.pop(ticket) for ticket in owned_tickets]
                 self._subjects.pop((session_id, subject_id), None)
@@ -726,7 +723,6 @@ class DedicatedMediaProductRegistry:
                 return
             try:
                 session_id = _required_id(result.get("session_id"), "session_id")
-                authenticated_user_id = _required_id(user_id, "user_id")
                 owner_connection_id = _required_id(connection_id, "connection_id")
                 if session_id != _required_id(routed_session_id, "routed_session_id"):
                     return
@@ -744,7 +740,7 @@ class DedicatedMediaProductRegistry:
                 )
             except MediaTransportViolation:
                 return
-            key = (session_id, authenticated_user_id, interaction_id)
+            key = (session_id, owner_connection_id, interaction_id)
             with self._lock:
                 self._prune(self._monotonic())
                 if status == "closed":
@@ -765,7 +761,6 @@ class DedicatedMediaProductRegistry:
                     return
                 authority = _ProductActivationAuthority(
                     session_id=session_id,
-                    user_id=authenticated_user_id,
                     connection_id=owner_connection_id,
                     correlation_id=correlation_id,
                     interaction_id=interaction_id,
@@ -795,7 +790,6 @@ class DedicatedMediaProductRegistry:
         if status != "notification":
             return
         try:
-            authenticated_user_id = _required_id(user_id, "user_id")
             owner_connection_id = _required_id(connection_id, "connection_id")
             routed_session = _required_id(routed_session_id, "routed_session_id")
         except MediaTransportViolation:
@@ -849,7 +843,6 @@ class DedicatedMediaProductRegistry:
                 if (
                     record.binding.session_id != session_id
                     or session_id != routed_session
-                    or record.user_id != authenticated_user_id
                     or record.binding.connection_id != owner_connection_id
                     or record.binding.correlation_id != correlation_id
                     or record.binding.interaction_id != ref.interaction_id
@@ -906,7 +899,6 @@ class DedicatedMediaProductRegistry:
                 and record.ticket_consumed
                 and record.route_completed
                 and record.binding.connection_id == connection_id
-                and record.user_id == user_id
                 and now <= record.authority_expires_at
                 and self._has_retained_product_activation(record, now)
             ):
@@ -989,7 +981,9 @@ class DedicatedMediaProductRegistry:
             return result
         payload = result.get("result")
         response_payload = params.get("response")
-        if not isinstance(payload, Mapping) or not isinstance(response_payload, Mapping):
+        if not isinstance(payload, Mapping) or not isinstance(
+            response_payload, Mapping
+        ):
             return result
         audio = payload.get("audio")
         if not isinstance(audio, Mapping):
@@ -1079,7 +1073,6 @@ class DedicatedMediaProductRegistry:
                 expected_origin=parent.expected_origin,
                 product_activation_id=parent.product_activation_id,
                 product_activation_generation=parent.product_activation_generation,
-                user_id=parent.user_id,
                 binding=binding,
                 locale=parent.locale,
                 issued_at=now,
@@ -1140,9 +1133,7 @@ class DedicatedMediaProductRegistry:
             record.downlink_frames = ()
             response = record.downlink_response
             unit_id = record.downlink_unit_id
-            overlapping_uplink = self._records.get(
-                record.downlink_overlap_ticket or ""
-            )
+            overlapping_uplink = self._records.get(record.downlink_overlap_ticket or "")
             record.downlink_overlap_observed = bool(
                 overlapping_uplink is not None
                 and overlapping_uplink.binding.direction is MediaDirection.UPLINK
@@ -1236,9 +1227,7 @@ class DedicatedMediaProductRegistry:
         capture_frames_acked = _safe_uint(
             params.get("capture_frames_acked"), "capture_frames_acked"
         )
-        rendered_chunks = _safe_uint(
-            params.get("rendered_chunks"), "rendered_chunks"
-        )
+        rendered_chunks = _safe_uint(params.get("rendered_chunks"), "rendered_chunks")
         rendered_through_seq = _safe_uint(
             params.get("rendered_through_seq"), "rendered_through_seq"
         )
@@ -1261,7 +1250,6 @@ class DedicatedMediaProductRegistry:
                 "MEDIA_INVALID_PLAYOUT_RECEIPT",
                 "media playout receipt does not prove the bounded browser flow",
             )
-        authenticated_user_id = _required_id(user_id, "user_id")
         owner_connection_id = _required_id(connection_id, "connection_id")
         now = self._monotonic()
         with self._lock:
@@ -1270,7 +1258,6 @@ class DedicatedMediaProductRegistry:
             record = self._records.get(ticket or "")
             if (
                 record is None
-                or record.user_id != authenticated_user_id
                 or record.binding.connection_id != owner_connection_id
                 or record.expected_origin != request_origin
                 or not is_allowed_browser_origin(request_origin)
@@ -1294,26 +1281,29 @@ class DedicatedMediaProductRegistry:
                 and downlink.get("complete") is True
                 and downlink.get("overlap_observed") is True
             )
-            receipt_id = "media-playout-" + hashlib.sha256(
-                canonical_json_bytes(
-                    {
-                        "session_id": session_id,
-                        "subject_id": subject_id,
-                        "correlation_id": correlation_id,
-                        "response": {
-                            "interaction_id": response.interaction_id,
-                            "response_id": response.response_id,
-                            "response_generation": response.response_generation,
-                        },
-                        "unit_id": unit_id,
-                        "capture_frames_acked": capture_frames_acked,
-                        "rendered_chunks": rendered_chunks,
-                        "rendered_through_seq": rendered_through_seq,
-                        "playout_queue_capacity": queue_capacity,
-                        "playout_peak_depth": queue_peak_depth,
-                    }
-                )
-            ).hexdigest()[:32]
+            receipt_id = (
+                "media-playout-"
+                + hashlib.sha256(
+                    canonical_json_bytes(
+                        {
+                            "session_id": session_id,
+                            "subject_id": subject_id,
+                            "correlation_id": correlation_id,
+                            "response": {
+                                "interaction_id": response.interaction_id,
+                                "response_id": response.response_id,
+                                "response_generation": response.response_generation,
+                            },
+                            "unit_id": unit_id,
+                            "capture_frames_acked": capture_frames_acked,
+                            "rendered_chunks": rendered_chunks,
+                            "rendered_through_seq": rendered_through_seq,
+                            "playout_queue_capacity": queue_capacity,
+                            "playout_peak_depth": queue_peak_depth,
+                        }
+                    )
+                ).hexdigest()[:32]
+            )
             payload = {
                 "status": "media_playout_acknowledged",
                 "reason_id": "MEDIA_PLAYOUT_RECEIPT_ACCEPTED",
@@ -1376,7 +1366,7 @@ class DedicatedMediaProductRegistry:
         authority = self._product_activations.get(
             (
                 record.binding.session_id,
-                record.user_id,
+                record.binding.connection_id,
                 record.binding.interaction_id,
             )
         )
@@ -1397,7 +1387,6 @@ class DedicatedMediaProductRegistry:
             for ticket, record in self._records.items()
             if (
                 record.binding.session_id == authority.session_id
-                and record.user_id == authority.user_id
                 and record.binding.connection_id == authority.connection_id
                 and record.binding.interaction_id == authority.interaction_id
                 and record.binding.correlation_id == authority.correlation_id
@@ -1408,9 +1397,7 @@ class DedicatedMediaProductRegistry:
         ]
         for ticket in tickets:
             record = self._records.pop(ticket)
-            self._subjects.pop(
-                (record.binding.session_id, record.subject_id), None
-            )
+            self._subjects.pop((record.binding.session_id, record.subject_id), None)
             record.route_completed = True
             record.recognition_content_sha256 = None
             record.synthesis_content_sha256.clear()

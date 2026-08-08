@@ -100,7 +100,7 @@ def _trust_product_activation(
     registry: DedicatedMediaProductRegistry,
     params: dict[str, object],
     *,
-    user_id: str = "user-1",
+    user_id: str | None = "user-1",
     connection_id: str = "connection-1",
 ) -> None:
     registry.observe_agent_response(
@@ -129,7 +129,7 @@ def _activate(
     params: dict[str, object],
     request_origin: str | None,
     connection_id: str,
-    user_id: str = "user-1",
+    user_id: str | None = "user-1",
 ) -> dict[str, object]:
     _trust_product_activation(
         registry, params, user_id=user_id, connection_id=connection_id
@@ -217,7 +217,40 @@ def test_ticket_is_single_use_and_exact_origin_bound() -> None:
     assert registry.consume_ticket(ticket, request_origin=ORIGIN) is None
 
 
-def test_activation_requires_exact_accepted_product_route_and_user() -> None:
+def test_stock_web_empty_identity_uses_connection_owned_p2_authority() -> None:
+    registry = _active_registry()
+    params = _params()
+    _trust_product_activation(
+        registry,
+        params,
+        user_id=None,
+        connection_id="stock-web-connection",
+    )
+
+    activation = registry.activate(
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="stock-web-connection",
+        user_id=None,
+    )
+
+    assert activation["status"] == "active"
+    assert activation["reason_id"] == "MEDIA_ROUTE_TICKET_ISSUED"
+    assert activation["binding"]["connection_id"] == "stock-web-connection"
+    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+    context = registry.context_for(
+        SimpleNamespace(_jiuwen_ws_id="stock-web-connection"),
+        {"scope": {"subject_id": activation["subject_id"]}},
+        "session-1",
+        None,
+    )
+    assert context.assurance is Assurance.AUTHENTICATED
+
+
+def test_browser_identity_claim_cannot_mint_or_transfer_media_authority() -> None:
     registry = _active_registry()
     params = _params()
     with pytest.raises(MediaTransportViolation) as untrusted:
@@ -225,19 +258,55 @@ def test_activation_requires_exact_accepted_product_route_and_user() -> None:
             params=params,
             request_origin=ORIGIN,
             connection_id="connection-1",
-            user_id="user-1",
+            user_id="browser-static-claim",
         )
     assert untrusted.value.reason_id == "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED"
+    assert registry._records == {}
+    assert registry._subjects == {}
 
-    _trust_product_activation(registry, params, user_id="user-1")
+    _trust_product_activation(
+        registry,
+        params,
+        user_id="browser-static-claim",
+        connection_id="connection-1",
+    )
     with pytest.raises(MediaTransportViolation) as foreign:
         registry.activate(
             params=params,
             request_origin=ORIGIN,
-            connection_id="connection-1",
-            user_id="user-2",
+            connection_id="connection-foreign",
+            user_id="browser-static-claim",
         )
     assert foreign.value.reason_id == "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED"
+    assert registry._records == {}
+    assert registry._subjects == {}
+
+    scope = ScopeRef("browser-static-claim", None, "session-1", Assurance.AUTHENTICATED)
+    unauthorized_speech = SpeechAuthorizationBinding(
+        subject_id=scope.subject_id,
+        scope=scope,
+        operation=RECOGNIZE_OPERATION,
+        operation_id="forged-browser-recognition",
+        correlation_id="correlation-1",
+        capture_id="capture-1",
+        capture_generation=0,
+        track_id="track-1",
+        response=None,
+        unit_id=None,
+        content_sha256="a" * 64,
+    )
+    assert registry.authorize(unauthorized_speech) is None
+
+    activation = registry.activate(
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+        user_id="changed-browser-claim",
+    )
+    assert activation["status"] == "active"
+    assert activation["binding"]["connection_id"] == "connection-1"
+    assert "browser-static-claim" not in repr(activation)
+    assert "changed-browser-claim" not in repr(activation)
 
 
 def test_partial_capture_never_authorizes_speech() -> None:
@@ -700,7 +769,9 @@ def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> No
     assert registry.authorize(wrong) is None
 
 
-def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow() -> None:
+def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow() -> (
+    None
+):
     registry = _active_registry()
     activation = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
@@ -850,21 +921,21 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
         )
     assert (
         registry.complete_downlink(
-        downlink,
-        DedicatedMediaSocketLeafResult(
-            activated=True,
-            socket_touched=True,
-            attach_sent=True,
-            accepted_frames=0,
-            close_result=None,
-            reason_id=MediaDetachReason.LOCAL_CLOSE,
-            sent_frames=1,
-            acknowledged_through_seq=0,
-            configured_max_pending_frames=8,
-            configured_max_pending_bytes=131_072,
-            peak_pending_frames=1,
-            peak_pending_bytes=1_320,
-        ),
+            downlink,
+            DedicatedMediaSocketLeafResult(
+                activated=True,
+                socket_touched=True,
+                attach_sent=True,
+                accepted_frames=0,
+                close_result=None,
+                reason_id=MediaDetachReason.LOCAL_CLOSE,
+                sent_frames=1,
+                acknowledged_through_seq=0,
+                configured_max_pending_frames=8,
+                configured_max_pending_bytes=131_072,
+                peak_pending_frames=1,
+                peak_pending_bytes=1_320,
+            ),
         )
         is expected_duplex
     )

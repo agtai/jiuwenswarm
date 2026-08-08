@@ -16,8 +16,10 @@ import json
 import os
 import re
 import secrets
+import sys
 import time
 import wave
+from array import array
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Protocol
@@ -79,6 +81,9 @@ MAX_CLOSE_TIMEOUT_MS = 5_000
 DEFAULT_CLOSE_TIMEOUT_MS = 1_000
 MAX_VOICE_COMMIT_RECEIPTS = 512
 VOICE_COMMIT_RECEIPT_TTL_SECONDS = 300.0
+
+_PCM16_SAMPLE_WIDTH_BYTES = 2
+_PCM_WAV_HEADER_BYTES = 44
 
 _LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 _PROVIDER_ID = "openai-compatible-batch-speech"
@@ -341,6 +346,116 @@ def inspect_pcm16_mono_wav(
     return info
 
 
+def _round_divide_signed(numerator: int, denominator: int) -> int:
+    """Round one signed integer ratio to nearest, with ties away from zero."""
+
+    if numerator >= 0:
+        return (numerator + denominator // 2) // denominator
+    return -((-numerator + denominator // 2) // denominator)
+
+
+def _resample_pcm16_mono_wav(
+    audio: bytes,
+    *,
+    target_sample_rate_hz: int,
+) -> bytes:
+    """Convert a validated mono PCM16 WAV to one exact target sample rate.
+
+    Linear interpolation uses integer arithmetic so output bytes are stable
+    across platforms.  The complete source is validated before conversion,
+    output capacity is checked before allocation, and the generated WAV is
+    validated again before it can cross the Provider Adapter boundary.
+    """
+
+    source_info = inspect_pcm16_mono_wav(
+        audio,
+        invalid_code=ErrorCode.PROTOCOL_VIOLATION,
+        invalid_reason="SPEECH_PROVIDER_INVALID_WAV",
+        unsupported_reason="SPEECH_PROVIDER_UNSUPPORTED_AUDIO_FORMAT",
+    )
+    if source_info.sample_rate_hz == target_sample_rate_hz:
+        return audio
+    if target_sample_rate_hz <= 0 or target_sample_rate_hz > 0xFFFFFFFF:
+        raise _fail(
+            ErrorCode.INVALID_ARGUMENT,
+            "INVALID_REQUIRED_SAMPLE_RATE",
+            "required playout sample rate is outside the PCM WAV range",
+        )
+
+    target_frame_count = max(
+        1,
+        (
+            source_info.frame_count * target_sample_rate_hz
+            + source_info.sample_rate_hz // 2
+        )
+        // source_info.sample_rate_hz,
+    )
+    max_target_frames = (
+        MAX_SYNTHESIS_AUDIO_BYTES - _PCM_WAV_HEADER_BYTES
+    ) // _PCM16_SAMPLE_WIDTH_BYTES
+    if target_frame_count > max_target_frames:
+        raise _fail(
+            ErrorCode.PROTOCOL_VIOLATION,
+            "SPEECH_PROVIDER_RESPONSE_LIMIT",
+            "resampled speech Provider output exceeds the package limit",
+        )
+
+    with wave.open(io.BytesIO(audio), "rb") as source_wav:
+        source_bytes = source_wav.readframes(source_info.frame_count)
+    source_samples = array("h")
+    source_samples.frombytes(source_bytes)
+    if sys.byteorder != "little":
+        source_samples.byteswap()
+    if len(source_samples) != source_info.frame_count:
+        raise _fail(
+            ErrorCode.PROTOCOL_VIOLATION,
+            "SPEECH_PROVIDER_INVALID_WAV",
+            "speech Provider WAV frame count changed during decoding",
+        )
+
+    target_samples = array("h", [0]) * target_frame_count
+    source_rate = source_info.sample_rate_hz
+    target_rate = target_sample_rate_hz
+    last_source_index = len(source_samples) - 1
+    for target_index in range(target_frame_count):
+        source_position, remainder = divmod(target_index * source_rate, target_rate)
+        if source_position >= last_source_index:
+            sample = source_samples[last_source_index]
+        else:
+            left = source_samples[source_position]
+            right = source_samples[source_position + 1]
+            sample = _round_divide_signed(
+                left * (target_rate - remainder) + right * remainder,
+                target_rate,
+            )
+        target_samples[target_index] = max(-32768, min(32767, sample))
+
+    output_samples = array("h", target_samples)
+    if sys.byteorder != "little":
+        output_samples.byteswap()
+    output = io.BytesIO()
+    with wave.open(output, "wb") as target_wav:
+        target_wav.setnchannels(1)
+        target_wav.setsampwidth(_PCM16_SAMPLE_WIDTH_BYTES)
+        target_wav.setframerate(target_rate)
+        target_wav.writeframes(output_samples.tobytes())
+    resampled = output.getvalue()
+    if len(resampled) > MAX_SYNTHESIS_AUDIO_BYTES:
+        raise _fail(
+            ErrorCode.PROTOCOL_VIOLATION,
+            "SPEECH_PROVIDER_RESPONSE_LIMIT",
+            "resampled speech Provider output exceeds the package limit",
+        )
+    inspect_pcm16_mono_wav(
+        resampled,
+        expected_sample_rate_hz=target_rate,
+        invalid_code=ErrorCode.PROTOCOL_VIOLATION,
+        invalid_reason="SPEECH_PROVIDER_INVALID_WAV",
+        unsupported_reason="SPEECH_PROVIDER_UNSUPPORTED_AUDIO_FORMAT",
+    )
+    return resampled
+
+
 @dataclass(frozen=True, slots=True)
 class SpeechRpcContext:
     subject_id: str | None
@@ -582,12 +697,9 @@ class OpenAICompatibleBatchSpeechProvider:
                 "SPEECH_PROVIDER_AUDIO_LIMIT",
                 "speech Provider returned empty or oversized audio",
             )
-        inspect_pcm16_mono_wav(
+        audio = _resample_pcm16_mono_wav(
             audio,
-            expected_sample_rate_hz=request.required_sample_rate_hz,
-            invalid_code=ErrorCode.PROTOCOL_VIOLATION,
-            invalid_reason="SPEECH_PROVIDER_INVALID_WAV",
-            unsupported_reason="SPEECH_PROVIDER_UNSUPPORTED_AUDIO_FORMAT",
+            target_sample_rate_hz=request.required_sample_rate_hz,
         )
         return ProviderSynthesisResult(audio, model, voice)
 
@@ -1304,7 +1416,7 @@ class FormalBatchSpeechService:
                     "max_timeout_ms": MAX_BATCH_TIMEOUT_MS,
                     "recognition_input": "wav_pcm16_mono",
                     "synthesis_output": "wav_pcm16_mono",
-                    "resampling": "unsupported",
+                    "resampling": "server_linear_pcm16_mono",
                     "credential_boundary": "gateway_only",
                     "max_operation_capacity": self._max_completed,
                     "operation_replay_window": self._max_completed,

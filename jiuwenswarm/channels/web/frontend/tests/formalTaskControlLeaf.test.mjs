@@ -117,9 +117,16 @@ test('create get list status cancel and events retain authoritative task truth',
   leaf.adopt('task.create', {
     status: 'mutation_processed',
     operation: 'task.create',
-    formal_task_result: { command_id: 'command-1', task_id: 'task-1', attempt_id: 'attempt-1' },
+    command_id: 'command-1',
+    target_task_id: null,
+    formal_task_result: {
+      task_id: 'task-1',
+      attempt_id: 'attempt-1',
+      state: 'accepted',
+      outbox_id: 'outbox-1',
+    },
   }, adoption(leaf, { command_id: 'command-1' }));
-  assert.equal(leaf.snapshot().tasks[0].state, null);
+  assert.equal(leaf.snapshot().tasks[0].state, 'accepted');
 
   leaf.adopt('task.get', {
     ok: true,
@@ -152,7 +159,16 @@ test('create get list status cancel and events retain authoritative task truth',
   leaf.adopt('task.cancel', {
     status: 'mutation_processed',
     operation: 'task.cancel',
-    formal_task_result: { command_id: 'command-cancel', task_id: 'task-1', attempt_id: 'attempt-1' },
+    command_id: 'command-cancel',
+    target_task_id: 'task-1',
+    formal_task_result: {
+      task_id: 'task-1',
+      attempt_id: 'attempt-1',
+      cancel_acknowledged: true,
+      applied: true,
+      state: 'running',
+      outbox_id: 'outbox-cancel',
+    },
   }, adoption(leaf, { command_id: 'command-cancel' }));
 
   assert.equal(calls, 1);
@@ -337,7 +353,14 @@ test('mutation adoption binds the exact submitted command, operation, target, an
       {
         status: 'mutation_processed',
         operation: 'task.create',
-        formal_task_result: { command_id: 'command-b', task_id: 'task-b', attempt_id: 'attempt-b' },
+        command_id: 'command-b',
+        target_task_id: null,
+        formal_task_result: {
+          task_id: 'task-b',
+          attempt_id: 'attempt-b',
+          state: 'accepted',
+          outbox_id: 'outbox-b',
+        },
       },
       adoption(leaf, { command_id: 'command-a' })
     ),
@@ -351,7 +374,14 @@ test('mutation adoption binds the exact submitted command, operation, target, an
       {
         status: 'mutation_processed',
         operation: 'task.create',
-        formal_task_result: { command_id: `command-${suffix}`, task_id: `task-${suffix}`, attempt_id: `attempt-${suffix}` },
+        command_id: `command-${suffix}`,
+        target_task_id: null,
+        formal_task_result: {
+          task_id: `task-${suffix}`,
+          attempt_id: `attempt-${suffix}`,
+          state: 'accepted',
+          outbox_id: `outbox-${suffix}`,
+        },
       },
       adoption(leaf, { command_id: `command-${suffix}` })
     );
@@ -368,20 +398,235 @@ test('mutation adoption binds the exact submitted command, operation, target, an
   );
   await leaf.submitMutation(cancel, async () => ({ ok: true }));
   const beforeWrongTarget = leaf.snapshot();
-  for (const result of [
-    { command_id: 'command-cancel-a', task_id: 'task-b', attempt_id: 'attempt-b' },
-    { command_id: 'command-cancel-a', task_id: 'task-a', attempt_id: 'attempt-b' },
+  for (const response of [
+    {
+      status: 'mutation_processed',
+      operation: 'task.cancel',
+      command_id: 'command-cancel-a',
+      target_task_id: 'task-b',
+      formal_task_result: {
+        task_id: 'task-a',
+        attempt_id: 'attempt-a',
+        cancel_acknowledged: true,
+        applied: true,
+        state: 'accepted',
+        outbox_id: 'outbox-cancel-a',
+      },
+    },
+    {
+      status: 'mutation_processed',
+      operation: 'task.cancel',
+      command_id: 'command-cancel-a',
+      target_task_id: 'task-a',
+      formal_task_result: {
+        task_id: 'task-b',
+        attempt_id: 'attempt-b',
+        cancel_acknowledged: true,
+        applied: true,
+        state: 'accepted',
+        outbox_id: 'outbox-cancel-a',
+      },
+    },
+    {
+      status: 'mutation_processed',
+      operation: 'task.cancel',
+      command_id: 'command-cancel-a',
+      target_task_id: 'task-a',
+      formal_task_result: {
+        task_id: 'task-a',
+        attempt_id: 'attempt-b',
+        cancel_acknowledged: true,
+        applied: true,
+        state: 'accepted',
+        outbox_id: 'outbox-cancel-a',
+      },
+    },
   ]) {
     assert.throws(
       () => leaf.adopt(
         'task.cancel',
-        { status: 'mutation_processed', operation: 'task.cancel', formal_task_result: result },
+        response,
         adoption(leaf, { command_id: 'command-cancel-a' })
       ),
-      /attempt binding mismatch/
+      /target binding mismatch|attempt binding mismatch/
     );
     assert.deepEqual(leaf.snapshot(), beforeWrongTarget);
   }
+});
+
+test('cancel result acknowledgement, application, and durable outbox stay fail closed', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt('task.list', { ok: true, result: { tasks: [task()] } }, adoption(leaf));
+  const prepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.cancel', command_id: 'command-cancel-repeat', task_id: 'task-1' },
+    confirmation({
+      confirmation_id: 'confirmation-cancel-repeat',
+      operation: 'task.cancel',
+      command_id: 'command-cancel-repeat',
+      target_task_id: 'task-1',
+    })
+  );
+  await leaf.submitMutation(prepared, async () => ({ ok: true }));
+  const repeatedCancelResult = {
+    task_id: 'task-1',
+    attempt_id: 'attempt-1',
+    cancel_acknowledged: true,
+    applied: false,
+    state: 'running',
+  };
+  const repeatedCancelResponse = {
+    status: 'mutation_processed',
+    operation: 'task.cancel',
+    command_id: 'command-cancel-repeat',
+    target_task_id: 'task-1',
+    formal_task_result: repeatedCancelResult,
+  };
+  const invalidResponses = [
+    [{ ...repeatedCancelResponse, formal_task_result: { ...repeatedCancelResult, cancel_acknowledged: false } }, /not acknowledged/],
+    [{ ...repeatedCancelResponse, formal_task_result: { ...repeatedCancelResult, applied: 'false' } }, /applied result is invalid/],
+    [{ ...repeatedCancelResponse, formal_task_result: { ...repeatedCancelResult, outbox_id: 'outbox-forged' } }, /cannot own an outbox/],
+    [{ ...repeatedCancelResponse, formal_task_result: { ...repeatedCancelResult, applied: true } }, /invalid durable outbox/],
+    [{
+      ...repeatedCancelResponse,
+      formal_task_result: {
+        ...repeatedCancelResult,
+        applied: true,
+        state: 'terminal',
+        outbox_id: 'outbox-forged',
+      },
+    }, /invalid durable outbox/],
+  ];
+  const beforeInvalidResponses = leaf.snapshot();
+
+  for (const [response, error] of invalidResponses) {
+    assert.throws(
+      () => leaf.adopt('task.cancel', response, adoption(leaf, { command_id: 'command-cancel-repeat' })),
+      error
+    );
+    assert.deepEqual(leaf.snapshot(), beforeInvalidResponses);
+  }
+
+  const repeated = leaf.adopt(
+    'task.cancel',
+    repeatedCancelResponse,
+    adoption(leaf, { command_id: 'command-cancel-repeat' })
+  );
+  assert.deepEqual(repeated, beforeInvalidResponses);
+  assert.deepEqual(
+    leaf.adopt(
+      'task.cancel',
+      { ...repeatedCancelResponse, formal_task_result: { ...repeatedCancelResult, outbox_id: null } },
+      adoption(leaf, { command_id: 'command-cancel-repeat' })
+    ),
+    repeated
+  );
+
+  const terminalLeaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  terminalLeaf.adopt('task.list', { ok: true, result: { tasks: [task()] } }, adoption(terminalLeaf));
+  const terminalPrepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.cancel', command_id: 'command-cancel-terminal', task_id: 'task-1' },
+    confirmation({
+      confirmation_id: 'confirmation-cancel-terminal',
+      operation: 'task.cancel',
+      command_id: 'command-cancel-terminal',
+      target_task_id: 'task-1',
+    })
+  );
+  await terminalLeaf.submitMutation(terminalPrepared, async () => ({ ok: true }));
+  terminalLeaf.adopt(
+    'task.cancel',
+    {
+      status: 'mutation_processed',
+      operation: 'task.cancel',
+      command_id: 'command-cancel-terminal',
+      target_task_id: 'task-1',
+      formal_task_result: {
+        task_id: 'task-1',
+        attempt_id: 'attempt-1',
+        cancel_acknowledged: true,
+        applied: true,
+        state: 'terminal',
+        outbox_id: null,
+      },
+    },
+    adoption(terminalLeaf, { command_id: 'command-cancel-terminal' })
+  );
+  assert.deepEqual(terminalLeaf.snapshot().tasks, leaf.snapshot().tasks);
+});
+
+test('product mutation wrapper rejects misplaced authority and invalid formal result fields', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const prepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.create', command_id: 'command-create', task_id: null },
+    confirmation({ confirmation_id: 'confirmation-create', command_id: 'command-create' })
+  );
+  await leaf.submitMutation(prepared, async () => ({ ok: true }));
+  const validFormalResult = {
+    task_id: 'task-created',
+    attempt_id: 'attempt-created',
+    state: 'accepted',
+    outbox_id: 'outbox-created',
+  };
+  const validResponse = {
+    status: 'mutation_processed',
+    operation: 'task.create',
+    command_id: 'command-create',
+    target_task_id: null,
+    formal_task_result: validFormalResult,
+  };
+  const invalidResponses = [
+    [{ ...validResponse, operation: 'task.cancel' }, /operation binding mismatch/],
+    [{ ...validResponse, command_id: 'command-forged' }, /command binding mismatch/],
+    [{ ...validResponse, target_task_id: 'task-forged' }, /target binding mismatch/],
+    [{ ...validResponse, formal_task_result: { ...validFormalResult, command_id: 'command-create' } }, /misplaced authority/],
+    [{ ...validResponse, formal_task_result: { ...validFormalResult, task_id: '' } }, /result.task_id is invalid/],
+    [{ ...validResponse, formal_task_result: { ...validFormalResult, attempt_id: null } }, /result.attempt_id is invalid/],
+    [{ ...validResponse, formal_task_result: { ...validFormalResult, state: 'running' } }, /not an accepted durable task/],
+    [{ ...validResponse, formal_task_result: { ...validFormalResult, outbox_id: null } }, /not an accepted durable task/],
+  ];
+  const beforeInvalidResponses = leaf.snapshot();
+
+  for (const [response, error] of invalidResponses) {
+    assert.throws(
+      () => leaf.adopt('task.create', response, adoption(leaf, { command_id: 'command-create' })),
+      error
+    );
+    assert.deepEqual(leaf.snapshot(), beforeInvalidResponses);
+  }
+
+  const adopted = leaf.adopt(
+    'task.create',
+    validResponse,
+    adoption(leaf, { command_id: 'command-create' })
+  );
+  assert.deepEqual(adopted.tasks, [{
+    task_id: 'task-created',
+    attempt_id: 'attempt-created',
+    state: 'accepted',
+    outcome: null,
+    event_head: null,
+    last_event_id: null,
+    last_event_seq: null,
+  }]);
+  assert.deepEqual(
+    leaf.adopt('task.create', validResponse, adoption(leaf, { command_id: 'command-create' })),
+    adopted
+  );
+  assert.throws(
+    () => leaf.adopt(
+      'task.create',
+      {
+        ...validResponse,
+        formal_task_result: { ...validFormalResult, outbox_id: 'outbox-forged' },
+      },
+      adoption(leaf, { command_id: 'command-create' })
+    ),
+    /replay conflicts/
+  );
+  assert.deepEqual(leaf.snapshot(), adopted);
 });
 
 test('disconnect fences direct adoption, progress, and every late in-flight mutation response', async () => {
