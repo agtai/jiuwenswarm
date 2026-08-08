@@ -2303,6 +2303,16 @@ def _observations_are_ordered(
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _V2CoreCancelWitness:
+    """One exact Core attempt whose accepted cancel reached terminal truth."""
+
+    attempt_id: str
+    create: LiveVoiceObservation
+    cancel: LiveVoiceObservation
+    terminal: LiveVoiceObservation
+
+
 def _derive_v2_runtime_items(
     artifacts: Sequence[W2EvidenceArtifact],
 ) -> frozenset[W2LedgerItem]:
@@ -2364,6 +2374,7 @@ def _derive_v2_runtime_items(
     task_list = facts("product.w2.task.list", "runtime.queue")
     task_status = facts("product.w2.task.status", "task.progress")
     task_cancel = facts("product.w2.task.cancel", "task.command")
+    task_retry = facts("product.w2.task.retry", "task.command")
     task_events = facts("product.w2.task.events", "task.progress")
     task_attempt = facts("product.w2.task.d0", "task.attempt")
     task_origin = facts("product.voice_task_origin", "runtime.turn")
@@ -2441,23 +2452,210 @@ def _derive_v2_runtime_items(
         items.add(W2LedgerItem.P2_AGENT)
     if presentation:
         items.add(W2LedgerItem.P2_PRESENTATION)
-    core_task_ids = {
-        item.binding.task_id
-        for item in task_create
-        if item.binding.task_id is not None
-        and all(
-            any(other.binding.task_id == item.binding.task_id for other in group)
-            for group in (task_get, task_status, task_cancel, task_events)
-        )
-    }
-    if core_task_ids and task_list:
+    def by_task_attempt(
+        records: Sequence[LiveVoiceObservation],
+    ) -> dict[tuple[str, str], list[LiveVoiceObservation]]:
+        indexed: dict[tuple[str, str], list[LiveVoiceObservation]] = {}
+        for record in records:
+            task_id = record.binding.task_id
+            attempt_id = record.binding.attempt_id
+            if task_id is None or attempt_id is None:
+                continue
+            indexed.setdefault((task_id, attempt_id), []).append(record)
+        return indexed
+
+    def ordered_chain(
+        groups: Sequence[Sequence[LiveVoiceObservation]],
+    ) -> tuple[LiveVoiceObservation, ...] | None:
+        if not groups or any(not group for group in groups):
+            return None
+        chains = [(item,) for item in groups[0]]
+        for group in groups[1:]:
+            advanced: dict[int, tuple[LiveVoiceObservation, ...]] = {}
+            for item in group:
+                chain = next(
+                    (
+                        previous + (item,)
+                        for previous in chains
+                        if ordered(previous[-1], item)
+                    ),
+                    None,
+                )
+                if chain is not None:
+                    advanced[id(item)] = chain
+            chains = list(advanced.values())
+            if not chains:
+                return None
+        return chains[0]
+
+    create_by_pair = by_task_attempt(task_create)
+    get_by_pair = by_task_attempt(task_get)
+    status_by_pair = by_task_attempt(task_status)
+    cancel_by_pair = by_task_attempt(task_cancel)
+    events_by_pair = by_task_attempt(task_events)
+    state_by_pair = by_task_attempt(state_events)
+    core_cancel_witnesses: dict[str, _V2CoreCancelWitness] = {}
+    ambiguous_core_tasks: set[str] = set()
+    if task_list:
+        for pair, creates in create_by_pair.items():
+            task_id, attempt_id = pair
+            terminal_records = [
+                item
+                for item in state_by_pair.get(pair, ())
+                if item.state == "terminal"
+            ]
+            if not terminal_records or any(
+                item.outcome != "cancelled" for item in terminal_records
+            ):
+                continue
+            chain = None
+            for create in creates:
+                matching_groups = tuple(
+                    [
+                        item
+                        for item in indexed.get(pair, ())
+                        if _same_binding(create, item, "task_id", "attempt_id")
+                    ]
+                    for indexed in (
+                        get_by_pair,
+                        status_by_pair,
+                        cancel_by_pair,
+                        events_by_pair,
+                    )
+                )
+                matching_list = [
+                    item for item in task_list if _same_binding(create, item)
+                ]
+                matching_terminal = [
+                    item
+                    for item in terminal_records
+                    if _same_binding(create, item, "task_id", "attempt_id")
+                ]
+                if not matching_list or any(not group for group in matching_groups):
+                    continue
+                chain = ordered_chain(
+                    ([create], matching_groups[2], matching_terminal)
+                )
+                if chain is not None:
+                    break
+            if chain is None:
+                continue
+            if task_id in ambiguous_core_tasks:
+                continue
+            existing = core_cancel_witnesses.get(task_id)
+            if existing is not None and existing.attempt_id != attempt_id:
+                # One Core task cannot claim two competing cancellation attempts.
+                core_cancel_witnesses.pop(task_id, None)
+                ambiguous_core_tasks.add(task_id)
+                continue
+            core_cancel_witnesses[task_id] = _V2CoreCancelWitness(
+                attempt_id=attempt_id,
+                create=chain[0],
+                cancel=chain[1],
+                terminal=chain[-1],
+            )
+    core_task_ids = set(core_cancel_witnesses)
+    if core_task_ids:
         items.add(W2LedgerItem.P3_CORE)
-    restarted_tasks = set(_derive_v2_restart(runtime))
-    if restarted_tasks and any(
-        attempt.binding.task_id in core_task_ids
-        and attempt.binding.task_id in restarted_tasks
-        for attempt in task_attempt
-    ):
+
+    restart_details = _derive_v2_restart_details(runtime)
+    retry_by_task: dict[str, list[LiveVoiceObservation]] = {}
+    for retry in task_retry:
+        if retry.binding.task_id is not None:
+            retry_by_task.setdefault(retry.binding.task_id, []).append(retry)
+    d0_by_task: dict[str, list[LiveVoiceObservation]] = {}
+    for attempt in task_attempt:
+        if attempt.binding.task_id is not None:
+            d0_by_task.setdefault(attempt.binding.task_id, []).append(attempt)
+
+    attempt_sources = {
+        "product.w2.task.create",
+        "product.w2.task.get",
+        "product.w2.task.status",
+        "product.w2.task.cancel",
+        "product.w2.task.retry",
+        "product.w2.task.events",
+        "product.w2.task.d0",
+        "product.w2.task.event",
+        "product.w2.task.reconciliation",
+    }
+    executor_tasks: set[str] = set()
+    for task_id, core in core_cancel_witnesses.items():
+        restart_attempt = restart_details.attempts_by_task.get(task_id)
+        restart_initial = restart_details.predecessor_events.get(task_id)
+        restart_terminal = restart_details.successor_events.get(task_id)
+        retries = retry_by_task.get(task_id, [])
+        d0_attempts = d0_by_task.get(task_id, [])
+        if (
+            restart_attempt is None
+            or restart_initial is None
+            or restart_terminal is None
+            or len(retries) != 2
+            or not d0_attempts
+        ):
+            continue
+        first_retry, second_retry = retries
+        if ordered(second_retry, first_retry):
+            first_retry, second_retry = second_retry, first_retry
+        elif not ordered(first_retry, second_retry):
+            continue
+        retry_b = first_retry.binding.attempt_id
+        retry_c = second_retry.binding.attempt_id
+        correlation_id = core.create.binding.correlation_id
+        # The public observation schema has no caller-selectable attempt-number
+        # field.  Exactly three identities plus two ordered retry completions
+        # therefore proves B and C as attempts 2 and 3 without reinterpreting a
+        # TaskEvent source_seq as an attempt ordinal.
+        if (
+            retry_b is None
+            or retry_c is None
+            or len({core.attempt_id, retry_b, retry_c}) != 3
+            or restart_attempt != retry_c
+            or any(
+                item.binding.correlation_id != correlation_id
+                for item in (
+                    first_retry,
+                    second_retry,
+                    restart_initial,
+                    restart_terminal,
+                )
+            )
+        ):
+            continue
+        matching_d0 = [
+            item
+            for item in d0_attempts
+            if item.binding.attempt_id == retry_b
+            and item.binding.correlation_id == correlation_id
+            and ordered(first_retry, item, second_retry)
+        ]
+        if not matching_d0 or any(
+            item.binding.attempt_id != retry_b
+            or item.binding.correlation_id != correlation_id
+            for item in d0_attempts
+        ):
+            continue
+        completed_attempt = matching_d0[0]
+        observed_attempts = {
+            item.binding.attempt_id
+            for _, _, item in (*completed, *governed)
+            if item.source_component in attempt_sources
+            and item.binding.task_id == task_id
+            and item.binding.attempt_id is not None
+        }
+        if observed_attempts != {core.attempt_id, retry_b, retry_c}:
+            continue
+        if not ordered(
+            core.terminal,
+            first_retry,
+            completed_attempt,
+            second_retry,
+            restart_initial,
+            restart_terminal,
+        ):
+            continue
+        executor_tasks.add(task_id)
+    if executor_tasks:
         items.add(W2LedgerItem.P3_EXECUTOR)
     bridged_task_ids = {
         bridge.binding.task_id
@@ -2928,74 +3126,227 @@ def _derive_v2_fault_class(
     )
 
 
-def _derive_v2_restart(
-    artifacts: Sequence[W2EvidenceArtifact],
-) -> Mapping[str, W2ReconciliationOutcome]:
-    """Derive a restart boundary from linked AgentServer epochs and TaskEvents."""
+@dataclass(frozen=True, slots=True)
+class _V2RestartDerivation:
+    """Closed restart derivation plus fail-closed diagnostics.
 
-    runtime = {
-        artifact.artifact_id: artifact
-        for artifact in artifacts
-        if artifact.runtime_format_version == 2
-        and artifact.producer_id == "agentserver"
-        and W2EvidenceKind.REAL_RUNTIME in artifact.evidence_kinds
-    }
-    reconciled: dict[str, W2ReconciliationOutcome] = {}
-    for successor in runtime.values():
+    Valid witnesses remain visible for unaffected tasks even when another task
+    is contradictory.  The Gate separately treats every diagnostic as a
+    failure, so retaining those witnesses can never turn partial evidence into
+    acceptance credit.
+    """
+
+    valid_artifact_pairs: frozenset[tuple[str, str]]
+    valid_task_attempt_pairs: frozenset[tuple[str, str]]
+    tasks: Mapping[str, W2ReconciliationOutcome]
+    attempts_by_task: Mapping[str, str]
+    predecessor_events: Mapping[str, LiveVoiceObservation]
+    successor_events: Mapping[str, LiveVoiceObservation]
+    diagnostics: tuple[str, ...]
+
+
+def _derive_v2_restart_details(
+    artifacts: Sequence[W2EvidenceArtifact],
+) -> _V2RestartDerivation:
+    """Derive exact predecessor-close/successor reconciliation ownership."""
+
+    diagnostics: list[str] = []
+    runtime: dict[str, W2EvidenceArtifact] = {}
+    for artifact in artifacts:
+        if (
+            artifact.runtime_format_version != 2
+            or artifact.producer_id != "agentserver"
+            or W2EvidenceKind.REAL_RUNTIME not in artifact.evidence_kinds
+        ):
+            continue
+        if artifact.artifact_id in runtime:
+            diagnostics.append(f"duplicate_artifact:{artifact.artifact_id}")
+            continue
+        runtime[artifact.artifact_id] = artifact
+
+    valid_artifact_pairs: set[tuple[str, str]] = set()
+    invalid_tasks: set[str] = set()
+    candidates: dict[
+        str,
+        list[
+            tuple[
+                str,
+                W2ReconciliationOutcome,
+                LiveVoiceObservation,
+                LiveVoiceObservation,
+            ]
+        ],
+    ] = {}
+    nonterminal_states = {"accepted", "running", "blocked", "decision_required"}
+
+    for successor in sorted(runtime.values(), key=lambda item: (item.sequence, item.artifact_id)):
         predecessor_id = successor.predecessor_artifact_id
         if predecessor_id is None:
             continue
         predecessor = runtime.get(predecessor_id)
-        if (
-            predecessor is None
-            or predecessor.evidence_set_id != successor.evidence_set_id
-            or predecessor.process_epoch == successor.process_epoch
-            or predecessor.sequence >= successor.sequence
-        ):
+        if predecessor is None:
+            diagnostics.append(
+                f"missing_predecessor:{successor.artifact_id}:{predecessor_id}"
+            )
             continue
-        before = [
-            item
-            for item in predecessor.runtime_observations
-            if item.source_component == "product.w2.task.event"
-            and item.event_name == "task.state_observed"
-            and item.state in {"accepted", "running", "blocked", "decision_required"}
-            and item.binding.task_id is not None
-            and item.binding.attempt_id is not None
-            and item.source_seq is not None
-        ]
-        after = [
+        pair = (predecessor.artifact_id, successor.artifact_id)
+        if predecessor.evidence_set_id != successor.evidence_set_id:
+            diagnostics.append(
+                f"evidence_set_mismatch:{predecessor.artifact_id}:{successor.artifact_id}"
+            )
+            continue
+        if predecessor.process_epoch == successor.process_epoch:
+            diagnostics.append(
+                f"epoch_not_advanced:{predecessor.artifact_id}:{successor.artifact_id}"
+            )
+            continue
+        if predecessor.sequence >= successor.sequence:
+            diagnostics.append(
+                f"artifact_seq_not_advanced:{predecessor.artifact_id}:"
+                f"{successor.artifact_id}"
+            )
+            continue
+        valid_artifact_pairs.add(pair)
+
+        predecessor_by_task: dict[str, list[LiveVoiceObservation]] = {}
+        for item in predecessor.runtime_observations:
+            task_id = item.binding.task_id
+            if (
+                item.source_component == "product.w2.task.event"
+                and item.event_name == "task.state_observed"
+                and task_id is not None
+                and item.binding.attempt_id is not None
+                and item.source_seq is not None
+            ):
+                predecessor_by_task.setdefault(task_id, []).append(item)
+
+        current: dict[tuple[str, str], LiveVoiceObservation] = {}
+        for task_id, task_records in predecessor_by_task.items():
+            latest_seq = max(item.source_seq for item in task_records if item.source_seq is not None)
+            latest = [item for item in task_records if item.source_seq == latest_seq]
+            if len(latest) != 1:
+                signatures = {
+                    (item.binding.attempt_id, item.state, item.outcome) for item in latest
+                }
+                diagnostic = (
+                    "predecessor_latest_conflict"
+                    if len(signatures) > 1
+                    else "predecessor_latest_duplicate"
+                )
+                diagnostics.append(f"{diagnostic}:{task_id}:{latest_seq}")
+                invalid_tasks.add(task_id)
+                continue
+            initial = latest[0]
+            attempt_id = initial.binding.attempt_id
+            if initial.state in nonterminal_states and attempt_id is not None:
+                current[(task_id, attempt_id)] = initial
+
+        successor_records = [
             item
             for item in successor.runtime_observations
             if item.source_component == "product.w2.task.reconciliation"
             and item.event_name == "task.state_observed"
-            and item.state == "terminal"
-            and item.outcome is not None
             and item.binding.task_id is not None
             and item.binding.attempt_id is not None
             and item.source_seq is not None
         ]
-        for initial in before:
-            terminal = next(
-                (
-                    item
-                    for item in after
-                    if item.binding.task_id == initial.binding.task_id
-                    and item.binding.attempt_id == initial.binding.attempt_id
-                    and item.source_seq > initial.source_seq
-                ),
-                None,
-            )
-            if terminal is None or initial.binding.task_id is None:
+        successor_by_pair: dict[tuple[str, str], list[LiveVoiceObservation]] = {}
+        successor_attempts_by_task: dict[str, set[str]] = {}
+        for item in successor_records:
+            task_id = item.binding.task_id
+            attempt_id = item.binding.attempt_id
+            assert task_id is not None and attempt_id is not None
+            successor_attempts_by_task.setdefault(task_id, set()).add(attempt_id)
+            successor_by_pair.setdefault((task_id, attempt_id), []).append(item)
+            if item.state != "terminal" or item.outcome is None:
+                diagnostics.append(
+                    f"successor_nonterminal:{task_id}:{attempt_id}:{item.source_seq}"
+                )
+                invalid_tasks.add(task_id)
+        for task_id, attempt_ids in successor_attempts_by_task.items():
+            if len(attempt_ids) > 1:
+                diagnostics.append(f"successor_multiple_attempts:{task_id}")
+                invalid_tasks.add(task_id)
+
+        expected_pairs = set(current)
+        actual_pairs = set(successor_by_pair)
+        for task_id, attempt_id in sorted(expected_pairs - actual_pairs):
+            diagnostics.append(f"successor_missing:{task_id}:{attempt_id}")
+            invalid_tasks.add(task_id)
+        for task_id, attempt_id in sorted(actual_pairs - expected_pairs):
+            diagnostics.append(f"successor_extra:{task_id}:{attempt_id}")
+            invalid_tasks.add(task_id)
+
+        for task_id, attempt_id in sorted(expected_pairs & actual_pairs):
+            initial = current[(task_id, attempt_id)]
+            terminals = successor_by_pair[(task_id, attempt_id)]
+            if len(terminals) != 1:
+                outcomes = {item.outcome for item in terminals}
+                diagnostic = (
+                    "successor_raw_outcome_conflict"
+                    if len(outcomes) > 1
+                    else "successor_duplicate"
+                )
+                diagnostics.append(f"{diagnostic}:{task_id}:{attempt_id}")
+                invalid_tasks.add(task_id)
+                continue
+            terminal = terminals[0]
+            if initial.binding.correlation_id != terminal.binding.correlation_id:
+                diagnostics.append(
+                    f"successor_binding_conflict:{task_id}:{attempt_id}"
+                )
+                invalid_tasks.add(task_id)
+                continue
+            assert initial.source_seq is not None and terminal.source_seq is not None
+            if terminal.source_seq <= initial.source_seq:
+                diagnostics.append(
+                    f"task_seq_not_advanced:{task_id}:{attempt_id}:"
+                    f"{initial.source_seq}:{terminal.source_seq}"
+                )
+                invalid_tasks.add(task_id)
                 continue
             outcome = {
                 "interrupted": W2ReconciliationOutcome.INTERRUPTED,
                 "unknown": W2ReconciliationOutcome.UNKNOWN,
             }.get(terminal.outcome, W2ReconciliationOutcome.TERMINAL)
-            previous = reconciled.get(initial.binding.task_id)
-            if previous is not None and previous is not outcome:
-                return {}
-            reconciled[initial.binding.task_id] = outcome
-    return MappingProxyType(reconciled)
+            candidates.setdefault(task_id, []).append(
+                (attempt_id, outcome, initial, terminal)
+            )
+
+    tasks: dict[str, W2ReconciliationOutcome] = {}
+    attempts_by_task: dict[str, str] = {}
+    predecessor_events: dict[str, LiveVoiceObservation] = {}
+    successor_events: dict[str, LiveVoiceObservation] = {}
+    for task_id, task_candidates in sorted(candidates.items()):
+        if task_id in invalid_tasks:
+            continue
+        if len(task_candidates) != 1:
+            diagnostics.append(f"task_reconciled_multiple_times:{task_id}")
+            continue
+        attempt_id, outcome, initial, terminal = task_candidates[0]
+        tasks[task_id] = outcome
+        attempts_by_task[task_id] = attempt_id
+        predecessor_events[task_id] = initial
+        successor_events[task_id] = terminal
+
+    unique_diagnostics = tuple(dict.fromkeys(diagnostics))
+    return _V2RestartDerivation(
+        valid_artifact_pairs=frozenset(valid_artifact_pairs),
+        valid_task_attempt_pairs=frozenset(attempts_by_task.items()),
+        tasks=MappingProxyType(tasks),
+        attempts_by_task=MappingProxyType(attempts_by_task),
+        predecessor_events=MappingProxyType(predecessor_events),
+        successor_events=MappingProxyType(successor_events),
+        diagnostics=unique_diagnostics,
+    )
+
+
+def _derive_v2_restart(
+    artifacts: Sequence[W2EvidenceArtifact],
+) -> Mapping[str, W2ReconciliationOutcome]:
+    """Return the compatibility task/outcome mapping for valid restart witnesses."""
+
+    return _derive_v2_restart_details(artifacts).tasks
 
 
 def _artifact_kinds(
@@ -3184,6 +3535,11 @@ def evaluate_w2_demo_gate(
                 failures.append(
                     f"runtime artifact {artifact.artifact_id} has an invalid predecessor"
                 )
+        restart_details = _derive_v2_restart_details(runtime_artifacts)
+        failures.extend(
+            f"restart evidence diagnostic: {diagnostic}"
+            for diagnostic in restart_details.diagnostics
+        )
     if len({artifact.source_label for artifact in artifact_by_id.values()}) != len(
         artifact_by_id
     ):
@@ -3772,8 +4128,11 @@ def evaluate_w2_demo_gate(
         artifact.runtime_format_version == 2 for artifact in restart_artifacts
     )
     restart_subjects = _subjects_for(restart.evidence_ids, artifact_by_id)
+    restart_details = (
+        _derive_v2_restart_details(restart_artifacts) if v2_restart else None
+    )
     derived_restart = (
-        _derive_v2_restart(restart_artifacts) if v2_restart else MappingProxyType({})
+        restart_details.tasks if restart_details is not None else MappingProxyType({})
     )
     if v2_restart:
         if any(
@@ -3785,6 +4144,11 @@ def evaluate_w2_demo_gate(
             failures.append(
                 "restart boundary is not derived from linked AgentServer epochs"
             )
+        assert restart_details is not None
+        failures.extend(
+            f"restart evidence diagnostic: {diagnostic}"
+            for diagnostic in restart_details.diagnostics
+        )
     elif "restart:boundary" not in restart_subjects:
         failures.append("restart boundary lacks signed durable-store proof")
     expected_inflight = set(restart.inflight_task_ids)
@@ -3798,11 +4162,13 @@ def evaluate_w2_demo_gate(
             for evidence_id in reconciliation.evidence_ids
             for task_id in artifact_by_id[evidence_id].proven_task_ids
         }
-        exact_v2 = _derive_v2_restart(
+        exact_v2_details = _derive_v2_restart_details(
             [artifact_by_id[evidence_id] for evidence_id in reconciliation.evidence_ids]
         )
+        exact_v2 = exact_v2_details.tasks
         runtime_proof_valid = (
-            exact_v2.get(reconciliation.task_id) is reconciliation.outcome
+            not exact_v2_details.diagnostics
+            and exact_v2.get(reconciliation.task_id) is reconciliation.outcome
             if v2_restart
             else (
                 reconciliation.task_id in task_ids

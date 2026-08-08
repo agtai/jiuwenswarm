@@ -41,6 +41,7 @@ from jiuwenswarm.server.live_voice.w2_demo_gate import (
     _derive_v2_fault_class,
     _derive_v2_journey_steps,
     _derive_v2_restart,
+    _derive_v2_restart_details,
     _derive_v2_runtime_items,
     _has_v2_claim_attestation,
     _common_v2_journey_runtime_ids,
@@ -53,6 +54,7 @@ from jiuwenswarm.server.live_voice.w2_demo_gate import (
 )
 from jiuwenswarm.server.live_voice.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
+    LiveVoiceObservation,
     OBSERVABILITY_SCHEMA_VERSION,
     create_observation,
 )
@@ -782,6 +784,345 @@ def _v2_task_state_artifact(
     )
 
 
+def _task_completed_records(
+    *,
+    source_component: str,
+    segment_name: str,
+    task_id: str,
+    attempt_id: str,
+    token: str,
+) -> tuple[LiveVoiceObservation, LiveVoiceObservation]:
+    source_record_id = f"record-{token}"
+    common = {
+        "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+        "segment_name": segment_name,
+        "observed_at": "2026-08-07T20:00:00Z",
+        "monotonic_ms": 1.0,
+        "binding": {
+            "correlation_id": f"correlation-{task_id}",
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+        },
+        "route": _route(token),
+        "source_component": source_component,
+        "source_record_id": source_record_id,
+    }
+    return (
+        create_observation(
+            {
+                **common,
+                "event_id": f"route-{token}",
+                "event_name": "route.selected",
+            }
+        ),
+        create_observation(
+            {
+                **common,
+                "event_id": f"completed-{token}",
+                "event_name": "segment.completed",
+                "state": "terminal",
+                "outcome": "completed",
+                "duration_ms": 1.0,
+            }
+        ),
+    )
+
+
+def _task_state_observation(
+    *,
+    task_id: str,
+    attempt_id: str,
+    source_seq: int,
+    state: str,
+    outcome: str | None,
+    source_component: str,
+    token: str,
+) -> LiveVoiceObservation:
+    facts: dict[str, object] = {
+        "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+        "event_id": f"state-{token}",
+        "event_name": "task.state_observed",
+        "segment_name": "task.progress",
+        "observed_at": (
+            "2026-08-07T20:00:01Z"
+            if source_component == "product.w2.task.reconciliation"
+            else "2026-08-07T20:00:00Z"
+        ),
+        "monotonic_ms": float(source_seq),
+        "binding": {
+            "correlation_id": f"correlation-{task_id}",
+            "task_id": task_id,
+            "attempt_id": attempt_id,
+        },
+        "route": _route(token),
+        "source_component": source_component,
+        "source_event_id": f"source-{token}",
+        "source_occurred_at": "2026-08-07T20:00:00Z",
+        "source_seq": source_seq,
+        "state": state,
+        "outcome": outcome,
+    }
+    if outcome == "cancelled":
+        facts["reason_code"] = "CANCEL_TERMINAL"
+    elif outcome == "failed":
+        facts["reason_code"] = "TASK_FAILURE"
+    return create_observation(facts)
+
+
+def _v2_agentserver_artifact(
+    observations: tuple[LiveVoiceObservation, ...],
+    *,
+    artifact_id: str,
+    artifact_sequence: int,
+    process_epoch: str,
+    predecessor_artifact_id: str | None = None,
+) -> W2EvidenceArtifact:
+    legacy = (
+        "\n".join(
+            json.dumps(
+                {
+                    "evidence_schema": "live-voice.w2-jsonl-evidence.v1",
+                    "candidate": {
+                        "candidate_sha": _CANDIDATE_SHA,
+                        "environment_id": "environment-1",
+                        "session_id": "session-1",
+                        "mode_id": "integrated-formal",
+                    },
+                    "record_kind": "observation",
+                    "sequence": sequence,
+                    "record": observation.to_dict(),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            for sequence, observation in enumerate(observations)
+        )
+        + "\n"
+    ).encode()
+    content = _v2_runtime_content(
+        legacy,
+        artifact_id=artifact_id,
+        artifact_sequence=artifact_sequence,
+        producer_id="agentserver",
+        process_epoch=process_epoch,
+        predecessor_artifact_id=predecessor_artifact_id,
+    )
+    return verify_w2_runtime_jsonl_content(
+        artifact_id=artifact_id,
+        sequence=artifact_sequence,
+        content=content,
+        **_runtime_trust_args(
+            content,
+            artifact_id=artifact_id,
+            sequence=artifact_sequence,
+            producer_id="agentserver",
+        ),
+    )
+
+
+def _v2_abc_retry_artifacts(
+    *,
+    cancel_attempt: str = "attempt-a",
+    include_cancel_command: bool = True,
+    cancel_outcome: str | None = "cancelled",
+    cancel_terminal_before_command: bool = False,
+    retry_attempts: tuple[str, ...] = ("attempt-b", "attempt-c"),
+    d0_attempt: str = "attempt-b",
+    execution_order: str = "normal",
+    extra_retry_attempt: str | None = None,
+) -> tuple[W2EvidenceArtifact, W2EvidenceArtifact]:
+    task_id = "task-abc"
+    records: list[LiveVoiceObservation] = []
+    for operation, segment in (
+        ("create", "task.command"),
+        ("get", "task.progress"),
+        ("list", "runtime.queue"),
+        ("status", "task.progress"),
+    ):
+        records.extend(
+            _task_completed_records(
+                source_component=f"product.w2.task.{operation}",
+                segment_name=segment,
+                task_id=task_id,
+                attempt_id="attempt-a",
+                token=f"{operation}-a",
+            )
+        )
+    cancelled = (
+        _task_state_observation(
+            task_id=task_id,
+            attempt_id="attempt-a",
+            source_seq=1,
+            state="terminal",
+            outcome=cancel_outcome,
+            source_component="product.w2.task.event",
+            token="cancelled-a",
+        )
+        if cancel_outcome is not None
+        else None
+    )
+    if cancel_terminal_before_command and cancelled is not None:
+        records.append(cancelled)
+    if include_cancel_command:
+        records.extend(
+            _task_completed_records(
+                source_component="product.w2.task.cancel",
+                segment_name="task.command",
+                task_id=task_id,
+                attempt_id=cancel_attempt,
+                token="cancel-a",
+            )
+        )
+    if not cancel_terminal_before_command and cancelled is not None:
+        records.append(cancelled)
+    records.extend(
+        _task_completed_records(
+            source_component="product.w2.task.events",
+            segment_name="task.progress",
+            task_id=task_id,
+            attempt_id="attempt-a",
+            token="events-a",
+        )
+    )
+
+    retry_records = [
+        _task_completed_records(
+            source_component="product.w2.task.retry",
+            segment_name="task.command",
+            task_id=task_id,
+            attempt_id=attempt_id,
+            token=f"retry-{index}-{attempt_id}",
+        )
+        for index, attempt_id in enumerate(retry_attempts)
+    ]
+    d0_records = _task_completed_records(
+        source_component="product.w2.task.d0",
+        segment_name="task.attempt",
+        task_id=task_id,
+        attempt_id=d0_attempt,
+        token=f"d0-{d0_attempt}",
+    )
+    if execution_order == "d0_before_retry":
+        records.extend(d0_records)
+        for retry in retry_records:
+            records.extend(retry)
+    elif execution_order == "second_retry_before_d0":
+        for retry in retry_records:
+            records.extend(retry)
+        records.extend(d0_records)
+    else:
+        if retry_records:
+            records.extend(retry_records[0])
+        records.extend(d0_records)
+        for retry in retry_records[1:]:
+            records.extend(retry)
+    if extra_retry_attempt is not None:
+        records.extend(
+            _task_completed_records(
+                source_component="product.w2.task.retry",
+                segment_name="task.command",
+                task_id=task_id,
+                attempt_id=extra_retry_attempt,
+                token=f"retry-{extra_retry_attempt}",
+            )
+        )
+    records.append(
+        _task_state_observation(
+            task_id=task_id,
+            attempt_id="attempt-b",
+            source_seq=2,
+            state="terminal",
+            outcome="completed",
+            source_component="product.w2.task.event",
+            token="completed-b",
+        )
+    )
+    records.append(
+        _task_state_observation(
+            task_id=task_id,
+            attempt_id="attempt-c",
+            source_seq=3,
+            state="running",
+            outcome=None,
+            source_component="product.w2.task.event",
+            token="running-c",
+        )
+    )
+    predecessor = _v2_agentserver_artifact(
+        tuple(records),
+        artifact_id="agentserver-abc-before",
+        artifact_sequence=1,
+        process_epoch="agentserver-abc-epoch-before",
+    )
+    successor = _v2_agentserver_artifact(
+        (
+            _task_state_observation(
+                task_id=task_id,
+                attempt_id="attempt-c",
+                source_seq=4,
+                state="terminal",
+                outcome="interrupted",
+                source_component="product.w2.task.reconciliation",
+                token="reconciled-c",
+            ),
+        ),
+        artifact_id="agentserver-abc-after",
+        artifact_sequence=2,
+        process_epoch="agentserver-abc-epoch-after",
+        predecessor_artifact_id=predecessor.artifact_id,
+    )
+    return predecessor, successor
+
+
+def _v2_restart_pair(
+    predecessor_facts: tuple[tuple[str, str, int, str, str | None], ...],
+    successor_facts: tuple[tuple[str, str, int, str, str | None], ...],
+    *,
+    artifact_sequence_start: int = 1,
+    artifact_prefix: str = "agentserver-restart",
+) -> tuple[W2EvidenceArtifact, W2EvidenceArtifact]:
+    predecessor = _v2_agentserver_artifact(
+        tuple(
+            _task_state_observation(
+                task_id=task_id,
+                attempt_id=attempt_id,
+                source_seq=source_seq,
+                state=state,
+                outcome=outcome,
+                source_component="product.w2.task.event",
+                token=f"before-{index}-{task_id}-{attempt_id}",
+            )
+            for index, (task_id, attempt_id, source_seq, state, outcome) in enumerate(
+                predecessor_facts
+            )
+        ),
+        artifact_id=f"{artifact_prefix}-before",
+        artifact_sequence=artifact_sequence_start,
+        process_epoch="agentserver-restart-epoch-before",
+    )
+    successor = _v2_agentserver_artifact(
+        tuple(
+            _task_state_observation(
+                task_id=task_id,
+                attempt_id=attempt_id,
+                source_seq=source_seq,
+                state=state,
+                outcome=outcome,
+                source_component="product.w2.task.reconciliation",
+                token=f"after-{index}-{task_id}-{attempt_id}",
+            )
+            for index, (task_id, attempt_id, source_seq, state, outcome) in enumerate(
+                successor_facts
+            )
+        ),
+        artifact_id=f"{artifact_prefix}-after",
+        artifact_sequence=artifact_sequence_start + 1,
+        process_epoch="agentserver-restart-epoch-after",
+        predecessor_artifact_id=predecessor.artifact_id,
+    )
+    return predecessor, successor
+
+
 def _assisted_content(
     artifact_id: str,
     sequence: int,
@@ -1359,8 +1700,8 @@ def _reverify_artifact(
     )
 
 
-def _evaluate(**overrides: object):
-    values: dict[str, object] = {
+def _evaluation_values() -> dict[str, object]:
+    return {
         "candidate": _candidate(),
         "verification": _verification(),
         "awards": _awards(),
@@ -1370,6 +1711,10 @@ def _evaluate(**overrides: object):
         "faults": _faults(),
         "restart": _restart(),
     }
+
+
+def _evaluate(**overrides: object):
+    values = _evaluation_values()
     artifacts = overrides.pop("artifacts", None)
     values.update(overrides)
     values["artifacts"] = _artifacts(values) if artifacts is None else artifacts
@@ -1996,84 +2341,262 @@ def test_v2_restart_requires_linked_epochs_and_exact_task_attempt_sequence() -> 
     assert _derive_v2_restart((after,)) == {}
 
 
-def test_v2_executor_requires_d0_attempt_on_the_exact_restarted_core_task() -> None:
-    before = _v2_task_state_artifact(
-        artifact_id="agentserver-before-executor-restart",
-        artifact_sequence=1,
-        process_epoch="agentserver-epoch-before-executor",
-        source_seq=10,
-        state="running",
-        outcome=None,
-    )
-    after = _v2_task_state_artifact(
-        artifact_id="agentserver-after-executor-restart",
-        artifact_sequence=2,
-        process_epoch="agentserver-epoch-after-executor",
-        predecessor_artifact_id=before.artifact_id,
-        source_seq=11,
-        state="terminal",
-        outcome="interrupted",
+def test_v2_restart_uses_each_tasks_latest_unique_predecessor_state() -> None:
+    before, after = _v2_restart_pair(
+        (
+            ("task-x", "attempt-old", 1, "running", None),
+            ("task-x", "attempt-old", 2, "terminal", "completed"),
+            ("task-x", "attempt-current", 3, "running", None),
+        ),
+        (("task-x", "attempt-current", 4, "terminal", "interrupted"),),
     )
 
-    def d0_artifact(
-        task_id: str, artifact_id: str, sequence: int
-    ) -> W2EvidenceArtifact:
-        records = [
-            *(
-                json.loads(line)
-                for line in _runtime_content(
-                    f"evidence-{W2LedgerItem.P3_CORE.value}",
-                    "task.progress",
-                    task_id=task_id,
-                )
-                .decode()
-                .splitlines()
-            ),
-            *(
-                json.loads(line)
-                for line in _runtime_content(
-                    f"evidence-{W2LedgerItem.P3_EXECUTOR.value}",
-                    "task.attempt",
-                    task_id=task_id,
-                )
-                .decode()
-                .splitlines()
-            ),
-        ]
-        for record_sequence, envelope in enumerate(records):
-            envelope["sequence"] = record_sequence
-            envelope["record"]["binding"]["correlation_id"] = f"correlation-{task_id}"
-        legacy = ("\n".join(json.dumps(item) for item in records) + "\n").encode()
-        content = _v2_runtime_content(
-            legacy,
-            artifact_id=artifact_id,
-            artifact_sequence=sequence,
-            producer_id="agentserver",
-            process_epoch=f"agentserver-epoch-{artifact_id}",
-        )
-        return verify_w2_runtime_jsonl_content(
-            artifact_id=artifact_id,
-            sequence=sequence,
-            content=content,
-            **_runtime_trust_args(
-                content,
-                artifact_id=artifact_id,
-                sequence=sequence,
-                producer_id="agentserver",
-            ),
-        )
+    details = _derive_v2_restart_details((before, after))
 
-    restarted_d0 = d0_artifact("task-restart-v2", "agentserver-restarted-d0", 3)
-    unrelated_d0 = d0_artifact("task-unrelated-d0", "agentserver-unrelated-d0", 4)
+    assert details.valid_artifact_pairs == frozenset(
+        {(before.artifact_id, after.artifact_id)}
+    )
+    assert details.tasks == {"task-x": W2ReconciliationOutcome.INTERRUPTED}
+    assert details.attempts_by_task == {"task-x": "attempt-current"}
+    assert details.diagnostics == ()
 
-    assert W2LedgerItem.P3_EXECUTOR in _derive_v2_runtime_items(
-        (before, after, restarted_d0)
+
+def test_v2_restart_rejects_duplicate_latest_predecessor_without_erasing_peer() -> None:
+    before, after = _v2_restart_pair(
+        (
+            ("task-x", "attempt-x", 1, "running", None),
+            ("task-x", "attempt-x", 1, "running", None),
+            ("task-y", "attempt-y", 1, "running", None),
+        ),
+        (
+            ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+            ("task-y", "attempt-y", 2, "terminal", "interrupted"),
+        ),
     )
-    assert W2LedgerItem.P3_EXECUTOR not in _derive_v2_runtime_items(
-        (before, after, unrelated_d0)
+
+    details = _derive_v2_restart_details((before, after))
+
+    assert details.tasks == {"task-y": W2ReconciliationOutcome.INTERRUPTED}
+    assert "predecessor_latest_duplicate:task-x:1" in details.diagnostics
+
+
+@pytest.mark.parametrize(
+    ("successor_facts", "diagnostic", "expected_tasks"),
+    (
+        (
+            (("task-y", "attempt-y", 2, "terminal", "interrupted"),),
+            "successor_missing:task-x:attempt-x",
+            {"task-y": W2ReconciliationOutcome.INTERRUPTED},
+        ),
+        (
+            (
+                ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+                ("task-y", "attempt-y", 2, "terminal", "interrupted"),
+                ("task-z", "attempt-z", 2, "terminal", "interrupted"),
+            ),
+            "successor_extra:task-z:attempt-z",
+            {
+                "task-x": W2ReconciliationOutcome.INTERRUPTED,
+                "task-y": W2ReconciliationOutcome.INTERRUPTED,
+            },
+        ),
+    ),
+    ids=("missing", "extra"),
+)
+def test_v2_restart_requires_exact_successor_task_attempt_set(
+    successor_facts: tuple[tuple[str, str, int, str, str | None], ...],
+    diagnostic: str,
+    expected_tasks: dict[str, W2ReconciliationOutcome],
+) -> None:
+    before, after = _v2_restart_pair(
+        (
+            ("task-x", "attempt-x", 1, "running", None),
+            ("task-y", "attempt-y", 1, "running", None),
+        ),
+        successor_facts,
     )
-    assert W2LedgerItem.P3_EXECUTOR not in _derive_v2_runtime_items((before, after))
-    assert W2LedgerItem.P3_EXECUTOR not in _derive_v2_runtime_items((restarted_d0,))
+
+    details = _derive_v2_restart_details((before, after))
+
+    assert details.tasks == expected_tasks
+    assert diagnostic in details.diagnostics
+    assert _derive_v2_restart((before, after)) == expected_tasks
+
+
+@pytest.mark.parametrize(
+    ("task_x_facts", "diagnostic"),
+    (
+        (
+            (
+                ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+                ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+            ),
+            "successor_duplicate:task-x:attempt-x",
+        ),
+        (
+            (
+                ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+                ("task-x", "attempt-x", 2, "terminal", "completed"),
+            ),
+            "successor_raw_outcome_conflict:task-x:attempt-x",
+        ),
+        (
+            (("task-x", "attempt-x", 1, "terminal", "interrupted"),),
+            "task_seq_not_advanced:task-x:attempt-x:1:1",
+        ),
+        (
+            (
+                ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+                ("task-x", "attempt-other", 2, "terminal", "interrupted"),
+            ),
+            "successor_multiple_attempts:task-x",
+        ),
+    ),
+    ids=("duplicate-same-outcome", "outcome-conflict", "seq", "multiple-attempts"),
+)
+def test_v2_restart_conflict_on_task_x_preserves_valid_task_y_and_diagnostic(
+    task_x_facts: tuple[tuple[str, str, int, str, str | None], ...],
+    diagnostic: str,
+) -> None:
+    before, after = _v2_restart_pair(
+        (
+            ("task-x", "attempt-x", 1, "running", None),
+            ("task-y", "attempt-y", 1, "running", None),
+        ),
+        (
+            *task_x_facts,
+            ("task-y", "attempt-y", 2, "terminal", "interrupted"),
+        ),
+    )
+
+    details = _derive_v2_restart_details((before, after))
+
+    assert details.tasks == {"task-y": W2ReconciliationOutcome.INTERRUPTED}
+    assert details.attempts_by_task == {"task-y": "attempt-y"}
+    assert diagnostic in details.diagnostics
+    assert _derive_v2_restart((before, after)) == {
+        "task-y": W2ReconciliationOutcome.INTERRUPTED
+    }
+
+
+def test_v2_restart_diagnostic_always_fails_the_evaluator() -> None:
+    values = _evaluation_values()
+    base_artifacts = _artifacts(values)
+    before, after = _v2_restart_pair(
+        (("task-x", "attempt-x", 1, "running", None),),
+        (
+            ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+            ("task-x", "attempt-x", 2, "terminal", "interrupted"),
+        ),
+        artifact_sequence_start=len(base_artifacts) + 1,
+        artifact_prefix="agentserver-diagnostic",
+    )
+
+    result = evaluate_w2_demo_gate(
+        **values, artifacts=(*base_artifacts, before, after)  # type: ignore[arg-type]
+    )
+
+    assert result.status is W2GateStatus.FAIL
+    assert (
+        "restart evidence diagnostic: successor_duplicate:task-x:attempt-x"
+        in result.failures
+    )
+
+
+def test_v2_core_cancel_and_executor_require_full_ordered_abc_retry_truth() -> None:
+    before, after = _v2_abc_retry_artifacts()
+
+    proven = _derive_v2_runtime_items((before, after))
+    restart = _derive_v2_restart_details((before, after))
+
+    assert W2LedgerItem.P3_CORE in proven
+    assert W2LedgerItem.P3_EXECUTOR in proven
+    assert restart.tasks == {
+        "task-abc": W2ReconciliationOutcome.INTERRUPTED,
+    }
+    assert restart.attempts_by_task == {"task-abc": "attempt-c"}
+    assert restart.valid_task_attempt_pairs == frozenset(
+        {("task-abc", "attempt-c")}
+    )
+    assert restart.diagnostics == ()
+
+
+def test_v2_core_cancel_allows_events_query_after_cancelled_terminal() -> None:
+    before, after = _v2_abc_retry_artifacts()
+    records = before.runtime_observations
+    terminal_index = next(
+        index
+        for index, item in enumerate(records)
+        if item.source_component == "product.w2.task.event"
+        and item.outcome == "cancelled"
+    )
+    events_index = next(
+        index
+        for index, item in enumerate(records)
+        if item.source_component == "product.w2.task.events"
+        and item.event_name == "segment.completed"
+    )
+
+    assert terminal_index < events_index
+    assert W2LedgerItem.P3_CORE in _derive_v2_runtime_items((before, after))
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"cancel_attempt": "attempt-wrong"},
+        {"include_cancel_command": False},
+        {"cancel_outcome": None},
+        {"cancel_outcome": "completed"},
+        {"cancel_terminal_before_command": True},
+    ),
+    ids=(
+        "wrong-attempt",
+        "missing-cancel-command",
+        "missing-terminal",
+        "wrong-outcome",
+        "wrong-order",
+    ),
+)
+def test_v2_core_cancel_requires_exact_attempt_cancelled_terminal_after_command(
+    overrides: dict[str, object],
+) -> None:
+    artifacts = _v2_abc_retry_artifacts(**overrides)  # type: ignore[arg-type]
+
+    proven = _derive_v2_runtime_items(artifacts)
+
+    assert W2LedgerItem.P3_CORE not in proven
+    assert W2LedgerItem.P3_EXECUTOR not in proven
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"d0_attempt": "attempt-c"},
+        {"retry_attempts": ("attempt-b",)},
+        {"retry_attempts": ("attempt-b", "attempt-b")},
+        {"execution_order": "d0_before_retry"},
+        {"execution_order": "second_retry_before_d0"},
+        {"extra_retry_attempt": "attempt-d"},
+    ),
+    ids=(
+        "wrong-d0-attempt",
+        "only-one-retry",
+        "retry-b-equals-retry-c",
+        "d0-before-retry-b",
+        "retry-c-before-d0-b",
+        "extra-fourth-attempt",
+    ),
+)
+def test_v2_executor_rejects_incomplete_or_misordered_abc_retry_topology(
+    overrides: dict[str, object],
+) -> None:
+    artifacts = _v2_abc_retry_artifacts(**overrides)  # type: ignore[arg-type]
+
+    proven = _derive_v2_runtime_items(artifacts)
+
+    assert W2LedgerItem.P3_CORE in proven
+    assert W2LedgerItem.P3_EXECUTOR not in proven
 
 
 def test_v2_cross_file_merge_uses_producer_and_full_binding_not_correlation() -> None:
