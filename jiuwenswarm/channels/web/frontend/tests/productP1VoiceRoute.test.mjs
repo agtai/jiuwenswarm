@@ -643,9 +643,9 @@ test('formal P1 latches a starting-window track end and revokes issued media aut
   await assert.rejects(owner.startCapture({
     session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
     activation_id: 'activation-1', activation_generation: 7,
-  }), error => error?.reason === 'AUDIO_CAPTURE_STOPPED');
+  }), error => error?.reason === 'AUDIO_TRACK_ENDED');
 
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_STOPPED' });
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_TRACK_ENDED' });
   assert.deepEqual(calls.map(([method]) => method), [
     PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
     PRODUCT_P1_MEDIA_CLOSE_METHOD,
@@ -864,7 +864,7 @@ test('formal P1 unexpected track end closes exact capture and fences stale Workl
   for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
     await new Promise(resolve => setImmediate(resolve));
   }
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_STOPPED' });
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_TRACK_ENDED' });
   assert.deepEqual(calls.map(([method]) => method), [
     PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
     PRODUCT_P1_MEDIA_CLOSE_METHOD,
@@ -916,13 +916,74 @@ test('formal P1 AudioContext loss closes exact capture without Speech or busines
   for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
     await new Promise(resolve => setImmediate(resolve));
   }
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CAPTURE_STOPPED' });
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_CONTEXT_NOT_RUNNING' });
   assert.deepEqual(calls.map(([method]) => method), [
     PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
     PRODUCT_P1_MEDIA_CLOSE_METHOD,
   ]);
   assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
 });
+
+for (const [name, trigger, expectedReason] of [
+  [
+    'page hide',
+    environment => {
+      environment.document.visibilityState = 'hidden';
+      environment.document.emit('visibilitychange');
+    },
+    'PAGE_HIDDEN',
+  ],
+  [
+    'AudioWorklet processor failure',
+    environment => environment.worklet.onprocessorerror?.({}),
+    'AUDIO_PROCESSOR_ERROR',
+  ],
+]) {
+  test(`formal P1 preserves the stable ${name} reason and forbids Speech effects`, async () => {
+    const calls = [];
+    const binding = serverBinding();
+    const socket = new FakeSocket();
+    const environment = audioEnvironment();
+    const owner = new ProductP1VoiceRouteOwner({
+      enabled: true,
+      expected_origin: 'https://voice.example.test',
+      audio_environment: environment,
+      socket_factory: () => {
+        queueMicrotask(() => socket.open(binding));
+        return socket;
+      },
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+          return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+        }
+        assert.equal(method, PRODUCT_P1_MEDIA_ACTIVATE_METHOD);
+        return {
+          status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+          subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+          subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+          privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+        };
+      },
+    });
+
+    await startCaptureWithFirstFrame(owner, environment, {
+      session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+      activation_id: 'activation-1', activation_generation: 7,
+    });
+    trigger(environment);
+    for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+      await new Promise(resolve => setImmediate(resolve));
+    }
+
+    assert.deepEqual(owner.status(), { status: 'failed', reason: expectedReason });
+    assert.deepEqual(calls.map(([method]) => method), [
+      PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+      PRODUCT_P1_MEDIA_CLOSE_METHOD,
+    ]);
+    assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+  });
+}
 
 test('formal P1 completes capture, STT, authoritative TTS, and browser playout', async () => {
   const calls = [];
@@ -1727,16 +1788,19 @@ async function runConcurrentCaptureJourney(options = {}) {
     concurrentAudioReleased,
     concurrentCloseSnapshot,
     concurrentCloseAudioReleased,
+    environment,
   };
 }
 
 test('formal P1 dedicated downlink overlaps the next real capture and ACKs only rendered audio', async () => {
   const journey = await runConcurrentCaptureJourney();
-  const { owner, calls, sockets, activationCount, playError } = journey;
+  const { owner, calls, sockets, activationCount, playError, environment } = journey;
 
   assert.equal(playError, null);
   assert.equal(owner.status().status, 'capturing');
   assert.equal(activationCount, 2);
+  assert.equal(environment.contexts.length, 1);
+  assert.equal(environment.contexts[0].state, 'running');
   const downlinkSocket = sockets.find(socket => socket.serverBinding.direction === 'downlink');
   assert.ok(downlinkSocket);
   const downlinkControls = downlinkSocket.sent.filter(value => typeof value === 'string').map(JSON.parse);
@@ -1745,6 +1809,7 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
     method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-1'
   )));
   await owner.close();
+  assert.equal(environment.contexts[0].state, 'closed');
   assert.ok(calls.some(([method, params]) => (
     method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'
   )));

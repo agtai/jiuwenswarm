@@ -269,6 +269,9 @@ interface CaptureSession {
   readonly onTrackUnmute: BrowserEventListener;
   readonly onDeviceChange: BrowserEventListener;
   readonly onContextStateChange: BrowserEventListener;
+  readonly priorContextStateChange: BrowserEventListener | null;
+  readonly installedContextStateChange: BrowserEventListener;
+  readonly ownsContext: boolean;
   expectedSeq: number;
   closed: boolean;
 }
@@ -282,6 +285,9 @@ interface PendingCaptureResources {
   worklet: BrowserAudioWorkletNodeLike | null;
   readonly onTrackEnded: BrowserEventListener;
   readonly onContextStateChange: BrowserEventListener;
+  priorContextStateChange: BrowserEventListener | null;
+  installedContextStateChange: BrowserEventListener | null;
+  ownsContext: boolean;
   trackListenerAttached: boolean;
   contextHasRun: boolean;
   cleanupPromise: Promise<void> | null;
@@ -574,6 +580,9 @@ export class BrowserAudioIOAdapter {
           this.#stopCaptureFromBrowser(this.#capture?.token === token ? 'audio_context_not_running' : 'audio_context_lost_during_start');
         }
       },
+      priorContextStateChange: null,
+      installedContextStateChange: null,
+      ownsContext: true,
       trackListenerAttached: false,
       contextHasRun: false,
       cleanupPromise: null,
@@ -617,13 +626,25 @@ export class BrowserAudioIOAdapter {
       if (track.readyState !== undefined && track.readyState !== 'live') {
         throw new BrowserAudioIOViolation('AUDIO_TRACK_ENDED', 'the audio input track ended during startup');
       }
-      try {
-        context = createContext();
-      } catch (error) {
-        throw mapAudioContextFailure(error, 'AUDIO_CONTEXT_CREATE_FAILED');
+      const unlockedPlayoutContext = this.#playoutContext;
+      if (unlockedPlayoutContext !== null && unlockedPlayoutContext.state === 'running') {
+        context = unlockedPlayoutContext;
+        pending.ownsContext = false;
+      } else {
+        try {
+          context = createContext();
+        } catch (error) {
+          throw mapAudioContextFailure(error, 'AUDIO_CONTEXT_CREATE_FAILED');
+        }
       }
       pending.context = context;
-      context.onstatechange = pending.onContextStateChange;
+      pending.priorContextStateChange = context.onstatechange;
+      const installedContextStateChange = () => {
+        pending.priorContextStateChange?.();
+        pending.onContextStateChange();
+      };
+      pending.installedContextStateChange = installedContextStateChange;
+      context.onstatechange = installedContextStateChange;
       if (!Number.isSafeInteger(context.sampleRate) || context.sampleRate <= 0) {
         throw new BrowserAudioIOViolation('INVALID_AUDIO_CONTEXT_RATE', 'AudioContext sample rate is invalid');
       }
@@ -725,6 +746,9 @@ export class BrowserAudioIOAdapter {
         onTrackUnmute,
         onDeviceChange,
         onContextStateChange,
+        priorContextStateChange: pending.priorContextStateChange,
+        installedContextStateChange,
+        ownsContext: pending.ownsContext,
         expectedSeq: 0,
         closed: false,
       };
@@ -734,7 +758,7 @@ export class BrowserAudioIOAdapter {
       track.addEventListener('mute', onTrackMute);
       track.addEventListener('unmute', onTrackUnmute);
       mediaDevices.addEventListener('devicechange', onDeviceChange);
-      context.onstatechange = onContextStateChange;
+      context.onstatechange = installedContextStateChange;
       this.#requireCurrentCaptureToken(token);
       if ((track.readyState !== undefined && track.readyState !== 'live') || context.state !== 'running') {
         throw new BrowserAudioIOViolation('CAPTURE_STARTUP_LOST', 'audio input or AudioContext was lost during startup');
@@ -863,12 +887,14 @@ export class BrowserAudioIOAdapter {
         this.#emitPlayoutState('failed', 'invalid_audio_context_rate', null);
         throw new BrowserAudioIOViolation('INVALID_AUDIO_CONTEXT_RATE', 'AudioContext sample rate is invalid');
       }
-      context.onstatechange = () => {
-        if (this.#playoutContext !== context || context.state === 'running') return;
-        const playback = this.#playback;
-        if (playback !== null) this.stopPlayout(playback.response, 'audio_context_not_running');
-        this.#emitPlayoutState('failed', 'audio_context_not_running', playback);
-      };
+      if (context.onstatechange === null) {
+        context.onstatechange = () => {
+          if (this.#playoutContext !== context || context.state === 'running') return;
+          const playback = this.#playback;
+          if (playback !== null) this.stopPlayout(playback.response, 'audio_context_not_running');
+          this.#emitPlayoutState('failed', 'audio_context_not_running', playback);
+        };
+      }
       this.#requireCurrentPlayoutUnlock(generation, context);
       this.#emitPlayoutState('ready', 'playout_unlocked', null);
       this.#requireCurrentPlayoutUnlock(generation, context);
@@ -1390,7 +1416,9 @@ export class BrowserAudioIOAdapter {
     session.closed = true;
     session.worklet.port.onmessage = null;
     session.worklet.onprocessorerror = null;
-    session.context.onstatechange = null;
+    if (session.context.onstatechange === session.installedContextStateChange) {
+      session.context.onstatechange = session.priorContextStateChange;
+    }
     session.track.removeEventListener('ended', session.onTrackEnded);
     session.track.removeEventListener('mute', session.onTrackMute);
     session.track.removeEventListener('unmute', session.onTrackUnmute);
@@ -1412,7 +1440,7 @@ export class BrowserAudioIOAdapter {
       cleanupFailed = true;
     }
     cleanupFailed = stopStream(session.stream) || cleanupFailed;
-    if (session.context.state !== 'closed') {
+    if (session.ownsContext && session.context.state !== 'closed') {
       try {
         await session.context.close();
       } catch {
@@ -1431,10 +1459,20 @@ export class BrowserAudioIOAdapter {
         pending.track.removeEventListener('ended', pending.onTrackEnded);
         pending.trackListenerAttached = false;
       }
-      if (pending.context !== null && pending.context.onstatechange === pending.onContextStateChange) {
-        pending.context.onstatechange = null;
+      if (
+        pending.context !== null
+        && pending.installedContextStateChange !== null
+        && pending.context.onstatechange === pending.installedContextStateChange
+      ) {
+        pending.context.onstatechange = pending.priorContextStateChange;
       }
-      await this.#cleanupLooseCapture(pending.stream, pending.context, pending.source, pending.worklet);
+      await this.#cleanupLooseCapture(
+        pending.stream,
+        pending.context,
+        pending.source,
+        pending.worklet,
+        pending.ownsContext,
+      );
     })();
     return pending.cleanupPromise;
   }
@@ -1443,7 +1481,8 @@ export class BrowserAudioIOAdapter {
     stream: BrowserMediaStreamLike | null,
     context: BrowserAudioContextLike | null,
     source: BrowserAudioNodeLike | null,
-    worklet: BrowserAudioWorkletNodeLike | null
+    worklet: BrowserAudioWorkletNodeLike | null,
+    closeContext = true,
   ): Promise<void> {
     let cleanupFailed = false;
     if (worklet !== null) {
@@ -1468,7 +1507,7 @@ export class BrowserAudioIOAdapter {
       }
     }
     cleanupFailed = stopStream(stream) || cleanupFailed;
-    if (context !== null && context.state !== 'closed') {
+    if (closeContext && context !== null && context.state !== 'closed') {
       try {
         await context.close();
       } catch {

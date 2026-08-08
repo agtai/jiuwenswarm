@@ -118,6 +118,25 @@ function stableFailureReason(error: unknown): string {
   return 'FORMAL_P1_ROUTE_FAILED';
 }
 
+function stableCaptureStopReason(reason: string): string {
+  switch (reason) {
+    case 'audio_context_not_running':
+    case 'audio_context_lost_during_start':
+      return 'AUDIO_CONTEXT_NOT_RUNNING';
+    case 'track_ended':
+    case 'track_ended_during_start':
+      return 'AUDIO_TRACK_ENDED';
+    case 'page_hidden':
+      return 'PAGE_HIDDEN';
+    case 'audio_processor_error':
+      return 'AUDIO_PROCESSOR_ERROR';
+    case 'audio_frame_consumer_failed':
+      return 'AUDIO_FRAME_CONSUMER_FAILED';
+    default:
+      return 'AUDIO_CAPTURE_STOPPED';
+  }
+}
+
 function routeUnavailable(reason: unknown): Error & { readonly reason_id: string } {
   const reasonId = requiredText(reason, 'reason_id');
   return Object.assign(new Error('formal P1 route is unavailable'), {
@@ -216,7 +235,7 @@ export class ProductP1VoiceRouteOwner {
             });
           } else if (['stopping', 'stopped'].includes(event.state)) {
             failure = Object.assign(new Error('formal browser capture stopped unexpectedly'), {
-              reason: 'AUDIO_CAPTURE_STOPPED',
+              reason: stableCaptureStopReason(event.reason),
             });
           }
           if (

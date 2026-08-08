@@ -315,6 +315,93 @@ test('platform inspection is side-effect free and keeps capture identity separat
   await playoutOnlyAdapter.close();
 });
 
+test('capture reuses the user-unlocked playout context across bounded turns', async () => {
+  const fake = fakeEnvironment();
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+  });
+
+  await adapter.unlockPlayout();
+  const sharedContext = fake.contexts[0];
+  const playoutStateObserver = sharedContext.onstatechange;
+  await adapter.startCapture();
+
+  assert.equal(fake.contexts.length, 1);
+  assert.notEqual(sharedContext.onstatechange, playoutStateObserver);
+  await adapter.stopCapture('turn_committed');
+  assert.equal(sharedContext.closeCount, 0);
+  assert.equal(sharedContext.state, 'running');
+  assert.equal(sharedContext.onstatechange, playoutStateObserver);
+
+  fake.mediaDevices.stream = new FakeStream();
+  await adapter.startCapture();
+  assert.equal(fake.contexts.length, 1);
+  await adapter.stopCapture('second_turn_committed');
+  assert.equal(sharedContext.closeCount, 0);
+  assert.equal(sharedContext.onstatechange, playoutStateObserver);
+
+  await adapter.close();
+  assert.equal(sharedContext.closeCount, 1);
+  assert.equal(sharedContext.state, 'closed');
+});
+
+test('close fences an active capture on the shared context without restoring stale handlers', async () => {
+  const fake = fakeEnvironment();
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+  });
+
+  await adapter.unlockPlayout();
+  const sharedContext = fake.contexts[0];
+  const playoutStateObserver = sharedContext.onstatechange;
+  await adapter.startCapture();
+  const captureStateObserver = sharedContext.onstatechange;
+  assert.notEqual(captureStateObserver, playoutStateObserver);
+
+  await adapter.close();
+  assert.equal(fake.contexts.length, 1);
+  assert.equal(sharedContext.closeCount, 1);
+  assert.equal(sharedContext.state, 'closed');
+  assert.equal(sharedContext.onstatechange, null);
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+});
+
+test('shared context loss notifies both playout and capture owners before one cleanup', async () => {
+  const fake = fakeEnvironment();
+  const captureEvents = [];
+  const playoutEvents = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onCaptureState: event => captureEvents.push(event),
+      onPlayoutState: event => playoutEvents.push(event),
+    },
+  });
+
+  await adapter.unlockPlayout();
+  await adapter.startCapture();
+  const sharedContext = fake.contexts[0];
+  const composedStateObserver = sharedContext.onstatechange;
+  await adapter.unlockPlayout();
+  assert.equal(sharedContext.onstatechange, composedStateObserver);
+  sharedContext.state = 'suspended';
+  sharedContext.onstatechange?.({});
+  for (let turn = 0; turn < 100 && adapter.captureState() !== 'stopped'; turn += 1) {
+    await nextTask();
+  }
+
+  assert.equal(adapter.captureState(), 'stopped');
+  assert.equal(captureEvents.at(-1).reason, 'audio_context_not_running');
+  assert.equal(playoutEvents.at(-1).reason, 'audio_context_not_running');
+  assert.equal(sharedContext.closeCount, 0);
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  await adapter.close();
+  assert.equal(sharedContext.closeCount, 1);
+});
+
 test('disabled and insecure capture reject before media, context, listeners, or timers', async () => {
   for (const options of [
     { enabled: false, environment: fakeEnvironment().environment, reason: 'FEATURE_DISABLED' },
