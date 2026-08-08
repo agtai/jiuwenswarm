@@ -22,8 +22,8 @@ freeze because the real P3 D0 Executor exposed two code-level blockers:
 
 The first blocker has an uncommitted repair plus initial regressions. Independent
 review found additional cancellation and cleanup ownership gaps, so that repair
-is not accepted yet. The second blocker has a preferred bounded design direction
-but no accepted decision or implementation.
+is not accepted yet. D-069 now freezes the second blocker's bounded retry
+contract, but it has no implementation, review or Gate evidence yet.
 
 ## 2. Real failure and root cause
 
@@ -149,7 +149,7 @@ After fixing all findings, run implementation self-review, a cold complete-diff
 review and an independent review equivalent. Every finding must be fixed and its
 affected tests rerun before a local implementation commit is accepted.
 
-## 7. W2 P3 restart-evidence blocker
+## 7. Accepted D-069 W2 P3 restart-evidence contract
 
 The strict Gate implementation derives P3 Core only when one `task_id` has real
 create/get/status/cancel/events plus list evidence. It derives P3 Executor only
@@ -158,37 +158,73 @@ also appears in a valid predecessor/successor restart chain. The acceptance
 minimum is P3 `>=20/25`; without the six-point Executor item, the Core, Voice
 Bridge, Progress and UI items total only 19.
 
-The current formal Core and policy accept only `task.create` and `task.cancel`.
-The observability vocabulary already reserves `task.retry`, but the authenticated
-route, policy, Core and Store do not implement it. A single attempt cannot
-reliably provide both a successful cancel fact and later successor reconciliation:
-cancel either wins and makes the task terminal, or completion wins and terminal
-truth is consumed before restart.
+The current formal Core and policy still implement only `task.create` and
+`task.cancel`; the authenticated route, Store, subscription and Web consumer do
+not yet implement retry. D-069 in [DECISIONS.md](decisions/DECISIONS.md) accepts a
+bounded, explicit and exactly confirmed `task.retry` contract. It does not make
+retry an automatic restart/recovery behavior and it does not grant implementation
+or Gate credit.
 
-The preferred design direction is a bounded, repeatable formal `task.retry` on
-the same task. Its minimum deterministic evidence topology needs three distinct
-attempts rather than making cancel race completion:
+The deterministic evidence topology has exactly three distinct attempts:
 
 - attempt A is created, queried and successfully cancelled, proving the Core
   create/get/list/status/cancel/events path and a real cancelled terminal;
 - the first retry creates attempt B without changing `task_id`; B completes its
   D0 mutation and supplies the successful `task.attempt` fact;
-- the second retry creates attempt C with the same `task_id`; the predecessor
-  records C nonterminal and closes normally, then the successor publishes
-  truthful reconciliation for the exact C `attempt_id`;
+- after B, the external W2 fixture harness verifies the patch and records a new
+  clean Git revision for the same `{source, stable_id, uri, scope}` project
+  identity; retry itself performs no Git operation and cannot weaken the clean
+  guard;
+- the second retry creates attempt C with the same `task_id` against that exact
+  clean revision; the predecessor records C nonterminal and closes normally,
+  then the successor publishes truthful reconciliation for exact C;
 - the Gate joins Core, B's D0 fact and C's restart by exact same `task_id`, while
   restart reconciliation itself remains exact on both C's `task_id` and
   `attempt_id`.
 
-This is a proposal, not an accepted decision. Do not weaken the Gate to join
-unrelated tasks and do not freeze the external root policy/runtime slots until
-the owning design review accepts either this bounded retry or another equally
-repeatable same-task transition.
+The Store-derived budget is three total attempts/two applied retries. Only the
+current terminal `cancelled` or `completed` attempt is eligible. Exact auth,
+capability, confirmation, predecessor/outcome/next-number, same-project clean
+revision and settled outbox/reconciliation/worker/lease/cleanup prerequisites
+must all pass before one atomic CAS creates the successor. Applied exact replay
+returns the stored result with zero new effect; changed fingerprints, stale
+predecessors, exhausted budget and pending cleanup fail with the stable D-069
+reason and the complete zero-side-effect oracle.
+
+Each retry emits a new canonical `task.retry_accepted` (`state=accepted`) whose
+details bind `command_id`, `retry_of_attempt_id`, `previous_outcome` and
+`attempt_number`. Initial A alone begins with `task.accepted`. Full A/B/C history
+is available only from `task.events`; a formal subscription starts from the
+current attempt's atomic segment boundary (`task.accepted` for A, latest
+`task.retry_accepted` for B/C). Consumers that have not negotiated the new event
+must fail closed instead of skipping or translating it. Terminal irreversibility
+therefore remains per attempt epoch rather than being weakened globally.
+
+Implementation and acceptance must proceed in this order:
+
+1. close section 5's retained Agent/checkout ownership findings and its complete
+   Tier-3 reviews without relaxing the exact-root or clean-worktree guards;
+2. add the backend Store/Core atomic retry, reducer/event/subscription segment,
+   policy/auth/confirmation, facade/composition/Gateway and reconciliation/outbox
+   behavior together with migration, idempotency, concurrency and zero-effect
+   tests;
+3. update the Web TypeScript contract, formal control leaf, product activation
+   and route-panel consumer in the same compatible batch so no producer can emit
+   an event that the selected consumer silently ignores;
+4. complete implementation self-review, cold complete-diff review and an
+   independent review equivalent, fixing findings and rerunning affected suites;
+5. run a disposable A→B diagnostic, create and verify the external clean fixture
+   checkpoint, run C across the exact predecessor/successor process set, and
+   reject any extra attempt or cross-task join;
+6. only then create a fresh immutable candidate and run the hardened Gate with
+   exact A/B/C task/attempt lineage and the separately signed root policy.
 
 For planning only, the current three-showcase v2 evidence shape needs seven
 runtime slots: `gw1/as1`, `gw2/as2` and `gw3/as3/as4`. The fourth AgentServer
-slot is the successor needed for the restart observation. These slot names and
-their external authority bindings are not a frozen policy yet.
+slot is the successor needed for exact C restart observation. D-069 freezes the
+attempt topology, not these slot names or their external authority bindings;
+policy still has to be produced, signed and validated before evidence processes
+start.
 
 ## 8. Machine-private continuation facts
 
@@ -237,9 +273,10 @@ the active slice to D95.
    the real facade's exact-root guard.
 4. Run the focused P3/AgentManager/facade/vertical suites, then complete all three
    D-053 review passes and fix every finding.
-5. Obtain a scoped design decision for the same-task restart transition; the
-   current preferred direction is bounded formal `task.retry`. Implement and
-   review it only after the contract/oracles are frozen.
+5. Implement accepted D-069 in its recorded backend/Web dependency order, then
+   prove exact replay/conflict, bounded eligibility, clean-checkpoint separation,
+   current-attempt subscription segments, restart reconciliation and every
+   rejection's zero-side-effect oracle before review acceptance.
 6. Commit the coherent reviewed local batch under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
 7. Create one fresh clean descendant candidate and a disposable diagnostic
