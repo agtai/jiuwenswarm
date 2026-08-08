@@ -868,6 +868,109 @@ async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carr
 
 
 @pytest.mark.asyncio
+async def test_direct_executor_preserves_authority_checkout_line_endings(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    baseline = (project / "README.md").read_bytes()
+    _git(project, "config", "core.autocrlf", "true")
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert (project / "README.md").read_bytes() == baseline
+    assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+@pytest.mark.parametrize("authority_file_exists", [True, False])
+def test_attempt_content_mirror_rejects_junction_before_external_effect(
+    tmp_path: Path, authority_file_exists: bool
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    tracked = project / "nested" / "tracked.txt"
+    tracked.parent.mkdir()
+    tracked.write_text("authority\n", encoding="utf-8")
+    _git(project, "add", ".")
+    _git(project, "commit", "-m", "nested baseline")
+    if not authority_file_exists:
+        tracked.unlink()
+
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "tracked.txt"
+    sentinel.write_text("outside\n", encoding="utf-8")
+    junction = attempt / "nested"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip("host cannot create a Windows junction")
+
+    try:
+        with pytest.raises(RuntimeError, match="PROJECT_WORKTREE_BASELINE_MISMATCH"):
+            project_code_executor._mirror_git_visible_content(project, attempt)
+        assert sentinel.read_text(encoding="utf-8") == "outside\n"
+    finally:
+        junction.rmdir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_attempt_seed_rejects_untracked_junction_before_external_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    untracked = project / "nested" / "untracked.txt"
+    untracked.parent.mkdir()
+    untracked.write_text("untracked-authority\n", encoding="utf-8")
+    parent, worktree = project_code_executor._create_attempt_worktree(
+        project, "attempt-untracked-junction", _git(project, "rev-parse", "HEAD")
+    )
+    external = tmp_path / "external-untracked"
+    external.mkdir()
+    junction = worktree / "nested"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if created.returncode != 0:
+        project_code_executor._remove_attempt_worktree(project, parent, worktree)
+        pytest.skip("host cannot create a Windows junction")
+
+    try:
+        with pytest.raises(RuntimeError, match="PROJECT_WORKTREE_BASELINE_MISMATCH"):
+            project_code_executor._seed_attempt_worktree(
+                project,
+                worktree,
+                project_code_executor._project_content_fingerprint(project),
+            )
+        assert not (external / "untracked.txt").exists()
+    finally:
+        junction.rmdir()
+        project_code_executor._remove_attempt_worktree(project, parent, worktree)
+
+
+@pytest.mark.asyncio
 async def test_direct_executor_serializes_one_project_and_cannot_borrow_another_attempt_diff(
     tmp_path: Path,
 ) -> None:

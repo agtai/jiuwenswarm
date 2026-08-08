@@ -657,7 +657,7 @@ def _remove_attempt_worktree(root: Path, parent: Path, worktree: Path) -> None:
         raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING") from error
 
 
-def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> None:
+def _seed_attempt_worktree(root: Path, worktree: Path, expected_content: str) -> None:
     cached_patch = _git_output(
         root, "diff", "--cached", "--binary", "--full-index", "HEAD", "--"
     )
@@ -667,25 +667,80 @@ def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> No
     unstaged_patch = _git_output(root, "diff", "--binary", "--full-index", "--")
     if unstaged_patch:
         _git_run_with_input(worktree, ("apply", "--binary", "-"), unstaged_patch)
-    raw_untracked = _git_output(
+    _reject_git_visible_symlinks(worktree)
+    _mirror_git_visible_content(root, worktree)
+    _reject_git_visible_symlinks(worktree)
+    if _project_content_fingerprint(worktree) != expected_content:
+        raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
+    _git_output(worktree, "add", "-A", "--")
+
+
+def _mirror_git_visible_content(root: Path, worktree: Path) -> None:
+    """Preserve the selected checkout's exact bytes across linked worktrees.
+
+    Git may apply a different checkout conversion (notably ``core.autocrlf``)
+    when it creates the detached attempt worktree.  The index reconstruction
+    above preserves staged versus unstaged state; this final content mirror
+    preserves the authority checkout's actual Git-visible working-tree bytes.
+    """
+
+    raw_paths = _git_output(
         root,
         "ls-files",
+        "--cached",
         "--others",
         "--exclude-standard",
         "-z",
     ).split(b"\0")
-    for raw_relative in (item for item in raw_untracked if item):
+    for raw_relative in (item for item in raw_paths if item):
         relative = Path(raw_relative.decode("utf-8", errors="strict"))
-        source = root / relative
-        destination = worktree / relative
+        if relative.is_absolute() or ".." in relative.parts:
+            raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
+        _require_safe_mirror_path(root, relative)
+        _require_safe_mirror_path(worktree, relative)
+        source = root.joinpath(*relative.parts)
+        destination = worktree.joinpath(*relative.parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
+        _require_safe_mirror_path(worktree, relative)
+        if not source.exists() and not source.is_symlink():
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+            elif destination.is_dir():
+                shutil.rmtree(destination)
+            continue
         if source.is_symlink():
-            destination.symlink_to(source.readlink(), target_is_directory=False)
+            if destination.is_dir() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            elif destination.exists() or destination.is_symlink():
+                destination.unlink()
+            destination.symlink_to(
+                source.readlink(), target_is_directory=source.is_dir()
+            )
+        elif source.is_dir():
+            if destination.is_symlink() or destination.is_file():
+                destination.unlink()
+            destination.mkdir(parents=True, exist_ok=True)
         else:
+            if destination.is_dir() and not destination.is_symlink():
+                shutil.rmtree(destination)
             shutil.copy2(source, destination)
-    if _project_tree_fingerprint(worktree) != expected_tree:
+        _require_safe_mirror_path(worktree, relative)
+
+
+def _require_safe_mirror_path(root: Path, relative: Path) -> None:
+    """Fail closed before mirroring through a link or reparse-point ancestor."""
+
+    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
         raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
-    _git_output(worktree, "add", "-A", "--")
+    try:
+        if _is_unsafe_filesystem_link(root):
+            raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
+        for depth in range(1, len(relative.parts) + 1):
+            candidate = root.joinpath(*relative.parts[:depth])
+            if _is_unsafe_filesystem_link(candidate):
+                raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
+    except OSError as error:
+        raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH") from error
 
 
 def _attempt_patch(worktree: Path) -> tuple[bytes, str]:
@@ -1664,7 +1719,7 @@ class DirectProjectCodeExecutorAdapter:
                 _seed_attempt_worktree,
                 target_root,
                 created_worktree,
-                record.before_tree,
+                record.before_content,
             )
             await asyncio.to_thread(
                 _reject_git_visible_symlinks, created_worktree
