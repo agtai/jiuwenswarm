@@ -1120,8 +1120,10 @@ export class ProductP1VoiceRouteOwner {
     while (this.#mediaSentFrames < this.#frames.length) {
       const result = route.leaf.sendCaptureFrame(this.#frames[this.#mediaSentFrames]);
       if (!result.accepted) {
-        if (result.reason_id === 'MEDIA_NOT_ATTACHED') return;
-        throw new Error(result.reason_id);
+        if (['MEDIA_NOT_ATTACHED', 'MEDIA_BACKPRESSURE_LIMIT'].includes(result.reason_id)) return;
+        throw Object.assign(new Error('formal media route rejected a capture frame'), {
+          reason: result.reason_id,
+        });
       }
       this.#mediaSentFrames += 1;
     }

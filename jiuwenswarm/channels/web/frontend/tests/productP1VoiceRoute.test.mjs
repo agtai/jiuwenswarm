@@ -8,6 +8,7 @@ import {
   ProductP1VoiceRouteOwner,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js';
 import {
+  decodeAudioFrame,
   encodeAudioFrame,
   serializeMediaControl,
 } from '../node_modules/.cache/live-voice-browser-dedicated-media/browserDedicatedMediaRoute.mjs';
@@ -105,17 +106,20 @@ class FakeSocket {
   binding = null;
   closeOnFirstBinary = false;
   acknowledgeBinary = true;
+  binarySendCount = 0;
 
   send(value) {
     this.sent.push(value);
     if (typeof value !== 'string' && this.binding !== null && this.acknowledgeBinary) {
+      const throughSeq = this.binarySendCount;
+      this.binarySendCount += 1;
       queueMicrotask(() => this.onmessage?.({
         data: JSON.stringify({
           type: 'media.ack',
           contract_version: 'live-voice.media.v1',
           lease_id: this.binding.lease_id,
           generation: this.binding.generation.value,
-          through_seq: 0,
+          through_seq: throughSeq,
         }),
       }));
       if (this.closeOnFirstBinary) {
@@ -130,6 +134,7 @@ class FakeSocket {
   close() { this.readyState = 3; }
   open(binding) {
     this.binding = binding;
+    this.binarySendCount = 0;
     this.protocol = 'live-voice.media.v1';
     this.readyState = 1;
     this.onopen?.({});
@@ -438,6 +443,63 @@ test('formal P1 remains starting until a delayed first frame is accepted', async
   await starting;
   assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
   assert.equal(statuses.filter(status => status === 'capturing').length, 1);
+  await owner.close();
+});
+
+test('formal P1 drains capture accumulated before media attach through bounded ACK backpressure', async () => {
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  let releaseActivation;
+  const activationGate = new Promise(resolve => { releaseActivation = resolve; });
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      await activationGate;
+      return {
+        status: 'active', reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1', endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1', ticket_ttl_ms: 30_000, binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  const starting = owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7,
+  });
+  for (let turn = 0; turn < 100 && typeof environment.worklet?.port.onmessage !== 'function'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(typeof environment.worklet?.port.onmessage, 'function');
+  await new Promise(resolve => setImmediate(resolve));
+  for (let seq = 0; seq < 12; seq += 1) {
+    environment.worklet.port.onmessage({ data: {
+      kind: 'frame', capture_generation: environment.worklet.captureGeneration,
+      seq, sample_rate_hz: 48_000, sample_cursor: seq * 960, context_time_s: seq * 0.02,
+      samples: new Float32Array(960).fill(0.25),
+    } });
+  }
+  releaseActivation();
+
+  await starting;
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  const binaries = socket.sent.filter(value => typeof value !== 'string');
+  assert.equal(binaries.length, 12);
+  assert.deepEqual(
+    binaries.map(value => decodeAudioFrame(binding, value).seq),
+    Array.from({ length: 12 }, (_value, seq) => seq),
+  );
   await owner.close();
 });
 
