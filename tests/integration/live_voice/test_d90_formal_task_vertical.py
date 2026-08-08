@@ -111,6 +111,7 @@ def _voice_create(
     suffix: str,
     confirmed: bool = True,
 ) -> FormalTaskInvocation:
+    interaction_id = f"interaction-{suffix}"
     turn_id = f"turn-{suffix}"
     commit_id = f"commit-{suffix}"
     command_id = f"command-{suffix}"
@@ -122,7 +123,7 @@ def _voice_create(
                 "contract_version": CONTRACT_VERSION,
                 "commit_id": commit_id,
                 "turn_id": turn_id,
-                "interaction_id": f"interaction-{suffix}",
+                "interaction_id": interaction_id,
                 "text": instruction,
                 "hypothesis_provenance": {"provider": "integration"},
                 "scope": _scope().to_dict(),
@@ -146,6 +147,7 @@ def _voice_create(
             confirmed=confirmed,
         ),
         command_id=command_id,
+        interaction_id=interaction_id,
         turn_id=turn_id,
         commit_id=commit_id,
         name=f"Formal task {suffix}",
