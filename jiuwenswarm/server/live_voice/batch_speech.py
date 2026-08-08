@@ -87,6 +87,19 @@ _PCM16_SAMPLE_WIDTH_BYTES = 2
 _PCM_WAV_HEADER_BYTES = 44
 _OPENAI_PCM_SAMPLE_RATE_HZ = 24_000
 _MAX_SYNTHESIS_PCM_BYTES = MAX_SYNTHESIS_AUDIO_BYTES - _PCM_WAV_HEADER_BYTES
+_REBUILT_BODY_STALE_HEADERS = frozenset(
+    {
+        "content-digest",
+        "content-encoding",
+        "content-length",
+        "content-md5",
+        "content-range",
+        "digest",
+        "repr-digest",
+        "trailer",
+        "transfer-encoding",
+    }
+)
 
 _LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 _PROVIDER_ID = "openai-compatible-batch-speech"
@@ -757,7 +770,10 @@ class OpenAICompatibleBatchSpeechProvider:
         json_payload: dict[str, str] | None = None,
         max_response_bytes: int,
     ) -> httpx.Response:
-        headers = {"Authorization": f"Bearer {self._config.api_key}"}
+        headers = {
+            "Accept-Encoding": "identity",
+            "Authorization": f"Bearer {self._config.api_key}",
+        }
         try:
             async with self._client_factory() as client:
                 async with client.stream(
@@ -770,11 +786,25 @@ class OpenAICompatibleBatchSpeechProvider:
                 ) as streamed:
                     status_code = streamed.status_code
                     self._raise_provider_status(status_code)
-                    response_headers = streamed.headers
+                    content_encoding = streamed.headers.get("content-encoding")
+                    if (
+                        content_encoding is not None
+                        and content_encoding.strip().lower() != "identity"
+                    ):
+                        raise _fail(
+                            ErrorCode.PROTOCOL_VIOLATION,
+                            "SPEECH_PROVIDER_UNSUPPORTED_CONTENT_ENCODING",
+                            "speech Provider must return an identity-encoded response",
+                        )
+                    response_headers = [
+                        (name, value)
+                        for name, value in streamed.headers.multi_items()
+                        if name.lower() not in _REBUILT_BODY_STALE_HEADERS
+                    ]
                     response_request = streamed.request
                     chunks: list[bytes] = []
                     response_size = 0
-                    async for chunk in streamed.aiter_bytes():
+                    async for chunk in streamed.aiter_raw():
                         response_size += len(chunk)
                         if response_size > max_response_bytes:
                             raise _fail(

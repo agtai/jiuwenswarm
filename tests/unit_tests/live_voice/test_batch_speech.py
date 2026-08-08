@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import io
 import json
 import sys
 import wave
+import zlib
 from array import array
 from collections.abc import Callable
 from dataclasses import replace
@@ -17,6 +19,7 @@ import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    ErrorCode,
     ResponseRef,
     ScopeRef,
 )
@@ -92,10 +95,40 @@ def _openai_provider_returning(audio: bytes) -> OpenAICompatibleBatchSpeechProvi
         ),
         client_factory=lambda: httpx.AsyncClient(
             transport=httpx.MockTransport(
-                lambda request: httpx.Response(200, content=audio, request=request)
+                lambda request: httpx.Response(
+                    200,
+                    stream=httpx.ByteStream(audio),
+                    request=request,
+                )
             )
         ),
     )
+
+
+def _identity_response(content: bytes, *, content_type: str) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={
+            "Content-Encoding": "  IdEnTiTy  ",
+            "Content-Length": str(len(content)),
+            "Content-Type": content_type,
+            "X-Provider-Request-Id": "provider-request-safe",
+        },
+        stream=httpx.ByteStream(content),
+    )
+
+
+class TrackingAsyncByteStream(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+        self.read_count = 0
+
+    async def __aiter__(self):
+        self.read_count += 1
+        yield self._content
+
+    async def aclose(self) -> None:
+        return None
 
 
 class ControlledProvider(BatchSpeechProvider):
@@ -1113,7 +1146,7 @@ async def test_identity_and_operation_state_stays_within_declared_windows() -> N
 async def test_openai_compatible_adapter_uses_server_credentials_and_batch_endpoints() -> (
     None
 ):
-    seen: list[tuple[str, str | None, object | None]] = []
+    seen: list[tuple[str, str | None, str | None, object | None]] = []
 
     def responder(request: httpx.Request) -> httpx.Response:
         payload = (
@@ -1121,10 +1154,26 @@ async def test_openai_compatible_adapter_uses_server_credentials_and_batch_endpo
             if request.url.path.endswith("/audio/speech")
             else None
         )
-        seen.append((request.url.path, request.headers.get("authorization"), payload))
+        seen.append(
+            (
+                request.url.path,
+                request.headers.get("authorization"),
+                request.headers.get("accept-encoding"),
+                payload,
+            )
+        )
         if request.url.path.endswith("/audio/transcriptions"):
-            return httpx.Response(200, json={"text": "provider text", "language": "en"})
-        return httpx.Response(200, content=_pcm16_samples([0, 1, -1]))
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "application/json"},
+                stream=httpx.ByteStream(
+                    json.dumps({"text": "provider text", "language": "en"}).encode()
+                ),
+            )
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(_pcm16_samples([0, 1, -1])),
+        )
 
     config = OpenAICompatibleSpeechConfig(
         "https://speech.example.test/v1",
@@ -1149,13 +1198,15 @@ async def test_openai_compatible_adapter_uses_server_credentials_and_batch_endpo
 
     assert transcript.text == "provider text"
     assert audio.audio_wav.startswith(b"RIFF")
-    assert seen[0][0:2] == (
+    assert seen[0][0:3] == (
         "/v1/audio/transcriptions",
         "Bearer server-secret",
+        "identity",
     )
     assert seen[1] == (
         "/v1/audio/speech",
         "Bearer server-secret",
+        "identity",
         {
             "model": "tts-model",
             "voice": "voice-model",
@@ -1165,6 +1216,158 @@ async def test_openai_compatible_adapter_uses_server_credentials_and_batch_endpo
     )
     assert "server-secret" not in repr(config)
     assert "server-secret" not in repr(provider.capability())
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_adapter_accepts_identity_stt_and_tts() -> None:
+    source_pcm = _pcm16_samples([-1_000, 0, 1_000])
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/audio/transcriptions"):
+            return _identity_response(
+                json.dumps(
+                    {"text": "identity provider text", "language": "en"}
+                ).encode(),
+                content_type="application/json",
+            )
+        return _identity_response(source_pcm, content_type="application/octet-stream")
+
+    provider = OpenAICompatibleBatchSpeechProvider(
+        OpenAICompatibleSpeechConfig(
+            "https://speech.example.test/v1",
+            "server-secret",
+            "stt-model",
+            "tts-model",
+            "voice-model",
+        ),
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(responder)
+        ),
+    )
+
+    transcript = await provider.recognize(
+        ProviderRecognitionRequest("r", _wav(), "en-US")
+    )
+    audio = await provider.synthesize(
+        ProviderSynthesisRequest("s", "hello", "en-US", None, 24_000)
+    )
+
+    assert transcript.text == "identity provider text"
+    assert _read_wav_samples(audio.audio_wav) == (
+        24_000,
+        1,
+        2,
+        [-1_000, 0, 1_000],
+    )
+
+
+@pytest.mark.asyncio
+async def test_identity_response_rebuild_drops_stale_body_headers() -> None:
+    decoded = _pcm16_samples([-2, 0, 2])
+
+    provider = OpenAICompatibleBatchSpeechProvider(
+        OpenAICompatibleSpeechConfig(
+            "https://speech.example.test/v1",
+            "server-secret",
+            None,
+            "tts-model",
+            "voice-model",
+        ),
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={
+                        "Content-Digest": "sha-256=:stale:",
+                        "Content-Encoding": "identity",
+                        "Content-Length": "999",
+                        "Content-MD5": "stale",
+                        "Content-Range": "bytes 0-5/6",
+                        "Digest": "sha-256=:stale:",
+                        "Repr-Digest": "sha-256=:stale:",
+                        "Trailer": "Content-Digest",
+                        "Transfer-Encoding": "chunked",
+                        "Content-Type": "application/octet-stream",
+                        "X-Provider-Request-Id": "provider-request-safe",
+                    },
+                    stream=httpx.ByteStream(decoded),
+                    request=request,
+                )
+            )
+        ),
+    )
+
+    response = await provider._post(
+        "/audio/speech",
+        json_payload={"model": "tts-model"},
+        max_response_bytes=1024,
+    )
+
+    assert response.content == decoded
+    assert response.headers["content-length"] == str(len(decoded))
+    assert response.headers["content-type"] == "application/octet-stream"
+    assert response.headers["x-provider-request-id"] == "provider-request-safe"
+    for stale_header in (
+        "content-encoding",
+        "content-digest",
+        "content-md5",
+        "content-range",
+        "digest",
+        "repr-digest",
+        "trailer",
+        "transfer-encoding",
+    ):
+        assert stale_header not in response.headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("content_encoding", "body"),
+    [
+        pytest.param("gzip", gzip.compress(b"encoded"), id="gzip"),
+        pytest.param("deflate", zlib.compress(b"encoded"), id="deflate"),
+        pytest.param("GZip", b"corrupt-gzip", id="corrupt-gzip"),
+    ],
+)
+async def test_encoded_provider_response_fails_before_body_read(
+    content_encoding: str,
+    body: bytes,
+) -> None:
+    stream = TrackingAsyncByteStream(body)
+
+    provider = OpenAICompatibleBatchSpeechProvider(
+        OpenAICompatibleSpeechConfig(
+            "https://speech.example.test/v1",
+            "server-secret",
+            "stt-model",
+            None,
+            None,
+        ),
+        client_factory=lambda: httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200,
+                    headers={
+                        "Content-Encoding": content_encoding,
+                        "Content-Length": str(len(body)),
+                        "Content-Type": "application/json",
+                    },
+                    stream=stream,
+                    request=request,
+                )
+            )
+        ),
+    )
+
+    with pytest.raises(BatchSpeechError) as unsupported:
+        await provider.recognize(ProviderRecognitionRequest("r", _wav(), "en-US"))
+
+    assert unsupported.value.error.code is ErrorCode.PROTOCOL_VIOLATION
+    assert (
+        unsupported.value.error.reason == "SPEECH_PROVIDER_UNSUPPORTED_CONTENT_ENCODING"
+    )
+    assert unsupported.value.error.retriable is False
+    assert stream.read_count == 0
 
 
 @pytest.mark.asyncio
@@ -1329,7 +1532,10 @@ async def test_provider_response_limit_and_credentials_fail_with_safe_errors() -
     def responder(request: httpx.Request) -> httpx.Response:
         if status == 401:
             return httpx.Response(401, content=b"server-secret must not escape")
-        return httpx.Response(200, content=b"x" * (256 * 1024 + 1))
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(b"x" * (256 * 1024 + 1)),
+        )
 
     provider = OpenAICompatibleBatchSpeechProvider(
         OpenAICompatibleSpeechConfig(
