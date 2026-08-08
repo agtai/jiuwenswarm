@@ -120,7 +120,7 @@ test('closed P2 notification settles definitively so reconnect can reactivate', 
   let calls = 0;
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
-    request: async (method) => {
+    request: async method => {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       calls += 1;
       const error = webError('notification stream closed', 'UNAVAILABLE');
@@ -188,18 +188,11 @@ test('panel recovery coordinator closes an idle poll before activating the next 
       [PRODUCT_P2_ACTIVATE_METHOD, 2],
     ]
   );
-  const notificationCalls = calls.filter(
-    ([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD
-  );
+  const notificationCalls = calls.filter(([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
   assert.equal(notificationCalls.length, 1);
   assert.match(notificationCalls[0][2], /^live-voice-p2-notification-/);
   assert.equal(new Set(notificationCalls.map(([, , requestId]) => requestId)).size, 1);
-  for (const forbidden of [
-    PRODUCT_P2_SUBMIT_METHOD,
-    PRODUCT_P2_PRESENTATION_ACK_METHOD,
-    PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
-    PRODUCT_P3_MUTATE_METHOD,
-  ]) {
+  for (const forbidden of [PRODUCT_P2_SUBMIT_METHOD, PRODUCT_P2_PRESENTATION_ACK_METHOD, PRODUCT_P3_CONFIRMATION_ISSUE_METHOD, PRODUCT_P3_MUTATE_METHOD]) {
     assert.equal(calls.filter(([method]) => method === forbidden).length, 0, forbidden);
   }
 });
@@ -255,14 +248,27 @@ test('stock Web activates and closes one exact credential-free binding', async (
 
   assert.equal((await owner.start(binding)).status, 'active');
   assert.equal((await owner.close()).status, 'closed');
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P2_ACTIVATE_METHOD,
-    PRODUCT_P2_CLOSE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+  );
   for (const [, params] of calls) {
     assert.deepEqual(params, binding);
     assert.equal('auth_token' in params, false);
   }
+});
+
+test('stock Web exposes authoritative activation replay truth for refresh recovery', async () => {
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async method =>
+      response(method === PRODUCT_P2_ACTIVATE_METHOD ? 'active' : 'closed', method === PRODUCT_P2_ACTIVATE_METHOD ? { replayed: true } : {}),
+  });
+
+  assert.equal(owner.activationWasReplayed(), null);
+  await owner.start(binding);
+  assert.equal(owner.activationWasReplayed(), true);
+  await owner.close();
 });
 
 test('P2 owner publishes its construction snapshot without route allocation', () => {
@@ -276,7 +282,10 @@ test('P2 owner publishes its construction snapshot without route allocation', ()
   });
 
   assert.equal(owner.snapshot().status, 'idle');
-  assert.deepEqual(snapshots.map(snapshot => snapshot.status), ['idle']);
+  assert.deepEqual(
+    snapshots.map(snapshot => snapshot.status),
+    ['idle']
+  );
 });
 
 test('active stock Web owner submits text, polls output, and ACKs exact presentation', async () => {
@@ -304,29 +313,37 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
   });
   await owner.start(binding);
 
-  assert.equal((await owner.submitText({
-    commit_id: 'commit-1',
-    turn_id: 'turn-1',
-    response_id: 'response-1',
-    committed_at: '2026-08-07T10:00:00Z',
-    text: '  preserve exact text  ',
-  })).status, 'round_accepted');
+  assert.equal(
+    (
+      await owner.submitText({
+        commit_id: 'commit-1',
+        turn_id: 'turn-1',
+        response_id: 'response-1',
+        committed_at: '2026-08-07T10:00:00Z',
+        text: '  preserve exact text  ',
+      })
+    ).status,
+    'round_accepted'
+  );
   assert.equal((await owner.nextNotification()).kind, 'agent.output');
-  assert.equal((await owner.acknowledgePresentation({
-    response_id: 'response-1',
-    response_generation: 0,
-    surface: 'text',
-    unit_id: 'unit-1',
-    contiguous_cursor: 0,
-    presented_at: '2026-08-07T10:00:01Z',
-  })).accepted, true);
+  assert.equal(
+    (
+      await owner.acknowledgePresentation({
+        response_id: 'response-1',
+        response_generation: 0,
+        surface: 'text',
+        unit_id: 'unit-1',
+        contiguous_cursor: 0,
+        presented_at: '2026-08-07T10:00:01Z',
+      })
+    ).accepted,
+    true
+  );
 
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P2_ACTIVATE_METHOD,
-    PRODUCT_P2_SUBMIT_METHOD,
-    PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
-    PRODUCT_P2_PRESENTATION_ACK_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_SUBMIT_METHOD, PRODUCT_P2_NOTIFICATION_NEXT_METHOD, PRODUCT_P2_PRESENTATION_ACK_METHOD]
+  );
   assert.equal(calls[1][1].text, '  preserve exact text  ');
   assert.equal(calls[2][1].notification_sequence, 1);
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
@@ -380,19 +397,13 @@ test('active stock Web owner replays exact P2 operations after response loss', a
   await assert.rejects(owner.acknowledgePresentation(ack), /response lost/);
   await owner.acknowledgePresentation(ack);
 
-  for (const method of [
-    PRODUCT_P2_SUBMIT_METHOD,
-    PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
-    PRODUCT_P2_PRESENTATION_ACK_METHOD,
-  ]) {
+  for (const method of [PRODUCT_P2_SUBMIT_METHOD, PRODUCT_P2_NOTIFICATION_NEXT_METHOD, PRODUCT_P2_PRESENTATION_ACK_METHOD]) {
     const operationCalls = calls.filter(([called]) => called === method);
     assert.equal(operationCalls.length, 2);
     assert.equal(operationCalls[0][2], operationCalls[1][2]);
     assert.match(operationCalls[0][2], /^live-voice-p2-/);
   }
-  const notificationCalls = calls.filter(
-    ([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD
-  );
+  const notificationCalls = calls.filter(([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
   assert.equal(notificationCalls[0][1].notification_sequence, 1);
   assert.equal(notificationCalls[1][1].notification_sequence, 1);
 });
@@ -420,10 +431,7 @@ test('unknown P2 submit locks semantic changes but exact retry stays stable', as
 
   await assert.rejects(owner.submitText(first), /outcome unknown/);
   assert.equal(owner.hasPendingSubmission(), true);
-  await assert.rejects(
-    owner.submitText({ ...first, commit_id: 'commit-unknown-2', text: 'changed turn' }),
-    /previous product turn is still unresolved/
-  );
+  await assert.rejects(owner.submitText({ ...first, commit_id: 'commit-unknown-2', text: 'changed turn' }), /previous product turn is still unresolved/);
   unavailable = false;
   await owner.submitText(first);
 
@@ -486,7 +494,7 @@ test('completed Web submission capacity recovers and old replay fails closed', a
   let submissionCalls = 0;
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
-    request: async (method) => {
+    request: async method => {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       submissionCalls += 1;
       return response('round_accepted', { round_id: `round-${submissionCalls}` });
@@ -521,13 +529,16 @@ test('P2 operations fail before transport unless the exact activation is active'
     request: async (...args) => calls.push(args),
   });
 
-  await assert.rejects(owner.submitText({
-    commit_id: 'commit-1',
-    turn_id: 'turn-1',
-    response_id: 'response-1',
-    committed_at: '2026-08-07T10:00:00Z',
-    text: 'hello',
-  }), /not active/);
+  await assert.rejects(
+    owner.submitText({
+      commit_id: 'commit-1',
+      turn_id: 'turn-1',
+      response_id: 'response-1',
+      committed_at: '2026-08-07T10:00:00Z',
+      text: 'hello',
+    }),
+    /not active/
+  );
   await assert.rejects(owner.nextNotification(), /not active/);
   assert.deepEqual(calls, []);
 });
@@ -563,10 +574,10 @@ test('stock Web P3 owner forwards one exact credential-free confirmed mutation',
   const replay = await owner.issue(mutation);
   assert.equal(first, replay);
   assert.equal((await owner.mutate(mutation)).status, 'mutation_processed');
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
-    PRODUCT_P3_MUTATE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P3_CONFIRMATION_ISSUE_METHOD, PRODUCT_P3_MUTATE_METHOD]
+  );
   assert.equal(calls[1][1].confirmation_id, 'confirmation-1');
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
 });
@@ -600,21 +611,59 @@ test('stock Web owner retains one exact playback-scoped barge-in', async () => {
     cancel_response: false,
   };
 
+  assert.equal(owner.hasPendingBargeIn(), false);
   const first = await owner.bargeIn(input);
+  assert.equal(owner.hasPendingBargeIn(), false);
   const replay = await owner.bargeIn(input);
 
   assert.equal(first.status, 'barge_in_applied');
   assert.deepEqual(replay, first);
-  assert.equal(
-    calls.filter(([method]) => method === PRODUCT_P2_BARGE_IN_METHOD).length,
-    1,
-  );
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_BARGE_IN_METHOD).length, 1);
   assert.equal(calls[1][1].cancel_response, false);
   assert.match(calls[1][2], /^live-voice-p2-barge-/);
-  await assert.rejects(
-    owner.bargeIn({ ...input, response_generation: -1 }),
-    /barge-in binding/,
-  );
+  await assert.rejects(owner.bargeIn({ ...input, response_generation: -1 }), /barge-in binding/);
+});
+
+test('barge-in response loss stays pending until the exact input is replayed', async () => {
+  let bargeCalls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_BARGE_IN_METHOD) {
+        bargeCalls += 1;
+        if (bargeCalls === 1) {
+          const error = new Error('response lost');
+          error.code = 'REQUEST_TIMEOUT';
+          error.retriable = true;
+          throw error;
+        }
+        return response('barge_in_applied', {
+          action_id: params.action_id,
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          cancel_response: params.cancel_response,
+          applied: true,
+          replayed: true,
+          effect_ids: ['effect-playback-stop'],
+        });
+      }
+      return response('closed');
+    },
+  });
+  const input = {
+    action_id: 'barge-action-loss',
+    response_id: 'response-loss',
+    response_generation: 1,
+    cancel_response: true,
+  };
+  await owner.start(binding);
+
+  await assert.rejects(owner.bargeIn(input), /response lost/);
+  assert.equal(owner.hasPendingBargeIn(), true);
+  assert.equal((await owner.bargeIn(input)).replayed, true);
+  assert.equal(owner.hasPendingBargeIn(), false);
+  assert.equal(bargeCalls, 2);
 });
 
 test('stock Web P3 owner binds exact committed voice origin and rejects borrowing', async () => {
@@ -669,18 +718,9 @@ test('stock Web P3 owner binds exact committed voice origin and rejects borrowin
       throw new Error('transport must not be reached');
     },
   });
-  await assert.rejects(
-    rejecting.issue({ ...voice, source: 'structured' }),
-    /committed origin/
-  );
-  await assert.rejects(
-    rejecting.issue({ ...voice, interaction_id: undefined }),
-    /committed origin/
-  );
-  await assert.rejects(
-    rejecting.issue({ ...voice, turn_id: undefined }),
-    /committed origin/
-  );
+  await assert.rejects(rejecting.issue({ ...voice, source: 'structured' }), /committed origin/);
+  await assert.rejects(rejecting.issue({ ...voice, interaction_id: undefined }), /committed origin/);
+  await assert.rejects(rejecting.issue({ ...voice, turn_id: undefined }), /committed origin/);
 });
 
 test('stock Web P3 owner rejects forged confirmation echoes and closed bindings', async () => {
@@ -723,9 +763,10 @@ test('stock Web P3 owner rejects forged confirmation echoes and closed bindings'
 
     await assert.rejects(owner.issue(mutation), /response|binding/);
     await assert.rejects(owner.mutate(mutation), /confirmation/);
-    assert.deepEqual(calls.map(([method]) => method), [
-      PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
-    ]);
+    assert.deepEqual(
+      calls.map(([method]) => method),
+      [PRODUCT_P3_CONFIRMATION_ISSUE_METHOD]
+    );
   }
 });
 
@@ -897,7 +938,9 @@ test('stock Web P3 owner rejects mutation changes and feature-off effects', asyn
 test('close waits for an in-flight activation and still performs retained cleanup', async () => {
   const calls = [];
   let release;
-  const activation = new Promise(resolve => { release = resolve; });
+  const activation = new Promise(resolve => {
+    release = resolve;
+  });
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
     request: async (method, params) => {
@@ -909,15 +952,18 @@ test('close waits for an in-flight activation and still performs retained cleanu
 
   const started = owner.start(binding);
   const closed = owner.close();
-  assert.deepEqual(calls.map(([method]) => method), [PRODUCT_P2_ACTIVATE_METHOD]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD]
+  );
   release(response('active'));
 
   assert.equal((await started).status, 'active');
   assert.equal((await closed).status, 'closed');
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P2_ACTIVATE_METHOD,
-    PRODUCT_P2_CLOSE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+  );
 });
 
 test('binding mismatch fails closed and cleanup remains attempted', async () => {
@@ -926,19 +972,17 @@ test('binding mismatch fails closed and cleanup remains attempted', async () => 
     enabled: true,
     request: async (method, params) => {
       calls.push([method, params]);
-      return method === PRODUCT_P2_ACTIVATE_METHOD
-        ? response('active', { activation_id: 'wrong-activation' })
-        : response('closed');
+      return method === PRODUCT_P2_ACTIVATE_METHOD ? response('active', { activation_id: 'wrong-activation' }) : response('closed');
     },
   });
 
   await assert.rejects(owner.start(binding), /binding mismatch/);
   assert.equal(owner.snapshot().status, 'unavailable');
   assert.equal((await owner.close()).status, 'closed');
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P2_ACTIVATE_METHOD,
-    PRODUCT_P2_CLOSE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+  );
 });
 
 test('P2 transport-loss activation retains exact cleanup ownership', async () => {
@@ -963,33 +1007,30 @@ test('P2 transport-loss activation retains exact cleanup ownership', async () =>
 test('P2 pending activation disconnect cleans the exact route before reconnect recovery', async () => {
   const calls = [];
   let disconnected = true;
-  const createOwner = () => new ProductWebP2ActivationOwner({
-    enabled: true,
-    request: async (method, params) => {
-      calls.push([method, params]);
-      if (method === PRODUCT_P2_ACTIVATE_METHOD && disconnected) {
-        throw webError('connection closed after send', 'WS_CLOSED');
-      }
-      return response(method === PRODUCT_P2_ACTIVATE_METHOD ? 'active' : 'closed');
-    },
-  });
+  const createOwner = () =>
+    new ProductWebP2ActivationOwner({
+      enabled: true,
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === PRODUCT_P2_ACTIVATE_METHOD && disconnected) {
+          throw webError('connection closed after send', 'WS_CLOSED');
+        }
+        return response(method === PRODUCT_P2_ACTIVATE_METHOD ? 'active' : 'closed');
+      },
+    });
 
   const disconnectedOwner = createOwner();
   await assert.rejects(disconnectedOwner.start(binding), /closed after send/);
   assert.equal(disconnectedOwner.needsCleanup(), true);
-  assert.equal(
-    (await disconnectedOwner.closeWithRetry({ retry_delay_ms: 0 })).status,
-    'closed'
-  );
+  assert.equal((await disconnectedOwner.closeWithRetry({ retry_delay_ms: 0 })).status, 'closed');
 
   disconnected = false;
   const reconnectedOwner = createOwner();
   assert.equal((await reconnectedOwner.start(binding)).status, 'active');
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P2_ACTIVATE_METHOD,
-    PRODUCT_P2_CLOSE_METHOD,
-    PRODUCT_P2_ACTIVATE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD, PRODUCT_P2_ACTIVATE_METHOD]
+  );
   assert.deepEqual(calls[1][1], binding);
   await reconnectedOwner.close();
 });
@@ -1080,10 +1121,7 @@ test('P2 cleanup retry stops at its explicit bound and retains exact ownership',
   });
   await owner.start(binding);
 
-  await assert.rejects(
-    owner.closeWithRetry({ max_attempts: 3, retry_delay_ms: 0 }),
-    /cleanup still unavailable/
-  );
+  await assert.rejects(owner.closeWithRetry({ max_attempts: 3, retry_delay_ms: 0 }), /cleanup still unavailable/);
 
   assert.equal(closeCalls, 3);
   assert.equal(owner.snapshot().status, 'cleanup_pending');
@@ -1146,11 +1184,10 @@ test('stock Web queries one formal task then owns exact P3 progress activate and
   assert.equal(active.status, 'active');
   assert.equal(active.binding?.task_id, 'task-1');
   assert.equal((await owner.close()).status, 'closed');
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P3_TASK_LIST_METHOD,
-    PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
-    PRODUCT_P3_PROGRESS_CLOSE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD]
+  );
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
 });
 
@@ -1183,17 +1220,19 @@ test('fresh task.create binds progress directly to the exact accepted task', asy
   });
   await owner.close();
 
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
-    PRODUCT_P3_PROGRESS_CLOSE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD]
+  );
   assert.equal(calls[0][1].task_id, 'task-created-1');
 });
 
 test('P3 close waits for in-flight task selection and cleans the resulting activation', async () => {
   const calls = [];
   let releaseTaskList;
-  const taskList = new Promise(resolve => { releaseTaskList = resolve; });
+  const taskList = new Promise(resolve => {
+    releaseTaskList = resolve;
+  });
   const owner = new ProductWebP3ProgressOwner({
     enabled: true,
     request: async (method, params) => {
@@ -1222,7 +1261,10 @@ test('P3 close waits for in-flight task selection and cleans the resulting activ
     generation: 1,
   });
   const closed = owner.close();
-  assert.deepEqual(calls.map(([method]) => method), [PRODUCT_P3_TASK_LIST_METHOD]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P3_TASK_LIST_METHOD]
+  );
   releaseTaskList({
     ok: true,
     result: { tasks: [{ task_id: 'task-1', state: 'running' }] },
@@ -1230,11 +1272,10 @@ test('P3 close waits for in-flight task selection and cleans the resulting activ
 
   assert.equal((await started).status, 'active');
   assert.equal((await closed).status, 'closed');
-  assert.deepEqual(calls.map(([method]) => method), [
-    PRODUCT_P3_TASK_LIST_METHOD,
-    PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
-    PRODUCT_P3_PROGRESS_CLOSE_METHOD,
-  ]);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD]
+  );
 });
 
 test('P3 progress refuses ambiguous active task selection without activation', async () => {
@@ -1255,14 +1296,20 @@ test('P3 progress refuses ambiguous active task selection without activation', a
     },
   });
 
-  await assert.rejects(owner.start({
-    session_id: 'session-1',
-    correlation_id: 'correlation-1',
-    origin_id: 'origin-1',
-    generation_id: 'generation-1',
-    generation: 1,
-  }), /exactly one active task/);
-  assert.deepEqual(calls.map(([method]) => method), [PRODUCT_P3_TASK_LIST_METHOD]);
+  await assert.rejects(
+    owner.start({
+      session_id: 'session-1',
+      correlation_id: 'correlation-1',
+      origin_id: 'origin-1',
+      generation_id: 'generation-1',
+      generation: 1,
+    }),
+    /exactly one active task/
+  );
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P3_TASK_LIST_METHOD]
+  );
   assert.equal(owner.snapshot().binding, null);
   assert.equal((await owner.close()).status, 'closed');
 });
@@ -1270,30 +1317,31 @@ test('P3 progress refuses ambiguous active task selection without activation', a
 test('P3 authoritative activation unavailability stays unavailable and permits recovery', async () => {
   const calls = [];
   let dependencyAvailable = false;
-  const createOwner = () => new ProductWebP3ProgressOwner({
-    enabled: true,
-    request: async method => {
-      calls.push(method);
-      if (method === PRODUCT_P3_TASK_LIST_METHOD) {
-        return { ok: true, result: { tasks: [{ task_id: 'task-1', state: 'running' }] } };
-      }
-      if (method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD && !dependencyAvailable) {
-        throw webError('subscription unavailable', 'UNAVAILABLE');
-      }
-      return {
-        ok: true,
-        result: {
-          status: method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed',
-          session_id: 'session-1',
-          task_id: 'task-1',
-          correlation_id: 'correlation-1',
-          origin_id: 'origin-1',
-          generation_id: 'generation-1',
-          generation: 1,
-        },
-      };
-    },
-  });
+  const createOwner = () =>
+    new ProductWebP3ProgressOwner({
+      enabled: true,
+      request: async method => {
+        calls.push(method);
+        if (method === PRODUCT_P3_TASK_LIST_METHOD) {
+          return { ok: true, result: { tasks: [{ task_id: 'task-1', state: 'running' }] } };
+        }
+        if (method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD && !dependencyAvailable) {
+          throw webError('subscription unavailable', 'UNAVAILABLE');
+        }
+        return {
+          ok: true,
+          result: {
+            status: method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed',
+            session_id: 'session-1',
+            task_id: 'task-1',
+            correlation_id: 'correlation-1',
+            origin_id: 'origin-1',
+            generation_id: 'generation-1',
+            generation: 1,
+          },
+        };
+      },
+    });
   const input = {
     session_id: 'session-1',
     correlation_id: 'correlation-1',
@@ -1311,12 +1359,7 @@ test('P3 authoritative activation unavailability stays unavailable and permits r
   dependencyAvailable = true;
   const recovered = createOwner();
   assert.equal((await recovered.start(input)).status, 'active');
-  assert.deepEqual(calls, [
-    PRODUCT_P3_TASK_LIST_METHOD,
-    PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
-    PRODUCT_P3_TASK_LIST_METHOD,
-    PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
-  ]);
+  assert.deepEqual(calls, [PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD]);
   await recovered.close();
 });
 

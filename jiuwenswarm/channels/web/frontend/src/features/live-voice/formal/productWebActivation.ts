@@ -12,14 +12,7 @@ export const PRODUCT_P3_PROGRESS_CLOSE_METHOD = 'live_voice.composition.p3.progr
 
 type JsonObject = Readonly<Record<string, unknown>>;
 
-export type ProductWebP2ActivationStatus =
-  | 'disabled'
-  | 'idle'
-  | 'activating'
-  | 'active'
-  | 'unavailable'
-  | 'cleanup_pending'
-  | 'closed';
+export type ProductWebP2ActivationStatus = 'disabled' | 'idle' | 'activating' | 'active' | 'unavailable' | 'cleanup_pending' | 'closed';
 
 export interface ProductWebP2ActivationBinding {
   readonly session_id: string;
@@ -50,10 +43,7 @@ export interface ProductWebP3ProgressSnapshot {
   readonly reason: string | null;
 }
 
-type ProductWebCloseRetryObserver<TSnapshot> = (
-  snapshot: Readonly<TSnapshot>,
-  attempt: number
-) => void;
+type ProductWebCloseRetryObserver<TSnapshot> = (snapshot: Readonly<TSnapshot>, attempt: number) => void;
 
 export interface ProductWebCloseRetryOptions<TSnapshot> {
   readonly max_attempts?: number;
@@ -65,11 +55,7 @@ type ProductWebAmbiguousActivationError = Error & {
   readonly product_activation_cleanup_required: true;
 };
 
-const AMBIGUOUS_ACTIVATION_TRANSPORT_CODES = new Set([
-  'REQUEST_TIMEOUT',
-  'WS_DISCONNECTED',
-  'WS_CLOSED',
-]);
+const AMBIGUOUS_ACTIVATION_TRANSPORT_CODES = new Set(['REQUEST_TIMEOUT', 'WS_DISCONNECTED', 'WS_CLOSED']);
 const RETAINED_OPERATION_RETRY_DELAYS_MS = Object.freeze([250, 750]);
 const PRODUCT_OPERATION_CAPACITY = 128;
 
@@ -91,9 +77,7 @@ class ProductReplayFence {
   }
 
   has(value: string): boolean {
-    return this.indices(value).every(
-      index => (this.bits[index >> 3] & (1 << (index & 7))) !== 0
-    );
+    return this.indices(value).every(index => (this.bits[index >> 3] & (1 << (index & 7))) !== 0);
   }
 }
 
@@ -117,26 +101,18 @@ function allocateProductRequestId(prefix: string): string {
   return `${prefix}-${random ?? `${Date.now()}-${productRequestSequence}`}`;
 }
 
-export type ProductWebRequest = (
-  method: string,
-  params: Record<string, unknown>,
-  request_id?: string
-) => Promise<unknown>;
+export type ProductWebRequest = (method: string, params: Record<string, unknown>, request_id?: string) => Promise<unknown>;
 
 function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 export function isRetriableProductOperationError(error: unknown): boolean {
   const candidate = objectValue(error);
   return Boolean(
     candidate?.retriable === true ||
-      (typeof candidate?.code === 'string' &&
-        (AMBIGUOUS_ACTIVATION_TRANSPORT_CODES.has(candidate.code) ||
-          candidate.code === 'WS_NOT_READY' ||
-          candidate.code === 'UNAVAILABLE'))
+    (typeof candidate?.code === 'string' &&
+      (AMBIGUOUS_ACTIVATION_TRANSPORT_CODES.has(candidate.code) || candidate.code === 'WS_NOT_READY' || candidate.code === 'UNAVAILABLE'))
   );
 }
 
@@ -160,10 +136,8 @@ const DEFINITIVE_PRODUCT_FAILURE_REASONS = new Set([
 export function isDefinitiveProductOperationError(error: unknown): boolean {
   const candidate = objectValue(error);
   return Boolean(
-    (typeof candidate?.code === 'string' &&
-      DEFINITIVE_PRODUCT_FAILURE_CODES.has(candidate.code)) ||
-      (typeof candidate?.reason === 'string' &&
-        DEFINITIVE_PRODUCT_FAILURE_REASONS.has(candidate.reason))
+    (typeof candidate?.code === 'string' && DEFINITIVE_PRODUCT_FAILURE_CODES.has(candidate.code)) ||
+    (typeof candidate?.reason === 'string' && DEFINITIVE_PRODUCT_FAILURE_REASONS.has(candidate.reason))
   );
 }
 
@@ -177,19 +151,13 @@ export async function retryRetainedProductOperation<T>(input: {
   let failure: unknown;
   for (let attempt = 0; attempt <= delays.length; attempt += 1) {
     if (!input.is_current()) {
-      throw failure instanceof Error
-        ? failure
-        : new Error('retained product operation is no longer current');
+      throw failure instanceof Error ? failure : new Error('retained product operation is no longer current');
     }
     try {
       return await input.operation();
     } catch (error) {
       failure = error;
-      if (
-        isDefinitiveProductOperationError(error) ||
-        !isRetriableProductOperationError(error) ||
-        attempt === delays.length
-      ) throw error;
+      if (isDefinitiveProductOperationError(error) || !isRetriableProductOperationError(error) || attempt === delays.length) throw error;
       const delay = delays[attempt];
       if (!Number.isSafeInteger(delay) || delay < 0) {
         throw new Error('retained product retry delay is invalid');
@@ -254,9 +222,7 @@ function requiredContent(value: string, field: string): string {
   return value;
 }
 
-function freezeBinding(
-  input: Readonly<ProductWebP2ActivationBinding>
-): ProductWebP2ActivationBinding {
+function freezeBinding(input: Readonly<ProductWebP2ActivationBinding>): ProductWebP2ActivationBinding {
   if (!Number.isSafeInteger(input.activation_generation) || input.activation_generation <= 0) {
     throw new Error('activation_generation is invalid');
   }
@@ -269,10 +235,7 @@ function freezeBinding(
   });
 }
 
-function sameBinding(
-  left: Readonly<ProductWebP2ActivationBinding>,
-  right: Readonly<ProductWebP2ActivationBinding>
-): boolean {
+function sameBinding(left: Readonly<ProductWebP2ActivationBinding>, right: Readonly<ProductWebP2ActivationBinding>): boolean {
   return (
     left.session_id === right.session_id &&
     left.correlation_id === right.correlation_id &&
@@ -282,11 +245,7 @@ function sameBinding(
   );
 }
 
-function requireResult(
-  value: unknown,
-  expectedStatus: 'active' | 'closed',
-  binding: Readonly<ProductWebP2ActivationBinding>
-): JsonObject {
+function requireResult(value: unknown, expectedStatus: 'active' | 'closed', binding: Readonly<ProductWebP2ActivationBinding>): JsonObject {
   const payload = objectValue(value);
   const result = objectValue(payload?.result);
   if (payload?.ok !== true || result?.status !== expectedStatus) {
@@ -359,9 +318,7 @@ function freezeP3MutationInput(input: ProductWebP3MutationInput): ProductWebP3Mu
   }
   if (
     (source === 'voice' && (!input.interaction_id || !input.turn_id || !input.commit_id)) ||
-    (source === 'structured' && (
-      input.interaction_id !== undefined || input.turn_id !== undefined || input.commit_id !== undefined
-    ))
+    (source === 'structured' && (input.interaction_id !== undefined || input.turn_id !== undefined || input.commit_id !== undefined))
   ) {
     throw new Error('task.create committed origin is invalid');
   }
@@ -378,21 +335,15 @@ function freezeP3MutationInput(input: ProductWebP3MutationInput): ProductWebP3Mu
       : {}),
     name: requiredContent(input.name, 'name'),
     instruction: requiredContent(input.instruction, 'instruction'),
-    ...(input.model_intent === undefined
-      ? {}
-      : { model_intent: requiredText(input.model_intent, 'model_intent') }),
+    ...(input.model_intent === undefined ? {} : { model_intent: requiredText(input.model_intent, 'model_intent') }),
   });
 }
 
-function requireP3TaskControlBinding(
-  value: unknown,
-  mutation: ProductWebP3MutationInput
-): ProductWebP3TaskControlBinding {
+function requireP3TaskControlBinding(value: unknown, mutation: ProductWebP3MutationInput): ProductWebP3TaskControlBinding {
   const binding = objectValue(value);
   if (
     binding === null ||
-    Object.keys(binding).sort().join(',') !==
-      'correlation_id,generation,project_id,session_id,subject_id' ||
+    Object.keys(binding).sort().join(',') !== 'correlation_id,generation,project_id,session_id,subject_id' ||
     binding.session_id !== mutation.session_id ||
     binding.correlation_id !== mutation.correlation_id ||
     !Number.isSafeInteger(binding.generation) ||
@@ -432,9 +383,7 @@ function selectSingleActiveTask(value: unknown): string {
   return active[0]!;
 }
 
-function freezeP3Binding(
-  input: Readonly<ProductWebP3ProgressBinding>
-): ProductWebP3ProgressBinding {
+function freezeP3Binding(input: Readonly<ProductWebP3ProgressBinding>): ProductWebP3ProgressBinding {
   if (!Number.isSafeInteger(input.generation) || input.generation <= 0) {
     throw new Error('generation is invalid');
   }
@@ -448,11 +397,7 @@ function freezeP3Binding(
   });
 }
 
-function requireP3Result(
-  value: unknown,
-  expectedStatus: 'active' | 'closed',
-  binding: Readonly<ProductWebP3ProgressBinding>
-): JsonObject {
+function requireP3Result(value: unknown, expectedStatus: 'active' | 'closed', binding: Readonly<ProductWebP3ProgressBinding>): JsonObject {
   const payload = objectValue(value);
   const result = objectValue(payload?.result);
   if (
@@ -471,9 +416,7 @@ function requireP3Result(
 }
 
 function ambiguousActivationResponse(error: unknown): ProductWebAmbiguousActivationError {
-  const message = error instanceof Error
-    ? error.message
-    : 'product activation response binding is unavailable';
+  const message = error instanceof Error ? error.message : 'product activation response binding is unavailable';
   const wrapped = new Error(message) as ProductWebAmbiguousActivationError;
   wrapped.name = 'ProductWebAmbiguousActivationError';
   Object.defineProperty(wrapped, 'product_activation_cleanup_required', {
@@ -487,9 +430,7 @@ function ambiguousActivationResponse(error: unknown): ProductWebAmbiguousActivat
 export function requiresProductActivationCleanup(error: unknown): boolean {
   const candidate = objectValue(error);
   return (
-    candidate?.product_activation_cleanup_required === true ||
-    (typeof candidate?.code === 'string' &&
-      AMBIGUOUS_ACTIVATION_TRANSPORT_CODES.has(candidate.code))
+    candidate?.product_activation_cleanup_required === true || (typeof candidate?.code === 'string' && AMBIGUOUS_ACTIVATION_TRANSPORT_CODES.has(candidate.code))
   );
 }
 
@@ -540,25 +481,15 @@ export class ProductWebP2ActivationOwner {
   private status: ProductWebP2ActivationStatus;
   private reason: string | null = null;
   private activationAttempted = false;
+  private activationReplayed: boolean | null = null;
   private cleanupRequired = false;
   private activationPromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
   private closePromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
   private closeRetryPromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
-  private readonly closeRetryObservers = new Set<
-    ProductWebCloseRetryObserver<ProductWebP2ActivationSnapshot>
-  >();
-  private readonly submissions = new Map<
-    string,
-    { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }
-  >();
-  private readonly presentationAcks = new Map<
-    string,
-    { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }
-  >();
-  private readonly bargeIns = new Map<
-    string,
-    { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }
-  >();
+  private readonly closeRetryObservers = new Set<ProductWebCloseRetryObserver<ProductWebP2ActivationSnapshot>>();
+  private readonly submissions = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
+  private readonly presentationAcks = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
+  private readonly bargeIns = new Map<string, { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }>();
   private readonly submissionReplayFence = new ProductReplayFence();
   private readonly presentationAckReplayFence = new ProductReplayFence();
   private readonly bargeInReplayFence = new ProductReplayFence();
@@ -566,11 +497,7 @@ export class ProductWebP2ActivationOwner {
   private notificationPromise: Promise<JsonObject> | null = null;
   private notificationSequence = 0;
 
-  constructor(input: {
-    enabled: boolean;
-    request: ProductWebRequest;
-    on_snapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void;
-  }) {
+  constructor(input: { enabled: boolean; request: ProductWebRequest; on_snapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void }) {
     if (typeof input.request !== 'function') throw new Error('product request owner is required');
     this.enabled = input.enabled;
     this.request = input.request;
@@ -587,9 +514,11 @@ export class ProductWebP2ActivationOwner {
     return this.activationPromise !== null || this.cleanupRequired;
   }
 
-  start(
-    input: Readonly<ProductWebP2ActivationBinding>
-  ): Promise<ProductWebP2ActivationSnapshot> {
+  activationWasReplayed(): boolean | null {
+    return this.activationReplayed;
+  }
+
+  start(input: Readonly<ProductWebP2ActivationBinding>): Promise<ProductWebP2ActivationSnapshot> {
     if (!this.enabled) return Promise.resolve(this.snapshot());
     const binding = freezeBinding(input);
     if (this.binding && !sameBinding(this.binding, binding)) {
@@ -599,6 +528,7 @@ export class ProductWebP2ActivationOwner {
     if (this.status === 'active') return Promise.resolve(this.snapshot());
     this.binding = binding;
     this.activationAttempted = true;
+    this.activationReplayed = null;
     this.cleanupRequired = false;
     this.status = 'activating';
     this.reason = null;
@@ -606,7 +536,8 @@ export class ProductWebP2ActivationOwner {
     this.activationPromise = this.request(PRODUCT_P2_ACTIVATE_METHOD, { ...binding })
       .then(value => {
         try {
-          requireResult(value, 'active', binding);
+          const result = requireResult(value, 'active', binding);
+          this.activationReplayed = result.replayed === true ? true : result.replayed === false ? false : null;
         } catch (error) {
           throw ambiguousActivationResponse(error);
         }
@@ -640,6 +571,10 @@ export class ProductWebP2ActivationOwner {
     return [...this.presentationAcks.values()].some(entry => entry.result === undefined);
   }
 
+  hasPendingBargeIn(): boolean {
+    return [...this.bargeIns.values()].some(entry => entry.result === undefined);
+  }
+
   async submitText(input: {
     commit_id: string;
     turn_id: string;
@@ -666,9 +601,7 @@ export class ProductWebP2ActivationOwner {
       committed_at: requiredText(input.committed_at, 'committed_at'),
       text: requiredContent(input.text, 'text'),
       dispatch_target: dispatchTarget,
-      ...(input.voice_commit_receipt
-        ? { voice_commit_receipt: requiredText(input.voice_commit_receipt, 'voice_commit_receipt') }
-        : {}),
+      ...(input.voice_commit_receipt ? { voice_commit_receipt: requiredText(input.voice_commit_receipt, 'voice_commit_receipt') } : {}),
       ...(input.critical_confirmation === true ? { critical_confirmation: true } : {}),
     };
     const fingerprint = JSON.stringify(params);
@@ -682,10 +615,7 @@ export class ProductWebP2ActivationOwner {
       if (this.hasPendingSubmission() || this.hasPendingPresentationAck()) {
         return Promise.reject(new Error('a previous product turn is still unresolved'));
       }
-      if (
-        this.submissions.size >= PRODUCT_OPERATION_CAPACITY &&
-        !evictCompletedProductOperation(this.submissions, this.submissionReplayFence)
-      ) {
+      if (this.submissions.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.submissions, this.submissionReplayFence)) {
         return Promise.reject(new Error('bounded product submission ledger is full'));
       }
       retained = { requestId: allocateProductRequestId('live-voice-p2-submit') };
@@ -695,11 +625,7 @@ export class ProductWebP2ActivationOwner {
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_SUBMIT_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(
-          value,
-          dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted',
-          binding,
-        );
+        const result = requireP2BoundOperationResult(value, dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted', binding);
         entry.result = result;
         return result;
       })
@@ -723,11 +649,7 @@ export class ProductWebP2ActivationOwner {
     }
     const requestId = this.notificationRequestId;
     let promise: Promise<JsonObject>;
-    promise = this.request(
-      PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
-      { ...binding, notification_sequence: this.notificationSequence },
-      requestId
-    )
+    promise = this.request(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, { ...binding, notification_sequence: this.notificationSequence }, requestId)
       .then(value => {
         const result = requireP2BoundOperationResult(value, 'notification', binding);
         this.notificationRequestId = null;
@@ -744,18 +666,9 @@ export class ProductWebP2ActivationOwner {
     return promise;
   }
 
-  async bargeIn(input: {
-    action_id: string;
-    response_id: string;
-    response_generation: number;
-    cancel_response: boolean;
-  }): Promise<JsonObject> {
+  async bargeIn(input: { action_id: string; response_id: string; response_generation: number; cancel_response: boolean }): Promise<JsonObject> {
     const binding = this.requireActiveBinding();
-    if (
-      !Number.isSafeInteger(input.response_generation) ||
-      input.response_generation < 0 ||
-      typeof input.cancel_response !== 'boolean'
-    ) {
+    if (!Number.isSafeInteger(input.response_generation) || input.response_generation < 0 || typeof input.cancel_response !== 'boolean') {
       return Promise.reject(new Error('barge-in binding is invalid'));
     }
     const params = {
@@ -773,10 +686,7 @@ export class ProductWebP2ActivationOwner {
       if (this.bargeInReplayFence.has(fingerprint)) {
         return Promise.reject(new Error('completed barge-in replay has expired'));
       }
-      if (
-        this.bargeIns.size >= PRODUCT_OPERATION_CAPACITY &&
-        !evictCompletedProductOperation(this.bargeIns, this.bargeInReplayFence)
-      ) {
+      if (this.bargeIns.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.bargeIns, this.bargeInReplayFence)) {
         return Promise.reject(new Error('bounded barge-in ledger is full'));
       }
       retained = { requestId: allocateProductRequestId('live-voice-p2-barge') };
@@ -786,11 +696,7 @@ export class ProductWebP2ActivationOwner {
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_BARGE_IN_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(
-          value,
-          'barge_in_applied',
-          binding,
-        );
+        const result = requireP2BoundOperationResult(value, 'barge_in_applied', binding);
         if (
           result.action_id !== params.action_id ||
           result.response_id !== params.response_id ||
@@ -855,13 +761,7 @@ export class ProductWebP2ActivationOwner {
       if (this.hasPendingPresentationAck()) {
         return Promise.reject(new Error('a previous presentation ACK is still unresolved'));
       }
-      if (
-        this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY &&
-        !evictCompletedProductOperation(
-          this.presentationAcks,
-          this.presentationAckReplayFence
-        )
-      ) {
+      if (this.presentationAcks.size >= PRODUCT_OPERATION_CAPACITY && !evictCompletedProductOperation(this.presentationAcks, this.presentationAckReplayFence)) {
         return Promise.reject(new Error('bounded presentation ACK ledger is full'));
       }
       retained = { requestId: allocateProductRequestId('live-voice-p2-ack') };
@@ -871,11 +771,7 @@ export class ProductWebP2ActivationOwner {
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_PRESENTATION_ACK_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(
-          value,
-          'presentation_acknowledged',
-          binding
-        );
+        const result = requireP2BoundOperationResult(value, 'presentation_acknowledged', binding);
         entry.result = result;
         return result;
       })
@@ -898,9 +794,7 @@ export class ProductWebP2ActivationOwner {
       return Promise.resolve(this.publish());
     }
     if (this.closePromise) return this.closePromise;
-    const waitForActivation = this.activationPromise
-      ? this.activationPromise.catch(() => this.snapshot())
-      : Promise.resolve(this.snapshot());
+    const waitForActivation = this.activationPromise ? this.activationPromise.catch(() => this.snapshot()) : Promise.resolve(this.snapshot());
     this.closePromise = waitForActivation
       .then(async () => {
         const binding = this.binding;
@@ -933,9 +827,7 @@ export class ProductWebP2ActivationOwner {
     return this.closePromise;
   }
 
-  closeWithRetry(
-    options: ProductWebCloseRetryOptions<ProductWebP2ActivationSnapshot> = {}
-  ): Promise<ProductWebP2ActivationSnapshot> {
+  closeWithRetry(options: ProductWebCloseRetryOptions<ProductWebP2ActivationSnapshot> = {}): Promise<ProductWebP2ActivationSnapshot> {
     if (options.on_retry) {
       this.closeRetryObservers.add(options.on_retry);
       if (this.closeRetryPromise && this.status === 'cleanup_pending') {
@@ -988,8 +880,7 @@ export class ProductWebP2ActivationOwner {
 }
 
 export type ProductP2PollRecoveryResult<TSuccessor> =
-  | { readonly kind: 'notification'; readonly notification: JsonObject }
-  | { readonly kind: 'recovered'; readonly successor: TSuccessor | null };
+  { readonly kind: 'notification'; readonly notification: JsonObject } | { readonly kind: 'recovered'; readonly successor: TSuccessor | null };
 
 /**
  * Poll one retained P2 notification and own the exact closed-route handoff.
@@ -1069,11 +960,7 @@ export class ProductWebP3MutationOwner {
     }
     const retained = pending;
     let issuePromise: Promise<ProductWebP3ConfirmationReceipt>;
-    issuePromise = this.request(
-      PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
-      { ...frozen },
-      retained.issueRequestId
-    )
+    issuePromise = this.request(PRODUCT_P3_CONFIRMATION_ISSUE_METHOD, { ...frozen }, retained.issueRequestId)
       .then(value => {
         const payload = objectValue(value);
         const result = objectValue(payload?.result);
@@ -1095,10 +982,7 @@ export class ProductWebP3MutationOwner {
           operation: frozen.operation,
           command_id: frozen.command_id,
           target_task_id: targetTaskId,
-          task_control_binding: requireP3TaskControlBinding(
-            result.task_control_binding,
-            frozen
-          ),
+          task_control_binding: requireP3TaskControlBinding(result.task_control_binding, frozen),
         });
         if (this.pending === retained) retained.receipt = receipt;
         return receipt;
@@ -1185,15 +1069,9 @@ export class ProductWebP3ProgressOwner {
   private startPromise: Promise<ProductWebP3ProgressSnapshot> | null = null;
   private closePromise: Promise<ProductWebP3ProgressSnapshot> | null = null;
   private closeRetryPromise: Promise<ProductWebP3ProgressSnapshot> | null = null;
-  private readonly closeRetryObservers = new Set<
-    ProductWebCloseRetryObserver<ProductWebP3ProgressSnapshot>
-  >();
+  private readonly closeRetryObservers = new Set<ProductWebCloseRetryObserver<ProductWebP3ProgressSnapshot>>();
 
-  constructor(input: {
-    enabled: boolean;
-    request: ProductWebRequest;
-    on_snapshot?: (snapshot: ProductWebP3ProgressSnapshot) => void;
-  }) {
+  constructor(input: { enabled: boolean; request: ProductWebRequest; on_snapshot?: (snapshot: ProductWebP3ProgressSnapshot) => void }) {
     if (typeof input.request !== 'function') throw new Error('product request owner is required');
     this.enabled = input.enabled;
     this.request = input.request;
@@ -1232,39 +1110,32 @@ export class ProductWebP3ProgressOwner {
     if (!Number.isSafeInteger(base.generation) || base.generation <= 0) {
       return Promise.reject(new Error('generation is invalid'));
     }
-    const exactTaskId = input.task_id === undefined
-      ? null
-      : requiredText(input.task_id, 'task_id');
+    const exactTaskId = input.task_id === undefined ? null : requiredText(input.task_id, 'task_id');
     this.cleanupRequired = false;
     this.status = 'activating';
     this.reason = null;
     this.publish();
-    const selectedTask = exactTaskId === null
-      ? this.request(PRODUCT_P3_TASK_LIST_METHOD, { session_id: sessionId })
-        .then(selectSingleActiveTask)
-      : Promise.resolve(exactTaskId);
+    const selectedTask =
+      exactTaskId === null ? this.request(PRODUCT_P3_TASK_LIST_METHOD, { session_id: sessionId }).then(selectSingleActiveTask) : Promise.resolve(exactTaskId);
     this.startPromise = selectedTask
       .then(taskId => {
         const binding = freezeP3Binding({ ...base, task_id: taskId });
         this.binding = binding;
         this.activationAttempted = true;
-        return this.request(PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, { ...binding })
-          .then(response => {
-            try {
-              requireP3Result(response, 'active', binding);
-            } catch (error) {
-              throw ambiguousActivationResponse(error);
-            }
-            this.cleanupRequired = true;
-            this.status = 'active';
-            this.reason = null;
-            return this.publish();
-          });
+        return this.request(PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, { ...binding }).then(response => {
+          try {
+            requireP3Result(response, 'active', binding);
+          } catch (error) {
+            throw ambiguousActivationResponse(error);
+          }
+          this.cleanupRequired = true;
+          this.status = 'active';
+          this.reason = null;
+          return this.publish();
+        });
       })
       .catch(error => {
-        this.cleanupRequired = (
-          this.binding !== null && requiresProductActivationCleanup(error)
-        );
+        this.cleanupRequired = this.binding !== null && requiresProductActivationCleanup(error);
         this.status = 'unavailable';
         this.reason = error instanceof Error ? error.message : 'product P3 progress unavailable';
         this.publish();
@@ -1282,9 +1153,7 @@ export class ProductWebP3ProgressOwner {
       return Promise.resolve(this.publish());
     }
     if (this.closePromise) return this.closePromise;
-    const waitForStart = this.startPromise
-      ? this.startPromise.catch(() => this.snapshot())
-      : Promise.resolve(this.snapshot());
+    const waitForStart = this.startPromise ? this.startPromise.catch(() => this.snapshot()) : Promise.resolve(this.snapshot());
     this.closePromise = waitForStart
       .then(async () => {
         const binding = this.binding;
@@ -1319,9 +1188,7 @@ export class ProductWebP3ProgressOwner {
     return this.closePromise;
   }
 
-  closeWithRetry(
-    options: ProductWebCloseRetryOptions<ProductWebP3ProgressSnapshot> = {}
-  ): Promise<ProductWebP3ProgressSnapshot> {
+  closeWithRetry(options: ProductWebCloseRetryOptions<ProductWebP3ProgressSnapshot> = {}): Promise<ProductWebP3ProgressSnapshot> {
     if (options.on_retry) {
       this.closeRetryObservers.add(options.on_retry);
       if (this.closeRetryPromise && this.status === 'cleanup_pending') {

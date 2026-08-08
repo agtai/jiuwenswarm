@@ -503,7 +503,10 @@ test('capture handoff rejects an input track that is already muted and releases 
     () => adapter.startCapture(),
     error => error instanceof BrowserAudioIOViolation && error.reason === 'AUDIO_INPUT_MUTED'
   );
-  assert.deepEqual(events.map(event => event.reason), ['start_requested', 'audio_input_muted']);
+  assert.deepEqual(
+    events.map(event => event.reason),
+    ['start_requested', 'audio_input_muted']
+  );
   assert.equal(adapter.captureState(), 'failed');
   assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
   assert.equal(fake.contexts[0].state, 'closed');
@@ -820,6 +823,85 @@ test('sequence gaps, hidden page, and stale worklet callbacks never revive captu
   fake.document.visibilityState = 'visible';
   fake.document.emit('visibilitychange');
   assert.equal(adapter.captureState(), 'stopped');
+});
+
+test('AudioWorklet failures retain exact bounded-gap reasons and fence stale callbacks', async () => {
+  const fake = fakeEnvironment();
+  const states = [];
+  const frames = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: {
+      onCaptureState: event => states.push([event.state, event.reason]),
+      onCaptureFrame: frame => frames.push(frame),
+    },
+  });
+  const metadata = await adapter.startCapture();
+  const staleCallback = fake.worklets[0].port.onmessage;
+
+  fake.worklets[0].port.emit({ kind: 'error', reason: 'input_gap_exceeded' });
+  await nextTask();
+
+  assert.equal(adapter.captureState(), 'stopped');
+  assert.ok(states.some(([state, reason]) => state === 'stopping' && reason === 'audio_input_gap_exceeded'));
+  assert.ok(states.some(([state, reason]) => state === 'stopped' && reason === 'audio_input_gap_exceeded'));
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  staleCallback?.({
+    data: {
+      kind: 'frame',
+      capture_generation: metadata.capture_generation,
+      seq: 0,
+      sample_cursor: 0,
+      context_time_s: 0,
+      sample_rate_hz: 48_000,
+      samples: new Float32Array(960),
+    },
+  });
+  assert.equal(frames.length, 0);
+});
+
+test('unknown AudioWorklet errors retain the generic stable gap reason', async () => {
+  const fake = fakeEnvironment();
+  const states = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    observer: { onCaptureState: event => states.push([event.state, event.reason]) },
+  });
+  await adapter.startCapture();
+
+  fake.worklets[0].port.emit({ kind: 'error', reason: 'future_worklet_failure' });
+  await nextTask();
+
+  assert.equal(adapter.captureState(), 'stopped');
+  assert.ok(states.some(([state, reason]) => state === 'stopped' && reason === 'audio_worklet_gap'));
+});
+
+test('fatal AudioWorklet clock and configuration errors retain their exact stable reasons', async () => {
+  const cases = [
+    ['render_frame_regressed', 'audio_render_frame_regressed'],
+    ['render_frame_not_advanced', 'audio_render_frame_not_advanced'],
+    ['invalid_frame_configuration', 'invalid_audio_worklet_configuration'],
+  ];
+  for (const [workletReason, stableReason] of cases) {
+    const fake = fakeEnvironment();
+    const states = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      environment: fake.environment,
+      observer: { onCaptureState: event => states.push([event.state, event.reason]) },
+    });
+    await adapter.startCapture();
+
+    fake.worklets[0].port.emit({ kind: 'error', reason: workletReason });
+    await nextTask();
+
+    assert.equal(adapter.captureState(), 'stopped');
+    assert.ok(states.some(([state, reason]) => state === 'stopping' && reason === stableReason));
+    assert.ok(states.some(([state, reason]) => state === 'stopped' && reason === stableReason));
+    assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  }
 });
 
 test('capture identity reuse fails closed and releases the replacement resources', async () => {

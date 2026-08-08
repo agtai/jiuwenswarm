@@ -102,8 +102,7 @@ export interface BrowserAudioEnvironment {
   readonly mediaDevices: BrowserMediaDevicesLike | null;
   readonly createAudioContext: (() => BrowserAudioContextLike) | null;
   readonly createAudioWorkletNode:
-    | ((context: BrowserAudioContextLike, name: string, options: Readonly<Record<string, unknown>>) => BrowserAudioWorkletNodeLike)
-    | null;
+    ((context: BrowserAudioContextLike, name: string, options: Readonly<Record<string, unknown>>) => BrowserAudioWorkletNodeLike) | null;
   readonly createId: (() => string) | null;
 }
 
@@ -1328,7 +1327,18 @@ export class BrowserAudioIOAdapter {
       }
       const message = data as Record<string, unknown>;
       if (message.kind === 'error') {
-        throw new BrowserAudioIOViolation('AUDIO_WORKLET_GAP', 'AudioWorklet reported a render-input gap');
+        switch (message.reason) {
+          case 'input_gap_exceeded':
+            throw new BrowserAudioIOViolation('AUDIO_INPUT_GAP_EXCEEDED', 'AudioWorklet input remained unavailable beyond the bounded transient window');
+          case 'render_frame_regressed':
+            throw new BrowserAudioIOViolation('AUDIO_RENDER_FRAME_REGRESSED', 'AudioWorklet render clock moved backwards');
+          case 'render_frame_not_advanced':
+            throw new BrowserAudioIOViolation('AUDIO_RENDER_FRAME_NOT_ADVANCED', 'AudioWorklet render clock did not advance');
+          case 'invalid_frame_configuration':
+            throw new BrowserAudioIOViolation('INVALID_AUDIO_WORKLET_CONFIGURATION', 'AudioWorklet rejected its frame configuration');
+          default:
+            throw new BrowserAudioIOViolation('AUDIO_WORKLET_GAP', 'AudioWorklet reported an unknown render-input failure');
+        }
       }
       if (message.kind !== 'frame' || message.capture_generation !== session.token) {
         throw new BrowserAudioIOViolation('INVALID_AUDIO_WORKLET_MESSAGE', 'AudioWorklet frame identity is invalid');
@@ -1459,20 +1469,10 @@ export class BrowserAudioIOAdapter {
         pending.track.removeEventListener('ended', pending.onTrackEnded);
         pending.trackListenerAttached = false;
       }
-      if (
-        pending.context !== null
-        && pending.installedContextStateChange !== null
-        && pending.context.onstatechange === pending.installedContextStateChange
-      ) {
+      if (pending.context !== null && pending.installedContextStateChange !== null && pending.context.onstatechange === pending.installedContextStateChange) {
         pending.context.onstatechange = pending.priorContextStateChange;
       }
-      await this.#cleanupLooseCapture(
-        pending.stream,
-        pending.context,
-        pending.source,
-        pending.worklet,
-        pending.ownsContext,
-      );
+      await this.#cleanupLooseCapture(pending.stream, pending.context, pending.source, pending.worklet, pending.ownsContext);
     })();
     return pending.cleanupPromise;
   }
@@ -1482,7 +1482,7 @@ export class BrowserAudioIOAdapter {
     context: BrowserAudioContextLike | null,
     source: BrowserAudioNodeLike | null,
     worklet: BrowserAudioWorkletNodeLike | null,
-    closeContext = true,
+    closeContext = true
   ): Promise<void> {
     let cleanupFailed = false;
     if (worklet !== null) {

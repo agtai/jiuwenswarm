@@ -29,12 +29,7 @@ import {
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/integratedWebRouteShell.js';
 import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
-async function renderPanel({
-  sessionId = 'persisted-session',
-  platform = null,
-  progress = null,
-  viewProps = {},
-} = {}) {
+async function renderPanel({ sessionId = 'persisted-session', platform = null, progress = null, viewProps = {} } = {}) {
   const translations = JSON.parse(await readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8'));
   const i18n = i18next.createInstance();
   await i18n.init({
@@ -154,6 +149,25 @@ test('route panel renders only a validated authenticated text progress fact', as
   assert.equal(html.includes('It is not voice progress or Integrated Gate evidence.'), true);
 });
 
+test('formal P1 discloses the 30-second capture bound and disables restart on terminal failure', async () => {
+  const html = await renderPanel({
+    viewProps: {
+      p1VoiceEnabled: true,
+      p1VoiceStatus: 'failed',
+      p1VoiceReason: 'AUDIO_CAPTURE_DURATION_EXCEEDED',
+      onP1VoiceStart: () => {},
+      onP1VoiceStop: () => {},
+    },
+  });
+
+  assert.equal(html.includes('This turn retains at most 30 seconds of captured audio.'), true);
+  assert.equal(html.includes('audio captured during overlapping playback counts toward the limit.'), true);
+  assert.equal(html.includes('Speak and press Stop and recognize before the limit.'), true);
+  assert.equal(html.includes('AUDIO_CAPTURE_DURATION_EXCEEDED'), true);
+  assert.equal(html.includes('The expired capture was discarded without a new Speech or Agent submission. Refresh to start again.'), true);
+  assert.match(html, /<button type="button" disabled="">Start formal voice turn<\/button>/);
+});
+
 test('P2 notification classification surfaces errors and terminal-without-final', () => {
   assert.deepEqual(
     classifyProductP2Notification({
@@ -203,21 +217,12 @@ test('Web response error extraction preserves nested product reason', () => {
 });
 
 test('P2 notification polling outlives the retained Gateway unary owner', () => {
-  assert.deepEqual(
-    productP2WebRequestOptions(
-      PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
-      'notification-request-1'
-    ),
-    {
-      requestId: 'notification-request-1',
-      timeoutMs: PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
-    }
-  );
+  assert.deepEqual(productP2WebRequestOptions(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, 'notification-request-1'), {
+    requestId: 'notification-request-1',
+    timeoutMs: PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
+  });
   assert.equal(PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS > 600_000, true);
-  assert.deepEqual(
-    productP2WebRequestOptions(PRODUCT_P2_SUBMIT_METHOD, 'submit-request-1'),
-    { requestId: 'submit-request-1' }
-  );
+  assert.deepEqual(productP2WebRequestOptions(PRODUCT_P2_SUBMIT_METHOD, 'submit-request-1'), { requestId: 'submit-request-1' });
   assert.deepEqual(productP2WebRequestOptions(PRODUCT_P2_SUBMIT_METHOD), {});
 });
 
@@ -301,20 +306,9 @@ test('browser progress consumption is fenced to the exact owned P3 binding', () 
     ['generation_id', 'wrong-generation-id'],
     ['generation', 4],
   ]) {
-    assert.equal(
-      progressMatchesOwnedBinding(
-        { ...event, [field]: value },
-        binding,
-        'session-1'
-      ),
-      false,
-      field
-    );
+    assert.equal(progressMatchesOwnedBinding({ ...event, [field]: value }, binding, 'session-1'), false, field);
   }
-  assert.equal(
-    progressMatchesOwnedBinding(event, binding, 'session-2'),
-    false
-  );
+  assert.equal(progressMatchesOwnedBinding(event, binding, 'session-2'), false);
   assert.equal(progressMatchesOwnedBinding(event, binding, null), false);
 });
 
@@ -329,14 +323,7 @@ test('a delayed prior-session activation cannot own or acknowledge the current s
   };
   const delayedSessionABinding = { ...sessionAEvent };
 
-  assert.equal(
-    progressMatchesOwnedBinding(
-      sessionAEvent,
-      delayedSessionABinding,
-      'session-b'
-    ),
-    false
-  );
+  assert.equal(progressMatchesOwnedBinding(sessionAEvent, delayedSessionABinding, 'session-b'), false);
   const current = {
     cancelled: false,
     owner_epoch: 7,
@@ -346,18 +333,9 @@ test('a delayed prior-session activation cannot own or acknowledge the current s
     is_current_owner: true,
   };
   assert.equal(isCurrentProgressOwner(current), true);
-  assert.equal(
-    isCurrentProgressOwner({ ...current, active_session_id: 'session-b' }),
-    false
-  );
-  assert.equal(
-    isCurrentProgressOwner({ ...current, current_owner_epoch: 8 }),
-    false
-  );
-  assert.equal(
-    isCurrentProgressOwner({ ...current, is_current_owner: false }),
-    false
-  );
+  assert.equal(isCurrentProgressOwner({ ...current, active_session_id: 'session-b' }), false);
+  assert.equal(isCurrentProgressOwner({ ...current, current_owner_epoch: 8 }), false);
+  assert.equal(isCurrentProgressOwner({ ...current, is_current_owner: false }), false);
   assert.equal(isCurrentProgressOwner({ ...current, cancelled: true }), false);
 });
 
@@ -377,16 +355,13 @@ test('recognized P1 text can enter P2 while every retained voice operation block
     assert.equal(productTextBlockedByP1Status(status), true, status);
   }
   assert.equal(productTextBlockedByP1Status('recognized'), false);
-  const source = await readFile(
-    new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url),
-    'utf8'
-  );
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   assert.match(source, /const recognition = await owner\.stopAndRecognize\(\)/);
   assert.match(source, /voice_commit_receipt: recognition\.voice_commit_receipt/);
   assert.match(source, /\? 'voice'\s*: 'structured'/);
   assert.match(source, /p1VoiceOwnerRef\.current\?\.status\(\)\.status/);
   assert.match(source, /if \(props\.isConnected\) return;/);
-  assert.match(source, /voiceOwner\.close\(\)\.then/);
+  assert.match(source, /voiceOwner\s*\.close\(\)\s*\.then/);
   assert.match(source, /\[props\.isConnected\]/);
 });
 
@@ -398,38 +373,18 @@ test('voice Task origin is exact-session and exact-committed-text only', () => {
     commit_id: 'commit-voice',
     instruction: 'Create the bounded voice task.',
   });
-  assert.deepEqual(
-    resolveProductTaskCreateOrigin(
-      'Create the bounded voice task.',
-      'session-voice',
-      origin
-    ),
-    {
-      source: 'voice',
-      interaction_id: 'interaction-voice',
-      turn_id: 'turn-voice',
-      commit_id: 'commit-voice',
-    }
-  );
-  assert.deepEqual(
-    resolveProductTaskCreateOrigin('Changed text.', 'session-voice', origin),
-    { source: 'structured' }
-  );
-  assert.deepEqual(
-    resolveProductTaskCreateOrigin(
-      'Create the bounded voice task.',
-      'session-other',
-      origin
-    ),
-    { source: 'structured' }
-  );
+  assert.deepEqual(resolveProductTaskCreateOrigin('Create the bounded voice task.', 'session-voice', origin), {
+    source: 'voice',
+    interaction_id: 'interaction-voice',
+    turn_id: 'turn-voice',
+    commit_id: 'commit-voice',
+  });
+  assert.deepEqual(resolveProductTaskCreateOrigin('Changed text.', 'session-voice', origin), { source: 'structured' });
+  assert.deepEqual(resolveProductTaskCreateOrigin('Create the bounded voice task.', 'session-other', origin), { source: 'structured' });
 });
 
 test('fresh task.create rebinds the panel progress owner to its exact task', async () => {
-  const source = await readFile(
-    new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url),
-    'utf8'
-  );
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
 
   assert.match(source, /setCreatedProgressTaskId\(createdTaskId\)/);
   assert.match(source, /task_id: createdProgressTaskId/);
@@ -437,23 +392,21 @@ test('fresh task.create rebinds the panel progress owner to its exact task', asy
 });
 
 test('product barge-in stops local playout before any response cancel request', async () => {
-  const source = await readFile(
-    new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url),
-    'utf8'
-  );
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   const start = source.indexOf('const stopProductVoicePlayout = async () =>');
   const end = source.indexOf('const commitRecognizedVoiceTaskOrigin', start);
   const handler = source.slice(start, end);
   const stopIndex = handler.indexOf('p1Owner.stopAgentPlayout(response)');
   const rejectIndex = handler.indexOf('if (!locallyStopped) return;');
   const clearIndex = handler.indexOf('activeVoiceResponseRef.current = null;');
-  const remoteIndex = handler.indexOf('await p2Owner.bargeIn({');
+  const remoteIndex = handler.indexOf('await p2Owner.bargeIn(retained.input)');
 
   assert.equal(start >= 0 && end > start, true);
   assert.equal(stopIndex >= 0, true);
   assert.equal(stopIndex < rejectIndex && rejectIndex < clearIndex && clearIndex < remoteIndex, true);
   assert.match(handler, /cancel_response: true/);
-  assert.match(handler, /catch \{\s*setProductTextStatus\('failed'\);/);
+  assert.match(handler, /p2Owner\.hasPendingBargeIn\(\)/);
+  assert.match(handler, /pendingBargeInRef\.current === retained/);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {
