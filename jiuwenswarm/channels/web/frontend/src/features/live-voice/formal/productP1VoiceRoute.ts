@@ -2,6 +2,7 @@ import { createAudioRenderPlan, type AudioResponseRef, type CapturedAudioFrame }
 import {
   BrowserAudioIOAdapter,
   type BrowserAudioEnvironment,
+  type BrowserAudioLocalStopReceipt,
   type BrowserAudioPcmChunk,
   type BrowserAudioPlayoutEvent,
   type BrowserAudioPlayoutMetadata,
@@ -42,6 +43,12 @@ export type ProductP1VoiceStatus =
 export interface ProductP1Recognition {
   readonly text: string;
   readonly voice_commit_receipt: string;
+}
+
+export interface ProductP1AgentPlayoutStopReceipt {
+  readonly kind: 'product_p1.agent_playout_stop.v1';
+  readonly local_stop: Readonly<BrowserAudioLocalStopReceipt>;
+  readonly media_stop_delivery: 'delivered' | 'not_applicable';
 }
 
 type ProductP1Request = (
@@ -169,6 +176,8 @@ export class ProductP1VoiceRouteOwner {
   readonly #retainedMediaAuthorities = new Map<string, Readonly<ProductP1MediaCloseBinding>>();
   #closePromise: Promise<void> | null = null;
   #failureCleanupPromise: Promise<void> | null = null;
+  #retainedPlayoutCleanupPromise: Promise<void> | null = null;
+  #retainedCleanupPending = false;
   #pendingPlayout: PendingProductPlayout | null = null;
 
   constructor(input: Readonly<{
@@ -205,8 +214,16 @@ export class ProductP1VoiceRouteOwner {
     this.#publish();
   }
 
-  status(): Readonly<{ status: ProductP1VoiceStatus; reason: string | null }> {
-    return Object.freeze({ status: this.#status, reason: this.#reason });
+  status(): Readonly<{
+    status: ProductP1VoiceStatus;
+    reason: string | null;
+    retained_cleanup_pending: boolean;
+  }> {
+    return Object.freeze({
+      status: this.#status,
+      reason: this.#reason,
+      retained_cleanup_pending: this.#retainedCleanupPending,
+    });
   }
 
   async startCapture(input: Readonly<{
@@ -534,7 +551,9 @@ export class ProductP1VoiceRouteOwner {
         && typeof error === 'object'
         && (error as Record<string, unknown>).reason === 'FORMAL_PLAYOUT_BARGED'
       ) {
-        this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
+        if (this.#status !== 'cleanup_pending') {
+          this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
+        }
         return;
       }
       const pending = this.#pendingPlayout;
@@ -548,6 +567,12 @@ export class ProductP1VoiceRouteOwner {
   }
 
   stopAgentPlayout(response: Readonly<AudioResponseRef>): boolean {
+    return this.stopAgentPlayoutExact(response) !== null;
+  }
+
+  stopAgentPlayoutExact(
+    response: Readonly<AudioResponseRef>,
+  ): Readonly<ProductP1AgentPlayoutStopReceipt> | null {
     const pending = this.#pendingPlayout;
     if (
       this.#status !== 'playing'
@@ -555,18 +580,62 @@ export class ProductP1VoiceRouteOwner {
       || pending.response.interaction_id !== response.interaction_id
       || pending.response.response_id !== response.response_id
       || pending.response.response_generation !== response.response_generation
-    ) return false;
+    ) return null;
+    return this.#settleAgentPlayoutStop(pending, response);
+  }
+
+  #settleAgentPlayoutStop(
+    pending: PendingProductPlayout,
+    response: Readonly<AudioResponseRef>,
+  ): Readonly<ProductP1AgentPlayoutStopReceipt> | null {
     this.#pendingPlayout = null;
-    const stopped = this.#audio.stopPlayout(response, 'formal_product_barge_in');
-    if (!stopped) {
-      this.#pendingPlayout = pending;
-      return false;
+    let receipt: Readonly<BrowserAudioLocalStopReceipt>;
+    try {
+      receipt = this.#audio.stopPlayoutExact(response, 'formal_product_barge_in');
+    } catch (error) {
+      pending.reject(
+        error instanceof Error ? error : new Error('formal local playout stop failed'),
+      );
+      return null;
     }
-    pending.downlinkRoute?.leaf.close('MEDIA_LOCAL_CLOSE');
+    if (!receipt.local_fence_established) {
+      this.#pendingPlayout = pending;
+      return null;
+    }
+    let mediaStopDelivery: ProductP1AgentPlayoutStopReceipt['media_stop_delivery'] =
+      'not_applicable';
+    if (pending.downlinkRoute !== null) {
+      try {
+        pending.downlinkRoute.leaf.sendLocalPlaybackStop(receipt);
+        mediaStopDelivery = 'delivered';
+      } catch (error) {
+        pending.downlinkRoute.leaf.close('MEDIA_LOCAL_CLOSE');
+        pending.reject(
+          error instanceof Error
+            ? error
+            : new Error('formal media playout stop receipt was not delivered'),
+        );
+        return null;
+      }
+    }
+    if (receipt.outcome !== 'local_fence_established') {
+      pending.reject(Object.assign(
+        new Error('formal browser source cleanup completion is unknown'),
+        { reason: 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' },
+      ));
+      return null;
+    }
+    if (pending.downlinkRoute !== null) {
+      this.#retainPlayoutAuthorityCleanup(pending.receiptAuthority);
+    }
     pending.reject(Object.assign(new Error('formal playout was interrupted'), {
       reason: 'FORMAL_PLAYOUT_BARGED',
     }));
-    return true;
+    return Object.freeze({
+      kind: 'product_p1.agent_playout_stop.v1',
+      local_stop: receipt,
+      media_stop_delivery: mediaStopDelivery,
+    });
   }
 
   async close(): Promise<void> {
@@ -576,6 +645,9 @@ export class ProductP1VoiceRouteOwner {
     this.#reason = 'FORMAL_P1_CLEANUP_IN_PROGRESS';
     this.#publish();
     const retained = (async () => {
+      if (this.#retainedPlayoutCleanupPromise !== null) {
+        try { await this.#retainedPlayoutCleanupPromise; } catch { /* retry below */ }
+      }
       if (this.#failureCleanupPromise !== null) {
         try { await this.#failureCleanupPromise; } catch { /* retry below */ }
       }
@@ -954,6 +1026,44 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
+  #retainPlayoutAuthorityCleanup(
+    binding: Readonly<ProductP1MediaCloseBinding>,
+  ): void {
+    const cleanupOperationGeneration = this.#operationGeneration;
+    const prior = this.#retainedPlayoutCleanupPromise;
+    this.#retainedCleanupPending = true;
+    this.#publish();
+    const retained = (async () => {
+      if (prior !== null) {
+        try { await prior; } catch { /* exact failed bindings remain in the map */ }
+      }
+      await this.#revokeMediaAuthority(binding);
+      this.#retainedCleanupPending = this.#retainedMediaAuthorities.size > 0;
+      this.#publish();
+    })().catch(error => {
+      // A retained prior authority can fail after a successor response has
+      // already become active. Preserve that successor's status/stop surface;
+      // the exact failed binding stays retained for close() to retry.
+      if (
+        !this.#closed
+        && this.#operationGeneration === cleanupOperationGeneration
+      ) {
+        this.#reason = 'FORMAL_P1_CLEANUP_PENDING';
+        this.#status = 'cleanup_pending';
+        this.#publish();
+      }
+      throw error;
+    }).finally(() => {
+      if (this.#retainedPlayoutCleanupPromise === retained) {
+        this.#retainedPlayoutCleanupPromise = null;
+      }
+    });
+    // The cleanup is retained by the owner and joined by close(); it must not
+    // block the local-stop receipt or exact response.cancel critical path.
+    void retained.catch(() => undefined);
+    this.#retainedPlayoutCleanupPromise = retained;
+  }
+
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
     if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
       throw new Error('formal capture frame limit exceeded');
@@ -1023,6 +1133,7 @@ export class ProductP1VoiceRouteOwner {
       authorities.set(this.#mediaCloseBinding.subject_id, this.#mediaCloseBinding);
     }
     for (const authority of authorities.values()) await this.#revokeMediaAuthority(authority);
+    this.#retainedCleanupPending = false;
     this.#frames = [];
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;

@@ -26,6 +26,7 @@ import {
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
   pollProductP2RouteWithRecovery,
+  isDefinitiveProductOperationError,
   requiresProductActivationCleanup,
   retryRetainedProductOperation,
   type ProductWebP2ActivationSnapshot,
@@ -64,6 +65,59 @@ export type ProductPresentationAckInput = {
   unit_id: string;
   contiguous_cursor: number;
 };
+
+export async function executeProductVoiceBargeIn(input: Readonly<{
+  p1_owner: Pick<ProductP1VoiceRouteOwner, 'status' | 'stopAgentPlayoutExact'>;
+  p2_owner: Pick<ProductWebP2ActivationOwner, 'bargeIn'>;
+  response: Readonly<{
+    interaction_id: string;
+    response_id: string;
+    response_generation: number;
+  }>;
+  action_id: string;
+  on_local_stop: () => void;
+  on_response_cancel_accepted: () => void;
+  is_current?: () => boolean;
+}>): Promise<boolean> {
+  if (input.p1_owner.status().status !== 'playing') return false;
+  const localStopReceipt = await input.p1_owner.stopAgentPlayoutExact(input.response);
+  if (localStopReceipt === null) return false;
+  input.on_local_stop();
+  await settleRetainedProductVoiceResponseCancel({
+    operation: {
+      owner: input.p2_owner,
+      response: input.response,
+      action_id: input.action_id,
+    },
+    is_current: input.is_current ?? (() => true),
+    on_accepted: input.on_response_cancel_accepted,
+  });
+  return true;
+}
+
+export type RetainedProductVoiceResponseCancel = Readonly<{
+  owner: Pick<ProductWebP2ActivationOwner, 'bargeIn'>;
+  response: ProductResponseIdentity;
+  action_id: string;
+}>;
+
+export async function settleRetainedProductVoiceResponseCancel(input: Readonly<{
+  operation: RetainedProductVoiceResponseCancel;
+  is_current: () => boolean;
+  on_accepted: () => void;
+}>): Promise<void> {
+  const { operation } = input;
+  await retryRetainedProductOperation({
+    operation: () => operation.owner.bargeIn({
+      action_id: operation.action_id,
+      response_id: operation.response.response_id,
+      response_generation: operation.response.response_generation,
+      cancel_response: true,
+    }),
+    is_current: input.is_current,
+  });
+  input.on_accepted();
+}
 
 type ProductTurnInput = {
   commit_id: string;
@@ -242,6 +296,92 @@ export function retainBoundedPresentedProductResponse(
   responses.set(responseId, true);
 }
 
+export type ProductResponseIdentity = Readonly<{
+  interaction_id: string;
+  response_id: string;
+  response_generation: number;
+}>;
+
+type ProductPresentationFenceDisposition = 'full' | 'text_only' | 'dropped';
+
+function productResponseFenceKey(response: ProductResponseIdentity): string {
+  return JSON.stringify([
+    response.interaction_id,
+    response.response_id,
+    response.response_generation,
+  ]);
+}
+
+export class ProductResponseSurfaceFence {
+  readonly #capacity: number;
+  readonly #entries = new Map<string, Readonly<{
+    audio: boolean;
+    presentation: boolean;
+  }>>();
+  #saturated = false;
+
+  constructor(capacity = 256) {
+    if (!Number.isSafeInteger(capacity) || capacity <= 0) {
+      throw new Error('response surface fence capacity is invalid');
+    }
+    this.#capacity = capacity;
+  }
+
+  fenceLocalStop(response: ProductResponseIdentity): void {
+    this.#retain(response, { audio: true, presentation: false });
+  }
+
+  fenceResponseCancelAccepted(response: ProductResponseIdentity): void {
+    this.#retain(response, { audio: true, presentation: true });
+  }
+
+  classify(response: ProductResponseIdentity): ProductPresentationFenceDisposition {
+    if (this.#saturated) return 'dropped';
+    const entry = this.#entries.get(productResponseFenceKey(response));
+    if (entry?.presentation === true) return 'dropped';
+    if (entry?.audio === true) return 'text_only';
+    return 'full';
+  }
+
+  clear(): void {
+    this.#entries.clear();
+    this.#saturated = false;
+  }
+
+  #retain(
+    response: ProductResponseIdentity,
+    next: Readonly<{ audio: boolean; presentation: boolean }>,
+  ): void {
+    const key = productResponseFenceKey(response);
+    const current = this.#entries.get(key);
+    const value = Object.freeze({
+      audio: current?.audio === true || next.audio,
+      presentation: current?.presentation === true || next.presentation,
+    });
+    if (!this.#entries.has(key) && this.#entries.size >= this.#capacity) {
+      // The product runtime is bounded to 256 turns. Never evict a response
+      // tombstone while a notification can still arrive; overflow fails the
+      // whole session surface closed until the authoritative Session changes.
+      this.#saturated = true;
+      return;
+    }
+    this.#entries.set(key, value);
+  }
+}
+
+export function executeProductPresentationWithFence(input: Readonly<{
+  fence: ProductResponseSurfaceFence;
+  response: ProductResponseIdentity;
+  on_text_presentation: () => void;
+  on_audio_presentation: () => void;
+}>): ProductPresentationFenceDisposition {
+  const disposition = input.fence.classify(input.response);
+  if (disposition === 'dropped') return disposition;
+  input.on_text_presentation();
+  if (disposition === 'full') input.on_audio_presentation();
+  return disposition;
+}
+
 function browserSpeechCompatibilityAvailable(): boolean {
   if (typeof window === 'undefined') return false;
   const browserWindow = window as Window & {
@@ -358,6 +498,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     response_id: string;
     response_generation: number;
   }> | null>(null);
+  const pendingVoiceResponseCancelRef = useRef<
+    RetainedProductVoiceResponseCancel | null
+  >(null);
+  const responseSurfaceFenceRef = useRef(new ProductResponseSurfaceFence());
   const presentedProductResponsesRef = useRef(new Map<string, true>());
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
@@ -417,46 +561,85 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       return;
     }
     if (disposition.kind !== 'presentation') return;
-    const pending = pendingPresentationAttemptRef.current;
-    if (
-      pending !== null &&
-      (pending.owner !== owner || pending.input.response_id !== disposition.response_id)
-    ) {
-      throw new Error('a previous presentation ACK is still unresolved');
-    }
-    retainBoundedPresentedProductResponse(
-      presentedProductResponsesRef.current,
-      disposition.response_id
-    );
-    setProductOutput(disposition.text);
-    setProductTextStatus('presented');
-    setPendingPresentationAck(disposition.ack);
-    activeVoiceResponseRef.current = disposition.response;
-    const voiceOwner = p1VoiceOwnerRef.current;
-    if (voiceOwner !== null) {
-      void voiceOwner.playAgentText({
-        response: disposition.response,
-        unit_id: disposition.unit_id,
-        text: disposition.text,
-      }).catch(() => undefined);
-    }
-    if (pending === null) {
-      pendingPresentationAttemptRef.current = {
-        owner,
-        input: {
-          ...disposition.ack,
-          presented_at: new Date().toISOString(),
-        },
-      };
-    }
+    executeProductPresentationWithFence({
+      fence: responseSurfaceFenceRef.current,
+      response: disposition.response,
+      on_text_presentation: () => {
+        const pending = pendingPresentationAttemptRef.current;
+        if (
+          pending !== null &&
+          (pending.owner !== owner || pending.input.response_id !== disposition.response_id)
+        ) {
+          throw new Error('a previous presentation ACK is still unresolved');
+        }
+        retainBoundedPresentedProductResponse(
+          presentedProductResponsesRef.current,
+          disposition.response_id
+        );
+        setProductOutput(disposition.text);
+        setProductTextStatus('presented');
+        setPendingPresentationAck(disposition.ack);
+        if (pending === null) {
+          pendingPresentationAttemptRef.current = {
+            owner,
+            input: {
+              ...disposition.ack,
+              presented_at: new Date().toISOString(),
+            },
+          };
+        }
+      },
+      on_audio_presentation: () => {
+        activeVoiceResponseRef.current = disposition.response;
+        const voiceOwner = p1VoiceOwnerRef.current;
+        if (voiceOwner !== null) {
+          void voiceOwner.playAgentText({
+            response: disposition.response,
+            unit_id: disposition.unit_id,
+            text: disposition.text,
+          }).catch(() => undefined);
+        }
+      },
+    });
   };
 
-  const settleRetainedP2Operations = async (owner: ProductWebP2ActivationOwner) => {
+  const settleRetainedP2Operations = async (
+    owner: ProductWebP2ActivationOwner,
+    bargeOnly = false,
+  ) => {
     const ownerSession = owner.snapshot().binding?.session_id;
     const isCurrent = () =>
       activationOwnerRef.current === owner &&
       ownerSession !== undefined &&
       activeSessionRef.current === ownerSession;
+    const pendingVoiceCancel = pendingVoiceResponseCancelRef.current;
+    if (pendingVoiceCancel?.owner === owner) {
+      try {
+        await settleRetainedProductVoiceResponseCancel({
+          operation: pendingVoiceCancel,
+          is_current: () => activationOwnerRef.current === owner,
+          on_accepted: () => {
+            if (pendingVoiceResponseCancelRef.current === pendingVoiceCancel) {
+              pendingVoiceResponseCancelRef.current = null;
+            }
+            if (activeSessionRef.current === ownerSession) {
+              responseSurfaceFenceRef.current.fenceResponseCancelAccepted(
+                pendingVoiceCancel.response
+              );
+            }
+          },
+        });
+      } catch (error) {
+        if (isDefinitiveProductOperationError(error)) {
+          if (pendingVoiceResponseCancelRef.current === pendingVoiceCancel) {
+            pendingVoiceResponseCancelRef.current = null;
+          }
+        } else {
+          throw error;
+        }
+      }
+    }
+    if (bargeOnly) return;
     const pendingTurn = pendingProductTurnRef.current;
     if (pendingTurn?.owner === owner) {
       try {
@@ -714,6 +897,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         if (previous.needsCleanup()) {
           try {
+            if (pendingVoiceResponseCancelRef.current?.owner === previous) {
+              if (!props.isConnected) {
+                scheduleRecovery();
+                return;
+              }
+              await settleRetainedP2Operations(previous, true);
+            }
             await previous.closeWithRetry({
               on_retry: snapshot => {
                 if (!cancelled && activationOwnerRef.current === previous) {
@@ -956,6 +1146,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     voiceTaskOriginRef.current = null;
     recognizedVoiceRef.current = null;
     activeVoiceResponseRef.current = null;
+    responseSurfaceFenceRef.current.clear();
     pendingFormalP3MutationRef.current = null;
     formalTaskControlLeafRef.current?.disconnect();
     formalTaskControlLeafRef.current = null;
@@ -1153,17 +1344,40 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     ) return;
     bargeInSequenceRef.current += 1;
     const actionId = `product-barge-${bargeInSequenceRef.current}`;
-    const locallyStopped = p1Owner.stopAgentPlayout(response);
-    if (!locallyStopped) return;
-    activeVoiceResponseRef.current = null;
+    const retained: RetainedProductVoiceResponseCancel = Object.freeze({
+      owner: p2Owner,
+      response,
+      action_id: actionId,
+    });
     try {
-      await p2Owner.bargeIn({
+      await executeProductVoiceBargeIn({
+        p1_owner: p1Owner,
+        p2_owner: p2Owner,
+        response,
         action_id: actionId,
-        response_id: response.response_id,
-        response_generation: response.response_generation,
-        cancel_response: true,
+        on_local_stop: () => {
+          pendingVoiceResponseCancelRef.current = retained;
+          responseSurfaceFenceRef.current.fenceLocalStop(response);
+          activeVoiceResponseRef.current = null;
+        },
+        on_response_cancel_accepted: () => {
+          if (pendingVoiceResponseCancelRef.current === retained) {
+            pendingVoiceResponseCancelRef.current = null;
+          }
+          responseSurfaceFenceRef.current.fenceResponseCancelAccepted(response);
+        },
+        is_current: () =>
+          props.isConnected
+          && activationOwnerRef.current === p2Owner
+          && activeSessionRef.current === p2Owner.snapshot().binding?.session_id,
       });
-    } catch {
+    } catch (error) {
+      if (
+        isDefinitiveProductOperationError(error)
+        && pendingVoiceResponseCancelRef.current === retained
+      ) {
+        pendingVoiceResponseCancelRef.current = null;
+      }
       setProductTextStatus('failed');
     }
   };
@@ -1504,6 +1718,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       productOperationRetained={Boolean(
           pendingProductTurnRef.current ||
           pendingPresentationAttemptRef.current ||
+          pendingVoiceResponseCancelRef.current ||
           activationOwnerRef.current?.hasPendingSubmission() ||
           activationOwnerRef.current?.hasPendingPresentationAck()
       )}
@@ -1512,6 +1727,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         if (
           pendingProductTurnRef.current ||
           pendingPresentationAttemptRef.current ||
+          pendingVoiceResponseCancelRef.current ||
           owner?.hasPendingSubmission() ||
           owner?.hasPendingPresentationAck()
         ) return;

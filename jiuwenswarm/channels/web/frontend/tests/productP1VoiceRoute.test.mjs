@@ -40,6 +40,20 @@ class FakeAudioContext {
   audioWorklet = { addModule: async () => undefined };
   activeSources = 0;
   peakSources = 0;
+  autoEndSources = true;
+  sourceStopThrows = false;
+  sourceDisconnectThrows = false;
+  sources = [];
+
+  constructor({
+    autoEndSources = true,
+    sourceStopThrows = false,
+    sourceDisconnectThrows = false,
+  } = {}) {
+    this.autoEndSources = autoEndSources;
+    this.sourceStopThrows = sourceStopThrows;
+    this.sourceDisconnectThrows = sourceDisconnectThrows;
+  }
 
   async resume() { this.state = 'running'; }
   async close() { this.state = 'closed'; }
@@ -49,23 +63,31 @@ class FakeAudioContext {
   }
   createBufferSource() {
     const context = this;
+    let finished = false;
     const source = {
       buffer: null,
       onended: null,
       connect() {},
-      disconnect() {},
+      disconnect() {
+        if (context.sourceDisconnectThrows) throw new Error('source disconnect failed');
+      },
       start() {
         context.activeSources += 1;
         context.peakSources = Math.max(context.peakSources, context.activeSources);
-        queueMicrotask(() => {
-          context.activeSources -= 1;
-          source.onended?.();
-        });
+        if (context.autoEndSources) queueMicrotask(() => source.finish());
       },
       stop() {
+        if (context.sourceStopThrows) throw new Error('source stop failed');
+        source.finish();
+      },
+      finish() {
+        if (finished) return;
+        finished = true;
         if (context.activeSources > 0) context.activeSources -= 1;
+        source.onended?.();
       },
     };
+    context.sources.push(source);
     return source;
   }
 }
@@ -129,7 +151,14 @@ class FakeSocket {
   }
 }
 
-function audioEnvironment(createId = () => 'capture-1') {
+function audioEnvironment(
+  createId = () => 'capture-1',
+  {
+    autoEndSources = true,
+    sourceStopThrows = false,
+    sourceDisconnectThrows = false,
+  } = {},
+) {
   const document = new FakeEventTarget();
   document.visibilityState = 'visible';
   const mediaDevices = new FakeEventTarget();
@@ -147,7 +176,11 @@ function audioEnvironment(createId = () => 'capture-1') {
     document,
     mediaDevices,
     createAudioContext: () => {
-      const context = new FakeAudioContext();
+      const context = new FakeAudioContext({
+        autoEndSources,
+        sourceStopThrows,
+        sourceDisconnectThrows,
+      });
       environment.contexts.push(context);
       return context;
     },
@@ -212,6 +245,339 @@ function serverBinding() {
       frame_duration_ms: 20,
     },
     playout: null,
+  };
+}
+
+async function waitFor(predicate, message) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  throw new Error(message);
+}
+
+async function startBatchBargeHarness({ sourceStopThrows = false } = {}) {
+  const calls = [];
+  const binding = serverBinding();
+  const environment = audioEnvironment(
+    () => 'capture-1',
+    { autoEndSources: false, sourceStopThrows },
+  );
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      const socket = new FakeSocket();
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return {
+          status: 'active',
+          reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+          subject_id: 'media-subject-1',
+          endpoint_path: '/ws/live-voice/media/private-ticket',
+          subprotocol: 'live-voice.media.v1',
+          ticket_ttl_ms: 30_000,
+          binding,
+          privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.recognize.batch',
+            voice_commit_receipt: 'voice-receipt-barge-1',
+            capture: params.capture,
+            event: {
+              session_id: params.capture.capture_id,
+              generation: params.capture.capture_generation,
+              seq: 0,
+              kind: 'final',
+              commits_turn: false,
+              hypothesis: {
+                alternatives: [{ raw_text: 'barge text', display_text: 'barge text', confidence: null }],
+                selected_index: 0,
+              },
+            },
+            provider: {
+              provider_id: 'provider-test', implementation_class: 'formal',
+              fallback_from: null, model: 'stt-test',
+            },
+          },
+        };
+      }
+      if (method === 'live_voice.speech.synthesize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.synthesize.batch',
+            response: params.response,
+            unit_id: params.unit_id,
+            audio: {
+              format: 'wav_pcm16_mono', sample_rate_hz: 48_000,
+              channel_count: 1, data_base64: wavBase64(48_000, 960 * 4),
+            },
+            provider: {
+              provider_id: 'provider-test', implementation_class: 'formal',
+              fallback_from: null, model: 'tts-test', voice: 'voice-test',
+            },
+            presented: false,
+          },
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+  await owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7, locale: 'zh-CN',
+  });
+  environment.worklet.port.onmessage({ data: {
+    kind: 'frame', capture_generation: 1, seq: 0, sample_rate_hz: 48_000,
+    sample_cursor: 0, context_time_s: 0, samples: new Float32Array(960).fill(0.25),
+  } });
+  await owner.stopAndRecognize();
+  return { calls, environment, owner };
+}
+
+async function startDedicatedBargeHarness({
+  failStopSend = false,
+  deferPriorClose = false,
+  failPriorCloseOnce = false,
+} = {}) {
+  const calls = [];
+  const bindingsByPath = new Map();
+  const sockets = [];
+  let captureIndex = 0;
+  let activationCount = 0;
+  let synthesisCount = 0;
+  let remainingPriorCloseFailures = failPriorCloseOnce ? 1 : 0;
+  let releasePriorClose = () => undefined;
+  let markPriorCloseStarted = () => undefined;
+  const priorCloseGate = new Promise(resolve => { releasePriorClose = resolve; });
+  const priorCloseStarted = new Promise(resolve => { markPriorCloseStarted = resolve; });
+  const environment = audioEnvironment(
+    () => `capture-${++captureIndex}`,
+    { autoEndSources: false },
+  );
+  const response = {
+    interaction_id: 'interaction-1',
+    response_id: 'response-dedicated-barge-1',
+    response_generation: 1,
+  };
+  const makeUplinkBinding = (params, index) => ({
+    ...serverBinding(),
+    lease_id: `media-uplink-lease-${index}`,
+    authority_evidence_id: `media-uplink-authority-${index}`,
+    media_session_id: `media-uplink-session-${index}`,
+    track_id: params.track_id,
+    generation: {
+      kind: 'capture',
+      id: params.capture_id,
+      value: params.capture_generation,
+    },
+  });
+  const makeDownlinkBinding = (synthesisResponse, index) => ({
+    ...serverBinding(),
+    lease_id: `media-downlink-barge-lease-${index}`,
+    authority_evidence_id: `media-downlink-barge-authority-${index}`,
+    media_session_id: `media-downlink-barge-session-${index}`,
+    track_id: `playout-barge-track-${index}`,
+    direction: 'downlink',
+    generation: {
+      kind: 'response',
+      id: synthesisResponse.response_id,
+      value: synthesisResponse.response_generation,
+    },
+    playout: {
+      response_id: synthesisResponse.response_id,
+      response_generation: synthesisResponse.response_generation,
+      unit_id: `unit-dedicated-barge-${index}`,
+    },
+  });
+
+  class DedicatedBargeSocket extends FakeSocket {
+    constructor(binding) {
+      super();
+      this.serverBinding = binding;
+    }
+    send(value) {
+      if (this.serverBinding.direction === 'downlink' && typeof value === 'string') {
+        const control = JSON.parse(value);
+        if (failStopSend && control.type === 'media.playback_stop_receipt') {
+          throw new Error('dedicated playback stop send failed');
+        }
+      }
+      this.sent.push(value);
+      if (this.serverBinding.direction === 'uplink' && typeof value !== 'string') {
+        queueMicrotask(() => this.onmessage?.({
+          data: serializeMediaControl({
+            type: 'media.ack',
+            lease_id: this.serverBinding.lease_id,
+            generation: this.serverBinding.generation.value,
+            through_seq: 0,
+          }),
+        }));
+      }
+    }
+  }
+
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: url => {
+      const binding = bindingsByPath.get(new URL(url).pathname);
+      if (binding === undefined) throw new Error('missing dedicated test binding');
+      const socket = new DedicatedBargeSocket(binding);
+      sockets.push(socket);
+      queueMicrotask(() => {
+        socket.open(binding);
+        if (binding.direction === 'downlink') {
+          socket.onmessage?.({
+            data: encodeAudioFrame(binding, {
+              seq: 0,
+              sample_cursor: 0,
+              samples: new Float32Array(960).fill(0.125),
+            }),
+          });
+        }
+      });
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        activationCount += 1;
+        const binding = makeUplinkBinding(params, activationCount);
+        const path = `/ws/live-voice/media/barge-uplink-${activationCount}`;
+        bindingsByPath.set(path, binding);
+        return {
+          status: 'active',
+          reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+          subject_id: `media-barge-subject-${activationCount}`,
+          endpoint_path: path,
+          subprotocol: 'live-voice.media.v1',
+          ticket_ttl_ms: 30_000,
+          binding,
+          privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.recognize.batch',
+            capture: params.capture,
+            voice_commit_receipt: 'voice-receipt-dedicated-barge-1',
+            event: {
+              session_id: params.capture.capture_id,
+              generation: params.capture.capture_generation,
+              seq: 0,
+              kind: 'final',
+              commits_turn: false,
+              hypothesis: {
+                alternatives: [{ raw_text: 'dedicated barge', display_text: 'dedicated barge', confidence: null }],
+                selected_index: 0,
+              },
+            },
+            provider: {
+              provider_id: 'provider-test', implementation_class: 'formal',
+              fallback_from: null, model: 'stt-test',
+            },
+          },
+        };
+      }
+      if (method === 'live_voice.speech.synthesize_batch') {
+        synthesisCount += 1;
+        const path = `/ws/live-voice/media/barge-downlink-${synthesisCount}`;
+        const downlinkBinding = makeDownlinkBinding(params.response, synthesisCount);
+        bindingsByPath.set(path, downlinkBinding);
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.synthesize.batch',
+            response: params.response,
+            unit_id: params.unit_id,
+            audio: {
+              format: 'pcm_f32_mono_20ms',
+              sample_rate_hz: 48_000,
+              channel_count: 1,
+              frame_count: 1,
+              delivery: 'dedicated_media_downlink',
+              endpoint_path: path,
+              subprotocol: 'live-voice.media.v1',
+              ticket_ttl_ms: 30_000,
+              binding: downlinkBinding,
+              max_pending_frames: 8,
+              max_pending_bytes: 131_072,
+            },
+            provider: {
+              provider_id: 'provider-test', implementation_class: 'formal',
+              fallback_from: null, model: 'tts-test', voice: 'voice-test',
+            },
+            presented: false,
+          },
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        if (deferPriorClose && params.subject_id === 'media-barge-subject-1') {
+          markPriorCloseStarted();
+          await priorCloseGate;
+        }
+        if (
+          params.subject_id === 'media-barge-subject-1'
+          && remainingPriorCloseFailures > 0
+        ) {
+          remainingPriorCloseFailures -= 1;
+          throw new Error('prior media authority close failed');
+        }
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+  await owner.startCapture({
+    session_id: 'session-1', interaction_id: 'interaction-1', correlation_id: 'correlation-1',
+    activation_id: 'activation-1', activation_generation: 7, locale: 'zh-CN',
+  });
+  environment.worklet.port.onmessage({ data: {
+    kind: 'frame', capture_generation: 1, seq: 0, sample_rate_hz: 48_000,
+    sample_cursor: 0, context_time_s: 0, samples: new Float32Array(960).fill(0.25),
+  } });
+  await owner.stopAndRecognize();
+  return {
+    calls,
+    environment,
+    owner,
+    priorCloseStarted,
+    releasePriorClose,
+    response,
+    sockets,
   };
 }
 
@@ -435,6 +801,269 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
   ]);
   await owner.close();
   assert.equal(calls.at(-1)[0], PRODUCT_P1_MEDIA_CLOSE_METHOD);
+});
+
+test('formal P1 exact batch barge-in rejects wrong targets and returns zero-business-cancel truth', async () => {
+  const { environment, owner } = await startBatchBargeHarness();
+  const response = {
+    interaction_id: 'interaction-1',
+    response_id: 'response-barge-1',
+    response_generation: 1,
+  };
+  const playing = owner.playAgentText({
+    response,
+    unit_id: 'unit-barge-1',
+    text: 'barge this response',
+  });
+  await waitFor(
+    () => environment.contexts.some(context => context.sources.length > 0),
+    'batch playout did not create a browser source',
+  );
+
+  const wrong = await owner.stopAgentPlayoutExact({
+    ...response,
+    response_generation: response.response_generation + 1,
+  });
+  assert.equal(wrong, null);
+  assert.equal(environment.contexts.reduce((count, item) => count + item.activeSources, 0), 4);
+
+  const receipt = await owner.stopAgentPlayoutExact(response);
+  assert.equal(receipt.kind, 'product_p1.agent_playout_stop.v1');
+  assert.equal(receipt.media_stop_delivery, 'not_applicable');
+  assert.equal(receipt.local_stop.outcome, 'local_fence_established');
+  assert.equal(receipt.local_stop.business_cancel_count_delta, 0);
+  assert.equal(receipt.local_stop.browser_sources.stop_request.failed_count, 0);
+  assert.equal(receipt.local_stop.browser_sources.disconnect.failed_count, 0);
+  await playing;
+  assert.equal(owner.status().status, 'recognized');
+  assert.equal(await owner.stopAgentPlayout(response), false);
+  await owner.close();
+});
+
+test('formal P1 source-cleanup unknown returns no continuation receipt and stays truthful', async () => {
+  const { environment, owner } = await startBatchBargeHarness({ sourceStopThrows: true });
+  const response = {
+    interaction_id: 'interaction-1',
+    response_id: 'response-source-unknown-1',
+    response_generation: 1,
+  };
+  const playing = owner.playAgentText({
+    response,
+    unit_id: 'unit-source-unknown-1',
+    text: 'source cleanup must remain truthful',
+  });
+  await waitFor(
+    () => environment.contexts.some(context => context.sources.length > 0),
+    'source-unknown playout did not create a browser source',
+  );
+
+  assert.equal(await owner.stopAgentPlayoutExact(response), null);
+  await assert.rejects(playing, /cleanup completion is unknown/);
+  assert.equal(owner.status().status, 'cleanup_pending');
+  await assert.rejects(owner.close());
+  assert.equal(owner.status().status, 'cleanup_pending');
+});
+
+test('formal P1 dedicated barge-in delivers exact stop truth and revokes only prior authority', async () => {
+  const { calls, environment, owner, response, sockets } =
+    await startDedicatedBargeHarness();
+  const playing = owner.playAgentText({
+    response,
+    unit_id: 'unit-dedicated-barge-1',
+    text: 'dedicated response to interrupt',
+  });
+  await waitFor(
+    () => environment.contexts.some(context => context.sources.length > 0),
+    'dedicated playout did not create a browser source',
+  );
+
+  const receipt = await owner.stopAgentPlayoutExact(response);
+  assert.equal(receipt.kind, 'product_p1.agent_playout_stop.v1');
+  assert.equal(receipt.media_stop_delivery, 'delivered');
+  assert.equal(receipt.local_stop.outcome, 'local_fence_established');
+  assert.equal(receipt.local_stop.business_cancel_count_delta, 0);
+  await playing;
+  assert.equal(owner.status().status, 'capturing');
+
+  const downlink = sockets.find(socket => socket.serverBinding.direction === 'downlink');
+  const controls = downlink.sent.filter(value => typeof value === 'string').map(JSON.parse);
+  const stops = controls.filter(control => control.type === 'media.playback_stop_receipt');
+  assert.equal(stops.length, 1);
+  assert.equal(stops[0].business_cancel_count_delta, 0);
+  await waitFor(
+    () => calls.some(([method, params]) => (
+      method === PRODUCT_P1_MEDIA_CLOSE_METHOD
+        && params.subject_id === 'media-barge-subject-1'
+    )),
+    'prior media authority cleanup did not start',
+  );
+  assert.deepEqual(
+    calls
+      .filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD)
+      .map(([, params]) => params.subject_id),
+    ['media-barge-subject-1'],
+  );
+
+  await owner.close();
+  assert.deepEqual(
+    calls
+      .filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD)
+      .map(([, params]) => params.subject_id),
+    ['media-barge-subject-1', 'media-barge-subject-2'],
+  );
+});
+
+test('formal P1 response-cancel continuation is not blocked by retained authority cleanup', async () => {
+  const {
+    environment,
+    owner,
+    priorCloseStarted,
+    releasePriorClose,
+    response,
+  } = await startDedicatedBargeHarness({ deferPriorClose: true });
+  const playing = owner.playAgentText({
+    response,
+    unit_id: 'unit-dedicated-barge-1',
+    text: 'cleanup cannot block the cancel continuation',
+  });
+  await waitFor(
+    () => environment.contexts.some(context => context.sources.length > 0),
+    'deferred-cleanup playout did not create a browser source',
+  );
+
+  const receipt = await owner.stopAgentPlayoutExact(response);
+  assert.equal(receipt.media_stop_delivery, 'delivered');
+  await playing;
+  assert.equal(owner.status().status, 'capturing');
+  await priorCloseStarted;
+
+  let closeSettled = false;
+  const closing = owner.close().finally(() => { closeSettled = true; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(closeSettled, false);
+  releasePriorClose();
+  await closing;
+  assert.equal(owner.status().status, 'closed');
+});
+
+test('late prior cleanup failure cannot disable exact stop for successor playout', async () => {
+  const {
+    calls,
+    environment,
+    owner,
+    priorCloseStarted,
+    releasePriorClose,
+    response,
+  } = await startDedicatedBargeHarness({
+    deferPriorClose: true,
+    failPriorCloseOnce: true,
+  });
+  const firstPlaying = owner.playAgentText({
+    response,
+    unit_id: 'unit-dedicated-barge-1',
+    text: 'first response interrupted before deferred cleanup',
+  });
+  await waitFor(
+    () => environment.contexts.some(context => context.sources.length > 0),
+    'first deferred-failure playout did not create a browser source',
+  );
+  assert.notEqual(owner.stopAgentPlayoutExact(response), null);
+  await firstPlaying;
+  await priorCloseStarted;
+  environment.worklet.port.onmessage({ data: {
+    kind: 'frame', capture_generation: 3, seq: 0, sample_rate_hz: 48_000,
+    sample_cursor: 0, context_time_s: 0, samples: new Float32Array(960).fill(0.25),
+  } });
+  await owner.stopAndRecognize();
+
+  try {
+    const priorSourceCount = environment.contexts.reduce(
+      (count, context) => count + context.sources.length,
+      0,
+    );
+    const successorResponse = {
+      interaction_id: response.interaction_id,
+      response_id: 'response-dedicated-barge-2',
+      response_generation: 2,
+    };
+    const successorPlaying = owner.playAgentText({
+      response: successorResponse,
+      unit_id: 'unit-dedicated-barge-2',
+      text: 'successor response must remain exactly stoppable',
+    });
+    await waitFor(
+      () => environment.contexts.reduce(
+        (count, context) => count + context.sources.length,
+        0,
+      ) > priorSourceCount,
+      'successor playout did not create a browser source',
+    );
+    releasePriorClose();
+    await waitFor(
+      () => calls.filter(([method, params]) => (
+        method === PRODUCT_P1_MEDIA_CLOSE_METHOD
+          && params.subject_id === 'media-barge-subject-1'
+      )).length === 1,
+      'deferred prior cleanup did not fail once',
+    );
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.deepEqual(owner.status(), {
+      status: 'playing',
+      reason: null,
+      retained_cleanup_pending: true,
+    });
+
+    const successorReceipt = owner.stopAgentPlayoutExact(successorResponse);
+    assert.equal(successorReceipt?.media_stop_delivery, 'delivered');
+    await successorPlaying;
+    assert.equal(owner.status().status, 'capturing');
+    assert.equal(owner.status().retained_cleanup_pending, true);
+    await owner.close();
+    assert.equal(owner.status().status, 'closed');
+    assert.equal(owner.status().retained_cleanup_pending, false);
+    const closedSubjects = calls
+      .filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD)
+      .map(([, params]) => params.subject_id);
+    assert.equal(closedSubjects.filter(subject => subject === 'media-barge-subject-1').length, 2);
+    assert.equal(closedSubjects.filter(subject => subject === 'media-barge-subject-2').length, 1);
+    assert.equal(closedSubjects.filter(subject => subject === 'media-barge-subject-3').length, 1);
+  } finally {
+    releasePriorClose();
+    if (owner.status().status !== 'closed') await owner.close().catch(() => undefined);
+  }
+});
+
+test('formal P1 dedicated stop-send failure returns no continuation and converges cleanup', async () => {
+  const { calls, environment, owner, response, sockets } =
+    await startDedicatedBargeHarness({ failStopSend: true });
+  const playing = owner.playAgentText({
+    response,
+    unit_id: 'unit-dedicated-barge-1',
+    text: 'failed receipt delivery must not continue',
+  });
+  await waitFor(
+    () => environment.contexts.some(context => context.sources.length > 0),
+    'send-failed playout did not create a browser source',
+  );
+
+  assert.equal(await owner.stopAgentPlayoutExact(response), null);
+  await assert.rejects(playing, /local playback stop transport send failed/);
+  assert.equal(owner.status().status, 'failed');
+  const downlink = sockets.find(socket => socket.serverBinding.direction === 'downlink');
+  const deliveredStops = downlink.sent
+    .filter(value => typeof value === 'string')
+    .map(JSON.parse)
+    .filter(control => control.type === 'media.playback_stop_receipt');
+  assert.equal(deliveredStops.length, 0);
+  assert.deepEqual(
+    calls
+      .filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD)
+      .map(([, params]) => params.subject_id)
+      .sort(),
+    ['media-barge-subject-1', 'media-barge-subject-2'],
+  );
+  await owner.close();
+  assert.equal(owner.status().status, 'closed');
 });
 
 test('a successor P1 turn revokes the exact prior media and Speech authority first', async () => {
@@ -689,7 +1318,9 @@ test('capture setup failure closes browser audio without an explicit owner close
     activation_id: 'activation-1', activation_generation: 1,
   }), /browser audio operation failed/);
 
-  assert.deepEqual(owner.status(), { status: 'failed', reason: 'CAPTURE_START_FAILED' });
+  assert.deepEqual(owner.status(), {
+    status: 'failed', reason: 'CAPTURE_START_FAILED', retained_cleanup_pending: false,
+  });
   assert.equal(requests, 0);
   assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
 });
@@ -1090,7 +1721,9 @@ for (const [status, reason] of [
       activation_id: 'activation-1',
       activation_generation: 1,
     }), error => error.reason_id === reason);
-    assert.deepEqual(owner.status(), { status: 'failed', reason });
+    assert.deepEqual(owner.status(), {
+      status: 'failed', reason, retained_cleanup_pending: false,
+    });
     await owner.close();
   });
 }
@@ -1115,6 +1748,7 @@ test('formal P1 never publishes a private transport error message', async () => 
   assert.deepEqual(owner.status(), {
     status: 'failed',
     reason: 'FORMAL_P1_ROUTE_FAILED',
+    retained_cleanup_pending: false,
   });
   assert.doesNotMatch(JSON.stringify(owner.status()), /private-provider-value|api_key/);
   await assert.rejects(owner.playAgentText({

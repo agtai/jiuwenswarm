@@ -11,6 +11,10 @@ import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
   classifyProductP2Notification,
+  ProductResponseSurfaceFence,
+  executeProductVoiceBargeIn,
+  executeProductPresentationWithFence,
+  settleRetainedProductVoiceResponseCancel,
   extractWebErrorReason,
   isCurrentProgressOwner,
   productP2WebRequestOptions,
@@ -21,7 +25,10 @@ import {
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+  PRODUCT_P2_ACTIVATE_METHOD,
+  PRODUCT_P2_BARGE_IN_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
+  ProductWebP2ActivationOwner,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
 import {
   IntegratedWebRouteShell,
@@ -444,16 +451,278 @@ test('product barge-in stops local playout before any response cancel request', 
   const start = source.indexOf('const stopProductVoicePlayout = async () =>');
   const end = source.indexOf('const commitRecognizedVoiceTaskOrigin', start);
   const handler = source.slice(start, end);
-  const stopIndex = handler.indexOf('p1Owner.stopAgentPlayout(response)');
-  const rejectIndex = handler.indexOf('if (!locallyStopped) return;');
+  const helperIndex = handler.indexOf('await executeProductVoiceBargeIn({');
   const clearIndex = handler.indexOf('activeVoiceResponseRef.current = null;');
-  const remoteIndex = handler.indexOf('await p2Owner.bargeIn({');
 
   assert.equal(start >= 0 && end > start, true);
-  assert.equal(stopIndex >= 0, true);
-  assert.equal(stopIndex < rejectIndex && rejectIndex < clearIndex && clearIndex < remoteIndex, true);
-  assert.match(handler, /cancel_response: true/);
-  assert.match(handler, /catch \{\s*setProductTextStatus\('failed'\);/);
+  assert.equal(helperIndex >= 0 && helperIndex < clearIndex, true);
+  assert.match(handler, /catch \(error\) \{[\s\S]*setProductTextStatus\('failed'\);/);
+});
+
+test('product barge helper permits remote cancel only after one successful exact local stop', async () => {
+  const response = {
+    interaction_id: 'interaction-1',
+    response_id: 'response-1',
+    response_generation: 1,
+  };
+  const effects = [];
+  const successfulP1 = {
+    status: () => ({ status: 'playing', reason: null }),
+    stopAgentPlayoutExact: async value => {
+      effects.push(['local', value]);
+      return Object.freeze({ kind: 'product_p1.agent_playout_stop.v1' });
+    },
+  };
+  const p2 = {
+    bargeIn: async value => {
+      effects.push(['remote', value]);
+      return Object.freeze({});
+    },
+  };
+
+  assert.equal(await executeProductVoiceBargeIn({
+    p1_owner: successfulP1,
+    p2_owner: p2,
+    response,
+    action_id: 'barge-1',
+    on_local_stop: () => effects.push(['clear']),
+    on_response_cancel_accepted: () => effects.push(['cancelled']),
+  }), true);
+  assert.deepEqual(effects, [
+    ['local', response],
+    ['clear'],
+    ['remote', {
+      action_id: 'barge-1',
+      response_id: 'response-1',
+      response_generation: 1,
+      cancel_response: true,
+    }],
+    ['cancelled'],
+  ]);
+
+  for (const stop of [async () => null, async () => { throw new Error('stop failed'); }]) {
+    let remoteCalls = 0;
+    const attempt = executeProductVoiceBargeIn({
+      p1_owner: { status: () => ({ status: 'playing', reason: null }), stopAgentPlayoutExact: stop },
+      p2_owner: { bargeIn: async () => { remoteCalls += 1; } },
+      response,
+      action_id: 'barge-rejected',
+      on_local_stop: () => { throw new Error('must not clear'); },
+      on_response_cancel_accepted: () => { throw new Error('must not fence cancel'); },
+    });
+    await attempt.catch(() => undefined);
+    assert.equal(remoteCalls, 0);
+  }
+
+  const remoteFailureEffects = [];
+  await assert.rejects(executeProductVoiceBargeIn({
+    p1_owner: successfulP1,
+    p2_owner: { bargeIn: async () => { throw new Error('cancel result unknown'); } },
+    response,
+    action_id: 'barge-unknown',
+    on_local_stop: () => remoteFailureEffects.push('local'),
+    on_response_cancel_accepted: () => remoteFailureEffects.push('cancelled'),
+  }), /cancel result unknown/);
+  assert.deepEqual(remoteFailureEffects, ['local']);
+
+  let disabledEffects = 0;
+  assert.equal(await executeProductVoiceBargeIn({
+    p1_owner: {
+      status: () => ({ status: 'closed', reason: null }),
+      stopAgentPlayoutExact: async () => { disabledEffects += 1; return null; },
+    },
+    p2_owner: { bargeIn: async () => { disabledEffects += 1; } },
+    response,
+    action_id: 'barge-disabled',
+    on_local_stop: () => { disabledEffects += 1; },
+    on_response_cancel_accepted: () => { disabledEffects += 1; },
+  }), false);
+  assert.equal(disabledEffects, 0);
+});
+
+test('unknown response cancel is replayed exactly after reconnect before fence promotion', async () => {
+  const binding = {
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 1,
+  };
+  const response = {
+    interaction_id: binding.interaction_id,
+    response_id: 'response-1',
+    response_generation: 1,
+  };
+  const calls = [];
+  let connected = true;
+  let loseFirstResponse = true;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) {
+        return { ok: true, result: { status: 'active', ...binding } };
+      }
+      if (method === PRODUCT_P2_BARGE_IN_METHOD) {
+        if (loseFirstResponse) {
+          loseFirstResponse = false;
+          connected = false;
+          throw Object.assign(new Error('response lost after server accept'), {
+            code: 'UNAVAILABLE',
+          });
+        }
+        return {
+          ok: true,
+          result: {
+            status: 'barge_in_applied',
+            ...binding,
+            action_id: params.action_id,
+            response_id: params.response_id,
+            response_generation: params.response_generation,
+            cancel_response: true,
+            applied: false,
+            replayed: true,
+            effect_ids: ['response.cancel:response-1:1'],
+          },
+        };
+      }
+      throw new Error(`forbidden method ${method}`);
+    },
+  });
+  await owner.start(binding);
+  let retained = null;
+  let cancelAccepted = 0;
+
+  await assert.rejects(executeProductVoiceBargeIn({
+    p1_owner: {
+      status: () => ({ status: 'playing', reason: null, retained_cleanup_pending: false }),
+      stopAgentPlayoutExact: () => Object.freeze({ kind: 'product_p1.agent_playout_stop.v1' }),
+    },
+    p2_owner: owner,
+    response,
+    action_id: 'barge-reconnect-1',
+    on_local_stop: () => {
+      retained = Object.freeze({ owner, response, action_id: 'barge-reconnect-1' });
+    },
+    on_response_cancel_accepted: () => { cancelAccepted += 1; },
+    is_current: () => connected,
+  }), /response lost after server accept/);
+  assert.notEqual(retained, null);
+  assert.equal(cancelAccepted, 0);
+
+  connected = true;
+  await settleRetainedProductVoiceResponseCancel({
+    operation: retained,
+    is_current: () => connected,
+    on_accepted: () => { cancelAccepted += 1; },
+  });
+  assert.equal(cancelAccepted, 1);
+  const cancelCalls = calls.filter(([method]) => method === PRODUCT_P2_BARGE_IN_METHOD);
+  assert.equal(cancelCalls.length, 2);
+  assert.deepEqual(cancelCalls[0][1], cancelCalls[1][1]);
+  assert.equal(cancelCalls[0][2], cancelCalls[1][2]);
+  assert.equal(
+    calls.some(([method]) => /submit|round|task/.test(method)),
+    false,
+  );
+});
+
+test('exact response surface fence prevents late audio and cancelled presentation resurrection', () => {
+  const fence = new ProductResponseSurfaceFence();
+  const response = {
+    interaction_id: 'interaction-1',
+    response_id: 'response-1',
+    response_generation: 1,
+  };
+  let textEffects = 0;
+  let audioEffects = 0;
+  const present = () => executeProductPresentationWithFence({
+    fence,
+    response,
+    on_text_presentation: () => { textEffects += 1; },
+    on_audio_presentation: () => { audioEffects += 1; },
+  });
+
+  assert.equal(present(), 'full');
+  assert.deepEqual([textEffects, audioEffects], [1, 1]);
+  fence.fenceLocalStop(response);
+  assert.equal(present(), 'text_only');
+  assert.deepEqual([textEffects, audioEffects], [2, 1]);
+  fence.fenceResponseCancelAccepted(response);
+  assert.equal(present(), 'dropped');
+  assert.deepEqual([textEffects, audioEffects], [2, 1]);
+
+  const nextGeneration = { ...response, response_generation: 2 };
+  assert.equal(executeProductPresentationWithFence({
+    fence,
+    response: nextGeneration,
+    on_text_presentation: () => { textEffects += 1; },
+    on_audio_presentation: () => { audioEffects += 1; },
+  }), 'full');
+  assert.deepEqual([textEffects, audioEffects], [3, 2]);
+});
+
+test('response surface tombstones outlive more than 128 late notifications without replay', () => {
+  const fence = new ProductResponseSurfaceFence();
+  const responses = Array.from({ length: 129 }, (_, index) => ({
+    interaction_id: `interaction-${index}`,
+    response_id: `response-${index}`,
+    response_generation: 1,
+  }));
+  for (const response of responses) fence.fenceResponseCancelAccepted(response);
+  let effects = 0;
+
+  assert.equal(executeProductPresentationWithFence({
+    fence,
+    response: responses[0],
+    on_text_presentation: () => { effects += 1; },
+    on_audio_presentation: () => { effects += 1; },
+  }), 'dropped');
+  assert.equal(effects, 0);
+
+  const saturated = new ProductResponseSurfaceFence(2);
+  for (const response of responses.slice(0, 3)) {
+    saturated.fenceResponseCancelAccepted(response);
+  }
+  assert.equal(executeProductPresentationWithFence({
+    fence: saturated,
+    response: { ...responses[2], response_generation: 2 },
+    on_text_presentation: () => { effects += 1; },
+    on_audio_presentation: () => { effects += 1; },
+  }), 'dropped');
+  assert.equal(effects, 0);
+});
+
+test('product P1 forwards the exact local-stop receipt without creating business cancel authority', async () => {
+  const source = await readFile(
+    new URL('../src/features/live-voice/formal/productP1VoiceRoute.ts', import.meta.url),
+    'utf8'
+  );
+  const start = source.indexOf('stopAgentPlayoutExact(');
+  const end = source.indexOf('async close(): Promise<void>', start);
+  const method = source.slice(start, end);
+  const releaseIndex = method.indexOf('this.#pendingPlayout = null;');
+  const localIndex = method.indexOf('this.#audio.stopPlayoutExact(');
+  const fenceIndex = method.indexOf('if (!receipt.local_fence_established) {');
+  const mediaIndex = method.indexOf('pending.downlinkRoute.leaf.sendLocalPlaybackStop(receipt)');
+  const cleanupIndex = method.indexOf("if (receipt.outcome !== 'local_fence_established') {");
+  const rejectIndex = method.indexOf('pending.reject(');
+
+  assert.equal(start >= 0 && end > start, true);
+  assert.equal(
+    releaseIndex >= 0
+      && releaseIndex < localIndex
+      && localIndex < fenceIndex
+      && fenceIndex < mediaIndex
+      && mediaIndex < cleanupIndex,
+    true
+  );
+  assert.equal(rejectIndex >= 0, true);
+  assert.match(method, /mediaStopDelivery = 'delivered'/);
+  assert.match(method, /this\.#retainPlayoutAuthorityCleanup\(pending\.receiptAuthority\)/);
+  assert.match(method, /return Object\.freeze\(\{\s*kind: 'product_p1\.agent_playout_stop\.v1'/);
+  assert.match(method, /pending\.downlinkRoute\.leaf\.close\('MEDIA_LOCAL_CLOSE'\)/);
+  assert.doesNotMatch(method, /round\.cancel|task\.cancel/);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {
