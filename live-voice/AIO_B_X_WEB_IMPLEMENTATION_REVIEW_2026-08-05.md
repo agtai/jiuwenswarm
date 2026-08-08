@@ -123,3 +123,105 @@ Planned verification:
 | Real Chrome evidence | `PASS FOR OBSERVED NORMAL PATH; POST-RUN CHANGES AUTOMATED` | Desktop Google Chrome `150.0.7871.116`; Windows NT build `26200.8875`, DisplayVersion `25H2`; `http://127.0.0.1:5193`; local controlled network; user-approved default microphone. Actual track settings reported 48 kHz mono with AEC, noise suppression and automatic gain control enabled; device identity was present but its value was not persisted. The AudioWorklet produced 1,283 contiguous 20ms mono Float32 frames (960 samples each), from sequence/cursor `0/0` through `1282/1230720`, with final context time `25.64s`. After explicit Stop, the count remained 1,283 after a further wait, capture ended as `stopped/harness_stop`, and the Adapter closed cleanly. Explicit synthetic 48 kHz mono PCM reached exact response `aio-harness-response-0`, unit `synthetic-tone`, contiguous `render_completed through_seq=9`; this proves browser graph completion, not that a person heard it. Chrome console warnings/errors were empty. Later reviews tightened failure/concurrency and identity validation, exposed the accepted playout rate, and updated the harness to consume that rate. Those changes pass deterministic tests but were not recreated on the real device. This one-machine evidence does not close permission revoke/device loss/background/AIO-C latency or the Web Alpha Gate. |
 
 The bounded AIO-B/X-WEB decision slice originated on `codex/aio-b-x-web` and was reconciled and cold-reviewed on `hx/0803_live_voice`, including the integration fixes above and browser decision D-058. Alternate closure `066d43eb` is superseded rather than an additional integration commit. Those fixes were verified deterministically but were not rerun on the physical Chrome device, so the earlier normal-path evidence is not widened. Current landed state belongs to `STATUS.md`. This slice does not close cumulative P1/P2/P3alpha or the Web Alpha Gate; the real-device limitations recorded above remain open acceptance work.
+
+## 9. 2026-08-08 D-065 cumulative-route correction
+
+This section is a later review addendum; it does not rewrite the frozen 2026-08-05
+contract or widen its real-device evidence. The original section 4 rule that every
+render gap terminates capture is superseded only by D-065's bounded Chrome input
+semantics: one forward gap may be materialized as silence only after real input
+returns, only up to 15ms, with at most 60ms inside a rolling 1000ms window. Initial
+empty input publishes no frame, a gap cannot span one complete 20ms frame, and
+over-limit, repeated, regressed-clock, malformed, stale or cross-generation input
+still fails closed with a stable reason.
+
+The correction was triggered by a real cumulative P1/P2 run in which Agent text
+reached exact presentation acknowledgement and TTS began, after which the
+concurrent capture stopped and P1 cleanup interrupted the current downlink. Gateway
+and Agent logs exclude an Agent cancel, Gateway-initiated stop and downlink ACK
+timeout; the former generic `AUDIO_CAPTURE_STOPPED` prevented stronger attribution.
+The Adapter now preserves exact Worklet/input protocol reasons. A corrected physical
+run remains required before claiming that D-065 fixed the observed machine or that
+the user heard the complete response.
+
+Deterministic closure covers processor→Adapter→P1→dedicated-downlink composition:
+a bounded startup gap plus a bounded playing-window gap keeps capture and playout
+alive, and downlink ACK remains render-completion-driven. Repeated sub-threshold
+gaps exceed the rolling budget and stop with zero playout receipt, zero widened
+cancel, no post-failure `capturing` publication and exact closure of both media
+authorities. Track end, context loss, page hide, processor error, stale callbacks,
+missing real readiness and missing Gateway ACK retain their prior fail-closed tests.
+Current test/review and physical-validation state belongs only in `STATUS.md`.
+
+## 10. 2026-08-08 D-066 render-clock predicate correction
+
+This later addendum does not widen the frozen AIO-B evidence. The first physical
+rerun after D-065 reached real Agent text and TTS but the user heard only the first
+phrase before exact `AUDIO_RENDER_FRAME_REGRESSED`. Source review found that the
+processor compared the next block start against the prior materialized interval's
+end rather than against the prior callback's `currentFrame`. A monotonic overlap
+therefore produced a false clock-regression diagnosis.
+
+D-066 separates `lastRenderFrame` from `expectedRenderFrame`. A true backward
+clock and a non-advancing clock remain distinct fail-closed conditions. A monotonic
+overlap is de-duplicated first-writer-wins only as compatibility for the observed
+UA/device anomaly; it is not claimed as standards-conforming Web Audio behavior,
+does not create duplicate samples or silence. The duplicate prefix cannot advance
+readiness, while an unseen suffix is unique real PCM and may normally advance
+sequence, cursor and readiness. D-065 remains authoritative for bounded forward gaps. Conforming tests
+now separately cover non-zero initial frame, fixed 128- and 256-frame quanta,
+suspend/resume without callbacks and valid empty-input topology; anomaly and
+invalid-clock tests cover exact failure and zero late effects. The complete
+physical response and next capture remain unproven until the corrected source is
+hard-refreshed and rerun.
+
+## 11. 2026-08-08 D-067 duplicate-frame watchdog correction
+
+The next physical rerun completed recognition, Agent submission, authoritative
+TTS and full user-heard “语音联调成功”, then the automatically overlapping capture
+failed with exact `AUDIO_RENDER_FRAME_NOT_ADVANCED`. This is a positive physical
+playout observation but not a complete P1/Gate pass because the next capture did
+not remain active and no immutable receipt/evidence set was frozen.
+
+D-067 replaces first-duplicate termination with interval de-duplication for at
+most eight consecutive callbacks at the same `currentFrame`. An empty callback
+cannot reserve samples, so same-frame real input may still populate an unseen
+interval; an already materialized interval remains first-writer-wins and cannot
+duplicate samples, silence, cursor or readiness. Clock advance resets the counter;
+the ninth consecutive duplicate still fails as not-advanced, and any real backward
+clock remains immediately terminal. Processor tests cover duplicate recovery,
+empty-to-real and repeated-empty same-frame input, changed-quantum unseen suffix,
+clock-advance reset and the exact watchdog boundary. The real
+processor→Adapter→P1/downlink composition now renders three TTS frames, injects
+the duplicate at final source teardown, proves exact ACK/receipt, retained capture
+and continuous next uplink PCM, then separately proves both during-playout and
+post-receipt terminal fencing. A processor that emits no callbacks at all is not
+detected by this callback-count watchdog; existing startup/route deadlines remain
+the liveness boundary. Current counts and physical state remain owned by
+`STATUS.md`.
+
+## 12. 2026-08-08 D-068 Product P1 capture-duration correction
+
+Product P1 retains at most 1500 complete 20ms frames because final Batch STT needs
+the whole utterance; uplink ACK does not release that recognition input. With no
+VAD/EOT, silent PCM consumes the same bound. This is 30 seconds of materialized
+audio rather than a wall-clock timer; audio captured during overlapping TTS counts
+toward it. D-068 keeps this bounded privacy/memory contract and replaces the
+old observer throw/generic `AUDIO_FRAME_CONSUMER_FAILED` with exact
+`AUDIO_CAPTURE_DURATION_EXCEEDED` inside Product P1. The expired audio is discarded
+before any fallible remote cleanup, with zero new Speech, Agent, Tool, Task,
+history, receipt or cancel effect attributable to expiry; any previously accepted
+render receipt remains unique. `Stop and recognize` at the exact 1500-frame
+boundary remains a positive path.
+
+The mounted UI now discloses the 30-second captured-audio capacity including overlapping
+playout, explains the zero-submission expiry and disables restart from a terminal
+failed owner until refresh. A retained Start singleflight also prevents two
+same-tick attempts from allocating two successors while exact old-authority close
+is pending; Session replacement, disconnect and unmount fence a retained Start.
+Persistent close failure retains only the exact remote authority needed for retry,
+not raw PCM. Unlimited retention, rolling frame eviction, automatic silence
+recognition and ad-hoc amplitude VAD remain excluded; formal VAD/EOT or streaming
+recognition is later Alpha/production work. Current physical observation, D-053
+review, affected test counts and candidate/Gate state belong to [D94](D94_BROWSER_REFRESH_DUPLEX_RECOVERY_REVIEW_2026-08-08.md)
+and [STATUS](STATUS.md), not this historical module review.

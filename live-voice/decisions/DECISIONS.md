@@ -699,3 +699,46 @@
 - 音频和 HTTP 边界：所选 OpenAI Adapter 对所有请求声明 `Accept-Encoding: identity`，只接受无 `Content-Encoding` 或规范化后精确为 `identity` 的响应，并通过 raw stream 按实际字节限流；其他编码在读取 body 前以不可重试协议错误 fail closed，不使用 HTTPX 隐式解压。`/audio/speech` 明确请求 `response_format=pcm`，并按 Provider 文档只接受 24 kHz、mono、signed PCM16 little-endian、无容器头的有界原始字节；Gateway 先生成固定 44-byte canonical WAV，再在浏览器 AIO-B playout rate 不同时用显式 capability `server_linear_pcm16_mono` 执行确定性的 server-owned 线性重采样。同采样率保持 PCM 样本并输出 canonical WAV。空响应、奇数字节、超限、未知 capability 或不一致结果全部 fail closed；其他 Provider 必须由各自受审 Adapter 声明真实格式，不能继承 OpenAI 假设。真实 Gate 记录 Provider、模型、voice、输入/输出 rate、转换 capability、延迟和人工实听，不从配置标签推导成功。
 - 可替换性：JiuwenSwarm 保留统一 Speech Provider seam；后续可以接入本地 Qwen3-ASR/TTS、JiuwenSwarm 内建实现或其他兼容服务，但必须作为新的受审 Provider Adapter 完成能力、质量、延迟、资源、隐私、失败模式和真实设备 evidence，不能把本次 OpenAI W2 结果自动转移为本地模型 credit。
 - 重新评估条件：模型/alias/voice 不再可用；API 不再满足已验证的 raw PCM 合同；延迟、成本、区域、隐私或网络不满足当前 Gate；本地 Qwen 路线准备好受审；或进入 production provider/SLO/retention/HA 选择。
+
+## D-065 AIO-B 对 Chrome 瞬态空输入采用受限静音时间轴，持续异常仍 fail closed
+
+- 日期：2026-08-08
+- 状态：Accepted implementation correction（用户要求解决真实 Formal P1 在 Agent 文本已确认、TTS 开始后因并发 capture 停止而中断的问题；该选择只修正 D-058 在声明桌面 Chrome/Windows 基线上的 AudioWorklet 输入语义，不扩大浏览器或 release 范围）
+- 观察事实：真实日志证明 P2 Agent 输出和 exact presentation ACK 已完成；下一个 capture uplink 与 TTS downlink 随后几乎同时关闭，UI 只显示被聚合的 `AUDIO_CAPTURE_STOPPED`。代码审查确认旧 processor 把 Web Audio 允许的 empty input quantum 或短 `currentFrame` 前跳立即视为 fatal，P1 的正式双工清理又会同步停止当前 playout，因此形成“开始朗读后立即中断”。该根因仍需修正后的物理复测确认；不能从自动化推导人已听见。
+- 输入缺口决策：capture processor 只在真实非空输入恢复后，把一次最多 `15ms` 的前向缺口补为 PCM silence，以保持 20ms frame、sequence、sample cursor 和 AudioContext clock 连续；任何单次缺口不得覆盖完整 20ms frame。一个 `1000ms` 滚动窗口内累计补偿最多 `60ms`，因此重复亚阈值异常不能无限取得正式 duplex credit。初始 empty input 本身不发布 frame，也不能满足 capture readiness。
+- 失败和诊断：单次或滚动预算超限以 `AUDIO_INPUT_GAP_EXCEEDED` fail closed；render clock 回退以 `AUDIO_RENDER_FRAME_REGRESSED` fail closed；未知 Worklet error、非法 message、sequence/sample-rate 变化保留各自稳定或 generic 原因，不再全部折叠成 `AUDIO_CAPTURE_STOPPED`。持续错误仍停止 exact response、撤销 capture/downlink authority，且不得产生 playout receipt、Agent/Tool/Task/history 或 widened cancel 副作用。
+- 不扩张边界：静音只表达浏览器输入时间轴中的短暂不可用区间，不是降噪、丢包隐藏、重采样、设备切换、ASR 质量保证、physical-heard proof 或 production dropout recovery。权限/track/context/page/processor 持续故障继续 fail closed；正式 ACK 仍只能来自实际浏览器 render completion。
+- 重新评估条件：修正后的真实 Chrome 仍发生中断；底层稳定原因不是输入 gap；15ms/60ms 界限不能覆盖声明基线的合法瞬态或造成可感知 ASR 质量下降；Web Audio/Chrome 行为改变；需要跨浏览器/OS 保证；或需要把合成 silence provenance 提升到 wire/Gate 合同。
+
+## D-066 AIO-B 分离 render clock 与已物化输入边界，单调重叠仅作异常兼容去重
+
+- 日期：2026-08-08
+- 状态：Accepted implementation correction（D-065 后的第二次真实 Formal P1 复测已经识别文字、完成 Agent 回复并开始 TTS，但用户只听到“语音联调”即中断，UI 给出精确 `AUDIO_RENDER_FRAME_REGRESSED`；本决定修正该谓词和诊断，不扩大 Chrome Alpha 或 Gate 范围）
+- 根因：旧实现把新回调的 `currentFrame` 与上一块已物化的结束位置 `expectedRenderFrame` 比较，并把 `currentFrame < expectedRenderFrame` 一律定义为时钟回退。这个条件只能证明输入区间重叠，不能证明 `currentFrame` 相对上一回调向后移动；旧测试甚至用严格递增的 `0 → 64` 作为“回退”例，固化了错误判据。规范连续 AudioWorklet 仍应按同一固定 render quantum 前进；真实机器缺少数值帧诊断，因此这次观察只证明稳定失败原因与错误谓词一致，不把异常重叠宣称为标准浏览器行为。
+- 时钟与输入决策：processor 分别保留上一回调起点 `lastRenderFrame` 和已物化输入边界 `expectedRenderFrame`。只有 `currentFrame < lastRenderFrame` 是 `AUDIO_RENDER_FRAME_REGRESSED`；D-066 当时将相等作为独立的 `AUDIO_RENDER_FRAME_NOT_ADVANCED` 并立即 fail closed，该单回调边界现由 D-067 取代。严格递增但与已物化区间重叠的回调只作为已观察 UA/device 异常的确定性兼容：采用 first-writer-wins，丢弃重复前缀且只追加未见 suffix，不补 silence、不重复麦克风样本。重复前缀或完全物化的重复区间不推进 readiness；未见 suffix 是唯一的新真实 PCM，可正常推进 sequence/cursor/readiness。该路径不按 overlap 次数预算，因为它不合成数据且以 `currentFrame` 的唯一时间区间去重；向前缺口仍继续受 D-065 的单次与滚动预算约束。
+- 传播和副作用：Worklet → Browser Adapter → Product P1 必须保留上述精确稳定原因；播放期间失败时，同一原因同时拒绝 pending playout Promise 和驱动 UI，不能再被资源释放覆盖。任一终止异常都关闭 exact capture/downlink/playout authority，产生零 playout receipt、零 widened cancel 和零额外 Agent/Tool/Task/history mutation。
+- 验证边界：自动化必须分别覆盖规范连续序列（包括非零首次 `currentFrame`、固定非 128 quantum 和 suspend/resume 无回调区间）、empty input、异常 full/partial overlap 去重、真实回退、停滞、非法 frame 值及失败后的零副作用。第二次物理失败不获得 Gate/Replacement Ledger credit；只有刷新到本修正后完整听完、render ACK 完成并回到下一轮 capture 的真实运行才能关闭当前 P1 blocker。
+- 重新评估条件：修正后的声明基线仍中断；出现新的精确 Worklet/Adapter 原因；UA 异常兼容造成样本丢失、重复、错误 readiness 或时间轴漂移；浏览器提供可稳定复现的不同 quantum/currentFrame 合同；或需要把数值诊断提升为受限观测事件。
+
+## D-067 AIO-B 对同一 render frame 的短重复回调执行有界去重，持续停滞仍 fail closed
+
+- 日期：2026-08-08
+- 状态：Accepted implementation correction（D-066 后的第三次真实 Formal P1 运行已经完整识别、提交 Agent、合成并让用户听到完整“语音联调成功”，但自动下一轮 capture 最终以 `AUDIO_RENDER_FRAME_NOT_ADVANCED` 失败；该运行证明完整物理声音可达，不证明下一 capture、render receipt 或累计 Gate 完成）
+- 观察与规范边界：Web Audio 的正常 `currentFrame` 应按 render quantum 单调前进；当前机器仍给出了代码唯一可能由相邻回调 frame 相等触发的稳定原因。缺少数值诊断使本记录不能把该现象推广成标准 Chrome 行为，但真实失败证明“一次相等立即终止”对声明机器过严。该异常与 D-066 的单调 overlap 一样只进入受限兼容路径，不改变规范正向模型。
+- 重复回调决策：相同 `currentFrame` 继续使用已物化时间区间的 first-writer-wins 去重。若前一回调为空且尚未物化输入，同 frame 的首次真实输入可以填入该区间；若区间已完整物化，重复样本全部丢弃，不重复麦克风内容、不插入 silence、不推进 sequence/cursor/readiness。`currentFrame` 一旦前进，连续重复计数归零。
+- 卡死边界：最多接受 `8` 次连续同 frame 回调；第 `9` 次仍未前进以 `AUDIO_RENDER_FRAME_NOT_ADVANCED` fail closed。真实 `currentFrame < lastRenderFrame` 仍立即 `AUDIO_RENDER_FRAME_REGRESSED`；D-065 的向前缺口预算不变。该小边界允许一次或短 burst 的实机异常，同时避免永久无进度 processor 隐藏为健康 capture。
+- 活性边界：该计数只检测“回调仍发生但 render frame 不前进”，不检测完全停止产生回调的稳态冻结，也不替代既有首帧、route attach/ACK 与 downlink drain deadline；不得把它表述为通用 AudioWorklet stall detector。
+- 传播和副作用：播放期间触发终止异常时，downlink admission/queue refill 同步要求 exact `playing` owner 且无 failure cleanup；故障后不得新增 audio source、receipt、cancel 或 Agent/Tool/Task/history effect。成功兼容路径必须完整 TTS、render-driven ACK 并保持下一 capture；自动化或完整实听本身都不能替代该最终状态。
+- 自动化证据：processor 覆盖 8→advance/reset→8→第 9 次失败、重复后立即 regression、same-frame empty 与不同 quantum 的 unseen suffix；真实 processor→Adapter→P1 组合覆盖三帧 TTS 的最终 source teardown 重复、唯一 receipt、下一 capture 的连续 uplink PCM，以及 receipt 后持续停滞只关闭保留 capture 且无第二 receipt/late source/frame/cancel。真实 Chrome 复验仍是关闭当前 P1 blocker 的必要条件。
+- 重新评估条件：修正后的真实 Chrome 仍报同一原因；实际重复 burst 超过 8 且可证明仍是可恢复输入；出现样本遗漏、重复、错误 readiness、长时间无进度或 CPU 异常；取得数值 frame 诊断并证明另一个根因；或浏览器/规范改变 render quantum/currentFrame 合同。
+
+## D-068 Product P1 保留 30 秒完整 Batch STT 边界，并以精确原因终止超时采集
+
+- 日期：2026-08-08
+- 状态：Accepted product boundary and reviewed implementation correction（D-067 后的真实 Formal P1 运行已完成 ASR、提交真实 JiuwenSwarm Agent、完整 TTS 实听并自动进入下一轮 capture；之后未提供第二次 utterance，连续采集约 30 秒后 UI 以通用 `AUDIO_FRAME_CONSUMER_FAILED` 失败。主链与 D-067 的实机阻塞因此关闭，但该运行仍是冻结前可变源码上的辅助诊断，不是 immutable Gate evidence 或 Replacement Ledger credit；D-053 修复后复审已完成，修复实现冻结为 `e821fea84`，正式证据仍是后续 Gate 动作）
+- 根因与采集边界：Product P1 为 Batch STT 保留完整的 `1500 × 20ms = 30s` 已采集 PCM frame 副本。media ACK 只证明 uplink 接收，不能释放 Batch STT 仍需要的帧；静音也会由 AudioWorklet 产生 PCM，因为当前 W2 路径没有 VAD/EOT。该限制是已物化音频容量而不是从 capture start 计算的墙钟 timer；连续采集时约 30 秒，启动等待、suspend 或无 callback 可使墙钟更长。并发下一轮 capture 在 TTS 播放前启动，因此重叠播报期间实际采集的音频计入同一容量。第 1501 帧的 Product callback 异常此前被 Browser Adapter 正确按未知 observer 异常折叠成通用 consumer failure，但丢失了 Product 已知容量边界的诊断语义。
+- 边界决策：保留 30 秒硬上限，不改成无限监听、不简单增大 retention、不滚动丢弃已 ACK frame，也不把超时静音自动提交 STT。无限 retention 会扩大内存、麦克风隐私与生命周期风险；滚动丢弃会截断 Batch STT 输入；静音自动识别会产生 Provider 费用、幻觉文本及潜在 Agent/Tool 副作用。正式 VAD/EOT 或 Gateway-owned streaming recognition 属于后续 Alpha/生产设计，不在本修复中临时实现。
+- 精确终止：第 1501 帧由 Product P1 同步锁定 failure cleanup，以 `AUDIO_CAPTURE_DURATION_EXCEEDED` 进入受限清理；当前 capture PCM 被丢弃，不发起新 STT、Agent、Tool、Task、history、receipt 或 cancel，晚到 frame 为零效果。此前已接受的唯一 playout receipt 保持不变。达到恰好 1500 帧时仍允许用户执行 `Stop and recognize`，并提交完整 30 秒 WAV。
+- UI 与并发：Formal P1 UI 明示“最多保留 30 秒已采集音频；连续采集时约 30 秒；重叠播报期间采到的音频计入上限”，要求在上限内说话并点击 `Stop and recognize`；超限后明确说明未产生新 Speech/Agent submission，失败 owner 必须刷新/关闭后重建。Start 使用单次共享 Promise；旧 owner 精确 close 未完成时，两次连续 Start 不得分配两个麦克风或 media authority，close 持续失败则终态按钮禁用并保留原 authority 供有界清理重试。
+- ASR 质量边界：本次 `联调` 被识别为同音词 `连调` 是当前模型/音频条件下的识别质量问题，不是路由、commit 或 TTS 失败。W2 通过“识别后可编辑、确认后提交”保持文本权威；受保护 token 继续使用既有关键 token Gate。不得把一次同音词误识别升级为自动提交或生产级 ASR 准确率证明。
+- 重新评估条件：30 秒不足以覆盖已接受的 Demo 交互；实际运行在 1500 帧之前触发相同原因；清理产生额外 Speech/Agent/Tool/Task/history/receipt/cancel；用户在精确边界 Stop 时被误拒；引入正式 VAD/EOT/streaming STT；或产品选择持续免按键监听模式。
