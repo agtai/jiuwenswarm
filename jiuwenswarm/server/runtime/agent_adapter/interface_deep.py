@@ -889,6 +889,10 @@ class JiuWenSwarmDeepAdapter:
         self._is_session_scoped_adapter: bool = False
         self._parent_session_id: str | None = None
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
+        # A child is published before its first initialization await.  This
+        # set prevents a concurrent lookup from treating that retained owner
+        # as ready after partial initialization failed or was cancelled.
+        self._session_adapter_initializing: set[str] = set()
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
         self._session_adapter_last_used: dict[str, float] = {}
         self._session_adapter_config_version: int = 0
@@ -913,6 +917,9 @@ class JiuWenSwarmDeepAdapter:
         self._a2x_config: dict[str, Any] = {}
         self._a2x_blank_service_id: str = ""
         self._a2x_blank_dataset: str = ""
+        self._formal_cleanup_lock = asyncio.Lock()
+        self._formal_cleanup_task: asyncio.Task[None] | None = None
+        self._formal_cleanup_complete = False
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -985,6 +992,7 @@ class JiuWenSwarmDeepAdapter:
         remove_runtime_state: bool = True,
     ) -> None:
         self._session_adapters.pop(session_id, None)
+        getattr(self, "_session_adapter_initializing", set()).discard(session_id)
         if remove_lock:
             self._session_adapter_locks.pop(session_id, None)
         self._session_adapter_last_used.pop(session_id, None)
@@ -1162,32 +1170,47 @@ class JiuWenSwarmDeepAdapter:
         async with lock:
             existing = self._session_adapters.get(sid)
             if existing is not None:
+                if sid in self._session_adapter_initializing:
+                    raise RuntimeError("SESSION_ADAPTER_INITIALIZATION_PENDING")
                 await self._reload_session_adapter_if_stale(sid, existing)
                 self._touch_session_adapter(sid)
                 return existing
 
             adapter = self._new_session_scoped_adapter(sid)
+            # Publish the exact child before create_instance can produce any
+            # runtime.  RuntimeError and CancelledError both retain this owner
+            # for formal strict cleanup; neither makes it usable.
+            self._session_adapters[sid] = adapter
+            self._session_adapter_initializing.add(sid)
             config = (
                 dict(self._session_instance_config)
                 if isinstance(self._session_instance_config, dict)
                 else None
             )
-            await adapter.create_instance(
-                config,
-                mode=self._session_instance_mode,
-                sub_mode=self._session_instance_sub_mode,
+            formal_profile = bool(
+                config and config.get("project_clean_runtime_support", False)
             )
-
-            await adapter.start_interaction(session_id=sid)
-
-            self._session_adapters[sid] = adapter
-            # A brand-new session adapter is created from ``_session_instance_config``
-            # (which may predate the latest global reload). If a global reload left a
-            # pending ``config_base``, apply it now so the new session reflects the
-            # same configuration as already-existing sessions that reload lazily.
-            # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
-            # (including the no-pending case, where it silently catches up).
-            await self._reload_session_adapter_if_stale(sid, adapter)
+            try:
+                await adapter.create_instance(
+                    config,
+                    mode=self._session_instance_mode,
+                    sub_mode=self._session_instance_sub_mode,
+                )
+                if formal_profile:
+                    strict_start = getattr(adapter, "_start_interaction", None)
+                    if not callable(strict_start):
+                        raise RuntimeError("SESSION_ADAPTER_INITIALIZATION_PENDING")
+                    await strict_start(session_id=sid, strict=True)
+                else:
+                    await adapter.start_interaction(session_id=sid)
+                # A brand-new session adapter is created from
+                # ``_session_instance_config`` (which may predate the latest
+                # global reload). Apply any pending global reload before the
+                # child is advertised as ready.
+                await self._reload_session_adapter_if_stale(sid, adapter)
+            except BaseException:  # noqa: BLE001 -- retain partial owner
+                raise
+            self._session_adapter_initializing.discard(sid)
             self._touch_session_adapter(sid)
             logger.info("[JiuWenSwarmDeepAdapter] session scoped DeepAgent created: session_id=%s", sid)
             return adapter
@@ -1258,12 +1281,41 @@ class JiuWenSwarmDeepAdapter:
     def is_session_active(self, session_id: str) -> bool:
         return self._is_session_active(session_id)
 
+    def _owns_local_runtime(self) -> bool:
+        return bool(
+            self._instance is not None
+            or self._a2x_client is not None
+            or (
+                self._memory_reindex_task is not None
+                and not self._memory_reindex_task.done()
+            )
+            or any(
+                not task.done()
+                for tasks in self._session_agent_tasks.values()
+                for task in tasks
+            )
+            or any(not task.done() for task in self._evolution_watcher_tasks)
+        )
+
+    def _owns_formal_runtime(self) -> bool:
+        return bool(
+            self._owns_local_runtime()
+            or self._session_adapters
+            or self._session_adapter_locks
+            or self._active_session_ids
+            or self._session_agent_tasks
+        )
+
     def has_session_runtime(self, session_id: str | None = None) -> bool:
-        """Return whether this adapter still owns session runtime."""
+        """Return whether this adapter still owns product session runtime."""
+        owns_local_runtime = self._owns_local_runtime()
         if session_id is not None:
             sid = self._session_adapter_key(session_id)
             if self._is_session_scoped_adapter:
-                return self._session_adapter_key(self._parent_session_id) == sid
+                return (
+                    self._session_adapter_key(self._parent_session_id) == sid
+                    and owns_local_runtime
+                )
             return bool(
                 sid in self._session_adapters
                 or sid in self._session_adapter_locks
@@ -1271,7 +1323,10 @@ class JiuWenSwarmDeepAdapter:
                 or sid in self._session_agent_tasks
             )
         if self._is_session_scoped_adapter:
-            return True
+            return owns_local_runtime
+        # A root DeepAdapter instance is a reusable cache, not product Session
+        # runtime.  The formal strict seam separately includes that local owner
+        # in its stronger quiescence proof before disposing the facade.
         return bool(
             self._session_adapters
             or self._session_adapter_locks
@@ -5585,6 +5640,11 @@ class JiuWenSwarmDeepAdapter:
         ``create_instance`` has not produced an underlying agent yet. Failures
         are logged and swallowed — same contract as the former inline start.
         """
+        await self._start_interaction(session_id=session_id, strict=False)
+
+    async def _start_interaction(self, session_id: str, *, strict: bool) -> None:
+        """Start an interaction, optionally propagating formal init failure."""
+
         if self._instance is None:
             return
         try:
@@ -5606,6 +5666,8 @@ class JiuWenSwarmDeepAdapter:
                 session_id,
                 exc,
             )
+            if strict:
+                raise
 
     async def stop_interaction(self) -> None:
         """Stop this adapter's DeepAgent interaction loop if it was started."""
@@ -5626,6 +5688,7 @@ class JiuWenSwarmDeepAdapter:
                         exc,
                     )
             self._session_adapters.clear()
+            self._session_adapter_initializing.clear()
             self._session_adapter_locks.clear()
             self._session_adapter_last_used.clear()
             self._session_adapter_versions.clear()
@@ -5656,6 +5719,166 @@ class JiuWenSwarmDeepAdapter:
             self._memory_reindex_task.cancel()
         self._memory_reindex_task = None
         await self._close_a2x_client()
+
+    @staticmethod
+    def _consume_formal_cleanup_result(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except BaseException:  # noqa: BLE001 -- retained owner is retried
+            pass
+
+    async def cleanup_formal_project_task_agent(self) -> None:
+        """Strictly release every owner of a disposable formal Agent runtime.
+
+        The coordinator is retained and shielded so caller cancellation cannot
+        consume cleanup ownership.  A failed coordinator is replaced only by a
+        later explicit retry; the exact children and local owners remain
+        observable until that retry proves quiescence.
+        """
+
+        if self._formal_cleanup_complete:
+            return
+        async with self._formal_cleanup_lock:
+            if self._formal_cleanup_complete:
+                return
+            coordinator = self._formal_cleanup_task
+            if coordinator is None or coordinator.done():
+                if coordinator is not None and not coordinator.cancelled():
+                    try:
+                        if coordinator.exception() is None:
+                            self._formal_cleanup_complete = True
+                            return
+                    except BaseException:  # noqa: BLE001 -- retry failed cleanup
+                        pass
+                coordinator = asyncio.create_task(
+                    self._cleanup_formal_project_task_agent_coordinator(),
+                    name=(
+                        "jiuwenswarm-deep-formal-cleanup-"
+                        f"{self._parent_session_id or 'root'}"
+                    ),
+                )
+                coordinator.add_done_callback(
+                    self._consume_formal_cleanup_result
+                )
+                self._formal_cleanup_task = coordinator
+        try:
+            await asyncio.shield(coordinator)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 -- stable strict seam
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING") from exc
+        if not self._formal_cleanup_complete or self._owns_formal_runtime():
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+
+    async def _cleanup_formal_project_task_agent_coordinator(self) -> None:
+        failures: list[BaseException] = []
+        if not self._is_session_scoped_adapter:
+            for sid, child in tuple(self._session_adapters.items()):
+                lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
+                try:
+                    async with lock:
+                        if self._session_adapters.get(sid) is not child:
+                            continue
+                        await child.cleanup_formal_project_task_agent()
+                        if child.has_session_runtime():
+                            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+                        self._drop_session_adapter_cache_entry(
+                            sid,
+                            remove_lock=False,
+                        )
+                except BaseException as exc:  # noqa: BLE001 -- retain exact child
+                    failures.append(exc)
+                    continue
+                if self._is_session_lock_idle(sid, lock):
+                    self._session_adapter_locks.pop(sid, None)
+            for sid, lock in tuple(self._session_adapter_locks.items()):
+                if sid in self._session_adapters:
+                    continue
+                if self._is_session_lock_idle(sid, lock):
+                    self._session_adapter_locks.pop(sid, None)
+                else:
+                    failures.append(
+                        RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+                    )
+        try:
+            await self._cleanup_formal_local_runtime()
+        except BaseException as exc:  # noqa: BLE001 -- aggregate after children
+            failures.append(exc)
+        if failures or self._owns_formal_runtime():
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING") from (
+                failures[0] if failures else None
+            )
+        self._formal_cleanup_complete = True
+
+    async def _cleanup_formal_local_runtime(self) -> None:
+        current = asyncio.current_task()
+        tasks = {
+            task
+            for registered in self._session_agent_tasks.values()
+            for task in registered
+            if task is not current and not task.done()
+        }
+        tasks.update(
+            task
+            for task in self._evolution_watcher_tasks
+            if task is not current and not task.done()
+        )
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if any(not task.done() for task in tasks):
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        self._session_agent_tasks = {
+            sid: {task for task in registered if not task.done()}
+            for sid, registered in self._session_agent_tasks.items()
+            if any(not task.done() for task in registered)
+        }
+        self._evolution_watcher_tasks = {
+            task for task in self._evolution_watcher_tasks if not task.done()
+        }
+
+        memory_task = self._memory_reindex_task
+        if memory_task is not None:
+            if not memory_task.done():
+                memory_task.cancel()
+            await asyncio.gather(memory_task, return_exceptions=True)
+            if not memory_task.done():
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+            if self._memory_reindex_task is memory_task:
+                self._memory_reindex_task = None
+
+        instance = self._instance
+        if instance is not None:
+            await self.stop_interaction()
+            if self._instance is not instance:
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+            self._instance = None
+        self._active_session_ids.clear()
+        await self._close_a2x_client_strict()
+
+    async def _close_a2x_client_strict(self) -> None:
+        client = self._a2x_client
+        if client is None:
+            self._a2x_config = {}
+            self._a2x_blank_service_id = ""
+            self._a2x_blank_dataset = ""
+            self._clear_a2x_runtime_state()
+            return
+        config = self._a2x_config
+        close_timeout_raw = config.get("close_timeout", 5.0)
+        try:
+            close_timeout = max(float(close_timeout_raw), 0.1)
+        except (TypeError, ValueError):
+            close_timeout = 5.0
+        await asyncio.wait_for(client.aclose(), timeout=close_timeout)
+        if self._a2x_client is not client:
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        self._a2x_client = None
+        self._a2x_config = {}
+        self._a2x_blank_service_id = ""
+        self._a2x_blank_dataset = ""
+        self._clear_a2x_runtime_state()
 
     def _collect_registered_ability_names(self) -> set[str]:
         ability_names: set[str] = set()

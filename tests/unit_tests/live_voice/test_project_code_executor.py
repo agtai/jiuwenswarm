@@ -8,9 +8,11 @@ import os
 import runpy
 import sqlite3
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,7 +42,11 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentTaskRecord,
     ResolvedTaskContext,
 )
+from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+    AgentManagerProjectBindingResolver,
+)
 from jiuwenswarm.server.live_voice.project_code_executor import (
+    AttemptProjectExecutorLease,
     DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
     FORMAL_RUNTIME_SUPPORT_POLICY,
@@ -51,6 +57,8 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
     ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
+from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
+from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 
 class _ProjectExecutor:
@@ -109,6 +117,13 @@ class _DirectProjectExecutor:
                 )
         finally:
             self.finished.set()
+
+
+class _ExactRootDirectProjectExecutor(_DirectProjectExecutor):
+    async def process_background_code_task_stream(self, request):
+        assert Path(request.params["project_dir"]).resolve() == self.project.resolve()
+        async for chunk in super().process_background_code_task_stream(request):
+            yield chunk
 
 
 class _AttributionExecutor:
@@ -868,6 +883,803 @@ async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carr
 
 
 @pytest.mark.asyncio
+async def test_direct_d0_attempt_executor_binds_exact_worktree_and_releases_before_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    canonical_executor = _DirectProjectExecutor(project)
+    attempt_executors: list[_ExactRootDirectProjectExecutor] = []
+    attempt_roots: list[Path] = []
+    events: list[str] = []
+
+    async def acquire_attempt(attempt_root: str) -> AttemptProjectExecutorLease:
+        root = Path(attempt_root).resolve()
+        attempt_roots.append(root)
+        executor = _ExactRootDirectProjectExecutor(root)
+        attempt_executors.append(executor)
+
+        async def release_attempt() -> None:
+            assert root.exists()
+            assert not (project / "result.txt").exists()
+            events.append("release")
+
+        return AttemptProjectExecutorLease(executor, str(root), release_attempt)
+
+    binding = replace(
+        _direct_binding(project, canonical_executor),
+        attempt_executor_factory=acquire_attempt,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+    )
+    real_apply = project_code_executor._apply_attempt_patch
+    real_remove = project_code_executor._remove_attempt_worktree
+
+    def observed_apply(root: Path, patch: bytes, **kwargs) -> None:
+        assert events == ["release"]
+        assert root.resolve() == project.resolve()
+        events.append("apply")
+        real_apply(root, patch, **kwargs)
+
+    def observed_remove(root: Path, parent: Path, worktree: Path) -> None:
+        assert events == ["release", "apply"]
+        assert worktree.resolve() == attempt_roots[0]
+        events.append("remove")
+        real_remove(root, parent, worktree)
+
+    monkeypatch.setattr(project_code_executor, "_apply_attempt_patch", observed_apply)
+    monkeypatch.setattr(
+        project_code_executor,
+        "_remove_attempt_worktree",
+        observed_remove,
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert canonical_executor.requests == []
+    assert len(attempt_executors) == 1
+    assert len(attempt_executors[0].requests) == 1
+    request_root = Path(
+        attempt_executors[0].requests[0].params["project_dir"]
+    ).resolve()
+    assert request_root == attempt_roots[0]
+    assert events == ["release", "apply", "remove"]
+    assert not attempt_roots[0].exists()
+    assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+    assert _git(project, "rev-list", "--count", "HEAD") == "1"
+    assert _git(project, "status", "--porcelain") == "?? result.txt"
+
+
+@pytest.mark.asyncio
+async def test_direct_d0_wrong_attempt_root_fails_closed_without_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel.txt"
+    sentinel.write_text("preserve\n", encoding="utf-8")
+    canonical_executor = _DirectProjectExecutor(project)
+    wrong_executor = _ExactRootDirectProjectExecutor(external)
+    attempt_roots: list[Path] = []
+    events: list[str] = []
+
+    async def acquire_wrong_root(attempt_root: str) -> AttemptProjectExecutorLease:
+        root = Path(attempt_root).resolve()
+        attempt_roots.append(root)
+
+        async def release_attempt() -> None:
+            assert root.exists()
+            assert _git(project, "status", "--porcelain") == ""
+            assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+            events.append("release")
+
+        return AttemptProjectExecutorLease(
+            wrong_executor,
+            str(external.resolve()),
+            release_attempt,
+        )
+
+    binding = replace(
+        _direct_binding(project, canonical_executor),
+        attempt_executor_factory=acquire_wrong_root,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+    )
+    real_remove = project_code_executor._remove_attempt_worktree
+
+    def forbidden_apply(*_args, **_kwargs) -> None:
+        raise AssertionError("wrong-root attempt must never apply a target patch")
+
+    def observed_remove(root: Path, parent: Path, worktree: Path) -> None:
+        assert events == ["release"]
+        events.append("remove")
+        real_remove(root, parent, worktree)
+
+    monkeypatch.setattr(project_code_executor, "_apply_attempt_patch", forbidden_apply)
+    monkeypatch.setattr(
+        project_code_executor,
+        "_remove_attempt_worktree",
+        observed_remove,
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[-1].error == "EXECUTION_TARGET_NOT_BOUND"
+    assert canonical_executor.requests == []
+    assert wrong_executor.requests == []
+    assert events == ["release", "remove"]
+    assert len(attempt_roots) == 1
+    assert not attempt_roots[0].exists()
+    assert _git(project, "status", "--porcelain") == ""
+    assert _git(project, "rev-list", "--count", "HEAD") == "1"
+    assert sentinel.read_text(encoding="utf-8") == "preserve\n"
+    assert sorted(path.name for path in external.iterdir()) == ["sentinel.txt"]
+
+
+@pytest.mark.asyncio
+async def test_attempt_root_getter_failure_releases_lease_before_worktree_cleanup(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    events: list[str] = []
+    attempt_roots: list[Path] = []
+
+    class FailingRootExecutor:
+        def get_project_execution_root(self) -> str:
+            raise RuntimeError("injected root getter failure")
+
+        async def process_background_code_task_stream(self, _request):
+            raise AssertionError("an unverified root must never execute")
+            yield  # pragma: no cover
+
+    async def acquire(attempt_root: str) -> AttemptProjectExecutorLease:
+        root = Path(attempt_root).resolve()
+        attempt_roots.append(root)
+
+        async def release() -> None:
+            assert root.exists()
+            events.append("release")
+
+        return AttemptProjectExecutorLease(
+            FailingRootExecutor(),
+            str(root),
+            release,
+        )
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].error == "EXECUTION_TARGET_NOT_BOUND"
+    assert events == ["release"]
+    assert len(attempt_roots) == 1
+    assert not attempt_roots[0].exists()
+    assert _git(project, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
+async def test_attempt_capability_failure_keeps_stable_error_and_releases_lease(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    releases = 0
+    attempt_roots: list[Path] = []
+
+    async def acquire(attempt_root: str) -> AttemptProjectExecutorLease:
+        nonlocal releases
+        root = Path(attempt_root).resolve()
+        attempt_roots.append(root)
+
+        async def release() -> None:
+            nonlocal releases
+            assert root.exists()
+            releases += 1
+
+        return AttemptProjectExecutorLease(object(), str(root), release)
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].error == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+    assert releases == 1
+    assert len(attempt_roots) == 1
+    assert not attempt_roots[0].exists()
+    assert _git(project, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
+async def test_cancelled_attempt_acquire_retains_lease_and_bounds_close(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    acquire_entered = asyncio.Event()
+    acquire_release = asyncio.Event()
+    attempt_roots: list[Path] = []
+    releases = 0
+
+    async def acquire(attempt_root: str) -> AttemptProjectExecutorLease:
+        nonlocal releases
+        root = Path(attempt_root).resolve()
+        attempt_roots.append(root)
+        acquire_entered.set()
+        await acquire_release.wait()
+        executor = _ExactRootDirectProjectExecutor(root)
+
+        async def release() -> None:
+            nonlocal releases
+            assert root.exists()
+            releases += 1
+
+        return AttemptProjectExecutorLease(executor, str(root), release)
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+        cancel_timeout=0.01,
+        close_timeout=0.01,
+    )
+    dispatch = asyncio.create_task(adapter.dispatch(_item(project)))
+    await asyncio.wait_for(acquire_entered.wait(), timeout=2)
+    assert len(attempt_roots) == 1
+    assert attempt_roots[0].exists()
+
+    dispatch.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(dispatch, timeout=1)
+    for _ in range(100):
+        if adapter.retained_cleanup_attempt_ids() == ("attempt-1",):
+            break
+        await asyncio.sleep(0.01)
+    assert adapter.retained_cleanup_attempt_ids() == ("attempt-1",)
+    assert attempt_roots[0].exists()
+
+    started = asyncio.get_running_loop().time()
+    with pytest.raises(RuntimeError, match="PROJECT_WORKTREE_CLEANUP_PENDING"):
+        await adapter.close(interrupt_running=True)
+    assert asyncio.get_running_loop().time() - started < 0.2
+    assert attempt_roots[0].exists()
+    assert releases == 0
+
+    acquire_release.set()
+    await _wait_direct_settled(adapter)
+    await adapter.close(interrupt_running=True)
+    assert releases == 1
+    assert adapter.retained_cleanup_attempt_ids() == ()
+    assert not attempt_roots[0].exists()
+    assert _git(project, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("factory_failure", ["exception", "cancelled"])
+async def test_attempt_factory_without_owner_evidence_never_deletes_checkout(
+    tmp_path: Path,
+    factory_failure: str,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    attempt_roots: list[Path] = []
+
+    async def acquire(attempt_root: str) -> AttemptProjectExecutorLease:
+        attempt_roots.append(Path(attempt_root).resolve())
+        if factory_failure == "exception":
+            raise RuntimeError("factory failed without ownership evidence")
+        raise asyncio.CancelledError()
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / f"factory-{factory_failure}.sqlite3",
+        close_timeout=0.01,
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+
+    assert len(attempt_roots) == 1
+    assert attempt_roots[0].exists()
+    assert adapter.retained_cleanup_attempt_ids() == ("attempt-1",)
+    with pytest.raises(RuntimeError, match="PROJECT_WORKTREE_CLEANUP_PENDING"):
+        await adapter.close()
+    assert attempt_roots[0].exists()
+    assert _git(project, "status", "--porcelain") == ""
+
+    # This test intentionally supplies a protocol-violating factory with no
+    # releasable evidence. Simulate an external recovery owner only after the
+    # fail-closed assertions so the temporary Git worktree does not leak.
+    cleanup = adapter._retained_worktree_cleanups.pop("attempt-1")
+    await asyncio.to_thread(
+        project_code_executor._remove_attempt_worktree,
+        cleanup.root,
+        cleanup.parent,
+        cleanup.worktree,
+    )
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    created_adapters: list[object] = []
+
+    class ControlledCodeAdapter:
+        _is_code_agent = True
+        _is_session_scoped_adapter = False
+
+        def __init__(self) -> None:
+            self._instance = object()
+            self._project_dir = ""
+            self.sessions: set[str] = set()
+            self.sub_mode: str | None = "unset"
+            created_adapters.append(self)
+
+        async def create_instance(
+            self,
+            config,
+            *,
+            mode: str = "agent",
+            sub_mode: str | None = None,
+        ) -> None:
+            assert mode == "code"
+            self.sub_mode = sub_mode
+            self._project_dir = str(Path(config["project_dir"]).resolve())
+
+        async def prepare_background_project_session(self, session_id: str) -> None:
+            self.sessions.add(session_id)
+
+        async def process_message_stream_impl(self, request, inputs):
+            requested = Path(request.params["project_dir"]).resolve()
+            assert requested == Path(self._project_dir).resolve()
+            assert Path(inputs["project_dir"]).resolve() == requested
+            (requested / "result.txt").write_text("done", encoding="utf-8")
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": "done"},
+                is_complete=True,
+            )
+
+        async def cleanup_session_adapter(self, session_id: str) -> bool:
+            existed = session_id in self.sessions
+            self.sessions.discard(session_id)
+            return existed
+
+        def has_session_runtime(self, session_id: str | None = None) -> bool:
+            if session_id is None:
+                return bool(self.sessions)
+            return session_id in self.sessions
+
+        async def cleanup(self) -> None:
+            self.sessions.clear()
+
+        async def cleanup_formal_project_task_agent(self) -> None:
+            self.sessions.clear()
+
+    monkeypatch.setattr(agent_interface, "resolve_sdk_choice", lambda: "harness")
+    monkeypatch.setattr(
+        agent_interface,
+        "create_adapter",
+        lambda _sdk_name, *, mode="agent": ControlledCodeAdapter(),
+    )
+
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(project.resolve()),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    class Models:
+        def resolve(self, _intent, **kwargs):
+            return SimpleNamespace(
+                model=(object() if kwargs.get("instantiate") else None),
+                identity="default#0",
+                config_version="catalog-v1",
+            )
+
+    manager = AgentManager()
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),  # type: ignore[arg-type]
+        agent_manager=manager,
+        service=None,
+        model_resolver=Models(),  # type: ignore[arg-type]
+        principal=object(),  # type: ignore[arg-type]
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert (project / "result.txt").read_text(encoding="utf-8") == "done"
+    assert len(created_adapters) == 2
+    canonical, isolated = created_adapters
+    assert Path(canonical._project_dir).resolve() == project.resolve()  # type: ignore[attr-defined]
+    assert Path(isolated._project_dir).resolve() != project.resolve()  # type: ignore[attr-defined]
+    assert canonical.sub_mode is None  # type: ignore[attr-defined]
+    assert isolated.sub_mode is None  # type: ignore[attr-defined]
+    assert manager._agent_pins == {}
+    assert adapter.retained_cleanup_attempt_ids() == ()
+
+    await adapter.close()
+    await resolver.close()
+    assert "live_voice_formal_task" not in manager.agents
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["runtime_error", "cancelled_error"])
+async def test_production_partial_attempt_initialization_releases_before_worktree_delete(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    attempt_roots: list[Path] = []
+    cleanup_roots: list[Path] = []
+
+    class PartialCodeAdapter:
+        _is_code_agent = True
+        _is_session_scoped_adapter = False
+
+        def __init__(self) -> None:
+            self._instance = object()
+            self._project_dir = ""
+            self.runtime = False
+
+        async def create_instance(
+            self,
+            config,
+            *,
+            mode: str = "agent",
+            sub_mode: str | None = None,
+        ) -> None:
+            assert mode == "code"
+            assert sub_mode is None
+            root = Path(config["project_dir"]).resolve()
+            self._project_dir = str(root)
+            if root == project.resolve():
+                return
+            attempt_roots.append(root)
+            self.runtime = True
+            attempt_agents = {
+                key: agent
+                for key, agent in manager.agents.get(
+                    "live_voice_formal_task", {}
+                ).items()
+                if "formal_attempt" in key
+            }
+            assert len(attempt_agents) == 1
+            owner = next(iter(attempt_agents.values()))
+            assert owner._adapter is self  # type: ignore[attr-defined]
+            assert manager._agent_pins == {id(owner): 1}
+            assert set(
+                manager._agent_create_params["live_voice_formal_task"]
+            ).issuperset(attempt_agents)
+            if failure_kind == "runtime_error":
+                raise RuntimeError("injected partial initialization")
+            raise asyncio.CancelledError()
+
+        async def process_message_stream_impl(self, _request, _inputs):
+            raise AssertionError("a partially initialized Agent must never execute")
+            if False:
+                yield None
+
+        def has_session_runtime(self, _session_id=None) -> bool:
+            return self.runtime
+
+        async def cleanup(self) -> None:
+            root = Path(self._project_dir).resolve()
+            if root != project.resolve():
+                assert root.exists()
+                cleanup_roots.append(root)
+            self.runtime = False
+
+        async def cleanup_formal_project_task_agent(self) -> None:
+            await self.cleanup()
+
+    monkeypatch.setattr(agent_interface, "resolve_sdk_choice", lambda: "harness")
+    monkeypatch.setattr(
+        agent_interface,
+        "create_adapter",
+        lambda _sdk_name, *, mode="agent": PartialCodeAdapter(),
+    )
+
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(project.resolve()),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    class Models:
+        def resolve(self, _intent, **kwargs):
+            return SimpleNamespace(
+                model=(object() if kwargs.get("instantiate") else None),
+                identity="default#0",
+                config_version="catalog-v1",
+            )
+
+    manager = AgentManager()
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),  # type: ignore[arg-type]
+        agent_manager=manager,
+        service=None,
+        model_resolver=Models(),  # type: ignore[arg-type]
+        principal=object(),  # type: ignore[arg-type]
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / f"{failure_kind}.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[-1].error == "EXECUTOR_INITIALIZATION_FAILED"
+    assert len(attempt_roots) == 1
+    assert cleanup_roots == attempt_roots
+    assert not attempt_roots[0].exists()
+    assert manager._agent_pins == {}
+    formal_agents = manager.agents.get("live_voice_formal_task", {})
+    assert all("formal_attempt" not in key for key in formal_agents)
+    assert _git(project, "status", "--porcelain") == ""
+
+    await adapter.close()
+    await resolver.close()
+    assert "live_voice_formal_task" not in manager.agents
+
+
+@pytest.mark.asyncio
+async def test_binding_resolver_close_failure_fences_resolve_and_retries_cleanup(
+    tmp_path: Path,
+) -> None:
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(tmp_path),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    class Manager:
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        async def cleanup_live_voice_formal_task_agents(self) -> None:
+            self.cleanup_calls += 1
+            if self.cleanup_calls == 1:
+                raise RuntimeError("injected retained cleanup")
+
+    manager = Manager()
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),  # type: ignore[arg-type]
+        agent_manager=manager,
+        service=None,
+        model_resolver=object(),  # type: ignore[arg-type]
+        principal=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="FORMAL_PROJECT_BINDING_CLEANUP_PENDING",
+    ):
+        await resolver.close()
+    assert resolver._close_requested is True
+    assert resolver._closed is False
+    with pytest.raises(FormalTaskViolation) as fenced:
+        await resolver.resolve(_spec(tmp_path), for_dispatch=False)
+    assert fenced.value.reason == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+
+    await resolver.close()
+    await resolver.close()
+    assert resolver._closed is True
+    assert manager.cleanup_calls == 2
+
+
+@pytest.mark.asyncio
+async def test_binding_resolve_close_race_releases_owner_before_closed(
+    tmp_path: Path,
+) -> None:
+    entered = Event()
+    allow_revalidate = Event()
+
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            entered.set()
+            assert allow_revalidate.wait(2)
+            return SimpleNamespace(
+                project_dir=str(tmp_path.resolve()),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    class Models:
+        def resolve(self, _intent, **kwargs):
+            return SimpleNamespace(
+                model=(object() if kwargs.get("instantiate") else None),
+                identity="default#0",
+                config_version="catalog-v1",
+            )
+
+    class Agent:
+        def get_project_execution_root(self) -> str:
+            return str(tmp_path.resolve())
+
+        def get_instance(self) -> object:
+            return object()
+
+    class Manager:
+        def __init__(self) -> None:
+            self.agent = Agent()
+            self.pins = 0
+            self.get_calls = 0
+            self.cleanup_calls = 0
+
+        async def get_live_voice_formal_task_agent(self, _project_dir: str):
+            self.get_calls += 1
+            return self.agent
+
+        def pin_agent(self, expected: Agent) -> None:
+            assert expected is self.agent
+            self.pins += 1
+
+        def unpin_agent(self, expected: Agent) -> None:
+            assert expected is self.agent
+            self.pins -= 1
+
+        async def cleanup_live_voice_formal_task_agents(self) -> None:
+            assert self.pins == 0
+            self.cleanup_calls += 1
+
+    manager = Manager()
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),  # type: ignore[arg-type]
+        agent_manager=manager,
+        service=None,
+        model_resolver=Models(),  # type: ignore[arg-type]
+        principal=object(),  # type: ignore[arg-type]
+    )
+
+    resolving = asyncio.create_task(resolver.resolve(_spec(tmp_path), for_dispatch=True))
+    assert await asyncio.to_thread(entered.wait, 2)
+    closing = asyncio.create_task(resolver.close())
+    await asyncio.sleep(0)
+    assert resolver._close_requested is True
+    allow_revalidate.set()
+
+    with pytest.raises(FormalTaskViolation) as fenced:
+        await resolving
+    assert fenced.value.reason == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+    await closing
+
+    assert resolver._closed is True
+    assert manager.pins == 0
+    assert manager.get_calls == 1
+    assert manager.cleanup_calls == 1
+    with pytest.raises(FormalTaskViolation):
+        await resolver.resolve(_spec(tmp_path), for_dispatch=True)
+    assert manager.get_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_binding_resolver_clear_failure_is_visible_and_retryable(
+    tmp_path: Path,
+) -> None:
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            raise AssertionError("closed resolver must not revalidate")
+
+    class Service:
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        def clear_scheduled_task_execution_contexts(self) -> None:
+            self.clear_calls += 1
+            if self.clear_calls == 1:
+                raise RuntimeError("injected context cleanup failure")
+
+    class Manager:
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        async def cleanup_live_voice_formal_task_agents(self) -> None:
+            self.cleanup_calls += 1
+
+    service = Service()
+    manager = Manager()
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),  # type: ignore[arg-type]
+        agent_manager=manager,
+        service=service,
+        model_resolver=object(),  # type: ignore[arg-type]
+        principal=object(),  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(RuntimeError, match="FORMAL_PROJECT_BINDING_CLEANUP_PENDING"):
+        await resolver.close()
+    assert resolver._closed is False
+    assert resolver._close_requested is True
+    assert service.clear_calls == 1
+    assert manager.cleanup_calls == 1
+
+    await resolver.close()
+    assert resolver._closed is True
+    assert service.clear_calls == 2
+    assert manager.cleanup_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_direct_executor_serializes_one_project_and_cannot_borrow_another_attempt_diff(
     tmp_path: Path,
 ) -> None:
@@ -966,7 +1778,16 @@ async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isol
     executor.release.set()
     await _wait_direct_settled(adapter)
     terminal_after_release = await adapter.status(task, attempt)
-    assert terminal_after_release == terminal_before_release
+    assert isinstance(terminal_after_release, ExecutorDeliveryResult)
+    assert terminal_after_release.observations[-1].attempt_outcome is (
+        terminal_before_release.observations[-1].attempt_outcome
+    )
+    assert terminal_after_release.observations[-1].error == (
+        terminal_before_release.observations[-1].error
+    )
+    assert terminal_after_release.observations[-1].raw_status.endswith(
+        "cleanup_resolved"
+    )
     assert not (project / "late-effect.txt").exists()
     isolated_root = Path(executor.requests[0].params["project_dir"])
     assert isolated_root != project.resolve()
@@ -1208,8 +2029,13 @@ async def test_direct_executor_retains_failed_worktree_cleanup_and_never_complet
         _Resolver(_direct_binding(project, executor)),
         tmp_path / "p3.sqlite3",
     )
-    await restarted.prepare_startup()
+    # A live predecessor retains the OS ownership lock across cleanup
+    # failure, so a successor must not delete its checkout.
+    assert await restarted.prepare_startup() == 0
     assert restarted.retained_cleanup_attempt_ids() == ()
+    assert isolated_root.exists()
+    await adapter.close()
+    await restarted.prepare_startup()
     assert not isolated_root.exists()
     resolved = await restarted.status(task, attempt)
     assert isinstance(resolved, ExecutorDeliveryResult)
@@ -1597,6 +2423,13 @@ async def test_direct_executor_restart_recovers_only_expired_attempt_lease(
         owner_id="dead-process",
         now="2026-08-07T10:00:00Z",
     )
+    worktree_parent, worktree = project_code_executor._create_attempt_worktree(
+        project,
+        item.attempt_id,
+        _git(project, "rev-parse", "HEAD"),
+    )
+    assert worktree.exists()
+    assert project_code_executor._worktree_registered(project, worktree)
 
     live = DirectProjectCodeExecutorAdapter(
         _Resolver(_direct_binding(project, executor)),
@@ -1610,12 +2443,179 @@ async def test_direct_executor_restart_recovers_only_expired_attempt_lease(
     )
 
     assert await live.prepare_startup() == 0
+    live_record = live._journal.get(item.attempt_id)
+    assert live_record is not None
+    assert live_record.state is FormalAttemptState.RUNNING
+    assert worktree.exists()
+    assert worktree_parent.exists()
+    assert project_code_executor._worktree_registered(project, worktree)
+    assert live.retained_cleanup_attempt_ids() == ()
+
     assert await expired.prepare_startup() == 1
+    assert not worktree.exists()
+    assert not project_code_executor._worktree_registered(project, worktree)
+    assert expired.retained_cleanup_attempt_ids() == ()
     task, attempt = _direct_task_attempt(project)
     terminal = await expired.status(task, attempt)
     assert isinstance(terminal, ExecutorDeliveryResult)
     assert terminal.observations[-1].attempt_outcome is TerminalOutcome.INTERRUPTED
     assert terminal.observations[-1].error == "EXECUTOR_PROCESS_RESTARTED"
+
+
+@pytest.mark.asyncio
+async def test_successor_never_recovers_or_deletes_while_predecessor_process_owns_lock(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    database = tmp_path / "p3.sqlite3"
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+    )
+    item = _item(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    created, _record = adapter._journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=project_code_executor._project_tree_fingerprint(project),
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=before_head,
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="predecessor-process",
+        now="2020-01-01T00:00:00.000000Z",
+    )
+    assert created
+    adapter._journal.start(
+        item.attempt_id,
+        owner_id="predecessor-process",
+        now="2020-01-01T00:00:00.000000Z",
+    )
+
+    script = "\n".join(
+        (
+            "import sys",
+            "from pathlib import Path",
+            "from jiuwenswarm.server.live_voice.project_code_executor import (",
+            "    _AttemptOwnershipLock, _create_attempt_worktree",
+            ")",
+            "root = Path(sys.argv[1])",
+            "attempt_id = sys.argv[2]",
+            "before_head = sys.argv[3]",
+            "ownership = _AttemptOwnershipLock.try_acquire(root, attempt_id)",
+            "assert ownership is not None",
+            "_parent, checkout = _create_attempt_worktree(root, attempt_id, before_head)",
+            "print('D0_LOCK_READY:' + str(checkout), flush=True)",
+            "sys.stdin.readline()",
+            "ownership.release()",
+        )
+    )
+    predecessor = subprocess.Popen(
+        [sys.executable, "-c", script, str(project), item.attempt_id, before_head],
+        cwd=str(Path.cwd()),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert predecessor.stdout is not None
+    assert predecessor.stdin is not None
+    try:
+        checkout_line = ""
+        while line := predecessor.stdout.readline():
+            if line.startswith("D0_LOCK_READY:"):
+                checkout_line = line.removeprefix("D0_LOCK_READY:").strip()
+                break
+        assert checkout_line
+        checkout = Path(checkout_line)
+        assert checkout.exists()
+
+        successor = DirectProjectCodeExecutorAdapter(
+            _Resolver(_direct_binding(project, executor)),
+            database,
+        )
+        assert await successor.prepare_startup() == 0
+        still_running = adapter._journal.get(item.attempt_id)
+        assert still_running is not None
+        assert still_running.state is not FormalAttemptState.TERMINAL
+        assert checkout.exists()
+
+        predecessor.stdin.write("release\n")
+        predecessor.stdin.flush()
+        assert predecessor.wait(timeout=10) == 0
+        predecessor.stdin.close()
+        predecessor.stdout.close()
+        if predecessor.stderr is not None:
+            predecessor.stderr.close()
+
+        assert await successor.prepare_startup() == 1
+        recovered = adapter._journal.get(item.attempt_id)
+        assert recovered is not None
+        assert recovered.state is FormalAttemptState.TERMINAL
+        assert recovered.outcome is TerminalOutcome.INTERRUPTED
+        assert not checkout.exists()
+        await successor.close()
+    finally:
+        if predecessor.poll() is None:
+            predecessor.kill()
+            predecessor.wait(timeout=10)
+        for stream in (predecessor.stdin, predecessor.stdout, predecessor.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+
+
+@pytest.mark.asyncio
+async def test_successor_cannot_recover_between_apply_and_completed_journal_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    database = tmp_path / "p3.sqlite3"
+    executor = _DirectProjectExecutor(project)
+    predecessor = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        clock=lambda: "2020-01-01T00:00:00.000000Z",
+    )
+    completion_started = Event()
+    allow_completion = Event()
+    real_finish = predecessor._journal.finish
+
+    def block_completed_truth(*args, **kwargs):
+        if kwargs.get("outcome") is TerminalOutcome.COMPLETED:
+            completion_started.set()
+            assert allow_completion.wait(timeout=10)
+        return real_finish(*args, **kwargs)
+
+    monkeypatch.setattr(predecessor._journal, "finish", block_completed_truth)
+    await predecessor.dispatch(_item(project))
+    assert await asyncio.to_thread(completion_started.wait, 10)
+    checkout = Path(executor.requests[0].params["project_dir"])
+    assert checkout.exists()
+
+    successor = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        database,
+        clock=lambda: "2030-01-01T00:00:00.000000Z",
+    )
+    assert await successor.prepare_startup() == 0
+    unresolved = predecessor._journal.get("attempt-1")
+    assert unresolved is not None
+    assert unresolved.state is not FormalAttemptState.TERMINAL
+    assert checkout.exists()
+
+    allow_completion.set()
+    await _wait_direct_settled(predecessor)
+    terminal = predecessor._journal.get("attempt-1")
+    assert terminal is not None
+    assert terminal.outcome is TerminalOutcome.COMPLETED
+    assert await successor.prepare_startup() == 0
+    assert not checkout.exists()
+    await predecessor.close()
+    await successor.close()
 
 
 @pytest.mark.parametrize(

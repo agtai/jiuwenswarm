@@ -2406,10 +2406,13 @@ async def test_binding_shutdown_releases_contexts_and_agents_after_scheduler_fai
     class FailingService:
         def __init__(self) -> None:
             self.clear_calls = 0
+            self.stop_calls = 0
 
         async def stop_scheduler(self, *, interrupt_running: bool = False) -> None:
             assert interrupt_running is True
-            raise RuntimeError("scheduler stop failed")
+            self.stop_calls += 1
+            if self.stop_calls == 1:
+                raise RuntimeError("scheduler stop failed")
 
         def clear_scheduled_task_execution_contexts(self) -> None:
             self.clear_calls += 1
@@ -2434,8 +2437,21 @@ async def test_binding_shutdown_releases_contexts_and_agents_after_scheduler_fai
         clock=lambda: NOW,
     )
 
+    with pytest.raises(
+        RuntimeError,
+        match="FORMAL_PROJECT_BINDING_CLEANUP_PENDING",
+    ):
+        await resolver.close()
+    assert resolver._closed is False
+    assert resolver._close_requested is True
+    assert service.stop_calls == 1
+    assert service.clear_calls == 1
+    assert manager.cleanup_calls == 1
+
     await resolver.close()
     await resolver.close()
 
+    assert resolver._closed is True
+    assert service.stop_calls == 2
     assert service.clear_calls == 1
-    assert manager.cleanup_calls == 1
+    assert manager.cleanup_calls == 2

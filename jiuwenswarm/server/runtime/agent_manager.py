@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import uuid
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -24,6 +25,14 @@ logger = logging.getLogger(__name__)
 
 
 ACP_DEFAULT_CAPABILITIES: dict[str, Any] = build_acp_initialize_result()
+
+
+@dataclass(frozen=True, slots=True)
+class LiveVoiceFormalTaskAttemptAgentAcquisition:
+    """Observable owner returned even when attempt-Agent initialization fails."""
+
+    agent: "JiuWenSwarm"
+    initialization_error: BaseException | None = None
 
 
 def _normalize_channel_id(channel_id: str | None) -> str:
@@ -674,28 +683,180 @@ class AgentManager:
             )
             return self._borrow_agent(agent)
 
-    async def cleanup_live_voice_formal_task_agents(self) -> None:
-        """Close and forget only the Agents owned by the formal P3 route."""
+    async def acquire_live_voice_formal_task_attempt_agent(
+        self,
+        project_dir: str,
+    ) -> "LiveVoiceFormalTaskAttemptAgentAcquisition | None":
+        """Create one pinned Agent owned only by an isolated D0 checkout.
+
+        Unlike the ordinary formal-task getter, this lease acquisition does
+        not attach lifetime to the caller task.  The D0 worker must release
+        the exact identity before deleting its detached Git worktree.
+        """
 
         channel_key = "live_voice_formal_task"
-        agents = self.agents.pop(channel_key, {})
-        self._agent_create_params.pop(channel_key, None)
-        for agent in agents.values():
-            self._agent_pins.pop(id(agent), None)
-            self._agent_borrowers.pop(id(agent), None)
-            cleanup = getattr(agent, "cleanup", None)
-            if not callable(cleanup):
-                continue
+        mode_key = "code"
+        project_key = _normalize_project_dir(project_dir)
+        if not project_key:
+            return None
+        cache_key = _make_agent_cache_key(mode_key, "formal_attempt", project_key)
+        create_lock = self._get_agent_create_lock(channel_key, cache_key)
+        async with create_lock:
+            if self.agents.get(channel_key, {}).get(cache_key) is not None:
+                return None
+            from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
+
+            config = {
+                "project_dir": project_key,
+                "project_clean_runtime_support": True,
+            }
+            agent = JiuWenSwarm()
+            setattr(agent, "_jiuwenswarm_agent_cache_key", cache_key)
+            setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
+            setattr(agent, "_jiuwenswarm_agent_sub_mode", "")
+            setattr(agent, "_jiuwenswarm_agent_project_dir", project_key)
+
+            # Publish the exact owner before the first initialization await.
+            # ``create_instance`` can construct a child adapter and then fail or
+            # be cancelled; cache + params + pin are therefore the recovery
+            # evidence that D0 receives and strictly releases before deleting
+            # the detached checkout.
+            self.agents.setdefault(channel_key, {})[cache_key] = agent
+            self._agent_create_params.setdefault(channel_key, {})[cache_key] = {
+                "mode": mode_key,
+                "sub_mode": None,
+                "config": dict(config),
+                "cache_key": cache_key,
+            }
+            self.pin_agent(agent)
+            initialization_error: BaseException | None = None
             try:
-                await cleanup()
-            except Exception as exc:  # noqa: BLE001 -- close remaining agents
+                await agent.create_instance(config, mode=mode_key, sub_mode=None)
+            except BaseException as exc:  # noqa: BLE001 -- return retained owner evidence
+                initialization_error = exc
+            return LiveVoiceFormalTaskAttemptAgentAcquisition(
+                agent=agent,
+                initialization_error=initialization_error,
+            )
+
+    @staticmethod
+    async def _strictly_quiesce_live_voice_formal_task_agent(
+        agent: "JiuWenSwarm",
+    ) -> bool:
+        """Run strict cleanup before proving that no child runtime remains."""
+
+        strict_cleanup = getattr(
+            agent,
+            "cleanup_formal_project_task_agent",
+            None,
+        )
+        has_runtime = getattr(agent, "has_session_runtime", None)
+        if not callable(strict_cleanup) or not callable(has_runtime):
+            return False
+        await strict_cleanup()
+        return not bool(has_runtime())
+
+    async def release_live_voice_formal_task_attempt_agent(
+        self,
+        project_dir: str,
+        *,
+        expected_agent: "JiuWenSwarm",
+    ) -> bool:
+        """Strictly retire one exact D0 checkout Agent under cache CAS."""
+
+        channel_key = "live_voice_formal_task"
+        project_key = _normalize_project_dir(project_dir)
+        if not project_key:
+            return False
+        cache_key = _make_agent_cache_key("code", "formal_attempt", project_key)
+        create_lock = self._get_agent_create_lock(channel_key, cache_key)
+        async with create_lock:
+            channel_agents = self.agents.get(channel_key)
+            if (
+                not isinstance(channel_agents, dict)
+                or channel_agents.get(cache_key) is not expected_agent
+            ):
+                return False
+            agent_id = id(expected_agent)
+            if self._agent_pins.get(agent_id, 0) != 1 or self._has_agent_borrowers(
+                expected_agent
+            ):
+                return False
+
+            # Keep the cache identity and its exact pin throughout cleanup.  A
+            # caller cancellation or child cleanup failure therefore leaves the
+            # same lease observable and retryable; only proven quiescence may
+            # retire it.
+            if not await self._strictly_quiesce_live_voice_formal_task_agent(
+                expected_agent
+            ):
+                return False
+
+            channel_agents.pop(cache_key, None)
+            channel_params = self._agent_create_params.get(channel_key)
+            if isinstance(channel_params, dict):
+                channel_params.pop(cache_key, None)
+            self._agent_pins.pop(agent_id, None)
+            if not channel_agents and self.agents.get(channel_key) is channel_agents:
+                self.agents.pop(channel_key, None)
+            if isinstance(channel_params, dict) and not channel_params:
+                self._agent_create_params.pop(channel_key, None)
+            self._agent_create_locks.pop((channel_key, cache_key), None)
+            return True
+
+    async def cleanup_live_voice_formal_task_agents(self) -> None:
+        """Strictly close formal P3 Agents without consuming failed ownership."""
+
+        channel_key = "live_voice_formal_task"
+        failures: list[BaseException] = []
+        channel_agents = self.agents.get(channel_key, {})
+        if not isinstance(channel_agents, dict):
+            return
+        for cache_key, agent in list(channel_agents.items()):
+            create_lock = self._get_agent_create_lock(channel_key, cache_key)
+            try:
+                async with create_lock:
+                    current_agents = self.agents.get(channel_key)
+                    if (
+                        not isinstance(current_agents, dict)
+                        or current_agents.get(cache_key) is not agent
+                    ):
+                        continue
+                    if self._agent_pins.get(id(agent), 0) > 0 or self._has_agent_borrowers(
+                        agent,
+                        exclude=asyncio.current_task(),
+                    ):
+                        raise RuntimeError("FORMAL_TASK_AGENT_CLEANUP_PENDING")
+                    if not await self._strictly_quiesce_live_voice_formal_task_agent(
+                        agent
+                    ):
+                        raise RuntimeError("FORMAL_TASK_AGENT_CLEANUP_PENDING")
+                    current_agents.pop(cache_key, None)
+                    channel_params = self._agent_create_params.get(channel_key)
+                    if isinstance(channel_params, dict):
+                        channel_params.pop(cache_key, None)
+                        if not channel_params:
+                            self._agent_create_params.pop(channel_key, None)
+                    self._agent_pins.pop(id(agent), None)
+                    self._agent_borrowers.pop(id(agent), None)
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:  # noqa: BLE001 -- retain and report all owners
+                failures.append(exc)
                 logger.warning(
                     "[AgentManager] formal Live Voice Agent cleanup failed: %s",
                     exc,
                 )
-        for lock_key in list(self._agent_create_locks):
-            if lock_key[0] == channel_key:
-                self._agent_create_locks.pop(lock_key, None)
+                continue
+            self._agent_create_locks.pop((channel_key, cache_key), None)
+        channel_agents = self.agents.get(channel_key)
+        if isinstance(channel_agents, dict) and not channel_agents:
+            self.agents.pop(channel_key, None)
+        if failures:
+            raise RuntimeError(
+                "FORMAL_TASK_AGENT_CLEANUP_PENDING: "
+                f"{len(failures)} Agent owner(s) remain"
+            ) from failures[0]
 
     def get_agent_nowait(
         self,

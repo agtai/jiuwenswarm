@@ -58,6 +58,7 @@ from .product_authority import (
 )
 from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
+    AttemptProjectExecutorLease,
     DirectProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
@@ -563,6 +564,8 @@ class AgentManagerProjectBindingResolver:
         self._model_resolver = model_resolver
         self._principal = principal
         self._clock = clock
+        self._close_lock = asyncio.Lock()
+        self._close_requested = False
         self._closed = False
 
     async def prepare_startup(self) -> int:
@@ -576,7 +579,16 @@ class AgentManagerProjectBindingResolver:
     async def resolve(
         self, spec: FormalTaskSpec, *, for_dispatch: bool
     ) -> ProjectExecutionBinding:
-        if self._closed:
+        async with self._close_lock:
+            return await self._resolve_transition(
+                spec,
+                for_dispatch=for_dispatch,
+            )
+
+    async def _resolve_transition(
+        self, spec: FormalTaskSpec, *, for_dispatch: bool
+    ) -> ProjectExecutionBinding:
+        if self._close_requested or self._closed:
             raise FormalTaskViolation(
                 "EXECUTOR_CAPABILITY_UNAVAILABLE",
                 "formal project Executor is closed",
@@ -597,6 +609,9 @@ class AgentManagerProjectBindingResolver:
         project_executor: Any = None
         release: Callable[[], None] | None = None
         dispatch_fence: Callable[[], Awaitable[None]] | None = None
+        attempt_executor_factory: (
+            Callable[[str], Awaitable[AttemptProjectExecutorLease]] | None
+        ) = None
         effective_root = snapshot.project_dir
         if for_dispatch:
             resolved_model = self._model_resolver.resolve(
@@ -621,8 +636,6 @@ class AgentManagerProjectBindingResolver:
                     "formal project Code Agent is unavailable",
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
-            get_root = getattr(agent, "get_project_execution_root", None)
-            effective_root = get_root() if callable(get_root) else snapshot.project_dir
             self._agent_manager.pin_agent(agent)
             released = False
 
@@ -635,9 +648,13 @@ class AgentManagerProjectBindingResolver:
 
             release = release_agent
             try:
+                get_root = getattr(agent, "get_project_execution_root", None)
+                effective_root = (
+                    get_root() if callable(get_root) else snapshot.project_dir
+                )
                 execution_agent = agent.get_instance()
                 project_executor = agent
-            except Exception:
+            except BaseException:  # noqa: BLE001 -- no acquired pin may be lost
                 release()
                 raise
 
@@ -667,8 +684,65 @@ class AgentManagerProjectBindingResolver:
                 )
 
             dispatch_fence = require_dispatch_fence
+
+            async def acquire_attempt_executor(
+                attempt_root: str,
+            ) -> AttemptProjectExecutorLease:
+                acquire = getattr(
+                    self._agent_manager,
+                    "acquire_live_voice_formal_task_attempt_agent",
+                    None,
+                )
+                release_attempt = getattr(
+                    self._agent_manager,
+                    "release_live_voice_formal_task_attempt_agent",
+                    None,
+                )
+                if not callable(acquire) or not callable(release_attempt):
+                    raise FormalTaskViolation(
+                        "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                        "formal attempt Agent leasing is unavailable",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                acquisition = await acquire(attempt_root)
+                if acquisition is None:
+                    raise FormalTaskViolation(
+                        "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                        "formal attempt Code Agent is unavailable",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                attempt_agent = getattr(acquisition, "agent", acquisition)
+                initialization_error = getattr(
+                    acquisition,
+                    "initialization_error",
+                    None,
+                )
+                released = False
+
+                async def release_attempt_agent() -> None:
+                    nonlocal released
+                    if released:
+                        return
+                    cleaned = await release_attempt(
+                        attempt_root,
+                        expected_agent=attempt_agent,
+                    )
+                    if not cleaned:
+                        raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+                    released = True
+
+                return AttemptProjectExecutorLease(
+                    project_executor=attempt_agent,
+                    # D0 stores ``context_release`` before it calls the real
+                    # facade's root getter or checks its stream capability.
+                    effective_execution_root=str(attempt_root),
+                    context_release=release_attempt_agent,
+                    initialization_error=initialization_error,
+                )
+
+            attempt_executor_factory = acquire_attempt_executor
         try:
-            return ProjectExecutionBinding(
+            binding = ProjectExecutionBinding(
                 service=self._service,
                 execution_agent=execution_agent,
                 project_executor=project_executor,
@@ -691,42 +765,68 @@ class AgentManagerProjectBindingResolver:
                 model_config_version=model_config_version,
                 context_release=release,
                 dispatch_fence=dispatch_fence,
+                attempt_executor_factory=attempt_executor_factory,
             )
+            if self._close_requested or self._closed:
+                if release is not None:
+                    release()
+                raise FormalTaskViolation(
+                    "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                    "formal project Executor is closing",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return binding
         except Exception:
             if release is not None:
                 release()
             raise
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        scheduler_stopped = self._service is None
-        stop_scheduler = getattr(self._service, "stop_scheduler", None)
-        if callable(stop_scheduler):
-            try:
-                await stop_scheduler(interrupt_running=True)
-                scheduler_stopped = True
-            except Exception as exc:  # noqa: BLE001 -- release remaining owners
-                logger.warning(
-                    "[LiveVoiceP3] carrier scheduler shutdown failed: %s", exc
-                )
-        clear_contexts = getattr(
-            self._service, "clear_scheduled_task_execution_contexts", None
-        )
-        if not scheduler_stopped and callable(clear_contexts):
-            try:
-                clear_contexts()
-            except Exception as exc:  # noqa: BLE001 -- release Agent regardless
-                logger.warning(
-                    "[LiveVoiceP3] carrier execution-context cleanup failed: %s",
-                    exc,
-                )
-        cleanup = getattr(
-            self._agent_manager, "cleanup_live_voice_formal_task_agents", None
-        )
-        if callable(cleanup):
-            await cleanup()
+        self._close_requested = True
+        async with self._close_lock:
+            if self._closed:
+                return
+            cleanup_failures: list[Exception] = []
+            scheduler_stopped = self._service is None
+            stop_scheduler = getattr(self._service, "stop_scheduler", None)
+            if callable(stop_scheduler):
+                try:
+                    await stop_scheduler(interrupt_running=True)
+                    scheduler_stopped = True
+                except Exception as exc:  # noqa: BLE001 -- release remaining owners
+                    cleanup_failures.append(exc)
+                    logger.warning(
+                        "[LiveVoiceP3] carrier scheduler shutdown failed: %s", exc
+                    )
+            clear_contexts = getattr(
+                self._service, "clear_scheduled_task_execution_contexts", None
+            )
+            if not scheduler_stopped and callable(clear_contexts):
+                try:
+                    clear_contexts()
+                except Exception as exc:  # noqa: BLE001 -- release Agent regardless
+                    cleanup_failures.append(exc)
+                    logger.warning(
+                        "[LiveVoiceP3] carrier execution-context cleanup failed: %s",
+                        exc,
+                    )
+            cleanup = getattr(
+                self._agent_manager, "cleanup_live_voice_formal_task_agents", None
+            )
+            if callable(cleanup):
+                try:
+                    await cleanup()
+                except Exception as exc:  # noqa: BLE001 -- retain and retry all owners
+                    cleanup_failures.append(exc)
+            if cleanup_failures:
+                raise RuntimeError(
+                    "FORMAL_PROJECT_BINDING_CLEANUP_PENDING: "
+                    f"{len(cleanup_failures)} owner cleanup(s) failed"
+                ) from cleanup_failures[0]
+            # A failed or cancelled cleanup leaves this false, so a later close
+            # retries the same retained owners.  New resolves remain fenced by
+            # ``_close_requested`` throughout that interval.
+            self._closed = True
 
 
 class _DirectP3RuntimeOwner:
@@ -746,6 +846,12 @@ class _DirectP3RuntimeOwner:
 
     async def close(self) -> None:
         await self._executor.close(interrupt_running=True)
+        if self._executor.has_live_workers:
+            raise FormalTaskViolation(
+                "EXECUTOR_CLOSE_CLEANUP_PENDING",
+                "formal attempt workers remain active after bounded shutdown",
+                ErrorCode.UNAVAILABLE,
+            )
         await self._binding_resolver.close()
 
 

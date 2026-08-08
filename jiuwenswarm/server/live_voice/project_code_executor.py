@@ -103,6 +103,16 @@ class LegacyProjectTaskService(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class AttemptProjectExecutorLease:
+    """One project Executor bound to an exact isolated attempt checkout."""
+
+    project_executor: Any
+    effective_execution_root: str
+    context_release: Callable[[], Awaitable[None]]
+    initialization_error: BaseException | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectExecutionBinding:
     """Trusted runtime objects for one exact server-resolved project context."""
 
@@ -119,6 +129,9 @@ class ProjectExecutionBinding:
     model_config_version: str | None = None
     context_release: Callable[[], None] | None = None
     dispatch_fence: Callable[[], Awaitable[None]] | None = None
+    attempt_executor_factory: (
+        Callable[[str], Awaitable[AttemptProjectExecutorLease]] | None
+    ) = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -588,6 +601,109 @@ def _attempt_worktree_paths(root: Path, attempt_id: str) -> tuple[Path, Path]:
     namespace = f"{_path_key(root, strict=False)}\0{attempt_id}".encode("utf-8")
     parent = base / f"attempt-{hashlib.sha256(namespace).hexdigest()}"
     return parent, parent / "checkout"
+
+
+def _attempt_ownership_lock_path(root: Path, attempt_id: str) -> Path:
+    """Return a stable lock path that survives removal of an attempt checkout."""
+
+    base = (
+        Path(tempfile.gettempdir()).resolve(strict=True)
+        / "jiuwenswarm-live-voice-d0"
+    )
+    namespace = f"{_path_key(root, strict=False)}\0{attempt_id}".encode("utf-8")
+    return base / "ownership-locks" / (
+        f"attempt-{hashlib.sha256(namespace).hexdigest()}.lock"
+    )
+
+
+class _AttemptOwnershipLock:
+    """Crash-releasing cross-process proof that one attempt may touch its checkout.
+
+    The stable lock file is deliberately never unlinked.  Removing it would let
+    one process retain a lock on the old inode while another locks a replacement,
+    creating split-brain ownership.
+    """
+
+    def __init__(self, descriptor: int, path: Path) -> None:
+        self._descriptor = descriptor
+        self.path = path
+        self._released = False
+
+    @classmethod
+    def try_acquire(
+        cls, root: Path, attempt_id: str
+    ) -> _AttemptOwnershipLock | None:
+        path = _attempt_ownership_lock_path(root, attempt_id)
+        base = path.parent.parent
+        lock_dir = path.parent
+        try:
+            base.mkdir(mode=0o700, exist_ok=True)
+            lock_dir.mkdir(mode=0o700, exist_ok=True)
+            expected_base = (
+                Path(tempfile.gettempdir()).resolve(strict=True)
+                / "jiuwenswarm-live-voice-d0"
+            )
+            if (
+                base.resolve(strict=True) != expected_base
+                or lock_dir.resolve(strict=True) != expected_base / "ownership-locks"
+                or _is_unsafe_filesystem_link(base)
+                or _is_unsafe_filesystem_link(lock_dir)
+                or _is_unsafe_filesystem_link(path)
+            ):
+                raise RuntimeError("PROJECT_ATTEMPT_OWNERSHIP_UNAVAILABLE")
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_BINARY"):
+                flags |= os.O_BINARY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(path, flags, 0o600)
+        except RuntimeError:
+            raise
+        except OSError as exc:
+            raise RuntimeError("PROJECT_ATTEMPT_OWNERSHIP_UNAVAILABLE") from exc
+        try:
+            if os.fstat(descriptor).st_size == 0:
+                os.write(descriptor, b"\0")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                try:
+                    msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    os.close(descriptor)
+                    return None
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(descriptor)
+                    return None
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.close(descriptor)
+            raise
+        return cls(descriptor, path)
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        descriptor = self._descriptor
+        try:
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
 
 
 def _worktree_registered(root: Path, worktree: Path) -> bool:
@@ -1275,7 +1391,6 @@ class _DirectProjectAttemptJournal:
 
     def recover_expired(self, *, now: str) -> int:
         with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             rows = connection.execute(
                 f"""
                 SELECT * FROM {_DIRECT_EXECUTOR_TABLE}
@@ -1284,66 +1399,104 @@ class _DirectProjectAttemptJournal:
                 """,
                 (FormalAttemptState.TERMINAL.value, now),
             ).fetchall()
-            for row in rows:
-                record = self._from_row(row)
-                outcome = TerminalOutcome.INTERRUPTED
-                raw_status = "restart_interrupted"
-                summary = None
-                error = "EXECUTOR_PROCESS_RESTARTED"
-                if record.raw_status == "applying":
-                    outcome = TerminalOutcome.UNKNOWN
-                    raw_status = "restart_apply_result_unknown"
-                    error = "EXECUTOR_RESTART_APPLY_RESULT_UNKNOWN"
-                    try:
-                        root = Path(record.project_root).resolve(strict=True)
-                        current_content = _project_content_fingerprint(root)
-                        unchanged_authority = (
-                            _git_head(root) == record.before_head
-                            and _target_support_fingerprints(root)
-                            == json.loads(record.protected_support_json)
-                        )
-                    except Exception:
-                        unchanged_authority = False
-                        current_content = None
-                    if (
-                        unchanged_authority
-                        and record.expected_tree is not None
-                        and current_content == record.expected_tree
-                    ):
-                        outcome = TerminalOutcome.COMPLETED
-                        raw_status = "restart_apply_completed"
-                        summary = (
-                            "project change was durably observed after Executor restart"
-                        )
-                        error = None
-                    elif (
-                        unchanged_authority
-                        and record.before_content is not None
-                        and current_content == record.before_content
-                    ):
-                        outcome = TerminalOutcome.INTERRUPTED
-                        raw_status = "restart_before_apply"
-                        error = "EXECUTOR_PROCESS_RESTARTED"
-                connection.execute(
-                    f"""
-                    UPDATE {_DIRECT_EXECUTOR_TABLE}
-                       SET state=?, outcome=?, source_seq=2, terminal_at=?,
-                           raw_status=?, summary=?, error=?, owner_id=NULL,
-                           lease_expires_at=NULL
-                     WHERE attempt_id=? AND state<>?
-                    """,
-                    (
-                        FormalAttemptState.TERMINAL.value,
-                        outcome.value,
-                        now,
-                        raw_status,
-                        summary,
-                        error,
-                        record.attempt_id,
-                        FormalAttemptState.TERMINAL.value,
-                    ),
+        recovered = 0
+        for row in rows:
+            candidate = self._from_row(row)
+            try:
+                root = Path(candidate.project_root)
+                ownership = _AttemptOwnershipLock.try_acquire(
+                    root, candidate.attempt_id
                 )
-        return len(rows)
+            except (OSError, RuntimeError, ValueError):
+                # Failure to prove exclusive cross-process ownership is not
+                # evidence that the former owner died.  Leave durable truth
+                # untouched for a later recovery attempt.
+                continue
+            if ownership is None:
+                continue
+            try:
+                with self._connect() as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    current_row = connection.execute(
+                        f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                        (candidate.attempt_id,),
+                    ).fetchone()
+                    if current_row is None:
+                        continue
+                    record = self._from_row(current_row)
+                    if (
+                        record.state is FormalAttemptState.TERMINAL
+                        or record.lease_expires_at is None
+                        or record.lease_expires_at > now
+                        or record.owner_id != candidate.owner_id
+                        or record.lease_expires_at != candidate.lease_expires_at
+                    ):
+                        continue
+                    outcome = TerminalOutcome.INTERRUPTED
+                    raw_status = "restart_interrupted"
+                    summary = None
+                    error = "EXECUTOR_PROCESS_RESTARTED"
+                    if record.raw_status == "applying":
+                        outcome = TerminalOutcome.UNKNOWN
+                        raw_status = "restart_apply_result_unknown"
+                        error = "EXECUTOR_RESTART_APPLY_RESULT_UNKNOWN"
+                        try:
+                            root = Path(record.project_root).resolve(strict=True)
+                            current_content = _project_content_fingerprint(root)
+                            unchanged_authority = (
+                                _git_head(root) == record.before_head
+                                and _target_support_fingerprints(root)
+                                == json.loads(record.protected_support_json)
+                            )
+                        except Exception:
+                            unchanged_authority = False
+                            current_content = None
+                        if (
+                            unchanged_authority
+                            and record.expected_tree is not None
+                            and current_content == record.expected_tree
+                        ):
+                            outcome = TerminalOutcome.COMPLETED
+                            raw_status = "restart_apply_completed"
+                            summary = (
+                                "project change was durably observed after "
+                                "Executor restart"
+                            )
+                            error = None
+                        elif (
+                            unchanged_authority
+                            and record.before_content is not None
+                            and current_content == record.before_content
+                        ):
+                            outcome = TerminalOutcome.INTERRUPTED
+                            raw_status = "restart_before_apply"
+                            error = "EXECUTOR_PROCESS_RESTARTED"
+                    changed = connection.execute(
+                        f"""
+                        UPDATE {_DIRECT_EXECUTOR_TABLE}
+                           SET state=?, outcome=?, source_seq=2, terminal_at=?,
+                               raw_status=?, summary=?, error=?, owner_id=NULL,
+                               lease_expires_at=NULL
+                         WHERE attempt_id=? AND state<>? AND owner_id IS ?
+                               AND lease_expires_at=?
+                        """,
+                        (
+                            FormalAttemptState.TERMINAL.value,
+                            outcome.value,
+                            now,
+                            raw_status,
+                            summary,
+                            error,
+                            record.attempt_id,
+                            FormalAttemptState.TERMINAL.value,
+                            record.owner_id,
+                            record.lease_expires_at,
+                        ),
+                    ).rowcount
+                    recovered += int(changed == 1)
+            finally:
+                ownership.release()
+        return recovered
 
 
 def _text(payload: Mapping[str, Any], *keys: str) -> str | None:
@@ -1366,6 +1519,18 @@ class _ReleaseOnce:
             return
         self._released = True
         self._callback()
+
+
+@dataclass(slots=True)
+class _RetainedAttemptCleanup:
+    root: Path
+    parent: Path
+    worktree: Path
+    ownership: _AttemptOwnershipLock
+    completion_pending: bool = False
+    agent_release: Callable[[], Awaitable[None]] | None = None
+    agent_acquire: asyncio.Task[AttemptProjectExecutorLease] | None = None
+    coordinator: asyncio.Task[None] | None = None
 
 
 class DirectProjectCodeExecutorAdapter:
@@ -1421,13 +1586,19 @@ class DirectProjectCodeExecutorAdapter:
         self._running: dict[str, asyncio.Task[None]] = {}
         self._applying: set[str] = set()
         self._interruptions: dict[str, tuple[str, str]] = {}
-        self._retained_worktree_cleanups: dict[str, tuple[Path, Path, Path]] = {}
+        self._retained_worktree_cleanups: dict[str, _RetainedAttemptCleanup] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._closed = False
 
     @property
     def database(self) -> str:
         return self._journal.database
+
+    @property
+    def has_live_workers(self) -> bool:
+        """Report whether an attempt can still touch its isolated checkout."""
+
+        return any(not worker.done() for worker in self._running.values())
 
     async def prepare_startup(self) -> int:
         """Resolve only expired process leases; active foreign work stays pending."""
@@ -1438,9 +1609,38 @@ class DirectProjectCodeExecutorAdapter:
         )
         attempts = await asyncio.to_thread(self._journal.all_attempts)
         for record in attempts:
+            # A still-nonterminal record owns a live process lease.  Neither an
+            # existing checkout nor its registration is orphan evidence: the
+            # foreign Agent/initialization child may still touch it.  Startup
+            # may take cleanup ownership only after recovery made the record
+            # terminal (or it was already terminal on entry).
+            if record.state is not FormalAttemptState.TERMINAL:
+                continue
             root = Path(record.project_root)
             parent, worktree = _attempt_worktree_paths(root, record.attempt_id)
             try:
+                ownership = await asyncio.to_thread(
+                    _AttemptOwnershipLock.try_acquire,
+                    root,
+                    record.attempt_id,
+                )
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if ownership is None:
+                # A predecessor still has an OS-level owner capable of
+                # touching the checkout even when its durable lease expired
+                # or its terminal row was already written.
+                continue
+            retained = False
+            try:
+                current = await asyncio.to_thread(
+                    self._journal.get, record.attempt_id
+                )
+                if (
+                    current is None
+                    or current.state is not FormalAttemptState.TERMINAL
+                ):
+                    continue
                 registered = await asyncio.to_thread(
                     _worktree_registered, root, worktree
                 )
@@ -1448,38 +1648,40 @@ class DirectProjectCodeExecutorAdapter:
                 registered = False
                 if worktree.exists() or parent.exists():
                     self._retained_worktree_cleanups[record.attempt_id] = (
-                        root,
-                        parent,
-                        worktree,
+                        _RetainedAttemptCleanup(root, parent, worktree, ownership)
                     )
+                    retained = True
                 continue
-            if not (worktree.exists() or parent.exists() or registered):
-                if record.raw_status.endswith("cleanup_pending"):
+            else:
+                if not (worktree.exists() or parent.exists() or registered):
+                    if current.raw_status.endswith("cleanup_pending"):
+                        await asyncio.to_thread(
+                            self._journal.mark_cleanup_resolved,
+                            record.attempt_id,
+                        )
+                    continue
+                try:
+                    await asyncio.to_thread(
+                        _remove_attempt_worktree, root, parent, worktree
+                    )
+                except Exception:
+                    self._retained_worktree_cleanups[record.attempt_id] = (
+                        _RetainedAttemptCleanup(root, parent, worktree, ownership)
+                    )
+                    retained = True
+                    await asyncio.to_thread(
+                        self._journal.mark_cleanup_pending,
+                        record.attempt_id,
+                    )
+                else:
+                    self._retained_worktree_cleanups.pop(record.attempt_id, None)
                     await asyncio.to_thread(
                         self._journal.mark_cleanup_resolved,
                         record.attempt_id,
                     )
-                continue
-            try:
-                await asyncio.to_thread(
-                    _remove_attempt_worktree, root, parent, worktree
-                )
-            except Exception:
-                self._retained_worktree_cleanups[record.attempt_id] = (
-                    root,
-                    parent,
-                    worktree,
-                )
-                await asyncio.to_thread(
-                    self._journal.mark_cleanup_pending,
-                    record.attempt_id,
-                )
-            else:
-                self._retained_worktree_cleanups.pop(record.attempt_id, None)
-                await asyncio.to_thread(
-                    self._journal.mark_cleanup_resolved,
-                    record.attempt_id,
-                )
+            finally:
+                if not retained:
+                    ownership.release()
         return recovered
 
     async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
@@ -1533,6 +1735,8 @@ class DirectProjectCodeExecutorAdapter:
             else None
         )
         worker_owns_release = False
+        ownership: _AttemptOwnershipLock | None = None
+        worker_owns_ownership = False
         worker: asyncio.Task[None] | None = None
         worker_started = asyncio.Event()
         try:
@@ -1573,13 +1777,49 @@ class DirectProjectCodeExecutorAdapter:
                 owner_id=self._owner_id,
                 now=self._clock(),
             )
+            ownership = await asyncio.to_thread(
+                _AttemptOwnershipLock.try_acquire,
+                root,
+                item.attempt_id,
+            )
+            if ownership is None:
+                raise FormalTaskViolation(
+                    "EXECUTOR_ATTEMPT_OWNERSHIP_UNAVAILABLE",
+                    "another process still owns the exact project attempt",
+                    ErrorCode.UNAVAILABLE,
+                )
+            # The durable lease may have changed while acquiring the OS lock.
+            # No checkout or attempt Agent may exist until both authorities
+            # name this exact worker.
+            record = await asyncio.to_thread(self._journal.get, item.attempt_id)
+            if (
+                record is None
+                or record.state is FormalAttemptState.TERMINAL
+                or record.owner_id != self._owner_id
+            ):
+                ownership.release()
+                ownership = None
+                if record is not None:
+                    return self._delivery(record, after_seq=item.source_seq)
+                raise FormalTaskViolation(
+                    "ATTEMPT_NOT_FOUND",
+                    "direct Executor attempt is unavailable",
+                    ErrorCode.NOT_FOUND,
+                )
             worker = asyncio.create_task(
-                self._run_attempt(item, binding, release, worker_started),
+                self._run_attempt(
+                    item,
+                    binding,
+                    release,
+                    worker_started,
+                    ownership,
+                ),
                 name=f"live-voice-d0-project-{item.attempt_id}",
             )
             self._running[item.attempt_id] = worker
             worker.add_done_callback(partial(self._settle_worker, item.attempt_id))
             worker_owns_release = True
+            worker_owns_ownership = True
             await worker_started.wait()
             current = await asyncio.to_thread(self._journal.get, item.attempt_id)
             assert current is not None
@@ -1591,9 +1831,13 @@ class DirectProjectCodeExecutorAdapter:
                     "EXECUTOR_DISPATCH_INTERRUPTED",
                 )
                 worker.cancel()
-                await asyncio.gather(worker, return_exceptions=True)
-                if release is not None:
-                    release()
+                done, _pending = await asyncio.wait(
+                    {worker},
+                    timeout=self._cancel_timeout,
+                )
+                for settled in done:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        settled.result()
             current = await asyncio.to_thread(self._journal.get, item.attempt_id)
             if (
                 current is not None
@@ -1632,6 +1876,8 @@ class DirectProjectCodeExecutorAdapter:
         finally:
             if not worker_owns_release and release is not None:
                 release()
+            if not worker_owns_ownership and ownership is not None:
+                ownership.release()
 
     async def _run_attempt(
         self,
@@ -1639,11 +1885,15 @@ class DirectProjectCodeExecutorAdapter:
         binding: ProjectExecutionBinding,
         release: _ReleaseOnce | None,
         started: asyncio.Event,
+        ownership: _AttemptOwnershipLock,
     ) -> None:
         heartbeat: asyncio.Task[None] | None = None
         worktree_parent: Path | None = None
         worktree: Path | None = None
+        attempt_agent_release: Callable[[], Awaitable[None]] | None = None
+        attempt_agent_acquire: asyncio.Task[AttemptProjectExecutorLease] | None = None
         completion_pending = False
+        worker_cancelled = False
         try:
             heartbeat = asyncio.create_task(
                 self._heartbeat(item.attempt_id),
@@ -1675,6 +1925,83 @@ class DirectProjectCodeExecutorAdapter:
                 _target_support_fingerprints, created_worktree
             ) != json.loads(record.protected_support_json):
                 raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
+            project_executor = binding.project_executor
+            if binding.attempt_executor_factory is not None:
+                attempt_agent_acquire = asyncio.create_task(
+                    binding.attempt_executor_factory(str(created_worktree)),
+                    name=f"live-voice-d0-agent-acquire-{item.attempt_id}",
+                )
+                lease = await asyncio.shield(attempt_agent_acquire)
+                attempt_agent_release = lease.context_release
+                attempt_agent_acquire = None
+                if lease.initialization_error is not None:
+                    raise FormalTaskViolation(
+                        "EXECUTOR_INITIALIZATION_FAILED",
+                        "attempt Code Agent initialization failed",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                bound_root: object = lease.effective_execution_root
+                get_execution_root = getattr(
+                    lease.project_executor,
+                    "get_project_execution_root",
+                    None,
+                )
+                if callable(get_execution_root):
+                    try:
+                        bound_root = get_execution_root()
+                    except Exception as exc:
+                        raise FormalTaskViolation(
+                            "EXECUTION_TARGET_NOT_BOUND",
+                            "attempt Code Agent root is unavailable",
+                            ErrorCode.PERMISSION_DENIED,
+                        ) from exc
+                try:
+                    exact_root = (
+                        isinstance(bound_root, str)
+                        and bool(bound_root.strip())
+                        and _path_key(bound_root) == _path_key(created_worktree)
+                    )
+                except (OSError, TypeError, ValueError):
+                    exact_root = False
+                if not exact_root:
+                    raise FormalTaskViolation(
+                        "EXECUTION_TARGET_NOT_BOUND",
+                        "attempt Code Agent must bind the exact isolated checkout",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                if not callable(
+                    getattr(
+                        lease.project_executor,
+                        "process_background_code_task_stream",
+                        None,
+                    )
+                ):
+                    raise FormalTaskViolation(
+                        "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                        "attempt Code Agent lacks the background project capability",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                project_executor = lease.project_executor
+                if (
+                    await asyncio.to_thread(_git_head, created_worktree)
+                    != record.before_head
+                    or await asyncio.to_thread(
+                        _project_tree_fingerprint, created_worktree
+                    )
+                    != record.before_tree
+                    or await asyncio.to_thread(
+                        _target_support_fingerprints, created_worktree
+                    )
+                    != json.loads(record.protected_support_json)
+                ):
+                    raise FormalTaskViolation(
+                        "EXECUTOR_INITIALIZATION_MUTATED_TARGET",
+                        "attempt Code Agent initialization changed the isolated checkout",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                await asyncio.to_thread(
+                    _reject_git_visible_symlinks, created_worktree
+                )
             request = AgentRequest(
                 request_id=f"{_DIRECT_EXECUTOR_REF_PREFIX}{item.attempt_id}",
                 channel_id="formal-task-core",
@@ -1708,7 +2035,7 @@ class DirectProjectCodeExecutorAdapter:
             with forbid_background_project_shell_commands():
                 async for (
                     chunk
-                ) in binding.project_executor.process_background_code_task_stream(
+                ) in project_executor.process_background_code_task_stream(
                     request
                 ):
                     terminal = terminal or chunk.is_complete
@@ -1719,6 +2046,9 @@ class DirectProjectCodeExecutorAdapter:
                 raise RuntimeError("PROJECT_EXECUTOR_AGENT_ERROR")
             if not terminal:
                 raise RuntimeError("PROJECT_EXECUTOR_INCOMPLETE")
+            if attempt_agent_release is not None:
+                await attempt_agent_release()
+                attempt_agent_release = None
             if (
                 await asyncio.to_thread(_git_head, created_worktree)
                 != record.before_head
@@ -1788,6 +2118,7 @@ class DirectProjectCodeExecutorAdapter:
                 self._applying.discard(item.attempt_id)
             completion_pending = True
         except asyncio.CancelledError:
+            worker_cancelled = True
             interruption = self._interruptions.get(item.attempt_id)
             raw_status, error = (
                 interruption
@@ -1816,7 +2147,14 @@ class DirectProjectCodeExecutorAdapter:
                 if isinstance(error, FormalTaskViolation)
                 else str(error)
             )
+            if code.startswith("EXECUTION_TARGET_NOT_BOUND:"):
+                code = "EXECUTION_TARGET_NOT_BOUND"
             if code not in {
+                "EXECUTION_TARGET_NOT_BOUND",
+                "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                "EXECUTOR_INITIALIZATION_FAILED",
+                "EXECUTOR_INITIALIZATION_MUTATED_TARGET",
+                "PROJECT_AGENT_CLEANUP_PENDING",
                 "PROJECT_EXECUTOR_AGENT_ERROR",
                 "PROJECT_EXECUTOR_INCOMPLETE",
                 "FORBIDDEN_GIT_HEAD_CHANGE",
@@ -1850,51 +2188,57 @@ class DirectProjectCodeExecutorAdapter:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await heartbeat
             if worktree_parent is not None and worktree is not None:
+                cleanup = _RetainedAttemptCleanup(
+                    root=Path(binding.effective_execution_root),
+                    parent=worktree_parent,
+                    worktree=worktree,
+                    ownership=ownership,
+                    completion_pending=completion_pending,
+                    agent_release=attempt_agent_release,
+                    agent_acquire=attempt_agent_acquire,
+                )
+                # Publish cleanup ownership before the first await.  A caller
+                # cancellation may leave the coordinator running, but can never
+                # make the checkout appear orphaned and therefore deletable.
+                self._retained_worktree_cleanups[item.attempt_id] = cleanup
+                completion_pending = False
+                cleanup_cancellation: asyncio.CancelledError | None = None
                 try:
-                    await asyncio.to_thread(
-                        _remove_attempt_worktree,
-                        Path(binding.effective_execution_root),
-                        worktree_parent,
-                        worktree,
+                    coordinator = self._ensure_attempt_cleanup_coordinator(
+                        item.attempt_id,
+                        cleanup,
                     )
+                    await asyncio.shield(coordinator)
+                except asyncio.CancelledError as exc:
+                    cleanup_cancellation = exc
                 except Exception:
-                    self._retained_worktree_cleanups[item.attempt_id] = (
-                        Path(binding.effective_execution_root),
-                        worktree_parent,
-                        worktree,
-                    )
-                    if completion_pending:
-                        await asyncio.to_thread(
-                            self._journal.finish,
-                            item.attempt_id,
-                            owner_id=self._owner_id,
-                            outcome=TerminalOutcome.COMPLETED,
-                            raw_status="completed",
-                            summary=(
-                                "project Code Agent completed with a Git-visible "
-                                "target change"
-                            ),
-                            error=None,
-                            now=self._clock(),
-                        )
-                        completion_pending = False
+                    pass
+                else:
+                    self._retained_worktree_cleanups.pop(item.attempt_id, None)
+                if item.attempt_id in self._retained_worktree_cleanups:
                     await asyncio.to_thread(
                         self._journal.mark_cleanup_pending,
                         item.attempt_id,
                     )
-                else:
-                    self._retained_worktree_cleanups.pop(item.attempt_id, None)
-            if completion_pending:
-                await asyncio.to_thread(
-                    self._journal.finish,
-                    item.attempt_id,
-                    owner_id=self._owner_id,
-                    outcome=TerminalOutcome.COMPLETED,
-                    raw_status="completed",
-                    summary="project Code Agent completed with a Git-visible target change",
-                    error=None,
-                    now=self._clock(),
-                )
+                    if cleanup_cancellation is not None and not worker_cancelled:
+                        raise cleanup_cancellation
+            else:
+                if completion_pending:
+                    await asyncio.to_thread(
+                        self._journal.finish,
+                        item.attempt_id,
+                        owner_id=self._owner_id,
+                        outcome=TerminalOutcome.COMPLETED,
+                        raw_status="completed",
+                        summary=(
+                            "project Code Agent completed with a Git-visible "
+                            "target change"
+                        ),
+                        error=None,
+                        now=self._clock(),
+                    )
+                    completion_pending = False
+                ownership.release()
             if release is not None:
                 release()
 
@@ -2046,6 +2390,87 @@ class DirectProjectCodeExecutorAdapter:
 
         return tuple(sorted(self._retained_worktree_cleanups))
 
+    @staticmethod
+    def _consume_attempt_cleanup_result(task: asyncio.Task[None]) -> None:
+        """Observe a retained coordinator result without consuming ownership."""
+
+        try:
+            task.result()
+        except BaseException:  # noqa: BLE001 -- retry observes retained state
+            pass
+
+    def _ensure_attempt_cleanup_coordinator(
+        self,
+        attempt_id: str,
+        cleanup: _RetainedAttemptCleanup,
+    ) -> asyncio.Task[None]:
+        coordinator = cleanup.coordinator
+        if coordinator is not None and not coordinator.done():
+            return coordinator
+        if coordinator is not None and not coordinator.cancelled():
+            try:
+                if coordinator.exception() is None:
+                    return coordinator
+            except BaseException:  # noqa: BLE001 -- replace failed coordinator
+                pass
+        coordinator = asyncio.create_task(
+            self._cleanup_attempt_resources(attempt_id, cleanup),
+            name=f"live-voice-d0-retained-cleanup-{attempt_id}",
+        )
+        coordinator.add_done_callback(self._consume_attempt_cleanup_result)
+        cleanup.coordinator = coordinator
+        return coordinator
+
+    async def _cleanup_attempt_resources(
+        self,
+        attempt_id: str,
+        cleanup: _RetainedAttemptCleanup,
+    ) -> None:
+        if cleanup.completion_pending:
+            await asyncio.to_thread(
+                self._journal.finish,
+                attempt_id,
+                owner_id=self._owner_id,
+                outcome=TerminalOutcome.COMPLETED,
+                raw_status="completed_cleanup_pending",
+                summary=(
+                    "project Code Agent completed with a Git-visible target change; "
+                    "isolated cleanup is still owned"
+                ),
+                error=None,
+                now=self._clock(),
+            )
+            cleanup.completion_pending = False
+        acquire = cleanup.agent_acquire
+        if acquire is not None:
+            if acquire.cancelled():
+                raise RuntimeError("PROJECT_AGENT_ACQUIRE_OWNERSHIP_UNKNOWN")
+            else:
+                try:
+                    lease = await asyncio.shield(acquire)
+                except BaseException as exc:  # noqa: BLE001 -- ownership is unknown
+                    # The factory contract must return retained evidence even
+                    # when initialization fails.  A cancelled/raising acquire
+                    # task violated that contract, so deleting its checkout is
+                    # permanently unsafe until an external owner is recovered.
+                    raise RuntimeError(
+                        "PROJECT_AGENT_ACQUIRE_OWNERSHIP_UNKNOWN"
+                    ) from exc
+                else:
+                    cleanup.agent_acquire = None
+                    cleanup.agent_release = lease.context_release
+        if cleanup.agent_release is not None:
+            await cleanup.agent_release()
+            cleanup.agent_release = None
+        await asyncio.to_thread(
+            _remove_attempt_worktree,
+            cleanup.root,
+            cleanup.parent,
+            cleanup.worktree,
+        )
+        await asyncio.to_thread(self._journal.mark_cleanup_resolved, attempt_id)
+        cleanup.ownership.release()
+
     async def close(self, *, interrupt_running: bool = True) -> None:
         self._closed = True
         applying: set[str] = set()
@@ -2116,8 +2541,23 @@ class DirectProjectCodeExecutorAdapter:
                     )
         cleanup_failures: list[str] = []
         for attempt_id, cleanup in tuple(self._retained_worktree_cleanups.items()):
+            worker = self._running.get(attempt_id)
+            if worker is not None and not worker.done():
+                cleanup_failures.append(attempt_id)
+                continue
+            coordinator = self._ensure_attempt_cleanup_coordinator(
+                attempt_id,
+                cleanup,
+            )
             try:
-                await asyncio.to_thread(_remove_attempt_worktree, *cleanup)
+                await asyncio.wait_for(
+                    asyncio.shield(coordinator),
+                    timeout=self._close_timeout,
+                )
+            except asyncio.CancelledError:
+                if not coordinator.cancelled():
+                    raise
+                cleanup_failures.append(attempt_id)
             except Exception:
                 cleanup_failures.append(attempt_id)
             else:

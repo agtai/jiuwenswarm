@@ -3121,3 +3121,32 @@ class JiuWenSwarm:
             self._adapter = None
 
         logger.info("[JiuWenSwarm] cleanup: 完成")
+
+    async def cleanup_formal_project_task_agent(self) -> None:
+        """Strictly close a short-lived formal project Agent.
+
+        The D0 Executor must prove that no session runtime remains before it
+        deletes the Agent's detached Git checkout. Unlike general process
+        cleanup, adapter failures propagate so the checkout can be retained
+        for a safe retry.
+        """
+
+        await self._session_manager.close_all_sessions()
+        adapter = self._adapter
+        if adapter is not None:
+            cleanup = getattr(
+                adapter,
+                "cleanup_formal_project_task_agent",
+                None,
+            )
+            if not callable(cleanup):
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+            await cleanup()
+        # Keep the adapter identity until both the facade and the lower adapter
+        # prove quiescence.  Cleanup failures, partial initialization and caller
+        # cancellation must leave the same owner available for a retry.
+        if self.has_session_runtime():
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        if self._adapter is not adapter:
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        self._adapter = None
