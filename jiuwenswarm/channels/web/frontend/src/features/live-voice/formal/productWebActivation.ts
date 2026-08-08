@@ -6,7 +6,10 @@ export const PRODUCT_P2_PRESENTATION_ACK_METHOD = 'live_voice.composition.p2.pre
 export const PRODUCT_P2_BARGE_IN_METHOD = 'live_voice.composition.p2.barge_in' as const;
 export const PRODUCT_P3_CONFIRMATION_ISSUE_METHOD = 'live_voice.composition.p3.confirmation.issue' as const;
 export const PRODUCT_P3_MUTATE_METHOD = 'live_voice.composition.p3.mutate' as const;
+export const PRODUCT_P3_TASK_GET_METHOD = 'live_voice.task.get' as const;
 export const PRODUCT_P3_TASK_LIST_METHOD = 'live_voice.task.list' as const;
+export const PRODUCT_P3_TASK_STATUS_METHOD = 'live_voice.task.status' as const;
+export const PRODUCT_P3_TASK_EVENTS_METHOD = 'live_voice.task.events' as const;
 export const PRODUCT_P3_PROGRESS_ACTIVATE_METHOD = 'live_voice.composition.p3.progress.activate' as const;
 export const PRODUCT_P3_PROGRESS_CLOSE_METHOD = 'live_voice.composition.p3.progress.close' as const;
 
@@ -247,6 +250,17 @@ export interface ProductWebP3TaskControlBinding {
   readonly project_id: string;
   readonly correlation_id: string;
   readonly generation: number;
+}
+
+export type ProductWebP3TaskQueryInput = Readonly<
+  { operation: 'task.list' } | { operation: 'task.get' | 'task.status'; task_id: string } | { operation: 'task.events'; task_id: string; after_seq: number }
+>;
+
+export interface ProductWebP3TaskQueryReceipt {
+  readonly operation: ProductWebP3TaskQueryInput['operation'];
+  readonly request_id: string;
+  readonly connection_generation: number;
+  readonly response: JsonObject;
 }
 
 function requiredContent(value: string, field: string): string {
@@ -1021,6 +1035,169 @@ export async function pollProductP2RouteWithRecovery<TSuccessor>(input: {
       kind: 'recovered',
       successor: await input.activate_successor(),
     };
+  }
+}
+
+const PRODUCT_P3_TASK_QUERY_METHODS = Object.freeze({
+  'task.get': PRODUCT_P3_TASK_GET_METHOD,
+  'task.list': PRODUCT_P3_TASK_LIST_METHOD,
+  'task.status': PRODUCT_P3_TASK_STATUS_METHOD,
+  'task.events': PRODUCT_P3_TASK_EVENTS_METHOD,
+} as const);
+
+function exactProductIdentity(value: string, field: string): string {
+  if (!value.trim() || value.length > 256) throw new Error(`${field} is invalid`);
+  return value;
+}
+
+function freezeP3TaskQueryInput(input: ProductWebP3TaskQueryInput): ProductWebP3TaskQueryInput {
+  if (!(input.operation in PRODUCT_P3_TASK_QUERY_METHODS)) {
+    throw new Error('product P3 query operation is unsupported');
+  }
+  if (input.operation === 'task.list') {
+    if (Object.keys(input).length !== 1) {
+      throw new Error('task.list does not accept a target or cursor');
+    }
+    return Object.freeze({ operation: 'task.list' as const });
+  }
+  const taskId = exactProductIdentity(input.task_id, 'task_id');
+  if (input.operation === 'task.events') {
+    if (Object.keys(input).sort().join(',') !== 'after_seq,operation,task_id') {
+      throw new Error('task.events query fields are invalid');
+    }
+    if (!Number.isSafeInteger(input.after_seq) || input.after_seq < -1) {
+      throw new Error('task.events.after_seq is invalid');
+    }
+    return Object.freeze({
+      operation: 'task.events' as const,
+      task_id: taskId,
+      after_seq: input.after_seq,
+    });
+  }
+  if (Object.keys(input).sort().join(',') !== 'operation,task_id') {
+    throw new Error(`${input.operation} query fields are invalid`);
+  }
+  return Object.freeze({ operation: input.operation, task_id: taskId });
+}
+
+function requireP3TaskQueryResult(value: unknown, requestId: string): JsonObject {
+  const payload = objectValue(value);
+  if (
+    payload?.contract_version !== 'live-voice.contract.v2'
+    || payload.request_id !== requestId
+    || payload.command_id !== null
+    || payload.ok !== true
+    || objectValue(payload.result) === null
+    || payload.error !== null
+    || typeof payload.observed_at !== 'string'
+  ) {
+    throw new Error('product P3 query response ownership is unavailable');
+  }
+  return Object.freeze({ ...payload });
+}
+
+/**
+ * Credential-free, read-only owner for one stock-Web formal P3 query at a time.
+ *
+ * A physical disconnect increments the local generation. Any reply from the
+ * prior generation is rejected before the UI replica can adopt it. Queries
+ * never issue a Task command and have no cancel/round/response authority.
+ */
+export class ProductWebP3TaskQueryOwner {
+  private readonly enabled: boolean;
+  private readonly request: ProductWebRequest;
+  private readonly sessionId: string;
+  private connected: boolean;
+  private connectionGeneration = 1;
+  private pending: Promise<ProductWebP3TaskQueryReceipt> | null = null;
+
+  constructor(input: { enabled: boolean; connected: boolean; session_id: string; request: ProductWebRequest }) {
+    if (typeof input.request !== 'function') throw new Error('product request owner is required');
+    this.enabled = input.enabled === true;
+    this.connected = input.connected === true;
+    this.sessionId = exactProductIdentity(input.session_id, 'session_id');
+    this.request = input.request;
+  }
+
+  snapshot(): Readonly<{
+    enabled: boolean;
+    connected: boolean;
+    session_id: string;
+    connection_generation: number;
+    pending: boolean;
+  }> {
+    return Object.freeze({
+      enabled: this.enabled,
+      connected: this.connected,
+      session_id: this.sessionId,
+      connection_generation: this.connectionGeneration,
+      pending: this.pending !== null,
+    });
+  }
+
+  disconnect(): void {
+    if (this.connected) {
+      this.connected = false;
+      this.connectionGeneration += 1;
+    }
+  }
+
+  reconnect(sessionId: string): void {
+    if (exactProductIdentity(sessionId, 'session_id') !== this.sessionId) {
+      throw new Error('product P3 query owner cannot cross Session scope');
+    }
+    this.connected = true;
+  }
+
+  query(input: ProductWebP3TaskQueryInput): Promise<ProductWebP3TaskQueryReceipt> {
+    if (!this.enabled) return Promise.reject(new Error('product P3 query is disabled'));
+    if (!this.connected) return Promise.reject(new Error('product P3 query is disconnected'));
+    if (this.pending !== null) {
+      return Promise.reject(new Error('a product P3 query is already in flight'));
+    }
+    let frozen: ProductWebP3TaskQueryInput;
+    try {
+      frozen = freezeP3TaskQueryInput(input);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const requestId = allocateProductRequestId('live-voice-p3-query');
+    const generation = this.connectionGeneration;
+    const params =
+      frozen.operation === 'task.list'
+        ? { session_id: this.sessionId }
+        : frozen.operation === 'task.events'
+          ? {
+              session_id: this.sessionId,
+              task_id: frozen.task_id,
+              after_seq: frozen.after_seq,
+            }
+          : { session_id: this.sessionId, task_id: frozen.task_id };
+    let requested: Promise<unknown>;
+    try {
+      requested = this.request(PRODUCT_P3_TASK_QUERY_METHODS[frozen.operation], params, requestId);
+    } catch (error) {
+      requested = Promise.reject(error);
+    }
+    let operation: Promise<ProductWebP3TaskQueryReceipt>;
+    operation = requested
+      .then(value => {
+        const response = requireP3TaskQueryResult(value, requestId);
+        if (!this.connected || this.connectionGeneration !== generation) {
+          throw new Error('product P3 query response is stale after disconnect');
+        }
+        return Object.freeze({
+          operation: frozen.operation,
+          request_id: requestId,
+          connection_generation: generation,
+          response,
+        });
+      })
+      .finally(() => {
+        if (this.pending === operation) this.pending = null;
+      });
+    this.pending = operation;
+    return operation;
   }
 }
 

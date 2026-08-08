@@ -2123,6 +2123,25 @@
         "execute": "执行已确认变更",
         "status": "P3 确认 / 变更"
       },
+      "taskQuery": {
+        "title": "正式 P3 任务查询",
+        "disclosure": "仅只读 Task Core 事实。精确保留任务 ID 和事件游标；这些控件不会停止播放、响应或轮次。",
+        "list": "列出任务",
+        "get": "获取任务",
+        "taskStatus": "获取任务状态",
+        "events": "获取任务事件",
+        "afterSeq": "精确事件游标（-1 表示 authoritative prefix）",
+        "execute": "执行只读查询",
+        "status": "P3 查询状态",
+        "reason": "查询限制",
+        "eventCount": "返回事件数",
+        "task": "任务 ID",
+        "attempt": "Attempt ID",
+        "taskState": "任务状态",
+        "outcome": "终态结果",
+        "correlation": "任务关联",
+        "cursor": "最后采纳的事件游标"
+      },
       "composition": {
         "flag_off": "flag 已关闭",
         "shell_only": "仅组合 shell",

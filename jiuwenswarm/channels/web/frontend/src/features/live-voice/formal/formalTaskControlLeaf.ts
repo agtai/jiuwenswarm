@@ -24,6 +24,7 @@ export interface FormalTaskControlBinding {
 export interface FormalTaskControlRecord {
   readonly task_id: string;
   readonly attempt_id: string | null;
+  readonly correlation_id: string;
   readonly state: FormalTaskState | null;
   readonly outcome: string | null;
   readonly event_head: number | null;
@@ -276,12 +277,80 @@ function parseTask(value: unknown, binding: FormalTaskControlBinding): FormalTas
   return Object.freeze({
     task_id: text(task.task_id, 'task_id'),
     attempt_id: text(task.attempt_id, 'attempt_id'),
+    correlation_id: text(task.correlation_id, 'task.correlation_id'),
     state,
     outcome,
     event_head: nonNegativeInteger(task.event_head, 'task.event_head'),
     last_event_id: null,
     last_event_seq: null,
   });
+}
+
+function queryResult(value: unknown): JsonObject {
+  const payload = objectValue(value);
+  const result = objectValue(payload?.result);
+  if (payload?.ok !== true || result === null) {
+    throw new Error('formal task query result is unavailable');
+  }
+  return result;
+}
+
+function queryBindingCandidate(operation: Exclude<FormalTaskControlOperation, 'task.create' | 'task.cancel'>, response: unknown): JsonObject | null {
+  const result = queryResult(response);
+  if (operation === 'task.list') {
+    if (!Array.isArray(result.tasks)) throw new Error('task.list result is invalid');
+    if (result.tasks.length === 0) return null;
+    const first = objectValue(result.tasks[0]);
+    if (first === null) throw new Error('task.list result is invalid');
+    return first;
+  }
+  if (operation === 'task.get' || operation === 'task.status') {
+    const task = objectValue(result.task);
+    if (task === null) throw new Error(`formal ${operation} task is invalid`);
+    return task;
+  }
+  if (!Array.isArray(result.events)) throw new Error('task.events result is invalid');
+  if (result.events.length === 0) return null;
+  const event = objectValue(result.events[0]);
+  if (event === null) throw new Error('task.events result is invalid');
+  return event;
+}
+
+/** Derive only the exact authenticated task binding returned by Task Core. */
+export function deriveFormalTaskQueryBinding(
+  input: Readonly<{
+    operation: Exclude<FormalTaskControlOperation, 'task.create' | 'task.cancel'>;
+    response: unknown;
+    expected_session_id: string;
+    generation: number;
+  }>,
+): FormalTaskControlBinding | null {
+  const candidate = queryBindingCandidate(input.operation, input.response);
+  if (candidate === null) return null;
+  const scope = objectValue(candidate.scope);
+  if (scope === null || scope.assurance !== 'authenticated' || scope.session_id !== input.expected_session_id || Object.keys(scope).sort().join(',') !== 'assurance,project_id,session_id,subject_id') {
+    throw new Error('formal task query scope binding mismatch');
+  }
+  const correlationId = text(candidate.correlation_id, 'task.correlation_id');
+  const binding = freezeBinding({
+    subject_id: text(scope.subject_id, 'scope.subject_id'),
+    session_id: text(scope.session_id, 'scope.session_id'),
+    project_id: text(scope.project_id, 'scope.project_id'),
+    correlation_id: correlationId,
+    generation: input.generation,
+  });
+  const result = queryResult(input.response);
+  const values = input.operation === 'task.list' ? result.tasks : input.operation === 'task.events' ? result.events : [result.task];
+  if (!Array.isArray(values)) throw new Error('formal task query result is invalid');
+  for (const value of values) {
+    const record = objectValue(value);
+    if (record === null) throw new Error('formal task query record is invalid');
+    requireScope(record.scope, binding);
+    if (input.operation === 'task.events' && record.correlation_id !== correlationId) {
+      throw new Error('task.events contains cross-correlation facts');
+    }
+  }
+  return binding;
 }
 
 function sameBinding(left: FormalTaskControlBinding, right: FormalTaskControlBinding): boolean {
@@ -379,6 +448,33 @@ export class FormalTaskControlLeaf {
     }
     this.#connected = true;
     return this.snapshot();
+  }
+
+  /**
+   * Transfer only one observed exact task replica to a fresh server-confirmed
+   * mutation binding. This changes no Task truth and cannot widen Session or
+   * project scope.
+   */
+  rebindConfirmedMutation(bindingInput: FormalTaskControlBinding, taskIdInput: string): FormalTaskControlLeaf {
+    const binding = freezeBinding(bindingInput);
+    const taskId = text(taskIdInput, 'task_id');
+    if (!this.#connected) {
+      throw new Error('formal task mutation rebind requires a connected observed replica');
+    }
+    if (binding.subject_id !== this.#binding.subject_id || binding.session_id !== this.#binding.session_id || binding.project_id !== this.#binding.project_id) {
+      throw new Error('formal task mutation rebind cannot cross scope');
+    }
+    if (this.#pendingMutationCommands.size > 0 || this.#pendingConfirmations.size > 0) {
+      throw new Error('formal task mutation rebind is unavailable while a mutation is pending');
+    }
+    const task = this.#tasks.get(taskId);
+    if (task === undefined || task.attempt_id === null) {
+      throw new Error('formal task mutation rebind requires an observed exact task attempt');
+    }
+    const next = new FormalTaskControlLeaf({ enabled: this.#enabled, binding });
+    next.#tasks.set(taskId, task);
+    this.disconnect();
+    return next;
   }
 
   async submitMutation<T>(prepared: PreparedFormalTaskMutation, send: (prepared: PreparedFormalTaskMutation) => Promise<T>): Promise<T> {
@@ -537,6 +633,7 @@ export class FormalTaskControlLeaf {
         const task: FormalTaskControlRecord = Object.freeze({
           task_id: taskId,
           attempt_id: attemptId,
+          correlation_id: this.#binding.correlation_id,
           state: null,
           outcome: null,
           event_head: null,
@@ -567,7 +664,7 @@ export class FormalTaskControlLeaf {
     const record = this.#tasks.get(text(origin.task_id, 'progress.task_id'));
     if (
       record === undefined ||
-      origin.correlation_id !== this.#binding.correlation_id ||
+      origin.correlation_id !== record.correlation_id ||
       origin.source_event_id !== record.last_event_id ||
       origin.source_event_seq !== record.last_event_seq ||
       origin.progress_causation_id !== origin.source_event_id ||
@@ -644,6 +741,7 @@ export class FormalTaskControlLeaf {
     let previous = afterSeq;
     let previousState: FormalTaskState | null = afterSeq === -1 ? null : existing?.state ?? null;
     let previousOutcome: string | null = afterSeq === -1 ? null : existing?.outcome ?? null;
+    let selectedCorrelationId: string | undefined = existing?.correlation_id;
     const eventIds = new Set<string>();
     for (const value of result.events) {
       const event = objectValue(value);
@@ -653,9 +751,11 @@ export class FormalTaskControlLeaf {
       const attemptId = text(event.attempt_id, 'event.attempt_id');
       const seq = nonNegativeInteger(event.seq, 'event.seq');
       const eventId = text(event.event_id, 'event.event_id');
+      const eventCorrelationId = text(event.correlation_id, 'event.correlation_id');
+      const expectedCorrelationId = selectedCorrelationId;
       if (
         eventTaskId !== taskId ||
-        event.correlation_id !== this.#binding.correlation_id ||
+        (expectedCorrelationId !== undefined && eventCorrelationId !== expectedCorrelationId) ||
         seq !== previous + 1 ||
         eventIds.has(eventId) ||
         (selected !== null && (selected.task_id !== eventTaskId || selected.attempt_id !== attemptId))
@@ -672,12 +772,14 @@ export class FormalTaskControlLeaf {
       selected = Object.freeze({
         task_id: eventTaskId,
         attempt_id: attemptId,
+        correlation_id: eventCorrelationId,
         state,
         outcome,
         event_head: head,
         last_event_id: eventId,
         last_event_seq: seq,
       });
+      selectedCorrelationId = eventCorrelationId;
       previous = seq;
       previousState = state;
       previousOutcome = outcome;
@@ -713,6 +815,7 @@ export class FormalTaskControlLeaf {
         Object.freeze({
           task_id: taskId,
           attempt_id: existing?.attempt_id ?? null,
+          correlation_id: existing?.correlation_id ?? this.#binding.correlation_id,
           state: existing?.state ?? null,
           outcome: existing?.outcome ?? null,
           event_head: head,

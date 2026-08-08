@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   FORMAL_TASK_CONTROL_LIMITS,
   FormalTaskControlLeaf,
+  deriveFormalTaskQueryBinding,
   mapFormalTaskCancel,
   prepareFormalTaskMutation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/formalTaskControlLeaf.js';
@@ -28,6 +29,7 @@ function task(overrides = {}) {
     task_id: overrides.task_id ?? 'task-1',
     scope: overrides.scope ?? { ...scope },
     attempt_id: overrides.attempt_id ?? 'attempt-1',
+    correlation_id: overrides.correlation_id ?? binding.correlation_id,
     state: overrides.state ?? 'running',
     outcome: overrides.outcome ?? null,
     event_head: overrides.event_head ?? 1,
@@ -636,4 +638,71 @@ test('closed practical limits accept their boundary and reject overflow before s
   assert.equal(pendingCalls, FORMAL_TASK_CONTROL_LIMITS.max_pending_mutations);
   releasePending();
   await Promise.all(pending);
+});
+
+test('query binding is derived only from exact authenticated Task Core scope and correlation', () => {
+  const response = {
+    ok: true,
+    result: {
+      tasks: [task({ task_id: 'task-1' }), task({ task_id: 'task-2', correlation_id: 'correlation-2' })],
+    },
+  };
+  assert.deepEqual(
+    deriveFormalTaskQueryBinding({
+      operation: 'task.list',
+      response,
+      expected_session_id: 'session-1',
+      generation: 7,
+    }),
+    {
+      ...binding,
+      generation: 7,
+    },
+  );
+  assert.throws(
+    () =>
+      deriveFormalTaskQueryBinding({
+        operation: 'task.list',
+        response,
+        expected_session_id: 'session-other',
+        generation: 7,
+      }),
+    /scope binding mismatch/,
+  );
+  assert.equal(
+    deriveFormalTaskQueryBinding({
+      operation: 'task.list',
+      response: { ok: true, result: { tasks: [] } },
+      expected_session_id: 'session-1',
+      generation: 7,
+    }),
+    null,
+  );
+});
+
+test('a confirmed mutation rebind transfers only the exact observed task attempt', () => {
+  const source = new FormalTaskControlLeaf({ enabled: true, binding });
+  source.adopt(
+    'task.list',
+    {
+      ok: true,
+      result: {
+        tasks: [task({ task_id: 'task-1' }), task({ task_id: 'task-2', correlation_id: 'correlation-2' })],
+      },
+    },
+    adoption(source),
+  );
+  const nextBinding = { ...binding, correlation_id: 'cancel-correlation', generation: 2 };
+  const rebound = source.rebindConfirmedMutation(nextBinding, 'task-2');
+
+  assert.equal(source.snapshot().connected, false);
+  assert.deepEqual(rebound.snapshot().binding, nextBinding);
+  assert.deepEqual(
+    rebound.snapshot().tasks.map(record => record.task_id),
+    ['task-2'],
+  );
+  assert.throws(() => rebound.rebindConfirmedMutation({ ...nextBinding, project_id: 'foreign-project' }, 'task-2'), /cannot cross scope/);
+  assert.throws(() => rebound.rebindConfirmedMutation(nextBinding, 'task-unobserved'), /observed exact task attempt/);
+  rebound.disconnect();
+  assert.throws(() => rebound.rebindConfirmedMutation(nextBinding, 'task-2'), /connected observed replica/);
 });

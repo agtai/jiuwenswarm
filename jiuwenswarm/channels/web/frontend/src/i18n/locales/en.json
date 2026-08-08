@@ -2125,6 +2125,25 @@
         "execute": "Execute confirmed mutation",
         "status": "P3 confirmation / mutation"
       },
+      "taskQuery": {
+        "title": "Formal P3 task queries",
+        "disclosure": "Read-only Task Core facts. Exact task IDs and event cursors are preserved; these controls do not stop playback, responses, or rounds.",
+        "list": "List tasks",
+        "get": "Get task",
+        "taskStatus": "Get task status",
+        "events": "Get task events",
+        "afterSeq": "Exact event cursor (-1 for the authoritative prefix)",
+        "execute": "Run read-only query",
+        "status": "P3 query state",
+        "reason": "Query limitation",
+        "eventCount": "Events returned",
+        "task": "Task ID",
+        "attempt": "Attempt ID",
+        "taskState": "Task state",
+        "outcome": "Terminal outcome",
+        "correlation": "Task correlation",
+        "cursor": "Last adopted event cursor"
+      },
       "composition": {
         "flag_off": "flag off",
         "shell_only": "shell only",

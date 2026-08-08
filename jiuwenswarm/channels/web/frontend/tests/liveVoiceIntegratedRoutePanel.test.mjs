@@ -15,6 +15,7 @@ import {
   coordinateRetainedProductP2Close,
   executeProductVoiceBargeIn,
   executeProductPresentationWithFence,
+  executeProductP3TaskQuery,
   settleRetainedProductVoiceResponseCancel,
   extractWebErrorReason,
   isCurrentProgressOwner,
@@ -31,7 +32,11 @@ import {
   PRODUCT_P2_CLOSE_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
   ProductWebP2ActivationOwner,
+  ProductWebP3TaskQueryOwner,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
+import {
+  FormalTaskControlLeaf,
+} from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/formalTaskControlLeaf.js';
 import {
   IntegratedWebRouteShell,
   createCurrentIntegratedWebRouteSelection,
@@ -288,6 +293,183 @@ test('route panel renders a distinct two-action formal P3 task control', async (
   assert.equal(html.includes('Execute confirmed mutation'), true);
   assert.equal(html.includes('Acceptance is not task completion.'), true);
   assert.equal((html.match(/disabled=""/g) ?? []).length >= 3, true);
+});
+
+function formalQueryTask(overrides = {}) {
+  return {
+    task_id: overrides.task_id ?? 'task-1',
+    attempt_id: overrides.attempt_id ?? 'attempt-1',
+    correlation_id: overrides.correlation_id ?? 'task-correlation-1',
+    scope: {
+      subject_id: 'subject-1',
+      session_id: overrides.session_id ?? 'persisted-session',
+      project_id: 'project-1',
+      assurance: 'authenticated',
+    },
+    state: overrides.state ?? 'accepted',
+    outcome: overrides.outcome ?? null,
+    event_head: overrides.event_head ?? 0,
+  };
+}
+
+function formalQueryEnvelope(requestId, result) {
+  return {
+    contract_version: 'live-voice.contract.v2',
+    request_id: requestId,
+    command_id: null,
+    ok: true,
+    result,
+    error: null,
+    observed_at: '2026-08-08T12:00:00Z',
+    extensions: {},
+  };
+}
+
+function formalAcceptedEvent() {
+  const task = formalQueryTask();
+  return {
+    event_id: 'event-0',
+    task_id: task.task_id,
+    attempt_id: task.attempt_id,
+    correlation_id: task.correlation_id,
+    scope: task.scope,
+    seq: 0,
+    event_type: 'task.accepted',
+    state: 'accepted',
+    outcome: null,
+    producer: 'task_core',
+    source_event_id: null,
+    causation_id: 'command-create-1',
+    occurred_at: '2026-08-08T11:59:00Z',
+    details: {},
+  };
+}
+
+test('all four structured P3 queries adopt exact Task Core facts without business cancel effects', async () => {
+  const calls = [];
+  const owner = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'persisted-session',
+    request: async (method, params, requestId) => {
+      calls.push([method, params]);
+      const task = formalQueryTask();
+      if (method.endsWith('.list')) return formalQueryEnvelope(requestId, { tasks: [task] });
+      if (method.endsWith('.events')) {
+        return formalQueryEnvelope(requestId, {
+          task_id: task.task_id,
+          after_seq: params.after_seq,
+          head_seq: 0,
+          events: [formalAcceptedEvent()],
+          truncated: false,
+          cursor_replay_supported: false,
+        });
+      }
+      return formalQueryEnvelope(requestId, {
+        task,
+        attempt: { task_id: task.task_id, attempt_id: task.attempt_id },
+      });
+    },
+  });
+  let leaf = null;
+  for (const query of [
+    { operation: 'task.list' },
+    { operation: 'task.get', task_id: 'task-1' },
+    { operation: 'task.status', task_id: 'task-1' },
+    { operation: 'task.events', task_id: 'task-1', after_seq: -1 },
+  ]) {
+    const result = await executeProductP3TaskQuery({
+      owner,
+      leaf,
+      query,
+      expected_session_id: 'persisted-session',
+    });
+    leaf = result.leaf;
+    assert.equal(result.snapshot.tasks[0].task_id, 'task-1');
+  }
+  assert.equal(leaf.snapshot().tasks[0].last_event_seq, 0);
+  assert.deepEqual(
+    calls.map(([, params]) => params),
+    [
+      { session_id: 'persisted-session' },
+      { session_id: 'persisted-session', task_id: 'task-1' },
+      { session_id: 'persisted-session', task_id: 'task-1' },
+      { session_id: 'persisted-session', task_id: 'task-1', after_seq: -1 },
+    ],
+  );
+  assert.equal(
+    calls.some(([method]) => /mutate|cancel|barge|submit/.test(method)),
+    false,
+  );
+});
+
+test('formal P3 query UI exposes exact read operations and truthful retained facts', async () => {
+  const leaf = new FormalTaskControlLeaf({
+    enabled: true,
+    binding: {
+      subject_id: 'subject-1',
+      session_id: 'persisted-session',
+      project_id: 'project-1',
+      correlation_id: 'task-correlation-1',
+      generation: 1,
+    },
+  });
+  const snapshot = leaf.adopt(
+    'task.list',
+    {
+      ok: true,
+      result: { tasks: [formalQueryTask()] },
+    },
+    {
+      connection_generation: 1,
+      command_id: null,
+      events_query: null,
+    },
+  );
+  const html = await renderPanel({
+    viewProps: {
+      p3QueryEnabled: true,
+      p3QueryOperation: 'task.events',
+      p3QueryTaskId: 'task-1',
+      p3EventsAfterSeq: '0',
+      p3QueryStatus: 'disconnected',
+      p3QueryReason: 'P3_QUERY_REFRESH_REQUIRED',
+      p3QuerySnapshot: snapshot,
+      p3QueryEventCount: 0,
+      onP3QueryOperation: () => {},
+      onP3QueryTaskId: () => {},
+      onP3EventsAfterSeq: () => {},
+      onP3Query: () => {},
+    },
+  });
+
+  assert.equal(html.includes('data-testid="live-voice-integrated-p3-query"'), true);
+  for (const label of ['List tasks', 'Get task', 'Get task status', 'Get task events']) {
+    assert.equal(html.includes(label), true, label);
+  }
+  for (const fact of ['task-1', 'attempt-1', 'task-correlation-1', 'P3_QUERY_REFRESH_REQUIRED']) {
+    assert.equal(html.includes(fact), true, fact);
+  }
+  assert.equal(html.includes('these controls do not stop playback, responses, or rounds'), true);
+
+  const disabled = await renderPanel({
+    viewProps: {
+      p3QueryEnabled: false,
+      onP3QueryOperation: () => {
+        throw new Error('must not run');
+      },
+      onP3QueryTaskId: () => {
+        throw new Error('must not run');
+      },
+      onP3EventsAfterSeq: () => {
+        throw new Error('must not run');
+      },
+      onP3Query: () => {
+        throw new Error('must not run');
+      },
+    },
+  });
+  assert.equal(disabled.includes('data-testid="live-voice-integrated-p3-query"'), false);
 });
 
 test('browser progress consumption is fenced to the exact owned P3 binding', () => {

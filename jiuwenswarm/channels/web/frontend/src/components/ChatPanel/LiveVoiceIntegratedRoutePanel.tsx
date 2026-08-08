@@ -25,6 +25,7 @@ import {
   ProductWebP2ActivationOwner,
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
+  ProductWebP3TaskQueryOwner,
   pollProductP2RouteWithRecovery,
   isDefinitiveProductOperationError,
   requiresProductActivationCleanup,
@@ -33,6 +34,7 @@ import {
   type ProductWebP3ProgressBinding,
   type ProductWebP3ProgressSnapshot,
   type ProductWebP3MutationInput,
+  type ProductWebP3TaskQueryInput,
 } from '../../features/live-voice/formal/productWebActivation';
 import {
   ProductP1VoiceRouteOwner,
@@ -40,7 +42,9 @@ import {
 } from '../../features/live-voice/formal/productP1VoiceRoute';
 import {
   FormalTaskControlLeaf,
+  deriveFormalTaskQueryBinding,
   prepareFormalTaskMutation,
+  type FormalTaskControlSnapshot,
   type PreparedFormalTaskMutation,
 } from '../../features/live-voice/formal/formalTaskControlLeaf';
 import { WebPlatformDiagnosticsMonitor, type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
@@ -189,6 +193,67 @@ export function resolveProductTaskCreateOrigin(
     });
   }
   return Object.freeze({ source: 'structured' as const });
+}
+
+function sameFormalTaskBinding(left: FormalTaskControlSnapshot['binding'], right: FormalTaskControlSnapshot['binding']): boolean {
+  return (
+    left.subject_id === right.subject_id
+    && left.session_id === right.session_id
+    && left.project_id === right.project_id
+    && left.correlation_id === right.correlation_id
+    && left.generation === right.generation
+  );
+}
+
+export async function executeProductP3TaskQuery(
+  input: Readonly<{
+    owner: ProductWebP3TaskQueryOwner;
+    leaf: FormalTaskControlLeaf | null;
+    query: ProductWebP3TaskQueryInput;
+    expected_session_id: string;
+  }>,
+): Promise<
+  Readonly<{
+    leaf: FormalTaskControlLeaf | null;
+    snapshot: FormalTaskControlSnapshot | null;
+    event_count: number | null;
+  }>
+> {
+  const receipt = await input.owner.query(input.query);
+  const binding = deriveFormalTaskQueryBinding({
+    operation: receipt.operation,
+    response: receipt.response,
+    expected_session_id: input.expected_session_id,
+    generation: receipt.connection_generation,
+  });
+  let leaf = input.leaf;
+  if (binding === null) {
+    if (input.query.operation === 'task.list') {
+      leaf?.disconnect();
+      return Object.freeze({ leaf: null, snapshot: null, event_count: null });
+    }
+    if (leaf === null) {
+      throw new Error('task.events cannot establish an exact task binding');
+    }
+    if (leaf.snapshot().binding.session_id !== input.expected_session_id || leaf.snapshot().binding.generation !== receipt.connection_generation) {
+      throw new Error('formal task query cannot reuse a foreign Session replica');
+    }
+    leaf.reconnect(leaf.snapshot().binding);
+  } else if (leaf === null || !sameFormalTaskBinding(leaf.snapshot().binding, binding)) {
+    leaf?.disconnect();
+    leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  } else {
+    leaf.reconnect(binding);
+  }
+  const eventsQuery = input.query.operation === 'task.events' ? { task_id: input.query.task_id, after_seq: input.query.after_seq } : null;
+  const snapshot = leaf.adopt(receipt.operation, receipt.response, {
+    connection_generation: leaf.snapshot().connection_generation,
+    command_id: null,
+    events_query: eventsQuery,
+  });
+  const payload = recordValue(receipt.response.result);
+  const eventCount = receipt.operation === 'task.events' && Array.isArray(payload?.events) ? payload.events.length : null;
+  return Object.freeze({ leaf, snapshot, event_count: eventCount });
 }
 
 // Gateway retains a unary AgentServer request for at most 600 seconds. The
@@ -497,6 +562,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p3MutationStatus, setP3MutationStatus] = useState<
     'idle' | 'issuing' | 'confirmed' | 'mutating' | 'accepted' | 'failed'
   >('idle');
+  const [p3QueryOperation, setP3QueryOperation] = useState<'task.get' | 'task.list' | 'task.status' | 'task.events'>('task.list');
+  const [p3QueryTaskId, setP3QueryTaskId] = useState('');
+  const [p3EventsAfterSeq, setP3EventsAfterSeq] = useState('-1');
+  const [p3QueryStatus, setP3QueryStatus] = useState<'idle' | 'querying' | 'available' | 'empty' | 'disconnected' | 'unsupported' | 'failed'>('idle');
+  const [p3QueryReason, setP3QueryReason] = useState<string | null>(null);
+  const [p3QuerySnapshot, setP3QuerySnapshot] = useState<FormalTaskControlSnapshot | null>(null);
+  const [p3QueryEventCount, setP3QueryEventCount] = useState<number | null>(null);
   const [createdProgressTaskId, setCreatedProgressTaskId] = useState<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
   const progressRef = useRef<Readonly<ProductTextProgressEvent> | null>(null);
@@ -532,10 +604,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const presentedProductResponsesRef = useRef(new Map<string, true>());
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
+  const p3TaskQueryOwnerRef = useRef<ProductWebP3TaskQueryOwner | null>(null);
   const pendingP3MutationRef = useRef<ProductWebP3MutationInput | null>(null);
   const voiceTaskOriginRef = useRef<ProductVoiceTaskOrigin | null>(null);
   const recognizedVoiceRef = useRef<ProductRecognizedVoice | null>(null);
   const formalTaskControlLeafRef = useRef<FormalTaskControlLeaf | null>(null);
+  const formalTaskQueryLeafRef = useRef<FormalTaskControlLeaf | null>(null);
   const pendingFormalP3MutationRef = useRef<PreparedFormalTaskMutation | null>(null);
   const activeSessionRef = useRef<string | null>(props.activeSessionId);
   const progressOwnerEpochRef = useRef(0);
@@ -555,7 +629,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         p2_available: p2Activation.status === 'active',
         p3_available:
           p3Activation.status === 'active'
-          || ['confirmed', 'mutating', 'accepted'].includes(p3MutationStatus),
+          || ['confirmed', 'mutating', 'accepted'].includes(p3MutationStatus)
+          || ['available', 'empty'].includes(p3QueryStatus),
       },
     ),
     [
@@ -564,6 +639,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p2Activation.status,
       p3Activation.status,
       p3MutationStatus,
+      p3QueryStatus,
       props.activeSessionId,
       props.agentRouteAvailable,
       props.isConnected,
@@ -1190,29 +1266,64 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingFormalP3MutationRef.current = null;
     formalTaskControlLeafRef.current?.disconnect();
     formalTaskControlLeafRef.current = null;
+    formalTaskQueryLeafRef.current?.disconnect();
+    formalTaskQueryLeafRef.current = null;
     setP3MutationStatus('idle');
+    setP3QueryStatus(props.isConnected ? 'idle' : 'disconnected');
+    setP3QueryReason(props.isConnected ? null : 'P3_QUERY_DISCONNECTED');
+    setP3QuerySnapshot(null);
+    setP3QueryEventCount(null);
     setCreatedProgressTaskId(null);
-    if (
-      !FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ||
-      !props.activeSessionId
-    ) {
+    if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION || !props.activeSessionId) {
       p3MutationOwnerRef.current = null;
+      p3TaskQueryOwnerRef.current = null;
       return;
     }
     const owner = new ProductWebP3MutationOwner({
       enabled: true,
-      request: (method, params, requestId) =>
-        webClient.request(method, params, { requestId }),
+      request: (method, params, requestId) => webClient.request(method, params, { requestId }),
+    });
+    const queryOwner = new ProductWebP3TaskQueryOwner({
+      enabled: true,
+      connected: props.isConnected,
+      session_id: props.activeSessionId,
+      request: (method, params, requestId) => webClient.request(method, params, { requestId }),
     });
     p3MutationOwnerRef.current = owner;
+    p3TaskQueryOwnerRef.current = queryOwner;
     return () => {
       formalTaskControlLeafRef.current?.disconnect();
+      formalTaskQueryLeafRef.current?.disconnect();
       if (p3MutationOwnerRef.current === owner) p3MutationOwnerRef.current = null;
+      if (p3TaskQueryOwnerRef.current === queryOwner) {
+        queryOwner.disconnect();
+        p3TaskQueryOwnerRef.current = null;
+      }
     };
   }, [props.activeSessionId]);
 
   useEffect(() => {
-    if (!props.isConnected) formalTaskControlLeafRef.current?.disconnect();
+    const queryOwner = p3TaskQueryOwnerRef.current;
+    const sessionId = props.activeSessionId;
+    if (!props.isConnected) {
+      const retainedQuery = formalTaskQueryLeafRef.current !== null || queryOwner?.snapshot().pending === true;
+      formalTaskControlLeafRef.current?.disconnect();
+      formalTaskQueryLeafRef.current?.disconnect();
+      queryOwner?.disconnect();
+      if (retainedQuery) {
+        setP3QueryStatus('disconnected');
+        setP3QueryReason('P3_QUERY_DISCONNECTED');
+      }
+      return;
+    }
+    if (queryOwner && sessionId) {
+      const wasDisconnected = !queryOwner.snapshot().connected;
+      queryOwner.reconnect(sessionId);
+      if (wasDisconnected && formalTaskQueryLeafRef.current !== null) {
+        setP3QueryStatus('disconnected');
+        setP3QueryReason('P3_QUERY_REFRESH_REQUIRED');
+      }
+    }
   }, [props.isConnected]);
 
   const submitProductText = async (
@@ -1519,11 +1630,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const owner = p3MutationOwnerRef.current;
     let mutation = pendingP3MutationRef.current;
     if (
-      mutation === null &&
-      p3MutationOperation === 'task.create' &&
-      voiceTaskOriginRef.current === null &&
-      recognizedVoiceRef.current?.session_id === props.activeSessionId &&
-      recognizedVoiceRef.current?.text === p3TaskInstruction
+      mutation === null
+      && p3MutationOperation === 'task.create'
+      && voiceTaskOriginRef.current === null
+      && recognizedVoiceRef.current?.session_id === props.activeSessionId
+      && recognizedVoiceRef.current?.text === p3TaskInstruction
     ) {
       const origin = await commitRecognizedVoiceTaskOrigin();
       if (origin === null) {
@@ -1533,20 +1644,45 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
     mutation = mutation ?? buildP3Mutation();
     if (!owner || !mutation) return;
+    if (
+      mutation.operation === 'task.cancel'
+      && ![formalTaskControlLeafRef.current, formalTaskQueryLeafRef.current].some(leaf => {
+        const snapshot = leaf?.snapshot();
+        return snapshot?.connected === true
+          && snapshot.tasks.some(task => task.task_id === mutation.task_id && task.attempt_id !== null);
+      })
+    ) {
+      setP3MutationStatus('failed');
+      return;
+    }
     pendingP3MutationRef.current = mutation;
     setP3MutationStatus('issuing');
     try {
       const receipt = await owner.issue(mutation);
       let leaf = formalTaskControlLeafRef.current;
-      if (leaf === null) {
+      const retainedTargetLeaf =
+        mutation.operation === 'task.cancel'
+          ? ([leaf, formalTaskQueryLeafRef.current].find(candidate => {
+              const snapshot = candidate?.snapshot();
+              return snapshot?.connected === true
+                && snapshot.tasks.some(task => task.task_id === mutation.task_id && task.attempt_id !== null);
+            }) ?? null)
+          : null;
+      if (mutation.operation === 'task.cancel' && retainedTargetLeaf !== null) {
+        leaf = retainedTargetLeaf.rebindConfirmedMutation(receipt.task_control_binding, mutation.task_id);
+        if (formalTaskQueryLeafRef.current === retainedTargetLeaf) {
+          formalTaskQueryLeafRef.current = null;
+          setP3QueryStatus('disconnected');
+          setP3QueryReason('P3_QUERY_REFRESH_REQUIRED_AFTER_MUTATION_BINDING');
+        }
+      } else {
+        leaf?.disconnect();
         leaf = new FormalTaskControlLeaf({
           enabled: true,
           binding: receipt.task_control_binding,
         });
-        formalTaskControlLeafRef.current = leaf;
-      } else {
-        leaf.reconnect(receipt.task_control_binding);
       }
+      formalTaskControlLeafRef.current = leaf;
       pendingFormalP3MutationRef.current = prepareFormalTaskMutation(
         receipt.task_control_binding,
         {
@@ -1575,10 +1711,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (!owner || !mutation || !leaf || !prepared) return;
     setP3MutationStatus('mutating');
     try {
-      const result = await leaf.submitMutation(
-        prepared,
-        () => owner.mutate(mutation),
-      );
+      const result = await leaf.submitMutation(prepared, () => owner.mutate(mutation));
       leaf.adopt(mutation.operation, result, {
         connection_generation: leaf.snapshot().connection_generation,
         command_id: mutation.command_id,
@@ -1592,6 +1725,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             throw new Error('formal task.create result did not return an exact task');
           }
           setCreatedProgressTaskId(createdTaskId);
+          setP3QueryTaskId(createdTaskId);
         }
         pendingP3MutationRef.current = null;
         pendingFormalP3MutationRef.current = null;
@@ -1601,6 +1735,62 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (p3MutationOwnerRef.current === owner) {
         if (!owner.hasPendingMutation()) pendingP3MutationRef.current = null;
         setP3MutationStatus('failed');
+      }
+    }
+  };
+
+  const buildP3Query = (): ProductWebP3TaskQueryInput | null => {
+    if (p3QueryOperation === 'task.list') return { operation: 'task.list' };
+    if (!p3QueryTaskId.trim()) return null;
+    if (p3QueryOperation === 'task.events') {
+      if (!/^-?\d+$/.test(p3EventsAfterSeq)) return null;
+      const afterSeq = Number(p3EventsAfterSeq);
+      if (!Number.isSafeInteger(afterSeq) || afterSeq < -1) return null;
+      return {
+        operation: 'task.events',
+        task_id: p3QueryTaskId,
+        after_seq: afterSeq,
+      };
+    }
+    return { operation: p3QueryOperation, task_id: p3QueryTaskId };
+  };
+
+  const executeP3Query = async () => {
+    const owner = p3TaskQueryOwnerRef.current;
+    const sessionId = props.activeSessionId;
+    const query = buildP3Query();
+    if (!owner || !sessionId || !props.isConnected || query === null) {
+      setP3QueryStatus('failed');
+      setP3QueryReason('P3_QUERY_INPUT_INVALID');
+      return;
+    }
+    setP3QueryStatus('querying');
+    setP3QueryReason(null);
+    try {
+      const result = await executeProductP3TaskQuery({
+        owner,
+        leaf: formalTaskQueryLeafRef.current,
+        query,
+        expected_session_id: sessionId,
+      });
+      if (p3TaskQueryOwnerRef.current !== owner || activeSessionRef.current !== sessionId) {
+        result.leaf?.disconnect();
+        return;
+      }
+      formalTaskQueryLeafRef.current = result.leaf;
+      setP3QuerySnapshot(result.snapshot);
+      setP3QueryEventCount(result.event_count);
+      setP3QueryStatus(result.snapshot === null || result.snapshot.tasks.length === 0 ? 'empty' : 'available');
+    } catch (error) {
+      if (p3TaskQueryOwnerRef.current !== owner) return;
+      const reason = extractWebErrorReason(error) ?? (error instanceof Error ? error.message : 'PRODUCT_P3_QUERY_FAILED');
+      setP3QueryReason(reason);
+      if (!owner.snapshot().connected) {
+        setP3QueryStatus('disconnected');
+      } else if (/UNSUPPORTED|CAPABILITY_UNAVAILABLE/.test(reason)) {
+        setP3QueryStatus('unsupported');
+      } else {
+        setP3QueryStatus('failed');
       }
     }
   };
@@ -1824,6 +2014,31 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }}
       onP3Issue={() => void issueP3MutationConfirmation()}
       onP3Execute={() => void executeP3Mutation()}
+      p3QueryEnabled={FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && props.activeSessionId !== null}
+      p3QueryConnected={props.isConnected}
+      p3QueryOperation={p3QueryOperation}
+      p3QueryTaskId={p3QueryTaskId}
+      p3EventsAfterSeq={p3EventsAfterSeq}
+      p3QueryStatus={p3QueryStatus}
+      p3QueryReason={p3QueryReason}
+      p3QuerySnapshot={p3QuerySnapshot}
+      p3QueryEventCount={p3QueryEventCount}
+      onP3QueryOperation={value => {
+        setP3QueryOperation(value);
+        setP3QueryStatus('idle');
+        setP3QueryReason(null);
+      }}
+      onP3QueryTaskId={value => {
+        setP3QueryTaskId(value);
+        setP3QueryStatus('idle');
+        setP3QueryReason(null);
+      }}
+      onP3EventsAfterSeq={value => {
+        setP3EventsAfterSeq(value);
+        setP3QueryStatus('idle');
+        setP3QueryReason(null);
+      }}
+      onP3Query={() => void executeP3Query()}
       onRefresh={() => void monitorRef.current?.refresh()}
     />
   );
@@ -1894,6 +2109,19 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   onP3TargetTaskId?: (value: string) => void;
   onP3Issue?: () => void;
   onP3Execute?: () => void;
+  p3QueryEnabled?: boolean;
+  p3QueryConnected?: boolean;
+  p3QueryOperation?: 'task.get' | 'task.list' | 'task.status' | 'task.events';
+  p3QueryTaskId?: string;
+  p3EventsAfterSeq?: string;
+  p3QueryStatus?: 'idle' | 'querying' | 'available' | 'empty' | 'disconnected' | 'unsupported' | 'failed';
+  p3QueryReason?: string | null;
+  p3QuerySnapshot?: FormalTaskControlSnapshot | null;
+  p3QueryEventCount?: number | null;
+  onP3QueryOperation?: (value: 'task.get' | 'task.list' | 'task.status' | 'task.events') => void;
+  onP3QueryTaskId?: (value: string) => void;
+  onP3EventsAfterSeq?: (value: string) => void;
+  onP3Query?: () => void;
   onRefresh: () => void;
 }
 
@@ -1928,6 +2156,19 @@ export function LiveVoiceIntegratedRoutePanelView({
   onP3TargetTaskId,
   onP3Issue,
   onP3Execute,
+  p3QueryEnabled = false,
+  p3QueryConnected = false,
+  p3QueryOperation = 'task.list',
+  p3QueryTaskId = '',
+  p3EventsAfterSeq = '-1',
+  p3QueryStatus = 'idle',
+  p3QueryReason = null,
+  p3QuerySnapshot = null,
+  p3QueryEventCount = null,
+  onP3QueryOperation,
+  onP3QueryTaskId,
+  onP3EventsAfterSeq,
+  onP3Query,
   onRefresh,
 }: LiveVoiceIntegratedRoutePanelViewProps) {
   const { t } = useTranslation();
@@ -1943,6 +2184,7 @@ export function LiveVoiceIntegratedRoutePanelView({
     ['submitting', 'waiting', 'presented'].includes(productTextStatus) ||
     productOperationRetained ||
     ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(p1VoiceStatus);
+  const p3QueryLocked = p3QueryStatus === 'querying' || !p3QueryConnected;
 
   return (
     <details className="live-voice-integrated" data-composition={manifest.composition_state} data-testid="live-voice-integrated-route">
@@ -2146,6 +2388,57 @@ export function LiveVoiceIntegratedRoutePanelView({
                 />
               </div>
             )}
+          {p3QueryEnabled && onP3QueryOperation && onP3QueryTaskId && onP3EventsAfterSeq && onP3Query && (
+            <div className="live-voice-integrated__text-route" data-testid="live-voice-integrated-p3-query">
+              <strong>{t('liveVoice.integrated.taskQuery.title')}</strong>
+              <span className="live-voice-integrated__progress-note">{t('liveVoice.integrated.taskQuery.disclosure')}</span>
+              <select
+                value={p3QueryOperation}
+                disabled={p3QueryLocked}
+                onChange={event => {
+                  const operation = event.target.value;
+                  if (operation === 'task.get' || operation === 'task.status' || operation === 'task.events') {
+                    onP3QueryOperation(operation);
+                  } else {
+                    onP3QueryOperation('task.list');
+                  }
+                }}
+              >
+                <option value="task.list">{t('liveVoice.integrated.taskQuery.list')}</option>
+                <option value="task.get">{t('liveVoice.integrated.taskQuery.get')}</option>
+                <option value="task.status">{t('liveVoice.integrated.taskQuery.taskStatus')}</option>
+                <option value="task.events">{t('liveVoice.integrated.taskQuery.events')}</option>
+              </select>
+              {p3QueryOperation !== 'task.list' && (
+                <input value={p3QueryTaskId} disabled={p3QueryLocked} onChange={event => onP3QueryTaskId(event.target.value)} placeholder={t('liveVoice.integrated.taskControl.taskId')} />
+              )}
+              {p3QueryOperation === 'task.events' && (
+                <input
+                  inputMode="numeric"
+                  value={p3EventsAfterSeq}
+                  disabled={p3QueryLocked}
+                  onChange={event => onP3EventsAfterSeq(event.target.value)}
+                  placeholder={t('liveVoice.integrated.taskQuery.afterSeq')}
+                />
+              )}
+              <button type="button" onClick={onP3Query} disabled={p3QueryLocked}>
+                {t('liveVoice.integrated.taskQuery.execute')}
+              </button>
+              <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.status')} value={p3QueryStatus} />
+              {p3QueryReason !== null && <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.reason')} value={p3QueryReason} />}
+              {p3QueryEventCount !== null && <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.eventCount')} value={String(p3QueryEventCount)} />}
+              {p3QuerySnapshot?.tasks.map(task => (
+                <div className="live-voice-integrated__facts" data-testid={`live-voice-integrated-p3-task-${task.task_id}`} key={task.task_id}>
+                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.task')} value={task.task_id} />
+                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.attempt')} value={task.attempt_id ?? 'unknown'} />
+                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.taskState')} value={task.state ?? 'unknown'} />
+                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.outcome')} value={task.outcome ?? 'unknown'} />
+                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.correlation')} value={task.correlation_id} />
+                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.cursor')} value={String(task.last_event_seq ?? -1)} />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {progress && (

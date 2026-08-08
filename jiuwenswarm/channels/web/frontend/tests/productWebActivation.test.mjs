@@ -10,12 +10,16 @@ import {
   PRODUCT_P2_SUBMIT_METHOD,
   PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
   PRODUCT_P3_PROGRESS_CLOSE_METHOD,
+  PRODUCT_P3_TASK_GET_METHOD,
   PRODUCT_P3_TASK_LIST_METHOD,
+  PRODUCT_P3_TASK_STATUS_METHOD,
+  PRODUCT_P3_TASK_EVENTS_METHOD,
   PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
   PRODUCT_P3_MUTATE_METHOD,
   ProductWebP2ActivationOwner,
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
+  ProductWebP3TaskQueryOwner,
   pollProductP2RouteWithRecovery,
   retryRetainedProductOperation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
@@ -1445,4 +1449,131 @@ test('P3 progress close rejects a partial binding response and retries exact cle
   assert.equal(owner.snapshot().status, 'cleanup_pending');
   assert.equal((await owner.close()).status, 'closed');
   assert.equal(closeCalls, 2);
+});
+
+function p3QueryResponse(requestId, result = { tasks: [] }) {
+  return {
+    contract_version: 'live-voice.contract.v2',
+    request_id: requestId,
+    command_id: null,
+    ok: true,
+    result,
+    error: null,
+    observed_at: '2026-08-08T12:00:00Z',
+    extensions: {},
+  };
+}
+
+test('product P3 query owner binds all four read-only methods to exact Session task and cursor', async () => {
+  const calls = [];
+  const owner = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'session-query',
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      return p3QueryResponse(requestId);
+    },
+  });
+
+  for (const query of [
+    { operation: 'task.list' },
+    { operation: 'task.get', task_id: 'task exact' },
+    { operation: 'task.status', task_id: 'task exact' },
+    { operation: 'task.events', task_id: 'task exact', after_seq: 7 },
+  ]) {
+    const receipt = await owner.query(query);
+    assert.equal(receipt.operation, query.operation);
+    assert.equal(receipt.request_id, calls.at(-1)[2]);
+    assert.equal(receipt.connection_generation, 1);
+  }
+
+  assert.deepEqual(
+    calls.map(([method, params]) => [method, params]),
+    [
+      [PRODUCT_P3_TASK_LIST_METHOD, { session_id: 'session-query' }],
+      [PRODUCT_P3_TASK_GET_METHOD, { session_id: 'session-query', task_id: 'task exact' }],
+      [PRODUCT_P3_TASK_STATUS_METHOD, { session_id: 'session-query', task_id: 'task exact' }],
+      [PRODUCT_P3_TASK_EVENTS_METHOD, { session_id: 'session-query', task_id: 'task exact', after_seq: 7 }],
+    ],
+  );
+  assert.equal(
+    calls.some(([method]) => /mutate|cancel|submit|barge/.test(method)),
+    false,
+  );
+});
+
+test('product P3 query feature-off and invalid closed inputs allocate zero requests', async () => {
+  let calls = 0;
+  const request = async () => {
+    calls += 1;
+    throw new Error('must not request');
+  };
+  const disabled = new ProductWebP3TaskQueryOwner({
+    enabled: false,
+    connected: true,
+    session_id: 'session-1',
+    request,
+  });
+  await assert.rejects(disabled.query({ operation: 'task.list' }), /disabled/);
+  assert.equal(calls, 0);
+
+  const enabled = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'session-1',
+    request,
+  });
+  await assert.rejects(enabled.query({ operation: 'task.events', task_id: 'task-1', after_seq: -2 }), /after_seq/);
+  await assert.rejects(enabled.query({ operation: 'task.list', task_id: 'foreign' }), /does not accept/);
+  assert.equal(calls, 0);
+});
+
+test('product P3 query disconnect fences the delayed response and reconnect uses a new generation', async () => {
+  let release;
+  const calls = [];
+  const owner = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'session-1',
+    request: (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (calls.length === 1) {
+        return new Promise(resolve => {
+          release = () => resolve(p3QueryResponse(requestId));
+        });
+      }
+      return Promise.resolve(p3QueryResponse(requestId));
+    },
+  });
+
+  const delayed = owner.query({ operation: 'task.get', task_id: 'task-1' });
+  owner.disconnect();
+  release();
+  await assert.rejects(delayed, /stale after disconnect/);
+  assert.equal(owner.snapshot().connection_generation, 2);
+  await assert.rejects(owner.query({ operation: 'task.list' }), /disconnected/);
+
+  owner.reconnect('session-1');
+  const current = await owner.query({ operation: 'task.status', task_id: 'task-1' });
+  assert.equal(current.connection_generation, 2);
+  assert.equal(calls.length, 2);
+  assert.throws(() => owner.reconnect('session-other'), /cannot cross Session/);
+});
+
+test('product P3 query rejects response owner mismatch and concurrent query duplication', async () => {
+  let release;
+  const owner = new ProductWebP3TaskQueryOwner({
+    enabled: true,
+    connected: true,
+    session_id: 'session-1',
+    request: (_method, _params, requestId) =>
+      new Promise(resolve => {
+        release = () => resolve(p3QueryResponse(`wrong-${requestId}`));
+      }),
+  });
+  const first = owner.query({ operation: 'task.list' });
+  await assert.rejects(owner.query({ operation: 'task.list' }), /already in flight/);
+  release();
+  await assert.rejects(first, /response ownership/);
 });
