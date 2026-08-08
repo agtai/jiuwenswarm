@@ -121,6 +121,13 @@ PRODUCT_COMPOSITION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENA
 PRODUCT_P2_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 PRODUCT_P3_TEXT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED"
 PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED"
+PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID"
+)
+PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_OPERATION"
+)
+_PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -128,7 +135,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
         "live_voice.composition.p2.close",
         "live_voice.composition.p2.submit",
         "live_voice.composition.p2.notification.next",
-        "live_voice.composition.p2.presentation.ack",
+        _PRODUCT_P2_PRESENTATION_ACK_OPERATION,
         "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.mutate",
@@ -165,10 +172,52 @@ def product_composition_enabled_from_environment() -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductP2RetriableFaultPlan:
+    """One immutable externally selected W2 fault, never a client claim."""
+
+    request_id: str
+    operation: str
+
+    def __post_init__(self) -> None:
+        request_id = self.request_id
+        if (
+            type(request_id) is not str
+            or not request_id
+            or request_id != request_id.strip()
+            or len(request_id) > 256
+            or any(character.isspace() for character in request_id)
+        ):
+            raise ValueError("P2 retriable fault request_id must be an opaque label")
+        try:
+            request_id.encode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            raise ValueError(
+                "P2 retriable fault request_id must contain Unicode scalar values"
+            ) from exc
+        if self.operation != _PRODUCT_P2_PRESENTATION_ACK_OPERATION:
+            raise ValueError(
+                "P2 retriable fault operation must be the exact presentation ACK"
+            )
+
+
+def _p2_retriable_fault_plan_from_environment() -> ProductP2RetriableFaultPlan | None:
+    request_id = os.getenv(PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV)
+    operation = os.getenv(PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV)
+    if request_id is None and operation is None:
+        return None
+    if request_id is None or operation is None:
+        raise ValueError(
+            "P2 retriable fault plan requires exact request_id and operation"
+        )
+    return ProductP2RetriableFaultPlan(request_id=request_id, operation=operation)
+
+
+@dataclass(frozen=True, slots=True)
 class ProductCompositionSettings:
     p2_enabled: bool
     p3_text_enabled: bool
     p3_mutation_enabled: bool = False
+    p2_retriable_fault_plan: ProductP2RetriableFaultPlan | None = None
 
     @classmethod
     def from_environment(cls) -> ProductCompositionSettings:
@@ -176,6 +225,7 @@ class ProductCompositionSettings:
             p2_enabled=_is_enabled(os.getenv(PRODUCT_P2_ENABLE_ENV)),
             p3_text_enabled=_is_enabled(os.getenv(PRODUCT_P3_TEXT_ENABLE_ENV)),
             p3_mutation_enabled=_is_enabled(os.getenv(PRODUCT_P3_MUTATION_ENABLE_ENV)),
+            p2_retriable_fault_plan=_p2_retriable_fault_plan_from_environment(),
         )
 
 
@@ -561,6 +611,7 @@ class AgentServerProductCompositionRegistry:
         self._p2_notification_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
+        self._p2_retriable_fault_consumed = False
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
         # Fixed-size fail-closed membership fence: evicted request IDs can be
@@ -2350,6 +2401,25 @@ class AgentServerProductCompositionRegistry:
                         route=parsed[5],
                     )
                     self._require_product_request_not_evicted("p2.ack", request_id)
+                    fault_plan = self._settings.p2_retriable_fault_plan
+                    if (
+                        fault_plan is not None
+                        and not self._p2_retriable_fault_consumed
+                        and fault_plan.request_id == request_id
+                        and fault_plan.operation
+                        == _PRODUCT_P2_PRESENTATION_ACK_OPERATION
+                    ):
+                        self._p2_retriable_fault_consumed = True
+                        return _error_result(
+                            request_id,
+                            reason="PRODUCT_W2_RETRIABLE_FAULT_INJECTED",
+                            code=ErrorCode.UNAVAILABLE,
+                            message=(
+                                "the externally frozen W2 plan injected a "
+                                "retriable presentation fault"
+                            ),
+                            manifest=retained.manifest,
+                        )
                     if (
                         len(self._p2_ack_operations) >= self._PRODUCT_OPERATION_CAPACITY
                         and not self._evict_completed_product_operation(
@@ -4022,17 +4092,38 @@ class AgentServerProductCompositionRegistry:
                 key = (routed_session, task_id, origin_id, generation_id)
                 retained = self._progress_routes.get(key)
                 closed = self._closed_progress_routes.get((*key, generation))
-                active_matches = retained is not None and (
+                active_identity_matches = retained is not None and (
                     retained.channel_id == channel_id
                     and retained.binding.correlation_id == correlation_id
-                    and retained.binding.generation == generation
                     and state.canonical.scope == retained.binding.scope
                 )
-                closed_matches = closed is not None and (
+                closed_identity_matches = closed is not None and (
                     closed.channel_id == channel_id
                     and closed.binding.correlation_id == correlation_id
-                    and closed.binding.generation == generation
                     and state.canonical.scope == closed.binding.scope
+                )
+                current_generation = self._progress_generations.get(key)
+                # A newer generation fences even an exact closed-delivery replay,
+                # but only after the caller proves the retained/closed identity.
+                if (
+                    current_generation is not None
+                    and generation < current_generation
+                    and (active_identity_matches or closed_identity_matches)
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="TASK_PROGRESS_STALE_GENERATION",
+                        code=ErrorCode.STALE,
+                    )
+                active_matches = (
+                    retained is not None
+                    and active_identity_matches
+                    and retained.binding.generation == generation
+                )
+                closed_matches = (
+                    closed is not None
+                    and closed_identity_matches
+                    and closed.binding.generation == generation
                 )
                 if active_matches:
                     assert retained is not None
@@ -4379,10 +4470,13 @@ __all__ = [
     "PRODUCT_COMPOSITION_ENABLE_ENV",
     "PRODUCT_COMPOSITION_METHODS",
     "PRODUCT_P2_ENABLE_ENV",
+    "PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV",
+    "PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV",
     "PRODUCT_P3_QUERY_OPERATIONS",
     "PRODUCT_P3_MUTATION_ENABLE_ENV",
     "PRODUCT_P3_TEXT_ENABLE_ENV",
     "ProductCompositionSettings",
+    "ProductP2RetriableFaultPlan",
     "create_product_composition_registry_from_environment",
     "product_composition_enabled_from_environment",
 ]

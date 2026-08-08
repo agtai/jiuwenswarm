@@ -197,6 +197,62 @@ async def test_product_owner_emits_one_exact_sanitized_route_and_closes(
 
 
 @pytest.mark.asyncio
+async def test_p2_retriable_presentation_fault_preserves_exact_product_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "w2-p2-retriable-fault.jsonl"
+    _enable(monkeypatch, path)
+    owner = create_product_w2_observability_owner_from_environment()
+    assert owner is not None
+    assert await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-w2",
+        request_id="request-p2-active",
+        operation="live_voice.composition.p2.activate",
+        result_ok=True,
+        interaction_id="interaction-w2",
+    )
+
+    assert await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-w2",
+        request_id="request-p2-retriable-presentation-fault",
+        operation="live_voice.composition.p2.presentation.ack",
+        result_ok=False,
+        interaction_id="interaction-w2",
+        response_id="response-w2",
+        response_generation=7,
+        error_code="UNAVAILABLE",
+    )
+    await owner.close()
+
+    records = [entry["record"] for entry in _observation_envelopes(path)]
+    fault_records = [
+        record for record in records if record["event_name"] == "segment.failed"
+    ]
+    assert len(fault_records) == 1
+    assert fault_records[0]["segment_name"] == "runtime.presentation"
+    assert fault_records[0]["source_component"] == "product.w2.p2.presentation"
+    assert fault_records[0]["error_code"] == "UNAVAILABLE"
+    assert fault_records[0]["reason_code"] == "UNAVAILABLE"
+    assert fault_records[0]["binding"] == {
+        "correlation_id": "correlation-w2",
+        "interaction_id": "interaction-w2",
+        "turn_id": None,
+        "response_id": "response-w2",
+        "response_generation": 7,
+        "round_id": None,
+        "task_id": None,
+        "attempt_id": None,
+    }
+    assert all(
+        record["source_record_id"] != fault_records[0]["source_record_id"]
+        for record in records
+        if record["event_name"] == "segment.completed"
+    )
+
+
+@pytest.mark.asyncio
 async def test_mismatched_route_is_rejected_and_export_failure_never_changes_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

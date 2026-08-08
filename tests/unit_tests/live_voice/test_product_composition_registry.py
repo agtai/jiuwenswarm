@@ -49,8 +49,11 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     PRODUCT_COMPOSITION_ENABLE_ENV,
     PRODUCT_P2_ENABLE_ENV,
+    PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV,
+    PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
+    ProductP2RetriableFaultPlan,
     _ProgressDelivery,
     create_product_composition_registry_from_environment,
 )
@@ -430,6 +433,7 @@ def _registry(
     p3: bool = True,
     push_success: bool = True,
     commit_ledger: TurnCommitLedger | None = None,
+    p2_retriable_fault_plan: ProductP2RetriableFaultPlan | None = None,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -440,7 +444,11 @@ def _registry(
         return push_success
 
     registry = AgentServerProductCompositionRegistry(
-        settings=ProductCompositionSettings(p2_enabled=p2, p3_text_enabled=p3),
+        settings=ProductCompositionSettings(
+            p2_enabled=p2,
+            p3_text_enabled=p3,
+            p2_retriable_fault_plan=p2_retriable_fault_plan,
+        ),
         p3_composition=p3_composition,
         agent_manager=manager,
         push_text_event=push,
@@ -508,6 +516,10 @@ def test_master_flag_off_constructs_no_registry_or_adapter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(PRODUCT_COMPOSITION_ENABLE_ENV, raising=False)
+    monkeypatch.setenv(
+        PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+        "ignored-with-master-off",
+    )
 
     class _Poison:
         def __getattribute__(self, _name):
@@ -520,6 +532,40 @@ def test_master_flag_off_constructs_no_registry_or_adapter(
     )
 
     assert result is None
+
+
+def test_p2_retriable_fault_plan_is_default_off_and_requires_exact_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV, raising=False)
+    monkeypatch.delenv(PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV, raising=False)
+
+    assert ProductCompositionSettings.from_environment().p2_retriable_fault_plan is None
+
+    monkeypatch.setenv(
+        PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+        "request-p2-retriable-fault",
+    )
+    with pytest.raises(ValueError, match="requires exact request_id and operation"):
+        ProductCompositionSettings.from_environment()
+
+    monkeypatch.setenv(
+        PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV,
+        "live_voice.composition.p2.submit",
+    )
+    with pytest.raises(ValueError, match="exact presentation ACK"):
+        ProductCompositionSettings.from_environment()
+
+    monkeypatch.setenv(
+        PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV,
+        "live_voice.composition.p2.presentation.ack",
+    )
+    settings = ProductCompositionSettings.from_environment()
+
+    assert settings.p2_retriable_fault_plan == ProductP2RetriableFaultPlan(
+        request_id="request-p2-retriable-fault",
+        operation="live_voice.composition.p2.presentation.ack",
+    )
 
 
 def test_factory_requires_real_authenticated_authority_when_enabled(
@@ -931,7 +977,7 @@ async def test_text_progress_web_ack_is_exact_authorized_and_idempotent(
 
 
 @pytest.mark.asyncio
-async def test_progress_ack_response_loss_replays_after_close_and_reactivation(
+async def test_progress_ack_response_loss_is_stale_after_newer_generation(
     tmp_path: Path,
 ) -> None:
     registry, _p3, _manager, pushed = _registry(tmp_path)
@@ -969,7 +1015,7 @@ async def test_progress_ack_response_loss_replays_after_close_and_reactivation(
         session_id="session-product",
         channel_id="web",
     )
-    replayed = await registry.handle_p3_progress_ack(
+    replayed_after_newer_generation = await registry.handle_p3_progress_ack(
         params=_progress_ack_params(event),
         request_id="request-progress-lost-ack-replay",
         session_id="session-product",
@@ -983,7 +1029,153 @@ async def test_progress_ack_response_loss_replays_after_close_and_reactivation(
         "TASK_PROGRESS_ROUTE_SETTLED"
     )
     assert reactivated.ok is True
+    assert replayed_after_newer_generation.ok is False
+    replay_error = cast(dict, replayed_after_newer_generation.payload["error"])
+    assert replay_error["code"] == ErrorCode.STALE.value
+    assert replay_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("current_route_state", ["active", "closed"])
+async def test_progress_ack_generation_ordering_is_identity_bound_and_effect_free(
+    tmp_path: Path,
+    current_route_state: str,
+) -> None:
+    registry, p3, manager, pushed = _registry(tmp_path)
+    first = await registry.handle_p3_progress_activate(
+        params=_progress_params(),
+        request_id=f"request-progress-stale-{current_route_state}-first",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert first.ok is True
+    first_event = cast(Mapping[str, object], pushed[0]["payload"])
+    first_closed = await registry.handle_p3_progress_close(
+        params=_progress_params(),
+        request_id=f"request-progress-stale-{current_route_state}-first-close",
+        session_id="session-product",
+    )
+    second = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=2),
+        request_id=f"request-progress-stale-{current_route_state}-second",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert first_closed.ok is True
+    assert second.ok is True
+    assert len(pushed) == 2
+    second_event = cast(Mapping[str, object], pushed[1]["payload"])
+
+    if current_route_state == "closed":
+        second_closed = await registry.handle_p3_progress_close(
+            params=_progress_params(generation=2),
+            request_id="request-progress-stale-second-close",
+            session_id="session-product",
+        )
+        assert second_closed.ok is True
+
+    key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    first_delivery_id = cast(str, first_event["delivery_id"])
+    second_delivery_id = cast(str, second_event["delivery_id"])
+    first_delivery = registry._closed_progress_routes[(*key, 1)].deliveries[
+        first_delivery_id
+    ]
+    if current_route_state == "active":
+        second_delivery = registry._progress_deliveries[key][second_delivery_id]
+    else:
+        second_delivery = registry._closed_progress_routes[(*key, 2)].deliveries[
+            second_delivery_id
+        ]
+    effect_snapshot = (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+        first_delivery.acknowledged,
+        second_delivery.acknowledged,
+    )
+
+    stale = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(first_event),
+        request_id=f"request-progress-stale-{current_route_state}-old-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert stale.ok is False
+    stale_error = cast(dict, stale.payload["error"])
+    assert stale_error["code"] == ErrorCode.STALE.value
+    assert stale_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+    assert (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+        first_delivery.acknowledged,
+        second_delivery.acknowledged,
+    ) == effect_snapshot
+
+    wrong_identity = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(first_event),
+        request_id=f"request-progress-stale-{current_route_state}-wrong-channel",
+        session_id="session-product",
+        channel_id="tui",
+    )
+    wrong_correlation = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(
+            first_event,
+            correlation_id="wrong-progress-correlation",
+        ),
+        request_id=f"request-progress-stale-{current_route_state}-wrong-correlation",
+        session_id="session-product",
+        channel_id="web",
+    )
+    future_generation = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(second_event, generation=3),
+        request_id=f"request-progress-stale-{current_route_state}-future",
+        session_id="session-product",
+        channel_id="web",
+    )
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(second_event),
+        request_id=f"request-progress-stale-{current_route_state}-current",
+        session_id="session-product",
+        channel_id="web",
+    )
+    replayed = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(second_event),
+        request_id=f"request-progress-stale-{current_route_state}-current-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert wrong_identity.ok is False
+    wrong_identity_error = cast(dict, wrong_identity.payload["error"])
+    assert wrong_identity_error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert wrong_identity_error["reason"] == "TASK_PROGRESS_BINDING_MISMATCH"
+    assert wrong_correlation.ok is False
+    wrong_correlation_error = cast(dict, wrong_correlation.payload["error"])
+    assert wrong_correlation_error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert wrong_correlation_error["reason"] == "TASK_PROGRESS_BINDING_MISMATCH"
+    assert future_generation.ok is False
+    future_error = cast(dict, future_generation.payload["error"])
+    assert future_error["code"] != ErrorCode.STALE.value
+    assert future_error["reason"] != "TASK_PROGRESS_STALE_GENERATION"
+    assert acknowledged.ok is True
     assert replayed.ok is True
+    assert cast(dict, acknowledged.payload["result"])["replayed"] is False
     assert cast(dict, replayed.payload["result"])["replayed"] is True
     await registry.close_active_routes()
 
@@ -1698,6 +1890,272 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     )
     assert manager.agent.calls == 1
     assert len(history.assistants) == 1
+
+
+@pytest.mark.asyncio
+async def test_p2_retriable_fault_requires_schema_authority_and_exact_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault_request_id = "request-p2-retriable-presentation-fault"
+    registry, p3, manager, pushed = _registry(
+        tmp_path,
+        p2_retriable_fault_plan=ProductP2RetriableFaultPlan(
+            request_id=fault_request_id,
+            operation="live_voice.composition.p2.presentation.ack",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-fault-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+    acknowledgement_calls: list[object] = []
+    original_acknowledge = route.activation_lease.acknowledge_presentation
+
+    async def track_acknowledgement(*args: object) -> object:
+        acknowledgement_calls.append(args)
+        return await original_acknowledge(*args)
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "acknowledge_presentation",
+        track_acknowledgement,
+    )
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-fault-1",
+            turn_id="turn-fault-1",
+            response_id="response-fault-1",
+            committed_at=NOW,
+            text="fault recovery turn",
+        ),
+        request_id="request-p2-fault-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    presentation: dict[str, object] | None = None
+    response: dict[str, object] | None = None
+    for index in range(4):
+        notification = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=index + 1),
+                request_id=f"request-p2-fault-notification-{index}",
+                session_id="session-product",
+            ),
+            timeout=1,
+        )
+        assert notification.ok is True
+        notification_result = cast(dict[str, object], notification.payload["result"])
+        candidate = notification_result["presentation_unit"]
+        if isinstance(candidate, dict):
+            presentation = cast(dict[str, object], candidate)
+            response = cast(dict[str, object], notification_result["response"])
+            break
+    assert presentation is not None
+    assert response is not None
+    ack_params = _p2_params(
+        response_id=response["response_id"],
+        response_generation=response["response_generation"],
+        surface=presentation["surface"],
+        unit_id=presentation["unit_id"],
+        contiguous_cursor=presentation["seq"],
+        presented_at=NOW,
+    )
+    await asyncio.sleep(0)
+    authority_calls_before_fault = len(p3.authority_calls)
+    runtime_before = route.activation_lease._runtime.snapshot()
+    manager_before = (
+        tuple(manager.get_calls),
+        manager.pins,
+        manager.unpins,
+        manager.agent.calls,
+    )
+
+    invalid_schema = await registry.handle_p2_presentation_ack(
+        params={**ack_params, "fault": "client-claim"},
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    wrong_binding = await registry.handle_p2_presentation_ack(
+        params={**ack_params, "activation_generation": 2},
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    injected = await registry.handle_p2_presentation_ack(
+        params=ack_params,
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+
+    assert invalid_schema.ok is False
+    assert cast(dict, invalid_schema.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert len(p3.authority_calls) == authority_calls_before_fault + 2
+    assert wrong_binding.ok is False
+    assert cast(dict, wrong_binding.payload["error"])["reason"] == (
+        "ACTIVATION_BINDING_MISMATCH"
+    )
+    assert injected.ok is False
+    assert cast(dict, injected.payload["error"]) == {
+        "code": "UNAVAILABLE",
+        "reason": "PRODUCT_W2_RETRIABLE_FAULT_INJECTED",
+        "message": (
+            "the externally frozen W2 plan injected a retriable presentation fault"
+        ),
+    }
+    assert _route(injected.payload, "p2.agent_interaction")["truth"] == "formal"
+
+    # The fault is after schema/authority/binding validation but before every
+    # ACK or protected business effect. Authority lookup is the sole delta.
+    assert acknowledgement_calls == []
+    assert registry._p2_ack_operations == {}
+    assert route.activation_lease._runtime.snapshot() == runtime_before
+    assert (
+        tuple(manager.get_calls),
+        manager.pins,
+        manager.unpins,
+        manager.agent.calls,
+    ) == manager_before
+    assert history.assistants == []
+    assert p3.query_calls == []
+    assert p3.subscription_calls == []
+    assert pushed == []
+
+    recovered = await registry.handle_p2_presentation_ack(
+        params=ack_params,
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    replayed_recovery = await registry.handle_p2_presentation_ack(
+        params=ack_params,
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    non_plan = await registry.handle_p2_presentation_ack(
+        params=ack_params,
+        request_id="request-p2-non-plan-ack",
+        session_id="session-product",
+    )
+
+    assert recovered.ok is True
+    assert replayed_recovery.payload == recovered.payload
+    assert non_plan.ok is True
+    assert cast(dict, recovered.payload["result"])["accepted"] is True
+    assert cast(dict, non_plan.payload["result"])["replayed"] is True
+    assert len(acknowledgement_calls) == 2
+    assert len(history.assistants) == 1
+    assert manager.agent.calls == manager_before[3]
+    assert p3.query_calls == []
+    assert p3.subscription_calls == []
+    assert pushed == []
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_retriable_fault_concurrency_consumes_exact_plan_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault_request_id = "request-p2-concurrent-retriable-fault"
+    registry, p3, manager, pushed = _registry(
+        tmp_path,
+        p2_retriable_fault_plan=ProductP2RetriableFaultPlan(
+            request_id=fault_request_id,
+            operation="live_voice.composition.p2.presentation.ack",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-concurrent-fault-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+    acknowledgement_calls: list[object] = []
+    acknowledgement_entered = asyncio.Event()
+    release_acknowledgement = asyncio.Event()
+
+    async def blocked_acknowledgement(*args: object) -> object:
+        acknowledgement_calls.append(args)
+        acknowledgement_entered.set()
+        await release_acknowledgement.wait()
+        return SimpleNamespace(
+            accepted=False,
+            replayed=False,
+            history_records_written=0,
+            history_pending=False,
+        )
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "acknowledge_presentation",
+        blocked_acknowledgement,
+    )
+    params = _p2_params(
+        response_id="response-concurrent-fault",
+        response_generation=1,
+        surface="text",
+        unit_id="unit-concurrent-fault",
+        contiguous_cursor=1,
+        presented_at=NOW,
+    )
+    calls = tuple(
+        asyncio.create_task(
+            registry.handle_p2_presentation_ack(
+                params=params,
+                request_id=fault_request_id,
+                session_id="session-product",
+            )
+        )
+        for _ in range(2)
+    )
+    await asyncio.wait_for(acknowledgement_entered.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    completed_before_release = [call.result() for call in calls if call.done()]
+    assert len(completed_before_release) == 1
+    assert completed_before_release[0].ok is False
+    assert cast(dict, completed_before_release[0].payload["error"])["reason"] == (
+        "PRODUCT_W2_RETRIABLE_FAULT_INJECTED"
+    )
+    assert len(acknowledgement_calls) == 1
+    assert len(registry._p2_ack_operations) == 1
+    assert len(p3.authority_calls) == 3
+    assert manager.agent.calls == 0
+    assert history.users == []
+    assert history.assistants == []
+    assert p3.query_calls == []
+    assert p3.subscription_calls == []
+    assert pushed == []
+
+    release_acknowledgement.set()
+    results = await asyncio.gather(*calls)
+
+    assert sum(result.ok for result in results) == 1
+    assert len(acknowledgement_calls) == 1
+    assert manager.agent.calls == 0
+    assert history.users == []
+    assert history.assistants == []
+    await registry.close_active_routes()
 
 
 @pytest.mark.asyncio
