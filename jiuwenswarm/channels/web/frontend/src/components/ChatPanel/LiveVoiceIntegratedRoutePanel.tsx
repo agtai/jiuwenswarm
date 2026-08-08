@@ -3,6 +3,7 @@ import { Activity, RefreshCw, ShieldAlert } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
   FEATURE_LIVE_VOICE_INTEGRATED_WEB,
+  FEATURE_LIVE_VOICE_INTEGRATED_P1,
   FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
   FEATURE_LIVE_VOICE_TASK_DEMO,
 } from '../../featureFlags';
@@ -32,6 +33,15 @@ import {
   type ProductWebP3ProgressSnapshot,
   type ProductWebP3MutationInput,
 } from '../../features/live-voice/formal/productWebActivation';
+import {
+  ProductP1VoiceRouteOwner,
+  type ProductP1VoiceStatus,
+} from '../../features/live-voice/formal/productP1VoiceRoute';
+import {
+  FormalTaskControlLeaf,
+  prepareFormalTaskMutation,
+  type PreparedFormalTaskMutation,
+} from '../../features/live-voice/formal/formalTaskControlLeaf';
 import { WebPlatformDiagnosticsMonitor, type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
 import { extractWebErrorReason, webClient } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
@@ -61,7 +71,47 @@ type ProductTurnInput = {
   response_id: string;
   committed_at: string;
   text: string;
+  dispatch_target?: 'agent' | 'task';
+  voice_commit_receipt?: string;
+  critical_confirmation?: true;
 };
+
+type ProductRecognizedVoice = Readonly<{
+  session_id: string;
+  text: string;
+  voice_commit_receipt: string;
+}>;
+
+export type ProductVoiceTaskOrigin = Readonly<{
+  session_id: string;
+  interaction_id: string;
+  turn_id: string;
+  commit_id: string;
+  instruction: string;
+}>;
+
+export function resolveProductTaskCreateOrigin(
+  instruction: string,
+  activeSessionId: string | null,
+  origin: ProductVoiceTaskOrigin | null
+): Readonly<
+  | { source: 'structured' }
+  | { source: 'voice'; interaction_id: string; turn_id: string; commit_id: string }
+> {
+  if (
+    origin !== null &&
+    activeSessionId === origin.session_id &&
+    instruction === origin.instruction
+  ) {
+    return Object.freeze({
+      source: 'voice' as const,
+      interaction_id: origin.interaction_id,
+      turn_id: origin.turn_id,
+      commit_id: origin.commit_id,
+    });
+  }
+  return Object.freeze({ source: 'structured' as const });
+}
 
 // Gateway retains a unary AgentServer request for at most 600 seconds. The
 // browser must not abandon a notification poll first and replay its exact ID
@@ -80,6 +130,16 @@ export function productP2WebRequestOptions(
   };
 }
 
+export function productTextBlockedByP1Status(status: ProductP1VoiceStatus): boolean {
+  return ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(status);
+}
+
+export function confirmRecognizedSpeechExact(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.confirm === 'function'
+    && window.confirm('Confirm that the recognized speech shown on screen is exact before dispatch.');
+}
+
 export type ProductP2NotificationDisposition =
   | { readonly kind: 'continue' }
   | { readonly kind: 'failed'; readonly reason: string }
@@ -87,6 +147,12 @@ export type ProductP2NotificationDisposition =
       readonly kind: 'presentation';
       readonly text: string;
       readonly response_id: string;
+      readonly response: Readonly<{
+        interaction_id: string;
+        response_id: string;
+        response_generation: number;
+      }>;
+      readonly unit_id: string;
       readonly ack: ProductPresentationAckInput;
     };
 
@@ -122,6 +188,7 @@ export function classifyProductP2Notification(
     unit?.surface === 'text' &&
     typeof unit.unit_id === 'string' &&
     Number.isSafeInteger(unit.seq) &&
+    typeof response?.interaction_id === 'string' &&
     typeof response?.response_id === 'string' &&
     Number.isSafeInteger(response.response_generation)
   ) {
@@ -129,6 +196,12 @@ export function classifyProductP2Notification(
       kind: 'presentation',
       text: event.text,
       response_id: response.response_id,
+      response: {
+        interaction_id: response.interaction_id,
+        response_id: response.response_id,
+        response_generation: response.response_generation as number,
+      },
+      unit_id: unit.unit_id,
       ack: {
         response_id: response.response_id,
         response_generation: response.response_generation as number,
@@ -179,7 +252,16 @@ function browserSpeechCompatibilityAvailable(): boolean {
   return recognition && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
 }
 
-function createManifest(input: Readonly<LiveVoiceIntegratedRoutePanelProps>, correlationId: string, observedAt: string): IntegratedWebRouteManifest {
+function createManifest(
+  input: Readonly<LiveVoiceIntegratedRoutePanelProps>,
+  correlationId: string,
+  observedAt: string,
+  formal: Readonly<{
+    p1_available: boolean;
+    p2_available: boolean;
+    p3_available: boolean;
+  }>,
+): IntegratedWebRouteManifest {
   const selection =
     input.routeSelection ??
     createCurrentIntegratedWebRouteSelection({
@@ -187,6 +269,12 @@ function createManifest(input: Readonly<LiveVoiceIntegratedRoutePanelProps>, cor
       p2_text_chat_available: input.isConnected && input.agentRouteAvailable,
       p3_task_compatibility_enabled: FEATURE_LIVE_VOICE_TASK_DEMO,
       p3_task_compatibility_available: input.taskCompatibilityAvailable,
+      p1_formal_enabled: FEATURE_LIVE_VOICE_INTEGRATED_P1,
+      p1_formal_available: formal.p1_available,
+      p2_formal_enabled: FEATURE_LIVE_VOICE_INTEGRATED_WEB,
+      p2_formal_available: formal.p2_available,
+      p3_formal_enabled: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
+      p3_formal_available: formal.p3_available,
     });
   return new IntegratedWebRouteShell({
     enabled: FEATURE_LIVE_VOICE_INTEGRATED_WEB,
@@ -231,6 +319,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [productTextStatus, setProductTextStatus] = useState<
     'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'
   >('idle');
+  const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(
+    FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed'
+  );
+  const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
   const [pendingPresentationAck, setPendingPresentationAck] = useState<
     ProductPresentationAckInput | null
   >(null);
@@ -241,6 +333,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p3MutationStatus, setP3MutationStatus] = useState<
     'idle' | 'issuing' | 'confirmed' | 'mutating' | 'accepted' | 'failed'
   >('idle');
+  const [createdProgressTaskId, setCreatedProgressTaskId] = useState<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
   const progressRef = useRef<Readonly<ProductTextProgressEvent> | null>(null);
   const pendingOwnedProgressRef = useRef(
@@ -251,6 +344,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   >(null);
   const progressAckOwnerRef = useRef<ProductTextProgressAckOwner | null>(null);
   const activationOwnerRef = useRef<ProductWebP2ActivationOwner | null>(null);
+  const p1VoiceOwnerRef = useRef<ProductP1VoiceRouteOwner | null>(null);
   const pendingProductTurnRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: ProductTurnInput;
@@ -259,20 +353,52 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     owner: ProductWebP2ActivationOwner;
     input: ProductPresentationAckInput & { presented_at: string };
   } | null>(null);
+  const activeVoiceResponseRef = useRef<Readonly<{
+    interaction_id: string;
+    response_id: string;
+    response_generation: number;
+  }> | null>(null);
   const presentedProductResponsesRef = useRef(new Map<string, true>());
   const progressActivationOwnerRef = useRef<ProductWebP3ProgressOwner | null>(null);
   const p3MutationOwnerRef = useRef<ProductWebP3MutationOwner | null>(null);
   const pendingP3MutationRef = useRef<ProductWebP3MutationInput | null>(null);
+  const voiceTaskOriginRef = useRef<ProductVoiceTaskOrigin | null>(null);
+  const recognizedVoiceRef = useRef<ProductRecognizedVoice | null>(null);
+  const formalTaskControlLeafRef = useRef<FormalTaskControlLeaf | null>(null);
+  const pendingFormalP3MutationRef = useRef<PreparedFormalTaskMutation | null>(null);
   const activeSessionRef = useRef<string | null>(props.activeSessionId);
   const progressOwnerEpochRef = useRef(0);
   const activationGenerationRef = useRef(0);
   const progressGenerationRef = useRef(0);
   const productTurnSequenceRef = useRef(0);
+  const bargeInSequenceRef = useRef(0);
   const p3MutationSequenceRef = useRef(0);
   activeSessionRef.current = props.activeSessionId;
   const manifest = useMemo(
-    () => createManifest(props, correlationId, new Date().toISOString()),
-    [correlationId, props.activeSessionId, props.agentRouteAvailable, props.isConnected, props.routeSelection, props.taskCompatibilityAvailable]
+    () => createManifest(
+      props,
+      correlationId,
+      new Date().toISOString(),
+      {
+        p1_available: ['capturing', 'recognizing', 'recognized', 'playing'].includes(p1VoiceStatus),
+        p2_available: p2Activation.status === 'active',
+        p3_available:
+          p3Activation.status === 'active'
+          || ['confirmed', 'mutating', 'accepted'].includes(p3MutationStatus),
+      },
+    ),
+    [
+      correlationId,
+      p1VoiceStatus,
+      p2Activation.status,
+      p3Activation.status,
+      p3MutationStatus,
+      props.activeSessionId,
+      props.agentRouteAvailable,
+      props.isConnected,
+      props.routeSelection,
+      props.taskCompatibilityAvailable,
+    ]
   );
 
   const adoptProductP2Notification = (
@@ -305,6 +431,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setProductOutput(disposition.text);
     setProductTextStatus('presented');
     setPendingPresentationAck(disposition.ack);
+    activeVoiceResponseRef.current = disposition.response;
+    const voiceOwner = p1VoiceOwnerRef.current;
+    if (voiceOwner !== null) {
+      void voiceOwner.playAgentText({
+        response: disposition.response,
+        unit_id: disposition.unit_id,
+        text: disposition.text,
+      }).catch(() => undefined);
+    }
     if (pending === null) {
       pendingPresentationAttemptRef.current = {
         owner,
@@ -470,6 +605,33 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [props.isConnected]);
 
   useEffect(() => {
+    if (props.isConnected) return;
+    const voiceOwner = p1VoiceOwnerRef.current;
+    if (voiceOwner === null) return;
+    void voiceOwner.close().then(() => {
+      if (p1VoiceOwnerRef.current === voiceOwner) {
+        p1VoiceOwnerRef.current = null;
+      }
+    }).catch(() => {
+      // The owner remains retained with cleanup_pending truth for retry on
+      // session teardown or the next explicit start attempt.
+    });
+  }, [props.isConnected]);
+
+  useEffect(() => {
+    const voiceOwner = p1VoiceOwnerRef.current;
+    if (voiceOwner !== null) {
+      void voiceOwner.close().then(() => {
+        if (p1VoiceOwnerRef.current === voiceOwner) {
+          p1VoiceOwnerRef.current = null;
+        }
+      }).catch(() => {
+        // Retain cleanup_pending ownership. A successor Session cannot replace
+        // it until the next explicit start retries the exact close.
+      });
+    }
+    setP1VoiceStatus(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
+    setP1VoiceReason(null);
     pendingProductTurnRef.current = null;
     pendingPresentationAttemptRef.current = null;
     presentedProductResponsesRef.current.clear();
@@ -477,6 +639,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setProductOutput(null);
     setProductTextStatus('idle');
   }, [props.activeSessionId]);
+
+  useEffect(() => () => {
+    const voiceOwner = p1VoiceOwnerRef.current;
+    if (voiceOwner !== null) {
+      // Local microphone/playout closes before remote authority revocation.
+      // Retry the retained remote close without constructing a successor.
+      void (async () => {
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            await voiceOwner.close();
+            return;
+          } catch {
+            // Bounded teardown retry; the page owns no successor route.
+          }
+        }
+      })();
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -773,7 +953,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   useEffect(() => {
     pendingP3MutationRef.current = null;
+    voiceTaskOriginRef.current = null;
+    recognizedVoiceRef.current = null;
+    activeVoiceResponseRef.current = null;
+    pendingFormalP3MutationRef.current = null;
+    formalTaskControlLeafRef.current?.disconnect();
+    formalTaskControlLeafRef.current = null;
     setP3MutationStatus('idle');
+    setCreatedProgressTaskId(null);
     if (
       !FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ||
       !props.activeSessionId
@@ -788,17 +975,36 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     });
     p3MutationOwnerRef.current = owner;
     return () => {
+      formalTaskControlLeafRef.current?.disconnect();
       if (p3MutationOwnerRef.current === owner) p3MutationOwnerRef.current = null;
     };
   }, [props.activeSessionId]);
 
-  const submitProductText = async () => {
+  useEffect(() => {
+    if (!props.isConnected) formalTaskControlLeafRef.current?.disconnect();
+  }, [props.isConnected]);
+
+  const submitProductText = async (
+    overrideText?: string,
+    source: 'structured' | 'voice' = 'structured'
+  ): Promise<ProductTurnInput | null> => {
     const owner = activationOwnerRef.current;
-    if (!owner || p2Activation.status !== 'active' || !productInput.trim()) return;
+    const turnText = overrideText ?? productInput;
+    if (!owner || p2Activation.status !== 'active' || !turnText.trim()) return null;
+    const liveP1Status = p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus;
+    if (productTextBlockedByP1Status(liveP1Status)) return null;
+    if (source === 'structured') voiceTaskOriginRef.current = null;
+    const recognized = recognizedVoiceRef.current;
+    if (
+      source === 'voice' &&
+      (recognized === null ||
+        recognized.session_id !== props.activeSessionId ||
+        recognized.text !== turnText)
+    ) return null;
     let retained = pendingProductTurnRef.current;
     if (retained !== null && retained.owner !== owner) {
       setProductTextStatus('failed');
-      return;
+      return null;
     }
     if (retained === null) {
       if (
@@ -808,8 +1014,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         owner.hasPendingPresentationAck()
       ) {
         setProductTextStatus('failed');
-        return;
+        return null;
       }
+      if (source === 'voice' && !confirmRecognizedSpeechExact()) return null;
       productTurnSequenceRef.current += 1;
       const identity = `${Date.now()}-${productTurnSequenceRef.current}`;
       retained = {
@@ -819,7 +1026,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           turn_id: `web-turn-${identity}`,
           response_id: `web-response-${identity}`,
           committed_at: new Date().toISOString(),
-          text: productInput,
+          text: turnText,
+          dispatch_target: 'agent',
+          ...(source === 'voice'
+            ? {
+                voice_commit_receipt: recognized!.voice_commit_receipt,
+                critical_confirmation: true as const,
+              }
+            : {}),
         },
       };
       pendingProductTurnRef.current = retained;
@@ -841,12 +1055,175 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingProductTurnRef.current = null;
         setProductInput('');
         setProductTextStatus('waiting');
+        if (source === 'voice' && recognizedVoiceRef.current === recognized) {
+          recognizedVoiceRef.current = null;
+        }
+        return retained.input;
       }
+      return null;
     } catch {
       if (activationOwnerRef.current === owner) {
         if (!owner.hasPendingSubmission()) pendingProductTurnRef.current = null;
         setProductTextStatus('failed');
       }
+      return null;
+    }
+  };
+
+  const startProductVoiceCapture = async () => {
+    const binding = p2Activation.binding;
+    if (
+      !FEATURE_LIVE_VOICE_INTEGRATED_P1
+      || !props.isConnected
+      || p2Activation.status !== 'active'
+      || binding === null
+      || typeof window === 'undefined'
+      || pendingProductTurnRef.current !== null
+      || pendingPresentationAttemptRef.current !== null
+      || activationOwnerRef.current?.hasPendingSubmission()
+      || activationOwnerRef.current?.hasPendingPresentationAck()
+    ) return;
+    let owner = p1VoiceOwnerRef.current;
+    if (owner && ['failed', 'cleanup_pending'].includes(owner.status().status)) {
+      await owner.close();
+      if (p1VoiceOwnerRef.current === owner) p1VoiceOwnerRef.current = null;
+      owner = null;
+    }
+    if (owner === null || owner.status().status === 'closed') {
+      owner = new ProductP1VoiceRouteOwner({
+        enabled: true,
+        expected_origin: window.location.origin,
+        request: (method, params) => webClient.request(method, params),
+        on_status: (status, reason) => {
+          if (p1VoiceOwnerRef.current === owner) {
+            setP1VoiceStatus(status);
+            setP1VoiceReason(reason);
+          }
+        },
+      });
+      p1VoiceOwnerRef.current = owner;
+    }
+    try {
+      await owner.startCapture({
+        session_id: binding.session_id,
+        interaction_id: binding.interaction_id,
+        correlation_id: binding.correlation_id,
+        activation_id: binding.activation_id,
+        activation_generation: binding.activation_generation,
+        locale: 'zh-CN',
+      });
+    } catch {
+      // The owner publishes a content-free reason and retains cleanup.
+    }
+  };
+
+  const stopProductVoiceCapture = async () => {
+    const owner = p1VoiceOwnerRef.current;
+    if (owner === null || owner.status().status !== 'capturing') return;
+    try {
+      const recognition = await owner.stopAndRecognize();
+      if (props.activeSessionId !== null) {
+        recognizedVoiceRef.current = Object.freeze({
+          session_id: props.activeSessionId,
+          text: recognition.text,
+          voice_commit_receipt: recognition.voice_commit_receipt,
+        });
+        voiceTaskOriginRef.current = null;
+        setProductInput(recognition.text);
+        pendingP3MutationRef.current = null;
+        setP3MutationStatus('idle');
+        setP3MutationOperation('task.create');
+        setP3TaskName('Voice task');
+        setP3TaskInstruction(recognition.text);
+      }
+    } catch {
+      // The owner publishes a content-free reason and retains cleanup.
+    }
+  };
+
+  const stopProductVoicePlayout = async () => {
+    const p2Owner = activationOwnerRef.current;
+    const p1Owner = p1VoiceOwnerRef.current;
+    const response = activeVoiceResponseRef.current;
+    if (
+      p2Owner === null
+      || p1Owner === null
+      || response === null
+      || p1Owner.status().status !== 'playing'
+    ) return;
+    bargeInSequenceRef.current += 1;
+    const actionId = `product-barge-${bargeInSequenceRef.current}`;
+    const locallyStopped = p1Owner.stopAgentPlayout(response);
+    if (!locallyStopped) return;
+    activeVoiceResponseRef.current = null;
+    try {
+      await p2Owner.bargeIn({
+        action_id: actionId,
+        response_id: response.response_id,
+        response_generation: response.response_generation,
+        cancel_response: true,
+      });
+    } catch {
+      setProductTextStatus('failed');
+    }
+  };
+
+  const commitRecognizedVoiceTaskOrigin = async (): Promise<ProductVoiceTaskOrigin | null> => {
+    const owner = activationOwnerRef.current;
+    const recognized = recognizedVoiceRef.current;
+    if (
+      owner === null ||
+      recognized === null ||
+      props.activeSessionId === null ||
+      recognized.session_id !== props.activeSessionId ||
+      recognized.text !== p3TaskInstruction ||
+      p2Activation.status !== 'active' ||
+      p2Activation.binding === null ||
+      pendingProductTurnRef.current !== null ||
+      owner.hasPendingSubmission() ||
+      owner.hasPendingPresentationAck()
+    ) return null;
+    if (!confirmRecognizedSpeechExact()) return null;
+    const activationBinding = p2Activation.binding;
+    productTurnSequenceRef.current += 1;
+    const identity = `${Date.now()}-${productTurnSequenceRef.current}`;
+    const input: ProductTurnInput = {
+      commit_id: `web-commit-${identity}`,
+      turn_id: `web-turn-${identity}`,
+      response_id: `web-response-${identity}`,
+      committed_at: new Date().toISOString(),
+      text: recognized.text,
+      dispatch_target: 'task',
+      voice_commit_receipt: recognized.voice_commit_receipt,
+      critical_confirmation: true,
+    };
+    const retained = { owner, input };
+    pendingProductTurnRef.current = retained;
+    try {
+      await retryRetainedProductOperation({
+        operation: () => owner.submitText(input),
+        is_current: () =>
+          props.isConnected &&
+          activationOwnerRef.current === owner &&
+          activeSessionRef.current === recognized.session_id,
+      });
+      if (pendingProductTurnRef.current !== retained) return null;
+      pendingProductTurnRef.current = null;
+      const origin = Object.freeze({
+        session_id: recognized.session_id,
+        interaction_id: activationBinding.interaction_id,
+        turn_id: input.turn_id,
+        commit_id: input.commit_id,
+        instruction: input.text,
+      });
+      voiceTaskOriginRef.current = origin;
+      recognizedVoiceRef.current = null;
+      return origin;
+    } catch {
+      if (activationOwnerRef.current === owner && !owner.hasPendingSubmission()) {
+        pendingProductTurnRef.current = null;
+      }
+      return null;
     }
   };
 
@@ -859,16 +1236,26 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       session_id: sessionId,
       command_id: `web-task-command-${identity}`,
       issued_at: new Date().toISOString(),
-      correlation_id: `${correlationId}-task-${identity}`,
+      correlation_id: correlationId,
     };
     if (p3MutationOperation === 'task.cancel') {
       if (!p3TargetTaskId.trim()) return null;
-      return { operation: 'task.cancel', ...common, task_id: p3TargetTaskId };
+      return {
+        operation: 'task.cancel',
+        ...common,
+        source: 'structured',
+        task_id: p3TargetTaskId,
+      };
     }
     if (!p3TaskName.trim() || !p3TaskInstruction.trim()) return null;
     return {
       operation: 'task.create',
       ...common,
+      ...resolveProductTaskCreateOrigin(
+        p3TaskInstruction,
+        props.activeSessionId,
+        voiceTaskOriginRef.current
+      ),
       name: p3TaskName,
       instruction: p3TaskInstruction,
     };
@@ -876,12 +1263,45 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   const issueP3MutationConfirmation = async () => {
     const owner = p3MutationOwnerRef.current;
-    const mutation = pendingP3MutationRef.current ?? buildP3Mutation();
+    let mutation = pendingP3MutationRef.current;
+    if (
+      mutation === null &&
+      p3MutationOperation === 'task.create' &&
+      voiceTaskOriginRef.current === null &&
+      recognizedVoiceRef.current?.session_id === props.activeSessionId &&
+      recognizedVoiceRef.current?.text === p3TaskInstruction
+    ) {
+      const origin = await commitRecognizedVoiceTaskOrigin();
+      if (origin === null) {
+        setP3MutationStatus('failed');
+        return;
+      }
+    }
+    mutation = mutation ?? buildP3Mutation();
     if (!owner || !mutation) return;
     pendingP3MutationRef.current = mutation;
     setP3MutationStatus('issuing');
     try {
-      await owner.issue(mutation);
+      const receipt = await owner.issue(mutation);
+      let leaf = formalTaskControlLeafRef.current;
+      if (leaf === null) {
+        leaf = new FormalTaskControlLeaf({
+          enabled: true,
+          binding: receipt.task_control_binding,
+        });
+        formalTaskControlLeafRef.current = leaf;
+      } else {
+        leaf.reconnect(receipt.task_control_binding);
+      }
+      pendingFormalP3MutationRef.current = prepareFormalTaskMutation(
+        receipt.task_control_binding,
+        {
+          operation: mutation.operation,
+          command_id: mutation.command_id,
+          task_id: mutation.operation === 'task.cancel' ? mutation.task_id : null,
+        },
+        receipt,
+      );
       if (p3MutationOwnerRef.current === owner) {
         setP3MutationStatus('confirmed');
       }
@@ -896,12 +1316,31 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const executeP3Mutation = async () => {
     const owner = p3MutationOwnerRef.current;
     const mutation = pendingP3MutationRef.current;
-    if (!owner || !mutation) return;
+    const leaf = formalTaskControlLeafRef.current;
+    const prepared = pendingFormalP3MutationRef.current;
+    if (!owner || !mutation || !leaf || !prepared) return;
     setP3MutationStatus('mutating');
     try {
-      await owner.mutate(mutation);
+      const result = await leaf.submitMutation(
+        prepared,
+        () => owner.mutate(mutation),
+      );
+      leaf.adopt(mutation.operation, result, {
+        connection_generation: leaf.snapshot().connection_generation,
+        command_id: mutation.command_id,
+        events_query: null,
+      });
       if (p3MutationOwnerRef.current === owner) {
+        if (mutation.operation === 'task.create') {
+          const formalResult = recordValue(result.formal_task_result);
+          const createdTaskId = formalResult?.task_id;
+          if (typeof createdTaskId !== 'string' || !createdTaskId.trim()) {
+            throw new Error('formal task.create result did not return an exact task');
+          }
+          setCreatedProgressTaskId(createdTaskId);
+        }
         pendingP3MutationRef.current = null;
+        pendingFormalP3MutationRef.current = null;
         setP3MutationStatus('accepted');
       }
     } catch {
@@ -996,6 +1435,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           origin_id: `web-progress-${routeId}`,
           generation_id: `web-progress-generation-${routeId}`,
           generation,
+          ...(createdProgressTaskId === null ? {} : { task_id: createdProgressTaskId }),
         });
       } catch (error) {
         // Reconcile a possibly response-lost activation before any successor
@@ -1035,7 +1475,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         })
         .catch(() => undefined);
     };
-  }, [correlationId, props.activeSessionId, props.isConnected]);
+  }, [correlationId, createdProgressTaskId, props.activeSessionId, props.isConnected]);
 
   return (
     <LiveVoiceIntegratedRoutePanelView
@@ -1048,6 +1488,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       productInput={productInput}
       productOutput={productOutput}
       productTextStatus={productTextStatus}
+      p1VoiceEnabled={
+        FEATURE_LIVE_VOICE_INTEGRATED_P1
+        && props.isConnected
+        && p2Activation.status === 'active'
+      }
+      p1VoiceStatus={p1VoiceStatus}
+      p1VoiceReason={p1VoiceReason}
+      onP1VoiceStart={() => void startProductVoiceCapture()}
+      onP1VoiceStop={() => void (
+        p1VoiceStatus === 'playing'
+          ? stopProductVoicePlayout()
+          : stopProductVoiceCapture()
+      )}
       productOperationRetained={Boolean(
           pendingProductTurnRef.current ||
           pendingPresentationAttemptRef.current ||
@@ -1063,9 +1516,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           owner?.hasPendingPresentationAck()
         ) return;
         setProductTextStatus('idle');
+        if (value !== recognizedVoiceRef.current?.text) {
+          recognizedVoiceRef.current = null;
+        }
         setProductInput(value);
       }}
-      onProductSubmit={() => void submitProductText()}
+      onProductSubmit={() => {
+        const recognized = recognizedVoiceRef.current;
+        void submitProductText(
+          undefined,
+          recognized !== null &&
+            recognized.session_id === props.activeSessionId &&
+            recognized.text === productInput
+            ? 'voice'
+            : 'structured',
+        );
+      }}
       p3MutationEnabled={FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && props.isConnected}
       p3MutationOperation={p3MutationOperation}
       p3TaskName={p3TaskName}
@@ -1075,6 +1541,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p3MutationRetained={p3MutationOwnerRef.current?.hasPendingMutation() ?? false}
       onP3MutationOperation={value => {
         pendingP3MutationRef.current = null;
+        voiceTaskOriginRef.current = null;
         setP3MutationStatus('idle');
         setP3MutationOperation(value);
       }}
@@ -1085,6 +1552,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }}
       onP3TaskInstruction={value => {
         pendingP3MutationRef.current = null;
+        if (value !== voiceTaskOriginRef.current?.instruction) {
+          voiceTaskOriginRef.current = null;
+        }
+        if (value !== recognizedVoiceRef.current?.text) {
+          recognizedVoiceRef.current = null;
+        }
         setP3MutationStatus('idle');
         setP3TaskInstruction(value);
       }}
@@ -1144,6 +1617,11 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   productInput?: string;
   productOutput?: string | null;
   productTextStatus?: 'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed';
+  p1VoiceEnabled?: boolean;
+  p1VoiceStatus?: ProductP1VoiceStatus;
+  p1VoiceReason?: string | null;
+  onP1VoiceStart?: () => void;
+  onP1VoiceStop?: () => void;
   productOperationRetained?: boolean;
   onProductInput?: (value: string) => void;
   onProductSubmit?: () => void;
@@ -1173,6 +1651,11 @@ export function LiveVoiceIntegratedRoutePanelView({
   productInput = '',
   productOutput = null,
   productTextStatus = 'idle',
+  p1VoiceEnabled = false,
+  p1VoiceStatus = 'closed',
+  p1VoiceReason = null,
+  onP1VoiceStart,
+  onP1VoiceStop,
   productOperationRetained = false,
   onProductInput,
   onProductSubmit,
@@ -1202,7 +1685,8 @@ export function LiveVoiceIntegratedRoutePanelView({
     (p3MutationStatus === 'failed' && p3MutationRetained);
   const productTextLocked =
     ['submitting', 'waiting', 'presented'].includes(productTextStatus) ||
-    productOperationRetained;
+    productOperationRetained ||
+    ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending'].includes(p1VoiceStatus);
 
   return (
     <details className="live-voice-integrated" data-composition={manifest.composition_state} data-testid="live-voice-integrated-route">
@@ -1262,6 +1746,37 @@ export function LiveVoiceIntegratedRoutePanelView({
                 label={t('liveVoice.integrated.activation.scope')}
                 value={p3Activation.binding ? `${p3Activation.binding.task_id}:${p3Activation.binding.generation}` : 'null'}
               />
+            </div>
+          )}
+          {p1VoiceEnabled && onP1VoiceStart && onP1VoiceStop && (
+            <div
+              className="live-voice-integrated__text-route"
+              data-testid="live-voice-integrated-product-voice"
+            >
+              <strong>Formal P1 voice</strong>
+              <span className="live-voice-integrated__progress-note">
+                Dedicated same-origin PCM route → Gateway batch Speech → committed Agent text → Gateway synthesis.
+              </span>
+              {p1VoiceStatus === 'capturing' || p1VoiceStatus === 'playing' ? (
+                <button type="button" onClick={onP1VoiceStop}>
+                  {p1VoiceStatus === 'playing' ? 'Stop playback' : 'Stop and recognize'}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={onP1VoiceStart}
+                  disabled={
+                    productOperationRetained
+                    || ['starting', 'recognizing', 'playing'].includes(p1VoiceStatus)
+                  }
+                >
+                  Start formal voice turn
+                </button>
+              )}
+              <DiagnosticsFact label="P1 status" value={p1VoiceStatus} />
+              {p1VoiceReason !== null && (
+                <DiagnosticsFact label="P1 reason" value={p1VoiceReason} />
+              )}
             </div>
           )}
           {p2Activation?.status === 'active' && onProductInput && onProductSubmit && (

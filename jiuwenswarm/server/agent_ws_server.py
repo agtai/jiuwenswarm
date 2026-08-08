@@ -166,6 +166,7 @@ def _log_session_create_kvc_failure(task: asyncio.Task) -> None:
             exc_info=exc,
         )
 
+
 # Serialize plan-mode restore per session to avoid checkpoint races.
 _session_mode_sync_locks: WeakValueDictionary[str, asyncio.Lock] = (
     WeakValueDictionary()
@@ -239,7 +240,6 @@ from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported fo
     _build_workflow_human_prompt_payload,
     _build_workflow_snapshot_payload,
 )
-
 
 
 def _request_query_text(request: AgentRequest) -> str:
@@ -871,10 +871,12 @@ class AgentWebSocketServer:
         self._live_voice_p3_composition: Any = None
         self._live_voice_p3_confirmation_owner: Any = None
         self._live_voice_p3_confirmation_forwarder: Any = None
+        self._live_voice_turn_commit_ledger: Any = None
         # The central product registry is even more strictly lazy: when its
         # master flag is off no registry, Adapter, registration, or worker is
         # constructed or called.
         self._live_voice_product_composition: Any = None
+        self._live_voice_w2_observability: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
@@ -993,6 +995,7 @@ class AgentWebSocketServer:
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
+        await self._start_live_voice_w2_observability()
         await self._start_live_voice_p3_composition()
         await self._start_live_voice_product_composition()
 
@@ -1187,6 +1190,50 @@ class AgentWebSocketServer:
                     unpin(scheduler_agent)
             self._scheduler_agent = None
 
+    async def _start_live_voice_w2_observability(self) -> None:
+        """Start evidence before P3 startup reconciliation can append facts."""
+
+        if getattr(self, "_live_voice_w2_observability", None) is not None:
+            return
+        enabled = all(
+            str(os.getenv(name) or "").strip().lower()
+            in {"1", "true", "yes", "on"}
+            for name in (
+                "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
+                "JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED",
+            )
+        )
+        if not enabled:
+            return
+        try:
+            from jiuwenswarm.server.live_voice.product_w2_observability import (
+                create_product_w2_observability_owner_from_environment,
+            )
+
+            self._live_voice_w2_observability = (
+                create_product_w2_observability_owner_from_environment()
+            )
+        except Exception as exc:  # noqa: BLE001 -- evidence cannot break product
+            self._live_voice_w2_observability = None
+            logger.exception(
+                "[LiveVoiceW2] evidence registration failed closed: %s", exc
+            )
+
+    async def _observe_live_voice_p3_reconciliation(
+        self,
+        event: object,
+        attempt: object,
+    ) -> None:
+        observer = self._live_voice_w2_observability
+        if observer is None:
+            return
+        try:
+            await observer.observe_reconciliation_event(event, attempt)
+        except Exception as exc:  # noqa: BLE001 -- evidence cannot change Task truth
+            logger.warning(
+                "[LiveVoiceW2] reconciliation evidence rejected: %s", exc
+            )
+
     async def _start_live_voice_p3_composition(self) -> None:
         """Start P3 only when its feature and complete authority gate validate."""
 
@@ -1195,7 +1242,11 @@ class AgentWebSocketServer:
         composition: Any = None
         confirmation_owner: Any = None
         confirmation_forwarder: Any = None
+        commit_ledger: Any = None
         try:
+            from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+                TurnCommitLedger,
+            )
             from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
                 create_p3_composition_from_environment,
                 resolve_p3_database_path_from_environment,
@@ -1230,6 +1281,7 @@ class AgentWebSocketServer:
                     confirmation_owner
                 )
 
+            commit_ledger = TurnCommitLedger()
             composition = create_p3_composition_from_environment(
                 agent_manager=self._agent_manager,
                 model_resolver=ServerModelCatalogResolver(
@@ -1237,6 +1289,10 @@ class AgentWebSocketServer:
                     model_builder=self._build_live_voice_p3_model,
                 ),
                 confirmation_verifier=confirmation_forwarder,
+                commit_ledger=commit_ledger,
+                reconciliation_event_sink=(
+                    self._observe_live_voice_p3_reconciliation
+                ),
             )
             if composition is None:
                 logger.info("[LiveVoiceP3] formal route disabled")
@@ -1245,6 +1301,7 @@ class AgentWebSocketServer:
             self._live_voice_p3_composition = composition
             self._live_voice_p3_confirmation_owner = confirmation_owner
             self._live_voice_p3_confirmation_forwarder = confirmation_forwarder
+            self._live_voice_turn_commit_ledger = commit_ledger
             if composition.mutation_authority_ready:
                 logger.info("[LiveVoiceP3] authenticated formal route ready")
             else:
@@ -1262,21 +1319,25 @@ class AgentWebSocketServer:
             self._live_voice_p3_composition = None
             self._live_voice_p3_confirmation_owner = None
             self._live_voice_p3_confirmation_forwarder = None
+            self._live_voice_turn_commit_ledger = None
 
-    async def _stop_live_voice_p3_composition(self) -> None:
+    async def _stop_live_voice_p3_composition(self) -> bool:
         composition = self._live_voice_p3_composition
-        self._live_voice_p3_composition = None
         if composition is None:
             self._live_voice_p3_confirmation_owner = None
             self._live_voice_p3_confirmation_forwarder = None
-            return
+            self._live_voice_turn_commit_ledger = None
+            return True
         try:
             await composition.stop()
         except Exception as exc:  # noqa: BLE001 -- continue transport shutdown
-            logger.warning("[LiveVoiceP3] shutdown failed: %s", exc)
-        finally:
-            self._live_voice_p3_confirmation_owner = None
-            self._live_voice_p3_confirmation_forwarder = None
+            logger.warning("[LiveVoiceP3] shutdown cleanup pending: %s", exc)
+            return False
+        self._live_voice_p3_composition = None
+        self._live_voice_p3_confirmation_owner = None
+        self._live_voice_p3_confirmation_forwarder = None
+        self._live_voice_turn_commit_ledger = None
+        return True
 
     async def _push_live_voice_product_text_event(
         self, message: dict[str, object]
@@ -1314,6 +1375,9 @@ class AgentWebSocketServer:
                 p3_confirmation_forwarder=(
                     getattr(self, "_live_voice_p3_confirmation_forwarder", None)
                 ),
+                commit_ledger=getattr(
+                    self, "_live_voice_turn_commit_ledger", None
+                ),
             )
             if registry is None:
                 logger.info("[LiveVoiceProduct] central composition disabled")
@@ -1349,6 +1413,19 @@ class AgentWebSocketServer:
             return False
         if self._live_voice_product_composition is registry:
             self._live_voice_product_composition = None
+        return True
+
+    async def _stop_live_voice_w2_observability(self) -> bool:
+        observer = getattr(self, "_live_voice_w2_observability", None)
+        if observer is None:
+            return True
+        try:
+            await observer.close()
+        except Exception as exc:  # noqa: BLE001 -- retain honest cleanup result
+            logger.warning("[LiveVoiceW2] evidence cleanup pending: %s", exc)
+            return False
+        if self._live_voice_w2_observability is observer:
+            self._live_voice_w2_observability = None
         return True
 
     def _set_scheduler_agent(self, agent: Any) -> None:
@@ -1436,13 +1513,20 @@ class AgentWebSocketServer:
             self._server = None
 
         # Product leases consume the authenticated P3 Core/Store and must
-        # detach before that lower owner closes.
+        # detach before that lower owner closes. Evidence remains active until
+        # P3's final reconciliation has published every durable fact.
         product_stopped = await self._stop_live_voice_product_composition()
         if product_stopped:
-            await self._stop_live_voice_p3_composition()
+            p3_stopped = await self._stop_live_voice_p3_composition()
+            if p3_stopped:
+                await self._stop_live_voice_w2_observability()
+            else:
+                logger.warning(
+                    "[LiveVoiceW2] retaining evidence owner until P3 cleanup retries"
+                )
         else:
             logger.warning(
-                "[LiveVoiceProduct] retaining P3 owner until product cleanup retries"
+                "[LiveVoiceProduct] retaining P3 and evidence owners until product cleanup retries"
             )
 
         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
@@ -1842,6 +1926,7 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
@@ -2600,7 +2685,6 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
             request.request_id,
         )
-
 
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
@@ -4259,7 +4343,6 @@ class AgentWebSocketServer:
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await send_wire_payload(ws, wire)
-
 
     async def _handle_proactive_tick(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """Handle proactive.tick request from CronScheduler.
@@ -8493,6 +8576,73 @@ class AgentWebSocketServer:
                 )
             result_ok = result.ok
             payload = result.payload
+            observer = getattr(self, "_live_voice_w2_observability", None)
+            correlation_id = (
+                request.request_id
+                if operation in {"task.get", "task.list", "task.status", "task.events"}
+                else formal_params.get("correlation_id")
+            )
+            if (
+                observer is not None
+                and isinstance(request.session_id, str)
+                and isinstance(correlation_id, str)
+            ):
+                from jiuwenswarm.server.live_voice.product_w2_observability import (
+                    product_result_error_code,
+                    product_result_agent_output_kind,
+                    product_result_execution_binding,
+                    product_result_has_terminal_d0_attempt,
+                    product_result_observation_ok,
+                    product_result_response_binding,
+                    product_result_task_id,
+                    product_result_task_event_facts,
+                    product_result_voice_task_bridge,
+                    product_result_voice_task_origin,
+                )
+
+                task_id, attempt_id = product_result_task_id(formal_params, payload)
+                interaction_id, response_id, response_generation = (
+                    product_result_response_binding(formal_params, payload)
+                )
+                turn_id, round_id = product_result_execution_binding(
+                    formal_params, payload
+                )
+                try:
+                    await observer.observe_route(
+                        session_id=request.session_id,
+                        correlation_id=correlation_id,
+                        request_id=request.request_id,
+                        operation=operation,
+                        result_ok=product_result_observation_ok(
+                            operation,
+                            result_ok=result_ok,
+                            payload=payload,
+                        ),
+                        task_id=task_id,
+                        attempt_id=attempt_id,
+                        interaction_id=interaction_id,
+                        response_id=response_id,
+                        response_generation=response_generation,
+                        turn_id=turn_id,
+                        round_id=round_id,
+                        error_code=product_result_error_code(payload),
+                        terminal_d0_attempt=(
+                            product_result_has_terminal_d0_attempt(payload)
+                        ),
+                        voice_task_bridge=product_result_voice_task_bridge(
+                            formal_params, payload
+                        ),
+                        voice_task_origin=product_result_voice_task_origin(payload),
+                        task_operation=(
+                            formal_params.get("operation")
+                            if isinstance(formal_params.get("operation"), str)
+                            else None
+                        ),
+                        agent_output_kind=product_result_agent_output_kind(payload),
+                        task_event_facts=product_result_task_event_facts(payload),
+                    )
+                except Exception as exc:  # noqa: BLE001 -- diagnostic only
+                    logger.warning("[LiveVoiceW2] route observation rejected: %s", exc)
         response = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -8567,6 +8717,12 @@ class AgentWebSocketServer:
                     request_id=request.request_id,
                     session_id=request.session_id,
                 )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN:
+                result = await registry.handle_p2_barge_in(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE:
                 result = await registry.handle_p3_confirmation_issue(
                     params=params,
@@ -8601,6 +8757,70 @@ class AgentWebSocketServer:
                 )
             result_ok = result.ok
             payload = result.payload
+            observer = getattr(self, "_live_voice_w2_observability", None)
+            correlation_id = params.get("correlation_id")
+            if (
+                observer is not None
+                and isinstance(request.session_id, str)
+                and isinstance(correlation_id, str)
+            ):
+                from jiuwenswarm.server.live_voice.product_w2_observability import (
+                    product_result_error_code,
+                    product_result_execution_binding,
+                    product_result_has_terminal_d0_attempt,
+                    product_result_observation_ok,
+                    product_result_response_binding,
+                    product_result_agent_output_kind,
+                    product_result_task_id,
+                    product_result_task_event_facts,
+                    product_result_voice_task_bridge,
+                    product_result_voice_task_origin,
+                )
+
+                task_id, attempt_id = product_result_task_id(params, payload)
+                interaction_id, response_id, response_generation = (
+                    product_result_response_binding(params, payload)
+                )
+                turn_id, round_id = product_result_execution_binding(params, payload)
+                observed_operation = (
+                    request.req_method.value if request.req_method is not None else ""
+                )
+                try:
+                    await observer.observe_route(
+                        session_id=request.session_id,
+                        correlation_id=correlation_id,
+                        request_id=request.request_id,
+                        operation=observed_operation,
+                        result_ok=product_result_observation_ok(
+                            observed_operation,
+                            result_ok=result_ok,
+                            payload=payload,
+                        ),
+                        task_id=task_id,
+                        attempt_id=attempt_id,
+                        interaction_id=interaction_id,
+                        response_id=response_id,
+                        response_generation=response_generation,
+                        turn_id=turn_id,
+                        round_id=round_id,
+                        error_code=product_result_error_code(payload),
+                        terminal_d0_attempt=(
+                            product_result_has_terminal_d0_attempt(payload)
+                        ),
+                        voice_task_bridge=product_result_voice_task_bridge(
+                            params, payload
+                        ),
+                        voice_task_origin=product_result_voice_task_origin(payload),
+                        task_operation=(
+                            params.get("operation")
+                            if isinstance(params.get("operation"), str)
+                            else None
+                        ),
+                        agent_output_kind=product_result_agent_output_kind(payload),
+                        task_event_facts=product_result_task_event_facts(payload),
+                    )
+                except Exception as exc:  # noqa: BLE001 -- diagnostic only
+                    logger.warning("[LiveVoiceW2] route observation rejected: %s", exc)
         response = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,

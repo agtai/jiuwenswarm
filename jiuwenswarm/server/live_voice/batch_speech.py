@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import secrets
 import time
 import wave
 from collections import OrderedDict
@@ -48,6 +49,7 @@ from jiuwenswarm.server.live_voice.speech_ports import (
     SynthesisPort,
     SynthesisRequest,
 )
+from jiuwenswarm.server.live_voice.critical_token_safety import CriticalTokenPolicy
 
 
 FORMAL_BATCH_SPEECH_FLAG = "LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED"
@@ -75,6 +77,8 @@ MAX_IDENTITY_TOMBSTONES = 512
 MIN_CLOSE_TIMEOUT_MS = 10
 MAX_CLOSE_TIMEOUT_MS = 5_000
 DEFAULT_CLOSE_TIMEOUT_MS = 1_000
+MAX_VOICE_COMMIT_RECEIPTS = 512
+VOICE_COMMIT_RECEIPT_TTL_SECONDS = 300.0
 
 _LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 _PROVIDER_ID = "openai-compatible-batch-speech"
@@ -1106,6 +1110,18 @@ def _provider_payload(
     }
 
 
+@dataclass(slots=True)
+class _VoiceCommitReceipt:
+    operation_id: str
+    capture_id: str
+    capture_generation: int
+    session_id: str
+    correlation_id: str
+    text: str
+    expires_at: float
+    claimed_binding: tuple[str, str, str, str, str, str] | None = None
+
+
 class FormalBatchSpeechService:
     def __init__(
         self,
@@ -1152,6 +1168,115 @@ class FormalBatchSpeechService:
         self._last_response_generation: OrderedDict[tuple[ScopeRef, str], int] = (
             OrderedDict()
         )
+        self._voice_commit_receipts: OrderedDict[str, _VoiceCommitReceipt] = (
+            OrderedDict()
+        )
+
+    async def claim_voice_commit_receipt(
+        self,
+        *,
+        receipt: object,
+        session_id: object,
+        correlation_id: object,
+        interaction_id: object,
+        turn_id: object,
+        commit_id: object,
+        text: object,
+        critical_confirmation: object,
+    ) -> dict[str, object]:
+        """Bind one formal STT result to one exact downstream TurnCommit.
+
+        The browser holds only an opaque, short-lived capability.  Gateway
+        redeems it immediately before E2A forwarding and replaces it with this
+        closed server claim.  Exact request replay is allowed; rebinding a
+        receipt to another turn, commit, interaction, or text fails closed.
+        """
+
+        token = str(receipt) if isinstance(receipt, str) else ""
+        values = {
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "interaction_id": interaction_id,
+            "turn_id": turn_id,
+            "commit_id": commit_id,
+            "text": text,
+        }
+        if not re.fullmatch(r"[A-Za-z0-9_-]{32,128}", token) or any(
+            type(value) is not str or not value or value != value.strip()
+            for value in values.values()
+        ):
+            raise ValueError("voice commit receipt binding is invalid")
+        now = self._monotonic()
+        critical_tokens = CriticalTokenPolicy().scan(str(text))
+        if critical_tokens and critical_confirmation is not True:
+            raise ValueError("critical speech tokens require explicit confirmation")
+        async with self._lock:
+            self._prune_voice_commit_receipts_locked(now)
+            retained = self._voice_commit_receipts.get(token)
+            if retained is None or retained.expires_at <= now:
+                raise ValueError("voice commit receipt is unknown or expired")
+            binding = (
+                str(session_id),
+                str(correlation_id),
+                str(interaction_id),
+                str(turn_id),
+                str(commit_id),
+                str(text),
+            )
+            if (
+                retained.session_id != binding[0]
+                or retained.correlation_id != binding[1]
+                or retained.text != binding[5]
+            ):
+                raise ValueError("voice commit receipt does not match recognition")
+            if retained.claimed_binding is None:
+                retained.claimed_binding = binding
+            elif retained.claimed_binding != binding:
+                raise ValueError("voice commit receipt was already bound")
+            self._voice_commit_receipts.move_to_end(token)
+            return {
+                "kind": "formal_speech_recognition",
+                "speech_operation_id": retained.operation_id,
+                "capture_id": retained.capture_id,
+                "capture_generation": retained.capture_generation,
+                "session_id": retained.session_id,
+                "correlation_id": retained.correlation_id,
+                "interaction_id": binding[2],
+                "turn_id": binding[3],
+                "commit_id": binding[4],
+                "text_sha256": hashlib.sha256(binding[5].encode("utf-8")).hexdigest(),
+                "critical_policy": "confirmed" if critical_tokens else "eligible",
+            }
+
+    async def _issue_voice_commit_receipt(
+        self, request: RecognitionBatchRequest, text: str
+    ) -> str:
+        now = self._monotonic()
+        async with self._lock:
+            self._prune_voice_commit_receipts_locked(now)
+            if len(self._voice_commit_receipts) >= MAX_VOICE_COMMIT_RECEIPTS:
+                raise _fail(
+                    ErrorCode.UNAVAILABLE,
+                    "VOICE_COMMIT_RECEIPT_CAPACITY_EXHAUSTED",
+                    "formal voice commit receipt capacity is exhausted",
+                    retriable=True,
+                )
+            token = secrets.token_urlsafe(32)
+            self._voice_commit_receipts[token] = _VoiceCommitReceipt(
+                operation_id=request.operation_id,
+                capture_id=request.capture_id,
+                capture_generation=request.capture_generation,
+                session_id=request.scope.session_id or "",
+                correlation_id=request.correlation_id,
+                text=text,
+                expires_at=now + VOICE_COMMIT_RECEIPT_TTL_SECONDS,
+            )
+            return token
+
+    def _prune_voice_commit_receipts_locked(self, now: float) -> None:
+        for token, retained in tuple(self._voice_commit_receipts.items()):
+            if retained.expires_at <= now:
+                self._voice_commit_receipts.pop(token, None)
 
     def capability_payload(self) -> dict[str, object]:
         formal_available = self._formal_available and not self._closed
@@ -1929,6 +2054,9 @@ class FormalBatchSpeechService:
             hypothesis,
         )
         wav_info = inspect_pcm16_mono_wav(request.audio_wav)
+        voice_commit_receipt = await self._issue_voice_commit_receipt(
+            request, provider_result.text
+        )
         return {
             "operation": RECOGNIZE_OPERATION,
             "capture": {
@@ -1967,6 +2095,7 @@ class FormalBatchSpeechService:
             "provider": _provider_payload(
                 event.provider.provider_id, model=provider_result.model
             ),
+            "voice_commit_receipt": voice_commit_receipt,
         }
 
     async def _synthesize_once(

@@ -2468,8 +2468,15 @@ class TurnCommit:
 class TurnCommitLedger:
     """Atomic, once-only commit ownership for a turn and commit identifier."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, capacity: int = 128) -> None:
+        if type(capacity) is not int or not 1 <= capacity <= 65_536:
+            raise _violation(
+                "INVALID_TURN_COMMIT_CAPACITY",
+                "turn commit capacity must be a bounded positive integer",
+                code=ErrorCode.INVALID_ARGUMENT,
+            )
         self._lock = threading.RLock()
+        self._capacity = capacity
         self._by_commit_id: dict[str, TurnCommit] = {}
         self._by_turn_id: dict[str, TurnCommit] = {}
 
@@ -2485,6 +2492,12 @@ class TurnCommitLedger:
                     "TURN_COMMIT_CONFLICT",
                     "commit_id and turn_id are immutable and may commit only once",
                     code=ErrorCode.CONFLICT,
+                )
+            if len(self._by_commit_id) >= self._capacity:
+                raise _violation(
+                    "TURN_COMMIT_LEDGER_FULL",
+                    "bounded turn commit authority is full",
+                    code=ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
             self._by_commit_id[commit.commit_id] = commit
             self._by_turn_id[commit.turn_id] = commit
@@ -2508,6 +2521,22 @@ class TurnCommitLedger:
                     code=ErrorCode.PERMISSION_DENIED,
                 )
             return commit
+
+    def release_origin(self, origin: OriginRef, scope: ScopeRef) -> bool:
+        """Release one exact downstream-only origin after use or route close."""
+
+        with self._lock:
+            commit = self._by_commit_id.get(origin.commit_id or "")
+            if (
+                origin.kind != "committed_turn"
+                or commit is None
+                or commit.turn_id != origin.turn_id
+                or commit.scope != scope
+            ):
+                return False
+            self._by_commit_id.pop(commit.commit_id, None)
+            self._by_turn_id.pop(commit.turn_id, None)
+            return True
 
     def dispatch(
         self,

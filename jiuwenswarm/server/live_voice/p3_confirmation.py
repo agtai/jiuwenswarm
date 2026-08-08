@@ -78,6 +78,10 @@ def p3_confirmation_intent_fingerprint(
     name: str | None = None,
     instruction: str | None = None,
     model: ResolvedP3Model | None = None,
+    source: str = "structured",
+    interaction_id: str | None = None,
+    turn_id: str | None = None,
+    commit_id: str | None = None,
 ) -> str:
     """Canonical server helper shared by the issuer and route verifier."""
 
@@ -85,6 +89,10 @@ def p3_confirmation_intent_fingerprint(
         "operation": operation,
         "command_id": command_id,
         "target_task_id": target_task_id,
+        "source": source,
+        "interaction_id": interaction_id,
+        "turn_id": turn_id,
+        "commit_id": commit_id,
     }
     if operation == "task.create":
         if context is None or name is None or instruction is None or model is None:

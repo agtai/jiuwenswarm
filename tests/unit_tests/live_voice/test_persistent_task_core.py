@@ -119,6 +119,7 @@ def _create(
         scope=_scope(),
         correlation_id=f"correlation-1{identity_suffix}",
         authorization=_grant("task.create", command_id=command_id, target=None),
+        interaction_id=f"interaction-1{identity_suffix}",
         turn_id=turn_id,
         commit_id=commit_id,
         name="Formal project task",
@@ -1848,6 +1849,8 @@ async def test_attempt_event_cannot_emit_duplicate_progress_and_event_head_is_au
     query = _events(task_id, after_seq=999)
     result = core.query(query.envelope, query.authorization, now=NOW)
     assert result.ok and result.result is not None
+    assert result.result["task_id"] == task_id
+    assert result.result["after_seq"] == 999
     assert result.result["events"] == []
     assert result.result["head_seq"] == events[-1].seq
 
@@ -1883,7 +1886,16 @@ async def test_restart_reconciles_only_the_original_attempt(
     restart_executor = _Executor()
     restart_executor.status_resolution = resolution
     restarted_store = SqliteTaskStore(database)
-    restarted = PersistentTaskCore(restarted_store, restart_executor)
+    reconciliation_events: list[tuple[object, object]] = []
+
+    async def reconciliation_sink(event: object, attempt: object) -> None:
+        reconciliation_events.append((event, attempt))
+
+    restarted = PersistentTaskCore(
+        restarted_store,
+        restart_executor,
+        reconciliation_event_sink=reconciliation_sink,
+    )
     summary = await restarted.reconcile()
 
     task = restarted_store.get_task(str(created.result["task_id"]), _scope())
@@ -1894,3 +1906,55 @@ async def test_restart_reconciles_only_the_original_attempt(
     assert restart_executor.dispatches == []
     assert restart_executor.cancels == []
     assert sum(summary[key] for key in ("known", "unavailable", "lost")) == 1
+    if resolution is ExecutorResolution.LOST:
+        assert [event.event_type for event, _ in reconciliation_events] == [
+            "attempt.terminal",
+            "task.terminal",
+        ]
+        assert all(
+            event.task_id == task.task_id
+            and event.attempt_id == task.attempt_id
+            and attempt.task_id == task.task_id
+            and attempt.attempt_id == task.attempt_id
+            for event, attempt in reconciliation_events
+        )
+    else:
+        assert reconciliation_events == []
+    await restarted.reconcile()
+    assert len(reconciliation_events) == (2 if terminal else 0)
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_sink_failure_cannot_change_durable_task_truth(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "sink-failure.sqlite"
+    first = PersistentTaskCore(SqliteTaskStore(database), _Executor())
+    invocation = _create(tmp_path)
+    created = first.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    await first.drain_outbox()
+
+    async def failing_sink(_event: object, _attempt: object) -> None:
+        raise RuntimeError("evidence sink unavailable")
+
+    executor = _Executor()
+    executor.status_resolution = ExecutorResolution.LOST
+    store = SqliteTaskStore(database)
+    restarted = PersistentTaskCore(
+        store,
+        executor,
+        reconciliation_event_sink=failing_sink,
+    )
+
+    summary = await restarted.reconcile()
+
+    task = store.get_task(str(created.result["task_id"]), _scope())
+    assert summary["lost"] == 1
+    assert task.state is FormalTaskState.TERMINAL
+    assert task.outcome is TerminalOutcome.INTERRUPTED

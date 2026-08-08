@@ -145,6 +145,7 @@ function recognitionEnvelope(params, generation = params.capture.capture_generat
         },
       },
       provider: provider(),
+      voice_commit_receipt: `voice-receipt-${params.capture.capture_id}`,
     },
   };
 }
@@ -221,6 +222,72 @@ test('authoritative Agent text reaches SS-B and maps exact-rate WAV into AIO-B c
   assert.equal(result.chunks[0].samples.length, 320);
   assert.equal(result.chunks[1].seq, 1);
   assert.deepEqual(result.chunks[0].provider, result.provider);
+});
+
+test('authoritative synthesis accepts one closed dedicated downlink without exposing inline audio', async () => {
+  const transport = {
+    async request(_method, params) {
+      const envelope = synthesisEnvelope(params);
+      envelope.result.audio = {
+        format: 'pcm_f32_mono_20ms',
+        sample_rate_hz: 16_000,
+        channel_count: 1,
+        frame_count: 2,
+        delivery: 'dedicated_media_downlink',
+        endpoint_path: '/ws/live-voice/media/private-ticket',
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        binding: {
+          lease_id: 'downlink-lease-1',
+          authority_evidence_id: 'downlink-authority-1',
+          connection_id: 'connection-1',
+          connection_epoch: 0,
+          session_id: 'session-1',
+          media_session_id: 'media-session-downlink-1',
+          interaction_id: params.response.interaction_id,
+          track_id: 'playout-track-1',
+          correlation_id: params.correlation_id,
+          direction: 'downlink',
+          generation: {
+            kind: 'response',
+            id: params.response.response_id,
+            value: params.response.response_generation,
+          },
+          frame_format: {
+            sample_rate_hz: 16_000,
+            samples_per_channel: 320,
+            encoding: 'pcm_f32',
+            byte_order: 'little',
+            channel_count: 1,
+            frame_duration_ms: 20,
+          },
+          playout: {
+            response_id: params.response.response_id,
+            response_generation: params.response.response_generation,
+            unit_id: params.unit_id,
+          },
+        },
+        max_pending_frames: 8,
+        max_pending_bytes: 131_072,
+      };
+      return envelope;
+    },
+  };
+  const client = new GatewayBatchSpeechClient({ enabled: true, transport, scope, createId: ids() });
+  const result = await client.synthesizeAuthoritative({
+    response: { interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 1 },
+    unitId: 'unit-1',
+    renderPlan: { display_text: 'Hello', spoken_text: 'Hello', transforms: [] },
+    authoritativeAgentText: true,
+    locale: 'en-US',
+    requiredSampleRateHz: 16_000,
+    correlationId: 'correlation-1',
+  });
+
+  assert.equal(result.chunks.length, 0);
+  assert.equal(result.downlink.frame_count, 2);
+  assert.equal(result.downlink.max_pending_frames, 8);
+  assert.equal(Object.hasOwn(result.downlink, 'data_base64'), false);
 });
 
 test('flag-off preserves Browser Speech fallback without any Gateway side effect', async () => {

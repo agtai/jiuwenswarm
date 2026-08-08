@@ -1083,6 +1083,35 @@ async def test_downlink_practical_limit_boundaries_are_accepted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_downlink_completion_is_retained_before_physical_close() -> None:
+    binding = _downlink_binding()
+    effects = {"completed": False}
+
+    class _OrderedCloseSocket(_FakeDedicatedSocket):
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            assert effects["completed"] is True
+            await super().close(code, reason)
+
+    socket = _OrderedCloseSocket(
+        [serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0))]
+    )
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=[_frame()],
+        on_playback_stop=lambda _receipt: None,
+        on_complete=lambda _result: effects.__setitem__("completed", True),
+        max_pending_frames=1,
+        max_pending_bytes=2048,
+    )
+
+    assert result.reason_id is MediaDetachReason.LOCAL_CLOSE
+    assert effects == {"completed": True}
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_downlink_wrong_ack_generation_detaches_before_stop_or_other_scope_effects() -> None:
     binding = _downlink_binding()
     socket = _FakeDedicatedSocket(

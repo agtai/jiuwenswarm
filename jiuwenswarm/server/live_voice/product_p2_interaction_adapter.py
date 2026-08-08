@@ -28,6 +28,7 @@ from typing import Protocol, runtime_checkable
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
+    ResponseRef,
     ScopeRef,
     TurnCommit,
 )
@@ -42,6 +43,7 @@ from .agent_conversation_runtime import (
     AgentConversationShutdownStatus,
     PresentationAckResult,
 )
+from .conversation_runtime_loop import BargeInResult
 from .interaction_engine import InteractionAction, InteractionEnginePort
 from .presentation_ledger import PresentationAck
 from .product_authority import (
@@ -253,6 +255,7 @@ class P2ActivationReason(StrEnum):
     INTERACTION_ENGINE_FACTORY_FAILED = "INTERACTION_ENGINE_FACTORY_FAILED"
     RUNTIME_START_FAILED = "RUNTIME_START_FAILED"
     INTERACTION_OPEN_FAILED = "INTERACTION_OPEN_FAILED"
+    NOTIFICATION_CONSUMER_ATTACH_FAILED = "NOTIFICATION_CONSUMER_ATTACH_FAILED"
     ROLLBACK_FAILED = "ROLLBACK_FAILED"
 
 
@@ -546,6 +549,16 @@ class P2ActivationLease:
         self._operation_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._close_coordinator: asyncio.Task[P2LeaseCloseResult] | None = None
+        attach_consumer = getattr(runtime, "attach_notification_consumer", None)
+        self._notification_lease = (
+            attach_consumer(
+                consumer_id=f"product-p2:{binding.activation_id}",
+                connection_epoch=binding.activation_generation,
+            )
+            if callable(attach_consumer)
+            else None
+        )
+        self._notification_detached = False
 
     @property
     def binding(self) -> P2InteractionBinding:
@@ -630,14 +643,22 @@ class P2ActivationLease:
 
         with self._state_lock:
             self._require_open_exact_binding(binding)
-        read = getattr(self._runtime, "next_notification", None)
+        read = (
+            getattr(self._runtime, "next_notification_for", None)
+            if self._notification_lease is not None
+            else getattr(self._runtime, "next_notification", None)
+        )
         if not callable(read):
             raise _violation(
                 "PRODUCT_NOTIFICATION_UNAVAILABLE",
                 "retained runtime has no product notification owner",
                 ErrorCode.UNAVAILABLE,
             )
-        notification = await read()
+        notification = (
+            await read(self._notification_lease)
+            if self._notification_lease is not None
+            else await read()
+        )
         if not isinstance(notification, AgentConversationNotification):
             raise _violation(
                 "PRODUCT_NOTIFICATION_UNAVAILABLE",
@@ -668,6 +689,45 @@ class P2ActivationLease:
                 raise _violation(
                     "PRODUCT_PRESENTATION_ACK_UNAVAILABLE",
                     "retained runtime returned no canonical ACK outcome",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
+    async def barge_in(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        action_id: str,
+        response: ResponseRef,
+        cancel_response: bool,
+    ) -> BargeInResult:
+        """Interrupt only the exact response owned by this activation."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            if response.interaction_id != binding.interaction_id:
+                raise _violation(
+                    "BARGE_IN_BINDING_MISMATCH",
+                    "barge-in must target the exact activated interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            interrupt = getattr(self._runtime, "barge_in", None)
+            if not callable(interrupt):
+                raise _violation(
+                    "PRODUCT_BARGE_IN_UNAVAILABLE",
+                    "retained runtime has no barge-in owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await interrupt(
+                action_id,
+                response,
+                cancel_response=cancel_response,
+            )
+            if not isinstance(outcome, BargeInResult):
+                raise _violation(
+                    "PRODUCT_BARGE_IN_UNAVAILABLE",
+                    "retained runtime returned no canonical barge-in result",
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
@@ -739,6 +799,19 @@ class P2ActivationLease:
     async def _run_close(self) -> P2LeaseCloseResult:
         try:
             async with self._operation_lock:
+                if (
+                    self._notification_lease is not None
+                    and not self._notification_detached
+                ):
+                    detach = getattr(
+                        self._runtime, "detach_notification_consumer", None
+                    )
+                    if not callable(detach):
+                        raise RuntimeError(
+                            "retained runtime lost its notification detach owner"
+                        )
+                    detach(self._notification_lease)
+                    self._notification_detached = True
                 while True:
                     result = await self._runtime.close(
                         timeout_seconds=self._close_poll_seconds
@@ -797,6 +870,7 @@ class P2ActivationResult:
                     P2ActivationReason.INTERACTION_ENGINE_FACTORY_FAILED,
                     P2ActivationReason.RUNTIME_START_FAILED,
                     P2ActivationReason.INTERACTION_OPEN_FAILED,
+                    P2ActivationReason.NOTIFICATION_CONSUMER_ATTACH_FAILED,
                     P2ActivationReason.ROLLBACK_FAILED,
                 }
             ),
@@ -1240,14 +1314,27 @@ class ProductP2InteractionAdapter:
         except BaseException:
             await self._cleanup_before_reraise(runtime, binding)
             raise
-        lease = P2ActivationLease(
-            context=context,
-            binding=binding,
-            runtime=runtime,
-            interaction_engine=engine,
-            close_poll_seconds=self._close_poll_seconds,
-            clock=self._clock,
-        )
+        try:
+            lease = P2ActivationLease(
+                context=context,
+                binding=binding,
+                runtime=runtime,
+                interaction_engine=engine,
+                close_poll_seconds=self._close_poll_seconds,
+                clock=self._clock,
+            )
+        except asyncio.CancelledError:
+            await self._cleanup_before_reraise(runtime, binding)
+            raise
+        except Exception:
+            return await self._settle_partial_failure(
+                runtime,
+                binding,
+                P2ActivationReason.NOTIFICATION_CONSUMER_ATTACH_FAILED,
+            )
+        except BaseException:
+            await self._cleanup_before_reraise(runtime, binding)
+            raise
         self._leases[lease_key] = lease
         return P2ActivationResult(
             P2ActivationStatus.ACTIVE,

@@ -14,7 +14,9 @@ import {
   extractWebErrorReason,
   isCurrentProgressOwner,
   productP2WebRequestOptions,
+  productTextBlockedByP1Status,
   progressMatchesOwnedBinding,
+  resolveProductTaskCreateOrigin,
   retainBoundedPresentedProductResponse,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import {
@@ -368,6 +370,90 @@ test('ChatPanel retains one integrated route owner across the first-message layo
   assert.equal(mounts.length, 1);
   assert.notEqual(mountIndex, -1);
   assert.equal(conversationComposerIndex > mountIndex, true);
+});
+
+test('recognized P1 text can enter P2 while every retained voice operation blocks it', async () => {
+  for (const status of ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending']) {
+    assert.equal(productTextBlockedByP1Status(status), true, status);
+  }
+  assert.equal(productTextBlockedByP1Status('recognized'), false);
+  const source = await readFile(
+    new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url),
+    'utf8'
+  );
+  assert.match(source, /const recognition = await owner\.stopAndRecognize\(\)/);
+  assert.match(source, /voice_commit_receipt: recognition\.voice_commit_receipt/);
+  assert.match(source, /\? 'voice'\s*: 'structured'/);
+  assert.match(source, /p1VoiceOwnerRef\.current\?\.status\(\)\.status/);
+  assert.match(source, /if \(props\.isConnected\) return;/);
+  assert.match(source, /voiceOwner\.close\(\)\.then/);
+  assert.match(source, /\[props\.isConnected\]/);
+});
+
+test('voice Task origin is exact-session and exact-committed-text only', () => {
+  const origin = Object.freeze({
+    session_id: 'session-voice',
+    interaction_id: 'interaction-voice',
+    turn_id: 'turn-voice',
+    commit_id: 'commit-voice',
+    instruction: 'Create the bounded voice task.',
+  });
+  assert.deepEqual(
+    resolveProductTaskCreateOrigin(
+      'Create the bounded voice task.',
+      'session-voice',
+      origin
+    ),
+    {
+      source: 'voice',
+      interaction_id: 'interaction-voice',
+      turn_id: 'turn-voice',
+      commit_id: 'commit-voice',
+    }
+  );
+  assert.deepEqual(
+    resolveProductTaskCreateOrigin('Changed text.', 'session-voice', origin),
+    { source: 'structured' }
+  );
+  assert.deepEqual(
+    resolveProductTaskCreateOrigin(
+      'Create the bounded voice task.',
+      'session-other',
+      origin
+    ),
+    { source: 'structured' }
+  );
+});
+
+test('fresh task.create rebinds the panel progress owner to its exact task', async () => {
+  const source = await readFile(
+    new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url),
+    'utf8'
+  );
+
+  assert.match(source, /setCreatedProgressTaskId\(createdTaskId\)/);
+  assert.match(source, /task_id: createdProgressTaskId/);
+  assert.match(source, /createdProgressTaskId, props\.activeSessionId/);
+});
+
+test('product barge-in stops local playout before any response cancel request', async () => {
+  const source = await readFile(
+    new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url),
+    'utf8'
+  );
+  const start = source.indexOf('const stopProductVoicePlayout = async () =>');
+  const end = source.indexOf('const commitRecognizedVoiceTaskOrigin', start);
+  const handler = source.slice(start, end);
+  const stopIndex = handler.indexOf('p1Owner.stopAgentPlayout(response)');
+  const rejectIndex = handler.indexOf('if (!locallyStopped) return;');
+  const clearIndex = handler.indexOf('activeVoiceResponseRef.current = null;');
+  const remoteIndex = handler.indexOf('await p2Owner.bargeIn({');
+
+  assert.equal(start >= 0 && end > start, true);
+  assert.equal(stopIndex >= 0, true);
+  assert.equal(stopIndex < rejectIndex && rejectIndex < clearIndex && clearIndex < remoteIndex, true);
+  assert.match(handler, /cancel_response: true/);
+  assert.match(handler, /catch \{\s*setProductTextStatus\('failed'\);/);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {

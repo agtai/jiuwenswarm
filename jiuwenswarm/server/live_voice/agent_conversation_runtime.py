@@ -1728,7 +1728,12 @@ class AgentConversationRuntime:
         deadline = asyncio.get_running_loop().time() + timeout
         self._close_requested = True
         try:
-            await asyncio.wait_for(self._start_lock.acquire(), timeout=timeout)
+            # ``wait_for(lock.acquire())`` can swallow an external cancellation
+            # when lock acquisition wins the same event-loop turn on Python
+            # 3.11.  The timeout context keeps its own deadline cancellation
+            # distinguishable while preserving caller cancellation exactly.
+            async with asyncio.timeout(timeout):
+                await self._start_lock.acquire()
         except TimeoutError:
             return AgentConversationShutdownResult(
                 AgentConversationShutdownStatus.PENDING,

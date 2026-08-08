@@ -6,7 +6,7 @@ import {
   FormalTaskControlLeaf,
   mapFormalTaskCancel,
   prepareFormalTaskMutation,
-} from '../node_modules/.cache/live-voice-formal-task-control/features/live-voice/formal/formalTaskControlLeaf.js';
+} from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/formalTaskControlLeaf.js';
 
 const binding = Object.freeze({
   subject_id: 'principal-1',

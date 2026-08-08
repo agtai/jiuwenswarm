@@ -238,6 +238,10 @@ class DedicatedMediaSocketLeafResult:
     sent_frames: int = 0
     acknowledged_through_seq: int | None = None
     playback_stop_receipts: int = 0
+    configured_max_pending_frames: int = 0
+    configured_max_pending_bytes: int = 0
+    peak_pending_frames: int = 0
+    peak_pending_bytes: int = 0
     business_cancel_count_delta: int = field(default=0, init=False)
     evidence_scope: str = field(
         default="dedicated_media_socket_leaf_only", init=False
@@ -259,6 +263,10 @@ class DedicatedMediaSocketLeafResult:
             or self.sent_frames != 0
             or self.acknowledged_through_seq is not None
             or self.playback_stop_receipts != 0
+            or self.configured_max_pending_frames != 0
+            or self.configured_max_pending_bytes != 0
+            or self.peak_pending_frames != 0
+            or self.peak_pending_bytes != 0
             or self.close_result is not None
             or not isinstance(self.reason_id, DedicatedMediaRouteReason)
         ):
@@ -272,6 +280,21 @@ class DedicatedMediaSocketLeafResult:
             raise MediaTransportViolation(
                 "MEDIA_INVALID_ROUTE_EVIDENCE",
                 "active socket leaf reason must use the media close vocabulary",
+            )
+        if self.activated is True and (
+            self.peak_pending_frames > self.configured_max_pending_frames
+            or self.peak_pending_bytes > self.configured_max_pending_bytes
+            or min(
+                self.configured_max_pending_frames,
+                self.configured_max_pending_bytes,
+                self.peak_pending_frames,
+                self.peak_pending_bytes,
+            )
+            < 0
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_ROUTE_EVIDENCE",
+                "media socket queue facts exceed their configured bounds",
             )
 
 
@@ -653,6 +676,7 @@ async def run_dedicated_media_downlink_socket_leaf(
     socket: DedicatedMediaSocket,
     frames: Iterable[MediaAudioFrame],
     on_playback_stop: Callable[[MediaPlaybackStopReceipt], None],
+    on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
     max_pending_frames: int = 8,
     max_pending_bytes: int = 131_072,
 ) -> DedicatedMediaSocketLeafResult:
@@ -696,6 +720,10 @@ async def run_dedicated_media_downlink_socket_leaf(
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "playback stop consumer must be callable"
         )
+    if on_complete is not None and not callable(on_complete):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "downlink completion consumer must be callable"
+        )
     if (
         type(max_pending_frames) is not int
         or not 0 < max_pending_frames <= _MAX_PENDING_FRAMES
@@ -725,6 +753,8 @@ async def run_dedicated_media_downlink_socket_leaf(
     sent_frames = 0
     acknowledged_through_seq: int | None = None
     playback_stop_receipts = 0
+    peak_pending_frames = 0
+    peak_pending_bytes = 0
 
     async def close_socket() -> None:
         nonlocal socket_touched
@@ -779,6 +809,10 @@ async def run_dedicated_media_downlink_socket_leaf(
             sent_frames=sent_frames,
             acknowledged_through_seq=acknowledged_through_seq,
             playback_stop_receipts=playback_stop_receipts,
+            configured_max_pending_frames=max_pending_frames,
+            configured_max_pending_bytes=max_pending_bytes,
+            peak_pending_frames=peak_pending_frames,
+            peak_pending_bytes=peak_pending_bytes,
         )
 
     async def terminate(
@@ -789,8 +823,15 @@ async def run_dedicated_media_downlink_socket_leaf(
         closed = sender.close(reason_id)
         if send_detach and closed.detach is not None:
             await send_message(serialize_media_control(closed.detach))
-        await close_socket()
-        return result(closed)
+        leaf_result = result(closed)
+        try:
+            if on_complete is not None:
+                on_complete(leaf_result)
+        finally:
+            # Completion must become registry-visible before the peer observes
+            # physical close and can submit its browser render receipt.
+            await close_socket()
+        return leaf_result
 
     if not await send_message(serialize_media_control(MediaAttach(binding))):
         return await terminate(
@@ -815,6 +856,10 @@ async def run_dedicated_media_downlink_socket_leaf(
                 return await terminate(MediaDetachReason.INVALID_FRAME)
             enqueued = sender.enqueue(pending_frame)
             if enqueued.accepted:
+                peak_pending_frames = max(
+                    peak_pending_frames, sender.pending_frames
+                )
+                peak_pending_bytes = max(peak_pending_bytes, sender.pending_bytes)
                 pending_frame = None
                 continue
             if enqueued.reason_id == "MEDIA_BACKPRESSURE_LIMIT":

@@ -15,9 +15,12 @@ import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    CONTRACT_VERSION,
     ErrorCode,
     ScopeRef,
     TerminalOutcome,
+    TurnCommit,
+    TurnCommitLedger,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorDeliveryResult,
@@ -53,9 +56,11 @@ from jiuwenswarm.server.live_voice.p3_model_resolution import (
 )
 from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.live_voice.project_code_executor import (
+    DirectProjectCodeExecutorAdapter,
     FORMAL_PROJECT_EXECUTOR_ID,
 )
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.live_voice.voice_task_policy import FormalTaskPolicyAdapter
 
 NOW = "2026-08-05T12:00:00Z"
 EXPIRY = "2026-08-05T13:00:00Z"
@@ -260,6 +265,7 @@ def _harness(
     expires_at: str = EXPIRY,
     allowed_project_ids: frozenset[str] = frozenset({"project-1", "project-2"}),
     allowed_operations: frozenset[str] = P3_OPERATIONS,
+    commit_ledger: TurnCommitLedger | None = None,
 ) -> _Harness:
     database = tmp_path / "formal-tasks.sqlite3"
     executor = _Executor()
@@ -291,6 +297,7 @@ def _harness(
         model_resolver=models,
         binding_resolver=closer,
         telemetry=telemetry,
+        policy=FormalTaskPolicyAdapter(commit_ledger),
         reconcile_interval=3600,
         clock=lambda: NOW,
     )
@@ -374,6 +381,16 @@ def _issue_confirmation(
                 str(params["instruction"]) if operation == "task.create" else None
             ),
             model=model,
+            source=str(params.get("source", "structured")),
+            interaction_id=(
+                str(params["interaction_id"])
+                if "interaction_id" in params
+                else None
+            ),
+            turn_id=(str(params["turn_id"]) if "turn_id" in params else None),
+            commit_id=(
+                str(params["commit_id"]) if "commit_id" in params else None
+            ),
         ),
     )
     params["confirmation_id"] = harness.confirmations.issue(
@@ -501,6 +518,121 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
     finally:
         await harness.composition.stop()
     assert harness.closer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_voice_task_create_requires_exact_accepted_commit_and_text(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    harness = _harness(tmp_path, commit_ledger=ledger)
+    voice_commit = TurnCommit.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "commit_id": "commit-voice-task",
+            "turn_id": "turn-voice-task",
+            "interaction_id": "interaction-voice-task",
+            "text": "Create one bounded project change.",
+            "hypothesis_provenance": {
+                "provider": "product.web.voice",
+                "kind": "committed_text",
+            },
+            "scope": _scope().to_dict(),
+            "context_refs": [],
+            "committed_at": NOW,
+        }
+    )
+    await harness.composition.start()
+    try:
+        unaccepted = _create_params("command-unaccepted-voice")
+        unaccepted.update(
+            source="voice",
+            interaction_id=voice_commit.interaction_id,
+            turn_id=voice_commit.turn_id,
+            commit_id=voice_commit.commit_id,
+        )
+        rejected = await harness.composition.handle(
+            operation="task.create",
+            params=_issue_confirmation(harness, unaccepted, operation="task.create"),
+            request_id="request-unaccepted-voice",
+            session_id="session-1",
+        )
+        assert rejected.ok is False
+        assert rejected.payload["error"]["reason"] == "TURN_COMMIT_NOT_ACCEPTED"
+        assert _store_counts(harness.database) == (0, 0, 0, 0, 0)
+        assert harness.executor.dispatches == []
+
+        assert ledger.accept(voice_commit) is True
+        changed = _create_params("command-changed-voice")
+        changed.update(
+            source="voice",
+            interaction_id=voice_commit.interaction_id,
+            turn_id=voice_commit.turn_id,
+            commit_id=voice_commit.commit_id,
+            instruction="A different instruction must not borrow the commit.",
+        )
+        changed_result = await harness.composition.handle(
+            operation="task.create",
+            params=_issue_confirmation(harness, changed, operation="task.create"),
+            request_id="request-changed-voice",
+            session_id="session-1",
+        )
+        assert changed_result.ok is False
+        assert changed_result.payload["error"]["reason"] == (
+            "VOICE_TASK_INSTRUCTION_MISMATCH"
+        )
+        assert _store_counts(harness.database) == (0, 0, 0, 0, 0)
+        assert harness.executor.dispatches == []
+
+        exact = _create_params("command-exact-voice")
+        exact.update(
+            source="voice",
+            interaction_id=voice_commit.interaction_id,
+            turn_id=voice_commit.turn_id,
+            commit_id=voice_commit.commit_id,
+        )
+        accepted = await harness.composition.handle(
+            operation="task.create",
+            params=_issue_confirmation(harness, exact, operation="task.create"),
+            request_id="request-exact-voice",
+            session_id="session-1",
+        )
+        assert accepted.ok is True
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_invalid_voice_origin_is_rejected_before_durable_confirmation(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    harness = _harness(tmp_path, commit_ledger=ledger)
+    params = _create_params("command-invalid-voice-confirmation")
+    params.update(
+        source="voice",
+        interaction_id="interaction-not-accepted",
+        turn_id="turn-not-accepted",
+        commit_id="commit-not-accepted",
+    )
+    await harness.composition.start()
+    try:
+        with pytest.raises(FormalTaskViolation) as raised:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.create",
+                params=params,
+                session_id="session-1",
+            )
+        assert raised.value.reason == "TURN_COMMIT_NOT_ACCEPTED"
+        with sqlite3.connect(harness.database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM p3_confirmations"
+            ).fetchone()[0] == 0
+        assert _store_counts(harness.database) == (0, 0, 0, 0, 0)
+        assert harness.executor.dispatches == []
+    finally:
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio
@@ -1354,6 +1486,33 @@ async def test_concurrent_starts_create_one_worker_and_one_startup_reconciliatio
 
 
 @pytest.mark.asyncio
+async def test_stop_wakes_periodic_reconciler_without_cancelling_child_waiter() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.reconcile_calls = 0
+
+        async def reconcile(self):
+            self.reconcile_calls += 1
+            return {"reconciled": self.reconcile_calls}
+
+    core = Core()
+    composition = P3AuthenticatedComposition(
+        authenticator=StaticBearerAuthenticator(token=TOKEN, principal=_principal()),
+        authority_resolver=_AuthorityResolver({}),
+        core=core,
+        reconcile_interval=3600,
+        clock=lambda: NOW,
+    )
+
+    await composition.start()
+    worker = composition._worker
+    await asyncio.wait_for(composition.stop(), timeout=1)
+
+    assert core.reconcile_calls == 2  # startup plus final shutdown drain
+    assert worker is not None and worker.done() and worker.cancelled() is False
+
+
+@pytest.mark.asyncio
 async def test_stop_waits_for_start_and_prevents_post_stop_reactivation() -> None:
     prepare_entered = asyncio.Event()
     prepare_release = asyncio.Event()
@@ -1562,17 +1721,47 @@ def test_factory_accepts_reconciliation_interval_boundaries(
         "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
         lambda _configured: database,
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.auto_harness.service.AutoHarnessService",
-        lambda *_args, **_kwargs: SimpleNamespace(),
-    )
-
     composition = create_p3_composition_from_environment(
         agent_manager=object(), model_resolver=_ModelResolver()
     )
 
     assert composition is not None
     assert composition._reconcile_interval == interval
+    assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
+
+
+@pytest.mark.asyncio
+async def test_factory_direct_executor_lifecycle_releases_agent_bindings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 3600)
+    database = tmp_path / "direct-lifecycle.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+
+    class Manager:
+        def __init__(self) -> None:
+            self.cleanup_calls = 0
+
+        async def cleanup_live_voice_formal_task_agents(self) -> None:
+            self.cleanup_calls += 1
+
+    manager = Manager()
+    composition = create_p3_composition_from_environment(
+        agent_manager=manager,
+        model_resolver=_ModelResolver(),
+    )
+
+    assert composition is not None
+    await composition.start()
+    await composition.stop()
+    await composition.stop()
+
+    assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
+    assert manager.cleanup_calls == 1
 
 
 @pytest.mark.parametrize(
@@ -1598,10 +1787,6 @@ def test_factory_widens_alpha_principal_to_p2_only_behind_both_product_flags(
     monkeypatch.setattr(
         "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
         lambda _configured: tmp_path / "product-p2-authority.sqlite3",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.common.auto_harness.service.AutoHarnessService",
-        lambda *_args, **_kwargs: SimpleNamespace(),
     )
     composition = create_p3_composition_from_environment(
         agent_manager=object(), model_resolver=_ModelResolver()

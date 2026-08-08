@@ -468,7 +468,6 @@ async def test_marked_sync_exporter_is_rejected_before_every_activation_effect(
     exporter_calls: list[ExportRecord] = []
     issuer_calls: list[ProductObservabilityActivationEvidence] = []
 
-    @inspect.markcoroutinefunction
     def marked_sync_exporter(record: ExportRecord) -> Awaitable[None]:
         exporter_calls.append(record)
 
@@ -476,6 +475,16 @@ async def test_marked_sync_exporter_is_rejected_before_every_activation_effect(
             return None
 
         return completion()
+
+    marker = getattr(inspect, "markcoroutinefunction", None)
+    if marker is not None:
+        marked_sync_exporter = marker(marked_sync_exporter)
+        marker_detector = inspect.iscoroutinefunction
+    else:
+        # Python 3.11 supports the legacy marker through asyncio while
+        # ``inspect.markcoroutinefunction`` is only available from 3.12.
+        setattr(marked_sync_exporter, "_is_coroutine", asyncio.coroutines._is_coroutine)
+        marker_detector = asyncio.iscoroutinefunction
 
     def issuer(evidence: ProductObservabilityActivationEvidence) -> ProductRouteFact:
         issuer_calls.append(evidence)
@@ -490,7 +499,7 @@ async def test_marked_sync_exporter_is_rejected_before_every_activation_effect(
         reject_allocation,
     )
 
-    assert inspect.iscoroutinefunction(marked_sync_exporter) is True
+    assert marker_detector(marked_sync_exporter) is True
     assert marked_sync_exporter.__code__.co_flags & inspect.CO_COROUTINE == 0
 
     activation = await activate_product_observability_adapter(

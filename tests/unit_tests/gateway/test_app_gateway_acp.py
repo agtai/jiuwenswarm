@@ -10,6 +10,7 @@ from jiuwenswarm.gateway.app_gateway import (
     GatewayServer,
     GatewayServerConfig,
     RouteConfig,
+    _inject_live_voice_gateway_voice_claim,
     _inject_live_voice_web_alpha_credential,
     _normalize_gateway_message,
 )
@@ -213,6 +214,7 @@ def test_live_voice_web_alpha_credential_owner_is_default_off(
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
         ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
         ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE,
         ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK,
@@ -238,6 +240,90 @@ def test_live_voice_web_alpha_credential_owner_replaces_client_claim(
     _inject_live_voice_web_alpha_credential(msg)
 
     assert msg.params["auth_token"] == "server-secret"
+
+
+@pytest.mark.asyncio
+async def test_gateway_redeems_voice_receipt_and_strips_client_claim() -> None:
+    calls: list[dict[str, object]] = []
+
+    class SpeechOwner:
+        async def claim_voice_commit_receipt(self, **kwargs: object):
+            calls.append(dict(kwargs))
+            return {
+                "kind": "formal_speech_recognition",
+                "speech_operation_id": "speech-operation-1",
+                "capture_id": "capture-1",
+                "capture_generation": 1,
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "turn_id": "turn-1",
+                "commit_id": "commit-1",
+                "text_sha256": "a" * 64,
+                "critical_policy": "eligible",
+            }
+
+    msg = Message(
+        id="req-voice-claim",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "turn_id": "turn-1",
+            "commit_id": "commit-1",
+            "text": "recognized text",
+            "voice_commit_receipt": "r" * 32,
+            "critical_confirmation": True,
+            "gateway_voice_claim": {"kind": "client-forged"},
+        },
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+    )
+
+    await _inject_live_voice_gateway_voice_claim(msg, SpeechOwner())
+
+    assert calls == [
+        {
+            "receipt": "r" * 32,
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "turn_id": "turn-1",
+            "commit_id": "commit-1",
+            "text": "recognized text",
+            "critical_confirmation": True,
+        }
+    ]
+    assert msg.params["gateway_voice_claim"]["kind"] == (
+        "formal_speech_recognition"
+    )
+    assert "voice_commit_receipt" not in msg.params
+    assert "critical_confirmation" not in msg.params
+
+
+@pytest.mark.asyncio
+async def test_gateway_strips_forged_voice_claim_without_receipt() -> None:
+    msg = Message(
+        id="req-forged-voice-claim",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={
+            "session_id": "session-1",
+            "gateway_voice_claim": {"kind": "formal_speech_recognition"},
+        },
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+    )
+
+    await _inject_live_voice_gateway_voice_claim(msg, None)
+
+    assert "gateway_voice_claim" not in msg.params
 
 
 def test_live_voice_web_alpha_credential_owner_fails_closed_without_secret(

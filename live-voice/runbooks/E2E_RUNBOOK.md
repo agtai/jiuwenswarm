@@ -223,13 +223,155 @@ Vite 也会读取 `JIUWENSWARM_DATA_DIR`，所以前端终端必须使用与本�
 
 ### 7.1 Cumulative Integrated / Web Alpha 激活门槛
 
-Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability，并由 route telemetry 标记每段 `formal/fallback/demo_substitute/unsupported/unknown`。在 STATUS 标记完整路径可运行、且本节记录精确启动和停止命令之前：
+Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability，并由 route telemetry 标记每段 `formal/fallback/demo_substitute/unsupported/unknown`。当前源码已提供默认关闭的累计产品路由、独立 Gateway/AgentServer JSONL 证据出口和严格 Gate CLI；这表示可以进入受控 candidate 激活，不表示已经有真实 Provider、设备、Executor、人工听感或 Gate PASS。
 
 - 不得同时打开现有两个 Post-V0 flag 并把偶然共存称为 Integrated Demo；
 - 不得拼接多个独立运行的截图或结果计算 Replacement Ledger；
 - 不得使用 fake Provider/Executor 作为真实 showcase 成功；
 - [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 只能作为 Gate 脚本，运行状态和 Week 2 分数只从 STATUS 读取；
-- 新组合模式落地时，必须在本节记录精确启动变量/配置、互斥与兼容规则、route trace 检查、停止/恢复流程和实际 tested candidate，不能提前写占位命令。
+- 必须用下述 CLI 导入签名原件并输出机器 Gate 结果；手填分数、通用 lifecycle 事件、截图和人工 receipt 都不能创建 runtime credit。
+
+#### 7.1.1 冻结 candidate、Session 和证据边界
+
+先在同一隔离数据目录完成机器私有的模型、code project 和一次持久 Session 注册，记录真实 `session_id`，然后停止全部服务。正式取证不能使用 `session_id=new`。在干净 candidate worktree 的新 PowerShell 中执行：
+
+```powershell
+Set-Location '<本次 candidate worktree 的绝对路径>' -ErrorAction Stop
+if (-not (Test-Path -LiteralPath '.\pyproject.toml')) { throw 'Not at the worktree root' }
+if (git status --porcelain=v1 --untracked-files=all) { throw 'W2 candidate worktree is dirty' }
+$candidateRoot = (Resolve-Path -LiteralPath '.').Path
+$candidateSha = (git rev-parse HEAD).Trim()
+if ($candidateSha -notmatch '^[0-9a-f]{40}$') { throw 'Candidate SHA is invalid' }
+$w2RunLabel = Get-Date -Format 'yyyyMMdd-HHmmss'
+$w2EvidenceRoot = [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $candidateRoot) ("jiuwenswarm-evidence-live-voice-w2-{0}" -f $w2RunLabel)))
+if (Test-Path -LiteralPath $w2EvidenceRoot) { throw "Refusing to reuse evidence dir: $w2EvidenceRoot" }
+New-Item -ItemType Directory -Path $w2EvidenceRoot -ErrorAction Stop | Out-Null
+$environmentId = "w2-localhost-$w2RunLabel"
+$modeId = 'integrated-formal'
+$evidenceSetId = "w2-evidence-$w2RunLabel"
+$sessionId = '<已在相同隔离 JIUWENSWARM_DATA_DIR 中保存的精确 session_id>'
+if (-not $sessionId -or $sessionId -eq 'new' -or $sessionId -like '<*') { throw 'Record one exact persistent session_id first' }
+```
+
+`$candidateRoot`、`$candidateSha`、`$w2EvidenceRoot`、`$environmentId`、`$modeId`、`$evidenceSetId`、`$sessionId` 和第 4.1 节的 `JIUWENSWARM_DATA_DIR` 要记录到本次非敏感环境说明，并在每个服务终端重新赋同样的值。证据目录必须在 candidate 仓库外且不得复用；Provider key、P3 bearer、签名私钥和未脱敏内容不得进入该目录或 Git。
+
+启动任何取证进程前，先由外部 root 身份签署 `live-voice.w2-trust-policy.v2`。policy 必须固定上述 candidate/environment/Session/mode、实际加载源码的 `repository_path`、`evidence_set_id`、两个互相独立的 Gateway/AgentServer runtime signer，以及本 attempt 允许出现的每个 runtime slot：`artifact_id`、全局 `artifact_sequence`、`producer_id`、`process_epoch`、同 producer 的可选 `predecessor_artifact_id` 和可选 `showcase_run`。所有 runtime、automated、assisted/review 原件还必须进入完整 `artifact_slots` 计划。三个 showcase 各自必须预留 Gateway 与 AgentServer slot；fault、restart 和其他取证 slot 也必须在启动前列全。使用独立可信渠道预先保存 root 公钥 SHA-256，并按 7.1.4 的 `validate-policy` 命令完成预检后才能启动服务。运行后不得补签 policy、删除失败 slot 或用 manifest 选择性省略原件；需要改变 slot 时废弃整个 attempt，使用新 evidence set 和新 root-signed policy 重来。
+
+#### 7.1.2 启动累计后端
+
+AgentServer 终端先设置第 4.1 节数据目录以及上节六个公共值，再设置：
+
+```powershell
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_P3_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN = '<本机私有 bearer；不得记录值>'
+$env:JIUWENSWARM_LIVE_VOICE_P3_PRINCIPAL_ID = '<本次受控 principal id>'
+$env:JIUWENSWARM_LIVE_VOICE_P3_PROJECT_IDS = '<本次可丢弃、已注册的精确 project id>'
+$env:JIUWENSWARM_LIVE_VOICE_P3_AUTH_EXPIRES_AT = '<带时区且晚于验收结束的 ISO-8601 时间>'
+Remove-Item Env:JIUWENSWARM_LIVE_VOICE_P3_DATABASE -ErrorAction SilentlyContinue
+$env:JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS = '1'
+$env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_PATH = (Join-Path $w2EvidenceRoot '<当前 policy slot 的 agentserver artifact_id>.jsonl')
+$env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_PRIVATE_KEY_PATH = '<policy 绑定的 AgentServer leaf 私钥绝对路径；不得位于 evidence 目录或 Git>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_SIGNATURE_PATH = (Join-Path $w2EvidenceRoot '<当前 agentserver artifact_id>.signature')
+$env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_SET_ID = $evidenceSetId
+$env:JIUWENSWARM_LIVE_VOICE_W2_ARTIFACT_ID = '<当前 root-authorized AgentServer artifact_id>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_ARTIFACT_SEQUENCE = '<当前 root-authorized 全局正整数 sequence>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_PROCESS_EPOCH = '<当前 root-authorized AgentServer process_epoch>'
+Remove-Item Env:JIUWENSWARM_LIVE_VOICE_W2_PREDECESSOR_ARTIFACT_ID -ErrorAction SilentlyContinue
+# 非首个同 producer slot 时，改为 policy 中精确 predecessor_artifact_id：
+# $env:JIUWENSWARM_LIVE_VOICE_W2_PREDECESSOR_ARTIFACT_ID = '<前驱 artifact_id>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_CANDIDATE_SHA = $candidateSha
+$env:JIUWENSWARM_LIVE_VOICE_W2_ENVIRONMENT_ID = $environmentId
+$env:JIUWENSWARM_LIVE_VOICE_W2_SESSION_ID = $sessionId
+$env:JIUWENSWARM_LIVE_VOICE_W2_MODE_ID = $modeId
+$env:JIUWENSWARM_LIVE_VOICE_W2_REPOSITORY_PATH = $candidateRoot
+& .\.venv\Scripts\python.exe -m jiuwenswarm.server.app_agentserver
+```
+
+默认 P3 数据库位于当前 `JIUWENSWARM_DATA_DIR/live_voice/p3alpha`。若本次必须指定文件，只能把 `JIUWENSWARM_LIVE_VOICE_P3_DATABASE` 设置为该目录内的新绝对路径；不得指向源码仓库或数据目录外。P3 project 必须是可丢弃或已备份的真实 Git project；D0 Executor 会产生真实代码副作用，取消不会回滚已发生的修改。
+
+Gateway 终端设置同一数据目录、candidate/environment/Session/mode/repository 值，再设置：
+
+```powershell
+$env:LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED = 'true'
+$env:LIVE_VOICE_SPEECH_PROVIDER = '<本次真实 Provider 标签>'
+$env:LIVE_VOICE_SPEECH_API_BASE = '<本机私有 HTTPS API base>'
+$env:LIVE_VOICE_SPEECH_API_KEY = '<本机私有 Provider key；不得记录值>'
+$env:LIVE_VOICE_SPEECH_STT_MODEL = '<本次真实 STT model>'
+$env:LIVE_VOICE_SPEECH_TTS_MODEL = '<本次真实 TTS model>'
+$env:LIVE_VOICE_SPEECH_TTS_VOICE = '<本次真实 voice>'
+$env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED = 'true'
+$env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_EVIDENCE_PATH = (Join-Path $w2EvidenceRoot '<当前 policy slot 的 gateway artifact_id>.jsonl')
+$env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_EVIDENCE_PRIVATE_KEY_PATH = '<policy 绑定的 Gateway leaf 私钥绝对路径；不得位于 evidence 目录或 Git>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_EVIDENCE_SIGNATURE_PATH = (Join-Path $w2EvidenceRoot '<当前 gateway artifact_id>.signature')
+$env:JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_SET_ID = $evidenceSetId
+$env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_ARTIFACT_ID = '<当前 root-authorized Gateway artifact_id>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_ARTIFACT_SEQUENCE = '<当前 root-authorized 全局正整数 sequence>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_PROCESS_EPOCH = '<当前 root-authorized Gateway process_epoch>'
+Remove-Item Env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_PREDECESSOR_ARTIFACT_ID -ErrorAction SilentlyContinue
+# 非首个同 producer slot 时，改为 policy 中精确 predecessor_artifact_id：
+# $env:JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_PREDECESSOR_ARTIFACT_ID = '<前驱 artifact_id>'
+$env:JIUWENSWARM_LIVE_VOICE_W2_CANDIDATE_SHA = $candidateSha
+$env:JIUWENSWARM_LIVE_VOICE_W2_ENVIRONMENT_ID = $environmentId
+$env:JIUWENSWARM_LIVE_VOICE_W2_SESSION_ID = $sessionId
+$env:JIUWENSWARM_LIVE_VOICE_W2_MODE_ID = $modeId
+$env:JIUWENSWARM_LIVE_VOICE_W2_REPOSITORY_PATH = $candidateRoot
+& .\.venv\Scripts\python.exe -c "import jiuwenswarm.common.config as c; real=c.get_config; c.get_config=lambda:(lambda x:(x.setdefault('channels',{}).setdefault('slack',{}).__setitem__('enabled',False),x)[1])(real()); import jiuwenswarm.gateway.app_gateway as g; g.main()"
+```
+
+每个 root-authorized slot 使用一组新进程和一个新 JSONL 文件；正常关闭 owner 后必须出现 `closed:true` footer，且 `rejected_invalid`、`rejected_capacity`、`failed_writes` 全为零。三个 showcase 不得写入同一 runtime artifact。任一进程若报告 candidate mismatch、dirty worktree、证据注册失败、Provider 配置错误或 P3 authority/project 错误，立即停止本次 attempt；不能关闭证据再继续算分。需要修代码或配置时关闭全部进程，产生新 commit/SHA、新证据目录、新 policy 和新 attempt。
+
+#### 7.1.3 启动累计前端并执行 journey
+
+Vite 终端绑定同一数据目录，启用且仅启用正式 Integrated Web 入口：
+
+```powershell
+Set-Location '<本次 candidate worktree 的绝对路径>' -ErrorAction Stop
+$env:VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB = 'true'
+$env:VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 = 'true'
+$env:VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = 'true'
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH -ErrorAction SilentlyContinue
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
+Set-Location jiuwenswarm\channels\web\frontend
+npm run dev
+```
+
+在声明的单一桌面 Chrome、同一持久 Session 和同一页面生命周期内按 [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 完成累计 journey、两类 fault、restart/reconciliation 和连续三轮 showcase。每次调用必须保持由产品入口生成的同一 causal chain/correlation；不得手工拼接另一 Session、另一 attempt 或另一 task 的事实。浏览器实听、麦克风/扬声器生命周期和 P3 UI 只能由实际观察者为精确 subject 签收；receipt 必须绑定被观察 runtime 原件的 SHA-256，不能代替或制造原件。
+
+P2 Realtime Media 取证时，产品会在 Agent 下行播放前自动打开下一轮麦克风上行。保持该上行处于采集状态直至物理播放完成，再使用产品内的停止/识别控制完成这轮上行；不得提前关闭麦克风、手工伪造 overlap，或把网络收包 ACK 当作播放 ACK。有效 runtime 顺序必须是同一 interaction/response 下的 Gateway downlink 完成、浏览器 render receipt、Gateway 派生 duplex receipt、后续 capture 完成。
+
+#### 7.1.4 冻结、签名、导入和评分
+
+完成后依次停止 Vite、Gateway、AgentServer，确认每个 JSONL v2 footer 已关闭、计数精确且没有 reject/write failure，并确认 candidate 仍干净。runtime 的 Gateway 与 AgentServer 必须使用 policy 中各自绑定的独立 signer/principal；自动化、人工观察、fault injection 和独立 review 也各用 policy 中的独立身份，独立 review 不得使用实现者身份。下面 `sign` policy 命令必须已在 7.1.2 启动前执行，此处只完整列出操作接口，禁止运行后补签或替换 policy。CLI 只创建新 key/signature 文件，拒绝覆盖：
+
+```powershell
+Set-Location $candidateRoot -ErrorAction Stop
+if ((git rev-parse HEAD).Trim() -ne $candidateSha) { throw 'Candidate HEAD changed' }
+if (git status --porcelain=v1 --untracked-files=all) { throw 'Candidate became dirty' }
+& .\.venv\Scripts\python.exe -m jiuwenswarm.server.live_voice.w2_gate_cli keygen --private-key '<证据目录外的新私钥绝对路径>' --public-key '<新公钥绝对路径>'
+& .\.venv\Scripts\python.exe -m jiuwenswarm.server.live_voice.w2_gate_cli sign --private-key '<外部 root 私钥绝对路径>' --input '<启动前冻结的 trust-policy.v2 JSON 绝对路径>' --signature '<新 policy root 签名绝对路径>'
+$expectedRootSha256 = '<通过独立可信渠道预先记录的 root raw-public-key SHA-256；不能从本次目录自行推导后再信任>'
+& .\.venv\Scripts\python.exe -m jiuwenswarm.server.live_voice.w2_gate_cli validate-policy --trust-policy '<启动前冻结的 trust-policy.v2 JSON 绝对路径>' --trust-policy-signature '<policy root 签名绝对路径>' --root-public-key '<外部 root 公钥绝对路径>' --expected-root-sha256 $expectedRootSha256
+if ($LASTEXITCODE -ne 0) { throw 'W2 trust policy preflight failed' }
+# runtime_jsonl 由各自 Gateway/AgentServer 生产进程在 seal 时直接签名，禁止离线补签：
+& .\.venv\Scripts\python.exe -m jiuwenswarm.server.live_voice.w2_gate_cli sign-artifact --private-key '<policy 绑定的非 runtime leaf 私钥绝对路径>' --input '<待签原件绝对路径>' --signature '<新 artifact 签名绝对路径>' --kind '<automated_report|assisted_receipt>' --artifact-id '<原件闭合 ID>' --sequence '<原件全局序号>'
+& .\.venv\Scripts\python.exe -m jiuwenswarm.server.live_voice.w2_gate_cli evaluate --manifest '<闭合 W2 manifest 的绝对路径>' --trust-policy '<启动前冻结的 trust-policy.v2 JSON 绝对路径>' --trust-policy-signature '<policy root 签名绝对路径>' --root-public-key '<外部 root 公钥绝对路径>' --expected-root-sha256 $expectedRootSha256
+```
+
+trust policy schema 固定为 `live-voice.w2-trust-policy.v2`，顶层必须且只能包含 `schema`、`policy_id`、`repository_path`、`candidate`、`evidence_set_id`、`runtime_slots`、`artifact_slots`、`signers`；`repository_path` 必须绑定实际加载代码的 candidate 根。每个 signer 直接内嵌唯一 `public_key_hex`，不得通过可变 `public_key_file` 间接换钥；root 公钥不得同时作为 leaf evidence signer。每个 signer 只拥有一个 evidence role，runtime signer 还必须精确绑定一个 producer。`artifact_slots` 必须在启动前列全所有 runtime、automated、assisted/review 原件的 ID、全局序号、kind、signer、source label 和精确 subjects；导入集合必须与该 root-authorized plan 完全相等。三个 showcase 引用的 runtime ID 也必须与各自 `showcase_run` slots 完全相等。
+
+Gateway 与 AgentServer 启动时会读取各自独立的 leaf 私钥；正常关闭证据 owner 后，生产进程先写入闭合 footer，再对原始 JSONL 的精确字节和 import identity 生成新 signature 文件。缺少私钥/签名路径、签名目标已存在、candidate dirty、加载源码不属于 `repository_path` 或 owner 未正常 seal 都必须终止 attempt。运行后不得用 `sign-artifact` 为 runtime 补签；该命令只接受 automated report 和 assisted receipt。
+
+manifest schema 固定为 `live-voice.w2-gate-manifest.v1`，顶层必须且只能包含 `schema`、`repository_path`、`candidate`、`artifacts`、`verification`、`awards`、`invariants`、`showcase_runs`、`journey_steps`、`faults`、`restart`；manifest 不得定义或替换 trust roots。artifact import 必须且只能包含 `kind`、`artifact_id`、`sequence`、`content_file`、`signature_file`、`signer_id`、`source_label`；`kind` 仅允许 `runtime_jsonl`、`automated_report`、`assisted_receipt`，runtime/assisted receipt 的 `source_label` 必须为 `null`。
+
+人工、fault 和 review receipt 使用闭合 `live-voice.w2-assisted-receipt.v2`：必须绑定同一个 `evidence_set_id`、所声称结论消费的全部 runtime SHA-256，连续三轮 showcase receipt 还必须用 `previous_receipt_sha256` 形成单链。receipt 只能见证真实原件，不能用 `product.w2.journey.*`、`showcase.*`、`fault_marker.*`、手填分数或 correlation-only 关联制造事实。真实 TaskEvent、Agent `tool_call/tool_result/final`、Speech/Media/presentation/barge-in 和失败操作的精确 source/binding 才能生成 runtime credit；闭合 schema 与 subject 命名以 [Gate 实现](../../jiuwenswarm/server/live_voice/w2_demo_gate.py) 为准。
+
+CLI 退出码 `0` 仅表示机器结果 `PASS`；`1` 表示合法证据集评估为 `FAIL`；`2` 表示 manifest、签名、候选或操作合同错误。只有保存 CLI JSON 结果、脱敏 manifest/公钥/签名/原件摘要、环境标签和实际缺口后才能更新 STATUS；任何非零结果均保持 Replacement Ledger 不变。
 
 完整 Integrated 模式可运行后仍要保留下述 V0 模式用于不可变回归，并允许每个 formal module 单独切回其声明的 fallback。Week 2/Week 4 分别按 [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 和 [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md) 取证。
 

@@ -10,6 +10,7 @@ import {
   serializeMediaControl,
   type ActiveMediaActivation,
   type MediaAuthorityBinding,
+  type MediaAck,
   type MediaControl,
   type MediaDetach,
   type MediaDetachReason,
@@ -110,6 +111,8 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly max_pending_frames?: number;
   readonly max_pending_bytes?: number;
   readonly socket_high_water_bytes?: number;
+  /** Hold downlink ACKs until the corresponding browser audio chunk renders. */
+  readonly defer_downlink_ack?: boolean;
 }
 
 export interface DedicatedMediaRouteCapability {
@@ -453,6 +456,10 @@ export function createBrowserDedicatedMediaRoute(
     MAX_SOCKET_HIGH_WATER_BYTES,
     'socket_high_water_bytes',
   );
+  if (
+    request.defer_downlink_ack !== undefined
+    && typeof request.defer_downlink_ack !== 'boolean'
+  ) throw new TypeError('defer_downlink_ack must be boolean');
 
   const activation = createBrowserGatewayMediaActivation({
     enabled: true,
@@ -475,7 +482,10 @@ export function createBrowserDedicatedMediaRoute(
     const leaf = new BrowserDedicatedMediaSocketLeaf(
       activation,
       socket,
+      maxPendingFrames,
+      maxPendingBytes,
       highWaterBytes,
+      request.defer_downlink_ack === true,
       DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN,
     );
     return Object.freeze({
@@ -497,7 +507,16 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly binding: MediaAuthorityBinding;
   readonly #activation: ActiveMediaActivation;
   readonly #socket: DedicatedMediaSocketLike;
+  readonly #maxPendingFrames: number;
+  readonly #maxPendingBytes: number;
   readonly #socketHighWaterBytes: number;
+  readonly #deferDownlinkAck: boolean;
+  readonly #pendingDownlinkAcks = new Map<
+    number,
+    Readonly<{ ack: Readonly<MediaAck>; byteLength: number }>
+  >();
+  #pendingDownlinkBytes = 0;
+  #lastDeferredDownlinkAck = -1;
   #attached = false;
   #closed = false;
   #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
@@ -505,7 +524,10 @@ export class BrowserDedicatedMediaSocketLeaf {
   constructor(
     activation: ActiveMediaActivation,
     socket: DedicatedMediaSocketLike,
+    maxPendingFrames: number,
+    maxPendingBytes: number,
     socketHighWaterBytes: number,
+    deferDownlinkAck: boolean,
     constructionToken?: symbol,
   ) {
     if (constructionToken !== DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN) {
@@ -514,7 +536,10 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#activation = activation;
     this.binding = activation.binding;
     this.#socket = socket;
+    this.#maxPendingFrames = maxPendingFrames;
+    this.#maxPendingBytes = maxPendingBytes;
     this.#socketHighWaterBytes = socketHighWaterBytes;
+    this.#deferDownlinkAck = deferDownlinkAck;
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
       if (this.#closed) return;
@@ -667,6 +692,42 @@ export class BrowserDedicatedMediaSocketLeaf {
     return this.#terminate(reasonId);
   }
 
+  acknowledgeDownlinkThrough(throughSeq: number): void {
+    if (
+      this.binding.direction !== 'downlink'
+      || !this.#deferDownlinkAck
+      || !Number.isSafeInteger(throughSeq)
+      || throughSeq < 0
+    ) throw new TypeError('deferred downlink ACK is unavailable');
+    if (this.#closed || !this.#attached) {
+      throw new MediaTransportViolation(
+        'MEDIA_LEASE_CLOSED',
+        'deferred downlink ACK requires an attached route',
+      );
+    }
+    const retained = this.#pendingDownlinkAcks.get(throughSeq);
+    if (retained === undefined) {
+      throw new MediaTransportViolation(
+        'MEDIA_ACK_UNSENT',
+        'deferred downlink ACK does not match a received frame',
+      );
+    }
+    if (throughSeq !== this.#lastDeferredDownlinkAck + 1) {
+      throw new MediaTransportViolation(
+        'MEDIA_ACK_OUT_OF_ORDER',
+        'deferred downlink ACK must follow browser render order',
+      );
+    }
+    for (const seq of this.#pendingDownlinkAcks.keys()) {
+      if (seq <= throughSeq) {
+        this.#pendingDownlinkBytes -= this.#pendingDownlinkAcks.get(seq)!.byteLength;
+        this.#pendingDownlinkAcks.delete(seq);
+      }
+    }
+    this.#lastDeferredDownlinkAck = throughSeq;
+    this.#sendControl(retained.ack);
+  }
+
   #acceptMessage(value: unknown): void {
     if (this.#closed) return;
     if (typeof value === 'string') {
@@ -685,8 +746,26 @@ export class BrowserDedicatedMediaSocketLeaf {
       this.#terminate(this.#attached ? 'MEDIA_TRANSPORT_PROTOCOL_ERROR' : 'MEDIA_NOT_ATTACHED');
       return;
     }
+    if (
+      this.#deferDownlinkAck
+      && (
+        this.#pendingDownlinkAcks.size >= this.#maxPendingFrames
+        || this.#pendingDownlinkBytes + binary.byteLength > this.#maxPendingBytes
+      )
+    ) {
+      this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+      return;
+    }
     const result = this.#activation.owner.acceptBinary(binary);
-    this.#sendControl(result);
+    if (result.type === 'media.ack' && this.#deferDownlinkAck) {
+      this.#pendingDownlinkAcks.set(result.through_seq, Object.freeze({
+        ack: result,
+        byteLength: binary.byteLength,
+      }));
+      this.#pendingDownlinkBytes += binary.byteLength;
+    } else {
+      this.#sendControl(result);
+    }
     if (result.type === 'media.detach') this.#terminate(result.reason_id, false);
   }
 
@@ -745,6 +824,8 @@ export class BrowserDedicatedMediaSocketLeaf {
     if (this.#retainedClose !== null) return this.#retainedClose;
     const closed = this.#activation.owner.close(reasonId);
     this.#retainedClose = closed;
+    this.#pendingDownlinkAcks.clear();
+    this.#pendingDownlinkBytes = 0;
     this.#closed = true;
     this.#attached = false;
     if (sendDetach && this.#socket.readyState === SOCKET_OPEN) {

@@ -239,9 +239,9 @@
           "system.degradation"
         ],
         "required_facts": [],
-        "allowed_facts": ["reason_code"],
+        "allowed_facts": ["source_record_id", "reason_code"],
         "required_bindings": [],
-        "source_kind": "none",
+        "source_kind": "optional",
         "states": [],
         "outcomes": [],
         "reasons": [

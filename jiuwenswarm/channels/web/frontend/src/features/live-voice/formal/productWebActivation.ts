@@ -3,6 +3,7 @@ export const PRODUCT_P2_CLOSE_METHOD = 'live_voice.composition.p2.close' as cons
 export const PRODUCT_P2_SUBMIT_METHOD = 'live_voice.composition.p2.submit' as const;
 export const PRODUCT_P2_NOTIFICATION_NEXT_METHOD = 'live_voice.composition.p2.notification.next' as const;
 export const PRODUCT_P2_PRESENTATION_ACK_METHOD = 'live_voice.composition.p2.presentation.ack' as const;
+export const PRODUCT_P2_BARGE_IN_METHOD = 'live_voice.composition.p2.barge_in' as const;
 export const PRODUCT_P3_CONFIRMATION_ISSUE_METHOD = 'live_voice.composition.p3.confirmation.issue' as const;
 export const PRODUCT_P3_MUTATE_METHOD = 'live_voice.composition.p3.mutate' as const;
 export const PRODUCT_P3_TASK_LIST_METHOD = 'live_voice.task.list' as const;
@@ -212,6 +213,10 @@ export type ProductWebP3MutationInput = Readonly<
       command_id: string;
       issued_at: string;
       correlation_id: string;
+      source: 'structured' | 'voice';
+      interaction_id?: string;
+      turn_id?: string;
+      commit_id?: string;
       name: string;
       instruction: string;
       model_intent?: string;
@@ -222,6 +227,7 @@ export type ProductWebP3MutationInput = Readonly<
       command_id: string;
       issued_at: string;
       correlation_id: string;
+      source: 'structured';
       task_id: string;
     }
 >;
@@ -230,6 +236,17 @@ export interface ProductWebP3ConfirmationReceipt {
   readonly confirmation_id: string;
   readonly expires_at: string;
   readonly operation: 'task.create' | 'task.cancel';
+  readonly command_id: string;
+  readonly target_task_id: string | null;
+  readonly task_control_binding: ProductWebP3TaskControlBinding;
+}
+
+export interface ProductWebP3TaskControlBinding {
+  readonly subject_id: string;
+  readonly session_id: string;
+  readonly project_id: string;
+  readonly correlation_id: string;
+  readonly generation: number;
 }
 
 function requiredContent(value: string, field: string): string {
@@ -299,7 +316,7 @@ function requireResult(
 
 function requireP2BoundOperationResult(
   value: unknown,
-  expectedStatus: 'round_accepted' | 'notification' | 'presentation_acknowledged',
+  expectedStatus: 'round_accepted' | 'task_origin_accepted' | 'notification' | 'presentation_acknowledged' | 'barge_in_applied',
   binding: Readonly<ProductWebP2ActivationBinding>
 ): JsonObject {
   const payload = objectValue(value);
@@ -326,20 +343,69 @@ function freezeP3MutationInput(input: ProductWebP3MutationInput): ProductWebP3Mu
     correlation_id: requiredText(input.correlation_id, 'correlation_id'),
   } as const;
   if (input.operation === 'task.cancel') {
+    if (input.source !== undefined && input.source !== 'structured') {
+      throw new Error('task.cancel source is invalid');
+    }
     return Object.freeze({
       operation: 'task.cancel' as const,
       ...common,
+      source: 'structured' as const,
       task_id: requiredText(input.task_id, 'task_id'),
     });
+  }
+  const source = input.source ?? 'structured';
+  if (source !== 'structured' && source !== 'voice') {
+    throw new Error('task.create source is invalid');
+  }
+  if (
+    (source === 'voice' && (!input.interaction_id || !input.turn_id || !input.commit_id)) ||
+    (source === 'structured' && (
+      input.interaction_id !== undefined || input.turn_id !== undefined || input.commit_id !== undefined
+    ))
+  ) {
+    throw new Error('task.create committed origin is invalid');
   }
   return Object.freeze({
     operation: 'task.create' as const,
     ...common,
+    source,
+    ...(source === 'voice'
+      ? {
+          interaction_id: requiredText(input.interaction_id ?? '', 'interaction_id'),
+          turn_id: requiredText(input.turn_id ?? '', 'turn_id'),
+          commit_id: requiredText(input.commit_id ?? '', 'commit_id'),
+        }
+      : {}),
     name: requiredContent(input.name, 'name'),
     instruction: requiredContent(input.instruction, 'instruction'),
     ...(input.model_intent === undefined
       ? {}
       : { model_intent: requiredText(input.model_intent, 'model_intent') }),
+  });
+}
+
+function requireP3TaskControlBinding(
+  value: unknown,
+  mutation: ProductWebP3MutationInput
+): ProductWebP3TaskControlBinding {
+  const binding = objectValue(value);
+  if (
+    binding === null ||
+    Object.keys(binding).sort().join(',') !==
+      'correlation_id,generation,project_id,session_id,subject_id' ||
+    binding.session_id !== mutation.session_id ||
+    binding.correlation_id !== mutation.correlation_id ||
+    !Number.isSafeInteger(binding.generation) ||
+    Number(binding.generation) <= 0
+  ) {
+    throw new Error('product P3 task-control binding is unavailable');
+  }
+  return Object.freeze({
+    subject_id: requiredText(String(binding.subject_id ?? ''), 'subject_id'),
+    session_id: requiredText(String(binding.session_id), 'session_id'),
+    project_id: requiredText(String(binding.project_id ?? ''), 'project_id'),
+    correlation_id: requiredText(String(binding.correlation_id), 'correlation_id'),
+    generation: Number(binding.generation),
   });
 }
 
@@ -489,8 +555,13 @@ export class ProductWebP2ActivationOwner {
     string,
     { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }
   >();
+  private readonly bargeIns = new Map<
+    string,
+    { requestId: string; result?: JsonObject; promise?: Promise<JsonObject> }
+  >();
   private readonly submissionReplayFence = new ProductReplayFence();
   private readonly presentationAckReplayFence = new ProductReplayFence();
+  private readonly bargeInReplayFence = new ProductReplayFence();
   private notificationRequestId: string | null = null;
   private notificationPromise: Promise<JsonObject> | null = null;
   private notificationSequence = 0;
@@ -575,8 +646,18 @@ export class ProductWebP2ActivationOwner {
     response_id: string;
     committed_at: string;
     text: string;
+    dispatch_target?: 'agent' | 'task';
+    voice_commit_receipt?: string;
+    critical_confirmation?: true;
   }): Promise<JsonObject> {
     const binding = this.requireActiveBinding();
+    const dispatchTarget = input.dispatch_target ?? 'agent';
+    if (dispatchTarget !== 'agent' && dispatchTarget !== 'task') {
+      throw new Error('product turn dispatch target is invalid');
+    }
+    if (dispatchTarget === 'task' && !input.voice_commit_receipt) {
+      throw new Error('voice task origin requires a formal speech receipt');
+    }
     const params = {
       ...binding,
       commit_id: requiredText(input.commit_id, 'commit_id'),
@@ -584,6 +665,11 @@ export class ProductWebP2ActivationOwner {
       response_id: requiredText(input.response_id, 'response_id'),
       committed_at: requiredText(input.committed_at, 'committed_at'),
       text: requiredContent(input.text, 'text'),
+      dispatch_target: dispatchTarget,
+      ...(input.voice_commit_receipt
+        ? { voice_commit_receipt: requiredText(input.voice_commit_receipt, 'voice_commit_receipt') }
+        : {}),
+      ...(input.critical_confirmation === true ? { critical_confirmation: true } : {}),
     };
     const fingerprint = JSON.stringify(params);
     let retained = this.submissions.get(fingerprint);
@@ -609,7 +695,11 @@ export class ProductWebP2ActivationOwner {
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_SUBMIT_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(value, 'round_accepted', binding);
+        const result = requireP2BoundOperationResult(
+          value,
+          dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted',
+          binding,
+        );
         entry.result = result;
         return result;
       })
@@ -651,6 +741,79 @@ export class ProductWebP2ActivationOwner {
         if (this.notificationPromise === promise) this.notificationPromise = null;
       });
     this.notificationPromise = promise;
+    return promise;
+  }
+
+  async bargeIn(input: {
+    action_id: string;
+    response_id: string;
+    response_generation: number;
+    cancel_response: boolean;
+  }): Promise<JsonObject> {
+    const binding = this.requireActiveBinding();
+    if (
+      !Number.isSafeInteger(input.response_generation) ||
+      input.response_generation < 0 ||
+      typeof input.cancel_response !== 'boolean'
+    ) {
+      return Promise.reject(new Error('barge-in binding is invalid'));
+    }
+    const params = {
+      ...binding,
+      action_id: requiredText(input.action_id, 'action_id'),
+      response_id: requiredText(input.response_id, 'response_id'),
+      response_generation: input.response_generation,
+      cancel_response: input.cancel_response,
+    };
+    const fingerprint = JSON.stringify(params);
+    let retained = this.bargeIns.get(fingerprint);
+    if (retained?.result) return Promise.resolve(retained.result);
+    if (retained?.promise) return retained.promise;
+    if (!retained) {
+      if (this.bargeInReplayFence.has(fingerprint)) {
+        return Promise.reject(new Error('completed barge-in replay has expired'));
+      }
+      if (
+        this.bargeIns.size >= PRODUCT_OPERATION_CAPACITY &&
+        !evictCompletedProductOperation(this.bargeIns, this.bargeInReplayFence)
+      ) {
+        return Promise.reject(new Error('bounded barge-in ledger is full'));
+      }
+      retained = { requestId: allocateProductRequestId('live-voice-p2-barge') };
+      this.bargeIns.set(fingerprint, retained);
+    }
+    const entry = retained;
+    let promise: Promise<JsonObject>;
+    promise = this.request(PRODUCT_P2_BARGE_IN_METHOD, params, entry.requestId)
+      .then(value => {
+        const result = requireP2BoundOperationResult(
+          value,
+          'barge_in_applied',
+          binding,
+        );
+        if (
+          result.action_id !== params.action_id ||
+          result.response_id !== params.response_id ||
+          result.response_generation !== params.response_generation ||
+          result.cancel_response !== params.cancel_response ||
+          typeof result.applied !== 'boolean' ||
+          typeof result.replayed !== 'boolean' ||
+          !Array.isArray(result.effect_ids) ||
+          result.effect_ids.some(item => typeof item !== 'string' || !item)
+        ) {
+          throw new Error('barge-in response binding is invalid');
+        }
+        entry.result = result;
+        return result;
+      })
+      .catch(error => {
+        if (isDefinitiveProductOperationError(error)) this.bargeIns.delete(fingerprint);
+        throw error;
+      })
+      .finally(() => {
+        if (entry.promise === promise) entry.promise = undefined;
+      });
+    entry.promise = promise;
     return promise;
   }
 
@@ -914,10 +1077,13 @@ export class ProductWebP3MutationOwner {
       .then(value => {
         const payload = objectValue(value);
         const result = objectValue(payload?.result);
+        const targetTaskId = frozen.operation === 'task.cancel' ? frozen.task_id : null;
         if (
           payload?.ok !== true ||
           result?.status !== 'confirmation_issued' ||
           result.operation !== frozen.operation ||
+          result.command_id !== frozen.command_id ||
+          result.target_task_id !== targetTaskId ||
           typeof result.confirmation_id !== 'string' ||
           typeof result.expires_at !== 'string'
         ) {
@@ -927,6 +1093,12 @@ export class ProductWebP3MutationOwner {
           confirmation_id: requiredText(result.confirmation_id, 'confirmation_id'),
           expires_at: requiredText(result.expires_at, 'expires_at'),
           operation: frozen.operation,
+          command_id: frozen.command_id,
+          target_task_id: targetTaskId,
+          task_control_binding: requireP3TaskControlBinding(
+            result.task_control_binding,
+            frozen
+          ),
         });
         if (this.pending === retained) retained.receipt = receipt;
         return receipt;
@@ -969,10 +1141,14 @@ export class ProductWebP3MutationOwner {
       .then(value => {
         const payload = objectValue(value);
         const result = objectValue(payload?.result);
+        const targetTaskId = frozen.operation === 'task.cancel' ? frozen.task_id : null;
         if (
           payload?.ok !== true ||
           result?.status !== 'mutation_processed' ||
-          result.operation !== frozen.operation
+          result.operation !== frozen.operation ||
+          result.command_id !== frozen.command_id ||
+          result.target_task_id !== targetTaskId ||
+          objectValue(result.formal_task_result) === null
         ) {
           throw new Error('product P3 mutation response is unavailable');
         }
@@ -1040,6 +1216,7 @@ export class ProductWebP3ProgressOwner {
     origin_id: string;
     generation_id: string;
     generation: number;
+    task_id?: string;
   }): Promise<ProductWebP3ProgressSnapshot> {
     if (!this.enabled) return Promise.resolve(this.snapshot());
     if (this.startPromise) return this.startPromise;
@@ -1055,13 +1232,19 @@ export class ProductWebP3ProgressOwner {
     if (!Number.isSafeInteger(base.generation) || base.generation <= 0) {
       return Promise.reject(new Error('generation is invalid'));
     }
+    const exactTaskId = input.task_id === undefined
+      ? null
+      : requiredText(input.task_id, 'task_id');
     this.cleanupRequired = false;
     this.status = 'activating';
     this.reason = null;
     this.publish();
-    this.startPromise = this.request(PRODUCT_P3_TASK_LIST_METHOD, { session_id: sessionId })
-      .then(value => {
-        const taskId = selectSingleActiveTask(value);
+    const selectedTask = exactTaskId === null
+      ? this.request(PRODUCT_P3_TASK_LIST_METHOD, { session_id: sessionId })
+        .then(selectSingleActiveTask)
+      : Promise.resolve(exactTaskId);
+    this.startPromise = selectedTask
+      .then(taskId => {
         const binding = freezeP3Binding({ ...base, task_id: taskId });
         this.binding = binding;
         this.activationAttempted = true;

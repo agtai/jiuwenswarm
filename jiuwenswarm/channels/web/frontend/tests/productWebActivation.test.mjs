@@ -6,6 +6,7 @@ import {
   PRODUCT_P2_CLOSE_METHOD,
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   PRODUCT_P2_PRESENTATION_ACK_METHOD,
+  PRODUCT_P2_BARGE_IN_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
   PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
   PRODUCT_P3_PROGRESS_CLOSE_METHOD,
@@ -18,6 +19,42 @@ import {
   pollProductP2RouteWithRecovery,
   retryRetainedProductOperation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
+
+function p3TaskControlBinding() {
+  return {
+    subject_id: 'subject-1',
+    session_id: 'session-1',
+    project_id: 'project-1',
+    correlation_id: 'correlation-1',
+    generation: 1,
+  };
+}
+
+function p3ConfirmationResult(confirmationId = 'confirmation-1') {
+  return {
+    status: 'confirmation_issued',
+    operation: 'task.cancel',
+    command_id: 'command-1',
+    target_task_id: 'task-1',
+    confirmation_id: confirmationId,
+    expires_at: '2026-08-07T10:02:00Z',
+    task_control_binding: p3TaskControlBinding(),
+  };
+}
+
+function p3MutationResult() {
+  return {
+    status: 'mutation_processed',
+    operation: 'task.cancel',
+    command_id: 'command-1',
+    target_task_id: 'task-1',
+    formal_task_result: {
+      command_id: 'command-1',
+      task_id: 'task-1',
+      attempt_id: 'attempt-1',
+    },
+  };
+}
 
 test('retained product retries reuse the exact operation after transport loss', async () => {
   let calls = 0;
@@ -501,17 +538,12 @@ test('stock Web P3 owner forwards one exact credential-free confirmed mutation',
       if (method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD) {
         return {
           ok: true,
-          result: {
-            status: 'confirmation_issued',
-            operation: 'task.cancel',
-            confirmation_id: 'confirmation-1',
-            expires_at: '2026-08-07T10:02:00Z',
-          },
+          result: p3ConfirmationResult(),
         };
       }
       return {
         ok: true,
-        result: { status: 'mutation_processed', operation: 'task.cancel' },
+        result: p3MutationResult(),
       };
     },
   });
@@ -536,6 +568,199 @@ test('stock Web P3 owner forwards one exact credential-free confirmed mutation',
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
 });
 
+test('stock Web owner retains one exact playback-scoped barge-in', async () => {
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_BARGE_IN_METHOD) {
+        return response('barge_in_applied', {
+          action_id: params.action_id,
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          cancel_response: params.cancel_response,
+          applied: true,
+          replayed: false,
+          effect_ids: ['effect-playback-stop'],
+        });
+      }
+      return response('closed');
+    },
+  });
+  await owner.start(binding);
+  const input = {
+    action_id: 'barge-action-1',
+    response_id: 'response-1',
+    response_generation: 0,
+    cancel_response: false,
+  };
+
+  const first = await owner.bargeIn(input);
+  const replay = await owner.bargeIn(input);
+
+  assert.equal(first.status, 'barge_in_applied');
+  assert.deepEqual(replay, first);
+  assert.equal(
+    calls.filter(([method]) => method === PRODUCT_P2_BARGE_IN_METHOD).length,
+    1,
+  );
+  assert.equal(calls[1][1].cancel_response, false);
+  assert.match(calls[1][2], /^live-voice-p2-barge-/);
+  await assert.rejects(
+    owner.bargeIn({ ...input, response_generation: -1 }),
+    /barge-in binding/,
+  );
+});
+
+test('stock Web P3 owner binds exact committed voice origin and rejects borrowing', async () => {
+  const calls = [];
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      return {
+        ok: true,
+        result:
+          method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD
+            ? {
+                ...p3ConfirmationResult(),
+                operation: 'task.create',
+                target_task_id: null,
+              }
+            : {
+                ...p3MutationResult(),
+                operation: 'task.create',
+                target_task_id: null,
+              },
+      };
+    },
+  });
+  const voice = Object.freeze({
+    operation: 'task.create',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    source: 'voice',
+    interaction_id: 'interaction-voice-1',
+    turn_id: 'turn-voice-1',
+    commit_id: 'commit-voice-1',
+    name: 'Voice task',
+    instruction: 'Create one bounded task.',
+  });
+
+  await owner.issue(voice);
+  await owner.mutate(voice);
+  for (const [, params] of calls) {
+    assert.equal(params.source, 'voice');
+    assert.equal(params.interaction_id, 'interaction-voice-1');
+    assert.equal(params.turn_id, 'turn-voice-1');
+    assert.equal(params.commit_id, 'commit-voice-1');
+  }
+
+  const rejecting = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async () => {
+      throw new Error('transport must not be reached');
+    },
+  });
+  await assert.rejects(
+    rejecting.issue({ ...voice, source: 'structured' }),
+    /committed origin/
+  );
+  await assert.rejects(
+    rejecting.issue({ ...voice, interaction_id: undefined }),
+    /committed origin/
+  );
+  await assert.rejects(
+    rejecting.issue({ ...voice, turn_id: undefined }),
+    /committed origin/
+  );
+});
+
+test('stock Web P3 owner rejects forged confirmation echoes and closed bindings', async () => {
+  const mutation = Object.freeze({
+    operation: 'task.cancel',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  });
+  const forgedResults = [
+    { ...p3ConfirmationResult(), command_id: 'command-forged' },
+    { ...p3ConfirmationResult(), target_task_id: 'task-forged' },
+    {
+      ...p3ConfirmationResult(),
+      task_control_binding: {
+        ...p3TaskControlBinding(),
+        correlation_id: 'correlation-forged',
+      },
+    },
+    {
+      ...p3ConfirmationResult(),
+      task_control_binding: {
+        ...p3TaskControlBinding(),
+        unexpected_grant: 'task.cancel',
+      },
+    },
+  ];
+
+  for (const forgedResult of forgedResults) {
+    const calls = [];
+    const owner = new ProductWebP3MutationOwner({
+      enabled: true,
+      request: async (method, params) => {
+        calls.push([method, params]);
+        return { ok: true, result: forgedResult };
+      },
+    });
+
+    await assert.rejects(owner.issue(mutation), /response|binding/);
+    await assert.rejects(owner.mutate(mutation), /confirmation/);
+    assert.deepEqual(calls.map(([method]) => method), [
+      PRODUCT_P3_CONFIRMATION_ISSUE_METHOD,
+    ]);
+  }
+});
+
+test('stock Web P3 owner rejects forged mutation echoes and missing formal result', async () => {
+  const mutation = Object.freeze({
+    operation: 'task.cancel',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  });
+  const forgedResults = [
+    { ...p3MutationResult(), command_id: 'command-forged' },
+    { ...p3MutationResult(), target_task_id: 'task-forged' },
+    { ...p3MutationResult(), formal_task_result: null },
+  ];
+
+  for (const forgedResult of forgedResults) {
+    let mutationCalls = 0;
+    const owner = new ProductWebP3MutationOwner({
+      enabled: true,
+      request: async method => {
+        if (method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD) {
+          return { ok: true, result: p3ConfirmationResult() };
+        }
+        mutationCalls += 1;
+        return { ok: true, result: forgedResult };
+      },
+    });
+
+    await owner.issue(mutation);
+    await assert.rejects(owner.mutate(mutation), /mutation response/);
+    assert.equal(owner.hasPendingMutation(), true);
+    assert.equal(mutationCalls, 1);
+  }
+});
+
 test('stock Web P3 owner reuses stable request IDs after response loss', async () => {
   const calls = [];
   let issueAttempts = 0;
@@ -549,19 +774,14 @@ test('stock Web P3 owner reuses stable request IDs after response loss', async (
         if (issueAttempts === 1) throw webError('issue response lost', 'REQUEST_TIMEOUT', true);
         return {
           ok: true,
-          result: {
-            status: 'confirmation_issued',
-            operation: 'task.cancel',
-            confirmation_id: 'confirmation-1',
-            expires_at: '2026-08-07T10:02:00Z',
-          },
+          result: p3ConfirmationResult(),
         };
       }
       mutationAttempts += 1;
       if (mutationAttempts === 1) throw webError('mutation response lost', 'WS_DISCONNECTED', true);
       return {
         ok: true,
-        result: { status: 'mutation_processed', operation: 'task.cancel' },
+        result: p3MutationResult(),
       };
     },
   });
@@ -606,12 +826,7 @@ test('stock Web P3 owner releases definitive rejects but retains unknown outcome
       }
       return {
         ok: true,
-        result: {
-          status: 'confirmation_issued',
-          operation: 'task.cancel',
-          confirmation_id: 'confirmation-2',
-          expires_at: '2026-08-07T10:02:00Z',
-        },
+        result: p3ConfirmationResult('confirmation-2'),
       };
     },
   });
@@ -633,12 +848,7 @@ test('stock Web P3 owner releases definitive rejects but retains unknown outcome
       }
       return {
         ok: true,
-        result: {
-          status: 'confirmation_issued',
-          operation: 'task.cancel',
-          confirmation_id: 'confirmation-3',
-          expires_at: '2026-08-07T10:02:00Z',
-        },
+        result: p3ConfirmationResult('confirmation-3'),
       };
     },
   });
@@ -672,12 +882,7 @@ test('stock Web P3 owner rejects mutation changes and feature-off effects', asyn
       calls.push([method, params]);
       return {
         ok: true,
-        result: {
-          status: 'confirmation_issued',
-          operation: 'task.cancel',
-          confirmation_id: 'confirmation-1',
-          expires_at: '2026-08-07T10:02:00Z',
-        },
+        result: p3ConfirmationResult(),
       };
     },
   });
@@ -944,6 +1149,42 @@ test('stock Web queries one formal task then owns exact P3 progress activate and
     PRODUCT_P3_PROGRESS_CLOSE_METHOD,
   ]);
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
+});
+
+test('fresh task.create binds progress directly to the exact accepted task', async () => {
+  const calls = [];
+  const owner = new ProductWebP3ProgressOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P3_TASK_LIST_METHOD) {
+        throw new Error('fresh task progress must not query a task list');
+      }
+      return {
+        ok: true,
+        result: {
+          status: method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed',
+          ...params,
+        },
+      };
+    },
+  });
+
+  await owner.start({
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    task_id: 'task-created-1',
+    origin_id: 'origin-1',
+    generation_id: 'generation-1',
+    generation: 1,
+  });
+  await owner.close();
+
+  assert.deepEqual(calls.map(([method]) => method), [
+    PRODUCT_P3_PROGRESS_ACTIVATE_METHOD,
+    PRODUCT_P3_PROGRESS_CLOSE_METHOD,
+  ]);
+  assert.equal(calls[0][1].task_id, 'task-created-1');
 });
 
 test('P3 close waits for in-flight task selection and cleans the resulting activation', async () => {

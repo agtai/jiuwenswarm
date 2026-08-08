@@ -101,6 +101,17 @@ class ControlledProvider(BatchSpeechProvider):
         )
 
 
+class CriticalTextProvider(ControlledProvider):
+    async def recognize(
+        self, request: ProviderRecognitionRequest
+    ) -> ProviderRecognitionResult:
+        self.recognize_calls += 1
+        assert request.audio_wav.startswith(b"RIFF")
+        return ProviderRecognitionResult(
+            "delete 3 files", "en", "stt-critical-test"
+        )
+
+
 class CancellationDefiantProvider(ControlledProvider):
     def __init__(self, *, swallow_continuously: bool) -> None:
         super().__init__()
@@ -365,6 +376,85 @@ async def test_formal_recognition_and_synthesis_return_exact_provenance() -> Non
     assert len(resolver.calls[1].content_sha256) == 64
     assert provider.recognize_calls == 1
     assert provider.synthesize_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_voice_commit_receipt_is_exact_replayable_and_cannot_rebind() -> None:
+    service = _service(ControlledProvider())
+    recognized = await service.recognize(_recognize_request(), CONTEXT)
+    receipt = recognized["result"]["voice_commit_receipt"]
+    binding = {
+        "receipt": receipt,
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "turn_id": "turn-1",
+        "commit_id": "commit-1",
+        "text": "hello formal speech",
+        "critical_confirmation": None,
+    }
+
+    first = await service.claim_voice_commit_receipt(**binding)
+    replay = await service.claim_voice_commit_receipt(**binding)
+
+    assert replay == first
+    assert first["kind"] == "formal_speech_recognition"
+    assert first["critical_policy"] == "eligible"
+    assert first["speech_operation_id"] == "operation-r0"
+    with pytest.raises(ValueError, match="already bound"):
+        await service.claim_voice_commit_receipt(
+            **{**binding, "commit_id": "commit-other"}
+        )
+    with pytest.raises(ValueError, match="does not match recognition"):
+        await service.claim_voice_commit_receipt(
+            **{**binding, "text": "changed recognized text"}
+        )
+
+
+@pytest.mark.asyncio
+async def test_critical_voice_receipt_requires_confirmation_and_expires() -> None:
+    now = [10.0]
+    service = FormalBatchSpeechService(
+        CriticalTextProvider(),
+        authorization_resolver=ExactAuthorizationResolver(),
+        monotonic=lambda: now[0],
+    )
+    recognized = await service.recognize(_recognize_request(), CONTEXT)
+    receipt = recognized["result"]["voice_commit_receipt"]
+    binding = {
+        "receipt": receipt,
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "turn_id": "turn-critical",
+        "commit_id": "commit-critical",
+        "text": "delete 3 files",
+    }
+
+    with pytest.raises(ValueError, match="explicit confirmation"):
+        await service.claim_voice_commit_receipt(
+            **binding, critical_confirmation=None
+        )
+    claim = await service.claim_voice_commit_receipt(
+        **binding, critical_confirmation=True
+    )
+    assert claim["critical_policy"] == "confirmed"
+
+    second = await service.recognize(
+        _recognize_request(
+            request_id="request-r-expiry",
+            operation_id="operation-r-expiry",
+            capture_id="capture-expiry",
+            generation=2,
+        ),
+        CONTEXT,
+    )
+    now[0] += 301
+    with pytest.raises(ValueError, match="unknown or expired"):
+        await service.claim_voice_commit_receipt(
+            **{**binding, "receipt": second["result"]["voice_commit_receipt"]},
+            critical_confirmation=True,
+        )
 
 
 @pytest.mark.asyncio

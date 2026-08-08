@@ -72,7 +72,7 @@ export interface GatewaySpeechScope {
   readonly subject_id: string;
   readonly project_id: null;
   readonly session_id: string;
-  readonly assurance: 'request_asserted';
+  readonly assurance: 'request_asserted' | 'authenticated';
 }
 
 export interface GatewaySpeechProvider extends AudioProviderRef {
@@ -93,6 +93,7 @@ export interface FormalBatchRecognitionResult {
   readonly final_text: string;
   readonly raw_text: string;
   readonly commits_turn: false;
+  readonly voice_commit_receipt: string;
   readonly provider: Readonly<GatewaySpeechProvider>;
 }
 
@@ -101,8 +102,20 @@ export interface FormalBatchSynthesisResult {
   readonly response: Readonly<AudioResponseRef>;
   readonly unit_id: string;
   readonly chunks: readonly Readonly<BrowserAudioPcmChunk>[];
+  readonly downlink: Readonly<FormalSynthesisDownlink> | null;
   readonly provider: Readonly<GatewaySpeechProvider>;
   readonly presented: false;
+}
+
+export interface FormalSynthesisDownlink {
+  readonly endpoint_path: string;
+  readonly subprotocol: 'live-voice.media.v1';
+  readonly ticket_ttl_ms: number;
+  readonly frame_count: number;
+  readonly sample_rate_hz: number;
+  readonly binding: Readonly<Record<string, unknown>>;
+  readonly max_pending_frames: number;
+  readonly max_pending_bytes: number;
 }
 
 export interface FormalRecognitionInput {
@@ -507,11 +520,14 @@ export class GatewayBatchSpeechClient {
     this.#createId = options.createId ?? createDefaultId;
     requiredText(this.#scope.subject_id, 'scope.subject_id');
     requiredText(this.#scope.session_id, 'scope.session_id');
-    if (this.#scope.project_id !== null || this.#scope.assurance !== 'request_asserted') {
+    if (
+      this.#scope.project_id !== null
+      || !['request_asserted', 'authenticated'].includes(this.#scope.assurance)
+    ) {
       throw new GatewayBatchSpeechError(
         'INVALID_ARGUMENT',
         'INVALID_SPEECH_SCOPE',
-        'formal batch speech requires request-asserted session scope without project authority'
+        'formal batch speech requires a closed session scope without project authority'
       );
     }
   }
@@ -737,6 +753,7 @@ export class GatewayBatchSpeechClient {
       final_text: requiredText(selected.display_text, 'display_text'),
       raw_text: requiredText(selected.raw_text, 'raw_text'),
       commits_turn: false,
+      voice_commit_receipt: requiredText(result.voice_commit_receipt, 'voice_commit_receipt'),
       provider: parseProvider(result.provider),
     });
   }
@@ -833,7 +850,6 @@ export class GatewayBatchSpeechClient {
       !sameResponse(resultResponse as unknown as AudioResponseRef, response) ||
       result.unit_id !== input.unitId ||
       result.presented !== false ||
-      audio.format !== 'wav_pcm16_mono' ||
       audio.channel_count !== 1
     ) {
       throw new GatewayBatchSpeechError(
@@ -846,8 +862,69 @@ export class GatewayBatchSpeechClient {
     if (audio.sample_rate_hz !== requiredRate) {
       throw new GatewayBatchSpeechError('CAPABILITY_UNAVAILABLE', 'SPEECH_SAMPLE_RATE_MISMATCH', 'Gateway declared a mismatched AIO-B playout rate');
     }
-    const decoded = decodePcm16MonoWav(decodeBase64(audio.data_base64, MAX_SYNTHESIS_AUDIO_BYTES), requiredRate);
     const provider = parseProvider(result.provider);
+    if (audio.delivery === 'dedicated_media_downlink') {
+      const actualKeys = Object.keys(audio).sort();
+      const expectedKeys = [
+        'binding', 'channel_count', 'delivery', 'endpoint_path', 'format',
+        'frame_count', 'max_pending_bytes', 'max_pending_frames',
+        'sample_rate_hz', 'subprotocol', 'ticket_ttl_ms',
+      ].sort();
+      if (
+        actualKeys.length !== expectedKeys.length
+        || actualKeys.some((key, index) => key !== expectedKeys[index])
+        || audio.format !== 'pcm_f32_mono_20ms'
+        || audio.subprotocol !== 'live-voice.media.v1'
+      ) {
+        throw new GatewayBatchSpeechError(
+          'PROTOCOL_VIOLATION',
+          'INVALID_DEDICATED_MEDIA_DOWNLINK',
+          'Gateway returned an invalid dedicated media downlink descriptor',
+        );
+      }
+      const frameCount = positiveSafeInteger(audio.frame_count, 'audio.frame_count');
+      const maxPendingFrames = positiveSafeInteger(
+        audio.max_pending_frames,
+        'audio.max_pending_frames',
+      );
+      const maxPendingBytes = positiveSafeInteger(
+        audio.max_pending_bytes,
+        'audio.max_pending_bytes',
+      );
+      if (frameCount > 1_500 || maxPendingFrames > 256 || maxPendingBytes > MAX_SYNTHESIS_AUDIO_BYTES) {
+        throw new GatewayBatchSpeechError(
+          'PROTOCOL_VIOLATION',
+          'AUDIO_LIMIT_EXCEEDED',
+          'Gateway returned an oversized dedicated media downlink descriptor',
+        );
+      }
+      return Object.freeze({
+        operation: 'speech.synthesize.batch',
+        response: Object.freeze({ ...response }),
+        unit_id: input.unitId,
+        chunks: Object.freeze([]),
+        downlink: Object.freeze({
+          endpoint_path: requiredText(audio.endpoint_path, 'audio.endpoint_path'),
+          subprotocol: 'live-voice.media.v1',
+          ticket_ttl_ms: positiveSafeInteger(audio.ticket_ttl_ms, 'audio.ticket_ttl_ms'),
+          frame_count: frameCount,
+          sample_rate_hz: requiredRate,
+          binding: Object.freeze({ ...objectValue(audio.binding, 'audio.binding') }),
+          max_pending_frames: maxPendingFrames,
+          max_pending_bytes: maxPendingBytes,
+        }),
+        provider,
+        presented: false,
+      });
+    }
+    if (audio.format !== 'wav_pcm16_mono') {
+      throw new GatewayBatchSpeechError(
+        'PROTOCOL_VIOLATION',
+        'SYNTHESIS_RESULT_MISMATCH',
+        'Gateway synthesis audio format is invalid',
+      );
+    }
+    const decoded = decodePcm16MonoWav(decodeBase64(audio.data_base64, MAX_SYNTHESIS_AUDIO_BYTES), requiredRate);
     const frameSamples = (decoded.sampleRateHz * LIVE_VOICE_AUDIO_FRAME_DURATION_MS) / 1000;
     if (!Number.isSafeInteger(frameSamples)) {
       throw new GatewayBatchSpeechError('CAPABILITY_UNAVAILABLE', 'NON_INTEGRAL_AUDIO_FRAME', 'Provider sample rate cannot form exact AIO-B 20ms chunks');
@@ -871,6 +948,7 @@ export class GatewayBatchSpeechClient {
       response: Object.freeze({ ...response }),
       unit_id: input.unitId,
       chunks: Object.freeze(chunks),
+      downlink: null,
       provider,
       presented: false,
     });

@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     OriginRef,
     QueryEnvelope,
     ScopeRef,
+    TurnCommit,
     TurnCommitLedger,
 )
 
@@ -45,6 +46,7 @@ class FormalTaskPolicyInput:
     authorization: TaskAuthorizationGrant | None
     command_id: str | None = None
     causation_id: str | None = None
+    interaction_id: str | None = None
     turn_id: str | None = None
     commit_id: str | None = None
     task_id: str | None = None
@@ -156,12 +158,61 @@ class FormalTaskPolicyAdapter:
                 ErrorCode.UNAVAILABLE,
             )
         try:
-            self._commits.require_origin(
+            commit = self._commits.require_origin(
                 OriginRef("committed_turn", intent.turn_id, intent.commit_id),
                 intent.scope,
             )
         except ContractViolation as error:
             raise FormalTaskViolation(error.reason, str(error), error.code) from error
+        if intent.interaction_id != commit.interaction_id:
+            raise FormalTaskViolation(
+                "VOICE_TASK_INTERACTION_MISMATCH",
+                "voice task intent must bind the exact committed interaction",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if intent.operation == "task.create" and intent.instruction != commit.text:
+            raise FormalTaskViolation(
+                "VOICE_TASK_INSTRUCTION_MISMATCH",
+                "voice task instruction must equal its exact committed speech text",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    def require_voice_origin(
+        self,
+        *,
+        scope: ScopeRef,
+        interaction_id: str,
+        turn_id: str,
+        commit_id: str,
+        instruction: str,
+    ) -> TurnCommit:
+        """Preflight exact voice authority before durable confirmation issue."""
+
+        if self._commits is None:
+            raise FormalTaskViolation(
+                "COMMIT_AUTHORITY_REQUIRED",
+                "voice task intent requires the authoritative turn commit ledger",
+                ErrorCode.UNAVAILABLE,
+            )
+        try:
+            commit = self._commits.require_origin(
+                OriginRef("committed_turn", turn_id, commit_id), scope
+            )
+        except ContractViolation as error:
+            raise FormalTaskViolation(error.reason, str(error), error.code) from error
+        if commit.interaction_id != interaction_id:
+            raise FormalTaskViolation(
+                "VOICE_TASK_INTERACTION_MISMATCH",
+                "voice task intent must bind the exact committed interaction",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if commit.text != instruction:
+            raise FormalTaskViolation(
+                "VOICE_TASK_INSTRUCTION_MISMATCH",
+                "voice task instruction must equal its exact committed speech text",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return commit
 
     @staticmethod
     def _validate_common(intent: FormalTaskPolicyInput) -> None:
@@ -190,13 +241,17 @@ class FormalTaskPolicyAdapter:
                 ErrorCode.UNAUTHENTICATED,
             )
         if intent.source == "voice":
-            if not intent.turn_id or not intent.commit_id:
+            if not intent.interaction_id or not intent.turn_id or not intent.commit_id:
                 raise FormalTaskViolation(
                     "COMMITTED_ORIGIN_REQUIRED",
                     "voice task intent requires the exact committed turn origin",
                     ErrorCode.PERMISSION_DENIED,
                 )
-        elif intent.turn_id is not None or intent.commit_id is not None:
+        elif (
+            intent.interaction_id is not None
+            or intent.turn_id is not None
+            or intent.commit_id is not None
+        ):
             raise FormalTaskViolation(
                 "INVALID_STRUCTURED_ORIGIN",
                 "structured task intent cannot claim a voice commit",

@@ -15,8 +15,10 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import uuid
@@ -53,6 +55,7 @@ from .formal_task_models import (
 )
 
 FORMAL_PROJECT_EXECUTOR_ID = "jiuwenswarm_code_agent.project_code"
+DIRECT_PROJECT_EXECUTOR_REF_PREFIX = "d0-project:"
 PROJECT_CODE_PIPELINE = "project_code_pipeline"
 PROJECT_CODE_EXECUTOR = "jiuwenswarm_code_agent"
 PROJECT_CODE_ARTIFACT_KIND = "git_visible_project_change"
@@ -72,7 +75,7 @@ FORMAL_RUNTIME_SUPPORT_POLICY = MappingProxyType(
 )
 _DIRECT_EXECUTOR_TABLE = "live_voice_formal_project_attempts_v1"
 _DIRECT_EXECUTOR_LEASE = timedelta(minutes=5)
-_DIRECT_EXECUTOR_REF_PREFIX = "d0-project:"
+_DIRECT_EXECUTOR_REF_PREFIX = DIRECT_PROJECT_EXECUTOR_REF_PREFIX
 _MAX_DIRECT_CLEANUP_TIMEOUT_SECONDS = 5.0
 _MAX_DIRECT_RUNNING_WORKERS = 32
 _PROTECTED_TARGET_SUPPORT_PATHS = tuple(FORMAL_RUNTIME_SUPPORT_POLICY)
@@ -362,6 +365,66 @@ def _project_tree_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_unsafe_filesystem_link(path: Path) -> bool:
+    """Recognize POSIX links plus Windows junction/reparse-point escapes."""
+
+    try:
+        if path.is_symlink():
+            return True
+        is_junction = getattr(path, "is_junction", None)
+        if callable(is_junction) and is_junction():
+            return True
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+    except FileNotFoundError:
+        return False
+    return bool(attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def _reject_git_visible_symlinks(root: Path) -> None:
+    """D0 rejects link/reparse escapes from every Git-visible path ancestor."""
+
+    raw_paths = _git_output(
+        root,
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "-z",
+    ).split(b"\0")
+    for raw_relative in (item for item in raw_paths if item):
+        try:
+            relative = Path(raw_relative.decode("utf-8", errors="strict"))
+        except UnicodeDecodeError as error:
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_NOT_BOUND",
+                "selected project contains a non-UTF-8 Git path",
+                ErrorCode.PERMISSION_DENIED,
+            ) from error
+        if relative.is_absolute() or ".." in relative.parts:
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_SYMLINK_UNSAFE",
+                "selected project contains an unsafe Git-visible path",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        try:
+            is_link = any(
+                _is_unsafe_filesystem_link(root.joinpath(*relative.parts[:depth]))
+                for depth in range(1, len(relative.parts) + 1)
+            )
+        except OSError as error:
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_SYMLINK_UNSAFE",
+                "selected project symlink safety could not be inspected",
+                ErrorCode.PERMISSION_DENIED,
+            ) from error
+        if is_link:
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_SYMLINK_UNSAFE",
+                "direct project execution does not permit Git-visible links or reparse points",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+
 def _project_content_fingerprint(root: Path) -> str:
     """Hash the Git-visible path/content state without index presentation details."""
 
@@ -456,8 +519,45 @@ def _git_run_with_input(root: Path, args: tuple[str, ...], payload: bytes) -> No
 def _create_attempt_worktree(
     root: Path, attempt_id: str, before_head: str
 ) -> tuple[Path, Path]:
-    parent = Path(tempfile.mkdtemp(prefix=f"live-voice-{attempt_id}-"))
-    worktree = parent / "checkout"
+    parent, worktree = _attempt_worktree_paths(root, attempt_id)
+    base = parent.parent
+    try:
+        base.mkdir(mode=0o700, exist_ok=True)
+        safe_temp_root = Path(tempfile.gettempdir()).resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("PROJECT_WORKTREE_UNAVAILABLE") from error
+    expected_base = safe_temp_root / "jiuwenswarm-live-voice-d0"
+    try:
+        base_resolved = base.resolve(strict=True)
+    except OSError as error:
+        raise RuntimeError("PROJECT_WORKTREE_UNAVAILABLE") from error
+    if (
+        base != expected_base
+        or _is_unsafe_filesystem_link(base)
+        or _is_unsafe_filesystem_link(base.parent)
+        or base_resolved != expected_base
+    ):
+        raise RuntimeError("PROJECT_WORKTREE_UNAVAILABLE")
+    try:
+        parent.mkdir(mode=0o700)
+    except OSError as error:
+        raise RuntimeError("PROJECT_WORKTREE_UNAVAILABLE") from error
+    try:
+        parent_resolved = parent.resolve(strict=True)
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            parent.rmdir()
+        raise RuntimeError("PROJECT_WORKTREE_UNAVAILABLE") from error
+    if (
+        _is_unsafe_filesystem_link(base)
+        or _is_unsafe_filesystem_link(parent)
+        or parent_resolved != expected_base / parent.name
+        or worktree.exists()
+        or _is_unsafe_filesystem_link(worktree)
+    ):
+        with contextlib.suppress(OSError):
+            parent.rmdir()
+        raise RuntimeError("PROJECT_WORKTREE_UNAVAILABLE")
     completed = subprocess.run(
         [
             "git",
@@ -480,17 +580,81 @@ def _create_attempt_worktree(
     return parent, worktree
 
 
-def _remove_attempt_worktree(root: Path, parent: Path, worktree: Path) -> None:
-    subprocess.run(
-        ["git", "-C", str(root), "worktree", "remove", "--force", str(worktree)],
+def _attempt_worktree_paths(root: Path, attempt_id: str) -> tuple[Path, Path]:
+    base = (
+        Path(tempfile.gettempdir()).resolve(strict=True)
+        / "jiuwenswarm-live-voice-d0"
+    )
+    namespace = f"{_path_key(root, strict=False)}\0{attempt_id}".encode("utf-8")
+    parent = base / f"attempt-{hashlib.sha256(namespace).hexdigest()}"
+    return parent, parent / "checkout"
+
+
+def _worktree_registered(root: Path, worktree: Path) -> bool:
+    completed = subprocess.run(
+        ["git", "-C", str(root), "worktree", "list", "--porcelain"],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
-    with contextlib.suppress(OSError):
-        worktree.rmdir()
-    with contextlib.suppress(OSError):
+    if completed.returncode != 0:
+        raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING")
+    expected = _path_key(worktree, strict=False)
+    for line in completed.stdout.decode("utf-8", errors="strict").splitlines():
+        if line.startswith("worktree ") and _path_key(
+            line.removeprefix("worktree "), strict=False
+        ) == expected:
+            return True
+    return False
+
+
+def _remove_attempt_worktree(root: Path, parent: Path, worktree: Path) -> None:
+    safe_temp_root = (
+        Path(tempfile.gettempdir()).resolve(strict=True)
+        / "jiuwenswarm-live-voice-d0"
+    )
+    resolved_parent = parent.resolve(strict=False)
+    resolved_worktree = worktree.resolve(strict=False)
+    if (
+        resolved_parent.parent != safe_temp_root
+        or not re.fullmatch(r"attempt-[0-9a-f]{64}", resolved_parent.name)
+        or resolved_worktree != resolved_parent / "checkout"
+    ):
+        raise RuntimeError("PROJECT_WORKTREE_CLEANUP_TARGET_UNSAFE")
+    for _attempt in range(3):
+        registered = _worktree_registered(root, worktree)
+        if not (worktree.exists() or worktree.is_symlink() or registered):
+            break
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "worktree",
+                "remove",
+                "--force",
+                str(worktree),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if completed.returncode == 0 and not (
+            worktree.exists()
+            or worktree.is_symlink()
+            or _worktree_registered(root, worktree)
+        ):
+            break
+    if (
+        worktree.exists()
+        or worktree.is_symlink()
+        or _worktree_registered(root, worktree)
+    ):
+        raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING")
+    try:
         parent.rmdir()
+    except OSError as error:
+        raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING") from error
 
 
 def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> None:
@@ -500,9 +664,7 @@ def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> No
     if cached_patch:
         _git_run_with_input(worktree, ("apply", "--binary", "-"), cached_patch)
         _git_output(worktree, "add", "-A", "--")
-    unstaged_patch = _git_output(
-        root, "diff", "--binary", "--full-index", "--"
-    )
+    unstaged_patch = _git_output(root, "diff", "--binary", "--full-index", "--")
     if unstaged_patch:
         _git_run_with_input(worktree, ("apply", "--binary", "-"), unstaged_patch)
     raw_untracked = _git_output(
@@ -535,7 +697,9 @@ def _attempt_patch(worktree: Path) -> tuple[bytes, str]:
         "--exclude-standard",
         "-z",
     ).split(b"\0")
-    untracked = [path.decode("utf-8", errors="strict") for path in raw_untracked if path]
+    untracked = [
+        path.decode("utf-8", errors="strict") for path in raw_untracked if path
+    ]
     if untracked:
         completed = subprocess.run(
             ["git", "-C", str(worktree), "add", "--intent-to-add", "--", *untracked],
@@ -628,6 +792,8 @@ class _DirectAttempt:
     summary: str | None
     error: str | None
     before_tree: str
+    before_content: str | None
+    expected_tree: str | None
     before_head: str
     protected_support_json: str
     governance_json: str
@@ -651,6 +817,13 @@ class _DirectProjectAttemptJournal:
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
+    def all_attempts(self) -> tuple[_DirectAttempt, ...]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} ORDER BY attempt_id"
+            ).fetchall()
+        return tuple(self._from_row(row) for row in rows)
+
     def _initialize(self) -> None:
         with self._connect() as connection:
             connection.execute("PRAGMA journal_mode=WAL")
@@ -672,6 +845,8 @@ class _DirectProjectAttemptJournal:
                     summary TEXT,
                     error TEXT,
                     before_tree TEXT NOT NULL,
+                    before_content TEXT,
+                    expected_tree TEXT,
                     before_head TEXT NOT NULL,
                     protected_support_json TEXT NOT NULL,
                     governance_json TEXT NOT NULL,
@@ -682,6 +857,20 @@ class _DirectProjectAttemptJournal:
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    f"PRAGMA table_info({_DIRECT_EXECUTOR_TABLE})"
+                ).fetchall()
+            }
+            if "before_content" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {_DIRECT_EXECUTOR_TABLE} ADD COLUMN before_content TEXT"
+                )
+            if "expected_tree" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {_DIRECT_EXECUTOR_TABLE} ADD COLUMN expected_tree TEXT"
+                )
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> _DirectAttempt:
@@ -705,6 +894,12 @@ class _DirectProjectAttemptJournal:
             summary=None if row["summary"] is None else str(row["summary"]),
             error=None if row["error"] is None else str(row["error"]),
             before_tree=str(row["before_tree"]),
+            before_content=(
+                None if row["before_content"] is None else str(row["before_content"])
+            ),
+            expected_tree=(
+                None if row["expected_tree"] is None else str(row["expected_tree"])
+            ),
             before_head=str(row["before_head"]),
             protected_support_json=str(row["protected_support_json"]),
             governance_json=str(row["governance_json"]),
@@ -731,6 +926,7 @@ class _DirectProjectAttemptJournal:
         item: PersistentOutboxItem,
         project_root: str,
         before_tree: str,
+        before_content: str,
         before_head: str,
         protected_support: Mapping[str, str],
         governance: Mapping[str, object],
@@ -781,10 +977,11 @@ class _DirectProjectAttemptJournal:
                     attempt_id, task_id, executor_ref, spec_fingerprint,
                     project_root, state, outcome, source_seq, accepted_at,
                     running_at, terminal_at, raw_status, summary, error,
-                    before_tree, before_head, protected_support_json,
+                    before_tree, before_content, expected_tree, before_head,
+                    protected_support_json,
                     governance_json, owner_id, lease_expires_at, cancel_requested
                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, NULL, ?, NULL,
-                          NULL, ?, ?, ?, ?, ?, ?, 0)
+                          NULL, ?, ?, NULL, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     item.attempt_id,
@@ -796,6 +993,7 @@ class _DirectProjectAttemptJournal:
                     now,
                     FormalAttemptState.ACCEPTED.value,
                     before_tree,
+                    before_content,
                     before_head,
                     json.dumps(dict(protected_support), sort_keys=True),
                     json.dumps(dict(governance), sort_keys=True),
@@ -938,6 +1136,82 @@ class _DirectProjectAttemptJournal:
             assert row is not None
             return self._from_row(row)
 
+    def mark_cleanup_pending(self, attempt_id: str) -> _DirectAttempt:
+        """Expose cleanup truth while preserving the business terminal outcome."""
+
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                raise FormalTaskViolation(
+                    "ATTEMPT_NOT_FOUND",
+                    "direct Executor attempt is unavailable",
+                    ErrorCode.NOT_FOUND,
+                )
+            current = self._from_row(row)
+            suffix = "cleanup_pending"
+            raw_status = current.raw_status
+            if not raw_status.endswith(suffix):
+                raw_status = f"{raw_status}_{suffix}"
+            connection.execute(
+                f"""
+                UPDATE {_DIRECT_EXECUTOR_TABLE}
+                   SET raw_status=?,
+                       summary=COALESCE(summary, ?)
+                 WHERE attempt_id=?
+                """,
+                (
+                    raw_status,
+                    "isolated project worktree cleanup remains pending",
+                    attempt_id,
+                ),
+            )
+            row = connection.execute(
+                f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            assert row is not None
+            return self._from_row(row)
+
+    def mark_cleanup_resolved(self, attempt_id: str) -> _DirectAttempt:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if row is None:
+                raise FormalTaskViolation(
+                    "ATTEMPT_NOT_FOUND",
+                    "direct Executor attempt is unavailable",
+                    ErrorCode.NOT_FOUND,
+                )
+            current = self._from_row(row)
+            suffix = "cleanup_pending"
+            if current.raw_status.endswith(suffix):
+                business_status = current.raw_status.removesuffix(suffix).rstrip("_")
+                connection.execute(
+                    f"""
+                    UPDATE {_DIRECT_EXECUTOR_TABLE}
+                       SET raw_status=?, summary=?
+                     WHERE attempt_id=?
+                    """,
+                    (
+                        f"{business_status}_cleanup_resolved",
+                        "isolated project worktree cleanup resolved",
+                        attempt_id,
+                    ),
+                )
+            row = connection.execute(
+                f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            assert row is not None
+            return self._from_row(row)
+
     def request_cancel(self, attempt_id: str) -> _DirectAttempt:
         with self._connect() as connection:
             connection.execute(
@@ -961,7 +1235,12 @@ class _DirectProjectAttemptJournal:
             return self._from_row(row)
 
     def reserve_completion(
-        self, attempt_id: str, *, owner_id: str, now: str
+        self,
+        attempt_id: str,
+        *,
+        owner_id: str,
+        expected_tree: str,
+        now: str,
     ) -> tuple[bool, _DirectAttempt]:
         """Make completion win its race before any target patch is applied."""
 
@@ -970,11 +1249,12 @@ class _DirectProjectAttemptJournal:
             changed = connection.execute(
                 f"""
                 UPDATE {_DIRECT_EXECUTOR_TABLE}
-                   SET raw_status='applying', lease_expires_at=?
+                   SET raw_status='applying', expected_tree=?, lease_expires_at=?
                  WHERE attempt_id=? AND owner_id=? AND state<>?
                        AND cancel_requested=0 AND raw_status<>'applying'
                 """,
                 (
+                    expected_tree,
                     _lease_expiry(now),
                     attempt_id,
                     owner_id,
@@ -996,25 +1276,74 @@ class _DirectProjectAttemptJournal:
     def recover_expired(self, *, now: str) -> int:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            changed = connection.execute(
+            rows = connection.execute(
                 f"""
-                UPDATE {_DIRECT_EXECUTOR_TABLE}
-                   SET state=?, outcome=?, source_seq=2, terminal_at=?,
-                       raw_status='restart_interrupted', summary=NULL,
-                       error='EXECUTOR_PROCESS_RESTARTED', owner_id=NULL,
-                       lease_expires_at=NULL
+                SELECT * FROM {_DIRECT_EXECUTOR_TABLE}
                  WHERE state<>? AND lease_expires_at IS NOT NULL
                        AND lease_expires_at<=?
                 """,
-                (
-                    FormalAttemptState.TERMINAL.value,
-                    TerminalOutcome.INTERRUPTED.value,
-                    now,
-                    FormalAttemptState.TERMINAL.value,
-                    now,
-                ),
-            ).rowcount
-        return int(changed)
+                (FormalAttemptState.TERMINAL.value, now),
+            ).fetchall()
+            for row in rows:
+                record = self._from_row(row)
+                outcome = TerminalOutcome.INTERRUPTED
+                raw_status = "restart_interrupted"
+                summary = None
+                error = "EXECUTOR_PROCESS_RESTARTED"
+                if record.raw_status == "applying":
+                    outcome = TerminalOutcome.UNKNOWN
+                    raw_status = "restart_apply_result_unknown"
+                    error = "EXECUTOR_RESTART_APPLY_RESULT_UNKNOWN"
+                    try:
+                        root = Path(record.project_root).resolve(strict=True)
+                        current_content = _project_content_fingerprint(root)
+                        unchanged_authority = (
+                            _git_head(root) == record.before_head
+                            and _target_support_fingerprints(root)
+                            == json.loads(record.protected_support_json)
+                        )
+                    except Exception:
+                        unchanged_authority = False
+                        current_content = None
+                    if (
+                        unchanged_authority
+                        and record.expected_tree is not None
+                        and current_content == record.expected_tree
+                    ):
+                        outcome = TerminalOutcome.COMPLETED
+                        raw_status = "restart_apply_completed"
+                        summary = (
+                            "project change was durably observed after Executor restart"
+                        )
+                        error = None
+                    elif (
+                        unchanged_authority
+                        and record.before_content is not None
+                        and current_content == record.before_content
+                    ):
+                        outcome = TerminalOutcome.INTERRUPTED
+                        raw_status = "restart_before_apply"
+                        error = "EXECUTOR_PROCESS_RESTARTED"
+                connection.execute(
+                    f"""
+                    UPDATE {_DIRECT_EXECUTOR_TABLE}
+                       SET state=?, outcome=?, source_seq=2, terminal_at=?,
+                           raw_status=?, summary=?, error=?, owner_id=NULL,
+                           lease_expires_at=NULL
+                     WHERE attempt_id=? AND state<>?
+                    """,
+                    (
+                        FormalAttemptState.TERMINAL.value,
+                        outcome.value,
+                        now,
+                        raw_status,
+                        summary,
+                        error,
+                        record.attempt_id,
+                        FormalAttemptState.TERMINAL.value,
+                    ),
+                )
+        return len(rows)
 
 
 def _text(payload: Mapping[str, Any], *keys: str) -> str | None:
@@ -1090,7 +1419,9 @@ class DirectProjectCodeExecutorAdapter:
         self._close_timeout = float(close_timeout)
         self._owner_id = f"d0-project-executor-{uuid.uuid4().hex}"
         self._running: dict[str, asyncio.Task[None]] = {}
+        self._applying: set[str] = set()
         self._interruptions: dict[str, tuple[str, str]] = {}
+        self._retained_worktree_cleanups: dict[str, tuple[Path, Path, Path]] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._closed = False
 
@@ -1101,10 +1432,55 @@ class DirectProjectCodeExecutorAdapter:
     async def prepare_startup(self) -> int:
         """Resolve only expired process leases; active foreign work stays pending."""
 
-        return await asyncio.to_thread(
+        recovered = await asyncio.to_thread(
             self._journal.recover_expired,
             now=self._clock(),
         )
+        attempts = await asyncio.to_thread(self._journal.all_attempts)
+        for record in attempts:
+            root = Path(record.project_root)
+            parent, worktree = _attempt_worktree_paths(root, record.attempt_id)
+            try:
+                registered = await asyncio.to_thread(
+                    _worktree_registered, root, worktree
+                )
+            except Exception:
+                registered = False
+                if worktree.exists() or parent.exists():
+                    self._retained_worktree_cleanups[record.attempt_id] = (
+                        root,
+                        parent,
+                        worktree,
+                    )
+                continue
+            if not (worktree.exists() or parent.exists() or registered):
+                if record.raw_status.endswith("cleanup_pending"):
+                    await asyncio.to_thread(
+                        self._journal.mark_cleanup_resolved,
+                        record.attempt_id,
+                    )
+                continue
+            try:
+                await asyncio.to_thread(
+                    _remove_attempt_worktree, root, parent, worktree
+                )
+            except Exception:
+                self._retained_worktree_cleanups[record.attempt_id] = (
+                    root,
+                    parent,
+                    worktree,
+                )
+                await asyncio.to_thread(
+                    self._journal.mark_cleanup_pending,
+                    record.attempt_id,
+                )
+            else:
+                self._retained_worktree_cleanups.pop(record.attempt_id, None)
+                await asyncio.to_thread(
+                    self._journal.mark_cleanup_resolved,
+                    record.attempt_id,
+                )
+        return recovered
 
     async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         async with self._lifecycle_lock:
@@ -1132,6 +1508,7 @@ class DirectProjectCodeExecutorAdapter:
                 "selected project, Code Agent root, and Git root must match",
                 ErrorCode.PERMISSION_DENIED,
             )
+        await asyncio.to_thread(_reject_git_visible_symlinks, root)
 
         existing = await asyncio.to_thread(self._journal.get, item.attempt_id)
         if existing is not None:
@@ -1145,6 +1522,7 @@ class DirectProjectCodeExecutorAdapter:
             )
 
         before_tree = await asyncio.to_thread(_project_tree_fingerprint, root)
+        before_content = await asyncio.to_thread(_project_content_fingerprint, root)
         before_head = await asyncio.to_thread(_git_head, root)
         protected_support = await asyncio.to_thread(_target_support_fingerprints, root)
         governance = await asyncio.to_thread(_runtime_support_governance, root)
@@ -1173,11 +1551,13 @@ class DirectProjectCodeExecutorAdapter:
                     "formal Agent initialization changed the selected project",
                     ErrorCode.PERMISSION_DENIED,
                 )
+            await asyncio.to_thread(_reject_git_visible_symlinks, root)
             created, record = await asyncio.to_thread(
                 self._journal.create,
                 item=item,
                 project_root=str(root),
                 before_tree=before_tree,
+                before_content=before_content,
                 before_head=before_head,
                 protected_support=protected_support,
                 governance=governance,
@@ -1201,9 +1581,7 @@ class DirectProjectCodeExecutorAdapter:
             worker.add_done_callback(partial(self._settle_worker, item.attempt_id))
             worker_owns_release = True
             await worker_started.wait()
-            current = await asyncio.to_thread(
-                self._journal.get, item.attempt_id
-            )
+            current = await asyncio.to_thread(self._journal.get, item.attempt_id)
             assert current is not None
             return self._delivery(current, after_seq=item.source_seq)
         except asyncio.CancelledError:
@@ -1265,6 +1643,7 @@ class DirectProjectCodeExecutorAdapter:
         heartbeat: asyncio.Task[None] | None = None
         worktree_parent: Path | None = None
         worktree: Path | None = None
+        completion_pending = False
         try:
             heartbeat = asyncio.create_task(
                 self._heartbeat(item.attempt_id),
@@ -1273,23 +1652,28 @@ class DirectProjectCodeExecutorAdapter:
             record = await asyncio.to_thread(self._journal.get, item.attempt_id)
             assert record is not None
             target_root = Path(record.project_root)
-            worktree_parent, worktree = await asyncio.to_thread(
+            created_parent, created_worktree = await asyncio.to_thread(
                 _create_attempt_worktree,
                 target_root,
                 item.attempt_id,
                 record.before_head,
             )
+            worktree_parent = created_parent
+            worktree = created_worktree
             await asyncio.to_thread(
                 _seed_attempt_worktree,
                 target_root,
-                worktree,
+                created_worktree,
                 record.before_tree,
             )
-            if (
-                await asyncio.to_thread(_git_head, worktree) != record.before_head
-                or await asyncio.to_thread(_target_support_fingerprints, worktree)
-                != json.loads(record.protected_support_json)
-            ):
+            await asyncio.to_thread(
+                _reject_git_visible_symlinks, created_worktree
+            )
+            if await asyncio.to_thread(
+                _git_head, created_worktree
+            ) != record.before_head or await asyncio.to_thread(
+                _target_support_fingerprints, created_worktree
+            ) != json.loads(record.protected_support_json):
                 raise RuntimeError("PROJECT_WORKTREE_BASELINE_MISMATCH")
             request = AgentRequest(
                 request_id=f"{_DIRECT_EXECUTOR_REF_PREFIX}{item.attempt_id}",
@@ -1298,12 +1682,12 @@ class DirectProjectCodeExecutorAdapter:
                 params={
                     "query": item.spec.instruction,
                     "mode": "code",
-                    "project_dir": str(worktree),
-                    "cwd": str(worktree),
+                    "project_dir": str(created_worktree),
+                    "cwd": str(created_worktree),
                     "workspace_dir": str(
                         get_agent_workspace_dir().resolve(strict=False)
                     ),
-                    "trusted_dirs": [str(worktree)],
+                    "trusted_dirs": [str(created_worktree)],
                     "supports_user_interaction": False,
                     "source": "live_voice.formal_task.d0",
                 },
@@ -1335,15 +1719,21 @@ class DirectProjectCodeExecutorAdapter:
                 raise RuntimeError("PROJECT_EXECUTOR_AGENT_ERROR")
             if not terminal:
                 raise RuntimeError("PROJECT_EXECUTOR_INCOMPLETE")
-            if await asyncio.to_thread(_git_head, worktree) != record.before_head:
+            if (
+                await asyncio.to_thread(_git_head, created_worktree)
+                != record.before_head
+            ):
                 raise RuntimeError("FORBIDDEN_GIT_HEAD_CHANGE")
+            await asyncio.to_thread(_reject_git_visible_symlinks, created_worktree)
             before_support = json.loads(record.protected_support_json)
             if (
-                await asyncio.to_thread(_target_support_fingerprints, worktree)
+                await asyncio.to_thread(_target_support_fingerprints, created_worktree)
                 != before_support
             ):
                 raise RuntimeError("RUNTIME_SUPPORT_PATH_MUTATED")
-            patch, expected_tree = await asyncio.to_thread(_attempt_patch, worktree)
+            patch, expected_tree = await asyncio.to_thread(
+                _attempt_patch, created_worktree
+            )
             interruption = self._interruptions.get(item.attempt_id)
             refreshed = await asyncio.to_thread(self._journal.get, item.attempt_id)
             assert refreshed is not None
@@ -1362,14 +1752,15 @@ class DirectProjectCodeExecutorAdapter:
                     now=self._clock(),
                 )
                 return
-            reserved, refreshed = await asyncio.to_thread(
+            reserved, completion_record = await asyncio.to_thread(
                 self._journal.reserve_completion,
                 item.attempt_id,
                 owner_id=self._owner_id,
+                expected_tree=expected_tree,
                 now=self._clock(),
             )
             if not reserved:
-                if refreshed.state is FormalAttemptState.TERMINAL:
+                if completion_record.state is FormalAttemptState.TERMINAL:
                     return
                 await asyncio.to_thread(
                     self._journal.finish,
@@ -1382,25 +1773,20 @@ class DirectProjectCodeExecutorAdapter:
                     now=self._clock(),
                 )
                 return
-            await asyncio.to_thread(
-                _apply_attempt_patch,
-                target_root,
-                patch,
-                expected_tree=expected_tree,
-                before_tree=record.before_tree,
-                before_head=record.before_head,
-                protected_support=before_support,
-            )
-            await asyncio.to_thread(
-                self._journal.finish,
-                item.attempt_id,
-                owner_id=self._owner_id,
-                outcome=TerminalOutcome.COMPLETED,
-                raw_status="completed",
-                summary="project Code Agent completed with a Git-visible target change",
-                error=None,
-                now=self._clock(),
-            )
+            self._applying.add(item.attempt_id)
+            try:
+                await asyncio.to_thread(
+                    _apply_attempt_patch,
+                    target_root,
+                    patch,
+                    expected_tree=expected_tree,
+                    before_tree=record.before_tree,
+                    before_head=record.before_head,
+                    protected_support=before_support,
+                )
+            finally:
+                self._applying.discard(item.attempt_id)
+            completion_pending = True
         except asyncio.CancelledError:
             interruption = self._interruptions.get(item.attempt_id)
             raw_status, error = (
@@ -1425,7 +1811,11 @@ class DirectProjectCodeExecutorAdapter:
             )
             raise
         except Exception as error:  # noqa: BLE001 -- persist stable terminal truth
-            code = str(error)
+            code = (
+                error.reason
+                if isinstance(error, FormalTaskViolation)
+                else str(error)
+            )
             if code not in {
                 "PROJECT_EXECUTOR_AGENT_ERROR",
                 "PROJECT_EXECUTOR_INCOMPLETE",
@@ -1438,6 +1828,9 @@ class DirectProjectCodeExecutorAdapter:
                 "PROJECT_CHANGE_APPLICATION_FAILED",
                 "PROJECT_CHANGE_ATTRIBUTION_FAILED",
                 "EXECUTION_TARGET_CHANGED_DURING_ATTEMPT",
+                "PROJECT_WORKTREE_CLEANUP_PENDING",
+                "PROJECT_WORKTREE_CLEANUP_TARGET_UNSAFE",
+                "EXECUTION_TARGET_SYMLINK_UNSAFE",
             }:
                 code = "PROJECT_EXECUTOR_FAILED"
             await asyncio.to_thread(
@@ -1457,11 +1850,50 @@ class DirectProjectCodeExecutorAdapter:
                 with contextlib.suppress(asyncio.CancelledError, Exception):
                     await heartbeat
             if worktree_parent is not None and worktree is not None:
+                try:
+                    await asyncio.to_thread(
+                        _remove_attempt_worktree,
+                        Path(binding.effective_execution_root),
+                        worktree_parent,
+                        worktree,
+                    )
+                except Exception:
+                    self._retained_worktree_cleanups[item.attempt_id] = (
+                        Path(binding.effective_execution_root),
+                        worktree_parent,
+                        worktree,
+                    )
+                    if completion_pending:
+                        await asyncio.to_thread(
+                            self._journal.finish,
+                            item.attempt_id,
+                            owner_id=self._owner_id,
+                            outcome=TerminalOutcome.COMPLETED,
+                            raw_status="completed",
+                            summary=(
+                                "project Code Agent completed with a Git-visible "
+                                "target change"
+                            ),
+                            error=None,
+                            now=self._clock(),
+                        )
+                        completion_pending = False
+                    await asyncio.to_thread(
+                        self._journal.mark_cleanup_pending,
+                        item.attempt_id,
+                    )
+                else:
+                    self._retained_worktree_cleanups.pop(item.attempt_id, None)
+            if completion_pending:
                 await asyncio.to_thread(
-                    _remove_attempt_worktree,
-                    Path(binding.effective_execution_root),
-                    worktree_parent,
-                    worktree,
+                    self._journal.finish,
+                    item.attempt_id,
+                    owner_id=self._owner_id,
+                    outcome=TerminalOutcome.COMPLETED,
+                    raw_status="completed",
+                    summary="project Code Agent completed with a Git-visible target change",
+                    error=None,
+                    now=self._clock(),
                 )
             if release is not None:
                 release()
@@ -1484,11 +1916,7 @@ class DirectProjectCodeExecutorAdapter:
                         ("cancelled", "TASK_CANCEL_ACKNOWLEDGED"),
                     )
                     task = self._running.get(attempt_id)
-                    if (
-                        task is not None
-                        and not task.done()
-                        and task.cancelling() == 0
-                    ):
+                    if task is not None and not task.done() and task.cancelling() == 0:
                         task.cancel()
                     return
         except asyncio.CancelledError:
@@ -1613,6 +2041,11 @@ class DirectProjectCodeExecutorAdapter:
             assert record is not None
         return self._delivery(record, after_seq=attempt.source_seq)
 
+    def retained_cleanup_attempt_ids(self) -> tuple[str, ...]:
+        """Expose bounded cleanup truth without leaking temporary paths."""
+
+        return tuple(sorted(self._retained_worktree_cleanups))
+
     async def close(self, *, interrupt_running: bool = True) -> None:
         self._closed = True
         applying: set[str] = set()
@@ -1620,7 +2053,9 @@ class DirectProjectCodeExecutorAdapter:
             tasks = list(self._running.items())
             for attempt_id, task in tasks:
                 record = await asyncio.to_thread(self._journal.get, attempt_id)
-                if record is not None and record.raw_status == "applying":
+                if attempt_id in self._applying or (
+                    record is not None and record.raw_status == "applying"
+                ):
                     applying.add(attempt_id)
                     continue
                 if interrupt_running:
@@ -1630,9 +2065,33 @@ class DirectProjectCodeExecutorAdapter:
                     )
                     if not task.done() and task.cancelling() == 0:
                         task.cancel()
-        if tasks:
+        applying_tasks = {task for attempt_id, task in tasks if attempt_id in applying}
+        if applying_tasks:
+            done, pending = await asyncio.wait(
+                applying_tasks,
+                timeout=self._close_timeout,
+            )
+            for task in done:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    task.result()
+            if pending:
+                # Applying a staged patch is intentionally not cancelled: a
+                # worker thread or Git subprocess cannot be stopped safely in
+                # process.  The owner therefore remains cleanup-pending and a
+                # later close retry must observe terminal apply before it can
+                # report success.  This bounds shutdown without permitting a
+                # successful close followed by a late project mutation.
+                raise FormalTaskViolation(
+                    "EXECUTOR_CLOSE_CLEANUP_PENDING",
+                    "project patch apply did not settle within the close budget",
+                    ErrorCode.UNAVAILABLE,
+                )
+        non_applying_tasks = {
+            task for attempt_id, task in tasks if attempt_id not in applying
+        }
+        if non_applying_tasks:
             _done, pending = await asyncio.wait(
-                {task for _, task in tasks},
+                non_applying_tasks,
                 timeout=self._close_timeout,
             )
             pending_tasks = {task for task in pending}
@@ -1655,6 +2114,20 @@ class DirectProjectCodeExecutorAdapter:
                         error="EXECUTOR_SHUTDOWN_INTERRUPTED_CLEANUP_PENDING",
                         now=self._clock(),
                     )
+        cleanup_failures: list[str] = []
+        for attempt_id, cleanup in tuple(self._retained_worktree_cleanups.items()):
+            try:
+                await asyncio.to_thread(_remove_attempt_worktree, *cleanup)
+            except Exception:
+                cleanup_failures.append(attempt_id)
+            else:
+                self._retained_worktree_cleanups.pop(attempt_id, None)
+                await asyncio.to_thread(
+                    self._journal.mark_cleanup_resolved,
+                    attempt_id,
+                )
+        if cleanup_failures:
+            raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING")
 
     @staticmethod
     def _require_item(item: PersistentOutboxItem, *, expected_kind: OutboxKind) -> None:
@@ -2238,6 +2711,7 @@ class ProjectCodeExecutorAdapter:
 
 __all__ = [
     "DirectProjectCodeExecutorAdapter",
+    "DIRECT_PROJECT_EXECUTOR_REF_PREFIX",
     "FORMAL_PROJECT_EXECUTOR_ID",
     "FORMAL_RUNTIME_SUPPORT_POLICY",
     "PROJECT_CODE_ARTIFACT_KIND",

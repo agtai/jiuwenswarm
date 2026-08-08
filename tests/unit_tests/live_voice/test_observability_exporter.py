@@ -278,6 +278,7 @@ async def test_export_timeout_is_failed_once_without_retry_or_business_effect() 
     assert closed.stats.attempted_records == 2
     assert closed.stats.failed_records == 1
     assert closed.stats.timed_out_observations == 1
+    assert closed.stats.deadline_exceeded_observations == 1
     assert closed.stats.delivered_metrics == 1
 
 
@@ -324,7 +325,7 @@ async def test_close_timeout_retains_worker_until_inflight_delivery_settles() ->
 
 
 @pytest.mark.asyncio
-async def test_timed_out_attempt_stays_failed_while_callback_cancellation_settles() -> (
+async def test_timed_out_attempt_is_classified_after_callback_cancellation_settles() -> (
     None
 ):
     entered = asyncio.Event()
@@ -360,15 +361,19 @@ async def test_timed_out_attempt_stays_failed_while_callback_cancellation_settle
     assert timed_out.state == "closing"
     assert timed_out.inflight_kind == "observation"
     assert timed_out.worker_running and timed_out.attempt_running
-    assert timed_out.last_failure_kind == "timeout"
-    assert timed_out.stats.failed_records == 1
-    assert timed_out.stats.timed_out_records == 1
+    assert timed_out.inflight_deadline_exceeded is True
+    assert timed_out.last_failure_kind is None
+    assert timed_out.stats.failed_records == 0
+    assert timed_out.stats.timed_out_records == 0
+    assert timed_out.stats.deadline_exceeded_records == 1
 
     release.set()
     closed = await buffer.close(timeout_seconds=1)
     assert attempts == 1
     assert closed.closed
     assert closed.stats.failed_records == 1
+    assert closed.stats.timed_out_records == 1
+    assert closed.stats.deadline_exceeded_records == 1
     assert closed.stats.delivered_records == 0
 
 

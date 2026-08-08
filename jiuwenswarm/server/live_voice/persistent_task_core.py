@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Protocol
 
@@ -139,6 +139,11 @@ def project_task_event(event: PersistentTaskEvent) -> dict[str, object]:
         ) from error
 
 
+ReconciliationEventSink = Callable[
+    [PersistentTaskEvent, PersistentAttemptRecord], Awaitable[None]
+]
+
+
 class PersistentTaskCore:
     """Owns formal task state; the Executor only reports attempt facts."""
 
@@ -152,9 +157,39 @@ class PersistentTaskCore:
         }
     )
 
-    def __init__(self, store: SqliteTaskStore, executor: FormalExecutor) -> None:
+    def __init__(
+        self,
+        store: SqliteTaskStore,
+        executor: FormalExecutor,
+        *,
+        reconciliation_event_sink: ReconciliationEventSink | None = None,
+    ) -> None:
         self.store = store
         self.executor = executor
+        self._reconciliation_event_sink = reconciliation_event_sink
+
+    async def _publish_reconciliation_events(
+        self,
+        task: PersistentTaskRecord,
+        *,
+        after_seq: int,
+    ) -> None:
+        """Publish only durable events appended by an actual reconciliation.
+
+        Evidence is deliberately downstream of the Store transaction.  A sink
+        failure can neither roll back nor reinterpret the Task/Attempt truth.
+        """
+
+        sink = self._reconciliation_event_sink
+        if sink is None:
+            return
+        attempt = self.store.get_attempt(task.attempt_id)
+        events = self.store.events(task.task_id, task.scope, after_seq=after_seq)
+        for event in events:
+            try:
+                await sink(event, attempt)
+            except Exception:  # noqa: BLE001 -- evidence never owns Task truth
+                continue
 
     def execute(
         self,
@@ -357,6 +392,8 @@ class PersistentTaskCore:
                     query.target_ref.id, query.scope, after_seq=after_seq
                 )
                 result = {
+                    "task_id": query.target_ref.id,
+                    "after_seq": after_seq,
                     "events": [event.to_dict() for event in events],
                     "head_seq": task.event_head,
                     "truncated": False,
@@ -514,6 +551,9 @@ class PersistentTaskCore:
                     unavailable += 1
                 else:
                     known += 1
+                    await self._publish_reconciliation_events(
+                        task, after_seq=task.event_head
+                    )
             elif final.resolution is ExecutorResolution.LOST:
                 self.store.resolve_lost_attempt(
                     task.task_id,
@@ -521,6 +561,9 @@ class PersistentTaskCore:
                     final.error or "EXECUTOR_ATTEMPT_LOST",
                 )
                 lost += 1
+                await self._publish_reconciliation_events(
+                    task, after_seq=task.event_head
+                )
             else:
                 self.store.mark_reconciliation_pending(
                     task.task_id, final.error or "EXECUTOR_STATUS_UNAVAILABLE"
@@ -539,5 +582,6 @@ class PersistentTaskCore:
 __all__ = [
     "FormalExecutor",
     "PersistentTaskCore",
+    "ReconciliationEventSink",
     "project_task_event",
 ]

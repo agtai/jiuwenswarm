@@ -95,6 +95,7 @@ _LIVE_VOICE_WEB_ALPHA_CREDENTIAL_METHODS = frozenset(
         "live_voice.composition.p2.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.mutate",
         "live_voice.composition.p3.progress.activate",
@@ -185,6 +186,42 @@ def _inject_live_voice_web_alpha_credential(msg: Message) -> None:
         token = str(os.getenv(_LIVE_VOICE_P3_AUTH_TOKEN_ENV) or "")
         if token:
             params["auth_token"] = token
+    msg.params = params
+
+
+async def _inject_live_voice_gateway_voice_claim(
+    msg: Message, speech_service: Any | None
+) -> None:
+    """Replace a browser receipt with a Gateway-owned closed speech claim."""
+
+    method = getattr(getattr(msg, "req_method", None), "value", "")
+    if msg.channel_id != "web" or method != "live_voice.composition.p2.submit":
+        return
+    params = dict(msg.params or {})
+    params.pop("gateway_voice_claim", None)
+    receipt = params.pop("voice_commit_receipt", None)
+    critical_confirmation = params.pop("critical_confirmation", None)
+    if receipt is None:
+        msg.params = params
+        return
+    claim = getattr(speech_service, "claim_voice_commit_receipt", None)
+    if not callable(claim):
+        params["gateway_voice_claim"] = {"kind": "unavailable"}
+        msg.params = params
+        return
+    try:
+        params["gateway_voice_claim"] = await claim(
+            receipt=receipt,
+            session_id=params.get("session_id"),
+            correlation_id=params.get("correlation_id"),
+            interaction_id=params.get("interaction_id"),
+            turn_id=params.get("turn_id"),
+            commit_id=params.get("commit_id"),
+            text=params.get("text"),
+            critical_confirmation=critical_confirmation,
+        )
+    except Exception:  # noqa: BLE001 -- the downstream closed parser rejects it
+        params["gateway_voice_claim"] = {"kind": "invalid"}
     msg.params = params
 
 
@@ -1780,6 +1817,11 @@ async def _run(
                 return False
             normalized = _normalize_gateway_message(msg)
             _inject_live_voice_web_alpha_credential(normalized)
+            if source_label == "Web":
+                await _inject_live_voice_gateway_voice_claim(
+                    normalized,
+                    getattr(web_channel, "live_voice_speech_service", None),
+                )
             # session.create 主路径注入 work_mode 归一化(与 fallback _session_create
             # 共用同一 helper resolve_session_work_mode_params,保持主路径/fallback 一致):
             # 成功时写回归一化后的 project_id/project_dir/work_mode 到 params,

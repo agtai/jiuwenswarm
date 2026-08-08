@@ -7,6 +7,7 @@ import hashlib
 from collections.abc import Callable
 
 import pytest
+import pytest_asyncio
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -61,7 +62,7 @@ def commit(
     )
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def loop_factory() -> Callable[..., ConversationRuntimeLoop]:
     loops: list[ConversationRuntimeLoop] = []
 

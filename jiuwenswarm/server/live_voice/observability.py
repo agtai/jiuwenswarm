@@ -327,8 +327,8 @@ EVENT_SEMANTIC_MATRIX: Final[Mapping[str, Mapping[str, object]]] = MappingProxyT
     {
         "route.selected": _semantic_rule(
             segments=SEGMENT_NAMES,
-            allowed=("reason_code",),
-            source_kind="none",
+            allowed=("source_record_id", "reason_code"),
+            source_kind="optional",
             reasons=(
                 "ROUTE_FALLBACK",
                 "DEMO_SUBSTITUTE",

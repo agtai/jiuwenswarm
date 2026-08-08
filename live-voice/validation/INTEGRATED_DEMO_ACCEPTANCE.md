@@ -14,6 +14,9 @@ This contract decides whether the cumulative P1/P2/P3alpha Demo has reached 90%.
 - Record exact SHA, dirty state, runtime versions, Provider/Executor labels, browser/OS/device/network/origin-security labels, and sanitized route traces.
 - Agent, Tool, task ID, status, outcome and result must come from real sources. Fakes are allowed only for automated conformance/fault injection and never as showcase success evidence.
 - Every journey segment must identify its actual owner and route as `formal`, `fallback`, `demo_substitute`, `unsupported`, or `unknown`.
+- Runtime credit requires a signed exporter artifact carrying the exact product source/event for the claimed item. Generic lifecycle or segment names, design records and assisted observations cannot create runtime credit.
+- Every credited item must bind its required facts to one correlation on the same candidate/environment/Session/mode. The cumulative journey must additionally prove one common causal chain, strict step order and one exact task chain where task identity is required.
+- A signed assisted receipt may attest only the named subject that the observer actually saw or heard. It must reference the matching runtime artifact, cannot substitute for runtime facts, and cannot be reused as the distinct observation for another journey step or showcase run.
 - Git cannot restore credentials, Provider configuration, project registration, runtime data, permissions, devices or network; their availability and exact test boundary must be recorded without secrets.
 
 ## 2. Mandatory invariants
@@ -54,6 +57,8 @@ Score only evidence observed on the candidate. A full item requires its target m
 | Agent Bridge | 8 | committed non-blocking dispatch, real Agent/Tool, source progress and no TaskCommand leakage |
 | Presentation/history truth | 6 | produced/enqueued/presented/invalidated are distinct and interrupted prefix handling is truthful |
 
+Realtime Media credit requires the exact candidate-bound order: completed server-authored downlink, authenticated browser render receipt, server-derived concurrent-uplink receipt, then completion of that later uplink under the same interaction/response binding. Sequential capture then playout, an immediate network receive ACK, or a browser-declared overlap receives no Realtime Media credit.
+
 ### P3alpha Task Control — 25 points
 
 | Item | Points | Full-credit evidence |
@@ -80,7 +85,7 @@ A real legacy schedule/Bridge plus a timeboxed D-031 poll Adapter may receive at
 
 ### Gate 0 — identity and environment
 
-Candidate SHA, clean worktree, isolated runtime data, routes/flags, Provider/Executor/device labels and secrets boundary are recorded. Failure to identify the actual project or route is a `FAIL`.
+Candidate SHA, clean worktree, isolated runtime data, routes/flags, Provider/Executor/device labels and secrets boundary are recorded. The operational evaluator must resolve the checked-out `HEAD` to that exact SHA and reject every tracked or untracked worktree change before importing evidence. Failure to identify the actual project or route is a `FAIL`.
 
 ### Gate 1 — automated evidence
 
@@ -100,7 +105,7 @@ On one Session and one cumulative mode:
 
 ### Gate 3 — scoring
 
-The evidence owner updates the itemized calculation. Pass requires:
+The evidence owner imports the closed manifest, verifies every artifact signature and runs the repository Gate evaluator described in the runbook. A manually edited score is not a Gate result. Pass requires:
 
 - total score `>= 90/100`;
 - P1 `>= 16/20`, P2 `>= 36/40`, P3alpha `>= 20/25`, Cross-cutting `>= 12/15`;

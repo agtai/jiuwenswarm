@@ -11,9 +11,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     Assurance,
     CommandEnvelope,
+    ContractViolation,
     InputCommitState,
     QueryEnvelope,
     ScopeRef,
+    OriginRef,
     TurnCommit,
     TurnCommitLedger,
 )
@@ -76,6 +78,7 @@ def _create(project: Path) -> FormalTaskPolicyInput:
         scope=_scope(),
         correlation_id="correlation-1",
         authorization=_grant("task.create", command_id="command-1", target=None),
+        interaction_id="interaction-1",
         turn_id="turn-1",
         commit_id="commit-1",
         name="Implement formal task",
@@ -96,7 +99,7 @@ def _voice_policy() -> FormalTaskPolicyAdapter:
                 "commit_id": "commit-1",
                 "turn_id": "turn-1",
                 "interaction_id": "interaction-1",
-                "text": "Create the bounded formal project task.",
+                "text": "Create the bounded project change.",
                 "hypothesis_provenance": {"provider": "test"},
                 "scope": _scope().to_dict(),
                 "context_refs": [],
@@ -105,6 +108,40 @@ def _voice_policy() -> FormalTaskPolicyAdapter:
         )
     )
     return FormalTaskPolicyAdapter(commits)
+
+
+def test_turn_commit_ledger_is_bounded_and_exact_release_recovers_capacity() -> None:
+    ledger = TurnCommitLedger(capacity=1)
+    first = TurnCommit.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "commit_id": "commit-capacity-1",
+            "turn_id": "turn-capacity-1",
+            "interaction_id": "interaction-1",
+            "text": "first",
+            "hypothesis_provenance": {"provider": "test"},
+            "scope": _scope().to_dict(),
+            "context_refs": [],
+            "committed_at": NOW,
+        }
+    )
+    second = TurnCommit.from_dict(
+        {
+            **first.to_dict(),
+            "commit_id": "commit-capacity-2",
+            "turn_id": "turn-capacity-2",
+            "text": "second",
+        }
+    )
+
+    assert ledger.accept(first)
+    with pytest.raises(ContractViolation) as raised:
+        ledger.accept(second)
+    assert raised.value.reason == "TURN_COMMIT_LEDGER_FULL"
+    assert ledger.release_origin(
+        OriginRef("committed_turn", first.turn_id, first.commit_id), first.scope
+    )
+    assert ledger.accept(second)
 
 
 def test_committed_voice_create_maps_to_formal_v2_without_claiming_authority(
@@ -146,6 +183,17 @@ def test_voice_create_rejects_unsafe_policy_inputs_before_core(
         _voice_policy().map(replace(_create(tmp_path), **change))
 
     assert raised.value.reason == reason
+
+
+def test_voice_create_cannot_borrow_commit_for_different_instruction(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        _voice_policy().map(
+            replace(_create(tmp_path), instruction="A different project change.")
+        )
+
+    assert raised.value.reason == "VOICE_TASK_INSTRUCTION_MISMATCH"
 
 
 def test_status_is_a_read_only_query_with_exact_task_and_no_context() -> None:

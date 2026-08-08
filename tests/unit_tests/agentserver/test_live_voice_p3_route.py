@@ -17,6 +17,7 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice import p3_authenticated_composition as p3_module
 from jiuwenswarm.server.live_voice import product_composition_registry as product_module
+from jiuwenswarm.server.live_voice import product_w2_observability as w2_module
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import P3RouteResult
 
 
@@ -52,6 +53,26 @@ class _Composition:
     async def handle(self, **kwargs):
         self.calls.append(kwargs)
         return P3RouteResult(True, {"ok": True, "result": {"task_id": "task-1"}})
+
+
+class _Observer:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.reconciliation_calls: list[tuple[object, object]] = []
+        self.close_calls = 0
+
+    async def observe_route(self, **kwargs: object) -> bool:
+        self.calls.append(kwargs)
+        return True
+
+    async def observe_reconciliation_event(
+        self, event: object, attempt: object
+    ) -> bool:
+        self.reconciliation_calls.append((event, attempt))
+        return True
+
+    async def close(self) -> None:
+        self.close_calls += 1
 
 
 class _LifecycleComposition:
@@ -105,6 +126,10 @@ class _ProductRegistry:
     async def handle_p2_presentation_ack(self, **kwargs):
         self.calls.append(("p2.presentation.ack", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
+
+    async def handle_p2_barge_in(self, **kwargs):
+        self.calls.append(("p2.barge_in", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"applied": True}})
 
     async def handle_p3_confirmation_issue(self, **kwargs):
         self.calls.append(("p3.confirmation.issue", kwargs))
@@ -312,6 +337,7 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
         "live_voice.composition.p2.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.mutate",
         "live_voice.composition.p3.progress.activate",
@@ -347,13 +373,16 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _ProductRegistry()
+    captured: list[dict[str, object]] = []
+    commit_ledger = object()
     server = _server(object())
     server._agent_manager = object()
+    server._live_voice_turn_commit_ledger = commit_ledger
     monkeypatch.setenv(product_module.PRODUCT_COMPOSITION_ENABLE_ENV, "1")
     monkeypatch.setattr(
         product_module,
         "create_product_composition_registry_from_environment",
-        lambda **_kwargs: registry,
+        lambda **kwargs: captured.append(kwargs) or registry,
     )
 
     await server._start_live_voice_product_composition()
@@ -362,6 +391,7 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
 
     assert registry.stop_calls == 1
     assert server._live_voice_product_composition is None
+    assert captured[0]["commit_ledger"] is commit_ledger
 
 
 @pytest.mark.asyncio
@@ -383,10 +413,29 @@ async def test_agentserver_retains_failed_product_cleanup_owner_for_retry() -> N
 async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds() -> (
     None
 ):
-    registry = _ProductRegistry(stop_failures=1)
-    composition = _LifecycleComposition()
+    order: list[str] = []
+
+    class OrderedRegistry(_ProductRegistry):
+        async def stop(self) -> None:
+            await super().stop()
+            order.append("product")
+
+    class OrderedComposition(_LifecycleComposition):
+        async def stop(self) -> None:
+            order.append("p3")
+            await super().stop()
+
+    class OrderedObserver(_Observer):
+        async def close(self) -> None:
+            order.append("evidence")
+            await super().close()
+
+    registry = OrderedRegistry(stop_failures=1)
+    composition = OrderedComposition()
+    observer = OrderedObserver()
     server = _server(composition)
     server._live_voice_product_composition = registry
+    server._live_voice_w2_observability = observer
     server._server = None
     server._checkpointer_warmup_task = None
 
@@ -394,14 +443,20 @@ async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds()
 
     assert registry.stop_calls == 1
     assert composition.stop_calls == 0
+    assert observer.close_calls == 0
     assert server._live_voice_p3_composition is composition
+    assert server._live_voice_w2_observability is observer
+    assert order == []
 
     await server.stop()
 
     assert registry.stop_calls == 2
     assert composition.stop_calls == 1
+    assert observer.close_calls == 1
     assert server._live_voice_product_composition is None
     assert server._live_voice_p3_composition is None
+    assert server._live_voice_w2_observability is None
+    assert order == ["product", "p3", "evidence"]
 
 
 @pytest.mark.asyncio
@@ -410,6 +465,8 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
     registry = _ProductRegistry()
     server = _server(composition)
     server._live_voice_product_composition = registry
+    observer = _Observer()
+    server._live_voice_w2_observability = observer
     ws = _WebSocket()
 
     query = AgentRequest(
@@ -453,6 +510,8 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
             "session_id": "session-1",
         }
     ]
+    assert observer.calls[0]["operation"] == "task.list"
+    assert observer.calls[0]["correlation_id"] == "request-query"
 
 
 @pytest.mark.asyncio
@@ -509,6 +568,11 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
         (
             ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
             "p2.presentation.ack",
+            False,
+        ),
+        (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
+            "p2.barge_in",
             False,
         ),
         (
@@ -647,8 +711,52 @@ async def test_agentserver_owns_formal_composition_start_and_stop(
     assert composition.stop_calls == 1
     assert server._live_voice_p3_composition is None
     assert captured[0]["confirmation_verifier"] is None
+    assert captured[0]["commit_ledger"] is not None
+    assert callable(captured[0]["reconciliation_event_sink"])
     assert server._live_voice_p3_confirmation_owner is None
     assert server._live_voice_p3_confirmation_forwarder is None
+    assert server._live_voice_turn_commit_ledger is None
+
+
+@pytest.mark.asyncio
+async def test_w2_owner_is_ready_before_p3_startup_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    captured: list[dict[str, object]] = []
+    observer = _Observer()
+
+    class Composition(_LifecycleComposition):
+        async def start(self) -> None:
+            assert server._live_voice_w2_observability is observer
+            order.append("p3")
+            await super().start()
+
+    composition = Composition()
+    server = _server(None)
+    server._agent_manager = object()
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED", "1")
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED", "1")
+    monkeypatch.setattr(
+        w2_module,
+        "create_product_w2_observability_owner_from_environment",
+        lambda: order.append("w2") or observer,
+    )
+    monkeypatch.setattr(
+        p3_module,
+        "create_p3_composition_from_environment",
+        lambda **kwargs: captured.append(kwargs) or composition,
+    )
+
+    await server._start_live_voice_w2_observability()
+    await server._start_live_voice_p3_composition()
+    sink = captured[0]["reconciliation_event_sink"]
+    assert callable(sink)
+    await sink("event", "attempt")
+
+    assert order == ["w2", "p3"]
+    assert observer.reconciliation_calls == [("event", "attempt")]
+    await server._stop_live_voice_p3_composition()
 
 
 @pytest.mark.asyncio

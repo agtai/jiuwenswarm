@@ -25,9 +25,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     ErrorCode,
     MAX_SAFE_INTEGER,
+    OriginRef,
     ProducerRef,
     ResponseRef,
     TurnCommit,
+    TurnCommitLedger,
     canonical_json_bytes,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
@@ -127,6 +129,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
         "live_voice.composition.p2.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
+        "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
         "live_voice.composition.p3.mutate",
         "live_voice.composition.p3.progress.activate",
@@ -495,6 +498,8 @@ class AgentServerProductCompositionRegistry:
     _PROGRESS_DELIVERY_CAPACITY = 128
     _PROGRESS_GENERATION_CAPACITY = 128
     _PRODUCT_OPERATION_CAPACITY = 128
+    _TURN_COMMIT_CAPACITY = 128
+    _TURN_COMMIT_CAPACITY_PER_ROUTE = 32
 
     def __init__(
         self,
@@ -505,6 +510,7 @@ class AgentServerProductCompositionRegistry:
         push_text_event: Callable[[dict[str, object]], Awaitable[bool]],
         p3_confirmation_owner: BoundedP3ConfirmationOwner | None = None,
         p3_confirmation_forwarder: ProductP3ConfirmationForwarder | None = None,
+        commit_ledger: TurnCommitLedger | None = None,
     ) -> None:
         if not isinstance(settings, ProductCompositionSettings):
             raise ValueError("product composition settings are required")
@@ -518,8 +524,11 @@ class AgentServerProductCompositionRegistry:
         self._push_text_event = push_text_event
         self._p3_confirmation_owner = p3_confirmation_owner
         self._p3_confirmation_forwarder = p3_confirmation_forwarder
+        self._commit_ledger = commit_ledger or TurnCommitLedger(
+            capacity=self._TURN_COMMIT_CAPACITY
+        )
         self._p3_confirmation_generation = (
-            secrets.randbits(63) + 1
+            secrets.randbits(52) + 1
             if settings.p3_mutation_enabled
             and p3_confirmation_owner is not None
             and p3_confirmation_forwarder is not None
@@ -543,8 +552,15 @@ class AgentServerProductCompositionRegistry:
         self._p2_orphan_cleanups: list[_P2FailedCleanupLease] = []
         self._root_orphan_cleanups: list[ProductCompositionLease] = []
         self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
+        self._pending_turn_commits_by_commit: dict[str, TurnCommit] = {}
+        self._pending_turn_commits_by_turn: dict[str, TurnCommit] = {}
+        self._pending_voice_commit_routes: dict[str, tuple[str, str]] = {}
+        self._accepted_turn_commits_by_commit: dict[str, TurnCommit] = {}
+        self._accepted_turn_commits_by_turn: dict[str, TurnCommit] = {}
+        self._accepted_voice_commit_routes: dict[str, tuple[str, str]] = {}
         self._p2_notification_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
+        self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
         # Fixed-size fail-closed membership fence: evicted request IDs can be
@@ -1606,8 +1622,49 @@ class AgentServerProductCompositionRegistry:
         correlation_id: str,
         commit: TurnCommit,
         channel_id: str,
+        dispatch_target: str,
+        route_key: tuple[str, str],
     ) -> P3RouteResult:
         try:
+            common = {
+                "session_id": retained.binding.session_id,
+                "correlation_id": retained.binding.correlation_id,
+                "interaction_id": retained.binding.interaction_id,
+                "activation_id": retained.binding.activation_id,
+                "activation_generation": retained.binding.activation_generation,
+            }
+            if dispatch_target == "task":
+                async with self._lock:
+                    if self._p2_routes.get(route_key) is not retained:
+                        raise FormalTaskViolation(
+                            "PRODUCT_P2_ROUTE_CLOSED",
+                            "voice task origin cannot outlive its exact P2 route",
+                            ErrorCode.PERMISSION_DENIED,
+                        )
+                    if self._commit_ledger.accept(commit) is not True:
+                        raise FormalTaskViolation(
+                            "TURN_COMMIT_ALREADY_SUBMITTED",
+                            "a committed turn cannot be submitted under a second request",
+                            ErrorCode.CONFLICT,
+                        )
+                    self._accepted_turn_commits_by_commit[commit.commit_id] = commit
+                    self._accepted_turn_commits_by_turn[commit.turn_id] = commit
+                    self._accepted_voice_commit_routes[commit.commit_id] = route_key
+                    if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
+                        self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
+                    if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
+                        self._pending_turn_commits_by_turn.pop(commit.turn_id, None)
+                    self._pending_voice_commit_routes.pop(commit.commit_id, None)
+                return _success_result(
+                    request_id,
+                    {
+                        "status": "task_origin_accepted",
+                        **common,
+                        "turn_id": commit.turn_id,
+                        "commit_id": commit.commit_id,
+                    },
+                    retained.manifest,
+                )
             handle = await retained.activation_lease.submit_committed_turn(
                 retained.binding,
                 request_id=request_id,
@@ -1621,11 +1678,7 @@ class AgentServerProductCompositionRegistry:
                 request_id,
                 {
                     "status": "round_accepted",
-                    "session_id": retained.binding.session_id,
-                    "correlation_id": retained.binding.correlation_id,
-                    "interaction_id": retained.binding.interaction_id,
-                    "activation_id": retained.binding.activation_id,
-                    "activation_generation": retained.binding.activation_generation,
+                    **common,
                     "request_id": handle.request_id,
                     "round_id": handle.round_id,
                     "response": {
@@ -1644,6 +1697,152 @@ class AgentServerProductCompositionRegistry:
                 message=str(exc),
                 manifest=retained.manifest,
             )
+        finally:
+            async with self._lock:
+                if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
+                    self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
+                if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
+                    self._pending_turn_commits_by_turn.pop(commit.turn_id, None)
+                self._pending_voice_commit_routes.pop(commit.commit_id, None)
+
+    def _reserve_turn_commit_locked(
+        self, commit: TurnCommit, route_key: tuple[str, str]
+    ) -> None:
+        existing = (
+            self._pending_turn_commits_by_commit.get(commit.commit_id)
+            or self._pending_turn_commits_by_turn.get(commit.turn_id)
+            or self._accepted_turn_commits_by_commit.get(commit.commit_id)
+            or self._accepted_turn_commits_by_turn.get(commit.turn_id)
+        )
+        if existing is not None:
+            reason = (
+                "TURN_COMMIT_ALREADY_SUBMITTED"
+                if existing.canonical_bytes() == commit.canonical_bytes()
+                else "TURN_COMMIT_CONFLICT"
+            )
+            raise FormalTaskViolation(
+                reason,
+                "commit_id and turn_id are immutable and may submit only once",
+                ErrorCode.CONFLICT,
+            )
+        retained_count = len(self._pending_turn_commits_by_commit) + len(
+            self._accepted_turn_commits_by_commit
+        )
+        if retained_count >= self._TURN_COMMIT_CAPACITY:
+            raise FormalTaskViolation(
+                "PRODUCT_TURN_COMMIT_LEDGER_FULL",
+                "bounded committed-turn authority is full",
+                ErrorCode.UNAVAILABLE,
+            )
+        retained_for_route = sum(
+            retained_route == route_key
+            for retained_route in self._pending_voice_commit_routes.values()
+        ) + sum(
+            retained_route == route_key
+            for retained_route in self._accepted_voice_commit_routes.values()
+        )
+        if retained_for_route >= self._TURN_COMMIT_CAPACITY_PER_ROUTE:
+            raise FormalTaskViolation(
+                "PRODUCT_ROUTE_TURN_COMMIT_LEDGER_FULL",
+                "bounded committed-turn authority for this route is full",
+                ErrorCode.UNAVAILABLE,
+            )
+        self._pending_turn_commits_by_commit[commit.commit_id] = commit
+        self._pending_turn_commits_by_turn[commit.turn_id] = commit
+        self._pending_voice_commit_routes[commit.commit_id] = route_key
+
+    def _release_voice_origin_locked(self, commit: TurnCommit) -> None:
+        self._accepted_turn_commits_by_commit.pop(commit.commit_id, None)
+        self._accepted_turn_commits_by_turn.pop(commit.turn_id, None)
+        self._accepted_voice_commit_routes.pop(commit.commit_id, None)
+        self._commit_ledger.release_origin(
+            OriginRef("committed_turn", commit.turn_id, commit.commit_id),
+            commit.scope,
+        )
+
+    def _release_voice_origins_for_route_locked(
+        self, route_key: tuple[str, str]
+    ) -> None:
+        for commit_id, retained_route in tuple(
+            self._accepted_voice_commit_routes.items()
+        ):
+            if retained_route != route_key:
+                continue
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if commit is not None:
+                self._release_voice_origin_locked(commit)
+
+    @staticmethod
+    def _gateway_voice_provenance(
+        claim: object,
+        *,
+        session_id: str,
+        correlation_id: str,
+        interaction_id: str,
+        turn_id: str,
+        commit_id: str,
+        text: str,
+        channel_id: str,
+    ) -> dict[str, object]:
+        if not isinstance(claim, Mapping) or set(claim) != {
+            "kind",
+            "speech_operation_id",
+            "capture_id",
+            "capture_generation",
+            "session_id",
+            "correlation_id",
+            "interaction_id",
+            "turn_id",
+            "commit_id",
+            "text_sha256",
+            "critical_policy",
+        }:
+            raise FormalTaskViolation(
+                "FORMAL_SPEECH_RECEIPT_REQUIRED",
+                "voice dispatch requires a Gateway-owned formal speech claim",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        expected = {
+            "kind": "formal_speech_recognition",
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "interaction_id": interaction_id,
+            "turn_id": turn_id,
+            "commit_id": commit_id,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        }
+        if channel_id != "web" or any(claim.get(key) != value for key, value in expected.items()):
+            raise FormalTaskViolation(
+                "FORMAL_SPEECH_RECEIPT_MISMATCH",
+                "voice dispatch does not match its Gateway speech claim",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        operation_id = _required_text(
+            claim.get("speech_operation_id"), "speech_operation_id"
+        )
+        capture_id = _required_text(claim.get("capture_id"), "capture_id")
+        critical_policy = claim.get("critical_policy")
+        if critical_policy not in {"eligible", "confirmed"}:
+            raise FormalTaskViolation(
+                "CRITICAL_TOKEN_POLICY_REQUIRED",
+                "voice dispatch did not pass the Gateway critical-token policy",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        generation = claim.get("capture_generation")
+        if type(generation) is not int or generation < 0 or generation > MAX_SAFE_INTEGER:
+            raise FormalTaskViolation(
+                "FORMAL_SPEECH_RECEIPT_MISMATCH",
+                "voice dispatch has an invalid capture generation",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return {
+            "provider": "formal-batch-speech",
+            "kind": "committed_speech",
+            "speech_operation_id": operation_id,
+            "capture_id": capture_id,
+            "capture_generation": generation,
+            "critical_token_policy": critical_policy,
+        }
 
     async def handle_p2_submit(
         self,
@@ -1675,6 +1874,8 @@ class AgentServerProductCompositionRegistry:
                         "response_id",
                         "committed_at",
                         "text",
+                        "dispatch_target",
+                        "gateway_voice_claim",
                     }
                 ),
             )
@@ -1688,6 +1889,34 @@ class AgentServerProductCompositionRegistry:
             )
             text_value = _required_content(params.get("text"), "text", maximum=100_000)
             routed_session, correlation_id, interaction_id, _, _, _ = parsed
+            dispatch_target = str(params.get("dispatch_target") or "agent")
+            if dispatch_target not in {"agent", "task"}:
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_DISPATCH_TARGET",
+                    "product committed input must target Agent or Task exactly once",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            voice_claim = params.get("gateway_voice_claim")
+            if dispatch_target == "task" and voice_claim is None:
+                raise FormalTaskViolation(
+                    "FORMAL_SPEECH_RECEIPT_REQUIRED",
+                    "Task-bound voice input requires formal Speech provenance",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            provenance = (
+                self._gateway_voice_provenance(
+                    voice_claim,
+                    session_id=routed_session,
+                    correlation_id=correlation_id,
+                    interaction_id=interaction_id,
+                    turn_id=turn_id,
+                    commit_id=commit_id,
+                    text=text_value,
+                    channel_id=channel_id,
+                )
+                if voice_claim is not None
+                else {"provider": "product.web.text", "kind": "committed_text"}
+            )
         except FormalTaskViolation as exc:
             return _error_result(
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
@@ -1758,15 +1987,16 @@ class AgentServerProductCompositionRegistry:
                             "turn_id": turn_id,
                             "interaction_id": interaction_id,
                             "text": text_value,
-                            "hypothesis_provenance": {
-                                "provider": "product.web.text",
-                                "kind": "committed_text",
-                            },
+                            "hypothesis_provenance": provenance,
                             "scope": retained.binding.scope.to_dict(),
                             "context_refs": [],
                             "committed_at": committed_at,
                         }
                     )
+                    if dispatch_target == "task":
+                        self._reserve_turn_commit_locked(
+                            commit, (routed_session, interaction_id)
+                        )
                     task = asyncio.create_task(
                         self._run_p2_submit(
                             retained=retained,
@@ -1775,6 +2005,8 @@ class AgentServerProductCompositionRegistry:
                             correlation_id=correlation_id,
                             commit=commit,
                             channel_id=channel_id,
+                            dispatch_target=dispatch_target,
+                            route_key=(routed_session, interaction_id),
                         ),
                         name=f"live-voice-product-p2-submit:{request_id}",
                     )
@@ -2069,11 +2301,7 @@ class AgentServerProductCompositionRegistry:
                     "response_generation must be a non-negative safe integer",
                     ErrorCode.INVALID_ARGUMENT,
                 )
-            if (
-                type(cursor) is not int
-                or cursor < 0
-                or cursor > MAX_SAFE_INTEGER
-            ):
+            if type(cursor) is not int or cursor < 0 or cursor > MAX_SAFE_INTEGER:
                 raise FormalTaskViolation(
                     "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
                     "contiguous_cursor must be a non-negative safe integer",
@@ -2123,8 +2351,7 @@ class AgentServerProductCompositionRegistry:
                     )
                     self._require_product_request_not_evicted("p2.ack", request_id)
                     if (
-                        len(self._p2_ack_operations)
-                        >= self._PRODUCT_OPERATION_CAPACITY
+                        len(self._p2_ack_operations) >= self._PRODUCT_OPERATION_CAPACITY
                         and not self._evict_completed_product_operation(
                             self._p2_ack_operations,
                             namespace="p2.ack",
@@ -2191,6 +2418,164 @@ class AgentServerProductCompositionRegistry:
                         p2_binding=retained.binding,
                     )
                     self._p2_ack_operations[request_id] = entry
+            return await asyncio.shield(entry.task)
+        except FormalTaskViolation as exc:
+            return _error_result(
+                request_id, reason=exc.reason, code=exc.code, message=str(exc)
+            )
+
+    async def handle_p2_barge_in(
+        self,
+        *,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+    ) -> P3RouteResult:
+        """Apply an exact playback-only or playback-plus-response interruption."""
+
+        if not self._settings.p2_enabled:
+            return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
+        try:
+            _require_exact_params(
+                params,
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "correlation_id",
+                        "interaction_id",
+                        "activation_id",
+                        "activation_generation",
+                        "claimed_user_id",
+                        "claimed_project_id",
+                        "action_id",
+                        "response_id",
+                        "response_generation",
+                        "cancel_response",
+                    }
+                ),
+            )
+            self._ensure_running()
+            parsed = self._parse_p2_route_binding(params, session_id=session_id)
+            action_id = _required_text(params.get("action_id"), "action_id")
+            response_id = _required_text(params.get("response_id"), "response_id")
+            response_generation = params.get("response_generation")
+            cancel_response = params.get("cancel_response")
+            if (
+                type(response_generation) is not int
+                or response_generation < 0
+                or response_generation > MAX_SAFE_INTEGER
+                or type(cancel_response) is not bool
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                    "barge-in generation and policy are invalid",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            fingerprint = canonical_json_bytes(
+                {key: value for key, value in params.items() if key != "auth_token"}
+            )
+            async with self._lock:
+                entry = self._p2_barge_operations.get(request_id)
+                if entry is not None:
+                    if entry.p2_binding is None:
+                        raise RuntimeError("retained P2 barge-in lost its binding")
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=entry.p2_binding,
+                    )
+                    if entry.fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "barge-in request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                else:
+                    retained = await self._require_active_p2_route_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                    )
+                    self._require_product_request_not_evicted("p2.barge", request_id)
+                    if (
+                        len(self._p2_barge_operations)
+                        >= self._PRODUCT_OPERATION_CAPACITY
+                        and not self._evict_completed_product_operation(
+                            self._p2_barge_operations,
+                            namespace="p2.barge",
+                        )
+                    ):
+                        raise FormalTaskViolation(
+                            "PRODUCT_OPERATION_LEDGER_FULL",
+                            "bounded barge-in replay ledger is full",
+                            ErrorCode.UNAVAILABLE,
+                        )
+                    response = ResponseRef(
+                        parsed[2], response_id, response_generation
+                    )
+
+                    async def interrupt() -> P3RouteResult:
+                        try:
+                            outcome = await retained.activation_lease.barge_in(
+                                retained.binding,
+                                action_id=action_id,
+                                response=response,
+                                cancel_response=cancel_response,
+                            )
+                            return _success_result(
+                                request_id,
+                                {
+                                    "status": "barge_in_applied",
+                                    "session_id": retained.binding.session_id,
+                                    "correlation_id": retained.binding.correlation_id,
+                                    "interaction_id": retained.binding.interaction_id,
+                                    "activation_id": retained.binding.activation_id,
+                                    "activation_generation": (
+                                        retained.binding.activation_generation
+                                    ),
+                                    "action_id": outcome.action_id,
+                                    "response_id": response.response_id,
+                                    "response_generation": (
+                                        response.response_generation
+                                    ),
+                                    "cancel_response": cancel_response,
+                                    "applied": outcome.applied,
+                                    "replayed": outcome.replayed,
+                                    "effect_ids": list(outcome.effect_ids),
+                                },
+                                retained.manifest,
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            return _error_result(
+                                request_id,
+                                reason=getattr(
+                                    exc, "reason", "PRODUCT_P2_BARGE_IN_FAILED"
+                                ),
+                                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                                message=str(exc),
+                                manifest=retained.manifest,
+                            )
+
+                    task = asyncio.create_task(
+                        interrupt(),
+                        name=f"live-voice-product-p2-barge:{request_id}",
+                    )
+                    entry = _RetainedProductOperation(
+                        fingerprint,
+                        task,
+                        p2_binding=retained.binding,
+                    )
+                    self._p2_barge_operations[request_id] = entry
             return await asyncio.shield(entry.task)
         except FormalTaskViolation as exc:
             return _error_result(
@@ -2346,6 +2731,7 @@ class AgentServerProductCompositionRegistry:
                 if authority.lease is not None:
                     await authority.lease.close()
             key = (routed_session, interaction_id)
+            self._release_voice_origins_for_route_locked(key)
             self._p2_routes.pop(key, None)
             self._retain_closed_p2_route(
                 key,
@@ -2414,9 +2800,12 @@ class AgentServerProductCompositionRegistry:
             required.add("confirmation_id")
         if operation == "task.create":
             required.update({"name", "instruction"})
-            optional.add("model_intent")
+            optional.update(
+                {"model_intent", "source", "interaction_id", "turn_id", "commit_id"}
+            )
         else:
             required.add("task_id")
+            optional.add("source")
         _require_exact_params(params, frozenset(required | optional))
         routed_session = _required_text(session_id, "routed_session_id")
         if _required_text(params.get("session_id"), "session_id") != routed_session:
@@ -2447,6 +2836,10 @@ class AgentServerProductCompositionRegistry:
             )
         async with self._p3_operation_lock:
             try:
+                await self._require_current_voice_origin_route(
+                    forwarded=forwarded,
+                    session_id=session_id,
+                )
                 confirmation_id = hashlib.sha256(
                     f"{generation}:{request_id}".encode("utf-8")
                 ).hexdigest()
@@ -2488,6 +2881,15 @@ class AgentServerProductCompositionRegistry:
                         "expires_at": receipt.expires_at,
                         "replayed": receipt.replayed,
                         "operation": operation,
+                        "command_id": prepared.binding.command_id,
+                        "target_task_id": prepared.binding.target_task_id,
+                        "task_control_binding": {
+                            "subject_id": prepared.binding.scope.subject_id,
+                            "session_id": prepared.binding.scope.session_id,
+                            "project_id": prepared.binding.scope.project_id,
+                            "correlation_id": prepared.correlation_id,
+                            "generation": generation,
+                        },
                     },
                     manifest,
                 )
@@ -2692,11 +3094,20 @@ class AgentServerProductCompositionRegistry:
                         message=message,
                         manifest=manifest,
                     )
+                if operation == "task.create" and forwarded.get("source") == "voice":
+                    commit_id = str(forwarded.get("commit_id") or "")
+                    turn_id = str(forwarded.get("turn_id") or "")
+                    async with self._lock:
+                        commit = self._accepted_turn_commits_by_commit.get(commit_id)
+                        if commit is not None and commit.turn_id == turn_id:
+                            self._release_voice_origin_locked(commit)
                 return _success_result(
                     request_id,
                     {
                         "status": "mutation_processed",
                         "operation": operation,
+                        "command_id": prepared.binding.command_id,
+                        "target_task_id": prepared.binding.target_task_id,
                         "formal_task_result": result.payload.get("result"),
                     },
                     manifest,
@@ -2728,6 +3139,10 @@ class AgentServerProductCompositionRegistry:
                 ErrorCode.UNAVAILABLE,
             )
         async with self._p3_operation_lock:
+            await self._require_current_voice_origin_route(
+                forwarded=forwarded,
+                session_id=session_id,
+            )
             prepared = await self._p3_composition.prepare_mutation_confirmation(
                 operation=operation,
                 params=forwarded,
@@ -2748,6 +3163,32 @@ class AgentServerProductCompositionRegistry:
                 now=prepared.observed_at,
             )
             return prepared.binding
+
+    async def _require_current_voice_origin_route(
+        self, *, forwarded: Mapping[str, object], session_id: str
+    ) -> None:
+        if forwarded.get("source") != "voice":
+            return
+        interaction_id = _required_text(
+            forwarded.get("interaction_id"), "interaction_id"
+        )
+        commit_id = _required_text(forwarded.get("commit_id"), "commit_id")
+        turn_id = _required_text(forwarded.get("turn_id"), "turn_id")
+        route_key = (session_id, interaction_id)
+        async with self._lock:
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if (
+                self._accepted_voice_commit_routes.get(commit_id) != route_key
+                or self._p2_routes.get(route_key) is None
+                or commit is None
+                or commit.turn_id != turn_id
+                or commit.interaction_id != interaction_id
+            ):
+                raise FormalTaskViolation(
+                    "VOICE_TASK_ROUTE_MISMATCH",
+                    "voice task origin must belong to the exact active P2 interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
 
     async def handle_p3_mutation(
         self,
@@ -2775,7 +3216,9 @@ class AgentServerProductCompositionRegistry:
                 existing = self._p3_mutation_operations.get(request_id)
             if existing is not None:
                 if existing.p3_binding is None:
-                    raise RuntimeError("retained P3 mutation lost its authority binding")
+                    raise RuntimeError(
+                        "retained P3 mutation lost its authority binding"
+                    )
                 await self._p3_composition.reauthorize_mutation_replay(
                     operation=operation,
                     params=forwarded,
@@ -3848,6 +4291,7 @@ class AgentServerProductCompositionRegistry:
                     logger.exception("[LiveVoiceProduct] P2 disconnect cleanup pending")
                     continue
                 self._p2_routes.pop(p2_key, None)
+                self._release_voice_origins_for_route_locked(p2_key)
                 self._retain_closed_p2_route(
                     p2_key,
                     _ClosedP2Route(
@@ -3888,6 +4332,7 @@ class AgentServerProductCompositionRegistry:
                 self._p2_submit_operations,
                 self._p2_notification_operations,
                 self._p2_ack_operations,
+                self._p2_barge_operations,
                 self._p3_issue_operations,
                 self._p3_mutation_operations,
             )
@@ -3906,6 +4351,7 @@ def create_product_composition_registry_from_environment(
     push_text_event: Callable[[dict[str, object]], Awaitable[bool]],
     p3_confirmation_owner: BoundedP3ConfirmationOwner | None = None,
     p3_confirmation_forwarder: ProductP3ConfirmationForwarder | None = None,
+    commit_ledger: TurnCommitLedger | None = None,
 ) -> AgentServerProductCompositionRegistry | None:
     """Construct no registry or Adapter unless the master gate is explicit."""
 
@@ -3924,6 +4370,7 @@ def create_product_composition_registry_from_environment(
         push_text_event=push_text_event,
         p3_confirmation_owner=p3_confirmation_owner,
         p3_confirmation_forwarder=p3_confirmation_forwarder,
+        commit_ledger=commit_ledger,
     )
 
 

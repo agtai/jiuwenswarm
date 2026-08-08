@@ -131,6 +131,7 @@ function active({
   maxPendingFrames,
   maxPendingBytes,
   highWater,
+  deferDownlinkAck,
 } = {}) {
   const counters = effects ?? { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
   const factoryCalls = [];
@@ -149,6 +150,7 @@ function active({
     max_pending_frames: maxPendingFrames,
     max_pending_bytes: maxPendingBytes,
     socket_high_water_bytes: highWater,
+    defer_downlink_ack: deferDownlinkAck,
   });
   assert.equal(activation.active, true);
   return { activation, socket, effects: counters, factoryCalls };
@@ -292,6 +294,66 @@ test('downlink accepts exact binary sequence, invokes audio once, and returns ty
     through_seq: 0,
   });
   assert.deepEqual(effects, { audio: 1, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+});
+
+test('downlink can defer its bounded ACK until browser rendering confirms the frame', () => {
+  const effects = { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
+  const route = active({
+    exactBinding: binding({ direction: 'downlink' }),
+    effects,
+    deferDownlinkAck: true,
+  });
+  attach(route);
+
+  route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame(0)));
+  route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame(1)));
+  assert.equal(effects.audio, 2);
+  assert.equal(route.socket.sent.length, 0);
+  assert.throws(
+    () => route.activation.leaf.acknowledgeDownlinkThrough(2),
+    error => error?.reasonId === 'MEDIA_ACK_UNSENT',
+  );
+  assert.throws(
+    () => route.activation.leaf.acknowledgeDownlinkThrough(1),
+    error => error?.reasonId === 'MEDIA_ACK_OUT_OF_ORDER',
+  );
+
+  route.activation.leaf.acknowledgeDownlinkThrough(0);
+  route.activation.leaf.acknowledgeDownlinkThrough(1);
+  assert.deepEqual(route.socket.sent.map(deserializeMediaControl), [
+    {
+      type: 'media.ack',
+      lease_id: route.activation.binding.lease_id,
+      generation: route.activation.binding.generation.value,
+      through_seq: 0,
+    },
+    {
+      type: 'media.ack',
+      lease_id: route.activation.binding.lease_id,
+      generation: route.activation.binding.generation.value,
+      through_seq: 1,
+    },
+  ]);
+});
+
+test('deferred downlink rejects a peer that exceeds the advertised unrendered window', () => {
+  const effects = { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
+  const route = active({
+    exactBinding: binding({ direction: 'downlink' }),
+    effects,
+    deferDownlinkAck: true,
+    maxPendingFrames: 1,
+  });
+  attach(route);
+  route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame(0)));
+  route.socket.message(encodeAudioFrame(route.activation.binding, mediaFrame(1)));
+
+  assert.equal(effects.audio, 1);
+  assert.equal(route.activation.leaf.closed, true);
+  assert.equal(
+    deserializeMediaControl(route.socket.sent[0]).reason_id,
+    'MEDIA_TRANSPORT_PROTOCOL_ERROR',
+  );
 });
 
 test('wrong attach, stale capture, cursor gap, and malformed control terminally fence the leaf', () => {

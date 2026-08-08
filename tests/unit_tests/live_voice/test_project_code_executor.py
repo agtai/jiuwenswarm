@@ -4,13 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import runpy
 import sqlite3
 import subprocess
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import pytest
+
+from jiuwenswarm.server.live_voice import project_code_executor
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
@@ -92,13 +96,9 @@ class _DirectProjectExecutor:
                     _git(project, "add", "forbidden.txt")
                     _git(project, "commit", "-m", "forbidden")
                 elif self.behavior == "support_change":
-                    (project / ".gitignore").write_text(
-                        "runtime/\n", encoding="utf-8"
-                    )
+                    (project / ".gitignore").write_text("runtime/\n", encoding="utf-8")
                 elif self.behavior == "ignored_only":
-                    (project / "ignored.txt").write_text(
-                        "ignored", encoding="utf-8"
-                    )
+                    (project / "ignored.txt").write_text("ignored", encoding="utf-8")
                 else:
                     (project / "result.txt").write_text("done", encoding="utf-8")
                 yield AgentResponseChunk(
@@ -945,7 +945,9 @@ async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isol
             )
         )
         assert result.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
-        assert result.observations[-1].error == "TASK_CANCEL_ACKNOWLEDGED_CLEANUP_PENDING"
+        assert (
+            result.observations[-1].error == "TASK_CANCEL_ACKNOWLEDGED_CLEANUP_PENDING"
+        )
     else:
         await adapter.close(interrupt_running=True)
     assert asyncio.get_running_loop().time() - started < 0.2
@@ -969,6 +971,54 @@ async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isol
     isolated_root = Path(executor.requests[0].params["project_dir"])
     assert isolated_root != project.resolve()
     assert not isolated_root.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_close", [False, True])
+async def test_close_is_bounded_and_retains_cleanup_while_patch_is_applying(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cancel_close: bool,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    entered = Event()
+    release = Event()
+    real_apply = project_code_executor._apply_attempt_patch
+
+    def blocked_apply(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(project_code_executor, "_apply_attempt_patch", blocked_apply)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        tmp_path / "p3.sqlite3",
+        close_timeout=0.01,
+    )
+    await adapter.dispatch(_item(project))
+    assert await asyncio.to_thread(entered.wait, 5)
+
+    closing = asyncio.create_task(adapter.close(interrupt_running=True))
+    if cancel_close:
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+    else:
+        with pytest.raises(FormalTaskViolation) as captured:
+            await closing
+        assert captured.value.reason == "EXECUTOR_CLOSE_CLEANUP_PENDING"
+    assert not (project / "result.txt").exists()
+
+    release.set()
+    await _wait_direct_settled(adapter)
+    await adapter.close(interrupt_running=True)
+    assert (project / "result.txt").read_text("utf-8") == "done"
+    settled = _git(project, "status", "--porcelain=v2")
+    await asyncio.sleep(0.03)
+    assert _git(project, "status", "--porcelain=v2") == settled
+    assert adapter._running == {}
 
 
 @pytest.mark.parametrize("field", ["cancel_timeout", "close_timeout"])
@@ -1114,6 +1164,237 @@ async def test_direct_executor_faults_fail_closed_with_stable_terminal_truth(
     assert len(terminal.observations) == 1
     assert terminal.observations[0].attempt_outcome is TerminalOutcome.FAILED
     assert terminal.observations[0].error == expected_error
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_retains_failed_worktree_cleanup_and_never_completes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    real_remove = project_code_executor._remove_attempt_worktree
+    removals = 0
+
+    def fail_once(root: Path, parent: Path, worktree: Path) -> None:
+        nonlocal removals
+        removals += 1
+        if removals == 1:
+            raise RuntimeError("injected cleanup lock")
+        real_remove(root, parent, worktree)
+
+    monkeypatch.setattr(
+        project_code_executor, "_remove_attempt_worktree", fail_once
+    )
+    await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert terminal.observations[-1].error is None
+    assert terminal.observations[-1].raw_status == "completed_cleanup_pending"
+    assert adapter.retained_cleanup_attempt_ids() == ("attempt-1",)
+    isolated_root = Path(executor.requests[0].params["project_dir"])
+    assert isolated_root.exists()
+    restarted = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    await restarted.prepare_startup()
+    assert restarted.retained_cleanup_attempt_ids() == ()
+    assert not isolated_root.exists()
+    resolved = await restarted.status(task, attempt)
+    assert isinstance(resolved, ExecutorDeliveryResult)
+    assert resolved.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert resolved.observations[-1].raw_status == "completed_cleanup_resolved"
+    await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_exposes_independent_cleanup_pending_truth(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, "agent_error")
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    real_remove = project_code_executor._remove_attempt_worktree
+    monkeypatch.setattr(
+        project_code_executor,
+        "_remove_attempt_worktree",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("injected lock")),
+    )
+    await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[-1].error == "PROJECT_EXECUTOR_AGENT_ERROR"
+    assert terminal.observations[-1].raw_status == "failed_cleanup_pending"
+    assert adapter.retained_cleanup_attempt_ids() == ("attempt-1",)
+
+    monkeypatch.setattr(
+        project_code_executor, "_remove_attempt_worktree", real_remove
+    )
+    await adapter.close()
+    assert adapter.retained_cleanup_attempt_ids() == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_is_directory", [False, True])
+async def test_direct_executor_rejects_git_visible_symlink_before_agent_effects(
+    tmp_path: Path,
+    target_is_directory: bool,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    external = tmp_path / ("external-dir" if target_is_directory else "external.txt")
+    if target_is_directory:
+        external.mkdir()
+        marker = external / "marker.txt"
+    else:
+        marker = external
+    marker.write_text("unchanged\n", encoding="utf-8")
+    link = project / ("unsafe-dir" if target_is_directory else "unsafe-file")
+    try:
+        link.symlink_to(external, target_is_directory=target_is_directory)
+    except OSError as error:
+        pytest.skip(f"host cannot create symlinks: {error}")
+    _git(project, "add", ".")
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await adapter.dispatch(_item(project))
+
+    assert raised.value.reason == "EXECUTION_TARGET_SYMLINK_UNSAFE"
+    assert marker.read_text("utf-8") == "unchanged\n"
+    assert resolver.calls == []
+    assert executor.requests == []
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_rechecks_symlinks_after_agent_before_target_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    real_reject = project_code_executor._reject_git_visible_symlinks
+    post_agent_checks: list[Path] = []
+
+    def reject_after_agent(root: Path) -> None:
+        real_reject(root)
+        if executor.finished.is_set() and root.resolve() != project.resolve():
+            post_agent_checks.append(root.resolve())
+            raise FormalTaskViolation(
+                "EXECUTION_TARGET_SYMLINK_UNSAFE",
+                "simulated post-Agent reparse discovery",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    monkeypatch.setattr(
+        project_code_executor, "_reject_git_visible_symlinks", reject_after_agent
+    )
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert post_agent_checks
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    assert terminal.observations[-1].error == "EXECUTION_TARGET_SYMLINK_UNSAFE"
+    assert not (project / "result.txt").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+async def test_direct_executor_rejects_git_visible_windows_junction(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    external = tmp_path / "external-junction-target"
+    external.mkdir()
+    marker = external / "marker.txt"
+    marker.write_text("unchanged\n", encoding="utf-8")
+    junction = project / "unsafe-junction"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(junction), str(external)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip("host cannot create a Windows junction")
+    _git(project, "add", ".")
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await adapter.dispatch(_item(project))
+
+    assert raised.value.reason == "EXECUTION_TARGET_SYMLINK_UNSAFE"
+    assert marker.read_text("utf-8") == "unchanged\n"
+    assert resolver.calls == []
+    assert executor.requests == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
+def test_attempt_worktree_rejects_preplanted_temp_junction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    temp_root = tmp_path / "temp"
+    temp_root.mkdir()
+    external = tmp_path / "external-attempt-root"
+    external.mkdir()
+    base = temp_root / "jiuwenswarm-live-voice-d0"
+    created = subprocess.run(
+        ["cmd.exe", "/d", "/c", "mklink", "/J", str(base), str(external)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if created.returncode != 0:
+        pytest.skip("host cannot create a Windows junction")
+    monkeypatch.setattr(
+        project_code_executor.tempfile, "gettempdir", lambda: str(temp_root)
+    )
+
+    try:
+        with pytest.raises(RuntimeError, match="PROJECT_WORKTREE_UNAVAILABLE"):
+            project_code_executor._create_attempt_worktree(
+                project, "attempt-preplanted", _git(project, "rev-parse", "HEAD")
+            )
+    finally:
+        base.rmdir()
+
+    assert list(external.iterdir()) == []
 
 
 @pytest.mark.asyncio
@@ -1303,6 +1584,7 @@ async def test_direct_executor_restart_recovers_only_expired_attempt_lease(
         item=item,
         project_root=str(project),
         before_tree=before_tree,
+        before_content=project_code_executor._project_content_fingerprint(project),
         before_head=_git(project, "rev-parse", "HEAD"),
         protected_support={name: "baseline" for name in FORMAL_RUNTIME_SUPPORT_POLICY},
         governance={"policy": dict(FORMAL_RUNTIME_SUPPORT_POLICY)},
@@ -1334,3 +1616,85 @@ async def test_direct_executor_restart_recovers_only_expired_attempt_lease(
     assert isinstance(terminal, ExecutorDeliveryResult)
     assert terminal.observations[-1].attempt_outcome is TerminalOutcome.INTERRUPTED
     assert terminal.observations[-1].error == "EXECUTOR_PROCESS_RESTARTED"
+
+
+@pytest.mark.parametrize(
+    ("root_state", "expected_outcome", "expected_status", "expected_error"),
+    [
+        (
+            "before",
+            TerminalOutcome.INTERRUPTED,
+            "restart_before_apply",
+            "EXECUTOR_PROCESS_RESTARTED",
+        ),
+        (
+            "applied",
+            TerminalOutcome.COMPLETED,
+            "restart_apply_completed",
+            None,
+        ),
+        (
+            "unknown",
+            TerminalOutcome.UNKNOWN,
+            "restart_apply_result_unknown",
+            "EXECUTOR_RESTART_APPLY_RESULT_UNKNOWN",
+        ),
+    ],
+)
+def test_direct_executor_restart_classifies_atomic_apply_crash_window(
+    tmp_path: Path,
+    root_state: str,
+    expected_outcome: TerminalOutcome,
+    expected_status: str,
+    expected_error: str | None,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    journal = project_code_executor._DirectProjectAttemptJournal(
+        tmp_path / "p3.sqlite3"
+    )
+    item = _item(project)
+    before_content = project_code_executor._project_content_fingerprint(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    protected_support = project_code_executor._target_support_fingerprints(project)
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=_git(project, "status", "--porcelain=v2"),
+        before_content=before_content,
+        before_head=before_head,
+        protected_support=protected_support,
+        governance={"policy": dict(FORMAL_RUNTIME_SUPPORT_POLICY)},
+        owner_id="dead-process",
+        now="2026-08-07T10:00:00Z",
+    )
+    assert created is True
+    journal.start(
+        item.attempt_id,
+        owner_id="dead-process",
+        now="2026-08-07T10:00:00Z",
+    )
+
+    readme = project / "README.md"
+    readme.write_text("expected change\n", encoding="utf-8")
+    expected_content = project_code_executor._project_content_fingerprint(project)
+    readme.write_text("baseline\n", encoding="utf-8")
+    reserved, _ = journal.reserve_completion(
+        item.attempt_id,
+        owner_id="dead-process",
+        expected_tree=expected_content,
+        now="2026-08-07T10:00:00Z",
+    )
+    assert reserved is True
+    if root_state == "applied":
+        readme.write_text("expected change\n", encoding="utf-8")
+    elif root_state == "unknown":
+        readme.write_text("unexpected change\n", encoding="utf-8")
+
+    assert journal.recover_expired(now="2026-08-07T10:05:01Z") == 1
+    recovered = journal.get(item.attempt_id)
+    assert recovered is not None
+    assert recovered.state is FormalAttemptState.TERMINAL
+    assert recovered.outcome is expected_outcome
+    assert recovered.raw_status == expected_status
+    assert recovered.error == expected_error

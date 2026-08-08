@@ -94,6 +94,7 @@ class FakeRuntime:
         ),
         close_statuses: list[AgentConversationShutdownStatus] | None = None,
         close_gate: asyncio.Event | None = None,
+        attach_failure: Exception | None = None,
         order: list[str] | None = None,
     ) -> None:
         self.start_result = start_result
@@ -105,11 +106,20 @@ class FakeRuntime:
         self.close_status = close_status
         self.close_statuses = list(close_statuses or ())
         self.close_gate = close_gate
+        self.attach_failure = attach_failure
         self.order = order
         self.start_calls = 0
         self.open_calls: list[str] = []
         self.close_calls = 0
         self.closed = False
+
+    def attach_notification_consumer(
+        self, *, consumer_id: str, connection_epoch: int
+    ) -> object | None:
+        del consumer_id, connection_epoch
+        if self.attach_failure is not None:
+            raise self.attach_failure
+        return None
 
     async def start(self) -> bool:
         self.start_calls += 1
@@ -758,6 +768,25 @@ async def test_partial_activation_failure_rolls_back_runtime(
     assert result.lease is None
     assert runtime.close_calls == 1
     assert runtime.closed is True
+
+
+@pytest.mark.asyncio
+async def test_notification_consumer_attach_failure_rolls_back_open_runtime() -> None:
+    resolver = RecordingResolver((candidate(),))
+    runtime = FakeRuntime(attach_failure=RuntimeError("attach-secret"))
+    adapter = adapter_for(resolver, lambda _context, _binding: runtime)
+
+    result = await adapter.activate(request())
+
+    assert result.status is P2ActivationStatus.FAILED
+    assert result.reason is P2ActivationReason.NOTIFICATION_CONSUMER_ATTACH_FAILED
+    assert result.lease is None
+    assert runtime.start_calls == 1
+    assert runtime.open_calls == ["interaction-1"]
+    assert runtime.close_calls == 1
+    assert runtime.closed is True
+    assert adapter.retained_failed_cleanups() == ()
+    assert "secret" not in repr(result)
 
 
 @pytest.mark.asyncio

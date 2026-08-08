@@ -485,6 +485,12 @@ export interface CurrentIntegratedWebRouteFacts {
   readonly p2_text_chat_available: boolean;
   readonly p3_task_compatibility_enabled: boolean;
   readonly p3_task_compatibility_available: boolean;
+  readonly p1_formal_enabled?: boolean;
+  readonly p1_formal_available?: boolean;
+  readonly p2_formal_enabled?: boolean;
+  readonly p2_formal_available?: boolean;
+  readonly p3_formal_enabled?: boolean;
+  readonly p3_formal_available?: boolean;
 }
 
 export interface IntegratedWebRouteSelection {
@@ -494,10 +500,13 @@ export interface IntegratedWebRouteSelection {
 
 export function createCurrentIntegratedWebRouteSelection(facts: Readonly<CurrentIntegratedWebRouteFacts>): Readonly<IntegratedWebRouteSelection> {
   for (const [field, value] of Object.entries(facts)) {
-    if (typeof value !== 'boolean') {
+    if (value !== undefined && typeof value !== 'boolean') {
       throw new IntegratedWebRouteViolation('INVALID_CURRENT_ROUTE_FACT', `${field} must be boolean`);
     }
   }
+  const p1FormalEnabled = facts.p1_formal_enabled === true;
+  const p2FormalEnabled = facts.p2_formal_enabled === true;
+  const p3FormalEnabled = facts.p3_formal_enabled === true;
   const registry = new IntegratedWebAdapterRegistry()
     .register({
       segment_id: 'p1.speech_io',
@@ -524,7 +533,50 @@ export function createCurrentIntegratedWebRouteSelection(facts: Readonly<Current
       capabilities: ['committed_text_dispatch', 'truthful_text_response'],
     });
 
-  if (facts.p3_task_compatibility_enabled) {
+  if (p1FormalEnabled) {
+    registry.register({
+      segment_id: 'p1.speech_io',
+      adapter_id: 'formal.product-batch-speech-media',
+      implementation_class: 'formal',
+      owner_module: 'P1.ProductDedicatedMediaBatchSpeech',
+      capability_provider: 'gateway-batch-speech',
+      contract_version: CONTRACT_VERSION,
+      safe_reason: null,
+      available: facts.p1_formal_available === true,
+      unavailable_reason: facts.p1_formal_available === true ? null : 'FORMAL_P1_NOT_ACTIVE',
+      capabilities: ['browser_audio_io', 'dedicated_binary_media', 'batch_stt', 'batch_tts'],
+    });
+  }
+  if (p2FormalEnabled) {
+    registry.register({
+      segment_id: 'p2.realtime_conversation',
+      adapter_id: 'formal.product-p2-runtime',
+      implementation_class: 'formal',
+      owner_module: 'P2.ProductConversationRuntime',
+      capability_provider: 'jiuwenswarm-agent-runtime',
+      contract_version: CONTRACT_VERSION,
+      safe_reason: null,
+      available: facts.p2_formal_available === true,
+      unavailable_reason: facts.p2_formal_available === true ? null : 'FORMAL_P2_NOT_ACTIVE',
+      capabilities: ['committed_turn', 'nonblocking_notification_poll', 'presented_history'],
+    });
+  }
+  if (p3FormalEnabled) {
+    registry.register({
+      segment_id: 'p3alpha.task_control',
+      adapter_id: 'formal.product-p3-task-control',
+      implementation_class: 'formal',
+      owner_module: 'P3alpha.FormalTaskControl',
+      capability_provider: 'formal-task-core-direct-d0',
+      contract_version: CONTRACT_VERSION,
+      safe_reason: null,
+      available: facts.p3_formal_available === true,
+      unavailable_reason: facts.p3_formal_available === true ? null : 'FORMAL_P3_NOT_ACTIVE',
+      capabilities: ['confirmed_task_mutation', 'direct_d0_executor', 'task_event_progress'],
+    });
+  }
+
+  if (!p3FormalEnabled && facts.p3_task_compatibility_enabled) {
     registry.register({
       segment_id: 'p3alpha.task_control',
       adapter_id: 'compat.d031-task-bridge',
@@ -542,9 +594,11 @@ export function createCurrentIntegratedWebRouteSelection(facts: Readonly<Current
   return Object.freeze({
     registry,
     policy: Object.freeze({
-      'p1.speech_io': 'fallback',
-      'p2.realtime_conversation': 'fallback',
-      'p3alpha.task_control': facts.p3_task_compatibility_enabled ? 'demo_substitute' : 'unsupported',
+      'p1.speech_io': p1FormalEnabled ? 'formal' : 'fallback',
+      'p2.realtime_conversation': p2FormalEnabled ? 'formal' : 'fallback',
+      'p3alpha.task_control': p3FormalEnabled
+        ? 'formal'
+        : facts.p3_task_compatibility_enabled ? 'demo_substitute' : 'unsupported',
     }),
   });
 }

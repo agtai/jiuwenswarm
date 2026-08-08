@@ -32,6 +32,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     QueryEnvelope,
     ResultEnvelope,
     ScopeRef,
+    TurnCommitLedger,
 )
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
@@ -42,7 +43,7 @@ from .formal_task_models import (
     TaskAuthorizationGrant,
     utc_now,
 )
-from .persistent_task_core import PersistentTaskCore
+from .persistent_task_core import PersistentTaskCore, ReconciliationEventSink
 from .p3_confirmation import (
     P3ConfirmationBinding,
     P3ConfirmationVerifier,
@@ -57,7 +58,7 @@ from .product_authority import (
 )
 from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
-    ProjectCodeExecutorAdapter,
+    DirectProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
 from .task_event_subscription import TaskEventSubscription
@@ -700,12 +701,16 @@ class AgentManagerProjectBindingResolver:
         if self._closed:
             return
         self._closed = True
-        scheduler_stopped = False
-        try:
-            await self._service.stop_scheduler(interrupt_running=True)
-            scheduler_stopped = True
-        except Exception as exc:  # noqa: BLE001 -- release remaining owners
-            logger.warning("[LiveVoiceP3] carrier scheduler shutdown failed: %s", exc)
+        scheduler_stopped = self._service is None
+        stop_scheduler = getattr(self._service, "stop_scheduler", None)
+        if callable(stop_scheduler):
+            try:
+                await stop_scheduler(interrupt_running=True)
+                scheduler_stopped = True
+            except Exception as exc:  # noqa: BLE001 -- release remaining owners
+                logger.warning(
+                    "[LiveVoiceP3] carrier scheduler shutdown failed: %s", exc
+                )
         clear_contexts = getattr(
             self._service, "clear_scheduled_task_execution_contexts", None
         )
@@ -722,6 +727,26 @@ class AgentManagerProjectBindingResolver:
         )
         if callable(cleanup):
             await cleanup()
+
+
+class _DirectP3RuntimeOwner:
+    """Start and close the direct Executor before releasing Agent bindings."""
+
+    def __init__(
+        self,
+        *,
+        executor: DirectProjectCodeExecutorAdapter,
+        binding_resolver: AgentManagerProjectBindingResolver,
+    ) -> None:
+        self._executor = executor
+        self._binding_resolver = binding_resolver
+
+    async def prepare_startup(self) -> int:
+        return await self._executor.prepare_startup()
+
+    async def close(self) -> None:
+        await self._executor.close(interrupt_running=True)
+        await self._binding_resolver.close()
 
 
 class P3AuthenticatedComposition:
@@ -760,6 +785,7 @@ class P3AuthenticatedComposition:
         self._worker: asyncio.Task[None] | None = None
         self._accepting = False
         self._closed = False
+        self._cleanup_complete = False
 
     @property
     def accepting(self) -> bool:
@@ -992,7 +1018,7 @@ class P3AuthenticatedComposition:
 
     async def stop(self) -> None:
         async with self._lifecycle_lock:
-            if self._closed:
+            if self._cleanup_complete:
                 return
             self._closed = True
             was_started = self._worker is not None
@@ -1015,16 +1041,18 @@ class P3AuthenticatedComposition:
             worker = self._worker
             self._worker = None
             if worker is not None and not worker.done():
-                worker.cancel()
-                try:
-                    await worker
-                except asyncio.CancelledError:
-                    pass
+                # Ask the periodic worker to leave through its normal wake
+                # path.  Cancelling asyncio.wait_for(Event.wait()) can retain
+                # its child waiter on the Windows proactor loop, leaving this
+                # shutdown permanently stuck in the cancelling state.
+                self._wake.set()
+                await worker
             # Drain an externally requested reconcile_once before carrier close.
             async with self._reconcile_lock:
                 pass
             if self._binding_resolver is not None:
                 await self._binding_resolver.close()
+            self._cleanup_complete = True
 
     async def _enter_operation(self) -> None:
         async with self._active_condition:
@@ -1071,6 +1099,8 @@ class P3AuthenticatedComposition:
             except TimeoutError:
                 pass
             self._wake.clear()
+            if self._closed:
+                return
             try:
                 await self.reconcile_once()
             except asyncio.CancelledError:
@@ -1182,6 +1212,10 @@ class P3AuthenticatedComposition:
                 name=clean.get("name"),
                 instruction=clean.get("instruction"),
                 model=model,
+                source=str(clean["source"]),
+                interaction_id=clean.get("interaction_id"),
+                turn_id=clean.get("turn_id"),
+                commit_id=clean.get("commit_id"),
             ),
         )
         return await self._run_blocking(
@@ -1261,6 +1295,14 @@ class P3AuthenticatedComposition:
                     clean.get("model_intent"),
                     instantiate=False,
                 )
+                if clean["source"] == "voice":
+                    self._policy.require_voice_origin(
+                        scope=authority.scope,
+                        interaction_id=str(clean["interaction_id"]),
+                        turn_id=str(clean["turn_id"]),
+                        commit_id=str(clean["commit_id"]),
+                        instruction=str(clean["instruction"]),
+                    )
             target_task_id = (
                 str(clean["task_id"]) if operation == "task.cancel" else None
             )
@@ -1278,6 +1320,10 @@ class P3AuthenticatedComposition:
                     name=clean.get("name"),
                     instruction=clean.get("instruction"),
                     model=model,
+                    source=str(clean["source"]),
+                    interaction_id=clean.get("interaction_id"),
+                    turn_id=clean.get("turn_id"),
+                    commit_id=clean.get("commit_id"),
                 ),
             )
             return PreparedP3MutationConfirmation(
@@ -1473,7 +1519,7 @@ class P3AuthenticatedComposition:
             )
             intent = FormalTaskPolicyInput(
                 state=InputCommitState.COMMITTED,
-                source="structured",
+                source=str(clean["source"]),
                 operation=operation,
                 request_id=_required_text(request_id, "request_id", maximum=256),
                 issued_at=clean.get("issued_at", now),
@@ -1481,6 +1527,9 @@ class P3AuthenticatedComposition:
                 correlation_id=clean.get("correlation_id", request_id),
                 authorization=grant,
                 command_id=clean.get("command_id"),
+                interaction_id=clean.get("interaction_id"),
+                turn_id=clean.get("turn_id"),
+                commit_id=clean.get("commit_id"),
                 task_id=clean.get("task_id"),
                 name=clean.get("name"),
                 instruction=clean.get("instruction"),
@@ -1596,7 +1645,15 @@ class P3AuthenticatedComposition:
                         "instruction",
                     }
                 ),
-                frozenset({"model_intent"}),
+                frozenset(
+                    {
+                        "model_intent",
+                        "source",
+                        "interaction_id",
+                        "turn_id",
+                        "commit_id",
+                    }
+                ),
             ),
             "task.cancel": (
                 frozenset(
@@ -1610,7 +1667,7 @@ class P3AuthenticatedComposition:
                         "task_id",
                     }
                 ),
-                frozenset(),
+                frozenset({"source"}),
             ),
             "task.list": (
                 frozenset({"auth_token", "session_id"}),
@@ -1685,6 +1742,46 @@ class P3AuthenticatedComposition:
             clean["model_intent"] = _required_text(
                 params["model_intent"], "model_intent", maximum=256
             )
+        source = _required_text(
+            params.get("source", "structured"), "source", maximum=32
+        )
+        if source not in {"structured", "voice"}:
+            raise FormalTaskViolation(
+                "INVALID_TASK_INTENT_SOURCE",
+                "formal task intent source must be voice or structured",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if source == "voice":
+            if operation != "task.create" or not {
+                "interaction_id",
+                "turn_id",
+                "commit_id",
+            }.issubset(params):
+                raise FormalTaskViolation(
+                    "COMMITTED_ORIGIN_REQUIRED",
+                    "voice task.create requires the exact committed turn origin",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            clean["interaction_id"] = _required_text(
+                params["interaction_id"], "interaction_id", maximum=256
+            )
+            clean["turn_id"] = _required_text(
+                params["turn_id"], "turn_id", maximum=256
+            )
+            clean["commit_id"] = _required_text(
+                params["commit_id"], "commit_id", maximum=256
+            )
+        elif (
+            "interaction_id" in params
+            or "turn_id" in params
+            or "commit_id" in params
+        ):
+            raise FormalTaskViolation(
+                "INVALID_STRUCTURED_ORIGIN",
+                "structured task intent cannot claim a voice commit",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        clean["source"] = source
         if "after_seq" in params:
             if type(params["after_seq"]) is not int or params["after_seq"] < -1:
                 raise FormalTaskViolation(
@@ -1702,6 +1799,8 @@ def create_p3_composition_from_environment(
     model_resolver: P3ModelResolver,
     confirmation_verifier: P3ConfirmationVerifier | None = None,
     telemetry: P3TelemetrySink | None = None,
+    commit_ledger: TurnCommitLedger | None = None,
+    reconciliation_event_sink: ReconciliationEventSink | None = None,
 ) -> P3AuthenticatedComposition | None:
     """Build the production composition only after the complete gate validates."""
 
@@ -1761,33 +1860,33 @@ def create_p3_composition_from_environment(
     authenticator = StaticBearerAuthenticator(token=token, principal=principal)
     authority_resolver = ServerSessionProjectAuthorityResolver()
 
-    # Importing and constructing the legacy carrier is intentionally behind the
-    # complete feature/auth gate.  Its scheduler loop is not started: formal
-    # one-shot dispatch uses trigger_immediate, while this composition owns
-    # restart and periodic reconciliation.
-    from jiuwenswarm.agents.harness.common.auto_harness.service import (
-        AutoHarnessService,
-    )
-
-    carrier = AutoHarnessService(None, agent=None)
     binding_resolver = AgentManagerProjectBindingResolver(
         authority_resolver=authority_resolver,
         agent_manager=agent_manager,
-        service=carrier,
+        service=None,
         model_resolver=model_resolver,
         principal=principal,
     )
-    executor = ProjectCodeExecutorAdapter(binding_resolver)
+    executor = DirectProjectCodeExecutorAdapter(binding_resolver, database_path)
+    runtime_owner = _DirectP3RuntimeOwner(
+        executor=executor,
+        binding_resolver=binding_resolver,
+    )
     store = SqliteTaskStore(database_path)
-    core = PersistentTaskCore(store, executor)
+    core = PersistentTaskCore(
+        store,
+        executor,
+        reconciliation_event_sink=reconciliation_event_sink,
+    )
     return P3AuthenticatedComposition(
         authenticator=authenticator,
         authority_resolver=authority_resolver,
         core=core,
         confirmation_verifier=confirmation_verifier,
         model_resolver=model_resolver,
-        binding_resolver=binding_resolver,
+        binding_resolver=runtime_owner,
         telemetry=telemetry,
+        policy=FormalTaskPolicyAdapter(commit_ledger),
         reconcile_interval=interval,
     )
 

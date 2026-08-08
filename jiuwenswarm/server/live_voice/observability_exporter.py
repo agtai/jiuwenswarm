@@ -15,6 +15,7 @@ import inspect
 import math
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from threading import Lock
 from typing import Final, Literal, Protocol, TypeAlias
@@ -89,6 +90,8 @@ class ExporterStats:
     failed_metrics: int
     timed_out_observations: int
     timed_out_metrics: int
+    deadline_exceeded_observations: int
+    deadline_exceeded_metrics: int
     rejected_full: int
     rejected_not_started: int
     rejected_closing: int
@@ -120,6 +123,10 @@ class ExporterStats:
     def timed_out_records(self) -> int:
         return self.timed_out_observations + self.timed_out_metrics
 
+    @property
+    def deadline_exceeded_records(self) -> int:
+        return self.deadline_exceeded_observations + self.deadline_exceeded_metrics
+
 
 @dataclass(frozen=True, slots=True)
 class ExporterSnapshot:
@@ -132,6 +139,7 @@ class ExporterSnapshot:
     inflight_kind: ExportRecordKind | None
     worker_running: bool
     attempt_running: bool
+    inflight_deadline_exceeded: bool
     last_failure_kind: FailureKind | None
     stats: ExporterStats
 
@@ -166,6 +174,37 @@ class _AttemptResult:
     accounted: bool = False
 
 
+class _DeliveryHandshake:
+    """Distinguish a durable cancellation settlement from a stubborn callback."""
+
+    __slots__ = ("_committed", "_lock")
+
+    def __init__(self) -> None:
+        self._committed = False
+        self._lock = Lock()
+
+    def mark_committed(self) -> None:
+        with self._lock:
+            self._committed = True
+
+    def committed(self) -> bool:
+        with self._lock:
+            return self._committed
+
+
+_CURRENT_DELIVERY_HANDSHAKE: ContextVar[_DeliveryHandshake | None] = ContextVar(
+    "live_voice_export_delivery_handshake", default=None
+)
+
+
+def mark_current_export_committed() -> None:
+    """Mark the current buffer attempt durably delivered, if one owns the call."""
+
+    handshake = _CURRENT_DELIVERY_HANDSHAKE.get()
+    if handshake is not None:
+        handshake.mark_committed()
+
+
 ExporterCallback: TypeAlias = Callable[[ExportRecord], Awaitable[None]]
 
 
@@ -192,9 +231,12 @@ class LiveVoiceObservabilityExporterBuffer:
     ``capacity`` is the strict total number of retained records, including the
     current in-flight attempt.  The worker makes exactly one attempt per accepted
     record and never retries.  Exporter failures are diagnostics only and cannot
-    rewrite collector acceptance or a business result.  A timed-out attempt is
-    counted as failed at its deadline but remains visibly in-flight until callback
-    cancellation settles; only then can draining reach ``closed``.
+    rewrite collector acceptance or a business result.  A deadline-exceeded
+    attempt is recorded immediately and remains visibly in-flight until callback
+    cancellation settles; only then is it classified as delivered or failed and
+    draining can reach ``closed``.  A cancellation-aware durable sink may
+    explicitly mark a completed commit so a deadline cannot be reported as final
+    failure before success.
 
     The owning event loop must be kept alive through ``close``.  If an integrator
     destroys it first, a later enqueue rolls back before acceptance and reports a
@@ -236,6 +278,7 @@ class LiveVoiceObservabilityExporterBuffer:
         self._attempt_task: asyncio.Task[None] | None = None
         self._worker_running = False
         self._attempt_running = False
+        self._inflight_deadline_exceeded = False
         self._last_failure_kind: FailureKind | None = None
 
         self._accepted_observations = 0
@@ -248,6 +291,8 @@ class LiveVoiceObservabilityExporterBuffer:
         self._failed_metrics = 0
         self._timed_out_observations = 0
         self._timed_out_metrics = 0
+        self._deadline_exceeded_observations = 0
+        self._deadline_exceeded_metrics = 0
         self._rejected_full = 0
         self._rejected_not_started = 0
         self._rejected_closing = 0
@@ -405,6 +450,7 @@ class LiveVoiceObservabilityExporterBuffer:
                 ),
                 worker_running=self._worker_running,
                 attempt_running=self._attempt_running,
+                inflight_deadline_exceeded=self._inflight_deadline_exceeded,
                 last_failure_kind=self._last_failure_kind,
                 stats=self._stats_locked(),
             )
@@ -514,6 +560,7 @@ class LiveVoiceObservabilityExporterBuffer:
                 return None
             item = pending.popleft()
             self._inflight = item
+            self._inflight_deadline_exceeded = False
             if item.kind == "observation":
                 self._attempted_observations += 1
             else:
@@ -521,8 +568,9 @@ class LiveVoiceObservabilityExporterBuffer:
             return item
 
     async def _attempt_export(self, item: _BufferedRecord) -> _AttemptResult:
+        handshake = _DeliveryHandshake()
         attempt = asyncio.create_task(
-            self._invoke_exporter(item.record),
+            self._invoke_exporter(item.record, handshake),
             name=f"live-voice-observability-export-{item.sequence}",
         )
         with self._lock:
@@ -533,7 +581,7 @@ class LiveVoiceObservabilityExporterBuffer:
                 {attempt}, timeout=self._export_timeout_seconds
             )
             if not done:
-                self._record_timed_out_attempt(item)
+                self._mark_deadline_exceeded(item)
                 attempt.cancel()
                 try:
                     await asyncio.shield(attempt)
@@ -542,9 +590,9 @@ class LiveVoiceObservabilityExporterBuffer:
                         raise
                 except BaseException:
                     pass
-                return _AttemptResult(
-                    delivered=False, failure_kind="timeout", accounted=True
-                )
+                if handshake.committed():
+                    return _AttemptResult(delivered=True)
+                return _AttemptResult(delivered=False, failure_kind="timeout")
             try:
                 attempt.result()
             except asyncio.CancelledError:
@@ -561,17 +609,24 @@ class LiveVoiceObservabilityExporterBuffer:
                         self._attempt_task = None
                         self._attempt_running = False
 
-    async def _invoke_exporter(self, record: ExportRecord) -> None:
-        result = self._exporter(record)
-        if not inspect.isawaitable(result):
-            raise _InvalidAwaitableError
-        await result
+    async def _invoke_exporter(
+        self, record: ExportRecord, handshake: _DeliveryHandshake
+    ) -> None:
+        token = _CURRENT_DELIVERY_HANDSHAKE.set(handshake)
+        try:
+            result = self._exporter(record)
+            if not inspect.isawaitable(result):
+                raise _InvalidAwaitableError
+            await result
+        finally:
+            _CURRENT_DELIVERY_HANDSHAKE.reset(token)
 
     def _complete_attempt(self, item: _BufferedRecord, result: _AttemptResult) -> None:
         with self._lock:
             if self._inflight is not item:
                 return
             self._inflight = None
+            self._inflight_deadline_exceeded = False
             if result.delivered:
                 if item.kind == "observation":
                     self._delivered_observations += 1
@@ -593,15 +648,15 @@ class LiveVoiceObservabilityExporterBuffer:
                 if failure_kind == "timeout":
                     self._timed_out_metrics += 1
 
-    def _record_timed_out_attempt(self, item: _BufferedRecord) -> None:
+    def _mark_deadline_exceeded(self, item: _BufferedRecord) -> None:
         with self._lock:
-            self._last_failure_kind = "timeout"
+            if self._inflight is not item or self._inflight_deadline_exceeded:
+                return
+            self._inflight_deadline_exceeded = True
             if item.kind == "observation":
-                self._failed_observations += 1
-                self._timed_out_observations += 1
+                self._deadline_exceeded_observations += 1
             else:
-                self._failed_metrics += 1
-                self._timed_out_metrics += 1
+                self._deadline_exceeded_metrics += 1
 
     def _worker_done(self, worker: asyncio.Task[bool]) -> None:
         self._finalize_worker(worker)
@@ -635,6 +690,8 @@ class LiveVoiceObservabilityExporterBuffer:
             failed_metrics=self._failed_metrics,
             timed_out_observations=self._timed_out_observations,
             timed_out_metrics=self._timed_out_metrics,
+            deadline_exceeded_observations=self._deadline_exceeded_observations,
+            deadline_exceeded_metrics=self._deadline_exceeded_metrics,
             rejected_full=self._rejected_full,
             rejected_not_started=self._rejected_not_started,
             rejected_closing=self._rejected_closing,
@@ -673,4 +730,5 @@ __all__ = [
     "LiveVoiceObservabilityExporterBuffer",
     "ObservabilityExporterError",
     "ReentrantExporterCloseError",
+    "mark_current_export_committed",
 ]

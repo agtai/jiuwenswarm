@@ -153,6 +153,57 @@ test('the current compatibility selection is manifest-only and keeps every prede
   await assert.rejects(route.activate(), error => error instanceof IntegratedWebRouteViolation && error.reason === 'ROUTE_NOT_ACTIVATABLE');
 });
 
+test('current product facts select only active formal P1 P2 and P3 routes', () => {
+  const selection = createCurrentIntegratedWebRouteSelection({
+    p1_browser_speech_available: true,
+    p2_text_chat_available: true,
+    p3_task_compatibility_enabled: true,
+    p3_task_compatibility_available: true,
+    p1_formal_enabled: true,
+    p1_formal_available: true,
+    p2_formal_enabled: true,
+    p2_formal_available: true,
+    p3_formal_enabled: true,
+    p3_formal_available: true,
+  });
+  const preview = shell({ registry: selection.registry, policy: selection.policy }).preview();
+
+  assert.deepEqual(
+    preview.segments.map(segment => segment.implementation_class),
+    ['formal', 'formal', 'formal']
+  );
+  assert.equal(
+    preview.segments.every(segment => segment.contract_version === 'live-voice.contract.v2'),
+    true
+  );
+  assert.equal(
+    selection.registry.list().some(adapter => adapter.adapter_id === 'compat.d031-task-bridge'),
+    false
+  );
+});
+
+test('registered but inactive formal product routes remain explicitly unavailable', () => {
+  const selection = createCurrentIntegratedWebRouteSelection({
+    p1_browser_speech_available: true,
+    p2_text_chat_available: true,
+    p3_task_compatibility_enabled: true,
+    p3_task_compatibility_available: true,
+    p1_formal_enabled: true,
+    p1_formal_available: false,
+    p2_formal_enabled: true,
+    p2_formal_available: false,
+    p3_formal_enabled: true,
+    p3_formal_available: false,
+  });
+  const preview = shell({ registry: selection.registry, policy: selection.policy }).preview();
+
+  assert.deepEqual(
+    preview.segments.map(segment => segment.safe_reason),
+    ['FORMAL_P1_NOT_ACTIVE', 'FORMAL_P2_NOT_ACTIVE', 'FORMAL_P3_NOT_ACTIVE']
+  );
+  assert.equal(preview.segments.every(segment => segment.implementation_class === 'unsupported'), true);
+});
+
 test('task compatibility flag-off is explicit unsupported rather than an inferred substitute', () => {
   const selection = createCurrentIntegratedWebRouteSelection({
     p1_browser_speech_available: true,

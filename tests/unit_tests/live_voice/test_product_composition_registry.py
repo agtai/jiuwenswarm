@@ -15,10 +15,13 @@ import pytest
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    ContractViolation,
     ErrorCode,
     MAX_SAFE_INTEGER,
+    OriginRef,
     ResultEnvelope,
     ScopeRef,
+    TurnCommitLedger,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
     FormalTaskViolation,
@@ -426,6 +429,7 @@ def _registry(
     p2: bool = True,
     p3: bool = True,
     push_success: bool = True,
+    commit_ledger: TurnCommitLedger | None = None,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -440,6 +444,7 @@ def _registry(
         p3_composition=p3_composition,
         agent_manager=manager,
         push_text_event=push,
+        commit_ledger=commit_ledger,
     )
     return registry, p3_composition, manager, pushed
 
@@ -1596,7 +1601,6 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     assert submitted.ok is True
     assert replayed.payload == submitted.payload
     assert manager.agent.calls == 1
-
     presentation: dict[str, object] | None = None
     response: dict[str, object] | None = None
     presentation_notification_request_id: str | None = None
@@ -1645,7 +1649,6 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     assert ack_replay.payload == acknowledged.payload
     assert cast(dict, acknowledged.payload["result"])["accepted"] is True
     assert len(history.assistants) == 1
-
     await registry.close_active_routes()
     submit_after_disconnect = await registry.handle_p2_submit(
         params=submit_params,
@@ -1695,6 +1698,174 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     )
     assert manager.agent.calls == 1
     assert len(history.assistants) == 1
+
+
+@pytest.mark.asyncio
+async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) -> None:
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(
+        tmp_path, commit_ledger=ledger
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-voice-origin",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    rejected = await registry.handle_p2_submit(
+        params=_p2_params(
+            activation_generation=2,
+            commit_id="commit-rejected",
+            turn_id="turn-rejected",
+            response_id="response-rejected",
+            committed_at=NOW,
+            text="must never acquire task authority",
+        ),
+        request_id="request-submit-rejected-origin",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert rejected.ok is False
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef("committed_turn", "turn-rejected", "commit-rejected"),
+            SCOPE,
+        )
+
+    voice_text = "create the bounded voice task"
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-voice-origin",
+            turn_id="turn-voice-origin",
+            response_id="response-voice-origin",
+            committed_at=NOW,
+            text=voice_text,
+            dispatch_target="task",
+            gateway_voice_claim={
+                "kind": "formal_speech_recognition",
+                "speech_operation_id": "speech-operation-1",
+                "capture_id": "capture-1",
+                "capture_generation": 1,
+                "session_id": "session-product",
+                "correlation_id": "correlation-p2",
+                "interaction_id": "interaction-1",
+                "turn_id": "turn-voice-origin",
+                "commit_id": "commit-voice-origin",
+                "text_sha256": hashlib.sha256(voice_text.encode("utf-8")).hexdigest(),
+                "critical_policy": "eligible",
+            },
+        ),
+        request_id="request-submit-voice-origin",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    assert cast(dict, submitted.payload["result"])["status"] == (
+        "task_origin_accepted"
+    )
+    accepted = ledger.require_origin(
+        OriginRef("committed_turn", "turn-voice-origin", "commit-voice-origin"),
+        SCOPE,
+    )
+    assert accepted.text == voice_text
+    assert manager.agent.calls == 0
+
+    ordinary = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-agent-chat",
+            turn_id="turn-agent-chat",
+            response_id="response-agent-chat",
+            committed_at=NOW,
+            text="answer this ordinary voice chat",
+            dispatch_target="agent",
+        ),
+        request_id="request-submit-agent-chat",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert ordinary.ok is True
+    assert manager.agent.calls == 1
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef("committed_turn", "turn-agent-chat", "commit-agent-chat"),
+            SCOPE,
+        )
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    blocking = _BlockingFacade()
+    manager.agent = blocking
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-barge",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-barge",
+            turn_id="turn-barge",
+            response_id="response-barge",
+            committed_at=NOW,
+            text="keep this response active",
+            dispatch_target="agent",
+        ),
+        request_id="request-submit-barge",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+
+    params = _p2_params(
+        action_id="barge-action-1",
+        response_id="response-barge",
+        response_generation=0,
+        cancel_response=False,
+    )
+    interrupted = await registry.handle_p2_barge_in(
+        params=params,
+        request_id="request-barge-1",
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p2_barge_in(
+        params=params,
+        request_id="request-barge-1",
+        session_id="session-product",
+    )
+    conflict = await registry.handle_p2_barge_in(
+        params={**params, "cancel_response": True},
+        request_id="request-barge-1",
+        session_id="session-product",
+    )
+
+    assert interrupted.ok is True
+    assert replayed.payload == interrupted.payload
+    assert conflict.ok is False
+    assert cast(dict, conflict.payload["error"])["reason"] == (
+        "PRODUCT_REQUEST_ID_CONFLICT"
+    )
+    result = cast(dict, interrupted.payload["result"])
+    assert result["status"] == "barge_in_applied"
+    assert result["cancel_response"] is False
+    assert result["applied"] is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    effects = route.activation_lease._runtime._cr.snapshot().effects
+    effect_types = [record.effect.effect_type for record in effects]
+    assert effect_types.count("playback.stop") == 1
+    assert not {"response.cancel", "round.cancel", "task.cancel"} & set(
+        effect_types
+    )
+
+    blocking.release.set()
+    await registry.close_active_routes()
 
 
 @pytest.mark.asyncio
@@ -1841,9 +2012,21 @@ async def test_p3_confirmation_issue_and_mutation_use_current_owner_permit(
     assert issued.ok is True
     assert replayed_issue.payload == issued.payload
     assert receipt["status"] == "confirmation_issued"
+    assert receipt["command_id"] == "command-cancel-1"
+    assert receipt["target_task_id"] == "task-1"
+    assert receipt["task_control_binding"] == {
+        "subject_id": SCOPE.subject_id,
+        "session_id": SCOPE.session_id,
+        "project_id": SCOPE.project_id,
+        "correlation_id": "correlation-cancel-1",
+        "generation": registry._p3_confirmation_generation,
+    }
     assert direct.value.reason == "P3_CONFIRMATION_FORWARDING_REQUIRED"
     assert mutated.ok is True
     assert replayed_mutation.payload == mutated.payload
+    mutation_result = cast(dict[str, object], mutated.payload["result"])
+    assert mutation_result["command_id"] == "command-cancel-1"
+    assert mutation_result["target_task_id"] == "task-1"
     assert len(composition.mutation_calls) == 1
     assert _route(mutated.payload, "authority")["truth"] == "formal"
     assert _route(mutated.payload, "p3.control")["truth"] == "formal"
@@ -2220,9 +2403,9 @@ async def test_p2_generation_fence_survives_exact_tombstone_eviction(
 
     assert first_params is not None
     assert (
-        ("session-product", "interaction-capacity-0")
-        not in registry._closed_p2_routes
-    )
+        "session-product",
+        "interaction-capacity-0",
+    ) not in registry._closed_p2_routes
     allocations_before = len(manager.get_calls)
     stale = await registry.handle_p2_activate(
         params=first_params,
