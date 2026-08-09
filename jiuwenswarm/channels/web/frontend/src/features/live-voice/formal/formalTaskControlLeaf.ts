@@ -222,8 +222,10 @@ function validateEventProvenance(
     || (eventType === 'task.cancel_requested' && producer === 'task_core.control')
     || (eventType === 'task.terminal' && ['task_core', 'task_core.delivery', 'task_core.reconciliation'].includes(producer))
   );
+  const internalAttemptTerminal = eventType === 'attempt.terminal'
+    && ['task_core.delivery', 'task_core.reconciliation'].includes(producer);
   const attemptProducerValid = eventType.startsWith('attempt.')
-    && [PROJECT_CODE_EXECUTOR_ID, 'task_core.reconciliation'].includes(producer);
+    && (producer === PROJECT_CODE_EXECUTOR_ID || internalAttemptTerminal);
   if (!taskProducerValid && !attemptProducerValid) {
     throw new Error('task event producer is not authoritative for its event type');
   }
@@ -237,6 +239,7 @@ function validateEventProvenance(
         || (eventType.startsWith('attempt.') && producer === PROJECT_CODE_EXECUTOR_ID)
       )
     )
+    || (internalAttemptTerminal && sourceEventId !== null)
   ) {
     throw new Error('task event source and causation provenance mismatch');
   }

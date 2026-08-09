@@ -432,6 +432,91 @@ test('canonical task blocked and decision_required history remains consumable', 
   assert.equal(leaf.snapshot().tasks[0].outcome, 'completed');
 });
 
+test('canonical delivery-owned failed terminal history remains consumable', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const history = [
+    event(0),
+    event(1, {
+      event_type: 'attempt.terminal',
+      state: 'terminal',
+      outcome: 'failed',
+      producer: 'task_core.delivery',
+      source_event_id: null,
+      causation_id: 'outbox-dispatch-1',
+      details: { reason: 'EXECUTOR_CAPABILITY_UNAVAILABLE' },
+    }),
+    event(2, {
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome: 'failed',
+      producer: 'task_core.delivery',
+      source_event_id: null,
+      causation_id: 'outbox-dispatch-1',
+      details: { reason: 'EXECUTOR_CAPABILITY_UNAVAILABLE' },
+    }),
+  ];
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(history, 2, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.deepEqual(
+    {
+      attempt_id: leaf.snapshot().tasks[0].attempt_id,
+      attempt_number: leaf.snapshot().tasks[0].attempt_number,
+      state: leaf.snapshot().tasks[0].state,
+      outcome: leaf.snapshot().tasks[0].outcome,
+    },
+    { attempt_id: 'attempt-1', attempt_number: 1, state: 'terminal', outcome: 'failed' },
+  );
+});
+
+test('internal attempt producers cannot forge accepted, running, or sourced terminal history', () => {
+  for (const forged of [
+    event(1, {
+      event_type: 'attempt.accepted',
+      state: 'accepted',
+      producer: 'task_core.delivery',
+      source_event_id: null,
+      causation_id: 'outbox-dispatch-1',
+    }),
+    event(1, {
+      event_type: 'attempt.running',
+      state: 'running',
+      producer: 'task_core.reconciliation',
+      source_event_id: null,
+      causation_id: 'reconciliation:attempt-1',
+    }),
+    event(1, {
+      event_type: 'attempt.terminal',
+      state: 'terminal',
+      outcome: 'failed',
+      producer: 'task_core.delivery',
+      source_event_id: 'forged-source',
+      causation_id: 'forged-source',
+    }),
+    event(1, {
+      event_type: 'attempt.terminal',
+      state: 'terminal',
+      outcome: 'failed',
+      producer: 'task_core.control',
+      source_event_id: null,
+      causation_id: 'outbox-dispatch-1',
+    }),
+  ]) {
+    const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+    assert.throws(
+      () => leaf.adopt(
+        'task.events',
+        { ok: true, result: eventsResult([event(0), forged], 1, 'task-1', -1) },
+        adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+      ),
+      /producer|source/,
+    );
+    assert.deepEqual(leaf.snapshot().tasks, []);
+  }
+});
+
 test('status target binding and equal-head event truth fail closed', () => {
   const foreign = new FormalTaskControlLeaf({ enabled: true, binding });
   assert.throws(
