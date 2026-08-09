@@ -16,6 +16,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from jiuwenswarm.server.live_voice.w2_demo_gate import (
     W2EvidenceKind,
+    W2GateContractViolation,
+    _required_absolute_path,
     w2_artifact_signature_payload,
 )
 from jiuwenswarm.server.live_voice.w2_gate_cli import (
@@ -165,7 +167,7 @@ def test_cli_sign_artifact_binds_import_identity_and_sequence(tmp_path: Path) ->
         )
 
 
-def _root_signed_policy(tmp_path: Path):
+def _root_signed_policy(tmp_path: Path, *, repository_path: Path | None = None):
     root = Ed25519PrivateKey.generate()
     root_public = tmp_path / "root.public"
     root_public.write_text(
@@ -258,7 +260,7 @@ def _root_signed_policy(tmp_path: Path):
             {
                 "schema": "live-voice.w2-trust-policy.v2",
                 "policy_id": "w2-policy-1",
-                "repository_path": str(tmp_path.resolve()),
+                "repository_path": str((repository_path or tmp_path).resolve()),
                 "candidate": {
                     "candidate_sha": "a" * 40,
                     "environment_id": "environment-1",
@@ -277,6 +279,64 @@ def _root_signed_policy(tmp_path: Path):
     signature = tmp_path / "trust-policy.signature"
     signature.write_text(root.sign(policy.read_bytes()).hex(), encoding="ascii")
     return policy, signature, root_public
+
+
+def test_root_signed_policy_accepts_absolute_repository_path_with_spaces(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repository = tmp_path / "candidate with spaces"
+    repository.mkdir()
+    policy, signature, root_public = _root_signed_policy(
+        tmp_path, repository_path=repository
+    )
+    expected_root = hashlib.sha256(
+        bytes.fromhex(root_public.read_text(encoding="ascii"))
+    ).hexdigest()
+
+    trust, _, _ = _load_trust_policy(
+        policy,
+        signature,
+        root_public,
+        expected_root_sha256=expected_root,
+    )
+
+    assert trust.repository_path == str(repository.resolve())
+    assert (
+        main(
+            [
+                "validate-policy",
+                "--trust-policy",
+                str(policy),
+                "--trust-policy-signature",
+                str(signature),
+                "--root-public-key",
+                str(root_public),
+                "--expected-root-sha256",
+                expected_root,
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result["repository_path"] == str(repository.resolve())
+
+
+@pytest.mark.parametrize("control", ("\x00", "\t", "\r", "\n", "\x7f"))
+def test_root_authorized_repository_path_rejects_control_characters(
+    tmp_path: Path, control: str
+) -> None:
+    with pytest.raises(W2GateContractViolation, match="control character"):
+        _required_absolute_path(
+            f"{tmp_path.resolve()}{control}candidate",
+            "root-authorized repository_path",
+        )
+
+
+def test_root_authorized_repository_path_still_requires_absolute() -> None:
+    with pytest.raises(W2GateContractViolation, match="must be absolute"):
+        _required_absolute_path(
+            "candidate with spaces", "root-authorized repository_path"
+        )
 
 
 def test_external_root_signed_policy_loads_and_tampering_fails_closed(

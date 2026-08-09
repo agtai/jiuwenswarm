@@ -46,6 +46,8 @@ MAX_W2_EVIDENCE_IDS: Final = 64
 MAX_W2_PROVIDER_LABELS: Final = 16
 _MAX_LABEL_CHARACTERS: Final = 256
 _MAX_LABEL_UTF8_BYTES: Final = 1_024
+_MAX_PATH_CHARACTERS: Final = 4_096
+_MAX_PATH_UTF8_BYTES: Final = 16_384
 MAX_W2_ARTIFACT_BYTES: Final = 32 * 1024 * 1024
 _SENSITIVE_MARKER = re.compile(
     r"(?:^|[._:@-])(?:api[-_]?key|access[-_]?token|authorization|bearer|password|"
@@ -310,13 +312,11 @@ class W2EvidenceTrustPolicy:
                 (mode_id, "mode_id"),
                 (self.evidence_set_id, "evidence_set_id"),
                 (self.policy_id, "policy_id"),
-                (self.repository_path, "repository_path"),
             ):
                 _required_text(value, f"root-authorized {label}")
-            if not Path(self.repository_path).is_absolute():
-                raise W2GateContractViolation(
-                    "root-authorized repository_path must be absolute"
-                )
+            _required_absolute_path(
+                self.repository_path, "root-authorized repository_path"
+            )
             artifact_ids = [slot.artifact_id for slot in self.runtime_slots]
             sequences = [slot.artifact_sequence for slot in self.runtime_slots]
             if len(artifact_ids) != len(set(artifact_ids)) or len(sequences) != len(
@@ -841,6 +841,24 @@ def _required_text(value: object, field: str) -> str:
         raise W2GateContractViolation(f"{field} must be an opaque label")
     if _SENSITIVE_MARKER.search(value) is not None:
         raise W2GateContractViolation(f"{field} contains a sensitive marker")
+    return value
+
+
+def _required_absolute_path(value: object, field: str) -> str:
+    """Validate one bounded absolute filesystem path without label semantics."""
+
+    if type(value) is not str or not value or len(value) > _MAX_PATH_CHARACTERS:
+        raise W2GateContractViolation(f"{field} must be a non-empty bounded path")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise W2GateContractViolation(f"{field} must be valid UTF-8") from exc
+    if len(encoded) > _MAX_PATH_UTF8_BYTES:
+        raise W2GateContractViolation(f"{field} exceeds the UTF-8 byte limit")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise W2GateContractViolation(f"{field} contains a control character")
+    if not Path(value).is_absolute():
+        raise W2GateContractViolation(f"{field} must be absolute")
     return value
 
 
