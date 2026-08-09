@@ -25,14 +25,16 @@ freeze because the real P3 D0 Executor exposed two code-level blockers:
 The first blocker is closed in reviewed source commit `7be485e8c`. The hardened
 Gate is integrated as `decec4a79`, the compatible Web retry consumer as
 `89237a075`, and its canonical delivery-terminal history follow-up as `99eb0453f`.
-D-069 Core/Store exists in an isolated uncommitted worker diff. Its first
+D-069 Core/Store is frozen in isolated candidate `ad7e36bc8`, rebased onto
+governance/integration base `b5f3cec8b`. Its first
 independent review was NOT PASS with three P1 defects in schema authority,
 durable attempt lineage and reconciliation epoch isolation; a later replay-seam
 review also found that a fresh product process could not reconstruct a stored
 retry from client-owned facts. The worker now implements all four repairs and
-reports green focused/wide checks plus self/cold review, but this is development
-evidence only: D-070 requires rebase, rerun and an Opus third-round PASS on the
-frozen exact SHA before Main may accept or integrate it. The existing
+passes default-coverage focused `342/342`, wide `1312/1312`, static checks and
+self/cold review on the rebased exact SHA, but this remains development evidence
+only: D-070 requires an Opus third-round PASS before Main may accept or integrate
+it. The existing
 authenticated create/cancel policy, auth, confirmation, composition and direct
 transport path has not yet been extended with retry or executor retry readiness.
 No real A→B→C journey or cumulative Gate evidence exists.
@@ -186,10 +188,11 @@ Current slice evidence at this checkpoint:
 - Web `89237a075` and follow-up `99eb0453f` completed the same three passes;
   Python/TypeScript contract tests passed `32/32`, integrated Web tests `201/201`,
   and frontend `tsc --noEmit` passed again on the integration branch;
-- Core/Store's isolated worker reports the independent review's three P1 repairs,
-  the later durable applied-replay repair, focused `342/342`, wide `1276/1276`,
-  static checks and self/cold review; none of those results has yet been rerun on
-  the rebased frozen candidate or confirmed by the D-070 Opus third round;
+- Core/Store candidate `ad7e36bc8` contains the independent review's three P1
+  repairs and the later durable applied-replay repair. On parent `b5f3cec8b`,
+  repository-default-coverage focused tests pass `342/342` in 96.49 seconds,
+  wide tests pass `1312/1312` in 185.08 seconds, and format/Ruff/compile/diff
+  checks pass. Opus has not yet confirmed the D-070 third round;
 - executor retry readiness and the authenticated product route's retry extension
   have not started, so no current retry UI action can complete formal A→B→C.
 
@@ -199,7 +202,7 @@ The machine-local review scratchpad is recovery material only and is not a Git
 authority. The following stable findings are reconciled against the worker diff
 and reported deterministic tests; historical line numbers and superseded
 transcript inferences are intentionally omitted. Their implementation status is
-not acceptance: the rebased exact candidate still needs rerun and Opus review.
+not acceptance: the rebased exact candidate still needs Opus review.
 
 1. **Schema authority failed open at construction.** A database containing only
    generic/shared metadata could claim the Task Store v2 version without the
@@ -237,7 +240,7 @@ corruption, cross-process replay without the original envelope, reconciliation
 commit→retry→publish races, superseded status races, current-attempt outbox/
 cancel/reconciliation behavior, attempt-segment subscription/progress and
 concurrent retry CAS. D-070 deliberately withholds D-053 PASS until Opus reruns
-and reviews the frozen rebased candidate.
+and reviews frozen candidate `ad7e36bc8` with the supplied exact commands.
 
 Each preview/candidate handoff to Opus must carry the exact SHA, worktree cwd,
 Python executable, focused and wide commands, expected collection/result and
@@ -286,9 +289,9 @@ Implementation and acceptance proceed in this order:
    closed in `7be485e8c` without relaxing exact-root or clean-worktree guards;
 2. the Gate and Web slices are integrated in `decec4a79`, `89237a075` and
    `99eb0453f`;
-3. freeze and pre-read the Core preview, rebase the implemented repairs to the
-   current integration base, rerun focused/wide/static checks and obtain Opus's
-   exact-SHA third-round PASS before Main integrates Core;
+3. keep rebased Core candidate `ad7e36bc8` frozen and obtain Opus's exact-SHA
+   third-round PASS before Main integrates Core; its Main-side
+   focused/wide/static verification is already green;
 4. after the Core seam checkpoint, let Opus implement executor readiness and the
    existing policy/auth/confirmation, facade/composition/Gateway path in its
    isolated worktree; findings pause only the product portions that depend on the
@@ -353,11 +356,10 @@ the active slice to D95.
    user-owned or parallel work.
 3. Treat section 5's exact-root ownership repair as closed at `7be485e8c`; do not
    reopen or refactor it unless an affected D-069 regression proves necessary.
-4. Create an immutable Core preview, rebase the existing repairs to the current
-   integration base, rerun focused/wide/static checks and freeze the candidate.
-   Opus may pre-read the preview but the formal third round must bind the frozen
-   exact SHA and rerun the supplied exact commands; Codex fixes findings and Opus
-   confirms the final Core diff before Main integration.
+4. Core preview `9bbb69e9d` and rebased candidate `ad7e36bc8` are frozen. Opus may
+   use the preview for non-binding pre-read, but the formal third round must bind
+   `ad7e36bc8` and rerun the supplied exact default-coverage commands; Codex fixes
+   findings and Opus confirms the final Core diff before Main integration.
 5. After the Core seam checkpoint, Opus implements and reviews the remaining
    task.retry product extension in its own worktree, then rebases it to the final
    Core SHA and proves exact
