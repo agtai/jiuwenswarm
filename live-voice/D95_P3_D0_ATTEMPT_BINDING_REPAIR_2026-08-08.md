@@ -3,8 +3,8 @@
 > Tier-3 implementation/review record for the P3 blockers found during the first
 > real W2 cumulative rehearsal. The exact-root runtime-ownership sub-batch is
 > **CLOSED** in `7be485e8c` with D-053 equivalent independent review PASS. D-069
-> same-task retry remains **IN PROGRESS** across the integrated Gate/Web slices and
-> the still-unaccepted Core/product slices. Nothing in this record grants Gate or
+> same-task retry remains **IN PROGRESS** across the integrated Gate/Web/Core slices
+> and the still-unaccepted product slice. Nothing in this record grants Gate or
 > Replacement Ledger credit. [STATUS.md](STATUS.md) remains the only authority for
 > mutable branch state and next action.
 
@@ -40,9 +40,11 @@ and static checks. Product testing subsequently found a separate pre-existing
 retry correlation write/read asymmetry. Candidate `8067e1387` adds Store-owned
 fail-before-readiness rejection, replay-order and zero-effect regressions and
 passes default-coverage focused `344/344`, wide `1314/1314`, static checks and
-self/cold review. Opus must review this exact two-file delta before Main accepts
-or integrates Core. The existing authenticated create/cancel product path is
-being extended with retry and executor readiness in the isolated product worker.
+self/cold review. Opus reviewed this exact two-file delta, independently reran
+default-coverage focused `344/344`, wide `1314/1314` and static checks, and
+returned PASS with no actionable finding. Main integrated the exact Core tree as
+`3a6b54842`. The existing authenticated create/cancel product path is being
+extended with retry and executor readiness in the isolated product worker.
 No real A→B→C journey or cumulative Gate evidence exists.
 
 ## 2. Real failure and root cause
@@ -182,9 +184,9 @@ D-069 in [DECISIONS.md](decisions/DECISIONS.md) accepts a bounded, explicit and
 exactly confirmed `task.retry` contract. D-070 fixes the two-batch execution and
 review split: GPT/Sol implements Core and reviews Opus's product batch; Opus
 performs Core's third round and implements product reachability; Main alone
-integrates. Gate derivation and the Web consumer are integrated, but Core/Store
-is only an unaccepted worker candidate and the authenticated product route has
-no retry extension yet. This does not make retry an automatic restart/recovery
+integrates. Gate derivation, the Web consumer and reviewed Core/Store are
+integrated, but the authenticated product route has no accepted retry extension
+yet. This does not make retry an automatic restart/recovery
 behavior and grants no Gate credit.
 
 Current slice evidence at this checkpoint:
@@ -199,8 +201,10 @@ Current slice evidence at this checkpoint:
   correction plus the later correlation admission repair. On parent `b5f3cec8b`,
   repository-default-coverage focused tests pass `344/344` in 95.46 seconds,
   wide tests pass `1314/1314` in 185.24 seconds, and format/Ruff/compile/diff
-  checks pass. Opus returned PASS on exact predecessor `0c18810eb`; the new
-  `62+/1-` two-file delta remains subject to its exact-SHA confirmation;
+  checks pass. Opus returned PASS on exact predecessor `0c18810eb`, then confirmed
+  the `62+/1-` correlation delta at exact SHA `8067e1387` with no actionable
+  finding after independently rerunning the same `344/344` focused and `1314/1314`
+  wide suites. Main integrated the exact 14-file Core tree as `3a6b54842`;
 - the isolated product branch remains based on `ad7e36bc8`. Clean local candidate
   `dc39e83fa` contains six production files plus six direct test files for
   executor readiness and the policy/auth/confirmation/composition path; required-
@@ -262,9 +266,9 @@ The worker's current regressions cover malformed or partial schemas, lineage
 corruption, cross-process replay without the original envelope, reconciliation
 commit→retry→publish races, superseded status races, current-attempt outbox/
 cancel/reconciliation behavior, attempt-segment subscription/progress and
-concurrent retry CAS. D-070 deliberately withholds final Core acceptance until
-Opus confirms the correlation delta on frozen candidate `8067e1387` with the
-supplied exact commands. Its earlier exact-SHA review of `0c18810eb` is PASS.
+concurrent retry CAS. D-070's Core acceptance boundary is now closed: Opus
+confirmed the correlation delta on frozen candidate `8067e1387` with the supplied
+exact commands, and Main integrated that exact tree as `3a6b54842`.
 
 Each preview/candidate handoff to Opus must carry the exact SHA, worktree cwd,
 Python executable, focused and wide commands, expected collection/result and
