@@ -672,6 +672,7 @@ const COMMAND_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'response.cancel': 'response',
   'round.cancel': 'round',
   'task.cancel': 'task',
+  'task.retry': 'task',
 });
 const QUERY_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'task.get': 'task',
@@ -731,6 +732,21 @@ function commandPayload(commandType: string, value: unknown): Readonly<JsonObjec
     unsignedInteger(data.response_generation, 'command.payload.response_generation');
   } else if (commandType === 'round.cancel' || commandType === 'task.cancel') {
     exactKeys(data, [], 'command.payload');
+  } else if (commandType === 'task.retry') {
+    exactKeys(data, ['previous_attempt_id', 'previous_outcome', 'attempt_number'], 'command.payload');
+    requiredText(data.previous_attempt_id, 'command.payload.previous_attempt_id');
+    const outcome = enumeration(TERMINAL_OUTCOMES, data.previous_outcome, 'command.payload.previous_outcome');
+    if (outcome !== 'cancelled' && outcome !== 'completed') {
+      throw violation(
+        'TASK_RETRY_OUTCOME_NOT_ELIGIBLE',
+        'task.retry permits only cancelled or completed predecessors',
+        'CONFLICT'
+      );
+    }
+    const number = unsignedInteger(data.attempt_number, 'command.payload.attempt_number');
+    if (number !== 2 && number !== 3) {
+      throw violation('TASK_RETRY_ATTEMPT_NUMBER_INVALID', 'task.retry attempt_number must be 2 or 3', 'INVALID_ARGUMENT');
+    }
   }
   return cloneObject(data, 'command.payload');
 }
@@ -1170,6 +1186,7 @@ const EVENT_RULES: Readonly<Record<string, EventRule>> = Object.freeze({
     terminal: true,
   },
   'task.accepted': { streamKind: 'task', authority: 'task_core', state: 'accepted' },
+  'task.retry_accepted': { streamKind: 'task', authority: 'task_core', state: 'accepted' },
   'task.running': { streamKind: 'task', authority: 'task_core', state: 'running' },
   'task.blocked': { streamKind: 'task', authority: 'task_core', state: 'blocked' },
   'task.decision_required': {
@@ -1217,6 +1234,33 @@ function eventPayload(value: unknown, eventType: string, rule: EventRule): Reado
       throw violation('EVENT_STATE_MISMATCH', `${eventType} requires state ${rule.state}`);
     }
     enumeration(TERMINAL_OUTCOMES, data.outcome, 'event.payload.outcome');
+  } else if (eventType === 'task.retry_accepted') {
+    exactKeys(
+      data,
+      ['state', 'command_id', 'retry_of_attempt_id', 'previous_outcome', 'attempt_number'],
+      'event.payload'
+    );
+    if (data.state !== rule.state) {
+      throw violation('EVENT_STATE_MISMATCH', `${eventType} requires state ${rule.state}`);
+    }
+    requiredText(data.command_id, 'event.payload.command_id');
+    requiredText(data.retry_of_attempt_id, 'event.payload.retry_of_attempt_id');
+    const outcome = enumeration(TERMINAL_OUTCOMES, data.previous_outcome, 'event.payload.previous_outcome');
+    if (outcome !== 'cancelled' && outcome !== 'completed') {
+      throw violation(
+        'TASK_RETRY_OUTCOME_NOT_ELIGIBLE',
+        'task.retry_accepted permits only cancelled or completed predecessors',
+        'PROTOCOL_VIOLATION'
+      );
+    }
+    const number = unsignedInteger(data.attempt_number, 'event.payload.attempt_number');
+    if (number !== 2 && number !== 3) {
+      throw violation(
+        'TASK_RETRY_ATTEMPT_NUMBER_INVALID',
+        'task.retry_accepted attempt_number must be 2 or 3',
+        'PROTOCOL_VIOLATION'
+      );
+    }
   } else {
     exactKeys(data, ['state'], 'event.payload');
     if (data.state !== rule.state) {
@@ -1300,6 +1344,16 @@ export function parseEventEnvelope(value: unknown, identities?: IdentityRegistry
     payload: eventPayload(data.payload, eventType, rule),
     extensions: extensions(data.extensions, 'event.extensions'),
   });
+  if (
+    eventType === 'task.retry_accepted'
+    && (causationId === null || result.payload.command_id !== causationId)
+  ) {
+    throw violation(
+      'TASK_RETRY_CAUSATION_MISMATCH',
+      'task.retry_accepted command_id must equal its causation_id',
+      'PROTOCOL_VIOLATION'
+    );
+  }
   if (rule.progress === true) {
     const progress = parseWorkProgressEventV2(result.payload, scope, identities);
     if (progress.source.source_work_ref.kind === 'attempt' && identities === undefined) {
@@ -1771,8 +1825,10 @@ export class EventSequenceTracker {
   readonly #events = new Map<string, Readonly<EventEnvelope>>();
   readonly #results = new Map<string, Readonly<EventApplyResult>>();
   readonly #appliedIds = new Set<string>();
-  readonly #externalCauses = new Map<string, Readonly<{ scope: Readonly<ScopeRef>; correlationId: string }>>();
+  readonly #externalCauses = new Map<string, Readonly<CommandEnvelope>>();
   readonly #lifecycleByObject = new Map<string, string>();
+  readonly #taskAttemptNumberByObject = new Map<string, number>();
+  readonly #taskTerminalOutcomeByObject = new Map<string, string>();
   readonly #scopeByObject = new Map<string, Readonly<ScopeRef>>();
   readonly #nextProgressSeq = new Map<string, number>();
   readonly #progressSourceQueues = new Map<string, string[]>();
@@ -1789,10 +1845,10 @@ export class EventSequenceTracker {
       throw violation('CAUSATION_ID_KIND_CONFLICT', 'an event_id cannot also be an external command cause', 'PROTOCOL_VIOLATION');
     }
     const existing = this.#externalCauses.get(causeId);
-    if (existing !== undefined && (scopeKey(existing.scope) !== scopeKey(normalized.scope) || existing.correlationId !== normalized.correlation_id)) {
-      throw violation('CAUSATION_SOURCE_CONFLICT', 'an applied command cause cannot change scope or correlation', 'PROTOCOL_VIOLATION');
+    if (existing !== undefined && !bytesEqual(commandFingerprint(existing), commandFingerprint(normalized))) {
+      throw violation('CAUSATION_SOURCE_CONFLICT', 'an applied command cause cannot change its canonical facts', 'PROTOCOL_VIOLATION');
     }
-    this.#externalCauses.set(causeId, Object.freeze({ scope: normalized.scope, correlationId: normalized.correlation_id }));
+    this.#externalCauses.set(causeId, normalized);
     return Object.freeze(this.#applyAndDrain());
   }
 
@@ -1910,11 +1966,30 @@ export class EventSequenceTracker {
     const source = this.#events.get(event.causation_id);
     const external = this.#externalCauses.get(event.causation_id);
     if (source === undefined && external !== undefined) {
-      const mismatch = this.#causalContextError(event, external.scope, external.correlationId);
+      const mismatch = this.#causalContextError(event, external.scope, external.correlation_id);
       if (mismatch !== null) return mismatch;
-      return EVENT_RULES[event.event_type].adapter === true
-        ? ['ADAPTER_SOURCE_EVENT_REQUIRED', 'adapter events must reference an authoritative source event', true]
-        : null;
+      if (EVENT_RULES[event.event_type].adapter === true) {
+        return ['ADAPTER_SOURCE_EVENT_REQUIRED', 'adapter events must reference an authoritative source event', true];
+      }
+      if (
+        event.event_type === 'task.retry_accepted'
+        && (
+          external.command_type !== 'task.retry'
+          || event.payload.command_id !== external.command_id
+          || event.stream_ref.kind !== external.target_ref.kind
+          || event.stream_ref.id !== external.target_ref.id
+          || event.payload.retry_of_attempt_id !== external.payload.previous_attempt_id
+          || event.payload.previous_outcome !== external.payload.previous_outcome
+          || event.payload.attempt_number !== external.payload.attempt_number
+        )
+      ) {
+        return [
+          'TASK_RETRY_CAUSATION_MISMATCH',
+          'task.retry_accepted must bind the exact applied retry command',
+          true,
+        ];
+      }
+      return null;
     }
     if (source === undefined || !this.#appliedIds.has(source.event_id)) {
       return ['CAUSATION_NOT_APPLIED', 'causation_id must reference an already applied event', false];
@@ -1998,9 +2073,23 @@ export class EventSequenceTracker {
     }
     const currentState = this.#lifecycleByObject.get(objectKey);
     if (currentState === undefined) {
-      return state === initial
+      return state === initial && event.event_type !== 'task.retry_accepted'
         ? null
         : contractError('PROTOCOL_VIOLATION', 'INVALID_INITIAL_LIFECYCLE_STATE', `${event.stream_ref.kind} must begin at ${initial}`);
+    }
+    if (event.event_type === 'task.retry_accepted') {
+      if (
+        currentState !== 'terminal'
+        || event.payload.previous_outcome !== this.#taskTerminalOutcomeByObject.get(objectKey)
+        || event.payload.attempt_number !== (this.#taskAttemptNumberByObject.get(objectKey) ?? 1) + 1
+      ) {
+        return contractError(
+          'PROTOCOL_VIOLATION',
+          'TASK_RETRY_PRECONDITION_STALE',
+          'task.retry_accepted does not continue the exact terminal epoch'
+        );
+      }
+      return null;
     }
     try {
       validateTransition(event.stream_ref.kind as LifecycleKind, currentState, state, (event.payload.outcome ?? null) as TerminalOutcome | null);
@@ -2055,6 +2144,24 @@ export class EventSequenceTracker {
           const objectKey = `${candidate.stream_ref.kind}:${candidate.stream_ref.id}`;
           this.#lifecycleByObject.set(objectKey, candidate.payload.state);
           this.#scopeByObject.set(objectKey, candidate.scope);
+          if (candidate.stream_ref.kind === 'task') {
+            if (candidate.event_type === 'task.accepted') {
+              this.#taskAttemptNumberByObject.set(objectKey, 1);
+            } else if (candidate.event_type === 'task.retry_accepted') {
+              const retryNumber = candidate.payload.attempt_number;
+              if (typeof retryNumber !== 'number') {
+                throw violation('TASK_RETRY_ATTEMPT_NUMBER_INVALID', 'applied task.retry_accepted lost its attempt number');
+              }
+              this.#taskAttemptNumberByObject.set(objectKey, retryNumber);
+              this.#taskTerminalOutcomeByObject.delete(objectKey);
+            } else if (candidate.event_type === 'task.terminal') {
+              const taskOutcome = candidate.payload.outcome;
+              if (typeof taskOutcome !== 'string') {
+                throw violation('TASK_TERMINAL_OUTCOME_INVALID', 'applied task.terminal lost its outcome');
+              }
+              this.#taskTerminalOutcomeByObject.set(objectKey, taskOutcome);
+            }
+          }
           if (candidate.stream_ref.kind === 'round' || candidate.stream_ref.kind === 'task' || candidate.stream_ref.kind === 'attempt') {
             const sourceProgressKey = progressSourceKey(candidate);
             const queue = this.#progressSourceQueues.get(sourceProgressKey) ?? [];

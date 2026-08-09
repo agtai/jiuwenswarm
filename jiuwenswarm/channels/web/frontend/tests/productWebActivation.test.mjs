@@ -582,6 +582,84 @@ test('stock Web P3 owner forwards one exact credential-free confirmed mutation',
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
 });
 
+test('stock Web task.retry sends only the exact task target through two-step confirmation', async () => {
+  const calls = [];
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P3_CONFIRMATION_ISSUE_METHOD) {
+        return {
+          ok: true,
+          result: {
+            ...p3ConfirmationResult('confirmation-retry'),
+            operation: 'task.retry',
+          },
+        };
+      }
+      return {
+        ok: true,
+        result: {
+          ...p3MutationResult(),
+          operation: 'task.retry',
+          formal_task_result: {
+            task_id: 'task-1',
+            previous_attempt_id: 'attempt-a',
+            attempt_id: 'attempt-b',
+            attempt_number: 2,
+            applied: true,
+            state: 'accepted',
+            outbox_id: 'outbox-b',
+          },
+        },
+      };
+    },
+  });
+  const retry = Object.freeze({
+    operation: 'task.retry',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  });
+  await owner.issue(retry);
+  await owner.mutate(retry);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[0][1], retry);
+  assert.deepEqual(calls[1][1], { ...retry, confirmation_id: 'confirmation-retry' });
+  assert.equal(calls.some(([, params]) => 'previous_attempt_id' in params || 'attempt_number' in params || 'context' in params), false);
+  assert.notEqual(calls[0][2], calls[1][2]);
+});
+
+test('task.retry rejects client-declared lineage and changed targets before network effects', async () => {
+  let calls = 0;
+  const owner = new ProductWebP3MutationOwner({
+    enabled: true,
+    request: async () => {
+      calls += 1;
+      throw new Error('transport must not be reached');
+    },
+  });
+  const retry = {
+    operation: 'task.retry',
+    session_id: 'session-1',
+    command_id: 'command-1',
+    issued_at: '2026-08-07T10:00:00Z',
+    correlation_id: 'correlation-1',
+    task_id: 'task-1',
+  };
+  for (const forged of [
+    { previous_attempt_id: 'attempt-a' },
+    { previous_outcome: 'cancelled' },
+    { attempt_number: 2 },
+    { context: { revision: 'client-forged' } },
+  ]) {
+    await assert.rejects(owner.issue({ ...retry, ...forged }), /only task_id/);
+  }
+  assert.equal(calls, 0);
+});
+
 test('stock Web owner retains one exact playback-scoped barge-in', async () => {
   const calls = [];
   const owner = new ProductWebP2ActivationOwner({

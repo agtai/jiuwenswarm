@@ -27,7 +27,9 @@ function task(overrides = {}) {
   return {
     task_id: overrides.task_id ?? 'task-1',
     scope: overrides.scope ?? { ...scope },
+    correlation_id: overrides.correlation_id ?? binding.correlation_id,
     attempt_id: overrides.attempt_id ?? 'attempt-1',
+    attempt_number: overrides.attempt_number ?? 1,
     state: overrides.state ?? 'running',
     outcome: overrides.outcome ?? null,
     event_head: overrides.event_head ?? 1,
@@ -55,7 +57,7 @@ function event(seq, overrides = {}) {
     causation_id: overrides.causation_id ?? (sourceEventId ?? `cause-${seq}`),
     correlation_id: overrides.correlation_id ?? binding.correlation_id,
     occurred_at: '2026-08-07T12:00:00Z',
-    details: {},
+    details: overrides.details ?? {},
   };
 }
 
@@ -69,10 +71,11 @@ function confirmation(overrides = {}) {
   };
 }
 
-function adoption(leaf, { command_id = null, events_query = null, connection_generation } = {}) {
+function adoption(leaf, { command_id = null, target_task_id = null, events_query = null, connection_generation } = {}) {
   return {
     connection_generation: connection_generation ?? leaf.snapshot().connection_generation,
     command_id,
+    target_task_id,
     events_query,
   };
 }
@@ -130,12 +133,12 @@ test('create get list status cancel and events retain authoritative task truth',
 
   leaf.adopt('task.get', {
     ok: true,
-    result: { task: task(), attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } },
-  }, adoption(leaf));
+    result: { task: task(), attempt: { task_id: 'task-1', attempt_id: 'attempt-1', attempt_number: 1 } },
+  }, adoption(leaf, { target_task_id: 'task-1' }));
   leaf.adopt('task.status', {
     ok: true,
-    result: { task: task(), attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } },
-  }, adoption(leaf));
+    result: { task: task(), attempt: { task_id: 'task-1', attempt_id: 'attempt-1', attempt_number: 1 } },
+  }, adoption(leaf, { target_task_id: 'task-1' }));
   leaf.adopt('task.list', { ok: true, result: { tasks: [task()] } }, adoption(leaf));
   leaf.adopt(
     'task.events',
@@ -190,6 +193,323 @@ test('response and round cancellation never widen into formal task cancellation'
     task_id: 'task-1',
   });
   assert.throws(() => mapFormalTaskCancel('task.cancel', null), /task_id is invalid/);
+});
+
+test('bounded retry advances exact A/B/C lineage without client-supplied predecessor facts', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const aTerminal = event(1, {
+    event_type: 'task.terminal',
+    state: 'terminal',
+    outcome: 'cancelled',
+    attempt_id: 'attempt-a',
+  });
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult([event(0, { attempt_id: 'attempt-a' }), aTerminal], 1, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const retryB = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.retry', command_id: 'retry-b', task_id: 'task-1' },
+    confirmation({
+      confirmation_id: 'confirmation-retry-b',
+      operation: 'task.retry',
+      command_id: 'retry-b',
+      target_task_id: 'task-1',
+    }),
+  );
+  let sentB;
+  await leaf.submitMutation(retryB, async prepared => {
+    sentB = prepared;
+    return { ok: true };
+  });
+  assert.deepEqual(sentB.mutation, {
+    operation: 'task.retry',
+    command_id: 'retry-b',
+    task_id: 'task-1',
+  });
+  const retryBResponse = {
+    status: 'mutation_processed',
+    operation: 'task.retry',
+    command_id: 'retry-b',
+    target_task_id: 'task-1',
+    formal_task_result: {
+      task_id: 'task-1',
+      previous_attempt_id: 'attempt-a',
+      attempt_id: 'attempt-b',
+      attempt_number: 2,
+      applied: true,
+      state: 'accepted',
+      outbox_id: 'outbox-b',
+    },
+  };
+  leaf.adopt('task.retry', retryBResponse, adoption(leaf, { command_id: 'retry-b' }));
+  assert.deepEqual(
+    {
+      attempt_id: leaf.snapshot().tasks[0].attempt_id,
+      attempt_number: leaf.snapshot().tasks[0].attempt_number,
+      last_event_seq: leaf.snapshot().tasks[0].last_event_seq,
+    },
+    { attempt_id: 'attempt-b', attempt_number: 2, last_event_seq: null },
+  );
+  const afterRetryB = leaf.snapshot();
+  assert.deepEqual(
+    leaf.adopt('task.retry', retryBResponse, adoption(leaf, { command_id: 'retry-b' })),
+    afterRetryB,
+    'an exact command-ledger replay is a zero-effect receipt',
+  );
+
+  const historyThroughB = [
+    event(0, { attempt_id: 'attempt-a' }),
+    aTerminal,
+    event(2, {
+      attempt_id: 'attempt-b',
+      event_type: 'task.retry_accepted',
+      state: 'accepted',
+      source_event_id: null,
+      causation_id: 'retry-b',
+      details: {
+        command_id: 'retry-b',
+        retry_of_attempt_id: 'attempt-a',
+        previous_outcome: 'cancelled',
+        attempt_number: 2,
+      },
+    }),
+    event(3, {
+      attempt_id: 'attempt-b',
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome: 'completed',
+      producer: 'task_core.delivery',
+    }),
+  ];
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(historyThroughB, 3, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  const retryC = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.retry', command_id: 'retry-c', task_id: 'task-1' },
+    confirmation({
+      confirmation_id: 'confirmation-retry-c',
+      operation: 'task.retry',
+      command_id: 'retry-c',
+      target_task_id: 'task-1',
+    }),
+  );
+  await leaf.submitMutation(retryC, async () => ({ ok: true }));
+  leaf.adopt('task.retry', {
+    status: 'mutation_processed',
+    operation: 'task.retry',
+    command_id: 'retry-c',
+    target_task_id: 'task-1',
+    formal_task_result: {
+      task_id: 'task-1',
+      previous_attempt_id: 'attempt-b',
+      attempt_id: 'attempt-c',
+      attempt_number: 3,
+      applied: true,
+      state: 'accepted',
+      outbox_id: 'outbox-c',
+    },
+  }, adoption(leaf, { command_id: 'retry-c' }));
+  assert.equal(leaf.snapshot().tasks[0].attempt_id, 'attempt-c');
+  assert.equal(leaf.snapshot().tasks[0].attempt_number, 3);
+  const afterRetryC = leaf.snapshot();
+  assert.deepEqual(
+    leaf.adopt('task.retry', retryBResponse, adoption(leaf, { command_id: 'retry-b' })),
+    afterRetryC,
+    'a historical exact replay cannot roll the current attempt back',
+  );
+
+  let calls = 0;
+  const exhausted = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.retry', command_id: 'retry-d', task_id: 'task-1' },
+    confirmation({
+      confirmation_id: 'confirmation-retry-d',
+      operation: 'task.retry',
+      command_id: 'retry-d',
+      target_task_id: 'task-1',
+    }),
+  );
+  await assert.rejects(leaf.submitMutation(exhausted, async () => { calls += 1; }), /eligible/);
+  assert.equal(calls, 0);
+});
+
+test('forged retry boundaries and response lineage have zero task-replica effect', async () => {
+  const baseEvents = [
+    event(0, { attempt_id: 'attempt-a' }),
+    event(1, {
+      attempt_id: 'attempt-a',
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome: 'cancelled',
+    }),
+  ];
+  for (const retryOverride of [
+    { details: { command_id: 'retry-b', retry_of_attempt_id: 'attempt-extra', previous_outcome: 'cancelled', attempt_number: 2 } },
+    { details: { command_id: 'retry-b', retry_of_attempt_id: 'attempt-a', previous_outcome: 'completed', attempt_number: 2 } },
+    { attempt_id: 'attempt-a', details: { command_id: 'retry-b', retry_of_attempt_id: 'attempt-a', previous_outcome: 'cancelled', attempt_number: 2 } },
+    { details: { command_id: 'retry-b', retry_of_attempt_id: 'attempt-a', previous_outcome: 'cancelled', attempt_number: 3 } },
+  ]) {
+    const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+    leaf.adopt('task.events', { ok: true, result: eventsResult(baseEvents, 1, 'task-1', -1) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }));
+    const before = leaf.snapshot();
+    const forged = event(2, {
+      attempt_id: 'attempt-b',
+      event_type: 'task.retry_accepted',
+      state: 'accepted',
+      source_event_id: null,
+      causation_id: 'retry-b',
+      details: { command_id: 'retry-b', retry_of_attempt_id: 'attempt-a', previous_outcome: 'cancelled', attempt_number: 2 },
+      ...retryOverride,
+    });
+    assert.throws(
+      () => leaf.adopt('task.events', { ok: true, result: eventsResult([...baseEvents, forged], 2, 'task-1', -1) }, adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } })),
+      /retry|attempt|lineage/,
+    );
+    assert.deepEqual(leaf.snapshot(), before);
+  }
+
+  const responseLeaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  responseLeaf.adopt('task.events', { ok: true, result: eventsResult(baseEvents, 1, 'task-1', -1) }, adoption(responseLeaf, { events_query: { task_id: 'task-1', after_seq: -1 } }));
+  const prepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.retry', command_id: 'retry-forged', task_id: 'task-1' },
+    confirmation({
+      confirmation_id: 'confirmation-retry-forged',
+      operation: 'task.retry',
+      command_id: 'retry-forged',
+      target_task_id: 'task-1',
+    }),
+  );
+  await responseLeaf.submitMutation(prepared, async () => ({ ok: true }));
+  const beforeResponse = responseLeaf.snapshot();
+  assert.throws(
+    () => responseLeaf.adopt('task.retry', {
+      status: 'mutation_processed',
+      operation: 'task.retry',
+      command_id: 'retry-forged',
+      target_task_id: 'task-1',
+      formal_task_result: {
+        task_id: 'task-1',
+        previous_attempt_id: 'attempt-foreign',
+        attempt_id: 'attempt-b',
+        attempt_number: 2,
+        applied: true,
+        state: 'accepted',
+        outbox_id: 'outbox-b',
+      },
+    }, adoption(responseLeaf, { command_id: 'retry-forged' })),
+    /lineage|binding/,
+  );
+  assert.deepEqual(responseLeaf.snapshot(), beforeResponse);
+});
+
+test('canonical task blocked and decision_required history remains consumable', () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const history = [
+    event(0),
+    event(1),
+    event(2, { event_type: 'task.blocked', state: 'blocked' }),
+    event(3, { event_type: 'task.decision_required', state: 'decision_required' }),
+    event(4, { event_type: 'task.running', state: 'running' }),
+    event(5, {
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome: 'completed',
+      producer: 'task_core.delivery',
+    }),
+  ];
+  leaf.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(history, 5, 'task-1', -1) },
+    adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(leaf.snapshot().tasks[0].state, 'terminal');
+  assert.equal(leaf.snapshot().tasks[0].outcome, 'completed');
+});
+
+test('status target binding and equal-head event truth fail closed', () => {
+  const foreign = new FormalTaskControlLeaf({ enabled: true, binding });
+  assert.throws(
+    () => foreign.adopt(
+      'task.status',
+      {
+        ok: true,
+        result: {
+          task: task({ task_id: 'task-foreign', attempt_id: 'attempt-foreign' }),
+          attempt: { task_id: 'task-foreign', attempt_id: 'attempt-foreign', attempt_number: 1 },
+        },
+      },
+      adoption(foreign, { target_task_id: 'task-1' }),
+    ),
+    /binding mismatch/,
+  );
+  assert.deepEqual(foreign.snapshot().tasks, []);
+
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt(
+    'task.status',
+    {
+      ok: true,
+      result: {
+        task: task({ attempt_id: 'attempt-c', state: 'accepted', outcome: null, event_head: 4 }),
+        attempt: { task_id: 'task-1', attempt_id: 'attempt-c', attempt_number: 3 },
+      },
+    },
+    adoption(leaf, { target_task_id: 'task-1' }),
+  );
+  const beforeConflict = leaf.snapshot();
+  const staleB = [
+    event(0, { attempt_id: 'attempt-a' }),
+    event(1, { attempt_id: 'attempt-a', event_type: 'task.terminal', state: 'terminal', outcome: 'cancelled' }),
+    event(2, {
+      attempt_id: 'attempt-b',
+      event_type: 'task.retry_accepted',
+      state: 'accepted',
+      source_event_id: null,
+      causation_id: 'retry-b',
+      details: {
+        command_id: 'retry-b',
+        retry_of_attempt_id: 'attempt-a',
+        previous_outcome: 'cancelled',
+        attempt_number: 2,
+      },
+    }),
+    event(3, { attempt_id: 'attempt-b' }),
+    event(4, { attempt_id: 'attempt-b', event_type: 'task.terminal', state: 'terminal', outcome: 'completed' }),
+  ];
+  assert.throws(
+    () => leaf.adopt(
+      'task.events',
+      { ok: true, result: eventsResult(staleB, 4, 'task-1', -1) },
+      adoption(leaf, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+    ),
+    /replay conflicts/,
+  );
+  assert.deepEqual(leaf.snapshot(), beforeConflict);
+
+  const newer = new FormalTaskControlLeaf({ enabled: true, binding });
+  newer.adopt(
+    'task.status',
+    {
+      ok: true,
+      result: {
+        task: task({ attempt_id: 'attempt-b', state: 'running', outcome: null, event_head: 3 }),
+        attempt: { task_id: 'task-1', attempt_id: 'attempt-b', attempt_number: 2 },
+      },
+    },
+    adoption(newer, { target_task_id: 'task-1' }),
+  );
+  newer.adopt(
+    'task.events',
+    { ok: true, result: eventsResult(staleB, 4, 'task-1', -1) },
+    adoption(newer, { events_query: { task_id: 'task-1', after_seq: -1 } }),
+  );
+  assert.equal(newer.snapshot().tasks[0].outcome, 'completed');
 });
 
 test('concurrent mutation replay and confirmation reuse allocate one call', async () => {
@@ -285,16 +605,21 @@ test('progress adoption requires exact TaskEvent causation and result origin', (
 test('foreign scope, correlation, event gaps, and task-attempt mismatch fail closed', () => {
   for (const response of [
     { ok: true, result: { tasks: [task({ scope: { ...scope, project_id: 'foreign' } })] } },
+    { ok: true, result: { tasks: [task({ correlation_id: 'foreign-correlation' })] } },
     {
       ok: true,
       result: {
         task: task(),
-        attempt: { task_id: 'task-1', attempt_id: 'attempt-other' },
+        attempt: { task_id: 'task-1', attempt_id: 'attempt-other', attempt_number: 1 },
       },
     },
   ]) {
     const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
-    assert.throws(() => leaf.adopt('tasks' in response.result ? 'task.list' : 'task.get', response, adoption(leaf)), /mismatch/);
+    const operation = 'tasks' in response.result ? 'task.list' : 'task.get';
+    assert.throws(
+      () => leaf.adopt(operation, response, adoption(leaf, { target_task_id: operation === 'task.get' ? 'task-1' : null })),
+      /mismatch/,
+    );
     assert.equal(leaf.snapshot().tasks.length, 0);
   }
 
@@ -565,8 +890,9 @@ test('product mutation wrapper rejects misplaced authority and invalid formal re
   );
   await leaf.submitMutation(prepared, async () => ({ ok: true }));
   const validFormalResult = {
-    task_id: 'task-created',
-    attempt_id: 'attempt-created',
+      task_id: 'task-created',
+      attempt_id: 'attempt-created',
+      attempt_number: 1,
     state: 'accepted',
     outbox_id: 'outbox-created',
   };
@@ -605,6 +931,7 @@ test('product mutation wrapper rejects misplaced authority and invalid formal re
   assert.deepEqual(adopted.tasks, [{
     task_id: 'task-created',
     attempt_id: 'attempt-created',
+    attempt_number: 1,
     state: 'accepted',
     outcome: null,
     event_head: null,

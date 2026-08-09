@@ -22,6 +22,8 @@ import {
 } from '../../features/live-voice/formal/productTextProgress';
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+  PRODUCT_P3_TASK_EVENTS_METHOD,
+  PRODUCT_P3_TASK_STATUS_METHOD,
   ProductWebP2ActivationOwner,
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
@@ -45,7 +47,13 @@ import {
   ProductP2ActivationJournal,
   reconcileProductP2Predecessor,
 } from '../../features/live-voice/formal/productP2ActivationJournal';
-import { FormalTaskControlLeaf, prepareFormalTaskMutation, type PreparedFormalTaskMutation } from '../../features/live-voice/formal/formalTaskControlLeaf';
+import {
+  FormalTaskControlLeaf,
+  isFormalTaskRetryEligible,
+  prepareFormalTaskMutation,
+  type FormalTaskControlRecord,
+  type PreparedFormalTaskMutation,
+} from '../../features/live-voice/formal/formalTaskControlLeaf';
 import { WebPlatformDiagnosticsMonitor, type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
 import { extractWebErrorReason, webClient } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
@@ -97,6 +105,83 @@ export type ProductVoiceTaskOrigin = Readonly<{
   commit_id: string;
   instruction: string;
 }>;
+
+type ProductWebRequest = NonNullable<LiveVoiceIntegratedRoutePanelProps['request']>;
+
+/**
+ * Read and validate one exact retry candidate before publishing it to the live
+ * leaf.  Status and full history are first reduced in an isolated probe; only
+ * the already-validated event history may update the live replica, and only
+ * while the caller's Session/target generation is still current.
+ */
+export async function inspectProductP3RetryCandidate(input: Readonly<{
+  request: ProductWebRequest;
+  leaf: FormalTaskControlLeaf;
+  session_id: string;
+  task_id: string;
+  request_nonce: string;
+  is_current: () => boolean;
+}>): Promise<Readonly<FormalTaskControlRecord>> {
+  const taskId = input.task_id.trim();
+  if (!taskId || !input.session_id || !input.request_nonce || !input.is_current()) {
+    throw new Error('formal task retry inspection is stale or incomplete');
+  }
+  const initialSnapshot = input.leaf.snapshot();
+  if (!initialSnapshot.connected || initialSnapshot.binding.session_id !== input.session_id) {
+    throw new Error('formal task retry inspection does not own the exact Session binding');
+  }
+  const ownedGeneration = initialSnapshot.connection_generation;
+  const probe = new FormalTaskControlLeaf({ enabled: true, binding: initialSnapshot.binding });
+  const stillCurrent = () => (
+    input.is_current()
+    && input.leaf.snapshot().connected
+    && input.leaf.snapshot().connection_generation === ownedGeneration
+  );
+  const statusResponse = await input.request(
+    PRODUCT_P3_TASK_STATUS_METHOD,
+    { session_id: input.session_id, task_id: taskId },
+    { requestId: `web-task-status-${input.request_nonce}` },
+  );
+  if (!stillCurrent()) throw new Error('formal task retry inspection became stale');
+  probe.adopt('task.status', statusResponse, {
+    connection_generation: probe.snapshot().connection_generation,
+    command_id: null,
+    target_task_id: taskId,
+    events_query: null,
+  });
+  const eventsResponse = await input.request(
+    PRODUCT_P3_TASK_EVENTS_METHOD,
+    { session_id: input.session_id, task_id: taskId, after_seq: -1 },
+    { requestId: `web-task-events-${input.request_nonce}` },
+  );
+  if (!stillCurrent()) throw new Error('formal task retry inspection became stale');
+  probe.adopt('task.events', eventsResponse, {
+    connection_generation: probe.snapshot().connection_generation,
+    command_id: null,
+    target_task_id: null,
+    events_query: { task_id: taskId, after_seq: -1 },
+  });
+  const selected = probe.snapshot().tasks.find(task => task.task_id === taskId) ?? null;
+  if (selected === null) throw new Error('formal task retry inspection returned no exact task');
+  input.leaf.adopt('task.events', eventsResponse, {
+    connection_generation: ownedGeneration,
+    command_id: null,
+    target_task_id: null,
+    events_query: { task_id: taskId, after_seq: -1 },
+  });
+  const adopted = input.leaf.snapshot().tasks.find(task => task.task_id === taskId) ?? null;
+  if (
+    adopted === null
+    || adopted.attempt_id !== selected.attempt_id
+    || adopted.attempt_number !== selected.attempt_number
+    || adopted.state !== selected.state
+    || adopted.outcome !== selected.outcome
+    || adopted.event_head !== selected.event_head
+  ) {
+    throw new Error('formal task retry inspection lost its exact task revision');
+  }
+  return adopted;
+}
 
 export function resolveProductTaskCreateOrigin(
   instruction: string,
@@ -317,11 +402,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
   const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
   const [pendingPresentationAck, setPendingPresentationAck] = useState<ProductPresentationAckInput | null>(null);
-  const [p3MutationOperation, setP3MutationOperation] = useState<'task.create' | 'task.cancel'>('task.create');
+  const [p3MutationOperation, setP3MutationOperation] = useState<'task.create' | 'task.cancel' | 'task.retry'>('task.create');
   const [p3TaskName, setP3TaskName] = useState('');
   const [p3TaskInstruction, setP3TaskInstruction] = useState('');
   const [p3TargetTaskId, setP3TargetTaskId] = useState('');
   const [p3MutationStatus, setP3MutationStatus] = useState<'idle' | 'issuing' | 'confirmed' | 'mutating' | 'accepted' | 'failed'>('idle');
+  const [p3RetryInspectionStatus, setP3RetryInspectionStatus] = useState<'idle' | 'checking' | 'eligible' | 'ineligible' | 'failed'>('idle');
+  const [p3RetryEligibility, setP3RetryEligibility] = useState<Readonly<FormalTaskControlRecord> | null>(null);
+  const p3RetryInspectionGenerationRef = useRef(0);
   const [createdProgressTaskId, setCreatedProgressTaskId] = useState<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
   const progressRef = useRef<Readonly<ProductTextProgressEvent> | null>(null);
@@ -1266,7 +1354,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingFormalP3MutationRef.current = null;
     formalTaskControlLeafRef.current?.disconnect();
     formalTaskControlLeafRef.current = null;
+    p3RetryInspectionGenerationRef.current += 1;
     setP3MutationStatus('idle');
+    setP3RetryInspectionStatus('idle');
+    setP3RetryEligibility(null);
     setCreatedProgressTaskId(null);
     if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION || !props.activeSessionId) {
       p3MutationOwnerRef.current = null;
@@ -1582,6 +1673,52 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   };
 
+  const inspectP3RetryEligibility = async (): Promise<Readonly<FormalTaskControlRecord> | null> => {
+    const sessionId = props.activeSessionId;
+    const taskId = p3TargetTaskId.trim();
+    const leaf = formalTaskControlLeafRef.current;
+    if (!sessionId || !taskId || !leaf || p3MutationOwnerRef.current?.hasPendingMutation()) {
+      setP3RetryEligibility(null);
+      setP3RetryInspectionStatus('ineligible');
+      return null;
+    }
+    const inspectionGeneration = ++p3RetryInspectionGenerationRef.current;
+    setP3RetryEligibility(null);
+    setP3RetryInspectionStatus('checking');
+    try {
+      const selected = await inspectProductP3RetryCandidate({
+        request: productRequest,
+        leaf,
+        session_id: sessionId,
+        task_id: taskId,
+        request_nonce: `${Date.now()}-${inspectionGeneration}`,
+        is_current: () => (
+          formalTaskControlLeafRef.current === leaf
+          && activeSessionRef.current === sessionId
+          && p3RetryInspectionGenerationRef.current === inspectionGeneration
+        ),
+      });
+      if (!isFormalTaskRetryEligible(selected)) {
+        setP3RetryEligibility(null);
+        setP3RetryInspectionStatus('ineligible');
+        return null;
+      }
+      setP3RetryEligibility(selected);
+      setP3RetryInspectionStatus('eligible');
+      return selected;
+    } catch {
+      if (
+        formalTaskControlLeafRef.current === leaf
+        && activeSessionRef.current === sessionId
+        && p3RetryInspectionGenerationRef.current === inspectionGeneration
+      ) {
+        setP3RetryEligibility(null);
+        setP3RetryInspectionStatus('failed');
+      }
+      return null;
+    }
+  };
+
   const buildP3Mutation = (): ProductWebP3MutationInput | null => {
     const sessionId = props.activeSessionId;
     if (!sessionId) return null;
@@ -1593,14 +1730,27 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       issued_at: new Date().toISOString(),
       correlation_id: correlationId,
     };
-    if (p3MutationOperation === 'task.cancel') {
+    if (p3MutationOperation === 'task.cancel' || p3MutationOperation === 'task.retry') {
       if (!p3TargetTaskId.trim()) return null;
-      return {
-        operation: 'task.cancel',
-        ...common,
-        source: 'structured',
-        task_id: p3TargetTaskId,
-      };
+      if (
+        p3MutationOperation === 'task.retry'
+        && (
+          p3RetryEligibility?.task_id !== p3TargetTaskId.trim()
+          || !isFormalTaskRetryEligible(p3RetryEligibility)
+        )
+      ) return null;
+      return p3MutationOperation === 'task.cancel'
+        ? {
+            operation: 'task.cancel',
+            ...common,
+            source: 'structured',
+            task_id: p3TargetTaskId,
+          }
+        : {
+            operation: 'task.retry',
+            ...common,
+            task_id: p3TargetTaskId,
+          };
     }
     if (!p3TaskName.trim() || !p3TaskInstruction.trim()) return null;
     return {
@@ -1649,7 +1799,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         {
           operation: mutation.operation,
           command_id: mutation.command_id,
-          task_id: mutation.operation === 'task.cancel' ? mutation.task_id : null,
+          task_id: mutation.operation === 'task.create' ? null : mutation.task_id,
         },
         receipt
       );
@@ -1676,6 +1826,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       leaf.adopt(mutation.operation, result, {
         connection_generation: leaf.snapshot().connection_generation,
         command_id: mutation.command_id,
+        target_task_id: null,
         events_query: null,
       });
       if (p3MutationOwnerRef.current === owner) {
@@ -1686,10 +1837,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             throw new Error('formal task.create result did not return an exact task');
           }
           setCreatedProgressTaskId(createdTaskId);
+          p3RetryInspectionGenerationRef.current += 1;
+          setP3TargetTaskId(createdTaskId);
+          setP3RetryEligibility(null);
+          setP3RetryInspectionStatus('idle');
+        } else if (mutation.operation === 'task.retry') {
+          p3RetryInspectionGenerationRef.current += 1;
+          setP3RetryEligibility(null);
+          setP3RetryInspectionStatus('ineligible');
+          setP3MutationOperation('task.cancel');
         }
         pendingP3MutationRef.current = null;
         pendingFormalP3MutationRef.current = null;
         setP3MutationStatus('accepted');
+        if (mutation.operation === 'task.cancel') {
+          void inspectP3RetryEligibility();
+        }
       }
     } catch {
       if (p3MutationOwnerRef.current === owner) {
@@ -1868,6 +2031,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p3TargetTaskId={p3TargetTaskId}
       p3MutationStatus={p3MutationStatus}
       p3MutationRetained={p3MutationOwnerRef.current?.hasPendingMutation() ?? false}
+      p3RetryEligible={isFormalTaskRetryEligible(p3RetryEligibility)}
+      p3RetryAttemptNumber={p3RetryEligibility?.attempt_number ?? null}
+      p3RetryInspectionStatus={p3RetryInspectionStatus}
       onP3MutationOperation={value => {
         pendingP3MutationRef.current = null;
         voiceTaskOriginRef.current = null;
@@ -1892,9 +2058,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }}
       onP3TargetTaskId={value => {
         pendingP3MutationRef.current = null;
+        p3RetryInspectionGenerationRef.current += 1;
+        setP3RetryEligibility(null);
+        setP3RetryInspectionStatus('idle');
+        if (p3MutationOperation === 'task.retry') setP3MutationOperation('task.cancel');
         setP3MutationStatus('idle');
         setP3TargetTaskId(value);
       }}
+      onP3InspectRetry={() => void inspectP3RetryEligibility()}
       onP3Issue={() => void issueP3MutationConfirmation()}
       onP3Execute={() => void executeP3Mutation()}
       onRefresh={() => void monitorRef.current?.refresh()}
@@ -1955,16 +2126,20 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   onProductInput?: (value: string) => void;
   onProductSubmit?: () => void;
   p3MutationEnabled?: boolean;
-  p3MutationOperation?: 'task.create' | 'task.cancel';
+  p3MutationOperation?: 'task.create' | 'task.cancel' | 'task.retry';
   p3TaskName?: string;
   p3TaskInstruction?: string;
   p3TargetTaskId?: string;
   p3MutationStatus?: 'idle' | 'issuing' | 'confirmed' | 'mutating' | 'accepted' | 'failed';
   p3MutationRetained?: boolean;
-  onP3MutationOperation?: (value: 'task.create' | 'task.cancel') => void;
+  p3RetryEligible?: boolean;
+  p3RetryAttemptNumber?: number | null;
+  p3RetryInspectionStatus?: 'idle' | 'checking' | 'eligible' | 'ineligible' | 'failed';
+  onP3MutationOperation?: (value: 'task.create' | 'task.cancel' | 'task.retry') => void;
   onP3TaskName?: (value: string) => void;
   onP3TaskInstruction?: (value: string) => void;
   onP3TargetTaskId?: (value: string) => void;
+  onP3InspectRetry?: () => void;
   onP3Issue?: () => void;
   onP3Execute?: () => void;
   onRefresh: () => void;
@@ -1995,10 +2170,14 @@ export function LiveVoiceIntegratedRoutePanelView({
   p3TargetTaskId = '',
   p3MutationStatus = 'idle',
   p3MutationRetained = false,
+  p3RetryEligible = false,
+  p3RetryAttemptNumber = null,
+  p3RetryInspectionStatus = 'idle',
   onP3MutationOperation,
   onP3TaskName,
   onP3TaskInstruction,
   onP3TargetTaskId,
+  onP3InspectRetry,
   onP3Issue,
   onP3Execute,
   onRefresh,
@@ -2009,7 +2188,9 @@ export function LiveVoiceIntegratedRoutePanelView({
   const browserEvidence = platform?.browser_version
     ? `${platform.browser_family} ${platform.browser_version}`
     : (platform?.browser_family ?? t('liveVoice.integrated.diagnostics.pending'));
-  const p3MutationLocked = ['issuing', 'confirmed', 'mutating'].includes(p3MutationStatus) || (p3MutationStatus === 'failed' && p3MutationRetained);
+  const p3MutationLocked = ['issuing', 'confirmed', 'mutating'].includes(p3MutationStatus)
+    || p3RetryInspectionStatus === 'checking'
+    || (p3MutationStatus === 'failed' && p3MutationRetained);
   const productTextLocked =
     ['submitting', 'waiting', 'presented'].includes(productTextStatus) ||
     productOperationRetained ||
@@ -2136,10 +2317,14 @@ export function LiveVoiceIntegratedRoutePanelView({
               <select
                 value={p3MutationOperation}
                 disabled={p3MutationLocked}
-                onChange={event => onP3MutationOperation(event.target.value === 'task.cancel' ? 'task.cancel' : 'task.create')}
+                onChange={event => {
+                  const operation = event.target.value;
+                  onP3MutationOperation(operation === 'task.cancel' || operation === 'task.retry' ? operation : 'task.create');
+                }}
               >
                 <option value="task.create">{t('liveVoice.integrated.taskControl.create')}</option>
                 <option value="task.cancel">{t('liveVoice.integrated.taskControl.cancel')}</option>
+                {p3RetryEligible && <option value="task.retry">{t('liveVoice.integrated.taskControl.retry')}</option>}
               </select>
               {p3MutationOperation === 'task.create' ? (
                 <>
@@ -2165,12 +2350,35 @@ export function LiveVoiceIntegratedRoutePanelView({
                   placeholder={t('liveVoice.integrated.taskControl.taskId')}
                 />
               )}
+              {p3MutationOperation !== 'task.create' && onP3InspectRetry && (
+                <button
+                  type="button"
+                  onClick={onP3InspectRetry}
+                  disabled={!p3TargetTaskId.trim() || p3MutationLocked}
+                >
+                  {t('liveVoice.integrated.taskControl.inspectRetry')}
+                </button>
+              )}
+              <DiagnosticsFact
+                label={t('liveVoice.integrated.taskControl.retryStatus')}
+                value={p3RetryEligible && p3RetryAttemptNumber !== null
+                  ? `eligible:${p3RetryAttemptNumber}/3`
+                  : p3RetryInspectionStatus}
+              />
               {p3MutationStatus === 'confirmed' ? (
                 <button type="button" onClick={onP3Execute}>
                   {t('liveVoice.integrated.taskControl.execute')}
                 </button>
               ) : (
-                <button type="button" onClick={onP3Issue} disabled={p3MutationStatus === 'issuing' || p3MutationStatus === 'mutating'}>
+                <button
+                  type="button"
+                  onClick={onP3Issue}
+                  disabled={
+                    p3MutationStatus === 'issuing'
+                    || p3MutationStatus === 'mutating'
+                    || (p3MutationOperation === 'task.retry' && !p3RetryEligible)
+                  }
+                >
                   {t('liveVoice.integrated.taskControl.confirm')}
                 </button>
               )}

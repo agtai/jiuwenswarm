@@ -1,4 +1,4 @@
-export const FORMAL_TASK_CONTROL_OPERATIONS = Object.freeze(['task.create', 'task.get', 'task.list', 'task.status', 'task.cancel', 'task.events'] as const);
+export const FORMAL_TASK_CONTROL_OPERATIONS = Object.freeze(['task.create', 'task.get', 'task.list', 'task.status', 'task.cancel', 'task.retry', 'task.events'] as const);
 
 export const FORMAL_TASK_CONTROL_LIMITS = Object.freeze({
   max_text_chars: 4_096,
@@ -24,6 +24,7 @@ export interface FormalTaskControlBinding {
 export interface FormalTaskControlRecord {
   readonly task_id: string;
   readonly attempt_id: string | null;
+  readonly attempt_number: number | null;
   readonly state: FormalTaskState | null;
   readonly outcome: string | null;
   readonly event_head: number | null;
@@ -32,14 +33,14 @@ export interface FormalTaskControlRecord {
 }
 
 export interface FormalTaskMutationInput {
-  readonly operation: 'task.create' | 'task.cancel';
+  readonly operation: 'task.create' | 'task.cancel' | 'task.retry';
   readonly command_id: string;
   readonly task_id: string | null;
 }
 
 export interface FormalTaskConfirmationReceipt {
   readonly confirmation_id: string;
-  readonly operation: 'task.create' | 'task.cancel';
+  readonly operation: 'task.create' | 'task.cancel' | 'task.retry';
   readonly command_id: string;
   readonly target_task_id: string | null;
   readonly expires_at: string;
@@ -70,6 +71,7 @@ export interface FormalTaskEventsQueryContext {
 export interface FormalTaskAdoptionContext {
   readonly connection_generation: number;
   readonly command_id: string | null;
+  readonly target_task_id: string | null;
   readonly events_query: FormalTaskEventsQueryContext | null;
 }
 
@@ -106,7 +108,7 @@ function adoptionContext(
 ): Readonly<FormalTaskAdoptionContext> {
   const context = objectValue(value);
   const contextKeys = context === null ? [] : Object.keys(context).sort();
-  const expectedContextKeys = ['command_id', 'connection_generation', 'events_query'];
+  const expectedContextKeys = ['command_id', 'connection_generation', 'events_query', 'target_task_id'];
   if (
     context === null
     || !Number.isSafeInteger(context.connection_generation)
@@ -117,9 +119,11 @@ function adoptionContext(
     throw new Error('formal task adoption context is invalid');
   }
   const commandId = context.command_id === null ? null : text(context.command_id, 'adoption.command_id');
+  const targetTaskId = context.target_task_id === null ? null : text(context.target_task_id, 'adoption.target_task_id');
   const events = context.events_query === null ? null : objectValue(context.events_query);
   if (
-    (operation === 'task.create' || operation === 'task.cancel') !== (commandId !== null)
+    (operation === 'task.create' || operation === 'task.cancel' || operation === 'task.retry') !== (commandId !== null)
+    || (operation === 'task.get' || operation === 'task.status') !== (targetTaskId !== null)
     || (operation === 'task.events') !== (events !== null)
     || (events !== null && Object.keys(events).some(key => !['task_id', 'after_seq'].includes(key)))
   ) {
@@ -139,15 +143,17 @@ function adoptionContext(
   return Object.freeze({
     connection_generation: Number(context.connection_generation),
     command_id: commandId,
+    target_task_id: targetTaskId,
     events_query: eventsQuery,
   });
 }
 
 interface SubmittedMutationBinding {
-  readonly operation: 'task.create' | 'task.cancel';
+  readonly operation: 'task.create' | 'task.cancel' | 'task.retry';
   readonly command_id: string;
   readonly target_task_id: string | null;
   readonly target_attempt_id: string | null;
+  readonly target_attempt_number: number | null;
   readonly adopted_task_id: string | null;
   readonly adopted_attempt_id: string | null;
   readonly adopted_state: FormalTaskState | null;
@@ -157,7 +163,10 @@ interface SubmittedMutationBinding {
 const PROJECT_CODE_EXECUTOR_ID = 'jiuwenswarm_code_agent.project_code';
 const EVENT_TYPE_STATE = Object.freeze({
   'task.accepted': 'accepted',
+  'task.retry_accepted': 'accepted',
   'task.running': 'running',
+  'task.blocked': 'blocked',
+  'task.decision_required': 'decision_required',
   'task.terminal': 'terminal',
   'attempt.accepted': 'accepted',
   'attempt.running': 'running',
@@ -167,8 +176,10 @@ const EVENT_TYPE_STATE = Object.freeze({
 function validTaskStateTransition(
   previous: FormalTaskState | null,
   next: FormalTaskState,
+  retryBoundary = false,
 ): boolean {
   if (previous === null) return next === 'accepted';
+  if (retryBoundary) return previous === 'terminal' && next === 'accepted';
   if (previous === 'terminal') return next === 'terminal';
   if (previous === 'accepted') return ['accepted', 'running', 'blocked', 'decision_required', 'terminal'].includes(next);
   return ['running', 'blocked', 'decision_required', 'terminal'].includes(next);
@@ -181,7 +192,9 @@ function validateEventProvenance(
   outcome: string | null,
   previousState: FormalTaskState | null,
   previousOutcome: string | null,
-): void {
+  previousAttemptId: string | null,
+  previousAttemptNumber: number | null,
+): number {
   const eventType = text(event.event_type, 'event.event_type');
   const producer = text(event.producer, 'event.producer');
   const sourceEventId = event.source_event_id === null
@@ -190,23 +203,24 @@ function validateEventProvenance(
   const causationId = text(event.causation_id, 'event.causation_id');
   const expectedState = EVENT_TYPE_STATE[eventType as keyof typeof EVENT_TYPE_STATE];
   const cancelRequested = eventType === 'task.cancel_requested';
+  const retryAccepted = eventType === 'task.retry_accepted';
   if (expectedState === undefined && !cancelRequested) {
     throw new Error('task event type is outside the closed lifecycle vocabulary');
   }
   if (
     (expectedState !== undefined && state !== expectedState)
     || (cancelRequested && (previousState === null || state !== previousState || outcome !== previousOutcome))
-    || !validTaskStateTransition(previousState, state)
-    || (previousState === 'terminal' && outcome !== previousOutcome)
+    || !validTaskStateTransition(previousState, state, retryAccepted)
+    || (previousState === 'terminal' && !retryAccepted && outcome !== previousOutcome)
     || (seq === 0 && eventType !== 'task.accepted')
   ) {
     throw new Error('task event lifecycle is self-contradictory');
   }
   const taskProducerValid = (
-    (eventType === 'task.accepted' && producer === 'task_core')
-    || (eventType === 'task.running' && producer === 'task_core')
+    ((eventType === 'task.accepted' || eventType === 'task.retry_accepted') && producer === 'task_core')
+    || (['task.running', 'task.blocked', 'task.decision_required'].includes(eventType) && producer === 'task_core')
     || (eventType === 'task.cancel_requested' && producer === 'task_core.control')
-    || (eventType === 'task.terminal' && ['task_core', 'task_core.reconciliation'].includes(producer))
+    || (eventType === 'task.terminal' && ['task_core', 'task_core.delivery', 'task_core.reconciliation'].includes(producer))
   );
   const attemptProducerValid = eventType.startsWith('attempt.')
     && [PROJECT_CODE_EXECUTOR_ID, 'task_core.reconciliation'].includes(producer);
@@ -214,19 +228,53 @@ function validateEventProvenance(
     throw new Error('task event producer is not authoritative for its event type');
   }
   if (
-    ((eventType === 'task.accepted' || eventType === 'task.cancel_requested') && sourceEventId !== null)
+    ((eventType === 'task.accepted' || eventType === 'task.retry_accepted' || eventType === 'task.cancel_requested') && sourceEventId !== null)
     || (sourceEventId !== null && causationId !== sourceEventId)
     || (
       sourceEventId === null
-      && (eventType === 'task.running' || (eventType.startsWith('attempt.') && producer === PROJECT_CODE_EXECUTOR_ID))
+      && (
+        ['task.running', 'task.blocked', 'task.decision_required'].includes(eventType)
+        || (eventType.startsWith('attempt.') && producer === PROJECT_CODE_EXECUTOR_ID)
+      )
     )
   ) {
     throw new Error('task event source and causation provenance mismatch');
   }
+  const details = objectValue(event.details);
+  if (details === null) throw new Error('task event details are invalid');
+  if (!retryAccepted) return previousAttemptNumber ?? 1;
+  const attemptId = text(event.attempt_id, 'event.attempt_id');
+  const retryOfAttemptId = text(details.retry_of_attempt_id, 'event.details.retry_of_attempt_id');
+  const commandId = text(details.command_id, 'event.details.command_id');
+  const previous = text(details.previous_outcome, 'event.details.previous_outcome');
+  const attemptNumber = details.attempt_number;
+  if (
+    Object.keys(details).sort().join(',') !== 'attempt_number,command_id,previous_outcome,retry_of_attempt_id'
+    || previousAttemptId === null
+    || previousAttemptNumber === null
+    || retryOfAttemptId !== previousAttemptId
+    || attemptId === previousAttemptId
+    || previous !== previousOutcome
+    || !['cancelled', 'completed'].includes(previous)
+    || !Number.isSafeInteger(attemptNumber)
+    || Number(attemptNumber) !== previousAttemptNumber + 1
+    || ![2, 3].includes(Number(attemptNumber))
+    || commandId !== causationId
+  ) {
+    throw new Error('task.retry_accepted lineage is invalid');
+  }
+  return Number(attemptNumber);
 }
 
 function nonNegativeInteger(value: unknown, field: string): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error(`${field} is invalid`);
+  }
+  return Number(value);
+}
+
+function attemptNumber(value: unknown, field: string): number {
+  if (!Number.isSafeInteger(value) || ![1, 2, 3].includes(Number(value))) {
     throw new Error(`${field} is invalid`);
   }
   return Number(value);
@@ -266,10 +314,17 @@ function requireScope(value: unknown, binding: FormalTaskControlBinding): void {
   }
 }
 
-function parseTask(value: unknown, binding: FormalTaskControlBinding): FormalTaskControlRecord {
+function parseTask(
+  value: unknown,
+  binding: FormalTaskControlBinding,
+  authoritativeAttemptNumber: number | null = null,
+): FormalTaskControlRecord {
   const task = objectValue(value);
   if (task === null) throw new Error('task result is invalid');
   requireScope(task.scope, binding);
+  if (text(task.correlation_id, 'task.correlation_id') !== binding.correlation_id) {
+    throw new Error('formal task correlation binding mismatch');
+  }
   const state = canonicalTaskState(task.state);
   const outcome = task.outcome === null ? null : text(task.outcome, 'task.outcome');
   if ((state === 'terminal') !== (outcome !== null)) {
@@ -278,12 +333,24 @@ function parseTask(value: unknown, binding: FormalTaskControlBinding): FormalTas
   return Object.freeze({
     task_id: text(task.task_id, 'task_id'),
     attempt_id: text(task.attempt_id, 'attempt_id'),
+    attempt_number: authoritativeAttemptNumber,
     state,
     outcome,
     event_head: nonNegativeInteger(task.event_head, 'task.event_head'),
     last_event_id: null,
     last_event_seq: null,
   });
+}
+
+export function isFormalTaskRetryEligible(record: Readonly<FormalTaskControlRecord> | null | undefined): boolean {
+  return Boolean(
+    record
+    && record.attempt_id !== null
+    && record.attempt_number !== null
+    && record.attempt_number < 3
+    && record.state === 'terminal'
+    && (record.outcome === 'cancelled' || record.outcome === 'completed')
+  );
 }
 
 function sameBinding(left: FormalTaskControlBinding, right: FormalTaskControlBinding): boolean {
@@ -310,7 +377,7 @@ export function prepareFormalTaskMutation(
   const operation = mutationInput.operation;
   const commandId = text(mutationInput.command_id, 'command_id');
   const taskId = mutationInput.task_id === null ? null : text(mutationInput.task_id, 'task_id');
-  if ((operation === 'task.create') !== (taskId === null)) {
+  if ((operation === 'task.create') !== (taskId === null) || !['task.create', 'task.cancel', 'task.retry'].includes(operation)) {
     throw new Error('formal task mutation target is invalid');
   }
   const confirmation = Object.freeze({
@@ -415,10 +482,13 @@ export class FormalTaskControlLeaf {
       ? null
       : this.#tasks.get(normalized.mutation.task_id);
     if (
-      normalized.mutation.operation === 'task.cancel'
+      (normalized.mutation.operation === 'task.cancel' || normalized.mutation.operation === 'task.retry')
       && (targetTask === null || targetTask === undefined || targetTask.attempt_id === null)
     ) {
-      throw new Error('formal task cancellation requires an observed exact task attempt');
+      throw new Error(`formal ${normalized.mutation.operation} requires an observed exact task attempt`);
+    }
+    if (normalized.mutation.operation === 'task.retry' && !isFormalTaskRetryEligible(targetTask)) {
+      throw new Error('formal task.retry requires an eligible authoritative terminal attempt');
     }
     const connectionGeneration = this.#connectionGeneration;
     const retained: SubmittedMutationBinding = Object.freeze({
@@ -426,6 +496,7 @@ export class FormalTaskControlLeaf {
       command_id: commandId,
       target_task_id: normalized.mutation.task_id,
       target_attempt_id: targetTask?.attempt_id ?? null,
+      target_attempt_number: targetTask?.attempt_number ?? null,
       adopted_task_id: null,
       adopted_attempt_id: null,
       adopted_state: null,
@@ -461,7 +532,7 @@ export class FormalTaskControlLeaf {
     }
     const payload = objectValue(response);
     const productMutation =
-      (operation === 'task.create' || operation === 'task.cancel')
+      (operation === 'task.create' || operation === 'task.cancel' || operation === 'task.retry')
       && payload?.status === 'mutation_processed'
         ? payload
         : null;
@@ -481,16 +552,26 @@ export class FormalTaskControlLeaf {
       }
       const next = new Map<string, FormalTaskControlRecord>();
       for (const value of result.tasks) {
-        const task = parseTask(value, this.#binding);
+        const rawTask = objectValue(value);
+        const number = rawTask !== null && Object.prototype.hasOwnProperty.call(rawTask, 'attempt_number')
+          ? attemptNumber(rawTask.attempt_number, 'task.attempt_number')
+          : null;
+        const task = parseTask(value, this.#binding, number);
         if (next.has(task.task_id)) throw new Error('task.list contains a duplicate task');
         next.set(task.task_id, task);
       }
       this.#tasks.clear();
       for (const [taskId, task] of next) this.#tasks.set(taskId, task);
     } else if (operation === 'task.get' || operation === 'task.status') {
-      const task = parseTask(result.task, this.#binding);
       const attempt = objectValue(result.attempt);
-      if (attempt === null || attempt.task_id !== task.task_id || attempt.attempt_id !== task.attempt_id) {
+      if (attempt === null) throw new Error('formal task/attempt result binding mismatch');
+      const task = parseTask(result.task, this.#binding, attemptNumber(attempt.attempt_number, 'attempt.attempt_number'));
+      if (
+        context.target_task_id === null
+        || task.task_id !== context.target_task_id
+        || attempt.task_id !== task.task_id
+        || attempt.attempt_id !== task.attempt_id
+      ) {
         throw new Error('formal task/attempt result binding mismatch');
       }
       if (!this.#tasks.has(task.task_id) && this.#tasks.size >= FORMAL_TASK_CONTROL_LIMITS.max_tasks) {
@@ -514,6 +595,8 @@ export class FormalTaskControlLeaf {
       }
       let responseState: FormalTaskState | null = null;
       let responseOutboxId: string | null = null;
+      let responseAttemptNumber: number | null = null;
+      let responsePreviousAttemptId: string | null = null;
       if (productMutation !== null) {
         const responseTargetTaskId = productMutation.target_task_id === null
           ? null
@@ -532,8 +615,13 @@ export class FormalTaskControlLeaf {
         responseOutboxId = !Object.prototype.hasOwnProperty.call(result, 'outbox_id') || result.outbox_id === null
           ? null
           : text(result.outbox_id, 'result.outbox_id');
-        if (operation === 'task.create' && (responseState !== 'accepted' || responseOutboxId === null)) {
-          throw new Error('formal task.create result is not an accepted durable task');
+        if (operation === 'task.create') {
+          responseAttemptNumber = Object.prototype.hasOwnProperty.call(result, 'attempt_number')
+            ? attemptNumber(result.attempt_number, 'result.attempt_number')
+            : 1;
+          if (responseState !== 'accepted' || responseOutboxId === null || responseAttemptNumber !== 1) {
+            throw new Error('formal task.create result is not an accepted durable task initial attempt');
+          }
         }
         if (operation === 'task.cancel') {
           if (result.cancel_acknowledged !== true) {
@@ -551,37 +639,66 @@ export class FormalTaskControlLeaf {
           ) {
             throw new Error('formal task.cancel applied result has an invalid durable outbox');
           }
+          if (
+            Object.prototype.hasOwnProperty.call(result, 'attempt_number')
+            && attemptNumber(result.attempt_number, 'result.attempt_number') !== submitted.target_attempt_number
+          ) {
+            throw new Error('formal task.cancel result attempt number mismatch');
+          }
+        }
+        if (operation === 'task.retry') {
+          responseAttemptNumber = attemptNumber(result.attempt_number, 'result.attempt_number');
+          responsePreviousAttemptId = text(result.previous_attempt_id, 'result.previous_attempt_id');
+          if (
+            result.applied !== true
+            || responseState !== 'accepted'
+            || responseOutboxId === null
+            || responsePreviousAttemptId !== submitted.target_attempt_id
+            || submitted.target_attempt_number === null
+            || responseAttemptNumber !== submitted.target_attempt_number + 1
+            || responseAttemptNumber > 3
+          ) {
+            throw new Error('formal task.retry result lineage is invalid');
+          }
         }
       }
       const taskId = text(result.task_id, 'result.task_id');
       const attemptId = text(result.attempt_id, 'result.attempt_id');
-      const existing = this.#tasks.get(taskId);
-      if (operation === 'task.cancel' && existing === undefined) {
-        throw new Error('task.cancel result targets an unobserved formal task');
-      }
-      if (
-        operation === 'task.cancel'
-        && (
-          taskId !== submitted.target_task_id
-          || attemptId !== submitted.target_attempt_id
-          || existing?.attempt_id !== submitted.target_attempt_id
-        )
-      ) {
-        throw new Error('task.cancel result attempt binding mismatch');
-      }
-      if (existing !== undefined && existing.attempt_id !== null && existing.attempt_id !== attemptId) {
-        throw new Error('formal task mutation result conflicts with the observed task attempt');
-      }
-      if (
-        (submitted.adopted_task_id !== null || submitted.adopted_attempt_id !== null)
-        && (
+      if (submitted.adopted_task_id !== null || submitted.adopted_attempt_id !== null) {
+        if (
           submitted.adopted_task_id !== taskId
           || submitted.adopted_attempt_id !== attemptId
           || submitted.adopted_state !== responseState
           || submitted.adopted_outbox_id !== responseOutboxId
+        ) {
+          throw new Error('formal task mutation replay conflicts with its adopted result');
+        }
+        // A command-ledger replay may arrive after the task has advanced to a
+        // later attempt.  The original result is accepted as a receipt only and
+        // must never roll the current replica back to that historical attempt.
+        return this.snapshot();
+      }
+      const existing = this.#tasks.get(taskId);
+      if ((operation === 'task.cancel' || operation === 'task.retry') && existing === undefined) {
+        throw new Error(`${operation} result targets an unobserved formal task`);
+      }
+      if (
+        (operation === 'task.cancel' || operation === 'task.retry')
+        && (
+          taskId !== submitted.target_task_id
+          || existing?.attempt_id !== submitted.target_attempt_id
         )
       ) {
-        throw new Error('formal task mutation replay conflicts with its adopted result');
+        throw new Error(`${operation} result attempt binding mismatch`);
+      }
+      if (operation === 'task.cancel' && attemptId !== submitted.target_attempt_id) {
+        throw new Error('task.cancel result attempt binding mismatch');
+      }
+      if (operation === 'task.retry' && (attemptId === submitted.target_attempt_id || responsePreviousAttemptId !== submitted.target_attempt_id)) {
+        throw new Error('task.retry result attempt binding mismatch');
+      }
+      if (operation !== 'task.retry' && existing !== undefined && existing.attempt_id !== null && existing.attempt_id !== attemptId) {
+        throw new Error('formal task mutation result conflicts with the observed task attempt');
       }
       if (existing === undefined && this.#tasks.size >= FORMAL_TASK_CONTROL_LIMITS.max_tasks) {
         throw new Error('formal task capacity is exhausted');
@@ -597,6 +714,7 @@ export class FormalTaskControlLeaf {
         const task: FormalTaskControlRecord = Object.freeze({
           task_id: taskId,
           attempt_id: attemptId,
+          attempt_number: responseAttemptNumber,
           state: responseState,
           outcome: null,
           event_head: null,
@@ -605,6 +723,21 @@ export class FormalTaskControlLeaf {
         });
         this.#submittedMutations.set(responseCommandId, adoptedBinding);
         this.#tasks.set(taskId, task);
+      } else if (operation === 'task.retry') {
+        this.#submittedMutations.set(responseCommandId, adoptedBinding);
+        this.#tasks.set(taskId, Object.freeze({
+          task_id: taskId,
+          attempt_id: attemptId,
+          attempt_number: responseAttemptNumber,
+          state: responseState,
+          outcome: null,
+          // The accepted retry result advances the authoritative attempt but does
+          // not carry an event cursor.  Discard the predecessor cursor so a
+          // caller must rebuild the replica from a complete task.events history.
+          event_head: null,
+          last_event_id: null,
+          last_event_seq: null,
+        }));
       } else {
         this.#submittedMutations.set(responseCommandId, adoptedBinding);
       }
@@ -704,6 +837,8 @@ export class FormalTaskControlLeaf {
     let previous = afterSeq;
     let previousState: FormalTaskState | null = afterSeq === -1 ? null : existing?.state ?? null;
     let previousOutcome: string | null = afterSeq === -1 ? null : existing?.outcome ?? null;
+    let previousAttemptId: string | null = afterSeq === -1 ? null : existing?.attempt_id ?? null;
+    let previousAttemptNumber: number | null = afterSeq === -1 ? null : existing?.attempt_number ?? null;
     const eventIds = new Set<string>();
     for (const value of result.events) {
       const event = objectValue(value);
@@ -717,8 +852,7 @@ export class FormalTaskControlLeaf {
         eventTaskId !== taskId ||
         event.correlation_id !== this.#binding.correlation_id ||
         seq !== previous + 1 ||
-        eventIds.has(eventId) ||
-        (selected !== null && (selected.task_id !== eventTaskId || selected.attempt_id !== attemptId))
+        eventIds.has(eventId)
       ) {
         throw new Error('task event sequence or origin binding mismatch');
       }
@@ -728,10 +862,27 @@ export class FormalTaskControlLeaf {
       if ((state === 'terminal') !== (outcome !== null)) {
         throw new Error('task event terminal outcome mismatch');
       }
-      validateEventProvenance(event, seq, state, outcome, previousState, previousOutcome);
+      const eventType = text(event.event_type, 'event.event_type');
+      const nextAttemptNumber = validateEventProvenance(
+        event,
+        seq,
+        state,
+        outcome,
+        previousState,
+        previousOutcome,
+        previousAttemptId,
+        previousAttemptNumber,
+      );
+      if (
+        (previousAttemptId === null && (seq !== 0 || eventType !== 'task.accepted' || nextAttemptNumber !== 1))
+        || (previousAttemptId !== null && eventType !== 'task.retry_accepted' && attemptId !== previousAttemptId)
+      ) {
+        throw new Error('task event attempt segment binding mismatch');
+      }
       selected = Object.freeze({
         task_id: eventTaskId,
         attempt_id: attemptId,
+        attempt_number: nextAttemptNumber,
         state,
         outcome,
         event_head: head,
@@ -741,30 +892,31 @@ export class FormalTaskControlLeaf {
       previous = seq;
       previousState = state;
       previousOutcome = outcome;
+      previousAttemptId = attemptId;
+      previousAttemptNumber = nextAttemptNumber;
     }
     if (selected !== null) {
       if (selected.last_event_seq !== head) throw new Error('task.events head mismatch');
       if (
         existing !== undefined &&
-        ((existing.attempt_id !== null && existing.attempt_id !== selected.attempt_id) ||
-          (afterSeq !== -1 && existing.last_event_seq !== null && existing.last_event_seq !== afterSeq))
+        afterSeq !== -1 && existing.last_event_seq !== null && existing.last_event_seq !== afterSeq
       ) {
         throw new Error('task.events result conflicts with observed task truth');
       }
-      if (
-        afterSeq === -1
-        && existing !== undefined
-        && existing.last_event_seq !== null
-        && existing.event_head === head
-        && (
+      if (afterSeq === -1 && existing !== undefined && existing.event_head === head) {
+        const summaryConflict = (
           existing.attempt_id !== selected.attempt_id
-          || existing.last_event_id !== selected.last_event_id
-          || existing.last_event_seq !== selected.last_event_seq
+          || (existing.attempt_number !== null && existing.attempt_number !== selected.attempt_number)
           || existing.state !== selected.state
           || existing.outcome !== selected.outcome
-        )
-      ) {
-        throw new Error('task.events replay conflicts with observed task truth');
+        );
+        const cursorConflict = existing.last_event_seq !== null && (
+          existing.last_event_id !== selected.last_event_id
+          || existing.last_event_seq !== selected.last_event_seq
+        );
+        if (summaryConflict || cursorConflict) {
+          throw new Error('task.events replay conflicts with observed task truth');
+        }
       }
       this.#tasks.set(selected.task_id, selected);
     } else {
@@ -773,6 +925,7 @@ export class FormalTaskControlLeaf {
         Object.freeze({
           task_id: taskId,
           attempt_id: existing?.attempt_id ?? null,
+          attempt_number: existing?.attempt_number ?? null,
           state: existing?.state ?? null,
           outcome: existing?.outcome ?? null,
           event_head: head,

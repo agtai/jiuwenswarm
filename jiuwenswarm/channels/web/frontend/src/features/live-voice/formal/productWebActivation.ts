@@ -7,6 +7,8 @@ export const PRODUCT_P2_BARGE_IN_METHOD = 'live_voice.composition.p2.barge_in' a
 export const PRODUCT_P3_CONFIRMATION_ISSUE_METHOD = 'live_voice.composition.p3.confirmation.issue' as const;
 export const PRODUCT_P3_MUTATE_METHOD = 'live_voice.composition.p3.mutate' as const;
 export const PRODUCT_P3_TASK_LIST_METHOD = 'live_voice.task.list' as const;
+export const PRODUCT_P3_TASK_STATUS_METHOD = 'live_voice.task.status' as const;
+export const PRODUCT_P3_TASK_EVENTS_METHOD = 'live_voice.task.events' as const;
 export const PRODUCT_P3_PROGRESS_ACTIVATE_METHOD = 'live_voice.composition.p3.progress.activate' as const;
 export const PRODUCT_P3_PROGRESS_CLOSE_METHOD = 'live_voice.composition.p3.progress.close' as const;
 
@@ -198,12 +200,20 @@ export type ProductWebP3MutationInput = Readonly<
       source: 'structured';
       task_id: string;
     }
+  | {
+      operation: 'task.retry';
+      session_id: string;
+      command_id: string;
+      issued_at: string;
+      correlation_id: string;
+      task_id: string;
+    }
 >;
 
 export interface ProductWebP3ConfirmationReceipt {
   readonly confirmation_id: string;
   readonly expires_at: string;
-  readonly operation: 'task.create' | 'task.cancel';
+  readonly operation: 'task.create' | 'task.cancel' | 'task.retry';
   readonly command_id: string;
   readonly target_task_id: string | null;
   readonly task_control_binding: ProductWebP3TaskControlBinding;
@@ -302,13 +312,26 @@ function freezeP3MutationInput(input: ProductWebP3MutationInput): ProductWebP3Mu
     correlation_id: requiredText(input.correlation_id, 'correlation_id'),
   } as const;
   if (input.operation === 'task.cancel') {
-    if (input.source !== undefined && input.source !== 'structured') {
-      throw new Error('task.cancel source is invalid');
+    const source = (input as { source?: unknown }).source;
+    if (source !== undefined && source !== 'structured') {
+      throw new Error(`${input.operation} source is invalid`);
     }
     return Object.freeze({
-      operation: 'task.cancel' as const,
+      operation: input.operation,
       ...common,
       source: 'structured' as const,
+      task_id: requiredText(input.task_id, 'task_id'),
+    });
+  }
+  if (input.operation === 'task.retry') {
+    const inputKeys = Object.keys(input).sort();
+    const expectedKeys = ['command_id', 'correlation_id', 'issued_at', 'operation', 'session_id', 'task_id'];
+    if (inputKeys.length !== expectedKeys.length || inputKeys.some((key, index) => key !== expectedKeys[index])) {
+      throw new Error('task.retry input must contain only task_id and confirmation-bound request facts');
+    }
+    return Object.freeze({
+      operation: 'task.retry' as const,
+      ...common,
       task_id: requiredText(input.task_id, 'task_id'),
     });
   }
@@ -964,7 +987,7 @@ export class ProductWebP3MutationOwner {
       .then(value => {
         const payload = objectValue(value);
         const result = objectValue(payload?.result);
-        const targetTaskId = frozen.operation === 'task.cancel' ? frozen.task_id : null;
+        const targetTaskId = frozen.operation === 'task.create' ? null : frozen.task_id;
         if (
           payload?.ok !== true ||
           result?.status !== 'confirmation_issued' ||
@@ -1025,7 +1048,7 @@ export class ProductWebP3MutationOwner {
       .then(value => {
         const payload = objectValue(value);
         const result = objectValue(payload?.result);
-        const targetTaskId = frozen.operation === 'task.cancel' ? frozen.task_id : null;
+        const targetTaskId = frozen.operation === 'task.create' ? null : frozen.task_id;
         if (
           payload?.ok !== true ||
           result?.status !== 'mutation_processed' ||

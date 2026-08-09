@@ -861,6 +861,127 @@ test('the four cancel scopes route to exactly one handler', () => {
   assert.throws(() => parseCommandEnvelope(wrongOwner, registry(fixture)), ContractViolation);
 });
 
+test('task.retry accepts only exact server-derived bounded predecessor facts', () => {
+  const fixture = load('critical_kernel.valid.json');
+  const retry = clone(fixture.command);
+  retry.command_type = 'task.retry';
+  retry.target_ref = { kind: 'task', id: 'task-1' };
+  retry.required_capabilities = ['task.retry'];
+  retry.payload = {
+    previous_attempt_id: 'attempt-a',
+    previous_outcome: 'cancelled',
+    attempt_number: 2,
+  };
+  assert.deepEqual(parseCommandEnvelope(retry).payload, retry.payload);
+  for (const payload of [
+    { ...retry.payload, previous_attempt_id: '' },
+    { ...retry.payload, previous_outcome: 'failed' },
+    { ...retry.payload, attempt_number: 1 },
+    { ...retry.payload, attempt_number: 4 },
+    { ...retry.payload, context: {} },
+  ]) {
+    assert.throws(() => parseCommandEnvelope({ ...retry, payload }), ContractViolation);
+  }
+});
+
+test('task.retry_accepted binds the applied command and opens only the next exact epoch', () => {
+  const fixture = load('critical_kernel.valid.json');
+  const commandRaw = clone(fixture.command);
+  Object.assign(commandRaw, {
+    request_id: 'request-retry-2',
+    command_id: 'command-retry-2',
+    command_type: 'task.retry',
+    target_ref: { kind: 'task', id: 'task-1' },
+    required_capabilities: ['task.retry'],
+    payload: {
+      previous_attempt_id: 'attempt-1',
+      previous_outcome: 'completed',
+      attempt_number: 2,
+    },
+  });
+  const command = parseCommandEnvelope(commandRaw);
+  const accepted = eventFrom(fixture, { eventId: 'task-a', seq: 0 });
+  const terminalRaw = clone(fixture.event);
+  Object.assign(terminalRaw, {
+    event_id: 'task-a-terminal',
+    event_type: 'task.terminal',
+    seq: 1,
+    causation_id: accepted.event_id,
+    payload: { state: 'terminal', outcome: 'completed' },
+  });
+  const terminal = parseEventEnvelope(terminalRaw);
+  const retryRaw = clone(fixture.event);
+  Object.assign(retryRaw, {
+    event_id: 'task-b',
+    event_type: 'task.retry_accepted',
+    seq: 2,
+    causation_id: command.command_id,
+    payload: {
+      state: 'accepted',
+      command_id: command.command_id,
+      retry_of_attempt_id: 'attempt-1',
+      previous_outcome: 'completed',
+      attempt_number: 2,
+    },
+  });
+  const retryEvent = parseEventEnvelope(retryRaw);
+  const tracker = new EventSequenceTracker();
+  assert.equal(tracker.accept(accepted).status, 'applied');
+  assert.equal(tracker.accept(terminal).status, 'applied');
+  tracker.registerAppliedCause(command);
+  assert.equal(tracker.accept(retryEvent).status, 'applied');
+
+  const causalTracker = new EventSequenceTracker();
+  assert.equal(causalTracker.accept(accepted).status, 'applied');
+  assert.equal(causalTracker.accept(terminal).status, 'applied');
+  causalTracker.registerAppliedCause(command);
+  const mismatchedCause = clone(retryRaw);
+  mismatchedCause.event_id = 'task-b-mismatched-cause';
+  mismatchedCause.payload.retry_of_attempt_id = 'attempt-other';
+  const causalRejection = causalTracker.accept(parseEventEnvelope(mismatchedCause));
+  assert.equal(causalRejection.status, 'rejected_causation');
+  assert.equal(causalRejection.error.reason, 'TASK_RETRY_CAUSATION_MISMATCH');
+
+  const wrongLineage = clone(retryRaw);
+  Object.assign(wrongLineage, {
+    event_id: 'task-c',
+    seq: 3,
+    causation_id: 'command-retry-3',
+  });
+  Object.assign(wrongLineage.payload, {
+    command_id: 'command-retry-3',
+    retry_of_attempt_id: 'attempt-2',
+    attempt_number: 3,
+  });
+  const command3Raw = clone(commandRaw);
+  Object.assign(command3Raw, { request_id: 'request-retry-3', command_id: 'command-retry-3' });
+  Object.assign(command3Raw.payload, { previous_attempt_id: 'attempt-2', attempt_number: 3 });
+  tracker.registerAppliedCause(parseCommandEnvelope(command3Raw));
+  const rejected = tracker.accept(parseEventEnvelope(wrongLineage));
+  assert.equal(rejected.status, 'rejected_lifecycle');
+  assert.equal(rejected.error.reason, 'TASK_RETRY_PRECONDITION_STALE');
+
+  const missingCommand = clone(retryRaw);
+  delete missingCommand.payload.command_id;
+  assert.throws(() => parseEventEnvelope(missingCommand), ContractViolation);
+  const badCause = clone(retryRaw);
+  badCause.causation_id = 'another-command';
+  assert.throws(
+    () => parseEventEnvelope(badCause),
+    error => error instanceof ContractViolation && error.error.reason === 'TASK_RETRY_CAUSATION_MISMATCH',
+  );
+
+  const commandDrift = clone(retryRaw);
+  commandDrift.event_id = 'task-b-command-drift';
+  commandDrift.payload.command_id = 'another-command';
+  const zeroEffectTracker = new EventSequenceTracker();
+  assert.equal(zeroEffectTracker.accept(accepted).status, 'applied');
+  assert.equal(zeroEffectTracker.accept(terminal).status, 'applied');
+  zeroEffectTracker.registerAppliedCause(command);
+  assert.throws(() => parseEventEnvelope(commandDrift), ContractViolation);
+  assert.equal(zeroEffectTracker.accept(retryEvent).status, 'applied');
+});
+
 test('attempt cannot skip running and terminal transitions require outcome', () => {
   const fixture = load('critical_kernel.valid.json');
   for (const [kind, current, target] of fixture.lifecycle_allowed) {

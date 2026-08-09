@@ -12,6 +12,7 @@ import {
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
   classifyProductP2Notification,
   extractWebErrorReason,
+  inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   productP2WebRequestOptions,
   productTextBlockedByP1Status,
@@ -19,6 +20,10 @@ import {
   resolveProductTaskCreateOrigin,
   retainBoundedPresentedProductResponse,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+import {
+  FormalTaskControlLeaf,
+  isFormalTaskRetryEligible,
+} from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/formalTaskControlLeaf.js';
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
   PRODUCT_P2_SUBMIT_METHOD,
@@ -28,6 +33,109 @@ import {
   createCurrentIntegratedWebRouteSelection,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/integratedWebRouteShell.js';
 import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
+
+const retryBinding = Object.freeze({
+  subject_id: 'principal-1',
+  session_id: 'session-1',
+  project_id: 'project-1',
+  correlation_id: 'correlation-1',
+  generation: 1,
+});
+
+const retryScope = Object.freeze({
+  subject_id: retryBinding.subject_id,
+  session_id: retryBinding.session_id,
+  project_id: retryBinding.project_id,
+  assurance: 'authenticated',
+});
+
+function retryStatus({
+  taskId = 'task-1',
+  attemptId = 'attempt-b',
+  attemptNumber = 2,
+  state = 'terminal',
+  outcome = 'completed',
+  eventHead = 3,
+} = {}) {
+  return {
+    ok: true,
+    result: {
+      task: {
+        task_id: taskId,
+        scope: { ...retryScope },
+        correlation_id: retryBinding.correlation_id,
+        attempt_id: attemptId,
+        state,
+        outcome,
+        event_head: eventHead,
+      },
+      attempt: { task_id: taskId, attempt_id: attemptId, attempt_number: attemptNumber },
+    },
+  };
+}
+
+function retryEvent(seq, {
+  attemptId,
+  eventType,
+  state,
+  outcome = null,
+  sourceEventId,
+  causationId,
+  details = {},
+  producer = 'task_core',
+} = {}) {
+  const source = sourceEventId === undefined ? (seq === 0 ? null : `source-${seq}`) : sourceEventId;
+  return {
+    event_id: `task-1:event:${seq}`,
+    task_id: 'task-1',
+    attempt_id: attemptId,
+    scope: { ...retryScope },
+    seq,
+    event_type: eventType,
+    state,
+    outcome,
+    producer,
+    source_event_id: source,
+    causation_id: causationId ?? (source ?? `cause-${seq}`),
+    correlation_id: retryBinding.correlation_id,
+    occurred_at: '2026-08-09T12:00:00Z',
+    details,
+  };
+}
+
+function retryHistoryThroughB() {
+  return [
+    retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' }),
+    retryEvent(1, { attemptId: 'attempt-a', eventType: 'task.terminal', state: 'terminal', outcome: 'cancelled' }),
+    retryEvent(2, {
+      attemptId: 'attempt-b',
+      eventType: 'task.retry_accepted',
+      state: 'accepted',
+      sourceEventId: null,
+      causationId: 'retry-b',
+      details: {
+        command_id: 'retry-b',
+        retry_of_attempt_id: 'attempt-a',
+        previous_outcome: 'cancelled',
+        attempt_number: 2,
+      },
+    }),
+    retryEvent(3, {
+      attemptId: 'attempt-b',
+      eventType: 'task.terminal',
+      state: 'terminal',
+      outcome: 'completed',
+      producer: 'task_core.delivery',
+    }),
+  ];
+}
+
+function retryEvents(events = retryHistoryThroughB(), headSeq = 3) {
+  return {
+    ok: true,
+    result: { events, head_seq: headSeq, task_id: 'task-1', after_seq: -1 },
+  };
+}
 
 async function renderPanel({ sessionId = 'persisted-session', platform = null, progress = null, viewProps = {} } = {}) {
   const translations = JSON.parse(await readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8'));
@@ -284,6 +392,228 @@ test('route panel renders a distinct two-action formal P3 task control', async (
   assert.equal(html.includes('Execute confirmed mutation'), true);
   assert.equal(html.includes('Acceptance is not task completion.'), true);
   assert.equal((html.match(/disabled=""/g) ?? []).length >= 3, true);
+});
+
+test('route panel exposes task.retry only for an inspected eligible terminal attempt', async () => {
+  const base = {
+    p3MutationEnabled: true,
+    p3MutationOperation: 'task.cancel',
+    p3TargetTaskId: 'task-1',
+    p3MutationStatus: 'idle',
+    onP3MutationOperation: () => {},
+    onP3TaskName: () => {},
+    onP3TaskInstruction: () => {},
+    onP3TargetTaskId: () => {},
+    onP3InspectRetry: () => {},
+    onP3Issue: () => {},
+    onP3Execute: () => {},
+  };
+  const hidden = await renderPanel({
+    viewProps: {
+      ...base,
+      p3RetryEligible: false,
+      p3RetryInspectionStatus: 'ineligible',
+    },
+  });
+  assert.equal(hidden.includes('value="task.retry"'), false);
+  assert.equal(hidden.includes('Check retry eligibility'), true);
+
+  const visible = await renderPanel({
+    viewProps: {
+      ...base,
+      p3MutationOperation: 'task.retry',
+      p3RetryEligible: true,
+      p3RetryAttemptNumber: 2,
+      p3RetryInspectionStatus: 'eligible',
+    },
+  });
+  assert.equal(visible.includes('value="task.retry"'), true);
+  assert.equal(visible.includes('Retry eligible task'), true);
+  assert.equal(visible.includes('eligible:2/3'), true);
+  assert.equal(visible.includes('Issue confirmation'), true);
+  assert.equal(visible.includes('Execute confirmed mutation'), false);
+});
+
+test('retry candidate inspection binds exact status and full A/B history before exposing eligibility', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const calls = [];
+  const record = await inspectProductP3RetryCandidate({
+    leaf,
+    session_id: 'session-1',
+    task_id: 'task-1',
+    request_nonce: 'positive',
+    is_current: () => true,
+    request: async (method, params, options) => {
+      calls.push({ method, params, options });
+      if (method === 'live_voice.task.status') return retryStatus();
+      if (method === 'live_voice.task.events') return retryEvents();
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+
+  assert.deepEqual(calls, [
+    {
+      method: 'live_voice.task.status',
+      params: { session_id: 'session-1', task_id: 'task-1' },
+      options: { requestId: 'web-task-status-positive' },
+    },
+    {
+      method: 'live_voice.task.events',
+      params: { session_id: 'session-1', task_id: 'task-1', after_seq: -1 },
+      options: { requestId: 'web-task-events-positive' },
+    },
+  ]);
+  assert.equal(isFormalTaskRetryEligible(record), true);
+  assert.deepEqual(
+    {
+      task_id: record.task_id,
+      attempt_id: record.attempt_id,
+      attempt_number: record.attempt_number,
+      state: record.state,
+      outcome: record.outcome,
+      event_head: record.event_head,
+    },
+    {
+      task_id: 'task-1',
+      attempt_id: 'attempt-b',
+      attempt_number: 2,
+      state: 'terminal',
+      outcome: 'completed',
+      event_head: 3,
+    },
+  );
+  assert.deepEqual(leaf.snapshot().tasks, [record]);
+});
+
+test('retry candidate inspection rejects a foreign status before events with zero live-replica effect', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  let calls = 0;
+  await assert.rejects(
+    inspectProductP3RetryCandidate({
+      leaf,
+      session_id: 'session-1',
+      task_id: 'task-1',
+      request_nonce: 'foreign',
+      is_current: () => true,
+      request: async method => {
+        calls += 1;
+        if (method !== 'live_voice.task.status') throw new Error('events must not be requested');
+        return retryStatus({ taskId: 'task-foreign', attemptId: 'attempt-foreign', attemptNumber: 1 });
+      },
+    }),
+    /binding mismatch/,
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(leaf.snapshot().tasks, []);
+});
+
+test('retry candidate inspection rejects a stale Session binding before any network effect', async () => {
+  const wrongSessionLeaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const disconnectedLeaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  disconnectedLeaf.disconnect();
+  for (const [leaf, sessionId] of [
+    [wrongSessionLeaf, 'session-foreign'],
+    [disconnectedLeaf, 'session-1'],
+  ]) {
+    let calls = 0;
+    await assert.rejects(
+      inspectProductP3RetryCandidate({
+        leaf,
+        session_id: sessionId,
+        task_id: 'task-1',
+        request_nonce: 'stale-session',
+        is_current: () => true,
+        request: async () => {
+          calls += 1;
+          throw new Error('network must not be reached');
+        },
+      }),
+      /Session binding/,
+    );
+    assert.equal(calls, 0);
+    assert.deepEqual(leaf.snapshot().tasks, []);
+  }
+});
+
+test('retry candidate inspection rejects same-head status/events disagreement with zero live-replica effect', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const staleBAtHeadFour = [
+    retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' }),
+    retryEvent(1, { attemptId: 'attempt-a', eventType: 'task.terminal', state: 'terminal', outcome: 'cancelled' }),
+    retryEvent(2, {
+      attemptId: 'attempt-b',
+      eventType: 'task.retry_accepted',
+      state: 'accepted',
+      sourceEventId: null,
+      causationId: 'retry-b',
+      details: {
+        command_id: 'retry-b',
+        retry_of_attempt_id: 'attempt-a',
+        previous_outcome: 'cancelled',
+        attempt_number: 2,
+      },
+    }),
+    retryEvent(3, { attemptId: 'attempt-b', eventType: 'task.running', state: 'running' }),
+    retryEvent(4, { attemptId: 'attempt-b', eventType: 'task.terminal', state: 'terminal', outcome: 'completed' }),
+  ];
+  await assert.rejects(
+    inspectProductP3RetryCandidate({
+      leaf,
+      session_id: 'session-1',
+      task_id: 'task-1',
+      request_nonce: 'conflict',
+      is_current: () => true,
+      request: async method => (
+        method === 'live_voice.task.status'
+          ? retryStatus({ attemptId: 'attempt-c', attemptNumber: 3, state: 'accepted', outcome: null, eventHead: 4 })
+          : retryEvents(staleBAtHeadFour, 4)
+      ),
+    }),
+    /replay conflicts/,
+  );
+  assert.deepEqual(leaf.snapshot().tasks, []);
+});
+
+test('overlapping retry inspections let only the current generation perform events and publish truth', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  let currentGeneration = 1;
+  let releaseOldStatus;
+  const oldStatus = new Promise(resolve => {
+    releaseOldStatus = resolve;
+  });
+  const oldCalls = [];
+  const oldInspection = inspectProductP3RetryCandidate({
+    leaf,
+    session_id: 'session-1',
+    task_id: 'task-1',
+    request_nonce: 'old',
+    is_current: () => currentGeneration === 1,
+    request: async method => {
+      oldCalls.push(method);
+      if (method !== 'live_voice.task.status') throw new Error('stale inspection issued events');
+      return oldStatus;
+    },
+  });
+
+  currentGeneration = 2;
+  const currentRecord = await inspectProductP3RetryCandidate({
+    leaf,
+    session_id: 'session-1',
+    task_id: 'task-1',
+    request_nonce: 'current',
+    is_current: () => currentGeneration === 2,
+    request: async method => (
+      method === 'live_voice.task.status' ? retryStatus() : retryEvents()
+    ),
+  });
+  releaseOldStatus(retryStatus());
+
+  await assert.rejects(oldInspection, /became stale/);
+  assert.deepEqual(oldCalls, ['live_voice.task.status']);
+  assert.equal(currentRecord.attempt_id, 'attempt-b');
+  assert.equal(isFormalTaskRetryEligible(currentRecord), true);
+  assert.equal(leaf.snapshot().tasks[0].attempt_id, 'attempt-b');
+  assert.equal(leaf.snapshot().tasks[0].attempt_number, 2);
 });
 
 test('browser progress consumption is fenced to the exact owned P3 binding', () => {
