@@ -552,6 +552,67 @@ This closure grants no Gate or Replacement Ledger credit. The earlier
 discarded and must not be reused. A new clean descendant candidate and fresh
 externally signed policy are required before any new evidence owner starts.
 
+### 7.6 Formal Tool evidence and diagnostic-scroll closure
+
+A later discarded rehearsal on predecessor `a4daef504` reached real OpenAI
+Speech, the committed JiuwenSwarm Agent and an actual `read_file` Tool callback;
+the Agent log and final answer proved the Tool ran, but the sealed AgentServer
+JSONL contained only generic notification/final facts and no canonical
+`product.w2.agent.tool_call` or `product.w2.agent.tool_result`. The installed SDK
+wrote the inner ReAct rail's Tool stream to an inner `Session`, while the formal
+adapter consumed the outer `DeepAgent.attach_output` stream. The same rehearsal
+also showed that the bounded route-facts panel could not scroll to its lower P2
+and Agent diagnostics. Both runtime artifacts sealed cleanly, but the attempt
+was diagnostic only and was discarded without Gate or Ledger credit.
+
+Candidate `1ddb5813d2dfa02fb6e736d625b28529d9840393` closes that coherent
+source batch. The registered `JiuSwarmStreamEventRail` now opens one bounded
+capture for the exact `lv-formal-*` invocation, reserves call/update/result
+capacity before Tool execution, freezes callback-owned arguments/results, and
+delivers only canonical Tool events to the existing formal parser. Missing or
+unregistered authority, duplicate/foreign ordering, capacity exhaustion,
+unfinished results and lost capture ownership fail closed. Tool exceptions
+produce one authoritative error result and release the in-flight owner;
+`CancelledError`, output-lease cleanup and the no-history guard retain their
+prior ownership semantics. Non-formal streams continue through the original
+immediate emit path. The Web diagnostics body adds only a bounded vertical
+scroll container with contained overscroll and a stable scrollbar gutter.
+
+The Tier-3 review passes closed as follows:
+
+1. Main self-reviewed the real callback path, added positive, incomplete,
+   missing-authority and exception/deduplication tests, and removed accidental
+   whole-file formatter churn from baseline-non-clean files. The final local
+   results were affected Python `171/171` with default coverage, Gate `73/73`,
+   integrated Web `202/202`, final rail/adapter `37/37`, Ruff, `py_compile` and
+   `git diff --check` PASS.
+2. Main's cold complete-diff review confirmed callback rather than model/client
+   authority, pre-effect capacity reservation, terminal/result ordering,
+   cancellation/cleanup ownership, ordinary-stream compatibility and the
+   four-line CSS-only layout change; it found and closed the exception callback
+   owner cleanup before freezing the candidate.
+3. Claude Code + Opus 5 reviewed the pinned exact SHA from a new detached
+   read-only worktree, independently reran Python `171/171`, Gate `73/73`, Web
+   `202/202` and the supplied static checks, and returned `PASS` with zero P1
+   and zero actionable P2 findings. This was a cross-model equivalent
+   independent review, not a claim that literal `/review` ran; it retains the
+   same-machine/same-repository limitation.
+
+The review recorded a non-authoritative patch-id discrepancy: Opus computed
+`1c7792e687a4ff282f67c56ae906abb51dd44d63`, while Main's Git 2.47.1
+recomputed `43109d476259e6b63ded28b537d9dd95d4961cca`. Exact candidate SHA,
+tree `da49196fedd3970ce654c2db9a64219beef7aece` and all five reviewed blob IDs
+match byte-for-byte, so candidate identity is bound by those exact Git objects
+rather than the divergent derived patch-id. Two non-actionable observations
+remain intentionally outside this batch: the adapter `finally` is the primary
+capture cleanup owner rather than generic per-session cleanup, and the buffered
+formal builders intentionally duplicate the legacy immediate emit shape so
+they can deep-copy mutable callback values.
+
+This closure grants no Gate or Replacement Ledger credit. A fresh descendant
+must first reproduce canonical real Tool call/result facts, then use fresh
+candidate, policy, key and evidence roots for any rehearsal or formal Gate run.
+
 ## 8. Machine-private continuation facts
 
 These facts are usable on the current machine but are not restored by Git:
