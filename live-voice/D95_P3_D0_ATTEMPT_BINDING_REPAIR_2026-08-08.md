@@ -25,7 +25,7 @@ freeze because the real P3 D0 Executor exposed two code-level blockers:
 The first blocker is closed in reviewed source commit `7be485e8c`. The hardened
 Gate is integrated as `decec4a79`, the compatible Web retry consumer as
 `89237a075`, and its canonical delivery-terminal history follow-up as `99eb0453f`.
-D-069 Core/Store is frozen in isolated candidate `0c18810eb`, rebased onto
+D-069 Core/Store is frozen in isolated candidate `8067e1387`, rebased onto
 governance/integration base `b5f3cec8b`. Its first
 independent review was NOT PASS with three P1 defects in schema authority,
 durable attempt lineage and reconciliation epoch isolation; a later replay-seam
@@ -33,13 +33,16 @@ review also found that a fresh product process could not reconstruct a stored
 retry from client-owned facts. The worker now implements all four repairs and
 Opus's D-070 third round on predecessor candidate `ad7e36bc8` confirmed those
 repairs but returned NOT PASS with zero P1 and two P2 findings. Candidate
-`0c18810eb` fixes the stable-error rollback finding and passes default-coverage
-focused `343/343`, wide `1313/1313`, static checks and self/cold review. The other
-finding is challenged by the actual current-segment progress path and its
-nonzero-boundary regression; Opus must explicitly confirm that disposition on the
-exact candidate before Main may accept or integrate it. The existing
-authenticated create/cancel policy, auth, confirmation, composition and direct
-transport path has not yet been extended with retry or executor retry readiness.
+`0c18810eb` fixed the stable-error rollback finding; Opus's exact-SHA final round
+then withdrew the progress-baseline finding as unreachable and returned PASS
+after independently running default-coverage focused `343/343`, wide `1313/1313`
+and static checks. Product testing subsequently found a separate pre-existing
+retry correlation write/read asymmetry. Candidate `8067e1387` adds Store-owned
+fail-before-readiness rejection, replay-order and zero-effect regressions and
+passes default-coverage focused `344/344`, wide `1314/1314`, static checks and
+self/cold review. Opus must review this exact two-file delta before Main accepts
+or integrates Core. The existing authenticated create/cancel product path is
+being extended with retry and executor readiness in the isolated product worker.
 No real A→B→C journey or cumulative Gate evidence exists.
 
 ## 2. Real failure and root cause
@@ -191,19 +194,22 @@ Current slice evidence at this checkpoint:
 - Web `89237a075` and follow-up `99eb0453f` completed the same three passes;
   Python/TypeScript contract tests passed `32/32`, integrated Web tests `201/201`,
   and frontend `tsc --noEmit` passed again on the integration branch;
-- Core/Store candidate `0c18810eb` contains the independent review's three P1
+- Core/Store candidate `8067e1387` contains the independent review's three P1
   repairs, the later durable applied-replay repair and the Opus F-3 rollback-error
-  correction. On parent `b5f3cec8b`, repository-default-coverage focused tests
-  pass `343/343` in 93.03 seconds, wide tests pass `1313/1313` in 184.51 seconds,
-  and format/Ruff/compile/diff checks pass. Opus's review of predecessor
-  `ad7e36bc8` was NOT PASS with zero P1 and two P2 findings; final exact-SHA delta
-  confirmation is still required;
-- the isolated product branch remains based on `ad7e36bc8`. Its only current
-  uncommitted source change is a narrow `DirectProjectCodeExecutorAdapter`
-  `retry_readiness` implementation (`75+/0-`), structurally verified by Main as
-  pure additions outside the `7be485e8c` ownership regions. It has no tests yet;
-  policy/auth/confirmation/composition/Gateway wiring and all product-batch review
-  remain open, so no current retry UI action can complete formal A→B→C.
+  correction plus the later correlation admission repair. On parent `b5f3cec8b`,
+  repository-default-coverage focused tests pass `344/344` in 95.46 seconds,
+  wide tests pass `1314/1314` in 185.24 seconds, and format/Ruff/compile/diff
+  checks pass. Opus returned PASS on exact predecessor `0c18810eb`; the new
+  `62+/1-` two-file delta remains subject to its exact-SHA confirmation;
+- the isolated product branch remains based on `ad7e36bc8`. Clean local candidate
+  `dc39e83fa` contains six production files plus six direct test files for
+  executor readiness and the policy/auth/confirmation/composition path; required-
+  field and direct-route findings still require amendment, while cumulative
+  verification, rebase and all product-batch review remain open. W2 uses the
+  existing
+  `live_voice.composition.p3.mutate` carrier, so a separate
+  `live_voice.task.retry` ReqMethod/Gateway/AgentServer route is not part of this
+  batch.
 
 ### 7.1 Normalized Core/Store independent-review findings
 
@@ -243,14 +249,22 @@ not acceptance: the rebased exact candidate still needs Opus review.
    canonical command/result/lineage internally. A reopened process can replay B
    after C with zero database, readiness or Executor effect, while changed
    client-owned facts conflict.
+5. **Retry correlation could be committed with inconsistent durable identity.**
+   Store admission accepted a retry command whose correlation differed from the
+   authoritative task, persisted that command, and emitted the retry boundary
+   with the task correlation; later lineage reads then classified the task as
+   corrupt. Candidate `8067e1387` rejects the mismatch as
+   `TASK_RETRY_PRECONDITION_STALE` before readiness or any write, preserves the
+   healthy lineage and zero-effect oracle, and keeps exact replay/conflict
+   classification ahead of current-state admission.
 
 The worker's current regressions cover malformed or partial schemas, lineage
 corruption, cross-process replay without the original envelope, reconciliation
 commit→retry→publish races, superseded status races, current-attempt outbox/
 cancel/reconciliation behavior, attempt-segment subscription/progress and
-concurrent retry CAS. D-070 deliberately withholds D-053 PASS until Opus confirms
-the findings' final disposition on frozen candidate `0c18810eb` with the supplied
-exact commands.
+concurrent retry CAS. D-070 deliberately withholds final Core acceptance until
+Opus confirms the correlation delta on frozen candidate `8067e1387` with the
+supplied exact commands. Its earlier exact-SHA review of `0c18810eb` is PASS.
 
 Each preview/candidate handoff to Opus must carry the exact SHA, worktree cwd,
 Python executable, focused and wide commands, expected collection/result and
@@ -258,7 +272,7 @@ coverage mode. Iteration or single-failure diagnosis may use `--no-cov`, but it
 cannot substitute for the formal third-round focused/wide run with the repository
 default coverage configuration; the wide review window must allow for that cost.
 
-### 7.2 Opus third-round findings on `ad7e36bc8`
+### 7.2 Opus third-round findings and `0c18810eb` disposition
 
 The D-070 cross-model third round was a separated read-only review rather than a
 literal `/review`; it retains the recorded same-machine/same-repository
@@ -266,7 +280,7 @@ limitation. Opus reran the supplied default-coverage suites (`342/342` focused,
 `1312/1312` wide) and static checks itself. It confirmed the earlier P1 repairs,
 found zero new P1 defects and returned NOT PASS on two P2 items:
 
-1. **F-2, progress baseline:** the review inferred that a tracker receiving a
+1. **F-2, progress baseline — WITHDRAWN / NOT APPLICABLE:** the review inferred that a tracker receiving a
    non-initial attempt segment had no entry point to seed its nonzero progress
    sequence and might buffer B/C output indefinitely. The semantic follow-up
    found that the generic `EventSequenceTracker` is not the P3 product
@@ -278,29 +292,39 @@ found zero new P1 defects and returned NOT PASS on two P2 items:
    attempt epoch on `task.retry_accepted`. The deterministic
    `test_retry_segment_projects_from_authority_owned_nonzero_baseline` covers a
    fresh B subscriber whose boundary is greater than zero and observes no gap or
-   out-of-order event. No protocol change was made; Opus must explicitly confirm
-   withdrawal or provide a concrete still-reachable consumer path before this
-   finding is closed.
-2. **F-3, rollback error stability:** `_initialize()` called `rollback()` directly
+   out-of-order event. Opus's exact-SHA review also confirmed that production
+   `TaskProgressOriginKind.VOICE` occurrences are rejection branches, not a
+   constructed product bridge, and withdrew the finding without a protocol
+   change.
+2. **F-3, rollback error stability — CLOSED:** `_initialize()` called `rollback()` directly
    while handling an already-stable schema rejection, so a rollback failure could
    replace the authoritative `FormalTaskViolation`. Candidate `0c18810eb` retains
    the primary error even if rollback itself fails. A failure-first regression
    proves `TASK_STORE_SCHEMA_UNSUPPORTED`/`UNSUPPORTED` and byte-identical database
    state with an injected rollback exception.
 
-These changes do not expand the Core/product seam. Product work unrelated to F-2
-may continue; any still-disputed current-segment consumer wiring remains paused
-until Opus confirms the exact-candidate disposition.
+Opus independently reran default-coverage focused `343/343`, wide `1313/1313`
+and all supplied static checks on pinned detached candidate `0c18810eb` and
+returned PASS with no actionable new finding. The later correlation finding is a
+separate delta now frozen in `8067e1387`.
 
 ### 7.3 Product-worker state and formatting boundary
 
 The Opus product worker is isolated on `claude/w2-task-retry-product`, based on
-reviewed predecessor `ad7e36bc8`. Main independently inspected its current tracked
-diff: only `project_code_executor.py` is modified, with `75` added and zero removed
-lines. This is implementation-in-progress evidence, not an accepted source slice;
-the new readiness seam still needs direct positive, pending-owner, mismatch and
-zero-effect tests, completion of the remaining product route, rebase to the final
-accepted Core SHA and all three D-053 passes.
+reviewed predecessor `ad7e36bc8`. Main independently inspected clean local
+candidate `dc39e83fa`: it contains six production files and six direct test files
+for executor readiness plus policy/auth/confirmation/composition retry handling.
+Required-field and direct-route findings still require amendment; cumulative
+verification, rebase to the final accepted Core SHA and all three D-053 passes
+remain open. This is implementation-in-progress evidence, not an accepted slice.
+
+The accepted W2 carrier is the existing authenticated
+`live_voice.composition.p3.mutate` method with `operation=task.retry`. A separate
+`live_voice.task.retry` method would require a new public `ReqMethod`, Gateway
+allow-list and AgentServer dispatch surface but is not used by the integrated Web
+consumer. It is scope-out for this batch: remove the dead mapping from
+`P3_ROUTE_METHODS`, keep internal operation validation explicitly aware of
+`task.retry`, and do not add the direct transport route.
 
 Formatting is not an authority to rewrite protected history. Before running a
 whole-file formatter on any allowed product file, the worker must first test that
@@ -355,11 +379,12 @@ Implementation and acceptance proceed in this order:
    closed in `7be485e8c` without relaxing exact-root or clean-worktree guards;
 2. the Gate and Web slices are integrated in `decec4a79`, `89237a075` and
    `99eb0453f`;
-3. keep rebased Core candidate `0c18810eb` frozen and obtain Opus's exact-SHA
-   delta/final confirmation before Main integrates Core; its Main-side
-   focused/wide/static verification is already green at `343/343` and `1313/1313`;
+3. keep rebased Core candidate `8067e1387` frozen and obtain Opus's exact-SHA
+   correlation-delta confirmation against accepted predecessor `0c18810eb`
+   before Main integrates Core; its Main-side focused/wide/static verification is
+   green at `344/344` and `1314/1314`;
 4. after the Core seam checkpoint, let Opus implement executor readiness and the
-   existing policy/auth/confirmation, facade/composition/Gateway path in its
+   existing policy/auth/confirmation plus composition-mutation path in its
    isolated worktree; findings pause only the product portions that depend on the
    affected seam, with uncertain dependencies conservatively paused. After final
    Core PASS the product branch must rebase, rerun and complete self/cold plus
@@ -422,10 +447,11 @@ the active slice to D95.
    user-owned or parallel work.
 3. Treat section 5's exact-root ownership repair as closed at `7be485e8c`; do not
    reopen or refactor it unless an affected D-069 regression proves necessary.
-4. Core preview `9bbb69e9d` and reviewed predecessor `ad7e36bc8` are historical
-   checkpoints. Final candidate `0c18810eb` is frozen. Opus must bind that exact SHA,
-   confirm the F-2 disposition and F-3 repair, and rerun the supplied exact
-   default-coverage commands before Main integration.
+4. Core preview `9bbb69e9d`, reviewed predecessor `ad7e36bc8` and accepted
+   predecessor `0c18810eb` are historical checkpoints. Final candidate
+   `8067e1387` is frozen. Opus must bind that exact SHA, review the correlation
+   delta and rerun the supplied exact default-coverage commands before Main
+   integration.
 5. After the Core seam checkpoint, Opus implements and reviews the remaining
    task.retry product extension in its own worktree, then rebases it to the final
    Core SHA and proves exact
@@ -437,7 +463,9 @@ the active slice to D95.
    refactor the `7be485e8c` exact-root/lease/lock/cleanup/release boundaries. Do not
    run whole-file `ruff format` on `project_code_executor.py`; for every other
    allowed file, first prove the clean base is format-clean, and reject any
-   formatter output that changes unrelated baseline code.
+   formatter output that changes unrelated baseline code. Keep the W2 carrier on
+   `live_voice.composition.p3.mutate`; do not add a direct retry ReqMethod,
+   Gateway allow-list or AgentServer dispatch route.
 6. Commit coherent reviewed local batches under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
 7. Create one fresh clean descendant candidate and a disposable diagnostic
