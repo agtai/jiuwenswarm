@@ -1108,6 +1108,7 @@ class IdentityRegistry:
 _COMMAND_TARGETS: Final = MappingProxyType(
     {
         "task.create": IdentityKind.TASK,
+        "task.retry": IdentityKind.TASK,
         CancelScope.PLAYBACK_STOP.value: IdentityKind.RESPONSE,
         CancelScope.RESPONSE_CANCEL.value: IdentityKind.RESPONSE,
         CancelScope.ROUND_CANCEL.value: IdentityKind.ROUND,
@@ -1197,6 +1198,32 @@ def _command_payload(command_type: str, value: object) -> _FrozenObject:
         CancelScope.TASK_CANCEL.value,
     }:
         _require_exact_keys(data, required=set(), field_name="command.payload")
+    elif command_type == "task.retry":
+        _require_exact_keys(
+            data,
+            required={"previous_attempt_id", "previous_outcome", "attempt_number"},
+            field_name="command.payload",
+        )
+        _required_text(
+            data["previous_attempt_id"], "command.payload.previous_attempt_id"
+        )
+        outcome = _enum(
+            TerminalOutcome,
+            data["previous_outcome"],
+            "command.payload.previous_outcome",
+        )
+        if outcome not in {TerminalOutcome.CANCELLED, TerminalOutcome.COMPLETED}:
+            raise _violation(
+                "TASK_RETRY_OUTCOME_NOT_ELIGIBLE",
+                "task.retry permits only cancelled or completed predecessors",
+                code=ErrorCode.CONFLICT,
+            )
+        attempt_number = _uint(data["attempt_number"], "command.payload.attempt_number")
+        if attempt_number not in {2, 3}:
+            raise _violation(
+                "TASK_RETRY_ATTEMPT_NUMBER_INVALID",
+                "task.retry attempt_number must be 2 or 3",
+            )
     return _freeze_object(data, "command.payload")
 
 
@@ -1912,6 +1939,7 @@ _EVENT_RULES: Final = MappingProxyType(
             IdentityKind.ROUND, "harness", "terminal", terminal=True
         ),
         "task.accepted": _EventRule(IdentityKind.TASK, "task_core", "accepted"),
+        "task.retry_accepted": _EventRule(IdentityKind.TASK, "task_core", "accepted"),
         "task.running": _EventRule(IdentityKind.TASK, "task_core", "running"),
         "task.blocked": _EventRule(IdentityKind.TASK, "task_core", "blocked"),
         "task.decision_required": _EventRule(
@@ -1952,6 +1980,14 @@ def _validate_event_payload(
         _namespaced(data["source_event_type"], "event.payload.source_event_type")
         return _freeze_object(dict(data), "event.payload")
     required = {"state", "outcome"} if rule.terminal else {"state"}
+    if event_type == "task.retry_accepted":
+        required = {
+            "state",
+            "command_id",
+            "retry_of_attempt_id",
+            "previous_outcome",
+            "attempt_number",
+        }
     _require_exact_keys(data, required=required, field_name="event.payload")
     if data["state"] != rule.state:
         raise _violation(
@@ -1960,6 +1996,27 @@ def _validate_event_payload(
         )
     if rule.terminal:
         _enum(TerminalOutcome, data["outcome"], "event.payload.outcome")
+    elif event_type == "task.retry_accepted":
+        _required_text(data["command_id"], "event.payload.command_id")
+        _required_text(data["retry_of_attempt_id"], "event.payload.retry_of_attempt_id")
+        outcome = _enum(
+            TerminalOutcome,
+            data["previous_outcome"],
+            "event.payload.previous_outcome",
+        )
+        if outcome not in {TerminalOutcome.CANCELLED, TerminalOutcome.COMPLETED}:
+            raise _violation(
+                "TASK_RETRY_OUTCOME_NOT_ELIGIBLE",
+                "task.retry_accepted permits only cancelled or completed predecessors",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+        attempt_number = _uint(data["attempt_number"], "event.payload.attempt_number")
+        if attempt_number not in {2, 3}:
+            raise _violation(
+                "TASK_RETRY_ATTEMPT_NUMBER_INVALID",
+                "task.retry_accepted attempt_number must be 2 or 3",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
     return _freeze_object(dict(data), "event.payload")
 
 
@@ -2088,6 +2145,14 @@ class EventEnvelope:
             _payload=_validate_event_payload(event_type, event_payload, rule),
             _extensions=_extensions(data["extensions"], "event.extensions"),
         )
+        if event_type == "task.retry_accepted" and (
+            causation_id is None or result.payload["command_id"] != causation_id
+        ):
+            raise _violation(
+                "TASK_RETRY_CAUSATION_MISMATCH",
+                "task.retry_accepted command_id must equal its causation_id",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
         if rule.progress:
             progress = WorkProgressEventV2.from_dict(
                 result.payload, scope=scope, identities=identities
@@ -2801,8 +2866,10 @@ class EventSequenceTracker:
         self._events: dict[str, EventEnvelope] = {}
         self._results: dict[str, EventApplyResult] = {}
         self._applied_ids: set[str] = set()
-        self._external_causes: dict[str, tuple[ScopeRef, str]] = {}
+        self._external_causes: dict[str, CommandEnvelope] = {}
         self._lifecycle_by_object: dict[tuple[IdentityKind, str], str] = {}
+        self._task_attempt_number_by_object: dict[tuple[IdentityKind, str], int] = {}
+        self._task_terminal_outcome_by_object: dict[tuple[IdentityKind, str], str] = {}
         self._scope_by_object: dict[tuple[IdentityKind, str], ScopeRef] = {}
         self._next_progress_seq: dict[tuple[ScopeRef, IdentityKind, str], int] = {}
         self._progress_source_queues: dict[
@@ -2820,15 +2887,17 @@ class EventSequenceTracker:
                     "an event_id cannot also be an external command cause",
                     code=ErrorCode.PROTOCOL_VIOLATION,
                 )
-            metadata = (normalized.scope, normalized.correlation_id)
             existing = self._external_causes.get(cause_id)
-            if existing is not None and existing != metadata:
+            if (
+                existing is not None
+                and existing.fingerprint() != normalized.fingerprint()
+            ):
                 raise _violation(
                     "CAUSATION_SOURCE_CONFLICT",
-                    "an applied command cause cannot change scope or correlation",
+                    "an applied command cause cannot change its canonical facts",
                     code=ErrorCode.PROTOCOL_VIOLATION,
                 )
-            self._external_causes[cause_id] = metadata
+            self._external_causes[cause_id] = normalized
             return tuple(self._apply_and_drain())
 
     def accept(self, event: EventEnvelope) -> EventApplyResult:
@@ -2996,9 +3065,8 @@ class EventSequenceTracker:
         source = self._events.get(event.causation_id)
         external = self._external_causes.get(event.causation_id)
         if source is None and external is not None:
-            source_scope, source_correlation_id = external
             mismatch = self._causal_context_error(
-                event, source_scope, source_correlation_id
+                event, external.scope, external.correlation_id
             )
             if mismatch is not None:
                 return mismatch
@@ -3006,6 +3074,22 @@ class EventSequenceTracker:
                 return (
                     "ADAPTER_SOURCE_EVENT_REQUIRED",
                     "adapter events must reference an authoritative source event",
+                    True,
+                )
+            if event.event_type == "task.retry_accepted" and (
+                external.command_type != "task.retry"
+                or event.payload.get("command_id") != external.command_id
+                or external.target_ref != event.stream_ref
+                or event.payload.get("retry_of_attempt_id")
+                != external.payload.get("previous_attempt_id")
+                or event.payload.get("previous_outcome")
+                != external.payload.get("previous_outcome")
+                or event.payload.get("attempt_number")
+                != external.payload.get("attempt_number")
+            ):
+                return (
+                    "TASK_RETRY_CAUSATION_MISMATCH",
+                    "task.retry_accepted must bind the exact applied retry command",
                     True,
                 )
             return None
@@ -3142,13 +3226,29 @@ class EventSequenceTracker:
         assert outcome is None or isinstance(outcome, str)
         current_state = self._lifecycle_by_object.get(object_key)
         if current_state is None:
-            if state == initial:
+            if state == initial and event.event_type != "task.retry_accepted":
                 return None
             return _violation(
                 "INVALID_INITIAL_LIFECYCLE_STATE",
                 f"{event.stream_ref.kind.value} must begin at {initial!r}",
                 code=ErrorCode.PROTOCOL_VIOLATION,
             ).error
+        if event.event_type == "task.retry_accepted":
+            previous_outcome = event.payload.get("previous_outcome")
+            attempt_number = event.payload.get("attempt_number")
+            if (
+                current_state != "terminal"
+                or previous_outcome
+                != self._task_terminal_outcome_by_object.get(object_key)
+                or attempt_number
+                != self._task_attempt_number_by_object.get(object_key, 1) + 1
+            ):
+                return _violation(
+                    "TASK_RETRY_PRECONDITION_STALE",
+                    "task.retry_accepted does not continue the exact terminal epoch",
+                    code=ErrorCode.PROTOCOL_VIOLATION,
+                ).error
+            return None
         try:
             validate_transition(
                 LifecycleKind(event.stream_ref.kind.value),
@@ -3215,6 +3315,22 @@ class EventSequenceTracker:
                     )
                     self._lifecycle_by_object[object_key] = state
                     self._scope_by_object[object_key] = candidate.scope
+                    if candidate.stream_ref.kind is IdentityKind.TASK:
+                        if candidate.event_type == "task.accepted":
+                            self._task_attempt_number_by_object[object_key] = 1
+                        elif candidate.event_type == "task.retry_accepted":
+                            retry_number = candidate.payload.get("attempt_number")
+                            assert isinstance(retry_number, int)
+                            self._task_attempt_number_by_object[object_key] = (
+                                retry_number
+                            )
+                            self._task_terminal_outcome_by_object.pop(object_key, None)
+                        elif candidate.event_type == "task.terminal":
+                            task_outcome = candidate.payload.get("outcome")
+                            assert isinstance(task_outcome, str)
+                            self._task_terminal_outcome_by_object[object_key] = (
+                                task_outcome
+                            )
                     if candidate.stream_ref.kind in {
                         IdentityKind.ROUND,
                         IdentityKind.TASK,

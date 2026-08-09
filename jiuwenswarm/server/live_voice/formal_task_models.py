@@ -19,9 +19,11 @@ from urllib.parse import unquote, urlparse
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
+    CommandEnvelope,
     ContractViolation,
     ErrorCode,
     OriginRef,
+    ResultEnvelope,
     ScopeRef,
     TerminalOutcome,
     canonical_json_bytes,
@@ -66,6 +68,12 @@ class ReconciliationState(StrEnum):
     IN_PROGRESS = "in_progress"
     PENDING = "pending"
     RESOLVED = "resolved"
+
+
+class TaskMutationDisposition(StrEnum):
+    APPLIED = "applied"
+    NOOP = "noop"
+    SUPERSEDED = "superseded"
 
 
 class ExecutorResolution(StrEnum):
@@ -646,6 +654,15 @@ class PersistentAttemptRecord:
     state: FormalAttemptState
     outcome: TerminalOutcome | None
     source_seq: int
+    attempt_number: int = 1
+
+    def __post_init__(self) -> None:
+        if type(self.attempt_number) is not int or not 1 <= self.attempt_number <= 3:
+            raise FormalTaskViolation(
+                "INVALID_TASK_ATTEMPT_NUMBER",
+                "formal task attempt_number must be between 1 and 3",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -656,7 +673,215 @@ class PersistentAttemptRecord:
             "state": self.state.value,
             "outcome": None if self.outcome is None else self.outcome.value,
             "source_seq": self.source_seq,
+            "attempt_number": self.attempt_number,
         }
+
+
+TASK_RETRY_PRODUCT_REQUEST_EXTENSION = "jiuwenswarm.task_retry_product_request"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRetryProductRequestFingerprint:
+    """Opaque product-owned retry request identity persisted with the command.
+
+    The product computes this SHA-256 from its immutable request/confirmation
+    facts.  It must exclude the transport ``request_id`` and every server-derived
+    predecessor, context, readiness, or checkout fact.  Core deliberately does
+    not interpret those product facts; it only retains and compares their exact
+    canonical digest during durable replay.
+    """
+
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.sha256) is not str
+            or len(self.sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.sha256)
+        ):
+            raise FormalTaskViolation(
+                "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_INVALID",
+                "task.retry product request fingerprint must be canonical SHA-256",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+    def to_extensions(self) -> dict[str, object]:
+        return {
+            TASK_RETRY_PRODUCT_REQUEST_EXTENSION: {"sha256": self.sha256},
+        }
+
+    @classmethod
+    def from_extensions(
+        cls, extensions: Mapping[str, object]
+    ) -> TaskRetryProductRequestFingerprint:
+        binding = extensions.get(TASK_RETRY_PRODUCT_REQUEST_EXTENSION)
+        if set(extensions) != {TASK_RETRY_PRODUCT_REQUEST_EXTENSION} or not isinstance(
+            binding, Mapping
+        ):
+            raise FormalTaskViolation(
+                "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_REQUIRED",
+                "task.retry requires one product-owned request fingerprint",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if set(binding) != {"sha256"}:
+            raise FormalTaskViolation(
+                "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_INVALID",
+                "task.retry product request fingerprint extension is not canonical",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        return cls(binding["sha256"])  # type: ignore[arg-type]
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRetryPrecondition:
+    """Exact server-verified predecessor facts carried by ``task.retry``."""
+
+    previous_attempt_id: str
+    previous_outcome: TerminalOutcome
+    attempt_number: int
+
+    def __post_init__(self) -> None:
+        _require_text(self.previous_attempt_id, "task.retry.previous_attempt_id")
+        if self.previous_outcome not in {
+            TerminalOutcome.CANCELLED,
+            TerminalOutcome.COMPLETED,
+        }:
+            raise FormalTaskViolation(
+                "TASK_RETRY_OUTCOME_NOT_ELIGIBLE",
+                "only cancelled or completed attempts can be retried",
+                ErrorCode.CONFLICT,
+            )
+        if type(self.attempt_number) is not int or self.attempt_number not in {2, 3}:
+            raise FormalTaskViolation(
+                "TASK_RETRY_ATTEMPT_NUMBER_INVALID",
+                "task.retry attempt_number must be 2 or 3",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> TaskRetryPrecondition:
+        if set(payload) != {
+            "previous_attempt_id",
+            "previous_outcome",
+            "attempt_number",
+        }:
+            raise FormalTaskViolation(
+                "TASK_RETRY_PRECONDITION_INVALID",
+                "task.retry requires one exact predecessor lineage",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            outcome = TerminalOutcome(payload["previous_outcome"])
+        except (TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "TASK_RETRY_PRECONDITION_INVALID",
+                "task.retry previous_outcome is invalid",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
+        return cls(
+            previous_attempt_id=_require_text(
+                payload["previous_attempt_id"], "task.retry.previous_attempt_id"
+            ),
+            previous_outcome=outcome,
+            attempt_number=payload["attempt_number"],  # type: ignore[arg-type]
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "previous_attempt_id": self.previous_attempt_id,
+            "previous_outcome": self.previous_outcome.value,
+            "attempt_number": self.attempt_number,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRetryAuthoritySnapshot:
+    """Read-only retry admission snapshot; Store must re-check it when applying."""
+
+    task: PersistentTaskRecord
+    attempt: PersistentAttemptRecord
+    precondition: TaskRetryPrecondition
+
+    def __post_init__(self) -> None:
+        if (
+            self.task.attempt_id != self.attempt.attempt_id
+            or self.task.task_id != self.attempt.task_id
+            or self.task.state is not FormalTaskState.TERMINAL
+            or self.task.outcome != self.attempt.outcome
+            or self.attempt.state is not FormalAttemptState.TERMINAL
+            or self.precondition.previous_attempt_id != self.attempt.attempt_id
+            or self.precondition.previous_outcome != self.attempt.outcome
+            or self.precondition.attempt_number != self.attempt.attempt_number + 1
+        ):
+            raise FormalTaskViolation(
+                "TASK_RETRY_PRECONDITION_STALE",
+                "retry snapshot does not bind the exact current terminal attempt",
+                ErrorCode.STALE,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class AppliedTaskRetryReplay:
+    """Read-only durable proof of one previously applied ``task.retry``."""
+
+    original_command: CommandEnvelope
+    original_result: ResultEnvelope
+    precondition: TaskRetryPrecondition
+    resulting_spec: FormalTaskSpec
+
+    def __post_init__(self) -> None:
+        result = self.original_result.result
+        if (
+            self.original_command.command_type != "task.retry"
+            or not self.original_result.ok
+            or self.original_result.command_id != self.original_command.command_id
+            or result is None
+            or result.get("task_id") != self.original_command.target_ref.id
+            or result.get("previous_attempt_id")
+            != self.precondition.previous_attempt_id
+            or result.get("attempt_number") != self.precondition.attempt_number
+            or result.get("state") != FormalTaskState.ACCEPTED.value
+            or result.get("applied") is not True
+            or self.resulting_spec.context.scope != self.original_command.scope
+        ):
+            raise FormalTaskViolation(
+                "TASK_RETRY_REPLAY_BINDING_MISMATCH",
+                "applied retry replay does not bind one durable successor",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutorRetryReadiness:
+    """Executor-owned proof that predecessor cleanup reached a retry-safe state."""
+
+    task_id: str
+    previous_attempt_id: str
+    previous_outcome: TerminalOutcome
+    previous_attempt_number: int
+    ready: bool
+    reason: str
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "retry_readiness.task_id")
+        _require_text(self.previous_attempt_id, "retry_readiness.previous_attempt_id")
+        if not isinstance(self.previous_outcome, TerminalOutcome):
+            raise FormalTaskViolation(
+                "INVALID_RETRY_READINESS",
+                "retry readiness requires a canonical predecessor outcome",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            type(self.previous_attempt_number) is not int
+            or not 1 <= self.previous_attempt_number <= 2
+            or type(self.ready) is not bool
+        ):
+            raise FormalTaskViolation(
+                "INVALID_RETRY_READINESS",
+                "retry readiness facts are invalid",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        _require_text(self.reason, "retry_readiness.reason")
 
 
 @dataclass(frozen=True, slots=True)
@@ -780,6 +1005,44 @@ class PersistentTaskEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskMutationResult:
+    """Atomic mutation receipt pinned to one durable attempt epoch."""
+
+    disposition: TaskMutationDisposition
+    task_id: str
+    attempt: PersistentAttemptRecord
+    through_seq: int
+    events: tuple[PersistentTaskEvent, ...] = ()
+
+    def __post_init__(self) -> None:
+        _require_text(self.task_id, "task_mutation.task_id")
+        if (
+            not isinstance(self.disposition, TaskMutationDisposition)
+            or not isinstance(self.attempt, PersistentAttemptRecord)
+            or self.attempt.task_id != self.task_id
+            or type(self.through_seq) is not int
+            or self.through_seq < 0
+            or type(self.events) is not tuple
+            or any(not isinstance(event, PersistentTaskEvent) for event in self.events)
+            or any(
+                event.task_id != self.task_id
+                or event.attempt_id != self.attempt.attempt_id
+                or event.seq > self.through_seq
+                for event in self.events
+            )
+            or (
+                self.disposition is not TaskMutationDisposition.APPLIED
+                and bool(self.events)
+            )
+        ):
+            raise FormalTaskViolation(
+                "TASK_MUTATION_RECEIPT_INVALID",
+                "task mutation receipt does not bind one durable attempt epoch",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class TaskEventAuthoritySnapshot:
     """One exact durable TaskEvent prefix and its authority-owned cursor."""
 
@@ -787,6 +1050,7 @@ class TaskEventAuthoritySnapshot:
     attempt: PersistentAttemptRecord
     events: tuple[PersistentTaskEvent, ...]
     cursor: int
+    start_seq: int = 0
 
     def __post_init__(self) -> None:
         if (
@@ -796,6 +1060,9 @@ class TaskEventAuthoritySnapshot:
             or any(not isinstance(event, PersistentTaskEvent) for event in self.events)
             or type(self.cursor) is not int
             or self.cursor < 0
+            or type(self.start_seq) is not int
+            or self.start_seq < 0
+            or self.start_seq > self.cursor
         ):
             raise FormalTaskViolation(
                 "INVALID_TASK_EVENT_AUTHORITY_SNAPSHOT",
@@ -807,14 +1074,14 @@ class TaskEventAuthoritySnapshot:
             or self.attempt.task_id != self.task.task_id
             or self.attempt.attempt_id != self.task.attempt_id
             or self.attempt.executor_id != self.task.spec.executor_id
-            or len(self.events) != self.cursor + 1
+            or len(self.events) != self.cursor - self.start_seq + 1
         ):
             raise FormalTaskViolation(
                 "TASK_EVENT_AUTHORITY_SNAPSHOT_BINDING_MISMATCH",
                 "TaskEvent authority snapshot does not bind one exact task revision",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        for expected_seq, event in enumerate(self.events):
+        for expected_seq, event in enumerate(self.events, self.start_seq):
             if (
                 event.seq != expected_seq
                 or event.task_id != self.task.task_id
@@ -825,6 +1092,52 @@ class TaskEventAuthoritySnapshot:
                 raise FormalTaskViolation(
                     "TASK_EVENT_AUTHORITY_SNAPSHOT_SEQUENCE_MISMATCH",
                     "TaskEvent authority snapshot is not one contiguous canonical prefix",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        boundary = self.events[0]
+        expected_boundary = (
+            "task.accepted"
+            if self.attempt.attempt_number == 1
+            else "task.retry_accepted"
+        )
+        if boundary.event_type != expected_boundary:
+            raise FormalTaskViolation(
+                "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
+                "TaskEvent authority segment lacks its canonical attempt boundary",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.attempt.attempt_number == 1:
+            if self.start_seq != 0:
+                raise FormalTaskViolation(
+                    "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
+                    "initial attempt segment must begin at global sequence zero",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            details = boundary.details
+            retry_of_attempt_id = details.get("retry_of_attempt_id")
+            if (
+                set(details)
+                != {
+                    "command_id",
+                    "retry_of_attempt_id",
+                    "previous_outcome",
+                    "attempt_number",
+                }
+                or details.get("command_id") != boundary.causation_id
+                or details.get("attempt_number") != self.attempt.attempt_number
+                or type(retry_of_attempt_id) is not str
+                or not retry_of_attempt_id.strip()
+                or retry_of_attempt_id == self.attempt.attempt_id
+                or details.get("previous_outcome")
+                not in {
+                    TerminalOutcome.CANCELLED.value,
+                    TerminalOutcome.COMPLETED.value,
+                }
+            ):
+                raise FormalTaskViolation(
+                    "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
+                    "retry segment boundary does not bind exact predecessor lineage",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
 
@@ -994,9 +1307,11 @@ def safe_json_value(value: Any) -> Any:
 
 
 __all__ = [
+    "AppliedTaskRetryReplay",
     "ExecutorDeliveryResult",
     "ExecutorObservation",
     "ExecutorResolution",
+    "ExecutorRetryReadiness",
     "FormalAttemptState",
     "FormalTaskSpec",
     "FormalTaskState",
@@ -1011,6 +1326,12 @@ __all__ = [
     "ResolvedTaskContext",
     "TaskAuthorizationGrant",
     "TaskEventAuthoritySnapshot",
+    "TaskMutationDisposition",
+    "TaskMutationResult",
+    "TaskRetryAuthoritySnapshot",
+    "TaskRetryPrecondition",
+    "TaskRetryProductRequestFingerprint",
+    "TASK_RETRY_PRODUCT_REQUEST_EXTENSION",
     "require_exact_payload",
     "safe_json_value",
     "utc_now",

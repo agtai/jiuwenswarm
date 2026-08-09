@@ -19,6 +19,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     OriginRef,
     ProducerRef,
     ScopeRef,
+    TerminalOutcome,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorObservation,
@@ -28,6 +29,8 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentTaskEvent,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskRetryProductRequestFingerprint,
+    TaskRetryAuthoritySnapshot,
 )
 from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
     ForegroundFact,
@@ -411,6 +414,64 @@ def _advance_authority_task_running(store: SqliteTaskStore, task_id: str) -> Non
             ),
         ),
     )
+
+
+def _finish_authority_task(store: SqliteTaskStore, task_id: str) -> None:
+    task = store.get_task(task_id, _scope())
+    executor_ref = f"authority-progress:{task.attempt_id}"
+    store.apply_observations(
+        (
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=task.spec.executor_id,
+                executor_ref=executor_ref,
+                task_id=task_id,
+                attempt_id=task.attempt_id,
+                source_event_id=f"{executor_ref}:2",
+                source_seq=2,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.COMPLETED,
+                occurred_at=NOW,
+                raw_status="completed",
+            ),
+        )
+    )
+
+
+def _retry_authority_task(store: SqliteTaskStore, task_id: str) -> str:
+    task = store.get_task(task_id, _scope())
+    assert task.outcome is TerminalOutcome.COMPLETED
+    command = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": "request-authority-retry",
+            "command_id": "command-authority-retry",
+            "command_type": "task.retry",
+            "issued_at": NOW,
+            "scope": task.scope.to_dict(),
+            "correlation_id": task.correlation_id,
+            "causation_id": None,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {"kind": "task", "id": task.task_id},
+            "context_refs": [],
+            "required_capabilities": ["task.retry"],
+            "payload": {
+                "previous_attempt_id": task.attempt_id,
+                "previous_outcome": "completed",
+                "attempt_number": 2,
+            },
+            "extensions": TaskRetryProductRequestFingerprint("a" * 64).to_extensions(),
+        }
+    )
+    spec = replace(
+        task.spec,
+        context=replace(task.spec.context, revision_value="revision-2"),
+    )
+    authority = store.read_retry_authority(command)
+    assert isinstance(authority, TaskRetryAuthoritySnapshot)
+    result = store.retry(command, spec, authority, observed_at=NOW)
+    assert result.ok and result.result is not None
+    return str(result.result["attempt_id"])
 
 
 def _bridge(
@@ -1059,6 +1120,75 @@ async def test_concrete_authority_source_is_the_only_atomic_voice_handoff(
     assert store.counts() == before
     await activation.lease.close()
     assert bridge.snapshot().state is TaskProgressReturnState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_retry_segment_projects_from_authority_owned_nonzero_baseline(
+    tmp_path: Path,
+) -> None:
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    _finish_authority_task(store, task_id)
+    attempt_b = _retry_authority_task(store, task_id)
+    task = store.get_task(task_id, _scope())
+    assert task.attempt_id == attempt_b
+    boundary = store.events(
+        task_id,
+        task.scope,
+        after_seq=-1,
+        attempt_id=attempt_b,
+    )[0]
+    assert boundary.seq > 0
+    binding = _binding(
+        TaskProgressOriginKind.VOICE,
+        task_id=task_id,
+        correlation_id=correlation_id,
+    )
+    grant = _grant(task_id=task_id)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=binding.scope,
+        task_id=task_id,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+    voice_events: list[TaskProgressNotificationIntent] = []
+    arbiter = ProgressNotificationArbiter()
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.VOICE,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=binding,
+        arbiter=arbiter,
+        voice_events=voice_events,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active is True and activation.lease is not None
+    await _wait_until(lambda: len(voice_events) == 1)
+
+    projected = voice_events[0]
+    assert projected.task_event == boundary
+    assert projected.task_event.event_type == "task.retry_accepted"
+    assert projected.source_event.seq == boundary.seq
+    assert projected.progress_event.seq == boundary.seq
+    assert projected.source_event.payload == {
+        "state": "accepted",
+        "command_id": "command-authority-retry",
+        "retry_of_attempt_id": boundary.details["retry_of_attempt_id"],
+        "previous_outcome": "completed",
+        "attempt_number": 2,
+    }
+    snapshot = source.subscription.snapshot()
+    assert snapshot.segment_start_seq == boundary.seq
+    assert snapshot.attempt_id == attempt_b
+    assert snapshot.attempt_number == 2
+    assert arbiter.snapshot().accepted_events == 1
+    assert bridge.snapshot().gap_events == 0
+    assert bridge.snapshot().out_of_order_events == 0
+    await activation.lease.close()
 
 
 @pytest.mark.asyncio

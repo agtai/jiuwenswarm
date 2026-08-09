@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 
@@ -42,6 +43,7 @@ def auth(
             {
                 "task.create",
                 "task.cancel",
+                "task.retry",
                 "task.get",
                 "task.list",
                 "task.status",
@@ -177,6 +179,137 @@ def test_attempt_is_only_terminal_evidence_for_task() -> None:
     task = core.query(TaskQuery("q", "task.status", scope(), created.task_id), auth())
     assert task.state is TaskState.TERMINAL
     assert task.outcome is TerminalOutcome.COMPLETED
+
+
+def test_pure_core_retry_parity_is_bounded_and_epoch_exact() -> None:
+    core = TaskCore()
+    created = core.execute(create_command(), auth())
+    core.mark_attempt_running(created.task_id, created.attempt_id, auth())
+    core.finish_attempt(
+        created.task_id,
+        created.attempt_id,
+        TerminalOutcome.COMPLETED,
+        auth(),
+    )
+    retry_b = TaskCommand(
+        "request-b",
+        "command-b",
+        "task.retry",
+        scope(),
+        created.task_id,
+        None,
+        "commit-b",
+        previous_attempt_id=created.attempt_id,
+        previous_outcome=TerminalOutcome.COMPLETED,
+        attempt_number=2,
+    )
+    result_b = core.execute(retry_b, auth())
+    assert result_b.attempt_number == 2
+    assert result_b.previous_attempt_id == created.attempt_id
+    core.mark_attempt_running(created.task_id, result_b.attempt_id, auth())
+    core.finish_attempt(
+        created.task_id,
+        result_b.attempt_id,
+        TerminalOutcome.CANCELLED,
+        auth(),
+    )
+    retry_c = TaskCommand(
+        "request-c",
+        "command-c",
+        "task.retry",
+        scope(),
+        created.task_id,
+        None,
+        "commit-c",
+        previous_attempt_id=result_b.attempt_id,
+        previous_outcome=TerminalOutcome.CANCELLED,
+        attempt_number=3,
+    )
+    result_c = core.execute(retry_c, auth())
+    before_replay = core.snapshot()
+    replay_b = core.execute(replace(retry_b, request_id="request-b-replay"), auth())
+    assert replay_b == replace(result_b, request_id="request-b-replay", applied=True)
+    assert core.snapshot() == before_replay
+    snapshot = core.snapshot()
+    assert [attempt.attempt_number for attempt in snapshot.attempts] == [1, 2, 3]
+    assert [
+        event.event_type
+        for event in snapshot.events
+        if event.event_type == "task.retry_accepted"
+    ] == ["task.retry_accepted", "task.retry_accepted"]
+    assert dict(snapshot.events[-1].details) == {
+        "command_id": "command-c",
+        "retry_of_attempt_id": result_b.attempt_id,
+        "previous_outcome": "cancelled",
+        "attempt_number": 3,
+    }
+    core.mark_attempt_running(created.task_id, result_c.attempt_id, auth())
+    core.finish_attempt(
+        created.task_id,
+        result_c.attempt_id,
+        TerminalOutcome.COMPLETED,
+        auth(),
+    )
+    before = core.snapshot()
+    fourth = TaskCommand(
+        "request-d",
+        "command-d",
+        "task.retry",
+        scope(),
+        created.task_id,
+        None,
+        "commit-d",
+        previous_attempt_id=result_c.attempt_id,
+        previous_outcome=TerminalOutcome.COMPLETED,
+        attempt_number=3,
+    )
+    with pytest.raises(TaskCoreViolation) as rejected:
+        core.execute(fourth, auth())
+    assert rejected.value.reason == "TASK_RETRY_LIMIT_EXCEEDED"
+    assert core.snapshot() == before
+
+
+def test_pure_core_cancel_after_retry_binds_current_attempt_ordinal() -> None:
+    core = TaskCore()
+    created = core.execute(create_command(), auth())
+    core.mark_attempt_running(created.task_id, created.attempt_id, auth())
+    core.finish_attempt(
+        created.task_id,
+        created.attempt_id,
+        TerminalOutcome.COMPLETED,
+        auth(),
+    )
+    retried = core.execute(
+        TaskCommand(
+            "request-retry",
+            "command-retry",
+            "task.retry",
+            scope(),
+            created.task_id,
+            None,
+            "commit-retry",
+            previous_attempt_id=created.attempt_id,
+            previous_outcome=TerminalOutcome.COMPLETED,
+            attempt_number=2,
+        ),
+        auth(),
+    )
+    cancelled = core.execute(
+        TaskCommand(
+            "request-cancel-b",
+            "command-cancel-b",
+            "task.cancel",
+            scope(),
+            created.task_id,
+            None,
+            "commit-cancel-b",
+        ),
+        auth(),
+    )
+
+    assert cancelled.attempt_id == retried.attempt_id
+    assert cancelled.attempt_number == 2
+    assert core.snapshot().cancel_intents[-1].attempt_id == retried.attempt_id
 
 
 def test_attempt_cannot_skip_running_or_omit_terminal_outcome() -> None:

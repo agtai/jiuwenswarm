@@ -11,6 +11,7 @@ import pytest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ContractViolation,
+    ErrorCode,
     EventEnvelope,
     IdentityKind,
     IdentityRef,
@@ -281,6 +282,73 @@ def no_projection_advance(
     )
 
 
+def retry_epoch(
+    *,
+    work_id: str,
+    attempt_id: str,
+    retry_of_attempt_id: str,
+    attempt_number: int,
+    seq: int,
+) -> tuple[
+    PersistentTaskEvent, EventEnvelope, EventEnvelope, ProgressNotificationBinding
+]:
+    command_id = f"command-retry-{attempt_number}"
+    details = {
+        "command_id": command_id,
+        "retry_of_attempt_id": retry_of_attempt_id,
+        "previous_outcome": "completed",
+        "attempt_number": attempt_number,
+    }
+    persistent = PersistentTaskEvent(
+        event_id=f"task-event:{work_id}:retry:{attempt_number}",
+        task_id=work_id,
+        attempt_id=attempt_id,
+        scope=scope(),
+        seq=seq,
+        event_type="task.retry_accepted",
+        state="accepted",
+        outcome=None,
+        producer="task_core",
+        source_event_id=None,
+        causation_id=command_id,
+        correlation_id="correlation-1",
+        occurred_at="2026-08-06T08:00:00Z",
+        details=details,
+    )
+    source = EventEnvelope.from_dict(
+        {
+            "contract_version": "live-voice.contract.v2",
+            "event_id": persistent.event_id,
+            "event_type": persistent.event_type,
+            "producer": {
+                "component": "task_core",
+                "instance_id": "task_core-1",
+                "authority": "task_core",
+            },
+            "stream_ref": {"kind": "task", "id": work_id},
+            "seq": seq,
+            "occurred_at": persistent.occurred_at,
+            "scope": scope().to_dict(),
+            "correlation_id": persistent.correlation_id,
+            "causation_id": command_id,
+            "required_capabilities": [],
+            "payload": {"state": "accepted", **details},
+            "extensions": {
+                "jiuwenswarm.task_progress_return": {
+                    "persistent_event_seq": seq,
+                    "persistent_event_type": persistent.event_type,
+                    "persistent_event_producer": persistent.producer,
+                    "persistent_attempt_id": attempt_id,
+                    "persistent_source_event_id": None,
+                }
+            },
+        }
+    )
+    projected = progress_event(source)
+    expected = binding(source, projected)
+    return persistent, source, projected, expected
+
+
 def test_constructor_rejects_noncanonical_flags_and_capacities() -> None:
     with pytest.raises(ProgressNotificationArbiterViolation) as invalid_flag:
         ProgressNotificationArbiter(enabled=1)  # type: ignore[arg-type]
@@ -330,6 +398,164 @@ def test_feature_off_returns_before_inspecting_inputs_and_has_zero_state() -> No
     assert arbiter.snapshot().tracked_work_streams == 0
     assert arbiter.snapshot().pending_notifications == 0
     assert arbiter.snapshot().rejected_events == 0
+
+
+def test_retry_epoch_retires_pending_and_rejects_old_attempt_before_identity() -> None:
+    arbiter = ProgressNotificationArbiter()
+    work_id = "task-retry-epoch"
+    accepted_a = source_event(work_kind="task", work_id=work_id)
+    projected_a = progress_event(accepted_a)
+    deferred_a = offer(
+        arbiter,
+        accepted_a,
+        projected_a,
+        foreground=busy_foreground(),
+    )
+    assert deferred_a.disposition is NotificationDisposition.DEFERRED
+    assert arbiter.snapshot().pending_notifications == 1
+
+    boundary_b, source_b, projected_b, binding_b = retry_epoch(
+        work_id=work_id,
+        attempt_id="attempt-b",
+        retry_of_attempt_id="attempt-a",
+        attempt_number=2,
+        seq=5,
+    )
+    baseline_b = arbiter_module._mint_verified_attempt_epoch_baseline(
+        boundary_b, binding_b
+    )
+    arbiter._begin_attempt_epoch(baseline_b)
+
+    retired = arbiter.snapshot()
+    assert retired.pending_notifications == 0
+    assert retired.superseded_notifications == 1
+    assert not arbiter.acknowledge(scope(), accepted_a.stream_ref, projected_a.event_id)
+    accepted_b = offer(arbiter, source_b, projected_b, expected=binding_b)
+    assert accepted_b.disposition is NotificationDisposition.DISPLAY_NOW
+    assert arbiter.snapshot().pending_notifications == 1
+
+    old_source_dict = source_b.to_dict()
+    old_source_dict.update(
+        {
+            "event_id": "task-event:old-attempt:late",
+            "event_type": "task.running",
+            "seq": 6,
+            "causation_id": source_b.event_id,
+            "payload": {"state": "running"},
+        }
+    )
+    old_source_dict["extensions"]["jiuwenswarm.task_progress_return"][
+        "persistent_attempt_id"
+    ] = "attempt-a"
+    old_source = EventEnvelope.from_dict(old_source_dict)
+    old_progress = progress_event(old_source)
+    before_offer = arbiter.snapshot()
+
+    stale_offer = offer(
+        arbiter,
+        old_source,
+        old_progress,
+        expected=binding(old_source, old_progress),
+    )
+
+    assert stale_offer.disposition is NotificationDisposition.REJECTED
+    assert stale_offer.reason == "STALE_ATTEMPT"
+    assert stale_offer.code is ErrorCode.STALE
+    after_offer = arbiter.snapshot()
+    assert after_offer.retained_source_events == before_offer.retained_source_events
+    assert after_offer.retained_progress_events == before_offer.retained_progress_events
+    assert after_offer.pending_notifications == before_offer.pending_notifications
+    assert after_offer.accepted_events == before_offer.accepted_events
+
+    stale_attempt_event = PersistentTaskEvent(
+        event_id="task-event:old-attempt:no-projection",
+        task_id=work_id,
+        attempt_id="attempt-a",
+        scope=scope(),
+        seq=6,
+        event_type="attempt.running",
+        state="running",
+        outcome=None,
+        producer="executor-1",
+        source_event_id="executor-source:old-attempt:6",
+        causation_id="executor-source:old-attempt:6",
+        correlation_id="correlation-1",
+        occurred_at="2026-08-06T08:00:00Z",
+        details={},
+    )
+    stale_advance = arbiter_module._mint_verified_no_projection_advance(
+        stale_attempt_event, binding_b
+    )
+    before_advance = arbiter.snapshot()
+
+    stale_no_projection = arbiter._advance_without_projection(stale_advance)
+
+    assert stale_no_projection.disposition is NoProjectionAdvanceDisposition.REJECTED
+    assert stale_no_projection.reason == "STALE_ATTEMPT"
+    assert stale_no_projection.code is ErrorCode.STALE
+    after_advance = arbiter.snapshot()
+    assert after_advance.retained_source_events == before_advance.retained_source_events
+    assert after_advance.no_projection_advances == before_advance.no_projection_advances
+    assert after_advance.pending_notifications == before_advance.pending_notifications
+
+
+def test_retry_epoch_capability_is_private_and_cannot_regress() -> None:
+    arbiter = ProgressNotificationArbiter()
+    boundary_b, _source_b, _projected_b, binding_b = retry_epoch(
+        work_id="task-retry-epoch-private",
+        attempt_id="attempt-b",
+        retry_of_attempt_id="attempt-a",
+        attempt_number=2,
+        seq=5,
+    )
+    with pytest.raises(TypeError):
+        arbiter_module._VerifiedAttemptEpochBaseline(  # type: ignore[call-arg]
+            boundary_b,
+            binding_b,
+        )
+    with pytest.raises(ProgressNotificationArbiterViolation) as forged:
+        arbiter_module._VerifiedAttemptEpochBaseline(
+            boundary_b,
+            binding_b,
+            _token=object(),
+        )
+    assert forged.value.reason == "INVALID_ATTEMPT_EPOCH_CAPABILITY"
+
+    invalid_boundary = replace(
+        boundary_b,
+        details={
+            **dict(boundary_b.details),
+            "retry_of_attempt_id": boundary_b.attempt_id,
+        },
+    )
+    before_invalid = arbiter.snapshot()
+    with pytest.raises(ProgressNotificationArbiterViolation) as invalid_lineage:
+        arbiter._begin_attempt_epoch(
+            arbiter_module._mint_verified_attempt_epoch_baseline(
+                invalid_boundary, binding_b
+            )
+        )
+    assert invalid_lineage.value.reason == "INVALID_ATTEMPT_EPOCH_BASELINE"
+    assert arbiter.snapshot() == before_invalid
+
+    baseline_b = arbiter_module._mint_verified_attempt_epoch_baseline(
+        boundary_b, binding_b
+    )
+    arbiter._begin_attempt_epoch(baseline_b)
+    boundary_c, _source_c, _projected_c, binding_c = retry_epoch(
+        work_id="task-retry-epoch-private",
+        attempt_id="attempt-c",
+        retry_of_attempt_id="attempt-b",
+        attempt_number=3,
+        seq=9,
+    )
+    arbiter._begin_attempt_epoch(
+        arbiter_module._mint_verified_attempt_epoch_baseline(boundary_c, binding_c)
+    )
+
+    with pytest.raises(ProgressNotificationArbiterViolation) as stale:
+        arbiter._begin_attempt_epoch(baseline_b)
+    assert stale.value.reason == "STALE_ATTEMPT_EPOCH"
 
 
 def test_verified_no_projection_advances_all_sequences_without_delivery_state() -> None:

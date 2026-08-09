@@ -11,6 +11,7 @@ the exact pending item available for a later drain.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import RLock
@@ -106,6 +107,7 @@ class ProgressNotificationBinding:
 
 
 _NO_PROJECTION_ADVANCE_TOKEN = object()
+_ATTEMPT_EPOCH_BASELINE_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True, init=False, repr=False)
@@ -142,6 +144,39 @@ def _mint_verified_no_projection_advance(
         source_event,
         binding,
         _token=_NO_PROJECTION_ADVANCE_TOKEN,
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False, repr=False)
+class _VerifiedAttemptEpochBaseline:
+    source_event: PersistentTaskEvent
+    binding: ProgressNotificationBinding
+
+    def __init__(
+        self,
+        source_event: PersistentTaskEvent,
+        binding: ProgressNotificationBinding,
+        *,
+        _token: object,
+    ) -> None:
+        if _token is not _ATTEMPT_EPOCH_BASELINE_TOKEN:
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_ATTEMPT_EPOCH_CAPABILITY",
+                "attempt epoch baseline must be minted by its package owner",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        object.__setattr__(self, "source_event", source_event)
+        object.__setattr__(self, "binding", binding)
+
+
+def _mint_verified_attempt_epoch_baseline(
+    source_event: PersistentTaskEvent,
+    binding: ProgressNotificationBinding,
+) -> _VerifiedAttemptEpochBaseline:
+    return _VerifiedAttemptEpochBaseline(
+        source_event,
+        binding,
+        _token=_ATTEMPT_EPOCH_BASELINE_TOKEN,
     )
 
 
@@ -188,6 +223,7 @@ class ProgressNotificationArbiterSnapshot:
     backpressure_events: int
     no_projection_advances: int
     no_projection_duplicates: int
+    superseded_notifications: int
 
 
 @dataclass(slots=True)
@@ -232,6 +268,7 @@ _NO_PROJECTION_SOURCE_DOMAIN = b"live-voice.no-projection.source.v1\0"
 _NO_PROJECTION_PROGRESS_DOMAIN = b"live-voice.no-projection.progress.v1\0"
 _NO_PROJECTION_WORK_DOMAIN = b"live-voice.no-projection.work.v1\0"
 _NO_PROJECTION_OBSERVATION_DOMAIN = b"live-voice.no-projection.observation.v1\0"
+_TASK_PROGRESS_RETURN_EXTENSION = "jiuwenswarm.task_progress_return"
 
 
 class ProgressNotificationArbiter:
@@ -287,6 +324,88 @@ class ProgressNotificationArbiter:
         self._backpressure_events = 0
         self._no_projection_advances = 0
         self._no_projection_duplicates = 0
+        self._superseded_notifications = 0
+        self._attempt_epochs: dict[_WorkKey, tuple[str, int, int]] = {}
+
+    def _begin_attempt_epoch(self, baseline: object) -> None:
+        """Reset one task stream only from a verified retry boundary capability."""
+
+        if not self._enabled:
+            return
+        if type(baseline) is not _VerifiedAttemptEpochBaseline:
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_ATTEMPT_EPOCH_BASELINE",
+                "attempt epoch requires an internally minted authority boundary",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        event = baseline.source_event
+        binding = baseline.binding
+        if (
+            type(event) is not PersistentTaskEvent
+            or type(binding) is not ProgressNotificationBinding
+            or event.event_type != "task.retry_accepted"
+            or event.state != WorkState.ACCEPTED.value
+            or event.outcome is not None
+            or event.task_id != binding.work_ref.id
+            or event.scope != binding.scope
+            or event.correlation_id != binding.correlation_id
+            or event.producer != "task_core"
+            or event.source_event_id is not None
+            or set(event.details)
+            != {
+                "command_id",
+                "retry_of_attempt_id",
+                "previous_outcome",
+                "attempt_number",
+            }
+            or event.details.get("command_id") != event.causation_id
+            or type(event.details.get("retry_of_attempt_id")) is not str
+            or not str(event.details.get("retry_of_attempt_id")).strip()
+            or event.details.get("retry_of_attempt_id") == event.attempt_id
+            or event.details.get("attempt_number") not in {2, 3}
+            or event.details.get("previous_outcome")
+            not in {TerminalOutcome.CANCELLED.value, TerminalOutcome.COMPLETED.value}
+        ):
+            raise ProgressNotificationArbiterViolation(
+                "INVALID_ATTEMPT_EPOCH_BASELINE",
+                "attempt epoch boundary is not canonical retry authority evidence",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        source_key = (
+            binding.source_producer.component,
+            binding.source_producer.instance_id,
+            binding.source_work_ref.kind,
+            binding.source_work_ref.id,
+        )
+        progress_key = (
+            binding.progress_producer.component,
+            binding.progress_producer.instance_id,
+            binding.work_ref.kind,
+            binding.work_ref.id,
+        )
+        work_key = (binding.scope, binding.work_ref.kind, binding.work_ref.id)
+        epoch = (event.attempt_id, int(event.details["attempt_number"]), event.seq)
+        with self._lock:
+            prior = self._attempt_epochs.get(work_key)
+            if prior is not None:
+                if prior == epoch:
+                    return
+                if epoch[1] <= prior[1] or epoch[2] <= prior[2]:
+                    raise ProgressNotificationArbiterViolation(
+                        "STALE_ATTEMPT_EPOCH",
+                        "attempt epoch cannot regress or fork",
+                        ErrorCode.STALE,
+                    )
+            self._source_streams[source_key] = _SequenceState(event.seq, {})
+            self._progress_streams[progress_key] = _SequenceState(event.seq, {})
+            self._work_streams[work_key] = _WorkState(_SequenceState(event.seq, {}))
+            superseded = self._pending.pop(work_key, None)
+            if superseded is not None:
+                # A new authority epoch retires an undelivered predecessor
+                # notification.  Record that fact separately from acknowledgement;
+                # callers can therefore distinguish supersession from consumption.
+                self._superseded_notifications += 1
+            self._attempt_epochs[work_key] = epoch
 
     def offer(
         self,
@@ -384,6 +503,13 @@ class ProgressNotificationArbiter:
             expected.work_ref.id,
         )
         work_key = (expected.scope, expected.work_ref.kind, expected.work_ref.id)
+        if self._attempt_epoch_reason(work_key, event.attempt_id) is not None:
+            self._rejected_events += 1
+            return NoProjectionAdvanceDecision(
+                NoProjectionAdvanceDisposition.REJECTED,
+                "STALE_ATTEMPT",
+                ErrorCode.STALE,
+            )
         source_fingerprint = hashlib.sha256(
             _NO_PROJECTION_SOURCE_DOMAIN + evidence_bytes
         ).digest()
@@ -519,6 +645,20 @@ class ProgressNotificationArbiter:
             return self._rejected(error.reason, error.code)
 
         source, projected, facts, expected, progress = validated
+        work_key = (
+            expected.scope,
+            expected.work_ref.kind,
+            expected.work_ref.id,
+        )
+        extension = source.extensions.get(_TASK_PROGRESS_RETURN_EXTENSION)
+        persistent_attempt_id = (
+            extension.get("persistent_attempt_id")
+            if isinstance(extension, Mapping)
+            else None
+        )
+        if self._attempt_epoch_reason(work_key, persistent_attempt_id) is not None:
+            self._rejected_events += 1
+            return self._rejected("STALE_ATTEMPT", ErrorCode.STALE)
         try:
             source_bytes = source.canonical_bytes()
             progress_bytes = projected.canonical_bytes()
@@ -573,11 +713,6 @@ class ProgressNotificationArbiter:
 
         source_key = source.stream_key
         progress_key = projected.stream_key
-        work_key = (
-            expected.scope,
-            expected.work_ref.kind,
-            expected.work_ref.id,
-        )
         capacity_reason = self._capacity_reason(
             source_key=source_key,
             progress_key=progress_key,
@@ -786,7 +921,20 @@ class ProgressNotificationArbiter:
             backpressure_events=self._backpressure_events,
             no_projection_advances=self._no_projection_advances,
             no_projection_duplicates=self._no_projection_duplicates,
+            superseded_notifications=self._superseded_notifications,
         )
+
+    def _attempt_epoch_reason(
+        self,
+        work_key: _WorkKey,
+        attempt_id: object,
+    ) -> str | None:
+        epoch = self._attempt_epochs.get(work_key)
+        if epoch is None:
+            return None
+        if type(attempt_id) is not str or attempt_id != epoch[0]:
+            return "STALE_ATTEMPT"
+        return None
 
     @staticmethod
     def _validate_no_projection_advance(
@@ -1184,7 +1332,12 @@ class ProgressNotificationArbiter:
             f"{source_event.stream_ref.kind.value}.{progress.state.value}"
         )
         payload = source_event.payload
-        if source_event.event_type != expected_event_type:
+        retry_boundary = (
+            source_event.stream_ref.kind is IdentityKind.TASK
+            and progress.state is WorkState.ACCEPTED
+            and source_event.event_type == "task.retry_accepted"
+        )
+        if source_event.event_type != expected_event_type and not retry_boundary:
             raise _InputRejected(
                 "PROGRESS_SOURCE_STATE_MISMATCH",
                 "source event type must match projected state",

@@ -31,6 +31,8 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentTaskRecord,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskRetryProductRequestFingerprint,
+    TaskRetryAuthoritySnapshot,
 )
 from jiuwenswarm.server.live_voice.task_event_subscription import (
     TaskEventSubscription,
@@ -188,6 +190,50 @@ def _advance_terminal(store: SqliteTaskStore, task: PersistentTaskRecord) -> Non
             ),
         )
     )
+
+
+def _retry_task(
+    store: SqliteTaskStore,
+    task: PersistentTaskRecord,
+    *,
+    attempt_number: int,
+) -> PersistentTaskRecord:
+    assert task.outcome is not None
+    command_id = f"command-retry-{attempt_number}"
+    command = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": f"request-retry-{attempt_number}",
+            "command_id": command_id,
+            "command_type": "task.retry",
+            "issued_at": NOW,
+            "scope": task.scope.to_dict(),
+            "correlation_id": task.correlation_id,
+            "causation_id": None,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {"kind": "task", "id": task.task_id},
+            "context_refs": [],
+            "required_capabilities": ["task.retry"],
+            "payload": {
+                "previous_attempt_id": task.attempt_id,
+                "previous_outcome": task.outcome.value,
+                "attempt_number": attempt_number,
+            },
+            "extensions": TaskRetryProductRequestFingerprint("a" * 64).to_extensions(),
+        }
+    )
+    spec = replace(
+        task.spec,
+        context=replace(
+            task.spec.context,
+            revision_value=f"revision-{attempt_number}",
+        ),
+    )
+    authority = store.read_retry_authority(command)
+    assert isinstance(authority, TaskRetryAuthoritySnapshot)
+    result = store.retry(command, spec, authority, observed_at=NOW)
+    assert result.ok
+    return store.get_task(task.task_id, task.scope)
 
 
 def _event(
@@ -354,7 +400,12 @@ class _ScriptedSource:
         return self.attempt
 
     def events(
-        self, task_id: str, scope: ScopeRef, *, after_seq: int = -1
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        after_seq: int = -1,
+        attempt_id: str | None = None,
     ) -> tuple[PersistentTaskEvent, ...]:
         with self._lock:
             self.event_calls += 1
@@ -379,7 +430,12 @@ class _BlockingSource(_ScriptedSource):
         self.release_read = threading.Event()
 
     def events(
-        self, task_id: str, scope: ScopeRef, *, after_seq: int = -1
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        after_seq: int = -1,
+        attempt_id: str | None = None,
     ) -> tuple[PersistentTaskEvent, ...]:
         self.event_calls += 1
         self.read_started.set()
@@ -560,12 +616,70 @@ async def test_authority_close_before_prefix_delivery_has_zero_task_effect(
     assert await subscription.start() is True
     assert subscription.snapshot().worker_pending is False
     await subscription.close()
-
     snapshot = subscription.snapshot()
     assert snapshot.state is TaskEventSubscriptionState.CLOSED
     assert snapshot.queued_events == 0
     assert snapshot.worker_pending is False
     assert store.counts() == before
+
+
+@pytest.mark.asyncio
+async def test_old_epoch_feed_closes_on_its_terminal_and_never_consumes_retry(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "epoch-race.sqlite")
+    task_a = _create_task(store, tmp_path)
+    _advance_running(store, task_a)
+    _advance_terminal(store, task_a)
+    task_b = _retry_task(
+        store,
+        store.get_task(task_a.task_id, task_a.scope),
+        attempt_number=2,
+    )
+    _advance_running(store, task_b)
+    task_b = store.get_task(task_b.task_id, task_b.scope)
+    subscription = TaskEventSubscription(
+        source=store,
+        authorization=_grant(task_b.task_id),
+        scope=task_b.scope,
+        task_id=task_b.task_id,
+        enabled=True,
+        authority_atomic_replay=True,
+        queue_capacity=32,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+    assert await subscription.start() is True
+    segment_start = subscription.snapshot().segment_start_seq
+    assert segment_start is not None and segment_start > 0
+
+    # Keep the prefix queued while both durable facts land. The tail SELECT sees
+    # one SQLite state containing B terminal and C retry_accepted, but its exact
+    # attempt filter must expose only B's terminal pair to this retained feed.
+    _advance_terminal(store, task_b)
+    task_c = _retry_task(
+        store,
+        store.get_task(task_b.task_id, task_b.scope),
+        attempt_number=3,
+    )
+    b_events = store.events(
+        task_b.task_id,
+        task_b.scope,
+        after_seq=segment_start - 1,
+        attempt_id=task_b.attempt_id,
+    )
+    delivered = [
+        await asyncio.wait_for(subscription.next_event(), 1)
+        for _ in range(len(b_events))
+    ]
+
+    assert delivered == list(b_events)
+    assert delivered[-1].event_type == "task.terminal"
+    assert all(event.attempt_id == task_b.attempt_id for event in delivered)
+    settled = subscription.snapshot()
+    assert settled.state is TaskEventSubscriptionState.CLOSED
+    assert settled.failure_reason is None
+    assert task_c.attempt_id not in {event.attempt_id for event in delivered}
 
 
 @pytest.mark.asyncio

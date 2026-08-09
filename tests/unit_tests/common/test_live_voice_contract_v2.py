@@ -1049,6 +1049,125 @@ def test_lifecycle_rules_reject_attempt_shortcut_and_require_outcome() -> None:
         )
 
 
+def test_task_retry_command_and_epoch_event_are_strict_and_bounded() -> None:
+    fixture = _load("critical_kernel.valid.json")
+    command_raw = copy.deepcopy(fixture["command"])
+    command_raw.update(
+        {
+            "request_id": "request-retry-2",
+            "command_id": "command-retry-2",
+            "command_type": "task.retry",
+            "target_ref": {"kind": "task", "id": "task-1"},
+            "required_capabilities": ["task.retry"],
+            "payload": {
+                "previous_attempt_id": "attempt-1",
+                "previous_outcome": "completed",
+                "attempt_number": 2,
+            },
+        }
+    )
+    command = CommandEnvelope.from_dict(command_raw)
+    assert command.payload["attempt_number"] == 2
+
+    tracker = EventSequenceTracker()
+    accepted = _event(fixture, event_id="task-a", seq=0)
+    terminal_raw = copy.deepcopy(fixture["event"])
+    terminal_raw.update(
+        {
+            "event_id": "task-a-terminal",
+            "event_type": "task.terminal",
+            "seq": 1,
+            "causation_id": accepted.event_id,
+            "payload": {"state": "terminal", "outcome": "completed"},
+        }
+    )
+    terminal = EventEnvelope.from_dict(terminal_raw)
+    retry_raw = copy.deepcopy(fixture["event"])
+    retry_raw.update(
+        {
+            "event_id": "task-b",
+            "event_type": "task.retry_accepted",
+            "seq": 2,
+            "causation_id": command.command_id,
+            "payload": {
+                "state": "accepted",
+                "command_id": command.command_id,
+                "retry_of_attempt_id": "attempt-1",
+                "previous_outcome": "completed",
+                "attempt_number": 2,
+            },
+        }
+    )
+    retry_event = EventEnvelope.from_dict(retry_raw)
+    assert tracker.accept(accepted).status is EventApplyStatus.APPLIED
+    assert tracker.accept(terminal).status is EventApplyStatus.APPLIED
+    tracker.register_applied_cause(command)
+    assert tracker.accept(retry_event).status is EventApplyStatus.APPLIED
+
+    causal_tracker = EventSequenceTracker()
+    assert causal_tracker.accept(accepted).status is EventApplyStatus.APPLIED
+    assert causal_tracker.accept(terminal).status is EventApplyStatus.APPLIED
+    causal_tracker.register_applied_cause(command)
+    mismatched_cause = copy.deepcopy(retry_raw)
+    mismatched_cause["event_id"] = "task-b-mismatched-cause"
+    mismatched_cause["payload"]["retry_of_attempt_id"] = "attempt-other"
+    causal_rejection = causal_tracker.accept(EventEnvelope.from_dict(mismatched_cause))
+    assert causal_rejection.error is not None
+    assert causal_rejection.error.reason == "TASK_RETRY_CAUSATION_MISMATCH"
+
+    wrong_lineage = copy.deepcopy(retry_raw)
+    wrong_lineage.update(
+        {
+            "event_id": "task-c",
+            "seq": 3,
+            "causation_id": "command-retry-3",
+        }
+    )
+    wrong_lineage["payload"].update(
+        {
+            "command_id": "command-retry-3",
+            "retry_of_attempt_id": "attempt-2",
+            "attempt_number": 3,
+        }
+    )
+    command_3_raw = copy.deepcopy(command_raw)
+    command_3_raw.update(
+        {"request_id": "request-retry-3", "command_id": "command-retry-3"}
+    )
+    command_3_raw["payload"].update(
+        {"previous_attempt_id": "attempt-2", "attempt_number": 3}
+    )
+    tracker.register_applied_cause(CommandEnvelope.from_dict(command_3_raw))
+    rejected = tracker.accept(EventEnvelope.from_dict(wrong_lineage))
+    assert rejected.status is EventApplyStatus.REJECTED_LIFECYCLE
+    assert rejected.error is not None
+    assert rejected.error.reason == "TASK_RETRY_PRECONDITION_STALE"
+
+    missing_command = copy.deepcopy(retry_raw)
+    del missing_command["payload"]["command_id"]
+    with pytest.raises(ContractViolation) as missing:
+        EventEnvelope.from_dict(missing_command)
+    assert missing.value.reason == "MISSING_REQUIRED_FIELD"
+
+    bad_cause = copy.deepcopy(retry_raw)
+    bad_cause["causation_id"] = "another-command"
+    with pytest.raises(ContractViolation) as mismatch:
+        EventEnvelope.from_dict(bad_cause)
+    assert mismatch.value.reason == "TASK_RETRY_CAUSATION_MISMATCH"
+
+    command_drift = copy.deepcopy(retry_raw)
+    command_drift["event_id"] = "task-b-command-drift"
+    command_drift["payload"]["command_id"] = "another-command"
+    zero_effect_tracker = EventSequenceTracker()
+    assert zero_effect_tracker.accept(accepted).status is EventApplyStatus.APPLIED
+    assert zero_effect_tracker.accept(terminal).status is EventApplyStatus.APPLIED
+    zero_effect_tracker.register_applied_cause(command)
+    with pytest.raises(ContractViolation) as command_mismatch:
+        EventEnvelope.from_dict(command_drift)
+    assert command_mismatch.value.reason == "TASK_RETRY_CAUSATION_MISMATCH"
+    assert zero_effect_tracker.accept(retry_event).status is EventApplyStatus.APPLIED
+
+
 def test_event_gap_reorders_duplicate_and_conflicting_sequence_fail_closed() -> None:
     fixture = _load("critical_kernel.valid.json")
     tracker = EventSequenceTracker()

@@ -87,6 +87,9 @@ class TaskCommand:
     target_task_id: str | None
     spec: TaskSpec | None
     origin_commit_id: str
+    previous_attempt_id: str | None = None
+    previous_outcome: TerminalOutcome | None = None
+    attempt_number: int | None = None
 
     def fingerprint(self) -> bytes:
         return canonical_json_bytes(
@@ -97,6 +100,13 @@ class TaskCommand:
                 "target_task_id": self.target_task_id,
                 "spec": None if self.spec is None else self.spec.to_dict(),
                 "origin_commit_id": self.origin_commit_id,
+                "previous_attempt_id": self.previous_attempt_id,
+                "previous_outcome": (
+                    None
+                    if self.previous_outcome is None
+                    else self.previous_outcome.value
+                ),
+                "attempt_number": self.attempt_number,
             }
         )
 
@@ -128,6 +138,7 @@ class AttemptRecord:
     task_id: str
     state: AttemptState
     outcome: TerminalOutcome | None = None
+    attempt_number: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +151,7 @@ class TaskEvent:
     state: str
     outcome: str | None
     causation_id: str
+    details: tuple[tuple[str, str | int], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,6 +198,8 @@ class TaskCommandResult:
     task_id: str
     attempt_id: str
     cancel_acknowledged: bool = False
+    attempt_number: int = 1
+    previous_attempt_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,7 +213,7 @@ class TaskCoreSnapshot:
 
 
 class TaskCore:
-    _COMMANDS = frozenset({"task.create", "task.cancel"})
+    _COMMANDS = frozenset({"task.create", "task.cancel", "task.retry"})
     _QUERIES = frozenset({"task.get", "task.list", "task.status", "task.events"})
 
     def __init__(self) -> None:
@@ -229,11 +243,19 @@ class TaskCore:
                         ErrorCode.CONFLICT,
                     )
                 prior = existing[1]
-                return replace(prior, request_id=command.request_id, applied=False)
+                return replace(
+                    prior,
+                    request_id=command.request_id,
+                    applied=(
+                        prior.applied if command.operation == "task.retry" else False
+                    ),
+                )
             if command.operation == "task.create":
                 result = self._create(command)
-            else:
+            elif command.operation == "task.cancel":
                 result = self._cancel(command)
+            else:
+                result = self._retry(command)
             self._commands[command.command_id] = (fingerprint, result)
             return result
 
@@ -395,6 +417,7 @@ class TaskCore:
 
     def _cancel(self, command: TaskCommand) -> TaskCommandResult:
         task = self._require_task(command.target_task_id, command.scope)
+        attempt = self._attempts[task.attempt_id]
         if task.state is TaskState.TERMINAL:
             raise TaskCoreViolation(
                 "TASK_ALREADY_TERMINAL",
@@ -409,6 +432,7 @@ class TaskCore:
                 task.task_id,
                 task.attempt_id,
                 cancel_acknowledged=True,
+                attempt_number=attempt.attempt_number,
             )
         self._tasks[task.task_id] = replace(
             task, cancel_requested=True, dispatch_fenced=True
@@ -437,6 +461,99 @@ class TaskCore:
             task.task_id,
             task.attempt_id,
             cancel_acknowledged=True,
+            attempt_number=attempt.attempt_number,
+        )
+
+    def _retry(self, command: TaskCommand) -> TaskCommandResult:
+        task = self._require_task(command.target_task_id, command.scope)
+        attempt = self._attempts[task.attempt_id]
+        if (
+            task.state is not TaskState.TERMINAL
+            or attempt.state is not AttemptState.TERMINAL
+        ):
+            raise TaskCoreViolation(
+                "TASK_RETRY_REQUIRES_TERMINAL",
+                "task.retry requires a terminal current attempt",
+                ErrorCode.CONFLICT,
+            )
+        if attempt.attempt_number >= 3:
+            raise TaskCoreViolation(
+                "TASK_RETRY_LIMIT_EXCEEDED",
+                "formal task permits at most three total attempts",
+                ErrorCode.CONFLICT,
+            )
+        if (
+            task.outcome
+            not in {
+                TerminalOutcome.CANCELLED,
+                TerminalOutcome.COMPLETED,
+            }
+            or attempt.outcome != task.outcome
+        ):
+            raise TaskCoreViolation(
+                "TASK_RETRY_OUTCOME_NOT_ELIGIBLE",
+                "only cancelled or completed attempts can be retried",
+                ErrorCode.CONFLICT,
+            )
+        next_number = attempt.attempt_number + 1
+        if (
+            command.previous_attempt_id != attempt.attempt_id
+            or command.previous_outcome != attempt.outcome
+            or command.attempt_number != next_number
+        ):
+            raise TaskCoreViolation(
+                "TASK_RETRY_PRECONDITION_STALE",
+                "task.retry lineage does not match the current terminal attempt",
+                ErrorCode.STALE,
+            )
+        attempt_id = f"attempt-{self._next_id}"
+        self._next_id += 1
+        self._attempts[attempt_id] = AttemptRecord(
+            attempt_id,
+            task.task_id,
+            AttemptState.ACCEPTED,
+            attempt_number=next_number,
+        )
+        self._tasks[task.task_id] = replace(
+            task,
+            state=TaskState.ACCEPTED,
+            attempt_id=attempt_id,
+            cancel_requested=False,
+            dispatch_fenced=False,
+            outcome=None,
+        )
+        self._dispatch.append(
+            DispatchIntent(
+                task.task_id,
+                attempt_id,
+                command.command_id,
+                command.scope,
+                task.spec,
+            )
+        )
+        self._append_event(
+            task.task_id,
+            attempt_id,
+            "task.retry_accepted",
+            TaskState.ACCEPTED,
+            None,
+            command.command_id,
+            details={
+                "command_id": command.command_id,
+                "retry_of_attempt_id": attempt.attempt_id,
+                "previous_outcome": attempt.outcome.value,
+                "attempt_number": next_number,
+            },
+        )
+        self._mutation_version += 1
+        return TaskCommandResult(
+            command.request_id,
+            command.command_id,
+            True,
+            task.task_id,
+            attempt_id,
+            attempt_number=next_number,
+            previous_attempt_id=attempt.attempt_id,
         )
 
     def _transition_attempt(
@@ -495,6 +612,7 @@ class TaskCore:
         state: StrEnum,
         outcome: TerminalOutcome | None,
         causation_id: str,
+        details: dict[str, str | int] | None = None,
     ) -> TaskEvent:
         events = self._events.setdefault(task_id, [])
         event = TaskEvent(
@@ -506,6 +624,7 @@ class TaskCore:
             state=state.value,
             outcome=None if outcome is None else outcome.value,
             causation_id=causation_id,
+            details=tuple(sorted((details or {}).items())),
         )
         events.append(event)
         return event
@@ -529,16 +648,42 @@ class TaskCore:
                     ErrorCode.INVALID_ARGUMENT,
                 )
         if command.operation == "task.create":
-            if command.target_task_id is not None or command.spec is None:
+            if (
+                command.target_task_id is not None
+                or command.spec is None
+                or command.previous_attempt_id is not None
+                or command.previous_outcome is not None
+                or command.attempt_number is not None
+            ):
                 raise TaskCoreViolation(
                     "INVALID_TASK_CREATE",
                     "task.create requires a spec and no client task id",
                     ErrorCode.INVALID_ARGUMENT,
                 )
-        elif command.target_task_id is None or command.spec is not None:
+        elif command.operation == "task.cancel" and (
+            command.target_task_id is None
+            or command.spec is not None
+            or command.previous_attempt_id is not None
+            or command.previous_outcome is not None
+            or command.attempt_number is not None
+        ):
             raise TaskCoreViolation(
                 "INVALID_TASK_CANCEL",
                 "task.cancel requires an exact task id and no spec",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        elif command.operation == "task.retry" and (
+            command.target_task_id is None
+            or command.spec is not None
+            or not isinstance(command.previous_outcome, TerminalOutcome)
+            or type(command.attempt_number) is not int
+            or command.attempt_number not in {2, 3}
+            or type(command.previous_attempt_id) is not str
+            or not command.previous_attempt_id.strip()
+        ):
+            raise TaskCoreViolation(
+                "INVALID_TASK_RETRY",
+                "task.retry requires exact predecessor lineage and no replacement spec",
                 ErrorCode.INVALID_ARGUMENT,
             )
 

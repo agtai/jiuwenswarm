@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -22,21 +23,27 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     TurnCommit,
     TurnCommitLedger,
     WorkProgressEventV2,
+    canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
+    ExecutorRetryReadiness,
     FormalAttemptState,
     FormalTaskState,
     FormalTaskViolation,
     PersistentAttemptRecord,
     PersistentOutboxItem,
+    PersistentTaskEvent,
     PersistentTaskRecord,
     ReconciliationState,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
     TaskEventAuthoritySnapshot,
+    TaskMutationDisposition,
+    TaskRetryAuthoritySnapshot,
+    TaskRetryProductRequestFingerprint,
     utc_now,
 )
 from jiuwenswarm.server.live_voice.persistent_task_core import (
@@ -173,6 +180,76 @@ def _cancel(task_id: str):
     return FormalTaskPolicyAdapter().map(intent)
 
 
+def _retry(
+    task_id: str,
+    previous_attempt_id: str,
+    previous_outcome: TerminalOutcome,
+    attempt_number: int,
+    *,
+    command_id: str | None = None,
+    correlation_id: str = "correlation-1",
+) -> tuple[CommandEnvelope, TaskAuthorizationGrant]:
+    retry_command_id = command_id or f"command-retry-{attempt_number}"
+    product_request = _retry_product_request_fingerprint(
+        command_id=retry_command_id,
+        task_id=task_id,
+        correlation_id=correlation_id,
+    )
+    command = CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": f"request-retry-{attempt_number}",
+            "command_id": retry_command_id,
+            "command_type": "task.retry",
+            "issued_at": NOW,
+            "scope": _scope().to_dict(),
+            "correlation_id": correlation_id,
+            "causation_id": None,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {"kind": "task", "id": task_id},
+            "context_refs": [],
+            "required_capabilities": ["task.retry"],
+            "payload": {
+                "previous_attempt_id": previous_attempt_id,
+                "previous_outcome": previous_outcome.value,
+                "attempt_number": attempt_number,
+            },
+            "extensions": product_request.to_extensions(),
+        }
+    )
+    return command, _grant("task.retry", command_id=retry_command_id, target=task_id)
+
+
+def _retry_product_request_fingerprint(
+    *,
+    command_id: str,
+    task_id: str,
+    issued_at: str = NOW,
+    correlation_id: str = "correlation-1",
+    causation_id: str | None = None,
+    confirmation_id: str = "confirm-1",
+) -> TaskRetryProductRequestFingerprint:
+    """Model the product ledger facts; never include request_id or server facts."""
+
+    product_owned_facts = {
+        "operation": "task.retry",
+        "scope": _scope().to_dict(),
+        "command_id": command_id,
+        "task_id": task_id,
+        "issued_at": issued_at,
+        "correlation_id": correlation_id,
+        "causation_id": causation_id,
+        "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+        "confirmation_id": confirmation_id,
+    }
+    assert "request_id" not in product_owned_facts
+    assert "payload" not in product_owned_facts
+    assert "context" not in product_owned_facts
+    return TaskRetryProductRequestFingerprint(
+        hashlib.sha256(canonical_json_bytes(product_owned_facts)).hexdigest()
+    )
+
+
 def _status(task_id: str):
     intent = FormalTaskPolicyInput(
         state=InputCommitState.COMMITTED,
@@ -236,6 +313,1613 @@ def _observations(
     return tuple(result)
 
 
+def _downgrade_fixture_to_v1(database: Path) -> None:
+    """Rebuild only the v1 attempts table to exercise the real v2 migrator."""
+
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """CREATE TABLE attempts_v1 (
+                attempt_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL UNIQUE
+                    REFERENCES tasks(task_id) ON DELETE CASCADE,
+                executor_id TEXT NOT NULL, executor_ref TEXT,
+                state TEXT NOT NULL, outcome TEXT,
+                source_seq INTEGER NOT NULL DEFAULT -1,
+                updated_at TEXT NOT NULL)"""
+        )
+        connection.execute(
+            """INSERT INTO attempts_v1(
+                attempt_id, task_id, executor_id, executor_ref, state,
+                outcome, source_seq, updated_at)
+                SELECT attempt_id, task_id, executor_id, executor_ref, state,
+                       outcome, source_seq, updated_at FROM attempts"""
+        )
+        connection.execute("DROP TABLE attempts")
+        connection.execute("ALTER TABLE attempts_v1 RENAME TO attempts")
+        connection.execute("UPDATE metadata SET value='1' WHERE key='schema_version'")
+        connection.commit()
+
+
+def _database_dump(database: Path) -> tuple[str, ...]:
+    with sqlite3.connect(database) as connection:
+        return tuple(connection.iterdump())
+
+
+def test_v1_schema_migrates_atomically_and_preserves_active_attempt(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    invocation = _create(tmp_path)
+    result = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert result.ok and result.result is not None
+    task_id = str(result.result["task_id"])
+    attempt_id = str(result.result["attempt_id"])
+    before = store.counts()
+    _downgrade_fixture_to_v1(database)
+
+    reopened = SqliteTaskStore(database)
+
+    assert reopened.counts() == before
+    assert reopened.get_task(task_id, _scope()).attempt_id == attempt_id
+    assert reopened.get_attempt(attempt_id).attempt_number == 1
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("2",)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
+        assert "attempt_number" in columns
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("lifecycle", ["terminal", "claimed"])
+def test_v1_schema_migration_preserves_terminal_or_claimed_state_across_reopen(
+    tmp_path: Path, lifecycle: str
+) -> None:
+    database = tmp_path / f"migration-{lifecycle}.sqlite"
+    store = SqliteTaskStore(database)
+    invocation = _create(tmp_path)
+    created = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    item = store.claim_outbox(f"migration-{lifecycle}")
+    assert item is not None
+    if lifecycle == "terminal":
+        store.complete_outbox(
+            item,
+            executor_ref=f"legacy:{attempt_id}",
+            observations=_observations(item, outcome=TerminalOutcome.COMPLETED),
+        )
+    before_counts = store.counts()
+    before_task = store.get_task(task_id, _scope())
+    before_attempt = store.get_attempt(attempt_id)
+    with sqlite3.connect(database) as connection:
+        before_outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox WHERE attempt_id=?
+            """,
+            (attempt_id,),
+        ).fetchone()
+    _downgrade_fixture_to_v1(database)
+
+    migrated = SqliteTaskStore(database)
+    reopened = SqliteTaskStore(database)
+
+    assert migrated.counts() == before_counts
+    assert reopened.counts() == before_counts
+    assert reopened.get_task(task_id, _scope()) == before_task
+    migrated_attempt = reopened.get_attempt(attempt_id)
+    assert migrated_attempt == before_attempt
+    assert migrated_attempt.attempt_number == 1
+    with sqlite3.connect(database) as connection:
+        after_outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox WHERE attempt_id=?
+            """,
+            (attempt_id,),
+        ).fetchone()
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert after_outbox == before_outbox
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        "migration.v1_to_v2.before_create",
+        "migration.v1_to_v2.after_create",
+        "migration.v1_to_v2.after_copy",
+        "migration.v1_to_v2.after_drop",
+        "migration.v1_to_v2.after_rename",
+        "migration.v1_to_v2.before_metadata",
+    ],
+)
+def test_v1_schema_migration_failpoints_restore_exact_v1(
+    tmp_path: Path, failpoint: str
+) -> None:
+    database = tmp_path / f"{failpoint}.sqlite"
+    SqliteTaskStore(database)
+    _downgrade_fixture_to_v1(database)
+
+    def fail(name: str) -> None:
+        if name == failpoint:
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match=failpoint):
+        SqliteTaskStore(database, failpoint=fail)
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("1",)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
+        assert "attempt_number" not in columns
+        assert "attempts_v2" not in {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+
+
+def test_fresh_schema_bootstrap_failure_leaves_no_partial_ddl(tmp_path: Path) -> None:
+    database = tmp_path / "bootstrap-fail.sqlite"
+
+    def fail(name: str) -> None:
+        if name == "initialize.bootstrap.before_metadata":
+            raise RuntimeError(name)
+
+    with pytest.raises(RuntimeError, match="initialize.bootstrap.before_metadata"):
+        SqliteTaskStore(database, failpoint=fail)
+
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+            == []
+        )
+    reopened = SqliteTaskStore(database)
+    assert reopened.counts() == {
+        "commands": 0,
+        "tasks": 0,
+        "attempts": 0,
+        "task_events": 0,
+        "executor_events": 0,
+        "outbox": 0,
+    }
+
+
+def test_unknown_schema_is_rejected_without_ddl(tmp_path: Path) -> None:
+    database = tmp_path / "unknown.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)")
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('schema_version', '99')"
+        )
+        connection.execute("CREATE TABLE sentinel(value TEXT)")
+        connection.execute("INSERT INTO sentinel(value) VALUES('unchanged')")
+        connection.commit()
+    before = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_SCHEMA_UNSUPPORTED"
+    assert database.read_bytes() == before
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT * FROM sentinel").fetchall() == [
+            ("unchanged",)
+        ]
+        assert {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        } == {"metadata", "sentinel"}
+
+
+def test_initialize_rollback_failure_preserves_stable_schema_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "rollback-failure.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO metadata(key, value) VALUES('schema_version', '2')"
+        )
+        connection.commit()
+    before = database.read_bytes()
+    real_connect = sqlite3.connect
+
+    class RollbackFailingConnection(sqlite3.Connection):
+        def rollback(self) -> None:
+            raise sqlite3.OperationalError("injected rollback failure")
+
+    def connect_with_rollback_failure(*args: object, **kwargs: object) -> object:
+        kwargs["factory"] = RollbackFailingConnection
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect_with_rollback_failure)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_SCHEMA_UNSUPPORTED"
+    assert rejected.value.code is ErrorCode.UNSUPPORTED
+    assert database.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "metadata_only",
+        "missing_table",
+        "missing_attempt_number",
+        "fake_owned_table",
+        "missing_required_index",
+        "missing_attempt_bound",
+    ],
+)
+def test_supported_schema_versions_require_complete_authoritative_shape(
+    tmp_path: Path, damage: str
+) -> None:
+    database = tmp_path / f"schema-{damage}.sqlite"
+    if damage == "metadata_only":
+        with sqlite3.connect(database) as connection:
+            connection.execute(
+                "CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            connection.execute(
+                "INSERT INTO metadata(key, value) VALUES('schema_version', '2')"
+            )
+            connection.commit()
+    else:
+        SqliteTaskStore(database)
+        if damage == "missing_attempt_number":
+            _downgrade_fixture_to_v1(database)
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "UPDATE metadata SET value='2' WHERE key='schema_version'"
+                )
+                connection.commit()
+        else:
+            with sqlite3.connect(database) as connection:
+                connection.execute("PRAGMA foreign_keys=OFF")
+                if damage == "missing_table":
+                    connection.execute("DROP TABLE commands")
+                elif damage == "fake_owned_table":
+                    connection.execute("DROP TABLE outbox")
+                    connection.execute("CREATE TABLE outbox(fake TEXT)")
+                elif damage == "missing_required_index":
+                    connection.execute("DROP INDEX idx_tasks_scope")
+                else:
+                    connection.execute(
+                        """CREATE TABLE attempts_without_bound (
+                            attempt_id TEXT PRIMARY KEY,
+                            task_id TEXT NOT NULL REFERENCES tasks(task_id)
+                                ON DELETE CASCADE,
+                            attempt_number INTEGER NOT NULL,
+                            executor_id TEXT NOT NULL, executor_ref TEXT,
+                            state TEXT NOT NULL, outcome TEXT,
+                            source_seq INTEGER NOT NULL DEFAULT -1,
+                            updated_at TEXT NOT NULL,
+                            UNIQUE(task_id, attempt_number))"""
+                    )
+                    connection.execute("DROP TABLE attempts")
+                    connection.execute(
+                        "ALTER TABLE attempts_without_bound RENAME TO attempts"
+                    )
+                connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_SCHEMA_UNSUPPORTED"
+    assert _database_dump(database) == before
+
+
+def test_fresh_task_schema_coexists_with_unrelated_component_tables(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "shared-components.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE p3_confirmations(confirmation_id TEXT PRIMARY KEY)"
+        )
+        connection.execute(
+            "INSERT INTO p3_confirmations(confirmation_id) VALUES('confirmation-1')"
+        )
+        connection.commit()
+
+    store = SqliteTaskStore(database)
+
+    assert store.counts() == {
+        "commands": 0,
+        "tasks": 0,
+        "attempts": 0,
+        "task_events": 0,
+        "executor_events": 0,
+        "outbox": 0,
+    }
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT confirmation_id FROM p3_confirmations"
+        ).fetchall() == [("confirmation-1",)]
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("2",)
+
+
+def test_concurrent_initializers_converge_on_schema_v2(tmp_path: Path) -> None:
+    database = tmp_path / "concurrent.sqlite"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        stores = tuple(pool.map(lambda _index: SqliteTaskStore(database), range(2)))
+
+    assert all(store.counts()["attempts"] == 0 for store in stores)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'"
+        ).fetchone() == ("2",)
+
+
+def _terminal_task(
+    tmp_path: Path,
+    *,
+    outcome: TerminalOutcome = TerminalOutcome.COMPLETED,
+) -> tuple[SqliteTaskStore, _Executor, PersistentTaskCore, str, str]:
+    store = SqliteTaskStore(tmp_path / "retry.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    item = store.claim_outbox("terminal-fixture")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item, outcome=outcome),
+    )
+    return store, executor, core, item.task_id, item.attempt_id
+
+
+def test_retry_a_to_b_is_atomic_and_preserves_exact_history(tmp_path: Path) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    context_b = replace(_context(tmp_path), revision_value="clean-revision-b")
+
+    result = core.execute(retry, grant, context=context_b, now=NOW)
+
+    assert result.ok and result.result is not None
+    assert result.result["previous_attempt_id"] == attempt_a
+    assert result.result["attempt_number"] == 2
+    assert result.result["applied"] is True
+    attempt_b = str(result.result["attempt_id"])
+    assert attempt_b != attempt_a
+    assert store.get_attempt(attempt_a).to_dict()["outcome"] == "completed"
+    assert store.get_attempt(attempt_a).attempt_number == 1
+    assert store.get_attempt(attempt_b).attempt_number == 2
+    task = store.get_task(task_id, _scope())
+    assert task.attempt_id == attempt_b
+    assert task.state is FormalTaskState.ACCEPTED
+    assert task.spec.context.revision_value == "clean-revision-b"
+    assert executor.retry_readiness_calls == [attempt_a]
+    history = store.events(task_id, _scope())
+    boundary = history[-1]
+    assert boundary.event_type == "task.retry_accepted"
+    assert boundary.attempt_id == attempt_b
+    assert dict(boundary.details) == {
+        "command_id": retry.command_id,
+        "retry_of_attempt_id": attempt_a,
+        "previous_outcome": "completed",
+        "attempt_number": 2,
+    }
+    snapshot = store.event_authority_snapshot(task_id, _scope(), max_events=20)
+    assert snapshot.start_seq == boundary.seq
+    assert snapshot.events == (boundary,)
+
+
+def test_retry_preserves_stable_task_and_project_identity_with_zero_effects(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    before = store.counts()
+
+    wrong_project = core.execute(
+        retry,
+        grant,
+        context=replace(
+            _context(tmp_path),
+            stable_id="project-other",
+            revision_value="clean-revision-b",
+        ),
+        now=NOW,
+    )
+
+    assert not wrong_project.ok and wrong_project.error is not None
+    assert wrong_project.error.reason == "TASK_RETRY_CONTEXT_IDENTITY_MISMATCH"
+    assert store.counts() == before
+    assert executor.retry_readiness_calls == []
+
+    authority = store.read_retry_authority(retry)
+    assert isinstance(authority, TaskRetryAuthoritySnapshot)
+    with pytest.raises(FormalTaskViolation) as replaced_spec:
+        store.retry(
+            retry,
+            replace(authority.task.spec, instruction="replacement instruction"),
+            authority,
+            observed_at=NOW,
+        )
+
+    assert replaced_spec.value.reason == "TASK_RETRY_SPEC_MISMATCH"
+    assert store.counts() == before
+
+
+def test_retry_rejects_foreign_correlation_before_readiness_and_preserves_lineage(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry, grant = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.COMPLETED,
+        2,
+        correlation_id="correlation-foreign",
+    )
+    before = store.counts()
+    before_dump = _database_dump(store.database_path)
+    before_bytes = store.database_path.read_bytes()
+
+    rejected = core.execute(
+        retry,
+        grant,
+        context=replace(_context(tmp_path), revision_value="clean-revision-b"),
+        now=NOW,
+    )
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_RETRY_PRECONDITION_STALE"
+    assert rejected.error.code is ErrorCode.STALE
+    assert store.counts() == before
+    assert _database_dump(store.database_path) == before_dump
+    assert store.database_path.read_bytes() == before_bytes
+    assert executor.retry_readiness_calls == []
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    authority = core.read_current_retry_authority(scope=_scope(), task_id=task_id)
+    assert authority.task.correlation_id == "correlation-1"
+    assert authority.precondition.previous_attempt_id == attempt_a
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ["wrong_task", "wrong_ordinal", "nonterminal", "outcome_mismatch"],
+)
+def test_retry_event_authority_requires_exact_durable_predecessor(
+    tmp_path: Path, corruption: str
+) -> None:
+    store, _executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    retried = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert retried.ok and retried.result is not None
+    attempt_b = str(retried.result["attempt_id"])
+    database = store.database_path
+
+    if corruption == "wrong_task":
+        foreign_invocation = _create(tmp_path, identity_suffix="-foreign-lineage")
+        foreign = core.execute(
+            foreign_invocation.envelope,
+            foreign_invocation.authorization,
+            context=foreign_invocation.context,
+            now=NOW,
+        )
+        assert foreign.ok and foreign.result is not None
+        with sqlite3.connect(database) as connection:
+            row = connection.execute(
+                """
+                SELECT details_json FROM task_events
+                WHERE task_id=? AND attempt_id=? AND event_type='task.retry_accepted'
+                """,
+                (task_id, attempt_b),
+            ).fetchone()
+            assert row is not None
+            details = json.loads(row[0])
+            details["retry_of_attempt_id"] = str(foreign.result["attempt_id"])
+            connection.execute(
+                """
+                UPDATE task_events SET details_json=?
+                WHERE task_id=? AND attempt_id=? AND event_type='task.retry_accepted'
+                """,
+                (json.dumps(details, sort_keys=True), task_id, attempt_b),
+            )
+    else:
+        with sqlite3.connect(database) as connection:
+            if corruption == "wrong_ordinal":
+                connection.execute(
+                    "UPDATE attempts SET attempt_number=3 WHERE attempt_id=?",
+                    (attempt_a,),
+                )
+            elif corruption == "nonterminal":
+                connection.execute(
+                    """
+                    UPDATE attempts SET state='running', outcome=NULL
+                    WHERE attempt_id=?
+                    """,
+                    (attempt_a,),
+                )
+            else:
+                connection.execute(
+                    "UPDATE attempts SET outcome='cancelled' WHERE attempt_id=?",
+                    (attempt_a,),
+                )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        store.event_authority_snapshot(task_id, _scope(), max_events=20)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert store.counts() == before
+
+
+def test_retry_exact_replay_skips_readiness_and_conflict_has_zero_effects(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    context = replace(_context(tmp_path), revision_value="clean-revision-b")
+    first = core.execute(retry, grant, context=context, now=NOW)
+    assert first.ok and first.result is not None
+    before = store.counts()
+    calls = list(executor.retry_readiness_calls)
+
+    replay = core.execute(retry, grant, context=context, now=NOW)
+    conflicting_retry, conflicting_grant = _retry(
+        task_id,
+        "different-attempt",
+        TerminalOutcome.COMPLETED,
+        2,
+        command_id=retry.command_id,
+    )
+    conflict = core.execute(
+        conflicting_retry,
+        conflicting_grant,
+        context=replace(context, revision_value="different-clean-revision"),
+        now=NOW,
+    )
+    correlation_conflict, correlation_grant = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.COMPLETED,
+        2,
+        command_id=retry.command_id,
+        correlation_id="correlation-foreign",
+    )
+    correlation_rejected = core.execute(
+        correlation_conflict,
+        correlation_grant,
+        context=context,
+        now=NOW,
+    )
+
+    assert replay.ok and replay.result == first.result
+    assert not conflict.ok and conflict.error is not None
+    assert conflict.error.reason == "IDEMPOTENCY_CONFLICT"
+    assert not correlation_rejected.ok and correlation_rejected.error is not None
+    assert correlation_rejected.error.reason == "IDEMPOTENCY_CONFLICT"
+    assert store.counts() == before
+    assert executor.retry_readiness_calls == calls
+
+
+def test_concurrent_exact_retry_across_store_instances_has_one_successor(
+    tmp_path: Path,
+) -> None:
+    store, executor_a, core_a, task_id, attempt_a = _terminal_task(tmp_path)
+    store_b = SqliteTaskStore(store.database_path)
+    executor_b = _Executor()
+    core_b = PersistentTaskCore(store_b, executor_b)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    context = replace(_context(tmp_path), revision_value="clean-revision-b")
+    before = store.counts()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = tuple(
+            pool.submit(core.execute, retry, grant, context=context, now=NOW)
+            for core in (core_a, core_b)
+        )
+        results = tuple(future.result() for future in futures)
+
+    assert all(result.ok and result.result is not None for result in results)
+    assert results[0].result == results[1].result
+    assert results[0].result is not None
+    successor_id = str(results[0].result["attempt_id"])
+    after = store.counts()
+    assert after == {
+        **before,
+        "commands": before["commands"] + 1,
+        "attempts": before["attempts"] + 1,
+        "task_events": before["task_events"] + 1,
+        "outbox": before["outbox"] + 1,
+    }
+    assert store.get_task(task_id, _scope()).attempt_id == successor_id
+    assert [
+        event
+        for event in store.events(task_id, _scope())
+        if event.event_type == "task.retry_accepted"
+    ][0].attempt_id == successor_id
+    assert sum(
+        attempt_id == attempt_a
+        for attempt_id in (
+            *executor_a.retry_readiness_calls,
+            *executor_b.retry_readiness_calls,
+        )
+    ) in {1, 2}
+
+
+def test_concurrent_distinct_retries_from_same_epoch_apply_one_and_stale_one(
+    tmp_path: Path,
+) -> None:
+    store, _executor_a, core_a, task_id, attempt_a = _terminal_task(tmp_path)
+    core_b = PersistentTaskCore(SqliteTaskStore(store.database_path), _Executor())
+    retry_a, grant_a = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.COMPLETED,
+        2,
+        command_id="command-retry-left",
+    )
+    retry_b, grant_b = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.COMPLETED,
+        2,
+        command_id="command-retry-right",
+    )
+    context = replace(_context(tmp_path), revision_value="clean-revision-b")
+    before = store.counts()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = (
+            pool.submit(core_a.execute, retry_a, grant_a, context=context, now=NOW),
+            pool.submit(core_b.execute, retry_b, grant_b, context=context, now=NOW),
+        )
+        results = tuple(future.result() for future in futures)
+
+    successes = tuple(result for result in results if result.ok)
+    failures = tuple(result for result in results if not result.ok)
+    assert len(successes) == len(failures) == 1
+    assert failures[0].error is not None
+    assert failures[0].error.reason == "TASK_RETRY_PRECONDITION_STALE"
+    after = store.counts()
+    assert after == {
+        **before,
+        "commands": before["commands"] + 1,
+        "attempts": before["attempts"] + 1,
+        "task_events": before["task_events"] + 1,
+        "outbox": before["outbox"] + 1,
+    }
+    boundaries = tuple(
+        event
+        for event in store.events(task_id, _scope())
+        if event.event_type == "task.retry_accepted"
+    )
+    assert len(boundaries) == 1
+    assert store.get_task(task_id, _scope()).attempt_id == boundaries[0].attempt_id
+
+
+def test_retry_a_to_b_to_c_then_old_retry_replay_and_fourth_rejection(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry_b, grant_b = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    context_b = replace(_context(tmp_path), revision_value="clean-revision-b")
+    result_b = core.execute(retry_b, grant_b, context=context_b, now=NOW)
+    assert result_b.ok and result_b.result is not None
+    attempt_b = str(result_b.result["attempt_id"])
+    item_b = store.claim_outbox("terminal-b")
+    assert item_b is not None and item_b.attempt_id == attempt_b
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{attempt_b}",
+        observations=_observations(item_b, outcome=TerminalOutcome.CANCELLED),
+    )
+    retry_c, grant_c = _retry(task_id, attempt_b, TerminalOutcome.CANCELLED, 3)
+    context_c = replace(_context(tmp_path), revision_value="clean-revision-c")
+    result_c = core.execute(retry_c, grant_c, context=context_c, now=NOW)
+    assert result_c.ok and result_c.result is not None
+    attempt_c = str(result_c.result["attempt_id"])
+    item_c = store.claim_outbox("terminal-c")
+    assert item_c is not None and item_c.attempt_id == attempt_c
+    store.complete_outbox(
+        item_c,
+        executor_ref=f"legacy:{attempt_c}",
+        observations=_observations(item_c, outcome=TerminalOutcome.COMPLETED),
+    )
+    before = store.counts()
+    readiness_calls = list(executor.retry_readiness_calls)
+
+    replay_b = core.execute(retry_b, grant_b, context=None, now=NOW)
+    fourth, fourth_grant = _retry(
+        task_id,
+        attempt_c,
+        TerminalOutcome.COMPLETED,
+        3,
+        command_id="command-retry-fourth",
+    )
+    rejected = core.execute(fourth, fourth_grant, context=context_c, now=NOW)
+
+    assert replay_b.ok and replay_b.result == result_b.result
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_RETRY_LIMIT_EXCEEDED"
+    assert store.counts() == before
+    assert executor.retry_readiness_calls == readiness_calls
+    history = store.events(task_id, _scope())
+    boundaries = [
+        event for event in history if event.event_type == "task.retry_accepted"
+    ]
+    assert [event.attempt_id for event in boundaries] == [attempt_b, attempt_c]
+    snapshot = store.event_authority_snapshot(task_id, _scope(), max_events=20)
+    assert snapshot.start_seq == boundaries[-1].seq
+    assert all(event.attempt_id == attempt_c for event in snapshot.events)
+    page_a = store.events(task_id, _scope(), after_seq=-1)
+    page_b = store.events(task_id, _scope(), after_seq=boundaries[0].seq - 1)
+    page_c = store.events(task_id, _scope(), after_seq=boundaries[1].seq - 1)
+    assert page_a == history
+    assert page_b[0] == boundaries[0]
+    assert page_c[0] == boundaries[1]
+    assert store.events(
+        task_id,
+        _scope(),
+        after_seq=boundaries[0].seq - 1,
+        attempt_id=attempt_b,
+    ) == tuple(event for event in history if event.attempt_id == attempt_b)
+
+
+def test_current_retry_authority_derives_server_payload_without_side_effects(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    before_dump = _database_dump(store.database_path)
+    before_bytes = store.database_path.read_bytes()
+
+    authority = core.read_current_retry_authority(
+        scope=_scope(),
+        task_id=task_id,
+    )
+
+    assert authority.task.task_id == task_id
+    assert authority.attempt.attempt_id == attempt_a
+    assert authority.precondition.to_dict() == {
+        "previous_attempt_id": attempt_a,
+        "previous_outcome": TerminalOutcome.COMPLETED.value,
+        "attempt_number": 2,
+    }
+    assert executor.retry_readiness_calls == []
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert _database_dump(store.database_path) == before_dump
+    assert store.database_path.read_bytes() == before_bytes
+    request_asserted = ScopeRef(
+        "user-1",
+        "project-1",
+        "session-1",
+        Assurance.REQUEST_ASSERTED,
+    )
+    with pytest.raises(FormalTaskViolation) as rejected:
+        core.read_current_retry_authority(
+            scope=request_asserted,
+            task_id=task_id,
+        )
+    assert rejected.value.reason == "TASK_RETRY_AUTHORITY_FACTS_INVALID"
+    assert _database_dump(store.database_path) == before_dump
+    assert store.database_path.read_bytes() == before_bytes
+
+
+def test_retry_requires_one_product_request_fingerprint_before_readiness(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    before_dump = _database_dump(store.database_path)
+    before_bytes = store.database_path.read_bytes()
+
+    cases = (
+        ({}, "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_REQUIRED"),
+        (
+            {**retry.extensions, "product.unbound": {"fact": "changed"}},
+            "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_REQUIRED",
+        ),
+        (
+            {
+                next(iter(retry.extensions)): {
+                    "sha256": "NOT-A-CANONICAL-SHA256",
+                }
+            },
+            "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_INVALID",
+        ),
+    )
+    for extensions, reason in cases:
+        raw = retry.to_dict()
+        raw["extensions"] = extensions
+        invalid = CommandEnvelope.from_dict(raw)
+        result = core.execute(invalid, grant, context=_context(tmp_path), now=NOW)
+        assert not result.ok and result.error is not None
+        assert result.error.reason == reason
+
+    assert executor.retry_readiness_calls == []
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert _database_dump(store.database_path) == before_dump
+    assert store.database_path.read_bytes() == before_bytes
+
+
+def test_durable_applied_retry_replay_survives_new_process_without_command(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry_b_command_id = "command-retry-2"
+    retry_b, grant_b = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.COMPLETED,
+        2,
+        command_id=retry_b_command_id,
+    )
+    context_b = replace(_context(tmp_path), revision_value="clean-revision-b")
+    result_b = core.execute(retry_b, grant_b, context=context_b, now=NOW)
+    assert result_b.ok and result_b.result is not None
+    item_b = store.claim_outbox("replay-b")
+    assert item_b is not None
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{item_b.attempt_id}",
+        observations=_observations(item_b, outcome=TerminalOutcome.CANCELLED),
+    )
+    retry_c, grant_c = _retry(task_id, item_b.attempt_id, TerminalOutcome.CANCELLED, 3)
+    context_c = replace(_context(tmp_path), revision_value="clean-revision-c")
+    result_c = core.execute(retry_c, grant_c, context=context_c, now=NOW)
+    assert result_c.ok
+    database = store.database_path
+    product_request = _retry_product_request_fingerprint(
+        command_id=retry_b_command_id,
+        task_id=task_id,
+    )
+    del retry_b, grant_b, retry_c, grant_c, core, executor, store
+
+    reopened = SqliteTaskStore(database)
+    restarted_executor = _Executor()
+    restarted_core = PersistentTaskCore(reopened, restarted_executor)
+    before_dump = _database_dump(database)
+    before_bytes = database.read_bytes()
+
+    replay = restarted_core.read_applied_retry_replay(
+        scope=_scope(),
+        command_id=retry_b_command_id,
+        task_id=task_id,
+        product_request=product_request,
+    )
+
+    assert replay is not None
+    assert replay.original_command.command_id == retry_b_command_id
+    assert replay.original_command.payload == {
+        "previous_attempt_id": attempt_a,
+        "previous_outcome": TerminalOutcome.COMPLETED.value,
+        "attempt_number": 2,
+    }
+    assert replay.original_result == result_b
+    assert replay.precondition.previous_attempt_id == attempt_a
+    assert replay.precondition.attempt_number == 2
+    assert replay.resulting_spec.context.revision_value == "clean-revision-b"
+    assert reopened.get_task(task_id, _scope()).spec.context.revision_value == (
+        "clean-revision-c"
+    )
+    assert _database_dump(database) == before_dump
+    assert database.read_bytes() == before_bytes
+    assert restarted_executor.retry_readiness_calls == []
+    assert restarted_executor.dispatches == []
+    assert restarted_executor.cancels == []
+
+    assert (
+        restarted_core.read_applied_retry_replay(
+            scope=_scope(),
+            command_id="command-retry-absent",
+            task_id=task_id,
+            product_request=_retry_product_request_fingerprint(
+                command_id="command-retry-absent",
+                task_id=task_id,
+            ),
+        )
+        is None
+    )
+    conflict = _retry_product_request_fingerprint(
+        command_id=retry_b_command_id,
+        task_id=task_id,
+        correlation_id="changed-correlation",
+    )
+    with pytest.raises(FormalTaskViolation) as rejected:
+        restarted_core.read_applied_retry_replay(
+            scope=_scope(),
+            command_id=retry_b_command_id,
+            task_id=task_id,
+            product_request=conflict,
+        )
+    assert rejected.value.reason == "IDEMPOTENCY_CONFLICT"
+    assert _database_dump(database) == before_dump
+    assert database.read_bytes() == before_bytes
+    assert restarted_executor.retry_readiness_calls == []
+    assert restarted_executor.dispatches == []
+    assert restarted_executor.cancels == []
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "future_ordinal",
+        "orphan_attempt",
+        "foreign_event",
+        "duplicate_create_boundary",
+        "missing_create_command",
+        "missing_create_dispatch",
+    ],
+)
+def test_retry_read_authority_rejects_incomplete_full_lineage_before_readiness(
+    tmp_path: Path, corruption: str
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    database = store.database_path
+    if corruption == "foreign_event":
+        foreign = _create(tmp_path, identity_suffix="-lineage-foreign")
+        foreign_result = core.execute(
+            foreign.envelope,
+            foreign.authorization,
+            context=foreign.context,
+            now=NOW,
+        )
+        assert foreign_result.ok and foreign_result.result is not None
+        foreign_attempt = str(foreign_result.result["attempt_id"])
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA foreign_keys=OFF")
+        if corruption == "future_ordinal":
+            connection.execute(
+                "UPDATE attempts SET attempt_number=2 WHERE attempt_id=?",
+                (attempt_a,),
+            )
+        elif corruption == "orphan_attempt":
+            connection.execute(
+                """
+                INSERT INTO attempts(
+                    attempt_id, task_id, attempt_number, executor_id,
+                    executor_ref, state, outcome, source_seq, updated_at)
+                SELECT 'attempt-orphan', task_id, 2, executor_id, NULL,
+                    'accepted', NULL, -1, updated_at
+                FROM attempts WHERE attempt_id=?
+                """,
+                (attempt_a,),
+            )
+        elif corruption == "foreign_event":
+            connection.execute(
+                """
+                UPDATE task_events SET attempt_id=?
+                WHERE task_id=? AND seq=1
+                """,
+                (foreign_attempt, task_id),
+            )
+        elif corruption == "duplicate_create_boundary":
+            connection.execute(
+                """
+                UPDATE task_events SET event_type='task.accepted',
+                    state='accepted', outcome=NULL, producer='task_core',
+                    source_event_id=NULL, details_json=?
+                WHERE task_id=? AND seq=1
+                """,
+                (json.dumps({"command_id": "command-create"}), task_id),
+            )
+        elif corruption == "missing_create_command":
+            connection.execute("DELETE FROM commands WHERE command_id='command-create'")
+        else:
+            connection.execute(
+                """
+                DELETE FROM outbox WHERE task_id=? AND attempt_id=?
+                    AND kind='attempt.dispatch'
+                """,
+                (task_id, attempt_a),
+            )
+        connection.commit()
+    before = _database_dump(database)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+
+    rejected = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_STORE_CORRUPT"
+    assert executor.retry_readiness_calls == []
+    assert _database_dump(database) == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing_retry_boundary",
+        "duplicate_retry_boundary",
+        "missing_retry_command",
+        "wrong_retry_result",
+        "wrong_retry_dispatch_command",
+    ],
+)
+def test_next_retry_rejects_corrupt_prior_retry_ledger_with_zero_effects(
+    tmp_path: Path, corruption: str
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry_b, grant_b = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    result_b = core.execute(retry_b, grant_b, context=_context(tmp_path), now=NOW)
+    assert result_b.ok and result_b.result is not None
+    attempt_b = str(result_b.result["attempt_id"])
+    item_b = store.claim_outbox("prior-retry-ledger")
+    assert item_b is not None
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{attempt_b}",
+        observations=_observations(item_b, outcome=TerminalOutcome.CANCELLED),
+    )
+    with sqlite3.connect(store.database_path) as connection:
+        boundary = connection.execute(
+            """
+            SELECT seq, details_json FROM task_events
+            WHERE task_id=? AND attempt_id=? AND event_type='task.retry_accepted'
+            """,
+            (task_id, attempt_b),
+        ).fetchone()
+        assert boundary is not None
+        if corruption == "missing_retry_boundary":
+            connection.execute(
+                """
+                UPDATE task_events SET event_type='task.running'
+                WHERE task_id=? AND seq=?
+                """,
+                (task_id, boundary[0]),
+            )
+        elif corruption == "duplicate_retry_boundary":
+            connection.execute(
+                """
+                UPDATE task_events SET event_type='task.retry_accepted',
+                    state='accepted', outcome=NULL, producer='task_core',
+                    source_event_id=NULL, causation_id=?, details_json=?
+                WHERE task_id=? AND seq=?
+                """,
+                (
+                    retry_b.command_id,
+                    boundary[1],
+                    task_id,
+                    int(boundary[0]) + 1,
+                ),
+            )
+        elif corruption == "missing_retry_command":
+            connection.execute(
+                "DELETE FROM commands WHERE command_id=?",
+                (retry_b.command_id,),
+            )
+        elif corruption == "wrong_retry_result":
+            row = connection.execute(
+                "SELECT result_json FROM commands WHERE command_id=?",
+                (retry_b.command_id,),
+            ).fetchone()
+            assert row is not None
+            payload = json.loads(row[0])
+            payload["result"]["attempt_id"] = "attempt-foreign-result"
+            connection.execute(
+                "UPDATE commands SET result_json=? WHERE command_id=?",
+                (json.dumps(payload, sort_keys=True), retry_b.command_id),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE outbox SET command_id='command-create'
+                WHERE task_id=? AND attempt_id=? AND kind='attempt.dispatch'
+                """,
+                (task_id, attempt_b),
+            )
+        connection.commit()
+    before = _database_dump(store.database_path)
+    calls = list(executor.retry_readiness_calls)
+    retry_c, grant_c = _retry(task_id, attempt_b, TerminalOutcome.CANCELLED, 3)
+
+    rejected = core.execute(retry_c, grant_c, context=_context(tmp_path), now=NOW)
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == "TASK_STORE_CORRUPT"
+    assert executor.retry_readiness_calls == calls
+    assert _database_dump(store.database_path) == before
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    [
+        (TerminalOutcome.FAILED, "TASK_RETRY_OUTCOME_NOT_ELIGIBLE"),
+        (TerminalOutcome.INTERRUPTED, "TASK_RETRY_OUTCOME_NOT_ELIGIBLE"),
+    ],
+)
+def test_retry_ineligible_terminal_outcome_has_zero_effects(
+    tmp_path: Path, outcome: TerminalOutcome, reason: str
+) -> None:
+    store, executor, core, task_id, attempt_id = _terminal_task(
+        tmp_path, outcome=outcome
+    )
+    # The strict command contract permits only eligible outcomes; use an eligible
+    # asserted value and prove that Store authority still rejects actual truth.
+    retry, grant = _retry(task_id, attempt_id, TerminalOutcome.COMPLETED, 2)
+    before = store.counts()
+
+    result = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+
+    assert not result.ok and result.error is not None
+    assert result.error.reason == reason
+    assert store.counts() == before
+    assert executor.retry_readiness_calls == []
+
+
+def test_retry_requires_terminal_and_executor_readiness_with_zero_effects(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "retry-guards.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    retry, grant = _retry(task_id, attempt_id, TerminalOutcome.COMPLETED, 2)
+    before = store.counts()
+
+    nonterminal = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+
+    assert not nonterminal.ok and nonterminal.error is not None
+    assert nonterminal.error.reason == "TASK_RETRY_REQUIRES_TERMINAL"
+    assert store.counts() == before
+
+    item = store.claim_outbox("terminal-fixture")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item, outcome=TerminalOutcome.COMPLETED),
+    )
+    executor.retry_ready = False
+    before = store.counts()
+    pending = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert not pending.ok and pending.error is not None
+    assert pending.error.reason == "TASK_RETRY_EXECUTOR_CLEANUP_PENDING"
+    assert pending.error.message == "Executor predecessor cleanup is not retry-ready"
+    assert store.counts() == before
+    executor.retry_ready = True
+    executor.retry_readiness_error = FormalTaskViolation(
+        "PRIVATE_EXECUTOR_ERROR",
+        "credential-like private detail",
+        ErrorCode.INTERNAL,
+    )
+    failed_readiness = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert not failed_readiness.ok and failed_readiness.error is not None
+    assert failed_readiness.error.reason == "TASK_RETRY_EXECUTOR_CLEANUP_PENDING"
+    assert failed_readiness.error.message == "Executor retry-readiness is unavailable"
+    assert "private" not in failed_readiness.error.message
+    assert store.counts() == before
+
+    class GetterFailureExecutor(_Executor):
+        @property
+        def retry_readiness(self) -> object:
+            raise RuntimeError("private getter detail")
+
+    getter_failure = PersistentTaskCore(store, GetterFailureExecutor()).execute(
+        retry, grant, context=_context(tmp_path), now=NOW
+    )
+    assert not getter_failure.ok and getter_failure.error is not None
+    assert getter_failure.error.reason == "TASK_RETRY_EXECUTOR_CLEANUP_PENDING"
+    assert getter_failure.error.message == "Executor retry-readiness is unavailable"
+    assert "private" not in getter_failure.error.message
+    assert store.counts() == before
+
+
+@pytest.mark.parametrize(
+    ("unsettled_owner", "reason"),
+    [
+        ("outbox", "TASK_RETRY_OUTBOX_PENDING"),
+        ("reconciliation", "TASK_RETRY_RECONCILIATION_PENDING"),
+    ],
+)
+def test_retry_requires_settled_durable_ownership_with_zero_effects(
+    tmp_path: Path,
+    unsettled_owner: str,
+    reason: str,
+) -> None:
+    store, executor, core, task_id, attempt_id = _terminal_task(tmp_path)
+    retry, grant = _retry(task_id, attempt_id, TerminalOutcome.COMPLETED, 2)
+    with sqlite3.connect(store.database_path) as connection:
+        if unsettled_owner == "outbox":
+            connection.execute(
+                "UPDATE outbox SET state='pending' WHERE attempt_id=?",
+                (attempt_id,),
+            )
+        else:
+            connection.execute(
+                """
+                UPDATE tasks SET reconciliation_state='pending',
+                    reconciliation_reason='cleanup_pending' WHERE task_id=?
+                """,
+                (task_id,),
+            )
+        connection.commit()
+        before = tuple(connection.iterdump())
+
+    rejected = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+
+    assert not rejected.ok and rejected.error is not None
+    assert rejected.error.reason == reason
+    assert executor.retry_readiness_calls == []
+    with sqlite3.connect(store.database_path) as connection:
+        assert tuple(connection.iterdump()) == before
+
+
+def test_old_attempt_facts_are_explicitly_superseded_after_retry(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "stale-observation.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    item_a = store.claim_outbox("terminal-a")
+    assert item_a is not None
+    observations_a = _observations(item_a, outcome=TerminalOutcome.COMPLETED)
+    store.complete_outbox(
+        item_a,
+        executor_ref=f"legacy:{item_a.attempt_id}",
+        observations=observations_a,
+    )
+    retry, grant = _retry(
+        item_a.task_id, item_a.attempt_id, TerminalOutcome.COMPLETED, 2
+    )
+    applied = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert applied.ok
+    before = store.counts()
+
+    duplicate = store.apply_observations(observations_a)
+    assert duplicate.disposition is TaskMutationDisposition.SUPERSEDED
+    assert store.counts() == before
+    late = replace(
+        observations_a[-1],
+        source_event_id=f"late:{item_a.attempt_id}",
+        source_seq=3,
+    )
+    stale = store.apply_observations((late,))
+
+    assert stale.disposition is TaskMutationDisposition.SUPERSEDED
+    assert stale.attempt.attempt_id == item_a.attempt_id
+    assert stale.events == ()
+    assert store.counts() == before
+
+
+def test_old_attempt_outbox_and_reconciliation_callbacks_have_zero_effects(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "stale-callbacks.sqlite")
+    core = PersistentTaskCore(store, _Executor())
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    item_a = store.claim_outbox("terminal-a")
+    assert item_a is not None
+    store.complete_outbox(
+        item_a,
+        executor_ref=f"legacy:{item_a.attempt_id}",
+        observations=_observations(item_a, outcome=TerminalOutcome.COMPLETED),
+    )
+    retry, grant = _retry(
+        item_a.task_id, item_a.attempt_id, TerminalOutcome.COMPLETED, 2
+    )
+    retried = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert retried.ok and retried.result is not None
+    attempt_b = str(retried.result["attempt_id"])
+    before_counts = store.counts()
+    before_task = store.get_task(item_a.task_id, _scope())
+    before_history = store.events(item_a.task_id, _scope())
+    with sqlite3.connect(store.database_path) as connection:
+        before_outboxes = connection.execute(
+            """
+            SELECT outbox_id, state, delivery_count, claimed_by, claim_token
+            FROM outbox ORDER BY outbox_id
+            """
+        ).fetchall()
+
+    superseded_operations = (
+        lambda: store.mark_reconciliation_pending(
+            item_a.task_id, item_a.attempt_id, "late pending"
+        ),
+        lambda: store.mark_reconciliation_resolved(
+            item_a.task_id, item_a.attempt_id, "late resolved"
+        ),
+        lambda: store.resolve_lost_attempt(
+            item_a.task_id, item_a.attempt_id, "late lost"
+        ),
+    )
+    for operation in superseded_operations:
+        receipt = operation()
+        assert receipt.disposition is TaskMutationDisposition.SUPERSEDED
+        assert receipt.attempt.attempt_id == item_a.attempt_id
+        assert receipt.events == ()
+    with pytest.raises(FormalTaskViolation) as stale_release:
+        store.release_outbox(item_a, "late release")
+    assert stale_release.value.reason == "TASK_ATTEMPT_STALE"
+    assert stale_release.value.code is ErrorCode.STALE
+    with pytest.raises(FormalTaskViolation) as lost_claim:
+        store.complete_outbox(
+            item_a,
+            executor_ref=f"legacy:{item_a.attempt_id}",
+            observations=_observations(item_a),
+        )
+    assert lost_claim.value.reason == "OUTBOX_CLAIM_LOST"
+
+    assert store.counts() == before_counts
+    assert store.get_task(item_a.task_id, _scope()) == before_task
+    assert store.get_task(item_a.task_id, _scope()).attempt_id == attempt_b
+    assert store.events(item_a.task_id, _scope()) == before_history
+    assert store.get_attempt(item_a.attempt_id).outcome is TerminalOutcome.COMPLETED
+    with sqlite3.connect(store.database_path) as connection:
+        after_outboxes = connection.execute(
+            """
+            SELECT outbox_id, state, delivery_count, claimed_by, claim_token
+            FROM outbox ORDER BY outbox_id
+            """
+        ).fetchall()
+    assert after_outboxes == before_outboxes
+
+
+def test_cancel_after_retry_targets_only_current_attempt(tmp_path: Path) -> None:
+    store, _executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry, grant = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    retried = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert retried.ok and retried.result is not None
+    attempt_b = str(retried.result["attempt_id"])
+    before_a = store.get_attempt(attempt_a)
+
+    cancel = _cancel(task_id)
+    cancelled = core.execute(cancel.envelope, cancel.authorization, now=NOW)
+
+    assert cancelled.ok and cancelled.result is not None
+    assert cancelled.result["attempt_id"] == attempt_b
+    assert cancelled.result["state"] == FormalTaskState.TERMINAL.value
+    assert store.get_attempt(attempt_a) == before_a
+    assert store.get_attempt(attempt_a).outcome is TerminalOutcome.COMPLETED
+    assert store.get_attempt(attempt_b).outcome is TerminalOutcome.CANCELLED
+    current = store.get_task(task_id, _scope())
+    assert current.attempt_id == attempt_b
+    assert current.outcome is TerminalOutcome.CANCELLED
+    assert all(
+        event.attempt_id == attempt_b
+        for event in store.events(
+            task_id,
+            _scope(),
+            after_seq=-1,
+            attempt_id=attempt_b,
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "failpoint",
+    [
+        "retry.before_ids",
+        "retry.after_attempt",
+        "retry.after_event",
+        "retry.after_outbox",
+        "retry.after_command",
+        "retry.after_task",
+    ],
+)
+def test_retry_failpoints_leave_exact_predecessor_unchanged(
+    tmp_path: Path, failpoint: str
+) -> None:
+    enabled = False
+
+    def fail(name: str) -> None:
+        if enabled and name == failpoint:
+            raise RuntimeError(name)
+
+    store = SqliteTaskStore(tmp_path / f"{failpoint}.sqlite", failpoint=fail)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    item = store.claim_outbox("terminal-fixture")
+    assert item is not None
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=_observations(item, outcome=TerminalOutcome.COMPLETED),
+    )
+    retry, grant = _retry(item.task_id, item.attempt_id, TerminalOutcome.COMPLETED, 2)
+    before_counts = store.counts()
+    before_task = store.get_task(item.task_id, _scope())
+    before_events = store.events(item.task_id, _scope())
+    enabled = True
+
+    with pytest.raises(RuntimeError, match=failpoint):
+        core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+
+    assert store.counts() == before_counts
+    assert store.get_task(item.task_id, _scope()) == before_task
+    assert store.events(item.task_id, _scope()) == before_events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing_boundary",
+        "duplicate_boundary",
+        "boundary_details",
+        "boundary_state",
+        "boundary_not_segment_start",
+        "predecessor_outcome",
+        "predecessor_number",
+    ],
+)
+async def test_corrupt_retry_dispatch_lineage_fails_before_claim_or_executor(
+    tmp_path: Path, corruption: str
+) -> None:
+    database = tmp_path / f"retry-lineage-{corruption}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    attempt_a = str(created.result["attempt_id"])
+    dispatch_a = store.claim_outbox("terminal-a")
+    assert dispatch_a is not None
+    store.complete_outbox(
+        dispatch_a,
+        executor_ref=f"legacy:{attempt_a}",
+        observations=_observations(dispatch_a, outcome=TerminalOutcome.COMPLETED),
+    )
+    retry, grant = _retry(dispatch_a.task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    retried = core.execute(retry, grant, context=_context(tmp_path), now=NOW)
+    assert retried.ok and retried.result is not None
+    retry_outbox_id = str(retried.result["outbox_id"])
+    attempt_b = str(retried.result["attempt_id"])
+
+    with sqlite3.connect(database) as connection:
+        if corruption == "missing_boundary":
+            connection.execute(
+                "DELETE FROM task_events WHERE event_type='task.retry_accepted'"
+            )
+        elif corruption == "duplicate_boundary":
+            connection.execute(
+                """
+                INSERT INTO task_events(
+                    task_id, seq, event_id, attempt_id, scope_json, event_type,
+                    state, outcome, producer, source_event_id, causation_id,
+                    correlation_id, occurred_at, details_json
+                )
+                SELECT task_id, seq + 100, event_id || '-duplicate', attempt_id,
+                       scope_json, event_type, state, outcome, producer,
+                       source_event_id, causation_id, correlation_id,
+                       occurred_at, details_json
+                FROM task_events WHERE event_type='task.retry_accepted'
+                """
+            )
+        elif corruption == "boundary_details":
+            row = connection.execute(
+                """
+                SELECT details_json FROM task_events
+                WHERE event_type='task.retry_accepted'
+                """
+            ).fetchone()
+            assert row is not None
+            details = json.loads(row[0])
+            details["retry_of_attempt_id"] = "attempt-foreign"
+            connection.execute(
+                """
+                UPDATE task_events SET details_json=?
+                WHERE event_type='task.retry_accepted'
+                """,
+                (json.dumps(details, sort_keys=True),),
+            )
+        elif corruption == "boundary_state":
+            connection.execute(
+                """
+                UPDATE task_events SET state='running'
+                WHERE event_type='task.retry_accepted'
+                """
+            )
+        elif corruption == "boundary_not_segment_start":
+            connection.execute(
+                "UPDATE task_events SET attempt_id=? WHERE task_id=? AND seq=0",
+                (attempt_b, dispatch_a.task_id),
+            )
+        elif corruption == "predecessor_outcome":
+            connection.execute(
+                "UPDATE attempts SET outcome='cancelled' WHERE attempt_id=?",
+                (attempt_a,),
+            )
+        else:
+            connection.execute(
+                "UPDATE attempts SET attempt_number=3 WHERE attempt_id=?",
+                (attempt_a,),
+            )
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        await core.drain_outbox_once(worker_id="retry-worker-corrupt")
+
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
+    assert store.counts() == before
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            """
+            SELECT state, delivery_count, claimed_by, claimed_at, claim_token
+            FROM outbox WHERE outbox_id=?
+            """,
+            (retry_outbox_id,),
+        ).fetchone()
+    assert outbox == ("pending", 0, None, None, None)
+    assert store.get_task(dispatch_a.task_id, _scope()).attempt_id == attempt_b
+    assert executor.dispatches == []
+    assert executor.cancels == []
+
+
 class _Executor:
     executor_id = FORMAL_PROJECT_EXECUTOR_ID
 
@@ -244,6 +1928,25 @@ class _Executor:
         self.cancels: list[str] = []
         self.fail_dispatches = 0
         self.status_resolution: ExecutorResolution | None = None
+        self.retry_ready = True
+        self.retry_readiness_error: Exception | None = None
+        self.retry_readiness_calls: list[str] = []
+
+    def retry_readiness(
+        self, task: PersistentTaskRecord, attempt: PersistentAttemptRecord
+    ) -> ExecutorRetryReadiness:
+        self.retry_readiness_calls.append(attempt.attempt_id)
+        if self.retry_readiness_error is not None:
+            raise self.retry_readiness_error
+        assert attempt.outcome is not None
+        return ExecutorRetryReadiness(
+            task_id=task.task_id,
+            previous_attempt_id=attempt.attempt_id,
+            previous_outcome=attempt.outcome,
+            previous_attempt_number=attempt.attempt_number,
+            ready=self.retry_ready,
+            reason=("cleanup_complete" if self.retry_ready else "cleanup_pending"),
+        )
 
     async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self.dispatches.append(item.attempt_id)
@@ -1818,7 +3521,7 @@ def test_event_authority_snapshot_rejects_a_corrupt_head_without_partial_prefix(
 
     with pytest.raises(FormalTaskViolation) as raised:
         store.event_authority_snapshot(task_id, _scope(), max_events=64)
-    assert raised.value.reason == "TASK_EVENT_AUTHORITY_SNAPSHOT_BINDING_MISMATCH"
+    assert raised.value.reason == "TASK_STORE_CORRUPT"
 
 
 @pytest.mark.asyncio
@@ -1922,6 +3625,175 @@ async def test_restart_reconciles_only_the_original_attempt(
         assert reconciliation_events == []
     await restarted.reconcile()
     assert len(reconciliation_events) == (2 if terminal else 0)
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_publishes_frozen_predecessor_receipt_after_retry(
+    tmp_path: Path,
+) -> None:
+    class TerminalStatusExecutor(_Executor):
+        async def status(
+            self,
+            task: PersistentTaskRecord,
+            attempt: PersistentAttemptRecord,
+        ) -> ExecutorObservation:
+            return ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=self.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task.task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=f"status-terminal:{attempt.attempt_id}",
+                source_seq=attempt.source_seq + 1,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.COMPLETED,
+                occurred_at=utc_now(),
+                raw_status="success",
+            )
+
+    class RetryBeforeReturnStore(SqliteTaskStore):
+        after_apply: object | None = None
+
+        def apply_observations(self, observations):  # type: ignore[no-untyped-def]
+            receipt = super().apply_observations(observations)
+            callback = self.after_apply
+            if callback is not None:
+                self.after_apply = None
+                callback()  # type: ignore[operator]
+            return receipt
+
+    seed_store, _seed_executor, _seed_core, task_id, attempt_a = _terminal_task(
+        tmp_path
+    )
+    store = RetryBeforeReturnStore(seed_store.database_path)
+    executor = TerminalStatusExecutor()
+    core = PersistentTaskCore(store, executor)
+    retry_b, grant_b = _retry(task_id, attempt_a, TerminalOutcome.COMPLETED, 2)
+    result_b = core.execute(
+        retry_b,
+        grant_b,
+        context=replace(_context(tmp_path), revision_value="barrier-b"),
+        now=NOW,
+    )
+    assert result_b.ok and result_b.result is not None
+    attempt_b = str(result_b.result["attempt_id"])
+    item_b = store.claim_outbox("barrier-b")
+    assert item_b is not None
+    store.complete_outbox(
+        item_b,
+        executor_ref=f"legacy:{attempt_b}",
+        observations=_observations(item_b),
+    )
+    retry_c, grant_c = _retry(task_id, attempt_b, TerminalOutcome.COMPLETED, 3)
+
+    def create_c() -> None:
+        result_c = core.execute(
+            retry_c,
+            grant_c,
+            context=replace(_context(tmp_path), revision_value="barrier-c"),
+            now=NOW,
+        )
+        assert result_c.ok and result_c.result is not None
+
+    store.after_apply = create_c
+    published: list[tuple[PersistentTaskEvent, PersistentAttemptRecord]] = []
+
+    async def sink(
+        event: PersistentTaskEvent, attempt: PersistentAttemptRecord
+    ) -> None:
+        published.append((event, attempt))
+
+    core._reconciliation_event_sink = sink
+
+    summary = await core.reconcile()
+
+    assert summary["known"] == 1
+    assert [event.event_type for event, _ in published] == [
+        "attempt.terminal",
+        "task.terminal",
+    ]
+    assert all(
+        event.attempt_id == attempt_b and attempt.attempt_id == attempt_b
+        for event, attempt in published
+    )
+    assert all(event.event_type != "task.retry_accepted" for event, _ in published)
+    assert store.get_task(task_id, _scope()).attempt_id != attempt_b
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_counts_superseded_status_race_and_continues(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "reconcile-status-race.sqlite"
+    store = SqliteTaskStore(database)
+    seed_core = PersistentTaskCore(store, _Executor())
+    for suffix in ("-race-one", "-race-two"):
+        invocation = _create(tmp_path, identity_suffix=suffix)
+        created = seed_core.execute(
+            invocation.envelope,
+            invocation.authorization,
+            context=invocation.context,
+            now=NOW,
+        )
+        assert created.ok
+    await seed_core.drain_outbox()
+
+    class AdvancingStatusExecutor(_Executor):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core: PersistentTaskCore | None = None
+            self.advanced = False
+
+        async def status(
+            self,
+            task: PersistentTaskRecord,
+            attempt: PersistentAttemptRecord,
+        ) -> ExecutorDeliveryResult | ExecutorObservation:
+            if self.advanced:
+                return ExecutorDeliveryResult(attempt.executor_ref or "", ())
+            self.advanced = True
+            terminal = ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=self.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task.task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id=f"racing-terminal:{attempt.attempt_id}",
+                source_seq=attempt.source_seq + 1,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.COMPLETED,
+                occurred_at=utc_now(),
+                raw_status="success",
+            )
+            external = SqliteTaskStore(database)
+            external.apply_observations((terminal,))
+            retry, grant = _retry(
+                task.task_id,
+                attempt.attempt_id,
+                TerminalOutcome.COMPLETED,
+                2,
+                command_id=f"command-racing-retry:{attempt.attempt_id}",
+                correlation_id=task.correlation_id,
+            )
+            assert self.core is not None
+            retried = self.core.execute(
+                retry,
+                grant,
+                context=replace(_context(tmp_path), revision_value="race-successor"),
+                now=NOW,
+            )
+            assert retried.ok
+            return terminal
+
+    executor = AdvancingStatusExecutor()
+    core = PersistentTaskCore(store, executor)
+    executor.core = core
+
+    summary = await core.reconcile()
+
+    assert summary["superseded"] == 1
+    assert summary["known"] == 1
+    assert executor.advanced is True
 
 
 @pytest.mark.asyncio

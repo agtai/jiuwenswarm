@@ -41,6 +41,7 @@ from .formal_task_models import (
 _EVENTS_CAPABILITY = frozenset({"task.events"})
 _TASK_LIFECYCLE_EVENT_STATES = {
     "task.accepted": FormalTaskState.ACCEPTED,
+    "task.retry_accepted": FormalTaskState.ACCEPTED,
     "task.running": FormalTaskState.RUNNING,
     "task.blocked": FormalTaskState.BLOCKED,
     "task.decision_required": FormalTaskState.DECISION_REQUIRED,
@@ -99,6 +100,7 @@ _INTERNAL_ATTEMPT_TERMINAL_PRODUCERS = frozenset(
 )
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
+    "task.retry_accepted": frozenset({"task_core"}),
     "task.running": frozenset({"task_core"}),
     "task.blocked": frozenset({"task_core"}),
     "task.decision_required": frozenset({"task_core"}),
@@ -120,7 +122,12 @@ class TaskEventSource(Protocol):
     def get_attempt(self, attempt_id: str) -> PersistentAttemptRecord: ...
 
     def events(
-        self, task_id: str, scope: ScopeRef, *, after_seq: int = -1
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        after_seq: int = -1,
+        attempt_id: str | None = None,
     ) -> tuple[PersistentTaskEvent, ...]: ...
 
 
@@ -164,6 +171,9 @@ class TaskEventSubscriptionSnapshot:
     failure_reason: str | None
     failure_code: ErrorCode | None
     discarded_events: int
+    segment_start_seq: int | None
+    attempt_id: str | None
+    attempt_number: int | None
 
 
 def _violation(reason: str, message: str, code: ErrorCode) -> FormalTaskViolation:
@@ -267,6 +277,9 @@ class TaskEventSubscription:
         self._start_head_seq: int | None = None
         self._last_seq: int | None = None
         self._attempt_id: str | None = None
+        self._previous_attempt_id: str | None = None
+        self._attempt_number: int | None = None
+        self._segment_start_seq: int | None = None
         self._attempt_executor_id: str | None = None
         self._correlation_id: str | None = None
         self._task_state: FormalTaskState | None = None
@@ -389,17 +402,55 @@ class TaskEventSubscription:
             )
 
         genesis = events[0]
+        expected_boundary_type = (
+            "task.accepted" if attempt.attempt_number == 1 else "task.retry_accepted"
+        )
+        expected_details = (
+            {"command_id": genesis.causation_id}
+            if attempt.attempt_number == 1
+            else None
+        )
         if (
-            genesis.seq != 0
-            or genesis.event_type != "task.accepted"
+            genesis.seq != snapshot.start_seq
+            or genesis.event_type != expected_boundary_type
             or genesis.state != FormalTaskState.ACCEPTED.value
             or genesis.outcome is not None
             or genesis.producer != "task_core"
             or genesis.source_event_id is not None
+            or genesis.attempt_id != attempt.attempt_id
+            or (
+                attempt.attempt_number == 1
+                and (
+                    snapshot.start_seq != 0 or dict(genesis.details) != expected_details
+                )
+            )
+            or (
+                attempt.attempt_number > 1
+                and (
+                    snapshot.start_seq <= 0
+                    or set(genesis.details)
+                    != {
+                        "command_id",
+                        "retry_of_attempt_id",
+                        "previous_outcome",
+                        "attempt_number",
+                    }
+                    or genesis.details.get("attempt_number") != attempt.attempt_number
+                    or genesis.details.get("command_id") != genesis.causation_id
+                    or type(genesis.details.get("retry_of_attempt_id")) is not str
+                    or not str(genesis.details.get("retry_of_attempt_id")).strip()
+                    or genesis.details.get("retry_of_attempt_id") == attempt.attempt_id
+                    or genesis.details.get("previous_outcome")
+                    not in {
+                        TerminalOutcome.CANCELLED.value,
+                        TerminalOutcome.COMPLETED.value,
+                    }
+                )
+            )
         ):
             raise _violation(
-                "TASK_EVENT_AUTHORITY_GENESIS_INVALID",
-                "TaskEvent authority prefix lacks the canonical accepted genesis",
+                "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_INVALID",
+                "TaskEvent authority segment lacks its canonical attempt boundary",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         try:
@@ -423,8 +474,15 @@ class TaskEventSubscription:
             self._detach = asyncio.Event()
             self._state = TaskEventSubscriptionState.ACTIVE
             self._start_head_seq = snapshot.cursor
-            self._last_seq = 0
+            self._last_seq = snapshot.start_seq
             self._attempt_id = task.attempt_id
+            self._previous_attempt_id = (
+                None
+                if attempt.attempt_number == 1
+                else str(genesis.details["retry_of_attempt_id"])
+            )
+            self._attempt_number = attempt.attempt_number
+            self._segment_start_seq = snapshot.start_seq
             self._attempt_executor_id = task.spec.executor_id
             self._correlation_id = task.correlation_id
             self._task_state = FormalTaskState.ACCEPTED
@@ -432,7 +490,7 @@ class TaskEventSubscription:
             self._attempt_state = FormalAttemptState.ACCEPTED
             self._attempt_outcome = None
             self._seen_event_ids = {genesis.event_id: genesis_bytes}
-            self._seen_sequences = {0: genesis_bytes}
+            self._seen_sequences = {snapshot.start_seq: genesis_bytes}
             self._queue.put_nowait(genesis)
             if len(events) > 1 and not self._accept_batch(events[1:]):
                 assert self._failure is not None
@@ -551,6 +609,9 @@ class TaskEventSubscription:
         self._start_head_seq = task.event_head
         self._last_seq = task.event_head
         self._attempt_id = task.attempt_id
+        self._previous_attempt_id = None
+        self._attempt_number = attempt.attempt_number
+        self._segment_start_seq = None
         self._attempt_executor_id = task.spec.executor_id
         self._correlation_id = task.correlation_id
         self._task_state = task.state
@@ -714,6 +775,9 @@ class TaskEventSubscription:
             failure_reason=None if failure is None else failure.reason,
             failure_code=None if failure is None else failure.code,
             discarded_events=self._discarded_events,
+            segment_start_seq=self._segment_start_seq,
+            attempt_id=self._attempt_id,
+            attempt_number=self._attempt_number,
         )
 
     def _validate_start_snapshot(self, task: PersistentTaskRecord) -> None:
@@ -882,6 +946,7 @@ class TaskEventSubscription:
                         self._task_id,
                         self._scope,
                         after_seq=self._last_seq,
+                        attempt_id=self._attempt_id,
                     )
                     self._source_reads += 1
                 except asyncio.CancelledError:
@@ -1016,10 +1081,19 @@ class TaskEventSubscription:
                         ErrorCode.PROTOCOL_VIOLATION,
                     )
                 if event.attempt_id != self._attempt_id:
+                    stale = event.attempt_id == self._previous_attempt_id
                     raise _violation(
-                        "TASK_EVENT_ATTEMPT_MISMATCH",
-                        "TaskEvent does not belong to the subscribed task attempt",
-                        ErrorCode.PROTOCOL_VIOLATION,
+                        (
+                            "TASK_EVENT_ATTEMPT_STALE"
+                            if stale
+                            else "TASK_EVENT_ATTEMPT_MISMATCH"
+                        ),
+                        (
+                            "TaskEvent belongs to the predecessor attempt epoch"
+                            if stale
+                            else "TaskEvent does not belong to the subscribed task attempt"
+                        ),
+                        ErrorCode.STALE if stale else ErrorCode.PROTOCOL_VIOLATION,
                     )
                 if event.correlation_id != self._correlation_id:
                     raise _violation(

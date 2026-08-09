@@ -37,6 +37,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     IdentityRef,
     ProducerRef,
     ScopeRef,
+    TerminalOutcome,
     WorkProgressEventV2,
     WorkSourceAuthority,
     canonical_json_bytes,
@@ -55,6 +56,7 @@ from .progress_notification_arbiter import (
     NotificationDisposition,
     ProgressNotificationArbiter,
     ProgressNotificationBinding,
+    _mint_verified_attempt_epoch_baseline,
     _mint_verified_no_projection_advance,
 )
 from .task_event_subscription import TaskEventSubscription
@@ -63,6 +65,7 @@ from .task_store import SqliteTaskStore
 _EVENTS_CAPABILITY = frozenset({"task.events"})
 _PROJECTABLE_EVENTS = {
     "task.accepted": "accepted",
+    "task.retry_accepted": "accepted",
     "task.running": "running",
     "task.blocked": "blocked",
     "task.decision_required": "decision_required",
@@ -78,6 +81,7 @@ _NO_PROJECTION_EVENTS = frozenset(
 )
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
+    "task.retry_accepted": frozenset({"task_core"}),
     "task.running": frozenset({"task_core"}),
     "task.blocked": frozenset({"task_core"}),
     "task.decision_required": frozenset({"task_core"}),
@@ -120,6 +124,7 @@ class TaskProgressReturnReason(StrEnum):
     AUTHORIZATION_REJECTED = "TASK_PROGRESS_AUTHORIZATION_REJECTED"
     INVALID_BINDING = "TASK_PROGRESS_INVALID_BINDING"
     STALE_GENERATION = "TASK_PROGRESS_STALE_GENERATION"
+    STALE_ATTEMPT = "TASK_PROGRESS_STALE_ATTEMPT"
     AUTHORITY_HANDOFF_UNAVAILABLE = "TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE"
     HANDOFF_REJECTED = "TASK_PROGRESS_HANDOFF_REJECTED"
     SOURCE_EXHAUSTED = "TASK_PROGRESS_SOURCE_EXHAUSTED"
@@ -159,6 +164,7 @@ class TaskProgressSourceDecision(StrEnum):
     BINDING_REJECTED = "TASK_PROGRESS_SOURCE_BINDING_REJECTED"
     INVALID_EVENT = "TASK_PROGRESS_SOURCE_INVALID_EVENT"
     STALE_GENERATION = "TASK_PROGRESS_SOURCE_STALE_GENERATION"
+    STALE_ATTEMPT = "TASK_PROGRESS_SOURCE_STALE_ATTEMPT"
     NOT_PROJECTABLE = "TASK_PROGRESS_SOURCE_NOT_PROJECTABLE"
 
 
@@ -482,6 +488,28 @@ def project_task_progress_event(
         event.state != expected_state
         or event.producer not in _TASK_EVENT_PRODUCERS[event.event_type]
         or (event.state == "terminal") != (event.outcome is not None)
+        or (
+            event.event_type == "task.retry_accepted"
+            and (
+                set(event.details)
+                != {
+                    "command_id",
+                    "retry_of_attempt_id",
+                    "previous_outcome",
+                    "attempt_number",
+                }
+                or event.details.get("command_id") != event.causation_id
+                or type(event.details.get("retry_of_attempt_id")) is not str
+                or not str(event.details.get("retry_of_attempt_id")).strip()
+                or event.details.get("retry_of_attempt_id") == event.attempt_id
+                or event.details.get("attempt_number") not in {2, 3}
+                or event.details.get("previous_outcome")
+                not in {
+                    TerminalOutcome.CANCELLED.value,
+                    TerminalOutcome.COMPLETED.value,
+                }
+            )
+        )
     ):
         raise _violation(
             "INVALID_TASK_PROGRESS_SOURCE",
@@ -505,6 +533,15 @@ def project_task_progress_event(
     source_payload: dict[str, object] = {"state": event.state}
     if event.state == "terminal":
         source_payload["outcome"] = event.outcome
+    elif event.event_type == "task.retry_accepted":
+        source_payload.update(
+            {
+                "command_id": event.details.get("command_id"),
+                "retry_of_attempt_id": event.details.get("retry_of_attempt_id"),
+                "previous_outcome": event.details.get("previous_outcome"),
+                "attempt_number": event.details.get("attempt_number"),
+            }
+        )
     try:
         source_event = EventEnvelope.from_dict(
             {
@@ -702,6 +739,8 @@ class TaskProgressReturnBridge:
         self._seen_sequences: dict[int, bytes] = {}
         self._deferred_voice: dict[str, TaskProgressProjection] = {}
         self._next_seq: int | None = None
+        self._authority_attempt_id: str | None = None
+        self._authority_attempt_number: int | None = None
         self._last_task_event_id: str | None = None
         self._last_task_event_seq: int | None = None
         self._last_progress_event_id: str | None = None
@@ -799,6 +838,23 @@ class TaskProgressReturnBridge:
                 )
                 await self._close_source(binding)
                 return self._inactive_activation()
+            if (
+                binding.origin_kind is TaskProgressOriginKind.VOICE
+                and self._uses_exact_authority_source()
+            ):
+                authority_snapshot = self._subscription.snapshot()
+                if (
+                    authority_snapshot.segment_start_seq is None
+                    or authority_snapshot.attempt_id is None
+                    or authority_snapshot.attempt_number is None
+                ):
+                    self._state = TaskProgressReturnState.FAILED
+                    self._reason = TaskProgressReturnReason.HANDOFF_REJECTED
+                    await self._close_source(binding)
+                    return self._inactive_activation()
+                self._next_seq = authority_snapshot.segment_start_seq
+                self._authority_attempt_id = authority_snapshot.attempt_id
+                self._authority_attempt_number = authority_snapshot.attempt_number
             if not self._authorize(binding):
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.AUTHORIZATION_REJECTED
@@ -1067,6 +1123,23 @@ class TaskProgressReturnBridge:
             self._last_source_decision = TaskProgressSourceDecision.BINDING_REJECTED
             self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
             return False
+        if (
+            binding.origin_kind is TaskProgressOriginKind.VOICE
+            and self._uses_exact_authority_source()
+            and event.attempt_id != self._authority_attempt_id
+        ):
+            self._last_source_decision = TaskProgressSourceDecision.STALE_ATTEMPT
+            self._reject(TaskProgressReturnReason.STALE_ATTEMPT)
+            return False
+        if (
+            binding.origin_kind is TaskProgressOriginKind.VOICE
+            and self._uses_exact_authority_source()
+            and event.event_type == "task.retry_accepted"
+            and event.details.get("attempt_number") != self._authority_attempt_number
+        ):
+            self._last_source_decision = TaskProgressSourceDecision.INVALID_EVENT
+            self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
+            return False
         try:
             fingerprint = canonical_json_bytes(event.to_dict())
         except (ContractViolation, TypeError, ValueError):
@@ -1250,6 +1323,12 @@ class TaskProgressReturnBridge:
                 self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
                 return False
             try:
+                if projection.task_event.event_type == "task.retry_accepted":
+                    baseline = _mint_verified_attempt_epoch_baseline(
+                        projection.task_event,
+                        projection.notification_binding,
+                    )
+                    self._arbiter._begin_attempt_epoch(baseline)
                 foreground = self._foreground()
                 decision = self._arbiter.offer(
                     projection.source_event,

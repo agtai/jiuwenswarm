@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import ClassVar, Protocol
 
@@ -15,13 +16,16 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     QueryEnvelope,
     ResultEnvelope,
+    ScopeRef,
     WorkProgressEventV2,
 )
 
 from .formal_task_models import (
+    AppliedTaskRetryReplay,
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
+    ExecutorRetryReadiness,
     FormalTaskSpec,
     FormalTaskViolation,
     OutboxKind,
@@ -31,6 +35,10 @@ from .formal_task_models import (
     PersistentTaskRecord,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskMutationDisposition,
+    TaskMutationResult,
+    TaskRetryAuthoritySnapshot,
+    TaskRetryProductRequestFingerprint,
     require_exact_payload,
     utc_now,
 )
@@ -39,6 +47,7 @@ from .task_store import SqliteTaskStore
 _PROJECTABLE_TASK_EVENTS = frozenset(
     {
         "task.accepted",
+        "task.retry_accepted",
         "task.running",
         "task.blocked",
         "task.decision_required",
@@ -61,6 +70,11 @@ class FormalExecutor(Protocol):
         self, task: PersistentTaskRecord, attempt: PersistentAttemptRecord
     ) -> ExecutorDeliveryResult | ExecutorObservation:
         """Resolve an original attempt after dispatch or process restart."""
+
+    def retry_readiness(
+        self, task: PersistentTaskRecord, attempt: PersistentAttemptRecord
+    ) -> ExecutorRetryReadiness:
+        """Prove exact predecessor cleanup before a bounded retry is admitted."""
 
 
 def _contract_error(error: FormalTaskViolation) -> ContractViolation:
@@ -168,11 +182,36 @@ class PersistentTaskCore:
         self.executor = executor
         self._reconciliation_event_sink = reconciliation_event_sink
 
+    def read_current_retry_authority(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> TaskRetryAuthoritySnapshot:
+        """Expose Store-derived retry lineage without accepting client payload."""
+
+        return self.store.read_current_retry_authority(scope=scope, task_id=task_id)
+
+    def read_applied_retry_replay(
+        self,
+        *,
+        scope: ScopeRef,
+        command_id: str,
+        task_id: str,
+        product_request: TaskRetryProductRequestFingerprint,
+    ) -> AppliedTaskRetryReplay | None:
+        """Expose durable replay before current admission/readiness evaluation."""
+
+        return self.store.read_applied_retry_replay(
+            scope=scope,
+            command_id=command_id,
+            task_id=task_id,
+            product_request=product_request,
+        )
+
     async def _publish_reconciliation_events(
         self,
-        task: PersistentTaskRecord,
-        *,
-        after_seq: int,
+        receipt: TaskMutationResult,
     ) -> None:
         """Publish only durable events appended by an actual reconciliation.
 
@@ -183,11 +222,9 @@ class PersistentTaskCore:
         sink = self._reconciliation_event_sink
         if sink is None:
             return
-        attempt = self.store.get_attempt(task.attempt_id)
-        events = self.store.events(task.task_id, task.scope, after_seq=after_seq)
-        for event in events:
+        for event in receipt.events:
             try:
-                await sink(event, attempt)
+                await sink(event, receipt.attempt)
             except Exception:  # noqa: BLE001 -- evidence never owns Task truth
                 continue
 
@@ -207,10 +244,14 @@ class PersistentTaskCore:
                     "formal task command requires trusted authorization",
                     ErrorCode.UNAUTHENTICATED,
                 )
-            if command.command_type not in {"task.create", "task.cancel"}:
+            if command.command_type not in {
+                "task.create",
+                "task.cancel",
+                "task.retry",
+            }:
                 raise FormalTaskViolation(
                     "UNSUPPORTED_FORMAL_TASK_COMMAND",
-                    "formal P3-alpha supports only task.create and task.cancel",
+                    "formal Task Core does not support this command",
                     ErrorCode.UNSUPPORTED,
                 )
             if command.target_ref.kind != "task":
@@ -254,6 +295,37 @@ class PersistentTaskCore:
                     command.payload, frozenset(), field_name="task.cancel payload"
                 )
                 return self.store.cancel(command, observed_at=observed_at)
+            if command.command_type == "task.retry":
+                authority_or_replay = self.store.read_retry_authority(command)
+                if isinstance(authority_or_replay, ResultEnvelope):
+                    return authority_or_replay
+                authority = authority_or_replay
+                if context is None:
+                    raise FormalTaskViolation(
+                        "FORMAL_TASK_CONTEXT_REQUIRED",
+                        "task.retry requires a server-resolved execution context",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                spec = replace(authority.task.spec, context=context)
+                self._validate_retry_context(authority, context, observed_at)
+                try:
+                    readiness_method = getattr(self.executor, "retry_readiness", None)
+                    if not callable(readiness_method):
+                        raise AttributeError("retry_readiness is unavailable")
+                    readiness = readiness_method(authority.task, authority.attempt)
+                except Exception as error:  # noqa: BLE001 -- fail closed at seam
+                    raise FormalTaskViolation(
+                        "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+                        "Executor retry-readiness is unavailable",
+                        ErrorCode.UNAVAILABLE,
+                    ) from error
+                self._require_retry_readiness(authority, readiness)
+                return self.store.retry(
+                    command,
+                    spec,
+                    authority,
+                    observed_at=observed_at,
+                )
             if context is None:
                 raise FormalTaskViolation(
                     "FORMAL_TASK_CONTEXT_REQUIRED",
@@ -311,6 +383,66 @@ class PersistentTaskCore:
             return self.store.create(command, spec, observed_at=observed_at)
         except FormalTaskViolation as error:
             return _failure(command, error, observed_at=observed_at)
+
+    @staticmethod
+    def _validate_retry_context(
+        authority: TaskRetryAuthoritySnapshot,
+        context: ResolvedTaskContext,
+        observed_at: str,
+    ) -> None:
+        context.require_usable(
+            scope=authority.task.scope,
+            required_permissions=frozenset({"task.execute", "project.write"}),
+            destructive=True,
+            now=observed_at,
+        )
+        prior = authority.task.spec.context
+        if (
+            context.source,
+            context.stable_id,
+            context.uri,
+            context.scope,
+        ) != (
+            prior.source,
+            prior.stable_id,
+            prior.uri,
+            prior.scope,
+        ):
+            raise FormalTaskViolation(
+                "TASK_RETRY_CONTEXT_IDENTITY_MISMATCH",
+                "retry context must preserve the task's stable project identity",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    @staticmethod
+    def _require_retry_readiness(
+        authority: TaskRetryAuthoritySnapshot,
+        readiness: object,
+    ) -> None:
+        if type(readiness) is not ExecutorRetryReadiness:
+            raise FormalTaskViolation(
+                "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+                "Executor retry-readiness response is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        attempt = authority.attempt
+        if (
+            readiness.task_id != authority.task.task_id
+            or readiness.previous_attempt_id != attempt.attempt_id
+            or readiness.previous_outcome != attempt.outcome
+            or readiness.previous_attempt_number != attempt.attempt_number
+        ):
+            raise FormalTaskViolation(
+                "TASK_RETRY_EXECUTOR_READINESS_MISMATCH",
+                "Executor retry-readiness evidence binds another attempt",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if not readiness.ready:
+            raise FormalTaskViolation(
+                "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+                "Executor predecessor cleanup is not retry-ready",
+                ErrorCode.UNAVAILABLE,
+            )
 
     def query(
         self,
@@ -486,46 +618,74 @@ class PersistentTaskCore:
             if not changed:
                 break
             delivered += 1
-        known = unavailable = lost = 0
+        known = unavailable = lost = superseded = 0
         for task, attempt in self.store.nonterminal_attempts():
             if attempt.executor_ref is None:
-                self.store.mark_reconciliation_pending(
-                    task.task_id, "ATTEMPT_NOT_YET_BOUND"
+                receipt = self.store.mark_reconciliation_pending(
+                    task.task_id, attempt.attempt_id, "ATTEMPT_NOT_YET_BOUND"
                 )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
                 unavailable += 1
                 continue
-            self.store.mark_reconciliation_pending(
-                task.task_id, "EXECUTOR_STATUS_QUERY", in_progress=True
+            receipt = self.store.mark_reconciliation_pending(
+                task.task_id,
+                attempt.attempt_id,
+                "EXECUTOR_STATUS_QUERY",
+                in_progress=True,
             )
+            if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                superseded += 1
+                continue
             try:
                 resolution = await self.executor.status(task, attempt)
             except Exception as error:  # noqa: BLE001 -- isolate one Executor attempt
-                self.store.mark_reconciliation_pending(
+                receipt = self.store.mark_reconciliation_pending(
                     task.task_id,
+                    attempt.attempt_id,
                     f"EXECUTOR_STATUS_ERROR: {error}"[:1000],
                 )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
                 unavailable += 1
                 continue
             if isinstance(resolution, ExecutorDeliveryResult):
                 if resolution.executor_ref != attempt.executor_ref:
-                    self.store.mark_reconciliation_pending(
-                        task.task_id, "EXECUTOR_STATUS_BINDING_MISMATCH"
+                    receipt = self.store.mark_reconciliation_pending(
+                        task.task_id,
+                        attempt.attempt_id,
+                        "EXECUTOR_STATUS_BINDING_MISMATCH",
                     )
+                    if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                        superseded += 1
+                        continue
                     unavailable += 1
                     continue
                 if not resolution.observations:
-                    self.store.mark_reconciliation_resolved(
-                        task.task_id, "EXECUTOR_STATE_UNCHANGED"
+                    receipt = self.store.mark_reconciliation_resolved(
+                        task.task_id,
+                        attempt.attempt_id,
+                        "EXECUTOR_STATE_UNCHANGED",
                     )
+                    if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                        superseded += 1
+                        continue
                     known += 1
                     continue
                 observations = resolution.observations
             elif isinstance(resolution, ExecutorObservation):
                 observations = (resolution,)
             else:
-                self.store.mark_reconciliation_pending(
-                    task.task_id, "EXECUTOR_STATUS_PROTOCOL_VIOLATION"
+                receipt = self.store.mark_reconciliation_pending(
+                    task.task_id,
+                    attempt.attempt_id,
+                    "EXECUTOR_STATUS_PROTOCOL_VIOLATION",
                 )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
                 unavailable += 1
                 continue
             final = observations[-1]
@@ -535,39 +695,57 @@ class PersistentTaskCore:
                 or final.executor_id != attempt.executor_id
                 or final.executor_ref != attempt.executor_ref
             ):
-                self.store.mark_reconciliation_pending(
-                    task.task_id, "EXECUTOR_STATUS_BINDING_MISMATCH"
+                receipt = self.store.mark_reconciliation_pending(
+                    task.task_id,
+                    attempt.attempt_id,
+                    "EXECUTOR_STATUS_BINDING_MISMATCH",
                 )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
                 unavailable += 1
                 continue
             if final.resolution is ExecutorResolution.KNOWN:
                 try:
-                    self.store.apply_observations(observations)
+                    receipt = self.store.apply_observations(observations)
                 except FormalTaskViolation as error:
-                    self.store.mark_reconciliation_pending(
+                    if error.code is ErrorCode.INTERNAL:
+                        raise
+                    receipt = self.store.mark_reconciliation_pending(
                         task.task_id,
+                        attempt.attempt_id,
                         f"EXECUTOR_EVIDENCE_REJECTED: {error.reason}",
                     )
+                    if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                        superseded += 1
+                        continue
                     unavailable += 1
                 else:
+                    if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                        superseded += 1
+                        continue
                     known += 1
-                    await self._publish_reconciliation_events(
-                        task, after_seq=task.event_head
-                    )
+                    await self._publish_reconciliation_events(receipt)
             elif final.resolution is ExecutorResolution.LOST:
-                self.store.resolve_lost_attempt(
+                receipt = self.store.resolve_lost_attempt(
                     task.task_id,
                     attempt.attempt_id,
                     final.error or "EXECUTOR_ATTEMPT_LOST",
                 )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
                 lost += 1
-                await self._publish_reconciliation_events(
-                    task, after_seq=task.event_head
-                )
+                await self._publish_reconciliation_events(receipt)
             else:
-                self.store.mark_reconciliation_pending(
-                    task.task_id, final.error or "EXECUTOR_STATUS_UNAVAILABLE"
+                receipt = self.store.mark_reconciliation_pending(
+                    task.task_id,
+                    attempt.attempt_id,
+                    final.error or "EXECUTOR_STATUS_UNAVAILABLE",
                 )
+                if receipt.disposition is TaskMutationDisposition.SUPERSEDED:
+                    superseded += 1
+                    continue
                 unavailable += 1
         return {
             "reset_claims": reset_claims,
@@ -576,6 +754,7 @@ class PersistentTaskCore:
             "known": known,
             "unavailable": unavailable,
             "lost": lost,
+            "superseded": superseded,
         }
 
 
