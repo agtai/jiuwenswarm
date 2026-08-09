@@ -613,6 +613,37 @@ This closure grants no Gate or Replacement Ledger credit. A fresh descendant
 must first reproduce canonical real Tool call/result facts, then use fresh
 candidate, policy, key and evidence roots for any rehearsal or formal Gate run.
 
+### 7.7 Discarded descendant Tool-evidence runtime result
+
+Descendant `6c14abc9fe2b17a086b05ce98ea26fab1f4ddac8` was bound to a
+fresh externally signed rehearsal policy and expected-root acknowledgement
+before any runtime owner started. In an isolated Chrome profile, the stock Web
+formal P2 input submitted an exact `read_file` request against the disposable
+fixture. The committed Agent returned the fixture's first line,
+`# JiuwenSwarm Live Voice W2 disposable fixture`, and the route diagnostics
+body scrolled to its lower content.
+
+The closed AgentServer artifact
+`w2-rehearsal-6c14abc9fe-agentserver-showcase-1` contains exactly one
+`route.selected` and one `segment.completed` observation for each of
+`product.w2.agent.tool_call` and `product.w2.agent.tool_result`, with their
+common authoritative P2 correlation, interaction, response and round binding.
+Its producer signature verifies against the policy-authorized rehearsal
+AgentServer public key. The footer reports `150` accepted observations,
+`closed:true`, and zero `rejected_invalid`, `rejected_capacity` and
+`failed_writes`.
+
+This was deliberately a narrow Tool-only diagnostic. It skipped P1 speech, so
+the Gateway observability owner received no observation, never activated and
+correctly emitted no empty artifact or signature. The pair controller's final
+two-slot seal check therefore failed after both services had already exited
+cleanly. That absence is not Gateway evidence and cannot be repaired or
+supplemented after shutdown. The entire candidate, policy, keys, configuration
+and evidence root are discarded with no Gate or Replacement Ledger credit.
+The next rehearsal must use a fresh descendant and execute both a real Gateway
+P1 operation and the required AgentServer operation set in every logical pair
+before seal.
+
 ## 8. Machine-private continuation facts
 
 These facts are usable on the current machine but are not restored by Git:
