@@ -503,6 +503,55 @@ candidate-bound roots are superseded; the formal attempt must use a fresh clean
 descendant, fresh policy/keys/evidence roots and the existing pre-owner external
 signature validation sequence.
 
+### 7.5 P3 STALE zero-effect production-evidence closure
+
+The discarded rehearsal exposed a final evidence-path mismatch rather than a
+D-069 retry defect. An externally induced retry race could return `STALE`, but
+its failed observation lacked the authoritative attempt binding while a
+compatible completed retry existed for the same product source. The v2 Gate
+correctly refused to classify that shape as a zero-effect P3 fault.
+
+Candidate `3031d4bfa36ce8d2b35f946a7d53e15ec66c89fd` closes the bounded
+production-evidence seam without adding a direct retry route or changing normal
+D-069 mutation semantics. A default-off server-owned plan binds one exact
+request ID to exact operation `task.retry`. It can fire only after schema,
+authorization, confirmation and current retry-authority preflight, and before
+Core mutation, retry readiness, Store CAS, Executor, Agent or Git effects. The
+failed result is the stable pair
+`STALE / PRODUCT_W2_STALE_FAULT_INJECTED`; exact replay retains the original
+result, a concurrent duplicate shares the same operation, malformed or foreign
+requests do not consume the plan, and a different request resumes the ordinary
+production retry path. Clients cannot declare or enable the plan in request
+parameters.
+
+The coherent Tier-3 batch completed D-053 as follows:
+
+1. Main's implementation self-review and cold complete-diff review closed the
+   injection-order, retained replay, capacity, confirmation-consumption and Gate
+   same-source zero-effect boundaries. The final local suite passed `253/253`
+   with repository-default coverage; Ruff, `py_compile` and
+   `git diff --check` also passed.
+2. Claude Code + Opus 5 reviewed the pinned exact SHA in a new detached read-only
+   worktree, independently reproduced the configuration boundary, reran the
+   same `253/253` tests in 135 seconds and all static checks, verified patch-id
+   `8879e5f2966a1ce7f1974a1fa6f5502ecdb27913`, and returned `PASS` with no
+   actionable finding. This was a cross-model equivalent independent review,
+   not a claim that literal `/review` ran; it retains the same-machine and
+   same-repository limitation.
+3. Main integrated the reviewed tree as
+   `2097647783e7f5426869a80f176ea01bfca426e2`. No remote ref was updated.
+
+The registry-local one-shot state intentionally resets when the product
+registry process is rebuilt. The formal seven-slot choreography assigns one
+fresh exact request ID per logical runtime slot, so persistence across registry
+processes is neither required nor claimed. The two fault-plan environment
+variables must stay unset outside the predeclared evidence choreography.
+
+This closure grants no Gate or Replacement Ledger credit. The earlier
+`9bec07aed` rehearsal, policy, keys, configuration and evidence roots were
+discarded and must not be reused. A new clean descendant candidate and fresh
+externally signed policy are required before any new evidence owner starts.
+
 ## 8. Machine-private continuation facts
 
 These facts are usable on the current machine but are not restored by Git:
@@ -524,6 +573,18 @@ These facts are usable on the current machine but are not restored by Git:
   `attempt-27fdcf0f028f44bc8b9a87b40ad6836d` (C/interrupted after predecessor
   exit). C's journal is `restart_interrupted`, owner/lease are cleared and no
   attempt D exists. These IDs are diagnostic continuation facts only;
+- a no-evidence production probe against Main integration `209764778` returned
+  `CONFLICT / TASK_RETRY_REQUIRES_TERMINAL` for the non-retryable case and
+  `STALE / PRODUCT_W2_STALE_FAULT_INJECTED` for the exact planned request. It
+  then used a different request to create the sole successor attempt and
+  cancelled both attempts cleanly. The disposable database is
+  `D:\XGG AI\openjiuwen\jiuwenswarm-data-live-voice-w2-rehearsal-20260808\live_voice\p3alpha\w2-p3-fault-probe-hook-20260809-2120.sqlite3`;
+  task `task-43b0ad49b2834e40b720c0a9fa3aceb6` contains exactly A
+  `attempt-6800d516fd0a434f8f1f1b8e403d8b37` and B
+  `attempt-bec9a895320f48e48939bf2c1527d303`, both terminal/cancelled, with all
+  four dispatch/cancel outbox items delivered. The fixture is clean, the probe
+  file is absent and no diagnostic service port remains. This probe is mutable
+  diagnostic truth and grants no Gate credit;
 - OpenAI Speech configuration and devices are ready; the key remains process
   environment/private input only and is not recorded here. Replacing the current
   Gateway may require the user to enter it once more through the hidden terminal
