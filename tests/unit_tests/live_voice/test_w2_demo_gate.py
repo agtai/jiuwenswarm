@@ -2784,6 +2784,64 @@ def test_v2_stale_failure_plus_same_request_completion_is_not_zero_effect() -> N
     )
 
 
+def test_v2_p3_stale_retry_is_independent_of_completed_task_create() -> None:
+    create_lines = [
+        json.loads(line)
+        for line in _runtime_content(
+            "p3-create-before-stale-retry",
+            "task.command",
+            task_id="task-stale-retry",
+        )
+        .decode()
+        .splitlines()
+    ]
+    stale_lines = [
+        json.loads(line)
+        for line in _runtime_content(
+            "p3-stale-retry",
+            "task.command",
+            fault=True,
+            task_id="task-stale-retry",
+        )
+        .decode()
+        .splitlines()
+    ]
+    correlation_id = "correlation-p3-stale-retry"
+    for envelope in (*create_lines, *stale_lines):
+        record = envelope["record"]
+        record["binding"]["correlation_id"] = correlation_id
+    failed = stale_lines[0]["record"]
+    failed["source_component"] = "product.w2.task.retry"
+    failed["reason_code"] = "PROTOCOL_REJECTED"
+    failed["error_code"] = "STALE"
+    records = [*create_lines, *stale_lines]
+    for sequence, envelope in enumerate(records):
+        envelope["sequence"] = sequence
+    content = _v2_runtime_content(
+        ("\n".join(json.dumps(item) for item in records) + "\n").encode(),
+        artifact_id="p3-stale-retry",
+        artifact_sequence=1,
+        producer_id="agentserver",
+    )
+    artifact = verify_w2_runtime_jsonl_content(
+        artifact_id="p3-stale-retry",
+        sequence=1,
+        content=content,
+        **_runtime_trust_args(
+            content,
+            artifact_id="p3-stale-retry",
+            sequence=1,
+            producer_id="agentserver",
+        ),
+    )
+
+    assert _derive_v2_fault_class(
+        (artifact,),
+        plane=W2CapabilityPlane.P3_TASK,
+        fault_class="zero_effect",
+    )
+
+
 def test_v2_capture_and_synthesis_without_playout_earn_no_audio_credit() -> None:
     content = _v2_runtime_content(
         _runtime_content("no-browser-playout", ("speech.capture", "speech.synthesis")),

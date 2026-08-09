@@ -52,9 +52,12 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV,
     PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    PRODUCT_P3_STALE_FAULT_OPERATION_ENV,
+    PRODUCT_P3_STALE_FAULT_REQUEST_ID_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
     ProductP2RetriableFaultPlan,
+    ProductP3StaleFaultPlan,
     _ProgressDelivery,
     create_product_composition_registry_from_environment,
 )
@@ -570,6 +573,34 @@ def test_p2_retriable_fault_plan_is_default_off_and_requires_exact_pair(
     assert settings.p2_retriable_fault_plan == ProductP2RetriableFaultPlan(
         request_id="request-p2-retriable-fault",
         operation="live_voice.composition.p2.presentation.ack",
+    )
+
+
+def test_p3_stale_fault_plan_is_default_off_and_requires_exact_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PRODUCT_P3_STALE_FAULT_REQUEST_ID_ENV, raising=False)
+    monkeypatch.delenv(PRODUCT_P3_STALE_FAULT_OPERATION_ENV, raising=False)
+
+    assert ProductCompositionSettings.from_environment().p3_stale_fault_plan is None
+
+    monkeypatch.setenv(
+        PRODUCT_P3_STALE_FAULT_REQUEST_ID_ENV,
+        "request-p3-stale-fault",
+    )
+    with pytest.raises(ValueError, match="requires exact request_id and operation"):
+        ProductCompositionSettings.from_environment()
+
+    monkeypatch.setenv(PRODUCT_P3_STALE_FAULT_OPERATION_ENV, "task.cancel")
+    with pytest.raises(ValueError, match="exact task.retry"):
+        ProductCompositionSettings.from_environment()
+
+    monkeypatch.setenv(PRODUCT_P3_STALE_FAULT_OPERATION_ENV, "task.retry")
+    settings = ProductCompositionSettings.from_environment()
+
+    assert settings.p3_stale_fault_plan == ProductP3StaleFaultPlan(
+        request_id="request-p3-stale-fault",
+        operation="task.retry",
     )
 
 
@@ -3370,6 +3401,8 @@ def _retry_mutation_params(**changes: object) -> dict[str, object]:
 
 def _mutation_registry(
     tmp_path: Path,
+    *,
+    p3_stale_fault_plan: ProductP3StaleFaultPlan | None = None,
 ) -> tuple[
     AgentServerProductCompositionRegistry,
     _MutationP3Composition,
@@ -3387,6 +3420,7 @@ def _mutation_registry(
             p2_enabled=False,
             p3_text_enabled=False,
             p3_mutation_enabled=True,
+            p3_stale_fault_plan=p3_stale_fault_plan,
         ),
         p3_composition=composition,
         agent_manager=_AgentManager(),
@@ -3434,6 +3468,128 @@ async def test_product_retry_mutation_issues_and_forwards_one_exact_target(
     assert forwarded["task_id"] == "task-1"
     assert "previous_attempt_id" not in forwarded
     assert "attempt_number" not in forwarded
+
+
+@pytest.mark.asyncio
+async def test_product_retry_stale_fault_is_exact_retained_and_effect_free(
+    tmp_path: Path,
+) -> None:
+    planned_request_id = "request-retry-stale-fault"
+    registry, composition, _owner = _mutation_registry(
+        tmp_path,
+        p3_stale_fault_plan=ProductP3StaleFaultPlan(
+            request_id=planned_request_id,
+            operation="task.retry",
+        ),
+    )
+    issued = await registry.handle_p3_confirmation_issue(
+        params=_retry_mutation_params(),
+        request_id="request-retry-stale-confirmation",
+        session_id="session-product",
+    )
+    assert issued.ok is True, issued.payload
+    receipt = cast(dict[str, object], issued.payload["result"])
+    mutation_params = _retry_mutation_params(
+        confirmation_id=cast(str, receipt["confirmation_id"])
+    )
+
+    malformed = await registry.handle_p3_mutation(
+        params={**mutation_params, "fault": "client-claim"},
+        request_id=planned_request_id,
+        session_id="session-product",
+    )
+    wrong_target = await registry.handle_p3_mutation(
+        params={**mutation_params, "task_id": "task-other"},
+        request_id=planned_request_id,
+        session_id="session-product",
+    )
+    injected = await registry.handle_p3_mutation(
+        params=mutation_params,
+        request_id=planned_request_id,
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p3_mutation(
+        params=mutation_params,
+        request_id=planned_request_id,
+        session_id="session-product",
+    )
+
+    assert malformed.ok is False
+    assert cast(dict, malformed.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert wrong_target.ok is False
+    assert cast(dict, wrong_target.payload["error"])["reason"] == (
+        "P3_CONFIRMATION_BINDING_MISMATCH"
+    )
+    expected_error = {
+        "code": "STALE",
+        "reason": "PRODUCT_W2_STALE_FAULT_INJECTED",
+        "message": "the externally frozen W2 plan injected a stale retry fault",
+    }
+    assert injected.ok is False
+    assert cast(dict, injected.payload["error"]) == expected_error
+    assert replayed.payload == injected.payload
+    assert _route(injected.payload, "authority")["truth"] == "formal"
+    assert _route(injected.payload, "p3.control")["truth"] == "formal"
+    assert registry._p3_stale_fault_consumed is True
+    assert len(registry._p3_mutation_operations) == 1
+    assert composition.mutation_calls == []
+
+    # The plan is server-owned and one-shot.  It validates but does not consume
+    # the confirmation, so a non-planned transport request can recover through
+    # the unmodified production mutation path.
+    recovered = await registry.handle_p3_mutation(
+        params=mutation_params,
+        request_id="request-retry-after-stale-fault",
+        session_id="session-product",
+    )
+    assert recovered.ok is True, recovered.payload
+    assert [operation for operation, _ in composition.mutation_calls] == ["task.retry"]
+
+
+@pytest.mark.asyncio
+async def test_product_retry_stale_fault_concurrency_retains_one_zero_effect(
+    tmp_path: Path,
+) -> None:
+    planned_request_id = "request-retry-stale-concurrent"
+    registry, composition, _owner = _mutation_registry(
+        tmp_path,
+        p3_stale_fault_plan=ProductP3StaleFaultPlan(
+            request_id=planned_request_id,
+            operation="task.retry",
+        ),
+    )
+    issued = await registry.handle_p3_confirmation_issue(
+        params=_retry_mutation_params(),
+        request_id="request-retry-stale-concurrent-confirmation",
+        session_id="session-product",
+    )
+    receipt = cast(dict[str, object], issued.payload["result"])
+    mutation_params = _retry_mutation_params(
+        confirmation_id=cast(str, receipt["confirmation_id"])
+    )
+
+    results = await asyncio.gather(
+        *(
+            registry.handle_p3_mutation(
+                params=mutation_params,
+                request_id=planned_request_id,
+                session_id="session-product",
+            )
+            for _ in range(2)
+        )
+    )
+
+    assert results[0].payload == results[1].payload
+    assert cast(dict, results[0].payload["error"]) == {
+        "code": "STALE",
+        "reason": "PRODUCT_W2_STALE_FAULT_INJECTED",
+        "message": "the externally frozen W2 plan injected a stale retry fault",
+    }
+    assert registry._p3_stale_fault_consumed is True
+    assert len(registry._p3_mutation_operations) == 1
+    assert composition.mutation_calls == []
 
 
 @pytest.mark.asyncio

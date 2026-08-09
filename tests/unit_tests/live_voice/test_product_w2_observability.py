@@ -590,6 +590,53 @@ async def test_p2_retriable_presentation_fault_preserves_exact_product_source(
 
 
 @pytest.mark.asyncio
+async def test_p3_stale_retry_fault_has_no_matching_completed_product_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "w2-p3-stale-fault.jsonl"
+    _enable(monkeypatch, path)
+    owner = create_product_w2_observability_owner_from_environment()
+    assert owner is not None
+    assert await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-w2",
+        request_id="request-task-create",
+        operation="live_voice.composition.p3.mutate",
+        result_ok=True,
+        task_id="task-1",
+        attempt_id="attempt-1",
+        task_operation="task.create",
+    )
+    assert await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-w2",
+        request_id="request-task-retry-stale",
+        operation="live_voice.composition.p3.mutate",
+        result_ok=False,
+        task_id="task-1",
+        task_operation="task.retry",
+        error_code="STALE",
+    )
+    await owner.close()
+
+    records = [entry["record"] for entry in _observation_envelopes(path)]
+    fault_records = [
+        record for record in records if record["event_name"] == "segment.failed"
+    ]
+    assert len(fault_records) == 1
+    fault = fault_records[0]
+    assert fault["segment_name"] == "task.command"
+    assert fault["source_component"] == "product.w2.task.retry"
+    assert fault["error_code"] == "STALE"
+    assert fault["binding"]["task_id"] == "task-1"
+    assert all(
+        record["source_component"] != fault["source_component"]
+        for record in records
+        if record["event_name"] == "segment.completed"
+    )
+
+
+@pytest.mark.asyncio
 async def test_mismatched_route_is_rejected_and_export_failure_never_changes_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

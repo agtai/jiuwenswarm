@@ -180,6 +180,24 @@ class _QueuedQueryRegistry(_ProductRegistry):
         return P3RouteResult(True, self._payloads.pop(0))
 
 
+class _StaleMutationRegistry(_ProductRegistry):
+    async def handle_p3_mutation(self, **kwargs):
+        self.calls.append(("p3.mutate", kwargs))
+        return P3RouteResult(
+            False,
+            {
+                "request_id": kwargs["request_id"],
+                "ok": False,
+                "result": None,
+                "error": {
+                    "code": "STALE",
+                    "reason": "PRODUCT_W2_STALE_FAULT_INJECTED",
+                    "message": "the externally frozen W2 plan injected a stale retry fault",
+                },
+            },
+        )
+
+
 class _ConnectionCleanupRegistry:
     def __init__(self) -> None:
         self.calls = 0
@@ -841,6 +859,44 @@ async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
     assert observer.calls[0]["attempt_id"] == "attempt-1"
     assert observer.calls[0]["correlation_id"] == "correlation-task"
     assert observer.calls[0]["result_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_product_retry_stale_fault_projects_one_failed_task_observation() -> None:
+    registry = _StaleMutationRegistry()
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    observer = _Observer()
+    server._live_voice_w2_observability = observer
+    ws = _WebSocket()
+    request = AgentRequest(
+        request_id="request-retry-stale-fault",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "operation": "task.retry",
+            "command_id": "command-retry-stale-fault",
+            "confirmation_id": "confirmation-retry-stale-fault",
+            "issued_at": "2030-01-01T00:00:00Z",
+            "correlation_id": "correlation-retry-stale-fault",
+            "task_id": "task-1",
+        },
+    )
+
+    await server._handle_live_voice_product_request(ws, request, asyncio.Lock())
+
+    assert len(observer.calls) == 1
+    projected = observer.calls[0]
+    assert projected["operation"] == "live_voice.composition.p3.mutate"
+    assert projected["task_operation"] == "task.retry"
+    assert projected["task_id"] == "task-1"
+    assert projected["correlation_id"] == "correlation-retry-stale-fault"
+    assert projected["result_ok"] is False
+    assert projected["error_code"] == "STALE"
+    assert json.loads(ws.sent[0])["status"] == "failed"
 
 
 @pytest.mark.asyncio
