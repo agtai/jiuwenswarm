@@ -428,8 +428,13 @@ Implementation and acceptance proceed in this order:
    `602/602`; the disposable real runtime then passed A cancelled → B completed
    D0 → external clean checkpoint → C running → successor C interrupted with
    exact same `task_id`, attempts numbered 1/2/3 and no fourth attempt;
-6. after bounded P2 Agent/Tool and prepared-WAV Speech preflight, create a fresh
-   immutable candidate and run the hardened Gate with
+6. a bounded current-candidate P2 composition smoke observed real DeepSeek Agent
+   Tool call/update/result, exact final text, presentation acknowledgement,
+   terminal and close. The prepared 48 kHz user WAV also passed real
+   `gpt-4o-mini-transcribe` → `gpt-4o-mini-tts` (`marin`) and the synthesized
+   output passed the repository 48 kHz mono PCM16 boundary;
+7. after discarding those diagnostic runtimes, create a fresh immutable candidate
+   and run the hardened Gate with
    exact A/B/C task/attempt lineage and the separately signed root policy.
 
 For planning only, the current three-showcase v2 evidence shape needs seven
@@ -464,6 +469,14 @@ These facts are usable on the current machine but are not restored by Git:
   environment/private input only and is not recorded here. Replacing the current
   Gateway may require the user to enter it once more through the hidden terminal
   prompt; never request or paste the key in chat, a command line, Git or evidence;
+- on 2026-08-09 the validated 48 kHz WAV passed a hidden-key real-provider
+  preflight with input SHA-256
+  `4df35a6ceb9ca44dc033e74f7700fe476af3705a74580b2fb66156bcf4a58557`.
+  `gpt-4o-mini-transcribe` returned `请回复:语音连调成功。`; the expected command
+  used “联调”, so this is recorded as a diagnostic ASR word-form variance rather
+  than exact-text acceptance. `gpt-4o-mini-tts` voice `marin` produced 292844
+  WAV bytes, 3050ms, 48 kHz/mono/PCM16. The key was removed from the child
+  environment and secure buffer before the result window remained open;
 - deterministic user recording inputs are stored outside Git under
   `D:\XGG AI\openjiuwen\jiuwenswarm-live-voice-w2-input-20260808-hongx`:
   - `voice-command-48k-mono-pcm16.wav`, 48 kHz/mono/PCM16, 4523ms,
@@ -504,11 +517,10 @@ the active slice to D95.
    Gate credit and must be reproduced on the immutable evidence candidate.
 6. Commit coherent reviewed local batches under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
-7. Run bounded P2 Agent/Tool and automated prepared-WAV STT diagnostics. If the
-   in-memory Speech credential is unavailable, ask the user for one hidden
-   terminal re-entry. After they pass, discard all diagnostic runtimes, create a
-   fresh clean descendant candidate, fresh Gate runtime/evidence roots and the
-   complete seven-slot policy, obtain
+7. Preserve the passed bounded P2 Agent/Tool composition and prepared-WAV real
+   OpenAI STT/TTS diagnostics without granting credit. Discard their diagnostic
+   runtimes, create a fresh clean descendant candidate, fresh Gate
+   runtime/evidence roots and the complete seven-slot policy, obtain
    the user's external root signature plus expected-root hash acknowledgement,
    and validate the policy before any evidence owner or Gate process starts.
 8. Run the controlled browser/fault/restart Gate only after policy preflight.
