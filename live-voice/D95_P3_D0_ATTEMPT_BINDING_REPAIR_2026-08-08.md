@@ -4,7 +4,8 @@
 > real W2 cumulative rehearsal. The exact-root runtime-ownership sub-batch is
 > **CLOSED** in `7be485e8c` with D-053 equivalent independent review PASS. D-069
 > same-task retry source work is **CLOSED** across the integrated Gate/Web/Core/
-> product slices through `46616a138`; real A→B→C and restart evidence remain open.
+> product slices through `46616a138`; a disposable real A→B→C process-restart
+> diagnostic passes, while sealed Gate evidence remains open.
 > Nothing in this record grants Gate or
 > Replacement Ledger credit. [STATUS.md](STATUS.md) remains the only authority for
 > mutable branch state and next action.
@@ -47,8 +48,9 @@ returned PASS with no actionable finding. Main integrated the exact Core tree as
 `3a6b54842`. Product candidate `6aac859ad` then closed its predecessor's two P2
 findings, passed GPT/Sol's pinned delta/final third round and was integrated by
 Main as `46616a138`. The authenticated create/cancel product path now includes
-bounded retry and executor readiness. No real A→B→C journey or cumulative Gate
-evidence exists.
+bounded retry and executor readiness. A later disposable runtime completed the
+real same-task A→B→clean-checkpoint→C predecessor/successor diagnostic; this is
+mutable diagnostic truth, not cumulative Gate evidence.
 
 ## 2. Real failure and root cause
 
@@ -423,10 +425,11 @@ Implementation and acceptance proceed in this order:
    third round and was integrated by Main as `46616a138` without reopening Core
    or `7be485e8c` ownership semantics;
 5. Main's cumulative Contract/Core/Executor/product/route/Gate smoke passed
-   `602/602`; run a disposable A→B diagnostic, create and verify the external clean fixture
-   checkpoint, run C across the exact predecessor/successor process set, and
-   reject any extra attempt or cross-task join;
-6. only then create a fresh immutable candidate and run the hardened Gate with
+   `602/602`; the disposable real runtime then passed A cancelled → B completed
+   D0 → external clean checkpoint → C running → successor C interrupted with
+   exact same `task_id`, attempts numbered 1/2/3 and no fourth attempt;
+6. after bounded P2 Agent/Tool and prepared-WAV Speech preflight, create a fresh
+   immutable candidate and run the hardened Gate with
    exact A/B/C task/attempt lineage and the separately signed root policy.
 
 For planning only, the current three-showcase v2 evidence shape needs seven
@@ -440,14 +443,23 @@ start.
 
 These facts are usable on the current machine but are not restored by Git:
 
-- isolated runtime data root:
-  `D:\XGG AI\openjiuwen\jiuwenswarm-data-live-voice-w2-clean-20260808-1040`;
-- persistent Session: `sess_19fe0b6fa94_893a8e5a2ee8`;
-- registered project: `proj_fcdbd43e`;
+- isolated diagnostic runtime data root:
+  `D:\XGG AI\openjiuwen\jiuwenswarm-data-live-voice-w2-rehearsal-20260808`;
+- persistent Session: `sess_19fe04724e1_9e594ea75cad`;
+- registered project: `proj_1094cb88`;
 - selected model: `deepseek-v4-flash`;
 - disposable fixture:
   `D:\XGG AI\openjiuwen\jiuwenswarm-live-voice-w2-fixture-20260808-hongx`,
-  baseline `d2790e7f35413e54979c02e9fa6d8fb6c18952e3`, clean at the last inspection;
+  baseline `1ff26c0dbaec126248040499b643efed5d9095bd`, clean after the attempt-B
+  checkpoint and successor reconciliation;
+- disposable D-069 diagnostic database:
+  `D:\XGG AI\openjiuwen\jiuwenswarm-data-live-voice-w2-rehearsal-20260808\live_voice\p3alpha\w2-d069-diagnostic-20260809-1450\formal_tasks.sqlite3`;
+  task `task-241abc8d78a84cd7947be4c7b28a27b8` has exact attempts
+  `attempt-362d976d7f8e4d61a59f062e283330ff` (A/cancelled),
+  `attempt-7f4f785bc0d0401dbd161adfe7286ae7` (B/completed) and
+  `attempt-27fdcf0f028f44bc8b9a87b40ad6836d` (C/interrupted after predecessor
+  exit). C's journal is `restart_interrupted`, owner/lease are cleared and no
+  attempt D exists. These IDs are diagnostic continuation facts only;
 - OpenAI Speech configuration and devices are ready; the key remains process
   environment/private input only and is not recorded here. Replacing the current
   Gateway may require the user to enter it once more through the hidden terminal
@@ -484,19 +496,19 @@ the active slice to D95.
 4. Core `8067e1387` and product `6aac859ad` are accepted historical candidates;
    Main integrated their exact trees as `3a6b54842` and `46616a138`. Do not reopen
    their protocol, ownership or carrier semantics during diagnostic work.
-5. Main cumulative integration smoke is `602/602 PASS`; next prove exact
-   replay/conflict, bounded eligibility, frozen confirmation, clean-checkpoint separation,
-   current-attempt subscription segments, restart reconciliation and every
-   rejection's zero-side-effect oracle on the disposable real A→B→C diagnostic.
-   Keep the W2 carrier on `live_voice.composition.p3.mutate`; do not add a direct
-   retry ReqMethod, Gateway allow-list or AgentServer dispatch route.
+5. Main cumulative integration smoke is `602/602 PASS`; the disposable real
+   A→B→C diagnostic now proves clean-checkpoint separation and exact successor
+   reconciliation. Preserve its topology and keep the W2 carrier on
+   `live_voice.composition.p3.mutate`; do not add a direct retry ReqMethod,
+   Gateway allow-list or AgentServer dispatch route. This diagnostic grants no
+   Gate credit and must be reproduced on the immutable evidence candidate.
 6. Commit coherent reviewed local batches under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
-7. Create one fresh clean descendant candidate and a disposable diagnostic
-   runtime. If the in-memory Speech credential is unavailable, ask the user for
-   one hidden terminal re-entry. Run automated STT with the prepared WAV, then
-   P2 Agent/Tool and P3 text smokes. After they pass, discard that runtime, create
-   fresh Gate runtime/evidence roots and the complete seven-slot policy, obtain
+7. Run bounded P2 Agent/Tool and automated prepared-WAV STT diagnostics. If the
+   in-memory Speech credential is unavailable, ask the user for one hidden
+   terminal re-entry. After they pass, discard all diagnostic runtimes, create a
+   fresh clean descendant candidate, fresh Gate runtime/evidence roots and the
+   complete seven-slot policy, obtain
    the user's external root signature plus expected-root hash acknowledgement,
    and validate the policy before any evidence owner or Gate process starts.
 8. Run the controlled browser/fault/restart Gate only after policy preflight.
