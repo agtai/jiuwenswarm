@@ -48,6 +48,7 @@ from jiuwenswarm.server.live_voice.product_w2_observability import (
     product_result_agent_output_kind,
     product_result_has_terminal_d0_attempt,
     product_result_observation_ok,
+    product_result_query_binding,
     product_result_task_id,
     product_result_task_event_facts,
     product_result_voice_task_bridge,
@@ -122,6 +123,342 @@ def test_feature_off_does_not_inspect_an_invalid_evidence_path(
     monkeypatch.setenv(W2_EVIDENCE_PATH_ENV, "not-an-absolute-path")
 
     assert create_product_w2_observability_owner_from_environment() is None
+
+
+def test_query_evidence_prefers_server_owned_task_correlation() -> None:
+    def event(
+        *, event_id: str, seq: int, attempt_id: str = "attempt-1", correlation_id: str
+    ) -> dict[str, object]:
+        terminal = seq == 2
+        return {
+            "event_id": event_id,
+            "task_id": "task-1",
+            "attempt_id": attempt_id,
+            "seq": seq,
+            "state": "terminal" if terminal else "running",
+            "outcome": "completed" if terminal else None,
+            "correlation_id": correlation_id,
+            "occurred_at": f"2026-08-09T16:0{seq}:00Z",
+        }
+
+    task_payload = {
+        "result": {
+            "task": {
+                "task_id": "task-1",
+                "attempt_id": "attempt-1",
+                "correlation_id": "correlation-task",
+            },
+            "attempt": {"task_id": "task-1", "attempt_id": "attempt-1"},
+        }
+    }
+    events_payload = {
+        "result": {
+            "task_id": "task-1",
+            "events": [
+                event(
+                    event_id="event-1",
+                    seq=1,
+                    correlation_id="correlation-task",
+                ),
+                event(
+                    event_id="event-2",
+                    seq=2,
+                    correlation_id="correlation-task",
+                ),
+            ]
+        }
+    }
+    conflicting = {
+        "result": {
+            "task_id": "task-1",
+            "events": [
+                event(
+                    event_id="event-conflict-1",
+                    seq=1,
+                    correlation_id="correlation-task",
+                ),
+                event(
+                    event_id="event-conflict-2",
+                    seq=2,
+                    correlation_id="correlation-other",
+                ),
+            ]
+        }
+    }
+
+    assert (
+        product_result_query_binding(
+            "task.status", task_payload, request_id="transport-status-1"
+        )
+        == ("correlation-task", "task-1", "attempt-1")
+    )
+    assert (
+        product_result_query_binding(
+            "task.events", events_payload, request_id="transport-events-1"
+        )
+        == ("correlation-task", "task-1", "attempt-1")
+    )
+    assert (
+        product_result_query_binding(
+            "task.list",
+            {
+                "result": {
+                    "tasks": [
+                        {
+                            "task_id": "task-list-1",
+                            "attempt_id": "attempt-list-1",
+                            "correlation_id": "correlation-task",
+                        }
+                    ]
+                }
+            },
+            request_id="transport-list-1",
+        )
+        == ("correlation-task", "task-list-1", "attempt-list-1")
+    )
+    assert (
+        product_result_query_binding(
+            "task.events",
+            {
+                "result": {
+                    "task_id": "task-1",
+                    "events": [
+                        {
+                            "task_id": "task-1",
+                            "attempt_id": "attempt-1",
+                            "correlation_id": "correlation-task",
+                        }
+                    ],
+                }
+            },
+            request_id="transport-malformed-event",
+        )
+        is None
+    )
+    for unsafe_event in (
+        event(
+            event_id="event-non-utc",
+            seq=1,
+            correlation_id="correlation-task",
+        )
+        | {"occurred_at": "2026-08-09T17:00:00+01:00"},
+        event(
+            event_id="event-unsafe-seq",
+            seq=9_007_199_254_740_992,
+            correlation_id="correlation-task",
+        ),
+        event(
+            event_id="event-sensitive",
+            seq=1,
+            correlation_id="bearer-secret",
+        ),
+    ):
+        assert (
+            product_result_query_binding(
+                "task.events",
+                {"result": {"task_id": "task-1", "events": [unsafe_event]}},
+                request_id="transport-unsafe-event",
+            )
+            is None
+        )
+    assert (
+        product_result_query_binding(
+            "task.events", conflicting, request_id="transport-conflict"
+        )
+        is None
+    )
+    assert (
+        product_result_query_binding(
+            "task.events",
+            {
+                "result": {
+                    "task_id": "task-1",
+                    "events": [
+                        event(
+                            event_id="event-attempt-1",
+                            seq=1,
+                            correlation_id="correlation-task",
+                        ),
+                        event(
+                            event_id="event-attempt-2",
+                            seq=2,
+                            attempt_id="attempt-2",
+                            correlation_id="correlation-task",
+                        ),
+                    ]
+                }
+            },
+            request_id="transport-multiple-attempts",
+        )
+        is None
+    )
+    assert (
+        product_result_query_binding(
+            "task.events",
+            {"result": {"task_id": "task-1", "events": []}},
+            request_id="correlation-task",
+        )
+        is None
+    )
+    assert (
+        product_result_query_binding(
+            "task.status",
+            {"result": {"task": {"correlation_id": ""}}},
+            request_id="transport-malformed",
+        )
+        is None
+    )
+
+    with pytest.raises(ValueError, match="request_id"):
+        product_result_query_binding("task.status", task_payload, request_id="")
+
+@pytest.mark.asyncio
+async def test_incremental_task_queries_keep_one_correlation_and_unique_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "w2-incremental-task-events.jsonl"
+    _enable(monkeypatch, path)
+    owner = create_product_w2_observability_owner_from_environment()
+    assert owner is not None
+    invalid_event = {
+        "event_id": "task-invalid-1",
+        "task_id": "task-1",
+        "attempt_id": "attempt-1",
+        "seq": 0,
+        "state": "not-a-task-state",
+        "outcome": None,
+        "correlation_id": "correlation-poison",
+        "occurred_at": "2026-08-09T15:59:00Z",
+    }
+    assert not await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-poison",
+        request_id="transport-events-invalid",
+        operation="task.events",
+        result_ok=True,
+        task_id="task-1",
+        attempt_id="attempt-1",
+        task_event_facts=(invalid_event,),
+    )
+    list_payload = {
+        "result": {
+            "tasks": [
+                {
+                    "task_id": "task-1",
+                    "attempt_id": "attempt-1",
+                    "correlation_id": "correlation-task",
+                }
+            ]
+        }
+    }
+    list_binding = product_result_query_binding(
+        "task.list", list_payload, request_id="transport-list"
+    )
+    assert list_binding == ("correlation-task", "task-1", "attempt-1")
+    list_correlation_id, list_task_id, list_attempt_id = list_binding
+    assert await owner.observe_route(
+        session_id="session-w2",
+        correlation_id=list_correlation_id,
+        request_id="transport-list",
+        operation="task.list",
+        result_ok=True,
+        task_id=list_task_id,
+        attempt_id=list_attempt_id,
+    )
+    running_payload = {
+        "result": {
+            "task_id": "task-1",
+            "events": [
+                {
+                    "event_id": "task-running-1",
+                    "task_id": "task-1",
+                    "attempt_id": "attempt-1",
+                    "seq": 1,
+                    "state": "running",
+                    "outcome": None,
+                    "correlation_id": "correlation-task",
+                    "occurred_at": "2026-08-09T16:00:00Z",
+                }
+            ],
+        }
+    }
+    terminal_payload = {
+        "result": {
+            "task_id": "task-1",
+            "events": [
+                {
+                    "event_id": "task-terminal-1",
+                    "task_id": "task-1",
+                    "attempt_id": "attempt-1",
+                    "seq": 2,
+                    "state": "terminal",
+                    "outcome": "completed",
+                    "correlation_id": "correlation-task",
+                    "occurred_at": "2026-08-09T16:01:00Z",
+                }
+            ],
+        }
+    }
+    for request_id, payload in (
+        ("transport-events-running", running_payload),
+        ("transport-events-terminal", terminal_payload),
+    ):
+        facts = product_result_task_event_facts(payload)
+        binding = product_result_query_binding(
+            "task.events", payload, request_id=request_id
+        )
+        assert binding == ("correlation-task", "task-1", "attempt-1")
+        assert await owner.observe_route(
+            session_id="session-w2",
+            correlation_id=binding[0],
+            request_id=request_id,
+            operation="task.events",
+            result_ok=True,
+            task_id=binding[1],
+            attempt_id=binding[2],
+            task_event_facts=facts,
+        )
+    await owner.close()
+
+    observations = [entry["record"] for entry in _observation_envelopes(path)]
+    list_completion = next(
+        item
+        for item in observations
+        if item["source_component"] == "product.w2.task.list"
+        and item["event_name"] == "segment.completed"
+    )
+    assert list_completion["binding"]["task_id"] == "task-1"
+    assert list_completion["binding"]["attempt_id"] == "attempt-1"
+    event_sources = [
+        item["source_record_id"]
+        for item in observations
+        if item["source_component"] == "product.w2.task.events"
+        and item["event_name"] == "segment.completed"
+    ]
+    assert len(event_sources) == len(set(event_sources)) == 2
+    states = [
+        item
+        for item in observations
+        if item["source_component"] == "product.w2.task.event"
+    ]
+    assert [(item["source_seq"], item["state"]) for item in states] == [
+        (1, "running"),
+        (2, "terminal"),
+    ]
+    terminal_state_index = next(
+        index
+        for index, item in enumerate(observations)
+        if item["source_component"] == "product.w2.task.event"
+        and item["state"] == "terminal"
+    )
+    terminal_query_index = next(
+        index
+        for index, item in enumerate(observations)
+        if item["source_component"] == "product.w2.task.events"
+        and item["event_name"] == "segment.completed"
+        and item["source_record_id"] != event_sources[0]
+    )
+    assert terminal_state_index < terminal_query_index
 
 
 @pytest.mark.asyncio
@@ -667,6 +1004,16 @@ async def test_task_events_emit_exact_authority_sequence_facts(
     }
     facts = product_result_task_event_facts(payload)
     assert len(facts) == 1
+    assert not await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-foreign",
+        request_id="task-events-wrong-attempt",
+        operation="task.events",
+        result_ok=True,
+        task_id="task-1",
+        attempt_id="attempt-foreign",
+        task_event_facts=facts,
+    )
     assert await owner.observe_route(
         session_id="session-w2",
         correlation_id="correlation-task",

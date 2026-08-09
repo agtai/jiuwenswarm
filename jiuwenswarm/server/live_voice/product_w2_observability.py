@@ -222,6 +222,135 @@ def product_result_task_id(
     return task_id, attempt_id
 
 
+def _is_valid_observability_task_binding(
+    *, correlation_id: str, task_id: str, attempt_id: str
+) -> bool:
+    """Use the closed observation schema as the single identity validator."""
+
+    try:
+        create_observation(
+            {
+                "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                "segment_name": "task.progress",
+                "observed_at": "2026-01-01T00:00:00Z",
+                "monotonic_ms": 0.0,
+                "binding": {
+                    "correlation_id": correlation_id,
+                    "task_id": task_id,
+                    "attempt_id": attempt_id,
+                },
+                "route": {
+                    "implementation_class": "formal",
+                    "owner_module": "product.composition",
+                    "capability_provider": "jiuwenswarm-task-core",
+                    "contract_version": LIVE_VOICE_CONTRACT_VERSION,
+                    "reason_code": None,
+                },
+                "source_component": "product.w2.task.status",
+                "event_id": "w2-query-binding-preflight",
+                "event_name": "route.selected",
+                "source_record_id": "w2-query-binding-preflight",
+            }
+        )
+    except ValueError:
+        return False
+    return True
+
+
+def product_result_query_binding(
+    operation: str, payload: object, *, request_id: str
+) -> tuple[str, str, str] | None:
+    """Return one exact authority-owned Task query binding.
+
+    Formal Task queries use a fresh transport ``request_id`` for every read.
+    That transport identity must remain the evidence ``source_record_id``, but
+    it is not the cumulative product correlation.  Successful ``task.get`` and
+    ``task.status`` results expose the persisted Task binding, while a
+    non-empty ``task.events`` result exposes the same binding on every typed
+    event.  ``task.list`` is usable only when it returns exactly one Task with
+    one exact authority binding.  Missing, conflicting or malformed authority
+    facts return ``None`` so neither a transport identity nor an untrusted
+    caller value can activate or poison the cumulative evidence owner.
+    """
+
+    if type(request_id) is not str or not request_id:
+        raise ValueError("query evidence request_id must be non-empty")
+    if operation not in {"task.get", "task.list", "task.status", "task.events"}:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+
+    def authority_binding(value: object) -> tuple[str, str, str] | None:
+        if not isinstance(value, dict):
+            return None
+        correlation_id = value.get("correlation_id")
+        task_id = value.get("task_id")
+        attempt_id = value.get("attempt_id")
+        if (
+            not isinstance(correlation_id, str)
+            or not correlation_id
+            or not isinstance(task_id, str)
+            or not task_id
+            or not isinstance(attempt_id, str)
+            or not attempt_id
+        ):
+            return None
+        if not _is_valid_observability_task_binding(
+            correlation_id=correlation_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+        ):
+            return None
+        return correlation_id, task_id, attempt_id
+
+    if operation in {"task.get", "task.status"}:
+        if any(key in result for key in ("tasks", "events")):
+            return None
+        binding = authority_binding(result.get("task"))
+        attempt = result.get("attempt")
+        if binding is None or not isinstance(attempt, dict):
+            return None
+        _, task_id, attempt_id = binding
+        if attempt.get("task_id") != task_id or attempt.get("attempt_id") != attempt_id:
+            return None
+        return binding
+    if operation == "task.list":
+        tasks = result.get("tasks")
+        if (
+            any(key in result for key in ("task", "attempt", "events"))
+            or not isinstance(tasks, list)
+            or len(tasks) != 1
+        ):
+            return None
+        return authority_binding(tasks[0])
+
+    if any(key in result for key in ("task", "attempt", "tasks")):
+        return None
+    events = result.get("events")
+    if isinstance(events, list):
+        facts = product_result_task_event_facts(payload)
+        result_task_id = result.get("task_id")
+        if (
+            not events
+            or len(facts) != len(events)
+            or not isinstance(result_task_id, str)
+            or not result_task_id
+            or any(event.get("task_id") != result_task_id for event in facts)
+        ):
+            return None
+        bindings = {authority_binding(event) for event in facts}
+        if None in bindings or len(bindings) != 1:
+            return None
+        binding = next(iter(bindings))
+        if binding is None or binding[1] != result_task_id:
+            return None
+        return binding
+    return None
+
+
 def product_result_error_code(payload: object) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -309,6 +438,94 @@ def product_result_agent_output_kind(payload: object) -> str | None:
     return None
 
 
+_TASK_EVENT_FACT_KEYS = frozenset(
+    {
+        "event_id",
+        "task_id",
+        "attempt_id",
+        "seq",
+        "state",
+        "outcome",
+        "correlation_id",
+        "occurred_at",
+    }
+)
+_TASK_EVENT_STATES = frozenset(
+    {"accepted", "running", "blocked", "decision_required", "terminal"}
+)
+_TASK_EVENT_OUTCOMES = frozenset(
+    {"completed", "failed", "cancelled", "interrupted", "unknown"}
+)
+
+
+def _is_valid_task_event_fact(event: object) -> bool:
+    if not isinstance(event, dict) or set(event) != _TASK_EVENT_FACT_KEYS:
+        return False
+    if not all(
+        isinstance(event[key], str) and bool(event[key].strip())
+        for key in (
+            "event_id",
+            "task_id",
+            "attempt_id",
+            "state",
+            "correlation_id",
+            "occurred_at",
+        )
+    ):
+        return False
+    state = event["state"]
+    outcome = event["outcome"]
+    if (
+        type(event["seq"]) is not int
+        or event["seq"] < 0
+        or state not in _TASK_EVENT_STATES
+        or (
+            outcome is not None
+            and (
+                not isinstance(outcome, str)
+                or outcome not in _TASK_EVENT_OUTCOMES
+            )
+        )
+        or (state == "terminal") != (outcome is not None)
+    ):
+        return False
+    try:
+        create_observation(
+            {
+                "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                "segment_name": "task.progress",
+                "observed_at": "2026-01-01T00:00:00Z",
+                "monotonic_ms": 0.0,
+                "binding": {
+                    "correlation_id": event["correlation_id"],
+                    "task_id": event["task_id"],
+                    "attempt_id": event["attempt_id"],
+                },
+                "route": {
+                    "implementation_class": "formal",
+                    "owner_module": "product.composition",
+                    "capability_provider": "jiuwenswarm-task-core",
+                    "contract_version": LIVE_VOICE_CONTRACT_VERSION,
+                    "reason_code": None,
+                },
+                "source_component": "product.w2.task.event",
+                "event_id": (
+                    "w2-task-event-"
+                    + hashlib.sha256(event["event_id"].encode("utf-8")).hexdigest()[:32]
+                ),
+                "event_name": "task.state_observed",
+                "source_event_id": event["event_id"],
+                "source_occurred_at": event["occurred_at"],
+                "source_seq": event["seq"],
+                "state": state,
+                "outcome": outcome,
+            }
+        )
+    except ValueError:
+        return False
+    return True
+
+
 def product_result_task_event_facts(payload: object) -> tuple[dict[str, object], ...]:
     """Extract content-free TaskEvent authority facts from task.events only."""
 
@@ -336,36 +553,10 @@ def product_result_task_event_facts(payload: object) -> tuple[dict[str, object],
         )
         if any(key not in event for key in required):
             return ()
-        if (
-            not all(
-                isinstance(event[key], str) and bool(event[key].strip())
-                for key in (
-                    "event_id",
-                    "task_id",
-                    "attempt_id",
-                    "state",
-                    "correlation_id",
-                    "occurred_at",
-                )
-            )
-            or type(event["seq"]) is not int
-        ):
+        fact = {key: event[key] for key in _TASK_EVENT_FACT_KEYS}
+        if not _is_valid_task_event_fact(fact):
             return ()
-        outcome = event["outcome"]
-        if outcome is not None and not isinstance(outcome, str):
-            return ()
-        facts.append(
-            {
-                "event_id": event["event_id"],
-                "task_id": event["task_id"],
-                "attempt_id": event["attempt_id"],
-                "seq": event["seq"],
-                "state": event["state"],
-                "outcome": outcome,
-                "correlation_id": event["correlation_id"],
-                "occurred_at": event["occurred_at"],
-            }
-        )
+        facts.append(fact)
     return tuple(facts)
 
 
@@ -612,6 +803,23 @@ class ProductW2ObservabilityOwner:
                 return False
             if type(task_event_facts) is not tuple:
                 return False
+            if result_ok and operation == "task.events":
+                if (
+                    not task_event_facts
+                    or not isinstance(task_id, str)
+                    or not task_id
+                    or not isinstance(attempt_id, str)
+                    or not attempt_id
+                ):
+                    return False
+                for event in task_event_facts:
+                    if (
+                        not _is_valid_task_event_fact(event)
+                        or event.get("task_id") != task_id
+                        or event.get("attempt_id") != attempt_id
+                        or event.get("correlation_id") != correlation_id
+                    ):
+                        return False
             if result_ok:
                 if operation == "live_voice.composition.p2.submit":
                     fact_specs = (
@@ -799,27 +1007,66 @@ class ProductW2ObservabilityOwner:
                             )
                         )
                     else:
-                        observations.extend(
-                            (
-                                create_observation(
-                                    {
-                                        **common,
-                                        "event_id": f"w2-route-{segment_token}",
-                                        "event_name": "route.selected",
-                                        "source_record_id": request_fingerprint,
-                                    }
-                                ),
-                                create_observation(
-                                    {
-                                        **common,
-                                        "event_id": f"w2-complete-{segment_token}",
-                                        "event_name": "segment.completed",
-                                        "source_record_id": request_fingerprint,
-                                        "state": "terminal",
-                                        "outcome": "completed",
-                                        "duration_ms": 0.0,
-                                    }
-                                ),
+                        observations.append(
+                            create_observation(
+                                {
+                                    **common,
+                                    "event_id": f"w2-route-{segment_token}",
+                                    "event_name": "route.selected",
+                                    "source_record_id": request_fingerprint,
+                                }
+                            )
+                        )
+                        if operation == "task.events":
+                            for event in task_event_facts:
+                                if (
+                                    event.get("task_id") != task_id
+                                    or event.get("correlation_id") != correlation_id
+                                    or event.get("attempt_id") != attempt_id
+                                ):
+                                    return False
+                                task_event_binding = {
+                                    "correlation_id": correlation_id,
+                                    "task_id": task_id,
+                                    "attempt_id": event["attempt_id"],
+                                }
+                                observations.append(
+                                    create_observation(
+                                        {
+                                            **common,
+                                            "segment_name": "task.progress",
+                                            "binding": task_event_binding,
+                                            "source_component": (
+                                                "product.w2.task.event"
+                                            ),
+                                            "event_id": (
+                                                "w2-task-event-"
+                                                + hashlib.sha256(
+                                                    str(event["event_id"]).encode(
+                                                        "utf-8"
+                                                    )
+                                                ).hexdigest()[:32]
+                                            ),
+                                            "event_name": "task.state_observed",
+                                            "source_event_id": event["event_id"],
+                                            "source_occurred_at": event["occurred_at"],
+                                            "source_seq": event["seq"],
+                                            "state": event["state"],
+                                            "outcome": event["outcome"],
+                                        }
+                                    )
+                                )
+                        observations.append(
+                            create_observation(
+                                {
+                                    **common,
+                                    "event_id": f"w2-complete-{segment_token}",
+                                    "event_name": "segment.completed",
+                                    "source_record_id": request_fingerprint,
+                                    "state": "terminal",
+                                    "outcome": "completed",
+                                    "duration_ms": 0.0,
+                                }
                             )
                         )
                 if (
@@ -873,41 +1120,6 @@ class ProductW2ObservabilityOwner:
                             ),
                         )
                     )
-                if operation == "task.events":
-                    for event in task_event_facts:
-                        if (
-                            event.get("task_id") != task_id
-                            or event.get("correlation_id") != correlation_id
-                            or not isinstance(event.get("attempt_id"), str)
-                        ):
-                            return False
-                        task_event_binding = {
-                            "correlation_id": correlation_id,
-                            "task_id": task_id,
-                            "attempt_id": event["attempt_id"],
-                        }
-                        observations.append(
-                            create_observation(
-                                {
-                                    **common,
-                                    "segment_name": "task.progress",
-                                    "binding": task_event_binding,
-                                    "source_component": "product.w2.task.event",
-                                    "event_id": (
-                                        "w2-task-event-"
-                                        + hashlib.sha256(
-                                            str(event["event_id"]).encode("utf-8")
-                                        ).hexdigest()[:32]
-                                    ),
-                                    "event_name": "task.state_observed",
-                                    "source_event_id": event["event_id"],
-                                    "source_occurred_at": event["occurred_at"],
-                                    "source_seq": event["seq"],
-                                    "state": event["state"],
-                                    "outcome": event["outcome"],
-                                }
-                            )
-                        )
                 accepted = all(
                     activation.adapter.consume_observation(
                         context=context,
@@ -1232,6 +1444,7 @@ __all__ = [
     "product_result_has_terminal_d0_attempt",
     "product_result_observation_ok",
     "product_result_response_binding",
+    "product_result_query_binding",
     "product_result_task_id",
     "product_result_voice_task_bridge",
     "product_result_voice_task_origin",

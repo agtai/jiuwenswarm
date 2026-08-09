@@ -375,6 +375,7 @@ class _ProgressTarget:
 @dataclass(slots=True)
 class _ProgressDelivery:
     delivery_id: str
+    attempt_id: str
     source_event_id: str
     progress_event_id: str
     seq: int
@@ -904,6 +905,7 @@ class AgentServerProductCompositionRegistry:
                 {
                     "session_id": binding.session_id,
                     "task_id": binding.task_id,
+                    "attempt_id": event.task_event.attempt_id,
                     "correlation_id": binding.correlation_id,
                     "origin_id": binding.origin_id,
                     "generation_id": binding.generation_id,
@@ -923,6 +925,7 @@ class AgentServerProductCompositionRegistry:
             deliveries,
             _ProgressDelivery(
                 delivery_id=delivery_id,
+                attempt_id=event.task_event.attempt_id,
                 source_event_id=source_event_id,
                 progress_event_id=progress_event_id,
                 seq=seq,
@@ -4192,6 +4195,7 @@ class AgentServerProductCompositionRegistry:
                         "replayed": replayed,
                         "session_id": routed_session,
                         "task_id": task_id,
+                        "attempt_id": delivery.attempt_id,
                         "correlation_id": correlation_id,
                         "origin_id": origin_id,
                         "generation_id": generation_id,

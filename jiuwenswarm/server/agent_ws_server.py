@@ -8577,11 +8577,26 @@ class AgentWebSocketServer:
             result_ok = result.ok
             payload = result.payload
             observer = getattr(self, "_live_voice_w2_observability", None)
-            correlation_id = (
-                request.request_id
-                if operation in {"task.get", "task.list", "task.status", "task.events"}
-                else formal_params.get("correlation_id")
-            )
+            query_binding = None
+            if operation in {"task.get", "task.list", "task.status", "task.events"}:
+                from jiuwenswarm.server.live_voice.product_w2_observability import (
+                    product_result_query_binding,
+                )
+
+                query_binding = product_result_query_binding(
+                    operation,
+                    payload,
+                    request_id=request.request_id,
+                )
+                if (
+                    query_binding is not None
+                    and operation != "task.list"
+                    and formal_params.get("task_id") != query_binding[1]
+                ):
+                    query_binding = None
+                correlation_id = None if query_binding is None else query_binding[0]
+            else:
+                correlation_id = formal_params.get("correlation_id")
             if (
                 observer is not None
                 and isinstance(request.session_id, str)
@@ -8600,7 +8615,10 @@ class AgentWebSocketServer:
                     product_result_voice_task_origin,
                 )
 
-                task_id, attempt_id = product_result_task_id(formal_params, payload)
+                if query_binding is None:
+                    task_id, attempt_id = product_result_task_id(formal_params, payload)
+                else:
+                    _, task_id, attempt_id = query_binding
                 interaction_id, response_id, response_generation = (
                     product_result_response_binding(formal_params, payload)
                 )

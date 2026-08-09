@@ -149,13 +149,35 @@ class _ProductRegistry:
 
     async def handle_p3_progress_ack(self, **kwargs):
         self.calls.append(("progress.ack", kwargs))
-        return P3RouteResult(True, {"ok": True, "result": {"status": "acknowledged"}})
+        return P3RouteResult(
+            True,
+            {
+                "ok": True,
+                "result": {
+                    "status": "acknowledged",
+                    "acknowledgement": "web_ui_text_consumed",
+                    "task_id": kwargs["params"].get("task_id"),
+                    "attempt_id": "attempt-1",
+                    "correlation_id": kwargs["params"].get("correlation_id"),
+                },
+            },
+        )
 
     async def stop(self) -> None:
         self.stop_calls += 1
         if self.stop_failures:
             self.stop_failures -= 1
             raise RuntimeError("injected product cleanup failure")
+
+
+class _QueuedQueryRegistry(_ProductRegistry):
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        super().__init__()
+        self._payloads = list(payloads)
+
+    async def handle_p3_query(self, **kwargs):
+        self.calls.append(("query", kwargs))
+        return P3RouteResult(True, self._payloads.pop(0))
 
 
 class _ConnectionCleanupRegistry:
@@ -282,6 +304,148 @@ async def test_formal_route_passes_only_rpc_context_to_composition() -> None:
     wire = json.loads(ws.sent[0])
     assert wire["status"] == "succeeded"
     assert wire["body"]["result"]["result"]["task_id"] == "task-1"
+
+
+@pytest.mark.asyncio
+async def test_formal_query_observation_uses_authoritative_task_correlation() -> None:
+    def event(
+        *,
+        event_id: str,
+        seq: int,
+        state: str,
+        correlation_id: str,
+        task_id: str = "task-1",
+    ) -> dict[str, object]:
+        return {
+            "event_id": event_id,
+            "task_id": task_id,
+            "attempt_id": "attempt-1",
+            "seq": seq,
+            "state": state,
+            "outcome": "completed" if state == "terminal" else None,
+            "correlation_id": correlation_id,
+            "occurred_at": f"2026-08-09T16:0{seq}:00Z",
+        }
+
+    registry = _QueuedQueryRegistry(
+        [
+            {
+                "ok": True,
+                "result": {
+                    "task_id": "task-1",
+                    "events": [
+                        {
+                            "task_id": "task-1",
+                            "attempt_id": "attempt-1",
+                            "correlation_id": "correlation-malformed",
+                        }
+                    ],
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "task_id": "task-1",
+                    "events": [
+                        event(
+                            event_id="event-conflict-1",
+                            seq=1,
+                            state="running",
+                            correlation_id="correlation-foreign",
+                        ),
+                        event(
+                            event_id="event-conflict-2",
+                            seq=2,
+                            state="running",
+                            correlation_id="correlation-other",
+                        ),
+                    ],
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "task_id": "task-foreign",
+                    "events": [
+                        event(
+                            event_id="event-foreign-target",
+                            seq=2,
+                            state="running",
+                            correlation_id="correlation-foreign-target",
+                            task_id="task-foreign",
+                        )
+                    ],
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "task_id": "task-1",
+                    "events": [
+                        event(
+                            event_id="event-running",
+                            seq=3,
+                            state="running",
+                            correlation_id="correlation-task",
+                        )
+                    ],
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "task_id": "task-1",
+                    "events": [
+                        event(
+                            event_id="event-terminal",
+                            seq=4,
+                            state="terminal",
+                            correlation_id="correlation-task",
+                        )
+                    ],
+                },
+            },
+        ]
+    )
+    observer = _Observer()
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    server._live_voice_w2_observability = observer
+    ws = _WebSocket()
+
+    for request_id in (
+        "transport-events-malformed",
+        "transport-events-conflict",
+        "transport-events-foreign-target",
+        "transport-events-running",
+        "transport-events-terminal",
+    ):
+        await server._handle_live_voice_p3_request(
+            ws,
+            AgentRequest(
+                request_id=request_id,
+                channel_id="web",
+                session_id="session-1",
+                req_method=ReqMethod.LIVE_VOICE_TASK_EVENTS,
+                params={"task_id": "task-1", "after_seq": -1},
+            ),
+            asyncio.Lock(),
+        )
+
+    assert [call["request_id"] for call in observer.calls] == [
+        "transport-events-running",
+        "transport-events-terminal",
+    ]
+    assert [call["correlation_id"] for call in observer.calls] == [
+        "correlation-task",
+        "correlation-task",
+    ]
+    assert all(call["task_id"] == "task-1" for call in observer.calls)
+    assert all(call["attempt_id"] == "attempt-1" for call in observer.calls)
+    assert [call["task_event_facts"][0]["state"] for call in observer.calls] == [
+        "running",
+        "terminal",
+    ]
 
 
 @pytest.mark.asyncio
@@ -510,8 +674,10 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
             "session_id": "session-1",
         }
     ]
-    assert observer.calls[0]["operation"] == "task.list"
-    assert observer.calls[0]["correlation_id"] == "request-query"
+    # The central registry owns the business query, but this synthetic result
+    # does not carry an authority-owned Task correlation.  Transport identity
+    # must not be promoted into cumulative W2 evidence.
+    assert observer.calls == []
 
 
 @pytest.mark.asyncio
@@ -629,6 +795,8 @@ async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
     registry = _ProductRegistry()
     server = _server(object())
     server._live_voice_product_composition = registry
+    observer = _Observer()
+    server._live_voice_w2_observability = observer
     ws = _WebSocket()
     request = AgentRequest(
         request_id="request-progress-ack",
@@ -639,6 +807,7 @@ async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
             "auth_token": "opaque",
             "session_id": "session-1",
             "task_id": "task-1",
+            "correlation_id": "correlation-task",
             "delivery_id": "delivery-1",
             "mode": "agent",
         },
@@ -654,6 +823,7 @@ async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
                     "auth_token": "opaque",
                     "session_id": "session-1",
                     "task_id": "task-1",
+                    "correlation_id": "correlation-task",
                     "delivery_id": "delivery-1",
                 },
                 "request_id": "request-progress-ack",
@@ -663,6 +833,14 @@ async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
         )
     ]
     assert json.loads(ws.sent[0])["status"] == "succeeded"
+    assert len(observer.calls) == 1
+    assert observer.calls[0]["operation"] == (
+        "live_voice.composition.p3.progress.ack"
+    )
+    assert observer.calls[0]["task_id"] == "task-1"
+    assert observer.calls[0]["attempt_id"] == "attempt-1"
+    assert observer.calls[0]["correlation_id"] == "correlation-task"
+    assert observer.calls[0]["result_ok"] is True
 
 
 @pytest.mark.asyncio

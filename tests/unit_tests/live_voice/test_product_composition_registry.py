@@ -948,6 +948,12 @@ async def test_text_progress_web_ack_is_exact_authorized_and_idempotent(
         session_id="session-product",
         channel_id="tui",
     )
+    forged_attempt = await registry.handle_p3_progress_ack(
+        params={**_progress_ack_params(event), "attempt_id": "attempt-forged"},
+        request_id="request-progress-ack-forged-attempt",
+        session_id="session-product",
+        channel_id="web",
+    )
     acknowledged = await registry.handle_p3_progress_ack(
         params=_progress_ack_params(event),
         request_id="request-progress-ack",
@@ -964,10 +970,16 @@ async def test_text_progress_web_ack_is_exact_authorized_and_idempotent(
     assert denied.ok is False
     assert mismatched.ok is False
     assert wrong_channel.ok is False
+    assert forged_attempt.ok is False
+    assert cast(dict, forged_attempt.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
     assert acknowledged.ok is True
     assert replayed.ok is True
     assert cast(dict, acknowledged.payload["result"])["replayed"] is False
     assert cast(dict, replayed.payload["result"])["replayed"] is True
+    assert cast(dict, acknowledged.payload["result"])["attempt_id"] == "attempt-1"
+    assert cast(dict, replayed.payload["result"])["attempt_id"] == "attempt-1"
     assert cast(dict, acknowledged.payload["result"])["acknowledgement"] == (
         "web_ui_text_consumed"
     )
@@ -1180,6 +1192,8 @@ async def test_progress_ack_generation_ordering_is_identity_bound_and_effect_fre
     assert future_error["reason"] != "TASK_PROGRESS_STALE_GENERATION"
     assert acknowledged.ok is True
     assert replayed.ok is True
+    assert cast(dict, acknowledged.payload["result"])["attempt_id"] == "attempt-1"
+    assert cast(dict, replayed.payload["result"])["attempt_id"] == "attempt-1"
     assert cast(dict, acknowledged.payload["result"])["replayed"] is False
     assert cast(dict, replayed.payload["result"])["replayed"] is True
     await registry.close_active_routes()
@@ -1262,6 +1276,7 @@ async def test_progress_delivery_capacity_never_evicts_unacknowledged_on_failed_
         delivery_id = f"retained-unacknowledged-{index}"
         deliveries[delivery_id] = _ProgressDelivery(
             delivery_id=delivery_id,
+            attempt_id="attempt-1",
             source_event_id=f"source-{index}",
             progress_event_id=f"progress-{index}",
             seq=index,
@@ -1272,6 +1287,7 @@ async def test_progress_delivery_capacity_never_evicts_unacknowledged_on_failed_
     route = registry._progress_routes[key]
     event = SimpleNamespace(
         origin=route.binding,
+        task_event=SimpleNamespace(attempt_id="attempt-1"),
         source_event=SimpleNamespace(
             to_dict=lambda: {"event_id": "source-capacity", "seq": 1000}
         ),
