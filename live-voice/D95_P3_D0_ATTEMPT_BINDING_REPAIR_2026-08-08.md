@@ -444,6 +444,65 @@ attempt topology, not these slot names or their external authority bindings;
 policy still has to be produced, signed and validated before evidence processes
 start.
 
+### 7.4 Runtime task-evidence identity repair and D-053 closure
+
+The source-level retry/restart path exposed one final Gate stitching defect after
+the D-069 product and Core batches were accepted: direct task queries could use a
+transport `request_id` as cumulative business correlation, task result identity
+could combine caller-owned `task_id` with a server-owned attempt, and progress
+acknowledgement results did not retain their server-owned attempt. Malformed or
+mixed task-event results could therefore activate an observability owner before
+the complete closed schema rejected them, while the resulting completion facts
+could not reliably prove one exact terminal task/attempt chain.
+
+Commit `68617ec9d575c38d0b4d99fd54972f2d45cdd1c6` closes that coherent Tier-3
+boundary without changing Gate scoring, D-069 mutation authority or the public
+retry carrier:
+
+- `task.get/status/list/events` positive evidence identity is derived only from
+  the server result. Caller targets are corroboration, and transport request IDs
+  remain unique source-record identities rather than business correlation;
+- malformed, empty, mixed-attempt, foreign-target, non-UTC, unsafe-sequence or
+  invalid-identity task events fail before observability activation or retained
+  ownership. The preflight reuses the production observation constructor rather
+  than maintaining a weaker parallel validator;
+- task-event export order is route selection, authoritative state observations,
+  then segment completion, so a terminal query's completion follows and carries
+  the exact terminal task/attempt binding;
+- P3 progress acknowledgement returns the attempt retained from the verified
+  server delivery. Client-supplied `attempt_id` remains outside the accepted
+  parameter set and rejects with zero protected effect; active and closed replay
+  preserve the same authority attempt.
+
+The three D-053 passes are closed as follows:
+
+1. Main's implementation self-review removed an unnecessary widening of the
+   generic result helper and confirmed that the query-only parser owns the new
+   shapes. The final narrow suite passed `94/94`.
+2. A separate read-only cold complete-diff reviewer found the early-activation,
+   caller/result mixing and incomplete ACK tests. Main fixed every finding and
+   the reviewer returned `PASS` on the final delta. Main then ran affected+Gate
+   `166/166`, the integrated Web suite `201/201`, final wide `1350/1350`, Ruff,
+   `py_compile` and `git diff --check` successfully.
+3. Under D-070, Claude Code + Opus 5 reviewed the pinned exact SHA from a new
+   detached read-only worktree. It independently confirmed patch-id
+   `70f14f15c35c1e166355a54d3c88d07fba3235f1`, reran affected+Gate `166/166`,
+   wide `1350/1350`, Web `201/201` and the supplied static checks, added a direct
+   ten-case query-binding probe, and returned `PASS` with zero actionable
+   findings. This was a cross-model equivalent independent review, not a claim
+   that literal `/review` ran; it retains the same-machine/same-repository
+   limitation.
+
+The review noted only a non-actionable bounded cost: task-event validation uses
+the canonical observation constructor per event. At the current bounded query
+size that linear construction cost is preferable to duplicating authority
+validation rules and does not reopen this batch.
+
+This closure grants no Gate or Replacement Ledger credit. The prior `f5e021d2a`
+candidate-bound roots are superseded; the formal attempt must use a fresh clean
+descendant, fresh policy/keys/evidence roots and the existing pre-owner external
+signature validation sequence.
+
 ## 8. Machine-private continuation facts
 
 These facts are usable on the current machine but are not restored by Git:
