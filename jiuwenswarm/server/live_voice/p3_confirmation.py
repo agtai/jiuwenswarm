@@ -26,7 +26,8 @@ from .p3_model_resolution import ResolvedP3Model
 
 P3_CONFIRMATION_MAX_TTL = timedelta(minutes=2)
 P3_CONFIRMATION_MAX_CAPACITY = 4_096
-_P3_MUTATION_OPERATIONS = frozenset({"task.create", "task.cancel"})
+_P3_MUTATION_OPERATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
+_P3_RETRY_ELIGIBLE_OUTCOMES = frozenset({"cancelled", "completed"})
 
 
 def _parse_utc(value: str, field_name: str) -> datetime:
@@ -69,6 +70,89 @@ def _validate_capacity(capacity: int) -> int:
     return capacity
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedP3RetryFacts:
+    """Exact server-derived predecessor snapshot frozen into one retry confirmation.
+
+    Every field is read from Task Store authority and the original task
+    specification.  The external request contributes only ``task_id``; a client
+    can neither declare a predecessor, an attempt ordinal, nor a replacement
+    intent, executor, model, capability, or side-effect class.  Any change to
+    these facts between issuance and consumption changes the intent
+    fingerprint, so a stale or forged retry fails closed with zero effect.
+    """
+
+    previous_attempt_id: str
+    previous_outcome: str
+    attempt_number: int
+    name: str
+    instruction: str
+    executor_id: str
+    required_capabilities: tuple[str, ...]
+    side_effect_class: str
+    attributes: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("previous_attempt_id", self.previous_attempt_id),
+            ("name", self.name),
+            ("instruction", self.instruction),
+            ("executor_id", self.executor_id),
+            ("side_effect_class", self.side_effect_class),
+        ):
+            if type(value) is not str or not value.strip():
+                raise FormalTaskViolation(
+                    "INVALID_P3_CONFIRMATION",
+                    f"retry confirmation {field_name} must be a non-empty string",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+        if self.previous_outcome not in _P3_RETRY_ELIGIBLE_OUTCOMES:
+            raise FormalTaskViolation(
+                "TASK_RETRY_OUTCOME_NOT_ELIGIBLE",
+                "only cancelled or completed attempts can be retried",
+                ErrorCode.CONFLICT,
+            )
+        if type(self.attempt_number) is not int or self.attempt_number not in {2, 3}:
+            raise FormalTaskViolation(
+                "TASK_RETRY_ATTEMPT_NUMBER_INVALID",
+                "task.retry attempt_number must be 2 or 3",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(self.required_capabilities) is not tuple or any(
+            type(item) is not str or not item.strip()
+            for item in self.required_capabilities
+        ):
+            raise FormalTaskViolation(
+                "INVALID_P3_CONFIRMATION",
+                "retry confirmation capabilities must be exact non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(self.attributes) is not tuple or any(
+            type(item) is not tuple
+            or len(item) != 2
+            or any(type(part) is not str or not part.strip() for part in item)
+            for item in self.attributes
+        ):
+            raise FormalTaskViolation(
+                "INVALID_P3_CONFIRMATION",
+                "retry confirmation attributes must be exact string pairs",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+
+    def to_fingerprint_payload(self) -> dict[str, object]:
+        return {
+            "previous_attempt_id": self.previous_attempt_id,
+            "previous_outcome": self.previous_outcome,
+            "attempt_number": self.attempt_number,
+            "name": self.name,
+            "instruction": self.instruction,
+            "executor_id": self.executor_id,
+            "required_capabilities": list(self.required_capabilities),
+            "side_effect_class": self.side_effect_class,
+            "attributes": [list(item) for item in self.attributes],
+        }
+
+
 def p3_confirmation_intent_fingerprint(
     *,
     operation: str,
@@ -82,9 +166,16 @@ def p3_confirmation_intent_fingerprint(
     interaction_id: str | None = None,
     turn_id: str | None = None,
     commit_id: str | None = None,
+    retry: PreparedP3RetryFacts | None = None,
 ) -> str:
     """Canonical server helper shared by the issuer and route verifier."""
 
+    if retry is not None and operation != "task.retry":
+        raise FormalTaskViolation(
+            "INVALID_P3_CONFIRMATION",
+            "only task.retry confirmations may carry frozen retry facts",
+            ErrorCode.INVALID_ARGUMENT,
+        )
     payload: dict[str, object] = {
         "operation": operation,
         "command_id": command_id,
@@ -108,6 +199,26 @@ def p3_confirmation_intent_fingerprint(
                 "instruction": instruction,
                 "model_identity": model.identity,
                 "model_config_version": model.config_version,
+            }
+        )
+    elif operation == "task.retry":
+        if (
+            context is None
+            or type(retry) is not PreparedP3RetryFacts
+            or target_task_id is None
+            or name is not None
+            or instruction is not None
+            or model is not None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_P3_CONFIRMATION",
+                "task.retry confirmation requires the exact frozen retry snapshot",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        payload.update(
+            {
+                "context": context.to_dict(),
+                "retry": retry.to_fingerprint_payload(),
             }
         )
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
@@ -794,7 +905,7 @@ class BoundedP3ConfirmationOwner:
         if binding.operation not in _P3_MUTATION_OPERATIONS:
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION_OPERATION",
-                "confirmation operation must be task.create or task.cancel",
+                "confirmation operation must be task.create, task.cancel or task.retry",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if binding.operation == "task.create" and binding.target_task_id is not None:
@@ -803,10 +914,13 @@ class BoundedP3ConfirmationOwner:
                 "task.create confirmation must not bind a target task",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if binding.operation == "task.cancel" and binding.target_task_id is None:
+        if (
+            binding.operation in {"task.cancel", "task.retry"}
+            and binding.target_task_id is None
+        ):
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION",
-                "task.cancel confirmation must bind an exact target task",
+                f"{binding.operation} confirmation must bind an exact target task",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if binding.principal_id != binding.scope.subject_id:
@@ -831,6 +945,7 @@ __all__ = [
     "P3ConfirmationBinding",
     "P3ConfirmationOwnerContext",
     "P3ConfirmationVerifier",
+    "PreparedP3RetryFacts",
     "SqliteP3ConfirmationLedger",
     "TrustedP3ConfirmationIssue",
     "ValidatedP3ConfirmationForwarding",

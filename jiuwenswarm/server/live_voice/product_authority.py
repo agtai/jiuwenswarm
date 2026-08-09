@@ -44,12 +44,13 @@ _P3_OPERATIONS = frozenset(
         "task.list",
         "task.status",
         "task.cancel",
+        "task.retry",
         "task.events",
     }
 )
-_P3_MUTATIONS = frozenset({"task.create", "task.cancel"})
+_P3_MUTATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
 _P3_TARGETED_OPERATIONS = frozenset(
-    {"task.get", "task.status", "task.cancel", "task.events"}
+    {"task.get", "task.status", "task.cancel", "task.retry", "task.events"}
 )
 _P3_TASK_RESOURCE_KIND = "task"
 _EVIDENCE_IDS = frozenset(

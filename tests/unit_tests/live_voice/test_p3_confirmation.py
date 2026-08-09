@@ -10,14 +10,19 @@ from pathlib import Path
 import pytest
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance, ScopeRef
-from jiuwenswarm.server.live_voice.formal_task_models import FormalTaskViolation
+from jiuwenswarm.server.live_voice.formal_task_models import (
+    FormalTaskViolation,
+    ResolvedTaskContext,
+)
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3_CONFIRMATION_MAX_CAPACITY,
     P3ConfirmationBinding,
     P3ConfirmationOwnerContext,
+    PreparedP3RetryFacts,
     SqliteP3ConfirmationLedger,
     TrustedP3ConfirmationIssue,
+    p3_confirmation_intent_fingerprint,
 )
 
 
@@ -583,3 +588,158 @@ def test_existing_ledger_schema_is_migrated_without_breaking_old_records(
         "owner_correlation_id",
         "owner_generation",
     }.issubset(columns)
+
+
+# --- D-069 frozen task.retry confirmation snapshot ---------------------------
+
+
+def _context() -> ResolvedTaskContext:
+    return ResolvedTaskContext(
+        source="agent_server.session_project_registry",
+        stable_id="project-1",
+        uri="file:///tmp/project-1",
+        revision_kind="version",
+        revision_value="a77516a0",
+        scope=_scope(),
+        permissions=("task.execute", "project.write"),
+        expires_at=EXPIRY,
+        redaction_policy_id="live_voice.p3alpha.project.v1",
+    )
+
+
+def _retry_facts(**overrides: object) -> PreparedP3RetryFacts:
+    base: dict[str, object] = {
+        "previous_attempt_id": "attempt-1",
+        "previous_outcome": "cancelled",
+        "attempt_number": 2,
+        "name": "Formal project task",
+        "instruction": "Create one bounded project change.",
+        "executor_id": "jiuwenswarm_code_agent.project_code",
+        "required_capabilities": ("task.create",),
+        "side_effect_class": "project_mutation",
+        "attributes": (
+            ("model_config_version", "catalog-v1"),
+            ("model_identity", "default#0"),
+        ),
+    }
+    base.update(overrides)
+    return PreparedP3RetryFacts(**base)  # type: ignore[arg-type]
+
+
+_UNSET = object()
+
+
+def _retry_fingerprint(**overrides: object) -> str:
+    facts = overrides.pop("retry", _UNSET)
+    if facts is _UNSET:
+        facts = _retry_facts()
+    payload: dict[str, object] = {
+        "operation": "task.retry",
+        "command_id": "command-retry",
+        "target_task_id": "task-1",
+        "context": _context(),
+        "retry": facts,
+    }
+    payload.update(overrides)
+    return p3_confirmation_intent_fingerprint(**payload)  # type: ignore[arg-type]
+
+
+def test_retry_confirmation_binds_every_frozen_predecessor_fact() -> None:
+    baseline = _retry_fingerprint()
+    assert len(baseline) == 64
+
+    # Each frozen fact is load-bearing: changing any one changes the digest, so
+    # a confirmation issued for one predecessor can never authorize another.
+    for overrides in (
+        {"previous_attempt_id": "attempt-other"},
+        {"previous_outcome": "completed"},
+        {"attempt_number": 3},
+        {"name": "renamed"},
+        {"instruction": "replaced"},
+        {"executor_id": "legacy.demo_substitute"},
+        {"required_capabilities": ("task.retry",)},
+        {"side_effect_class": "read_only"},
+        {"attributes": (("model_identity", "other#1"),)},
+    ):
+        assert _retry_fingerprint(retry=_retry_facts(**overrides)) != baseline, (
+            overrides
+        )
+
+    # The re-resolved clean context and the command/target identity are equally
+    # bound, so an external checkpoint invalidates the previous confirmation.
+    assert (
+        _retry_fingerprint(context=replace(_context(), revision_value="b88627b1"))
+        != baseline
+    )
+    assert _retry_fingerprint(command_id="command-other") != baseline
+    assert _retry_fingerprint(target_task_id="task-other") != baseline
+    # Stability: the same facts always produce the same digest.
+    assert _retry_fingerprint() == baseline
+
+
+def test_retry_confirmation_requires_the_exact_frozen_snapshot() -> None:
+    for overrides in (
+        {"retry": None},
+        {"context": None},
+        {"target_task_id": None},
+        {"name": "renamed"},
+        {"instruction": "replaced"},
+    ):
+        with pytest.raises(FormalTaskViolation) as raised:
+            _retry_fingerprint(**overrides)
+        assert raised.value.reason == "INVALID_P3_CONFIRMATION", overrides
+
+    # Frozen retry facts never leak into another operation's fingerprint.
+    with pytest.raises(FormalTaskViolation) as leaked:
+        p3_confirmation_intent_fingerprint(
+            operation="task.cancel",
+            command_id="command-cancel",
+            target_task_id="task-1",
+            context=None,
+            retry=_retry_facts(),
+        )
+    assert leaked.value.reason == "INVALID_P3_CONFIRMATION"
+
+
+def test_prepared_retry_facts_reject_ineligible_or_malformed_lineage() -> None:
+    for overrides, expected in (
+        ({"previous_outcome": "failed"}, "TASK_RETRY_OUTCOME_NOT_ELIGIBLE"),
+        ({"previous_outcome": "interrupted"}, "TASK_RETRY_OUTCOME_NOT_ELIGIBLE"),
+        ({"attempt_number": 1}, "TASK_RETRY_ATTEMPT_NUMBER_INVALID"),
+        ({"attempt_number": 4}, "TASK_RETRY_ATTEMPT_NUMBER_INVALID"),
+        ({"previous_attempt_id": " "}, "INVALID_P3_CONFIRMATION"),
+        ({"executor_id": ""}, "INVALID_P3_CONFIRMATION"),
+        ({"side_effect_class": ""}, "INVALID_P3_CONFIRMATION"),
+        ({"required_capabilities": ("",)}, "INVALID_P3_CONFIRMATION"),
+        ({"attributes": (("k",),)}, "INVALID_P3_CONFIRMATION"),
+    ):
+        with pytest.raises(FormalTaskViolation) as raised:
+            _retry_facts(**overrides)
+        assert raised.value.reason == expected, overrides
+
+
+def test_retry_confirmation_owner_requires_an_exact_target_task() -> None:
+    owner_context = P3ConfirmationOwnerContext(
+        session_id="session-1",
+        correlation_id="correlation-1",
+        owner_generation=1,
+    )
+    BoundedP3ConfirmationOwner._validate_binding_owner(
+        _binding(operation="task.retry", target_task_id="task-1"),
+        owner_context,
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        BoundedP3ConfirmationOwner._validate_binding_owner(
+            _binding(operation="task.retry", target_task_id=None),
+            owner_context,
+        )
+    assert raised.value.reason == "INVALID_P3_CONFIRMATION"
+    assert "task.retry" in str(raised.value)
+
+    with pytest.raises(FormalTaskViolation) as unsupported:
+        BoundedP3ConfirmationOwner._validate_binding_owner(
+            _binding(operation="task.resume", target_task_id="task-1"),
+            owner_context,
+        )
+    assert unsupported.value.reason == "INVALID_P3_CONFIRMATION_OPERATION"

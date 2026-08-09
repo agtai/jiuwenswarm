@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import runpy
@@ -2698,3 +2699,419 @@ def test_direct_executor_restart_classifies_atomic_apply_crash_window(
     assert recovered.outcome is expected_outcome
     assert recovered.raw_status == expected_status
     assert recovered.error == expected_error
+
+
+# --- D-069 Executor retry readiness seam ------------------------------------
+
+
+def _terminal_direct_attempt(
+    project: Path,
+    *,
+    outcome: TerminalOutcome = TerminalOutcome.COMPLETED,
+    attempt_number: int = 1,
+    task_id: str = "task-1",
+    attempt_id: str = "attempt-1",
+) -> tuple[PersistentTaskRecord, PersistentAttemptRecord]:
+    task, attempt = _direct_task_attempt(
+        project, task_id=task_id, attempt_id=attempt_id
+    )
+    return (
+        replace(task, state=FormalTaskState.TERMINAL, outcome=outcome),
+        replace(
+            attempt,
+            state=FormalAttemptState.TERMINAL,
+            outcome=outcome,
+            attempt_number=attempt_number,
+        ),
+    )
+
+
+def _readiness_environment(project: Path) -> tuple[str, str]:
+    """Capture the Git surfaces a read-only readiness proof must not disturb."""
+
+    return (
+        _git(project, "status", "--porcelain"),
+        _git(project, "rev-parse", "HEAD"),
+    )
+
+
+def _journal_dump(adapter: DirectProjectCodeExecutorAdapter) -> tuple[str, ...]:
+    """Logical journal content, which a read-only readiness proof must preserve.
+
+    Raw file bytes are not a sound oracle here: opening and closing a SQLite
+    connection maintains the header change counter and page count even for a
+    pure read, so byte equality would report a difference that carries no data.
+    """
+
+    with sqlite3.connect(adapter._journal.database) as connection:
+        return tuple(connection.iterdump())
+
+
+async def _completed_direct_attempt(
+    tmp_path: Path,
+) -> tuple[DirectProjectCodeExecutorAdapter, Path]:
+    """Drive one real exact-root attempt to a completed terminal journal row."""
+
+    project = tmp_path / "project"
+    _git_project(project)
+
+    async def acquire_attempt(attempt_root: str) -> AttemptProjectExecutorLease:
+        root = Path(attempt_root).resolve()
+        attempt_executor = _ExactRootDirectProjectExecutor(root)
+
+        async def release_attempt() -> None:
+            return None
+
+        return AttemptProjectExecutorLease(
+            attempt_executor, str(root), release_attempt
+        )
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire_attempt,
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding),
+        tmp_path / "p3.sqlite3",
+    )
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    record = adapter._journal.get("attempt-1")
+    assert record is not None
+    assert record.state is FormalAttemptState.TERMINAL
+    assert record.outcome is TerminalOutcome.COMPLETED, record.error
+    return adapter, project
+
+
+@pytest.mark.asyncio
+async def test_retry_readiness_proves_a_quiescent_predecessor(
+    tmp_path: Path,
+) -> None:
+    adapter, project = await _completed_direct_attempt(tmp_path)
+    task, attempt = _terminal_direct_attempt(project)
+    before_environment = _readiness_environment(project)
+    before_journal = _journal_dump(adapter)
+
+    readiness = adapter.retry_readiness(task, attempt)
+
+    assert readiness.ready is True
+    assert readiness.reason == "PREDECESSOR_QUIESCENT"
+    # The proof binds the exact predecessor Core will re-check.
+    assert readiness.task_id == task.task_id
+    assert readiness.previous_attempt_id == attempt.attempt_id
+    assert readiness.previous_outcome is TerminalOutcome.COMPLETED
+    assert readiness.previous_attempt_number == 1
+    # Read-only: no journal write, no Git mutation, no retained worktree.
+    assert _journal_dump(adapter) == before_journal
+    assert _readiness_environment(project) == before_environment
+    assert adapter._retained_worktree_cleanups == {}
+    assert adapter._running == {}
+
+
+@pytest.mark.asyncio
+async def test_retry_readiness_is_synchronous_and_never_awaits(
+    tmp_path: Path,
+) -> None:
+    adapter, project = await _completed_direct_attempt(tmp_path)
+    # The Core seam is deliberately synchronous so its snapshot stays atomic
+    # with respect to the event loop that owns the attempt lifecycle.
+    assert not inspect.iscoroutinefunction(adapter.retry_readiness)
+    assert not inspect.isasyncgenfunction(adapter.retry_readiness)
+    task, attempt = _terminal_direct_attempt(project)
+    assert adapter.retry_readiness(task, attempt).ready is True
+
+
+@pytest.mark.asyncio
+async def test_retry_readiness_rejects_a_nonterminal_predecessor_outcome(
+    tmp_path: Path,
+) -> None:
+    adapter, project = await _completed_direct_attempt(tmp_path)
+    task, attempt = _direct_task_attempt(project)
+    before_journal = _journal_dump(adapter)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        adapter.retry_readiness(task, attempt)
+
+    assert rejected.value.reason == "TASK_RETRY_EXECUTOR_READINESS_MISMATCH"
+    assert rejected.value.code is ErrorCode.PROTOCOL_VIOLATION
+    assert _journal_dump(adapter) == before_journal
+
+
+@pytest.mark.asyncio
+async def test_retry_readiness_reports_every_retained_executor_state(
+    tmp_path: Path,
+) -> None:
+    adapter, project = await _completed_direct_attempt(tmp_path)
+    task, attempt = _terminal_direct_attempt(project)
+    before_environment = _readiness_environment(project)
+    before_journal = _journal_dump(adapter)
+
+    def _assert_not_ready(expected_reason: str) -> None:
+        readiness = adapter.retry_readiness(task, attempt)
+        assert readiness.ready is False, expected_reason
+        assert readiness.reason == expected_reason
+        # Even a not-ready verdict binds the exact predecessor so Core can
+        # separate "not yet quiescent" from "evidence for another attempt".
+        assert readiness.task_id == task.task_id
+        assert readiness.previous_attempt_id == attempt.attempt_id
+        assert readiness.previous_outcome is TerminalOutcome.COMPLETED
+        assert readiness.previous_attempt_number == 1
+        assert _journal_dump(adapter) == before_journal
+        assert _readiness_environment(project) == before_environment
+
+    live: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    worker = asyncio.ensure_future(live)
+    try:
+        adapter._running["attempt-1"] = worker
+        _assert_not_ready("ATTEMPT_WORKER_LIVE")
+    finally:
+        adapter._running.pop("attempt-1", None)
+        live.set_result(None)
+        await worker
+
+    adapter._applying.add("attempt-1")
+    _assert_not_ready("ATTEMPT_APPLY_IN_PROGRESS")
+    adapter._applying.discard("attempt-1")
+
+    adapter._interruptions["attempt-1"] = ("shutdown", "retained")
+    _assert_not_ready("ATTEMPT_INTERRUPTION_PENDING")
+    adapter._interruptions.pop("attempt-1", None)
+
+    retained = project_code_executor._RetainedAttemptCleanup(
+        root=project,
+        parent=project,
+        worktree=project / "attempt-worktree",
+        ownership=SimpleNamespace(release=lambda: None),
+    )
+    adapter._retained_worktree_cleanups["attempt-1"] = retained
+    _assert_not_ready("ATTEMPT_CLEANUP_RETAINED")
+    retained.completion_pending = True
+    _assert_not_ready("ATTEMPT_CLEANUP_COMPLETION_PENDING")
+    adapter._retained_worktree_cleanups.pop("attempt-1", None)
+
+    adapter._closed = True
+    _assert_not_ready("EXECUTOR_CLOSED")
+    adapter._closed = False
+
+    # The verdict is ready again once every retained surface is released.
+    assert adapter.retry_readiness(task, attempt).ready is True
+
+
+@pytest.mark.asyncio
+async def test_retry_readiness_rejects_journal_lineage_divergence(
+    tmp_path: Path,
+) -> None:
+    adapter, project = await _completed_direct_attempt(tmp_path)
+    before_journal = _journal_dump(adapter)
+
+    unknown_task, unknown_attempt = _terminal_direct_attempt(
+        project, attempt_id="attempt-never-dispatched"
+    )
+    missing = adapter.retry_readiness(unknown_task, unknown_attempt)
+    assert missing.ready is False
+    assert missing.reason == "ATTEMPT_JOURNAL_MISSING"
+    assert missing.previous_attempt_id == "attempt-never-dispatched"
+
+    foreign_task, foreign_attempt = _terminal_direct_attempt(
+        project, task_id="task-other"
+    )
+    mismatched = adapter.retry_readiness(foreign_task, foreign_attempt)
+    assert mismatched.ready is False
+    assert mismatched.reason == "ATTEMPT_JOURNAL_TASK_MISMATCH"
+    assert mismatched.task_id == "task-other"
+
+    diverged_task, diverged_attempt = _terminal_direct_attempt(
+        project, outcome=TerminalOutcome.CANCELLED
+    )
+    diverged = adapter.retry_readiness(diverged_task, diverged_attempt)
+    assert diverged.ready is False
+    assert diverged.reason == "ATTEMPT_OUTCOME_DIVERGED"
+    assert diverged.previous_outcome is TerminalOutcome.CANCELLED
+
+    assert _journal_dump(adapter) == before_journal
+
+
+@pytest.mark.asyncio
+async def test_retry_readiness_reports_retained_journal_cleanup_and_lease(
+    tmp_path: Path,
+) -> None:
+    adapter, project = await _completed_direct_attempt(tmp_path)
+    task, attempt = _terminal_direct_attempt(project)
+    before_environment = _readiness_environment(project)
+    assert adapter.retry_readiness(task, attempt).ready is True
+
+    # Retained cleanup truth is journal-owned and must block a retry even
+    # though the business terminal outcome is already durable.
+    adapter._journal.mark_cleanup_pending("attempt-1")
+    pending = adapter.retry_readiness(task, attempt)
+    assert pending.ready is False
+    assert pending.reason == "ATTEMPT_CLEANUP_PENDING"
+    assert pending.previous_attempt_id == "attempt-1"
+    adapter._journal.mark_cleanup_resolved("attempt-1")
+    assert adapter.retry_readiness(task, attempt).ready is True
+
+    # A retained owner/lease means another process may still touch the exact
+    # attempt, so the predecessor is not proven quiescent here.
+    with sqlite3.connect(adapter._journal.database) as connection:
+        connection.execute(
+            f"UPDATE {project_code_executor._DIRECT_EXECUTOR_TABLE} "
+            "SET owner_id=?, lease_expires_at=? WHERE attempt_id=?",
+            ("foreign-process", "2026-08-07T10:05:00Z", "attempt-1"),
+        )
+    retained = adapter.retry_readiness(task, attempt)
+    assert retained.ready is False
+    assert retained.reason == "ATTEMPT_LEASE_RETAINED"
+
+    # A journal row that never reached terminal is equally not retry-ready.
+    with sqlite3.connect(adapter._journal.database) as connection:
+        connection.execute(
+            f"UPDATE {project_code_executor._DIRECT_EXECUTOR_TABLE} "
+            "SET owner_id=NULL, lease_expires_at=NULL, state=?, outcome=NULL "
+            "WHERE attempt_id=?",
+            (FormalAttemptState.RUNNING.value, "attempt-1"),
+        )
+    nonterminal = adapter.retry_readiness(task, attempt)
+    assert nonterminal.ready is False
+    assert nonterminal.reason == "ATTEMPT_JOURNAL_NONTERMINAL"
+
+    # None of these read-only verdicts touched the canonical project.
+    assert _readiness_environment(project) == before_environment
+
+
+def _cancelled_before_dispatch(
+    project: Path,
+    *,
+    task_id: str = "task-1",
+    attempt_id: str = "attempt-1",
+) -> tuple[PersistentTaskRecord, PersistentAttemptRecord]:
+    """The exact Store shape of a task cancelled before its dispatch claim.
+
+    ``task.cancel`` fences dispatch and resolves the attempt without the
+    Direct Executor ever being called, so no journal row exists for it.
+    """
+
+    task = PersistentTaskRecord(
+        task_id,
+        _scope(),
+        _spec(project),
+        FormalTaskState.TERMINAL,
+        attempt_id,
+        "correlation-1",
+        True,
+        True,
+        TerminalOutcome.CANCELLED,
+        None,
+        None,
+    )
+    attempt = PersistentAttemptRecord(
+        attempt_id,
+        task_id,
+        FORMAL_PROJECT_EXECUTOR_ID,
+        None,
+        FormalAttemptState.TERMINAL,
+        TerminalOutcome.CANCELLED,
+        -1,
+    )
+    return task, attempt
+
+
+@pytest.mark.asyncio
+async def test_retry_readiness_accepts_a_cancelled_before_dispatch_predecessor(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    task, attempt = _cancelled_before_dispatch(project)
+    before_environment = _readiness_environment(project)
+    before_journal = _journal_dump(adapter)
+
+    readiness = adapter.retry_readiness(task, attempt)
+
+    assert readiness.ready is True
+    assert readiness.reason == "PREDECESSOR_CANCELLED_BEFORE_DISPATCH"
+    assert readiness.task_id == task.task_id
+    assert readiness.previous_attempt_id == attempt.attempt_id
+    assert readiness.previous_outcome is TerminalOutcome.CANCELLED
+    assert readiness.previous_attempt_number == 1
+    # The adapter was never called for this attempt and stays untouched.
+    assert executor.requests == []
+    assert adapter._running == {}
+    assert adapter._retained_worktree_cleanups == {}
+    assert adapter._journal.get("attempt-1") is None
+    assert _journal_dump(adapter) == before_journal
+    assert _readiness_environment(project) == before_environment
+
+
+@pytest.mark.asyncio
+async def test_missing_journal_stays_fail_closed_without_every_exact_fact(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        tmp_path / "p3.sqlite3",
+    )
+    task, attempt = _cancelled_before_dispatch(project)
+    before_journal = _journal_dump(adapter)
+    before_environment = _readiness_environment(project)
+
+    # Each single missing or contradictory fact keeps the verdict not ready.
+    degraded: tuple[tuple[str, PersistentTaskRecord, PersistentAttemptRecord], ...] = (
+        ("cancel not requested", replace(task, cancel_requested=False), attempt),
+        ("dispatch not fenced", replace(task, dispatch_fenced=False), attempt),
+        (
+            "task not terminal",
+            replace(task, state=FormalTaskState.RUNNING, outcome=None),
+            attempt,
+        ),
+        (
+            "completed rather than cancelled",
+            replace(task, outcome=TerminalOutcome.COMPLETED),
+            replace(attempt, outcome=TerminalOutcome.COMPLETED),
+        ),
+        (
+            "attempt not terminal",
+            task,
+            replace(attempt, state=FormalAttemptState.RUNNING, outcome=None),
+        ),
+        (
+            "executor_ref already bound",
+            task,
+            replace(attempt, executor_ref="d0-project:attempt-1"),
+        ),
+        (
+            "foreign executor",
+            task,
+            replace(attempt, executor_id="legacy.demo_substitute"),
+        ),
+        (
+            "task points at another attempt",
+            replace(task, attempt_id="attempt-other"),
+            attempt,
+        ),
+        (
+            "attempt belongs to another task",
+            task,
+            replace(attempt, task_id="task-other"),
+        ),
+    )
+    for label, degraded_task, degraded_attempt in degraded:
+        if degraded_attempt.outcome is None:
+            # A non-terminal outcome is refused earlier, by contract.
+            with pytest.raises(FormalTaskViolation) as rejected:
+                adapter.retry_readiness(degraded_task, degraded_attempt)
+            assert rejected.value.reason == (
+                "TASK_RETRY_EXECUTOR_READINESS_MISMATCH"
+            ), label
+        else:
+            readiness = adapter.retry_readiness(degraded_task, degraded_attempt)
+            assert readiness.ready is False, label
+            assert readiness.reason == "ATTEMPT_JOURNAL_MISSING", label
+        assert _journal_dump(adapter) == before_journal, label
+        assert _readiness_environment(project) == before_environment, label

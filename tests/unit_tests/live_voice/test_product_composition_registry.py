@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import sqlite3
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -343,7 +344,11 @@ class _MutationP3Composition(_P3Composition):
                 ErrorCode.PERMISSION_DENIED,
             )
         self.prepare_calls.append((operation, dict(params)))
-        target = str(params["task_id"]) if operation == "task.cancel" else None
+        target = (
+            str(params["task_id"])
+            if operation in {"task.cancel", "task.retry"}
+            else None
+        )
         intent = hashlib.sha256(
             repr(
                 (
@@ -3328,3 +3333,288 @@ async def test_p3_mutation_flag_off_has_zero_composition_effect(tmp_path: Path) 
         "P3_CONFIRMATION_ISSUER_UNAVAILABLE"
     )
     assert composition.authority_calls == []
+
+
+# --- D-069 bounded task.retry product mutation route ------------------------
+
+
+def _retry_mutation_params(**changes: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "auth_token": "trusted-token",
+        "session_id": "session-product",
+        "operation": "task.retry",
+        "command_id": "command-retry-1",
+        "issued_at": NOW,
+        "correlation_id": "correlation-retry-1",
+        "task_id": "task-1",
+    }
+    params.update(changes)
+    return params
+
+
+def _mutation_registry(
+    tmp_path: Path,
+) -> tuple[
+    AgentServerProductCompositionRegistry,
+    _MutationP3Composition,
+    BoundedP3ConfirmationOwner,
+]:
+    owner = BoundedP3ConfirmationOwner(tmp_path / "confirmations.sqlite3", enabled=True)
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _MutationP3Composition(tmp_path, forwarder)
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=False,
+            p3_text_enabled=False,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+    )
+    return registry, composition, owner
+
+
+@pytest.mark.asyncio
+async def test_product_retry_mutation_issues_and_forwards_one_exact_target(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+
+    issued = await registry.handle_p3_confirmation_issue(
+        params=_retry_mutation_params(),
+        request_id="request-retry-confirmation",
+        session_id="session-product",
+    )
+    assert issued.ok is True, issued.payload
+    receipt = cast(dict[str, object], issued.payload["result"])
+    assert receipt["operation"] == "task.retry"
+    assert receipt["command_id"] == "command-retry-1"
+    assert receipt["target_task_id"] == "task-1"
+
+    mutated = await registry.handle_p3_mutation(
+        params=_retry_mutation_params(
+            confirmation_id=cast(str, receipt["confirmation_id"])
+        ),
+        request_id="request-retry-mutation",
+        session_id="session-product",
+    )
+    assert mutated.ok is True, mutated.payload
+    result = cast(dict[str, object], mutated.payload["result"])
+    assert result["status"] == "mutation_processed"
+    assert result["operation"] == "task.retry"
+    assert result["target_task_id"] == "task-1"
+
+    # The registry forwards the operation verbatim and never invents lineage.
+    assert [operation for operation, _ in composition.mutation_calls] == ["task.retry"]
+    forwarded = composition.mutation_calls[0][1]
+    assert "operation" not in forwarded
+    assert forwarded["task_id"] == "task-1"
+    assert "previous_attempt_id" not in forwarded
+    assert "attempt_number" not in forwarded
+
+
+@pytest.mark.asyncio
+async def test_product_retry_rejects_extra_missing_or_unknown_mutation_fields(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+
+    # A bounded retry carries no voice-committed origin and no create content.
+    for extra in (
+        {"source": "voice"},
+        {"source": "structured"},
+        {"name": "renamed"},
+        {"instruction": "replaced"},
+        {"model_intent": "default"},
+        {"interaction_id": "interaction-1"},
+        {"previous_attempt_id": "attempt-client-declared"},
+        {"attempt_number": 2},
+    ):
+        rejected = await registry.handle_p3_confirmation_issue(
+            params=_retry_mutation_params(**extra),
+            request_id=f"request-retry-extra-{next(iter(extra))}",
+            session_id="session-product",
+        )
+        assert rejected.ok is False, extra
+        assert cast(dict, rejected.payload["error"])["reason"] == (
+            "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+        ), extra
+
+    # The exact target task is mandatory.
+    without_target = _retry_mutation_params()
+    without_target.pop("task_id")
+    missing = await registry.handle_p3_confirmation_issue(
+        params=without_target,
+        request_id="request-retry-missing-target",
+        session_id="session-product",
+    )
+    assert missing.ok is False
+    assert cast(dict, missing.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+
+    # An unnegotiated same-task operation still fails closed.
+    unsupported = await registry.handle_p3_confirmation_issue(
+        params=_retry_mutation_params(operation="task.resume"),
+        request_id="request-retry-unsupported",
+        session_id="session-product",
+    )
+    assert unsupported.ok is False
+    assert cast(dict, unsupported.payload["error"])["reason"] == (
+        "INVALID_P3_CONFIRMATION_OPERATION"
+    )
+
+    # Nothing above ever reached the mutation route.
+    assert composition.mutation_calls == []
+
+
+def _create_mutation_params(**changes: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "auth_token": "trusted-token",
+        "session_id": "session-product",
+        "operation": "task.create",
+        "command_id": "command-create-1",
+        "issued_at": NOW,
+        "correlation_id": "correlation-create-1",
+        "name": "Formal project task",
+        "instruction": "Create one bounded project change.",
+    }
+    params.update(changes)
+    return params
+
+
+@pytest.mark.asyncio
+async def test_every_p3_mutation_rejects_missing_required_fields_fail_closed(
+    tmp_path: Path,
+) -> None:
+    """A missing required field is one stable rejection, never a stray lookup.
+
+    ``_require_exact_params`` only rejects non-string or unknown keys, so each
+    P3 mutation additionally proves its required fields are present.  Without
+    that proof a missing ``task_id`` escaped as an unhandled ``KeyError`` from
+    the downstream confirmation preparation instead of failing closed.
+    """
+
+    registry, composition, owner = _mutation_registry(tmp_path)
+
+    cancel_without_target = _mutation_params()
+    cancel_without_target.pop("task_id")
+    create_without_name = _create_mutation_params()
+    create_without_name.pop("name")
+    create_without_instruction = _create_mutation_params()
+    create_without_instruction.pop("instruction")
+    retry_without_target = _retry_mutation_params()
+    retry_without_target.pop("task_id")
+
+    for label, params in (
+        ("task.cancel missing task_id", cancel_without_target),
+        ("task.create missing name", create_without_name),
+        ("task.create missing instruction", create_without_instruction),
+        ("task.retry missing task_id", retry_without_target),
+    ):
+        issued = await registry.handle_p3_confirmation_issue(
+            params=params,
+            request_id=f"request-issue-{label.replace(' ', '-')}",
+            session_id="session-product",
+        )
+        assert issued.ok is False, label
+        error = cast(dict, issued.payload["error"])
+        assert error["reason"] == "INVALID_PRODUCT_COMPOSITION_ARGUMENT", label
+        assert error["code"] == "INVALID_ARGUMENT", label
+
+    # ``mutate`` additionally requires the confirmation it must forward.
+    mutate_without_confirmation = _retry_mutation_params()
+    mutated = await registry.handle_p3_mutation(
+        params=mutate_without_confirmation,
+        request_id="request-mutate-missing-confirmation",
+        session_id="session-product",
+    )
+    assert mutated.ok is False
+    mutate_error = cast(dict, mutated.payload["error"])
+    assert mutate_error["reason"] == "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    assert mutate_error["code"] == "INVALID_ARGUMENT"
+
+    # None of the rejections reached authority resolution, the confirmation
+    # forwarder or the mutation route, and none consumed a confirmation.
+    assert composition.prepare_calls == []
+    assert composition.mutation_calls == []
+    assert composition.authority_calls == []
+    assert owner.raw_verifier is not None
+    with sqlite3.connect(tmp_path / "confirmations.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM p3_confirmations").fetchone()[0]
+            == 0
+        )
+
+
+@pytest.mark.asyncio
+async def test_missing_bearer_stays_an_authentication_failure_for_every_mutation(
+    tmp_path: Path,
+) -> None:
+    """A missing bearer is an authentication fact, not a structural one.
+
+    ``auth_token`` remains an allowed field and is deliberately excluded from
+    the structural required-field check, so the existing authenticator keeps
+    classifying it.  Folding it into the argument check would have silently
+    reclassified every unauthenticated create/cancel/retry.
+    """
+
+    registry, composition, owner = _mutation_registry(tmp_path)
+
+    for label, builder in (
+        ("task.create", _create_mutation_params),
+        ("task.cancel", _mutation_params),
+        ("task.retry", _retry_mutation_params),
+    ):
+        without_bearer = builder()
+        without_bearer.pop("auth_token")
+
+        issued = await registry.handle_p3_confirmation_issue(
+            params=without_bearer,
+            request_id=f"request-issue-no-bearer-{label}",
+            session_id="session-product",
+        )
+        assert issued.ok is False, label
+        issue_error = cast(dict, issued.payload["error"])
+        assert issue_error["reason"] == "FORMAL_TASK_AUTHENTICATION_REQUIRED", label
+        assert issue_error["code"] == "UNAUTHENTICATED", label
+
+        mutate_without_bearer = dict(without_bearer)
+        mutate_without_bearer["confirmation_id"] = "confirmation-never-issued"
+        mutated = await registry.handle_p3_mutation(
+            params=mutate_without_bearer,
+            request_id=f"request-mutate-no-bearer-{label}",
+            session_id="session-product",
+        )
+        assert mutated.ok is False, label
+        mutate_error = cast(dict, mutated.payload["error"])
+        assert mutate_error["reason"] == "FORMAL_TASK_AUTHENTICATION_REQUIRED", label
+        assert mutate_error["code"] == "UNAUTHENTICATED", label
+
+    # No rejection reached the mutation route or consumed a confirmation, and
+    # the remaining required-field checks are untouched for every operation.
+    assert composition.mutation_calls == []
+    assert composition.authority_calls == []
+    with sqlite3.connect(tmp_path / "confirmations.sqlite3") as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM p3_confirmations").fetchone()[0]
+            == 0
+        )
+    still_structural = _retry_mutation_params()
+    still_structural.pop("task_id")
+    structural = await registry.handle_p3_confirmation_issue(
+        params=still_structural,
+        request_id="request-issue-still-structural",
+        session_id="session-product",
+    )
+    assert structural.ok is False
+    assert cast(dict, structural.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )

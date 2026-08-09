@@ -26,11 +26,14 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
+    ExecutorRetryReadiness,
     FormalAttemptState,
     FormalTaskViolation,
+    OutboxState,
     PersistentAttemptRecord,
     PersistentOutboxItem,
     PersistentTaskRecord,
+    ReconciliationState,
     ResolvedTaskContext,
     utc_now,
 )
@@ -38,7 +41,10 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
     AuthenticatedPrincipal,
     P3AuthenticatedComposition,
+    P3_MUTATIONS,
     P3_OPERATIONS,
+    P3_ROUTE_METHODS,
+    P3_TARGETED_MUTATIONS,
     P3RouteTelemetry,
     ResolvedAuthority,
     ServerSessionProjectAuthorityResolver,
@@ -47,6 +53,7 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
 )
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     P3ConfirmationBinding,
+    PreparedP3RetryFacts,
     SqliteP3ConfirmationLedger,
     p3_confirmation_intent_fingerprint,
 )
@@ -145,7 +152,7 @@ def _observations(
             attempt_state=states[seq][0],
             attempt_outcome=states[seq][1],
             occurred_at=utc_now(),
-            raw_status=("cancelled" if outcome else "running"),
+            raw_status=(outcome.value if outcome is not None else "running"),
         )
         for seq in range(item.source_seq + 1, target_seq + 1)
     )
@@ -158,10 +165,36 @@ class _Executor:
         self.dispatches: list[str] = []
         self.cancels: list[str] = []
         self.statuses: list[str] = []
+        self.readiness: list[tuple[str, str]] = []
+        self.retry_ready = True
+        self.dispatch_outcome: TerminalOutcome | None = None
+
+    def retry_readiness(
+        self,
+        task: PersistentTaskRecord,
+        attempt: PersistentAttemptRecord,
+    ) -> ExecutorRetryReadiness:
+        self.readiness.append((task.task_id, attempt.attempt_id))
+        assert attempt.outcome is not None
+        return ExecutorRetryReadiness(
+            task_id=task.task_id,
+            previous_attempt_id=attempt.attempt_id,
+            previous_outcome=attempt.outcome,
+            previous_attempt_number=attempt.attempt_number,
+            ready=self.retry_ready,
+            reason=(
+                "PREDECESSOR_QUIESCENT"
+                if self.retry_ready
+                else "ATTEMPT_CLEANUP_RETAINED"
+            ),
+        )
 
     async def dispatch(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self.dispatches.append(item.attempt_id)
-        return ExecutorDeliveryResult(f"carrier:{item.attempt_id}", _observations(item))
+        return ExecutorDeliveryResult(
+            f"carrier:{item.attempt_id}",
+            _observations(item, outcome=self.dispatch_outcome),
+        )
 
     async def cancel(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         self.cancels.append(item.attempt_id)
@@ -2455,3 +2488,1015 @@ async def test_binding_shutdown_releases_contexts_and_agents_after_scheduler_fai
     assert service.stop_calls == 2
     assert service.clear_calls == 1
     assert manager.cleanup_calls == 2
+
+
+# --- D-069 bounded same-task task.retry product reachability -----------------
+
+
+def _retry_params(
+    task_id: str,
+    *,
+    command_id: str = "command-retry",
+    session_id: str = "session-1",
+    correlation_id: str | None = None,
+) -> dict[str, object]:
+    return {
+        **_base(session_id),
+        "command_id": command_id,
+        "confirmation_id": f"forged:{command_id}",
+        "issued_at": NOW,
+        "correlation_id": correlation_id or f"correlation:{command_id}",
+        "task_id": task_id,
+    }
+
+
+async def _issued_retry_params(
+    harness: _Harness,
+    params: dict[str, object],
+    *,
+    expires_at: str = EXPIRY,
+    now: str = NOW,
+) -> dict[str, object]:
+    """Issue the exact confirmation the production issue route would freeze."""
+
+    prepared = await harness.composition.prepare_mutation_confirmation(
+        operation="task.retry",
+        params=params,
+        session_id=str(params["session_id"]),
+    )
+    params["confirmation_id"] = harness.confirmations.issue(
+        prepared.binding, expires_at=expires_at, now=now
+    )
+    return params
+
+
+def _outbox_snapshot(database: Path) -> tuple[tuple[object, ...], ...]:
+    with sqlite3.connect(database) as connection:
+        return tuple(
+            tuple(row)
+            for row in connection.execute(
+                "SELECT outbox_id, kind, state, claimed_by FROM outbox"
+                " ORDER BY outbox_id"
+            ).fetchall()
+        )
+
+
+def _confirmation_count(database: Path) -> int:
+    with sqlite3.connect(database) as connection:
+        return int(
+            connection.execute("SELECT COUNT(*) FROM p3_confirmations").fetchone()[0]
+        )
+
+
+async def _effects(harness: _Harness) -> tuple[object, ...]:
+    """Every D-069 forbidden effect a rejection or replay must leave untouched.
+
+    The snapshot is taken only once every durable delivery has settled so an
+    earlier step's asynchronous tail can never be mistaken for a rejection's
+    side effect.
+
+    ``Executor.status`` is deliberately excluded.  An accepted mutation wakes
+    the periodic reconciliation worker, whose status query is a read-only
+    audit of an already dispatched attempt; the zero-effect oracle forbids
+    ``dispatch``/``cancel``, not that audit.  Every mutating surface —
+    task/spec/current-attempt rows, attempt/event/outbox/command rows, outbox
+    claim state, Executor dispatch/cancel, retry readiness and binding
+    resolver ownership — is covered here.
+    """
+
+    await _wait_until(
+        lambda: all(
+            row[2] not in {"pending", "claimed"}
+            for row in _outbox_snapshot(harness.database)
+        )
+    )
+    return (
+        _store_counts(harness.database),
+        _outbox_snapshot(harness.database),
+        tuple(harness.executor.dispatches),
+        tuple(harness.executor.cancels),
+        tuple(harness.executor.readiness),
+        harness.closer.calls,
+    )
+
+
+async def _cancel_current(
+    harness: _Harness, task_id: str, *, command_id: str
+) -> None:
+    params = _issue_confirmation(
+        harness,
+        {
+            **_mutation_params(task_id),
+            "command_id": command_id,
+            "confirmation_id": f"forged:{command_id}",
+            "correlation_id": f"correlation:{command_id}",
+        },
+        operation="task.cancel",
+    )
+    cancelled = await harness.composition.handle(
+        operation="task.cancel",
+        params=params,
+        request_id=f"request-{command_id}",
+        session_id="session-1",
+    )
+    assert cancelled.ok is True, cancelled.payload
+    await _wait_until(
+        lambda: harness.composition._core.store.get_task(task_id, _scope()).state.value
+        == "terminal"
+    )
+
+
+async def _terminal_task(
+    harness: _Harness,
+    *,
+    command_id: str = "command-create",
+    cancel_command_id: str = "command-cancel",
+    cancel: bool = True,
+) -> str:
+    """Drive one exact task to a terminal current attempt through the route."""
+
+    created = await harness.composition.handle(
+        operation="task.create",
+        params=_issued_create_params(harness, command_id),
+        request_id=f"request-{command_id}",
+        session_id="session-1",
+    )
+    assert created.ok is True, created.payload
+    task_id = str(created.payload["result"]["task_id"])
+    await _wait_until(lambda: len(harness.executor.dispatches) >= 1)
+    if cancel:
+        await _cancel_current(harness, task_id, command_id=cancel_command_id)
+    else:
+        await _wait_until(
+            lambda: harness.composition._core.store.get_task(
+                task_id, _scope()
+            ).state.value
+            == "terminal"
+        )
+    return task_id
+
+
+async def _apply_retry(
+    harness: _Harness, task_id: str, *, command_id: str
+) -> dict[str, object]:
+    params = await _issued_retry_params(
+        harness, _retry_params(task_id, command_id=command_id)
+    )
+    applied = await harness.composition.handle(
+        operation="task.retry",
+        params=params,
+        request_id=f"request-{command_id}",
+        session_id="session-1",
+    )
+    assert applied.ok is True, applied.payload
+    return dict(applied.payload["result"])
+
+
+@pytest.mark.asyncio
+async def test_retry_creates_one_successor_attempt_from_server_derived_lineage(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        predecessor = harness.composition._core.store.get_task(task_id, _scope())
+        attempt_a = predecessor.attempt_id
+        before = _store_counts(harness.database)
+
+        result = await _apply_retry(harness, task_id, command_id="command-retry-b")
+
+        assert result["task_id"] == task_id
+        assert result["previous_attempt_id"] == attempt_a
+        assert result["attempt_id"] != attempt_a
+        assert result["attempt_number"] == 2
+        assert result["applied"] is True
+        assert result["state"] == "accepted"
+
+        after = _store_counts(harness.database)
+        # No new task row; exactly one new attempt, dispatch outbox row and
+        # admission command.  The event count only grows further once the
+        # successor is delivered, so it is bounded from below.
+        assert after[0] == before[0]
+        assert after[1] == before[1] + 1
+        assert after[2] >= before[2] + 1
+        assert after[3] == before[3] + 1
+        assert after[4] == before[4] + 1
+
+        # Executor readiness was proved against the exact predecessor only.
+        assert harness.executor.readiness == [(task_id, attempt_a)]
+
+        current = harness.composition._core.store.get_task(task_id, _scope())
+        assert current.attempt_id == result["attempt_id"]
+        assert current.state.value == "accepted"
+        assert current.outcome is None
+        # The stable specification, executor and model binding are preserved.
+        assert current.spec.name == predecessor.spec.name
+        assert current.spec.instruction == predecessor.spec.instruction
+        assert current.spec.executor_id == predecessor.spec.executor_id
+        assert current.spec.attributes == predecessor.spec.attributes
+
+        boundary = harness.composition._core.store.events(
+            task_id, _scope(), after_seq=current.event_head - 1
+        )[0]
+        assert boundary.event_type == "task.retry_accepted"
+        assert boundary.state == "accepted"
+        assert boundary.outcome is None
+        assert boundary.attempt_id == result["attempt_id"]
+        assert boundary.details["retry_of_attempt_id"] == attempt_a
+        assert boundary.details["previous_outcome"] == "cancelled"
+        assert boundary.details["attempt_number"] == 2
+        assert boundary.details["command_id"] == "command-retry-b"
+
+        await _wait_until(lambda: result["attempt_id"] in harness.executor.dispatches)
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_applied_retry_replays_exactly_after_the_task_advanced(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        applied_params = await _issued_retry_params(
+            harness, _retry_params(task_id, command_id="command-retry-b")
+        )
+        first_confirmation = str(applied_params["confirmation_id"])
+        applied = await harness.composition.handle(
+            operation="task.retry",
+            params=applied_params,
+            request_id="request-retry-b",
+            session_id="session-1",
+        )
+        assert applied.ok is True, applied.payload
+        original = dict(applied.payload["result"])
+        await _wait_until(lambda: original["attempt_id"] in harness.executor.dispatches)
+        before = await _effects(harness)
+
+        # 1. Durable replay never bypasses confirmation.  The already consumed
+        #    credential still verifies, because the ledger deliberately allows
+        #    an exact single-use record to be replayed rather than re-issued,
+        #    but it is not an entry point for a second attempt: the command
+        #    ledger returns the same applied result with zero new effect.
+        consumed_replay = await harness.composition.handle(
+            operation="task.retry",
+            params={
+                **_retry_params(task_id, command_id="command-retry-b"),
+                "confirmation_id": first_confirmation,
+            },
+            request_id="request-retry-b-consumed",
+            session_id="session-1",
+        )
+        assert consumed_replay.ok is True, consumed_replay.payload
+        assert consumed_replay.payload["result"] == original
+        assert await _effects(harness) == before
+
+        # An expired credential with an otherwise exact binding is refused, and
+        # a forged binding is refused before expiry is even considered.
+        exact = await harness.composition.prepare_mutation_confirmation(
+            operation="task.retry",
+            params=_retry_params(task_id, command_id="command-retry-b"),
+            session_id="session-1",
+        )
+        stale_credentials = (
+            (
+                "expired",
+                harness.confirmations.issue(
+                    exact.binding,
+                    expires_at="2026-08-05T11:30:00Z",
+                    now="2026-08-05T11:00:00Z",
+                ),
+                "P3_CONFIRMATION_EXPIRED",
+            ),
+            (
+                "forged",
+                harness.confirmations.issue(
+                    P3ConfirmationBinding(
+                        principal_id="user-1",
+                        scope=_scope(),
+                        operation="task.retry",
+                        command_id="command-retry-b",
+                        target_task_id=task_id,
+                        intent_fingerprint="forged-intent",
+                    ),
+                    expires_at=EXPIRY,
+                    now=NOW,
+                ),
+                "P3_CONFIRMATION_BINDING_MISMATCH",
+            ),
+        )
+        for label, stale, expected in stale_credentials:
+            refused = await harness.composition.handle(
+                operation="task.retry",
+                params={
+                    **_retry_params(task_id, command_id="command-retry-b"),
+                    "confirmation_id": stale,
+                },
+                request_id=f"request-retry-b-{label}",
+                session_id="session-1",
+            )
+            assert refused.ok is False, label
+            assert refused.payload["error"]["reason"] == expected, label
+            assert refused.payload["error"]["code"] == "PERMISSION_DENIED", label
+            assert await _effects(harness) == before, label
+
+        # 2. A reopened process re-issues its own confirmation because that
+        #    ledger is single-use and short lived.  The new credential is
+        #    normally issued, verified and consumed; the durable command ledger
+        #    still owns the outcome, so the applied result replays exactly.
+        replay_params = await _issued_retry_params(
+            harness, _retry_params(task_id, command_id="command-retry-b")
+        )
+        assert replay_params["confirmation_id"] != first_confirmation
+        replayed = await harness.composition.handle(
+            operation="task.retry",
+            params=replay_params,
+            request_id="request-retry-b-replayed",
+            session_id="session-1",
+        )
+
+        assert replayed.ok is True, replayed.payload
+        assert replayed.payload["result"] == original
+        assert replayed.payload["request_id"] == "request-retry-b-replayed"
+        # Exact replay: zero new durable rows, zero outbox claim change, zero
+        # Executor work and — proving replay precedes current admission — zero
+        # additional readiness evaluations.
+        assert await _effects(harness) == before
+
+        # 3. A fresh valid confirmation does not launder a changed immutable
+        #    product fact.  Each one still conflicts or is refused earlier.
+        for changed in (
+            {"command_id": "command-retry-other"},
+            {"correlation_id": "correlation:tampered"},
+            {"issued_at": "2026-08-05T11:59:00Z"},
+        ):
+            tampered = _retry_params(task_id, command_id="command-retry-b")
+            tampered.update(changed)
+            with pytest.raises(FormalTaskViolation) as conflicted:
+                await _issued_retry_params(harness, tampered)
+            assert conflicted.value.reason in {
+                "IDEMPOTENCY_CONFLICT",
+                "TASK_RETRY_REQUIRES_TERMINAL",
+            }, changed
+            assert await _effects(harness) == before, changed
+
+        # The confirmation ledger may grow — D-069 keeps it an independent
+        # authorization record — but it never produced a second attempt.
+        assert _confirmation_count(harness.database) > 1
+        current = harness.composition._core.store.get_task(task_id, _scope())
+        assert current.attempt_id == original["attempt_id"]
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_changed_product_request_facts_conflict_on_the_same_command_id(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        await _apply_retry(harness, task_id, command_id="command-retry-b")
+        before = await _effects(harness)
+
+        confirmations_before = _confirmation_count(harness.database)
+        conflicting = _retry_params(
+            task_id,
+            command_id="command-retry-b",
+            correlation_id="correlation:tampered",
+        )
+
+        # The conflict is deterministic, so it is decided before any
+        # confirmation is issued and long before the route could re-admit.
+        with pytest.raises(FormalTaskViolation) as prepared:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=conflicting,
+                session_id="session-1",
+            )
+        assert prepared.value.reason == "IDEMPOTENCY_CONFLICT"
+        assert prepared.value.code is ErrorCode.CONFLICT
+
+        routed = await harness.composition.handle(
+            operation="task.retry",
+            params=conflicting,
+            request_id="request-retry-conflict",
+            session_id="session-1",
+        )
+        assert routed.ok is False
+        assert routed.payload["error"]["reason"] == "IDEMPOTENCY_CONFLICT"
+        assert routed.payload["error"]["code"] == "CONFLICT"
+
+        assert await _effects(harness) == before
+        assert _confirmation_count(harness.database) == confirmations_before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_nonterminal_predecessor_with_zero_effect(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness),
+            request_id="request-create",
+            session_id="session-1",
+        )
+        assert created.ok is True
+        task_id = str(created.payload["result"]["task_id"])
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        before = await _effects(harness)
+        confirmations_before = _confirmation_count(harness.database)
+
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=_retry_params(task_id),
+                session_id="session-1",
+            )
+
+        assert rejected.value.reason == "TASK_RETRY_REQUIRES_TERMINAL"
+        assert rejected.value.code is ErrorCode.CONFLICT
+        assert await _effects(harness) == before
+        # A deterministic rejection never reserves confirmation capacity.
+        assert _confirmation_count(harness.database) == confirmations_before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_ineligible_terminal_outcome_with_zero_effect(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    harness.executor.dispatch_outcome = TerminalOutcome.FAILED
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness, cancel=False)
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).outcome
+            is TerminalOutcome.FAILED
+        )
+        before = await _effects(harness)
+
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=_retry_params(task_id),
+                session_id="session-1",
+            )
+
+        assert rejected.value.reason == "TASK_RETRY_OUTCOME_NOT_ELIGIBLE"
+        assert rejected.value.code is ErrorCode.CONFLICT
+        assert await _effects(harness) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_budget_stops_at_three_total_attempts(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        second = await _apply_retry(harness, task_id, command_id="command-retry-b")
+        assert second["attempt_number"] == 2
+        await _cancel_current(harness, task_id, command_id="command-cancel-b")
+
+        third = await _apply_retry(harness, task_id, command_id="command-retry-c")
+        assert third["attempt_number"] == 3
+        await _cancel_current(harness, task_id, command_id="command-cancel-c")
+
+        before = await _effects(harness)
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=_retry_params(task_id, command_id="command-retry-d"),
+                session_id="session-1",
+            )
+
+        assert rejected.value.reason == "TASK_RETRY_LIMIT_EXCEEDED"
+        assert rejected.value.code is ErrorCode.CONFLICT
+        assert await _effects(harness) == before
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).attempt_id
+            == third["attempt_id"]
+        )
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_fails_closed_while_executor_cleanup_is_pending(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        params = await _issued_retry_params(harness, _retry_params(task_id))
+        harness.executor.retry_ready = False
+        before = await _effects(harness)
+
+        rejected = await harness.composition.handle(
+            operation="task.retry",
+            params=params,
+            request_id="request-retry-cleanup-pending",
+            session_id="session-1",
+        )
+
+        assert rejected.ok is False
+        assert rejected.payload["error"]["reason"] == (
+            "TASK_RETRY_EXECUTOR_CLEANUP_PENDING"
+        )
+        assert rejected.payload["error"]["code"] == "UNAVAILABLE"
+        after = await _effects(harness)
+        # Readiness itself was evaluated once and nothing else moved.
+        assert after[:4] == before[:4]
+        assert len(after[4]) == len(before[4]) + 1
+        assert after[5] == before[5]
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_forged_predecessor_lineage_confirmation(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        prepared = await harness.composition.prepare_mutation_confirmation(
+            operation="task.retry",
+            params=_retry_params(task_id),
+            session_id="session-1",
+        )
+        honest = harness.authority.contexts["session-1"]
+        persisted = harness.composition._core.store.get_task(task_id, _scope()).spec
+        forged = PreparedP3RetryFacts(
+            previous_attempt_id="attempt-forged",
+            previous_outcome="completed",
+            attempt_number=3,
+            name=persisted.name,
+            instruction=persisted.instruction,
+            executor_id=persisted.executor_id,
+            required_capabilities=tuple(persisted.required_capabilities),
+            side_effect_class=persisted.side_effect_class,
+            attributes=tuple(persisted.attributes),
+        )
+        forged_binding = P3ConfirmationBinding(
+            principal_id=prepared.binding.principal_id,
+            scope=prepared.binding.scope,
+            operation="task.retry",
+            command_id=prepared.binding.command_id,
+            target_task_id=task_id,
+            intent_fingerprint=p3_confirmation_intent_fingerprint(
+                operation="task.retry",
+                command_id=prepared.binding.command_id,
+                target_task_id=task_id,
+                context=honest,
+                retry=forged,
+            ),
+        )
+        assert forged_binding.intent_fingerprint != prepared.binding.intent_fingerprint
+        params = _retry_params(task_id)
+        params["confirmation_id"] = harness.confirmations.issue(
+            forged_binding, expires_at=EXPIRY, now=NOW
+        )
+        before = await _effects(harness)
+
+        rejected = await harness.composition.handle(
+            operation="task.retry",
+            params=params,
+            request_id="request-retry-forged",
+            session_id="session-1",
+        )
+
+        assert rejected.ok is False
+        assert rejected.payload["error"]["reason"] == "P3_CONFIRMATION_BINDING_MISMATCH"
+        assert rejected.payload["error"]["code"] == "PERMISSION_DENIED"
+        assert await _effects(harness) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_requires_a_clean_checkout_and_performs_no_git_operation(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        before = await _effects(harness)
+        harness.authority.dirty = True
+        harness.authority.calls.clear()
+
+        with pytest.raises(FormalTaskViolation) as prepared:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=_retry_params(task_id),
+                session_id="session-1",
+            )
+        assert prepared.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
+        assert prepared.value.code is ErrorCode.PERMISSION_DENIED
+
+        routed = await harness.composition.handle(
+            operation="task.retry",
+            params=_retry_params(task_id),
+            request_id="request-retry-dirty",
+            session_id="session-1",
+        )
+        assert routed.ok is False
+        assert routed.payload["error"]["reason"] == "TASK_CONTEXT_WORKTREE_DIRTY"
+
+        # Every retry authority resolution demanded the clean-worktree guard.
+        assert harness.authority.calls == [("session-1", True), ("session-1", True)]
+        assert await _effects(harness) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_expired_confirmation_foreign_scope_and_bad_bearer(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        # Issue against an earlier clock so the record is already expired at NOW.
+        expired = await _issued_retry_params(
+            harness,
+            _retry_params(task_id, command_id="command-retry-expired"),
+            expires_at="2026-08-05T11:30:00Z",
+            now="2026-08-05T11:00:00Z",
+        )
+        before = await _effects(harness)
+
+        stale = await harness.composition.handle(
+            operation="task.retry",
+            params=expired,
+            request_id="request-retry-expired",
+            session_id="session-1",
+        )
+        assert stale.ok is False
+        assert stale.payload["error"]["reason"] == "P3_CONFIRMATION_EXPIRED"
+        assert stale.payload["error"]["code"] == "PERMISSION_DENIED"
+
+        foreign = await harness.composition.handle(
+            operation="task.retry",
+            params=_retry_params(
+                task_id,
+                command_id="command-retry-foreign",
+                session_id="session-2",
+            ),
+            request_id="request-retry-foreign",
+            session_id="session-2",
+        )
+        assert foreign.ok is False
+        assert foreign.payload["error"]["code"] == "NOT_FOUND"
+        assert task_id not in str(foreign.payload["error"])
+
+        unauthorized = await harness.composition.handle(
+            operation="task.retry",
+            params={**_retry_params(task_id), "auth_token": "wrong-token"},
+            request_id="request-retry-unauthorized",
+            session_id="session-1",
+        )
+        assert unauthorized.ok is False
+        assert unauthorized.payload["error"]["code"] == "UNAUTHENTICATED"
+        assert await _effects(harness) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_fails_closed_while_predecessor_authority_is_unsettled(
+    tmp_path: Path,
+) -> None:
+    """Unsettled outbox or reconciliation ownership blocks admission upstream.
+
+    Both facts are Store-owned, so the product route must surface their exact
+    stable reason rather than folding them into a generic retry error.  The
+    snapshots below are taken directly instead of through ``_effects`` because
+    the injected pending outbox row would otherwise never appear settled.
+    """
+
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        attempt_id = harness.composition._core.store.get_task(
+            task_id, _scope()
+        ).attempt_id
+
+        with sqlite3.connect(harness.database) as connection:
+            connection.execute(
+                "UPDATE tasks SET reconciliation_state=? WHERE task_id=?",
+                (ReconciliationState.PENDING.value, task_id),
+            )
+        before = _store_counts(harness.database)
+        readiness_before = len(harness.executor.readiness)
+
+        with pytest.raises(FormalTaskViolation) as reconciliation:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=_retry_params(task_id),
+                session_id="session-1",
+            )
+        assert reconciliation.value.reason == "TASK_RETRY_RECONCILIATION_PENDING"
+        assert reconciliation.value.code is ErrorCode.UNAVAILABLE
+
+        with sqlite3.connect(harness.database) as connection:
+            connection.execute(
+                "UPDATE tasks SET reconciliation_state=NULL WHERE task_id=?",
+                (task_id,),
+            )
+            connection.execute(
+                "UPDATE outbox SET state=? WHERE task_id=? AND attempt_id=?",
+                (OutboxState.PENDING.value, task_id, attempt_id),
+            )
+
+        with pytest.raises(FormalTaskViolation) as outbox:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=_retry_params(task_id),
+                session_id="session-1",
+            )
+        assert outbox.value.reason == "TASK_RETRY_OUTBOX_PENDING"
+        assert outbox.value.code is ErrorCode.UNAVAILABLE
+
+        # Neither deterministic rejection admitted an attempt, appended an
+        # event, claimed an outbox row, issued a command or reached the
+        # Executor readiness seam.
+        assert _store_counts(harness.database) == before
+        assert len(harness.executor.readiness) == readiness_before
+        assert harness.executor.dispatches == [attempt_id]
+        assert harness.executor.cancels == [attempt_id]
+        with sqlite3.connect(harness.database) as connection:
+            assert (
+                connection.execute(
+                    "SELECT COUNT(*) FROM outbox WHERE claimed_by IS NOT NULL"
+                ).fetchone()[0]
+                == 0
+            )
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_an_unsupported_legacy_executor(tmp_path: Path) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        before = await _effects(harness)
+        harness.executor.executor_id = "legacy.demo_substitute"
+
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await harness.composition.prepare_mutation_confirmation(
+                operation="task.retry",
+                params=_retry_params(task_id),
+                session_id="session-1",
+            )
+
+        assert rejected.value.reason == "EXECUTOR_CAPABILITY_UNAVAILABLE"
+        assert rejected.value.code is ErrorCode.CAPABILITY_UNAVAILABLE
+        assert await _effects(harness) == before
+    finally:
+        harness.executor.executor_id = FORMAL_PROJECT_EXECUTOR_ID
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_retry_admits_exactly_one_successor_attempt(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        first = await _issued_retry_params(
+            harness, _retry_params(task_id, command_id="command-retry-x")
+        )
+        second = await _issued_retry_params(
+            harness, _retry_params(task_id, command_id="command-retry-y")
+        )
+        before = _store_counts(harness.database)
+
+        results = await asyncio.gather(
+            harness.composition.handle(
+                operation="task.retry",
+                params=first,
+                request_id="request-retry-x",
+                session_id="session-1",
+            ),
+            harness.composition.handle(
+                operation="task.retry",
+                params=second,
+                request_id="request-retry-y",
+                session_id="session-1",
+            ),
+        )
+
+        accepted = [item for item in results if item.ok]
+        refused = [item for item in results if not item.ok]
+        assert len(accepted) == 1
+        assert len(refused) == 1
+        assert refused[0].payload["error"]["reason"] in {
+            "TASK_RETRY_PRECONDITION_STALE",
+            "TASK_RETRY_REQUIRES_TERMINAL",
+        }
+        after = _store_counts(harness.database)
+        # Exactly one successor attempt and one dispatch outbox row.  The loser
+        # contributes no durable row at all; delivery of the winner may still
+        # append lifecycle events, so that count is bounded from below.
+        assert after[1] == before[1] + 1
+        assert after[2] >= before[2] + 1
+        assert after[3] == before[3] + 1
+        assert accepted[0].payload["result"]["attempt_number"] == 2
+        assert harness.executor.readiness[-1][0] == task_id
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_route_surface_rejects_client_declared_or_extra_facts(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        before = await _effects(harness)
+
+        for extra in (
+            {"source": "voice"},
+            {"previous_attempt_id": "attempt-client-declared"},
+            {"attempt_number": 2},
+            {"after_seq": 0},
+            {"name": "renamed"},
+        ):
+            rejected = await harness.composition.handle(
+                operation="task.retry",
+                params={**_retry_params(task_id), **extra},
+                request_id=f"request-retry-extra-{next(iter(extra))}",
+                session_id="session-1",
+            )
+            assert rejected.ok is False, extra
+            assert rejected.payload["error"]["reason"] == "INVALID_P3_ROUTE_ARGUMENT"
+
+        # Query-style authority registration can never resolve a retry grant.
+        with pytest.raises(FormalTaskViolation) as denied:
+            harness.composition.resolve_product_authority_candidate(
+                bearer_token=TOKEN,
+                operation="task.retry",
+                session_id="session-1",
+                correlation_id="correlation:retry",
+                required_capabilities=frozenset({"task.retry"}),
+                task_id=task_id,
+            )
+        assert denied.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
+        assert denied.value.code is ErrorCode.PERMISSION_DENIED
+        assert await _effects(harness) == before
+    finally:
+        await harness.composition.stop()
+
+
+def test_retry_has_no_direct_transport_route_but_stays_a_p3_mutation() -> None:
+    """W2 reaches retry only through the product composition mutate route.
+
+    Removing the direct transport method must not silently demote
+    ``task.retry`` to an unknown operation: every admission in ``handle`` and
+    ``prepare_mutation_confirmation`` gates on these sets, so losing the
+    operation here would disable retry validation instead of disabling retry.
+    """
+
+    from jiuwenswarm.common.schema.message import ReqMethod
+
+    assert "live_voice.task.retry" not in P3_ROUTE_METHODS
+    assert "task.retry" not in set(P3_ROUTE_METHODS.values())
+    assert all(item.value != "live_voice.task.retry" for item in ReqMethod)
+
+    assert "task.retry" in P3_OPERATIONS
+    assert "task.retry" in P3_MUTATIONS
+    assert "task.retry" in P3_TARGETED_MUTATIONS
+    # Every directly routed operation keeps its transport method.
+    assert P3_OPERATIONS - P3_MUTATIONS == set(P3_ROUTE_METHODS.values()) - {
+        "task.create",
+        "task.cancel",
+    }
+
+
+@pytest.mark.asyncio
+async def test_unrouted_transport_method_cannot_reach_the_retry_admission(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        before = await _effects(harness)
+
+        # AgentServer resolves an operation through P3_ROUTE_METHODS; an
+        # unrouted method yields the empty operation and must fail closed.
+        unrouted = P3_ROUTE_METHODS.get("live_voice.task.retry", "")
+        assert unrouted == ""
+        rejected = await harness.composition.handle(
+            operation=unrouted,
+            params=_retry_params(task_id),
+            request_id="request-retry-unrouted",
+            session_id="session-1",
+        )
+
+        assert rejected.ok is False
+        assert rejected.payload["error"]["reason"] == "UNSUPPORTED_FORMAL_TASK_INTENT"
+        assert rejected.payload["error"]["code"] == "UNSUPPORTED"
+        assert await _effects(harness) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_dispatch_predecessor_admits_exactly_one_successor(
+    tmp_path: Path,
+) -> None:
+    """The canonical cancel-before-dispatch shape is retry eligible end to end.
+
+    Admission is opened without the periodic reconciliation worker so the
+    create dispatch outbox is never claimed.  That is exactly how a task
+    cancelled before dispatch looks: the Direct Executor was never called, so
+    it owns no journal row for the predecessor, yet D-069 still makes a
+    cancelled terminal attempt retry eligible.
+    """
+
+    harness = _harness(tmp_path)
+    async with harness.composition._active_condition:
+        harness.composition._accepting = True
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness),
+            request_id="request-create",
+            session_id="session-1",
+        )
+        assert created.ok is True, created.payload
+        task_id = str(created.payload["result"]["task_id"])
+        assert harness.executor.dispatches == []
+
+        cancelled = await harness.composition.handle(
+            operation="task.cancel",
+            params=_issued_cancel_params(harness, task_id),
+            request_id="request-cancel",
+            session_id="session-1",
+        )
+        assert cancelled.ok is True, cancelled.payload
+
+        store = harness.composition._core.store
+        predecessor = store.get_task(task_id, _scope())
+        attempt_a = predecessor.attempt_id
+        assert predecessor.state.value == "terminal"
+        assert predecessor.outcome is TerminalOutcome.CANCELLED
+        assert predecessor.cancel_requested is True
+        assert predecessor.dispatch_fenced is True
+        assert store.get_attempt(attempt_a).executor_ref is None
+        # The Executor was never engaged, so it holds no journal for A.
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+        before = _store_counts(harness.database)
+
+        result = await _apply_retry(harness, task_id, command_id="command-retry-b")
+
+        assert result["previous_attempt_id"] == attempt_a
+        assert result["attempt_number"] == 2
+        assert result["applied"] is True
+        # Readiness was proved from Store facts alone, against exactly A.
+        assert harness.executor.readiness == [(task_id, attempt_a)]
+
+        after = _store_counts(harness.database)
+        # Exactly one successor attempt, one boundary event, one dispatch
+        # outbox row and one admission command; the task row is not duplicated.
+        assert after[0] == before[0]
+        assert after[1] == before[1] + 1
+        assert after[2] == before[2] + 1
+        assert after[3] == before[3] + 1
+        assert after[4] == before[4] + 1
+        current = store.get_task(task_id, _scope())
+        assert current.attempt_id == result["attempt_id"]
+        assert current.state.value == "accepted"
+        assert current.outcome is None
+        # No worker ran, so nothing was dispatched or cancelled for B either.
+        assert harness.executor.dispatches == []
+        assert harness.executor.cancels == []
+    finally:
+        await harness.composition.stop()

@@ -29,6 +29,8 @@ from .formal_task_models import (
     FormalTaskViolation,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskRetryPrecondition,
+    TaskRetryProductRequestFingerprint,
 )
 
 
@@ -59,6 +61,8 @@ class FormalTaskPolicyInput:
     confirmed: bool = False
     confirmation_id: str | None = None
     after_seq: int = -1
+    retry_precondition: TaskRetryPrecondition | None = None
+    retry_product_request: TaskRetryProductRequestFingerprint | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.attributes, Mapping):
@@ -108,7 +112,7 @@ class FormalTaskPolicyAdapter:
     """Fail closed before a formal command/query reaches the Task Core."""
 
     _QUERIES = frozenset({"task.get", "task.list", "task.status", "task.events"})
-    _COMMANDS = frozenset({"task.create", "task.cancel"})
+    _COMMANDS = frozenset({"task.create", "task.cancel", "task.retry"})
 
     def __init__(self, commits: TurnCommitLedger | None = None) -> None:
         self._commits = commits
@@ -240,6 +244,15 @@ class FormalTaskPolicyAdapter:
                 "request-derived identity cannot substitute for trusted authorization",
                 ErrorCode.UNAUTHENTICATED,
             )
+        if intent.operation != "task.retry" and (
+            intent.retry_precondition is not None
+            or intent.retry_product_request is not None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_RETRY_INTENT",
+                "only task.retry may carry server-derived retry lineage",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         if intent.source == "voice":
             if not intent.interaction_id or not intent.turn_id or not intent.commit_id:
                 raise FormalTaskViolation(
@@ -305,6 +318,58 @@ class FormalTaskPolicyAdapter:
                 "attributes": dict(intent.attributes),
             }
             target_id = f"create:{intent.command_id}"
+            extensions: dict[str, object] = {}
+        elif intent.operation == "task.retry":
+            # Every predecessor fact below is Store-derived by the composition
+            # owner.  The external request submits only ``task_id``; this
+            # adapter never accepts a client-declared lineage or attempt number.
+            if not intent.task_id:
+                raise FormalTaskViolation(
+                    "EXACT_TASK_REQUIRED",
+                    "task.retry requires an exact formal task id",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if intent.source != "structured":
+                raise FormalTaskViolation(
+                    "INVALID_TASK_RETRY_INTENT",
+                    "task.retry accepts only a structured bounded retry request",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if (
+                intent.name is not None
+                or intent.instruction is not None
+                or bool(intent.attributes)
+                or intent.after_seq != -1
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_RETRY_INTENT",
+                    "task.retry cannot replace create-only content",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if intent.context is None:
+                raise FormalTaskViolation(
+                    "FORMAL_TASK_CONTEXT_REQUIRED",
+                    "task.retry requires server-resolved project context",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if type(intent.retry_precondition) is not TaskRetryPrecondition:
+                raise FormalTaskViolation(
+                    "TASK_RETRY_PRECONDITION_REQUIRED",
+                    "task.retry requires the server-derived predecessor lineage",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if (
+                type(intent.retry_product_request)
+                is not TaskRetryProductRequestFingerprint
+            ):
+                raise FormalTaskViolation(
+                    "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_REQUIRED",
+                    "task.retry requires one product-owned request fingerprint",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            payload = intent.retry_precondition.to_dict()
+            target_id = intent.task_id
+            extensions = intent.retry_product_request.to_extensions()
         else:
             if not intent.task_id:
                 raise FormalTaskViolation(
@@ -326,6 +391,7 @@ class FormalTaskPolicyAdapter:
                 )
             payload = {}
             target_id = intent.task_id
+            extensions = {}
         origin = (
             {
                 "kind": "committed_turn",
@@ -350,7 +416,7 @@ class FormalTaskPolicyAdapter:
                 "context_refs": [],
                 "required_capabilities": [intent.operation],
                 "payload": payload,
-                "extensions": {},
+                "extensions": extensions,
             }
         )
 

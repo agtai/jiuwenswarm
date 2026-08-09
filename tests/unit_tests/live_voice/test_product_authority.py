@@ -1156,3 +1156,158 @@ def test_raw_routing_and_confirmation_values_never_appear_in_repr_or_errors() ->
     assert malformed_secret not in str(caught.value)
     assert malformed_secret not in repr(caught.value)
     assert caught.value.__cause__ is None
+
+
+# --- D-069 bounded task.retry authority -------------------------------------
+
+
+_RETRY_TASK_RESOURCE = AuthorityResourceBinding(
+    "task",
+    "task-1",
+    hashlib.sha256(b"task-1").hexdigest(),
+)
+
+
+def _retry_adapter(intent: str) -> P3AuthorityAdapter:
+    resolver = RecordingResolver(
+        [
+            _candidate(
+                operation="task.retry",
+                capabilities=frozenset({"task.retry"}),
+                resource=_RETRY_TASK_RESOURCE,
+                confirmation=_confirmation(
+                    operation="task.retry",
+                    target_id="task-1",
+                    intent_sha256=intent,
+                ),
+            )
+        ]
+    )
+    return P3AuthorityAdapter(_service(resolver))
+
+
+def test_p3_retry_is_a_targeted_confirmed_mutation() -> None:
+    intent = hashlib.sha256(b"retry-intent").hexdigest()
+    adapter = _retry_adapter(intent)
+
+    context = adapter.resolve(
+        _route(),
+        operation="task.retry",
+        required_capabilities=frozenset({"task.retry"}),
+        command_id="command-1",
+        target_task_id="task-1",
+        intent_sha256=intent,
+        confirmation_id="confirmation-1",
+    )
+
+    assert context is not None
+    assert context.target_task_id == "task-1"
+    # The task resource binding is derived, not accepted from the caller.
+    assert context.authority.resource == _RETRY_TASK_RESOURCE
+    assert context.confirmation_binding is not None
+    assert context.confirmation_binding.operation == "task.retry"
+    assert context.confirmation_binding.target_task_id == "task-1"
+
+    grant = adapter.to_task_grant(
+        context, VerifiedP3Confirmation("confirmation-1", SHORT_EXPIRY, False)
+    )
+    assert grant is not None
+    assert grant.operation == "task.retry"
+    assert grant.target_task_id == "task-1"
+    assert grant.confirmed is True
+    grant.authorize(
+        scope=SCOPE,
+        operation="task.retry",
+        command_id="command-1",
+        target_task_id="task-1",
+        required_capabilities=frozenset({"task.retry"}),
+        destructive=True,
+        now="2030-01-01T00:00:00Z",
+    )
+
+
+def test_p3_retry_requires_target_command_intent_and_confirmation() -> None:
+    intent = hashlib.sha256(b"retry-intent").hexdigest()
+
+    # A retry without its exact target task never resolves.
+    assert (
+        _retry_adapter(intent).resolve(
+            _route(),
+            operation="task.retry",
+            required_capabilities=frozenset({"task.retry"}),
+            command_id="command-1",
+            target_task_id=None,
+            intent_sha256=intent,
+            confirmation_id="confirmation-1",
+        )
+        is None
+    )
+    # A retry is destructive, so an unconfirmed request never resolves either.
+    for omitted in ("command_id", "intent_sha256", "confirmation_id"):
+        arguments: dict[str, object] = {
+            "command_id": "command-1",
+            "intent_sha256": intent,
+            "confirmation_id": "confirmation-1",
+        }
+        arguments[omitted] = None
+        assert (
+            _retry_adapter(intent).resolve(
+                _route(),
+                operation="task.retry",
+                required_capabilities=frozenset({"task.retry"}),
+                target_task_id="task-1",
+                **arguments,  # type: ignore[arg-type]
+            )
+            is None
+        ), omitted
+    # A forged task resource can never replace the derived binding.
+    assert (
+        _retry_adapter(intent).resolve(
+            _route(),
+            operation="task.retry",
+            required_capabilities=frozenset({"task.retry"}),
+            command_id="command-1",
+            target_task_id="task-1",
+            intent_sha256=intent,
+            confirmation_id="confirmation-1",
+            resource=AuthorityResourceBinding(
+                "task", "task-other", hashlib.sha256(b"task-other").hexdigest()
+            ),
+        )
+        is None
+    )
+
+
+def test_p3_retry_never_grants_without_the_exact_verified_confirmation() -> None:
+    intent = hashlib.sha256(b"retry-intent").hexdigest()
+    adapter = _retry_adapter(intent)
+    context = adapter.resolve(
+        _route(),
+        operation="task.retry",
+        required_capabilities=frozenset({"task.retry"}),
+        command_id="command-1",
+        target_task_id="task-1",
+        intent_sha256=intent,
+        confirmation_id="confirmation-1",
+    )
+    assert context is not None
+
+    assert adapter.to_task_grant(context, None) is None
+    assert (
+        adapter.to_task_grant(
+            context, VerifiedP3Confirmation("confirmation-other", SHORT_EXPIRY, False)
+        )
+        is None
+    )
+    assert (
+        adapter.to_task_grant(
+            context, VerifiedP3Confirmation("confirmation-1", ACTIVE_EXPIRY, False)
+        )
+        is None
+    )
+    assert (
+        adapter.to_task_grant(
+            context, VerifiedP3Confirmation("confirmation-1", EXPIRED, False)
+        )
+        is None
+    )

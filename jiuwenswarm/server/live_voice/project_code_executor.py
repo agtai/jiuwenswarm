@@ -44,8 +44,10 @@ from .formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
     ExecutorResolution,
+    ExecutorRetryReadiness,
     FormalAttemptState,
     FormalTaskSpec,
+    FormalTaskState,
     FormalTaskViolation,
     OutboxKind,
     PersistentAttemptRecord,
@@ -1599,6 +1601,102 @@ class DirectProjectCodeExecutorAdapter:
         """Report whether an attempt can still touch its isolated checkout."""
 
         return any(not worker.done() for worker in self._running.values())
+
+    def retry_readiness(
+        self,
+        task: PersistentTaskRecord,
+        attempt: PersistentAttemptRecord,
+    ) -> ExecutorRetryReadiness:
+        """Prove this exact predecessor released every Executor-owned resource.
+
+        The Core seam is synchronous on purpose.  This method never awaits, so
+        no ``_lifecycle_lock`` holder can interleave on the same event loop and
+        the snapshot it reads stays atomic with respect to that loop.  It only
+        observes: it never mutates the journal, lease, ownership lock, worktree
+        or Git state, and it never widens the exact-root, OS-lock or retained
+        cleanup semantics owned by the attempt lifecycle.
+
+        Outbox and reconciliation quiescence are Store-owned and already fail
+        closed upstream as ``TASK_RETRY_OUTBOX_PENDING`` and
+        ``TASK_RETRY_RECONCILIATION_PENDING``; this proof covers only the
+        Executor-owned worker, apply, interruption, cleanup and lease state.
+        """
+
+        outcome = attempt.outcome
+        if not isinstance(outcome, TerminalOutcome):
+            raise FormalTaskViolation(
+                "TASK_RETRY_EXECUTOR_READINESS_MISMATCH",
+                "retry readiness requires a terminal predecessor outcome",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+        def _verdict(*, ready: bool, reason: str) -> ExecutorRetryReadiness:
+            return ExecutorRetryReadiness(
+                task_id=task.task_id,
+                previous_attempt_id=attempt.attempt_id,
+                previous_outcome=outcome,
+                previous_attempt_number=attempt.attempt_number,
+                ready=ready,
+                reason=reason,
+            )
+
+        attempt_id = attempt.attempt_id
+        if self._closed:
+            return _verdict(ready=False, reason="EXECUTOR_CLOSED")
+        worker = self._running.get(attempt_id)
+        if worker is not None and not worker.done():
+            return _verdict(ready=False, reason="ATTEMPT_WORKER_LIVE")
+        if attempt_id in self._applying:
+            return _verdict(ready=False, reason="ATTEMPT_APPLY_IN_PROGRESS")
+        if attempt_id in self._interruptions:
+            return _verdict(ready=False, reason="ATTEMPT_INTERRUPTION_PENDING")
+        retained = self._retained_worktree_cleanups.get(attempt_id)
+        if retained is not None:
+            return _verdict(
+                ready=False,
+                reason=(
+                    "ATTEMPT_CLEANUP_COMPLETION_PENDING"
+                    if retained.completion_pending
+                    else "ATTEMPT_CLEANUP_RETAINED"
+                ),
+            )
+
+        record = self._journal.get(attempt_id)
+        if record is None:
+            # A task cancelled before its dispatch outbox was ever claimed has
+            # no Direct Executor journal by construction: this adapter was
+            # never called for the attempt.  That canonical shape is retry
+            # eligible under D-069, and the Store has already proved outbox and
+            # reconciliation ownership settled before reaching readiness.  It is
+            # recognised only from the exact Store-owned facts below; a missing
+            # journal for any other shape stays fail closed.
+            if (
+                task.attempt_id == attempt_id
+                and attempt.task_id == task.task_id
+                and task.state is FormalTaskState.TERMINAL
+                and attempt.state is FormalAttemptState.TERMINAL
+                and task.outcome is TerminalOutcome.CANCELLED
+                and outcome is TerminalOutcome.CANCELLED
+                and task.cancel_requested
+                and task.dispatch_fenced
+                and attempt.executor_ref is None
+                and attempt.executor_id == self.executor_id
+            ):
+                return _verdict(
+                    ready=True, reason="PREDECESSOR_CANCELLED_BEFORE_DISPATCH"
+                )
+            return _verdict(ready=False, reason="ATTEMPT_JOURNAL_MISSING")
+        if record.task_id != task.task_id:
+            return _verdict(ready=False, reason="ATTEMPT_JOURNAL_TASK_MISMATCH")
+        if record.state is not FormalAttemptState.TERMINAL:
+            return _verdict(ready=False, reason="ATTEMPT_JOURNAL_NONTERMINAL")
+        if record.outcome is not outcome:
+            return _verdict(ready=False, reason="ATTEMPT_OUTCOME_DIVERGED")
+        if record.raw_status.endswith("cleanup_pending"):
+            return _verdict(ready=False, reason="ATTEMPT_CLEANUP_PENDING")
+        if record.owner_id is not None or record.lease_expires_at is not None:
+            return _verdict(ready=False, reason="ATTEMPT_LEASE_RETAINED")
+        return _verdict(ready=True, reason="PREDECESSOR_QUIESCENT")
 
     async def prepare_startup(self) -> int:
         """Resolve only expired process leases; active foreign work stays pending."""

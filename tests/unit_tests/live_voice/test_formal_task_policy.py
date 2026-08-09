@@ -16,6 +16,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     QueryEnvelope,
     ScopeRef,
     OriginRef,
+    TerminalOutcome,
     TurnCommit,
     TurnCommitLedger,
 )
@@ -23,6 +24,8 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     FormalTaskViolation,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskRetryPrecondition,
+    TaskRetryProductRequestFingerprint,
 )
 from jiuwenswarm.server.live_voice.voice_task_policy import (
     FormalTaskPolicyAdapter,
@@ -256,3 +259,192 @@ def test_unreviewed_task_attribute_is_rejected_before_core(tmp_path: Path) -> No
         replace(_create(tmp_path), attributes={"execution_root": str(tmp_path)})
 
     assert raised.value.reason == "UNSUPPORTED_FORMAL_TASK_ATTRIBUTE"
+
+
+# --- D-069 bounded task.retry mapping ---------------------------------------
+
+
+def _retry_precondition(
+    *,
+    previous_attempt_id: str = "attempt-1",
+    outcome: TerminalOutcome = TerminalOutcome.CANCELLED,
+    attempt_number: int = 2,
+) -> TaskRetryPrecondition:
+    return TaskRetryPrecondition(
+        previous_attempt_id=previous_attempt_id,
+        previous_outcome=outcome,
+        attempt_number=attempt_number,
+    )
+
+
+def _retry_fingerprint(digest: str = "b" * 64) -> TaskRetryProductRequestFingerprint:
+    return TaskRetryProductRequestFingerprint(digest)
+
+
+def _retry(project: Path, **overrides: object) -> FormalTaskPolicyInput:
+    base: dict[str, object] = {
+        "state": InputCommitState.COMMITTED,
+        "source": "structured",
+        "operation": "task.retry",
+        "request_id": "request-retry",
+        "command_id": "command-retry",
+        "issued_at": NOW,
+        "scope": _scope(),
+        "correlation_id": "correlation-1",
+        "authorization": _grant(
+            "task.retry", command_id="command-retry", target="task-1"
+        ),
+        "task_id": "task-1",
+        "context": _context(project),
+        "destructive": True,
+        "confirmed": True,
+        "confirmation_id": "confirm-1",
+        "retry_precondition": _retry_precondition(),
+        "retry_product_request": _retry_fingerprint(),
+    }
+    base.update(overrides)
+    return FormalTaskPolicyInput(**base)  # type: ignore[arg-type]
+
+
+def test_retry_maps_server_derived_lineage_into_one_exact_command(
+    tmp_path: Path,
+) -> None:
+    invocation = FormalTaskPolicyAdapter().map(_retry(tmp_path))
+    envelope = invocation.envelope
+
+    assert isinstance(envelope, CommandEnvelope)
+    assert envelope.command_type == "task.retry"
+    assert envelope.target_ref.kind.value == "task"
+    assert envelope.target_ref.id == "task-1"
+    assert tuple(envelope.required_capabilities) == ("task.retry",)
+    assert envelope.origin == OriginRef("structured", None, None)
+    # The payload is exactly the Store-derived predecessor lineage.
+    assert envelope.payload == {
+        "previous_attempt_id": "attempt-1",
+        "previous_outcome": "cancelled",
+        "attempt_number": 2,
+    }
+    # The product-owned request fingerprint travels as the only extension.
+    assert envelope.extensions == {
+        "jiuwenswarm.task_retry_product_request": {"sha256": "b" * 64}
+    }
+    assert invocation.context is not None
+    assert invocation.authorization.operation == "task.retry"
+
+
+def test_retry_requires_confirmation_context_lineage_and_fingerprint(
+    tmp_path: Path,
+) -> None:
+    adapter = FormalTaskPolicyAdapter()
+
+    for overrides, expected in (
+        ({"confirmed": False}, "TASK_CONFIRMATION_REQUIRED"),
+        ({"confirmation_id": None}, "TASK_CONFIRMATION_REQUIRED"),
+        ({"destructive": False}, "TASK_CONFIRMATION_REQUIRED"),
+        ({"task_id": None}, "EXACT_TASK_REQUIRED"),
+        ({"context": None}, "FORMAL_TASK_CONTEXT_REQUIRED"),
+        ({"retry_precondition": None}, "TASK_RETRY_PRECONDITION_REQUIRED"),
+        (
+            {"retry_product_request": None},
+            "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_REQUIRED",
+        ),
+    ):
+        with pytest.raises(FormalTaskViolation) as raised:
+            adapter.map(_retry(tmp_path, **overrides))
+        assert raised.value.reason == expected, overrides
+
+
+def test_retry_rejects_create_only_content_and_a_voice_committed_origin(
+    tmp_path: Path,
+) -> None:
+    adapter = FormalTaskPolicyAdapter()
+
+    for overrides, expected in (
+        ({"name": "renamed"}, "INVALID_TASK_RETRY_INTENT"),
+        ({"instruction": "replaced"}, "INVALID_TASK_RETRY_INTENT"),
+        (
+            {"attributes": {"model_identity": "m", "model_config_version": "v"}},
+            "INVALID_TASK_RETRY_INTENT",
+        ),
+        ({"after_seq": 0}, "INVALID_TASK_RETRY_INTENT"),
+    ):
+        with pytest.raises(FormalTaskViolation) as raised:
+            adapter.map(_retry(tmp_path, **overrides))
+        assert raised.value.reason == expected, overrides
+
+    # A retry never borrows a committed voice turn: the bounded W2 contract is
+    # structured-only, so a voice claim fails closed rather than being ignored.
+    with pytest.raises(FormalTaskViolation) as voice:
+        adapter.map(
+            _retry(
+                tmp_path,
+                source="voice",
+                interaction_id="interaction-1",
+                turn_id="turn-1",
+                commit_id="commit-1",
+            )
+        )
+    assert voice.value.reason == "COMMIT_AUTHORITY_REQUIRED"
+
+    with pytest.raises(FormalTaskViolation) as voice_with_ledger:
+        _voice_policy().map(
+            _retry(
+                tmp_path,
+                source="voice",
+                interaction_id="interaction-1",
+                turn_id="turn-1",
+                commit_id="commit-1",
+            )
+        )
+    assert voice_with_ledger.value.reason == "INVALID_TASK_RETRY_INTENT"
+
+
+def test_only_retry_may_carry_server_derived_retry_lineage(tmp_path: Path) -> None:
+    adapter = FormalTaskPolicyAdapter()
+
+    with pytest.raises(FormalTaskViolation) as created:
+        _voice_policy().map(
+            replace(_create(tmp_path), retry_precondition=_retry_precondition())
+        )
+    assert created.value.reason == "INVALID_TASK_RETRY_INTENT"
+
+    query = FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED,
+        source="structured",
+        operation="task.get",
+        request_id="request-get",
+        issued_at=NOW,
+        scope=_scope(),
+        correlation_id="correlation-1",
+        authorization=_grant("task.get", command_id=None, target="task-1"),
+        task_id="task-1",
+        retry_product_request=_retry_fingerprint(),
+    )
+    with pytest.raises(FormalTaskViolation) as queried:
+        adapter.map(query)
+    assert queried.value.reason == "INVALID_TASK_RETRY_INTENT"
+
+
+def test_retry_precondition_rejects_ineligible_outcome_and_attempt_number() -> None:
+    for outcome in (
+        TerminalOutcome.FAILED,
+        TerminalOutcome.INTERRUPTED,
+        TerminalOutcome.UNKNOWN,
+    ):
+        with pytest.raises(FormalTaskViolation) as raised:
+            _retry_precondition(outcome=outcome)
+        assert raised.value.reason == "TASK_RETRY_OUTCOME_NOT_ELIGIBLE"
+
+    for attempt_number in (0, 1, 4):
+        with pytest.raises(FormalTaskViolation) as raised:
+            _retry_precondition(attempt_number=attempt_number)
+        assert raised.value.reason == "TASK_RETRY_ATTEMPT_NUMBER_INVALID"
+
+
+def test_product_request_fingerprint_must_be_canonical_sha256() -> None:
+    for invalid in ("", "b" * 63, "B" * 64, "g" * 64):
+        with pytest.raises(FormalTaskViolation) as raised:
+            TaskRetryProductRequestFingerprint(invalid)
+        assert raised.value.reason == (
+            "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_INVALID"
+        )

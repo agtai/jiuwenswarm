@@ -33,6 +33,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResultEnvelope,
     ScopeRef,
     TurnCommitLedger,
+    canonical_json_bytes,
 )
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
@@ -41,12 +42,15 @@ from .formal_task_models import (
     FormalTaskSpec,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskRetryPrecondition,
+    TaskRetryProductRequestFingerprint,
     utc_now,
 )
 from .persistent_task_core import PersistentTaskCore, ReconciliationEventSink
 from .p3_confirmation import (
     P3ConfirmationBinding,
     P3ConfirmationVerifier,
+    PreparedP3RetryFacts,
     SqliteP3ConfirmationLedger,
     VerifiedP3Confirmation,
     p3_confirmation_intent_fingerprint,
@@ -77,8 +81,13 @@ P3_ROUTE_METHODS: Mapping[str, str] = {
     "live_voice.task.cancel": "task.cancel",
     "live_voice.task.events": "task.events",
 }
-P3_OPERATIONS = frozenset(P3_ROUTE_METHODS.values())
-P3_MUTATIONS = frozenset({"task.create", "task.cancel"})
+P3_MUTATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
+P3_TARGETED_MUTATIONS = frozenset({"task.cancel", "task.retry"})
+# ``task.retry`` deliberately has no direct transport method: the only W2
+# carrier is the product composition mutate route.  It must still be a first
+# class P3 operation, because dropping it here would silently disable the
+# mutation validation every retry admission depends on.
+P3_OPERATIONS = frozenset(P3_ROUTE_METHODS.values()) | P3_MUTATIONS
 
 _ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_ENABLED"
 _TOKEN_ENV = "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN"
@@ -541,6 +550,24 @@ class PreparedP3MutationConfirmation:
     observed_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedRetrySnapshot:
+    """One frozen retry admission snapshot derived only from server authority.
+
+    ``replayed`` records that the exact predecessor lineage came from the
+    durable command ledger rather than from current admission.  That branch is
+    evaluated first so a reopened process can prove an already applied retry
+    without depending on facts the current task epoch no longer carries.
+    """
+
+    precondition: TaskRetryPrecondition
+    context: ResolvedTaskContext
+    facts: PreparedP3RetryFacts
+    correlation_id: str
+    product_request: TaskRetryProductRequestFingerprint
+    replayed: bool
+
+
 class ClosableBindingResolver(Protocol):
     async def close(self) -> None: ...
 
@@ -931,6 +958,14 @@ class P3AuthenticatedComposition:
                 "formal product operation is unavailable",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if operation == "task.retry":
+            # Retry authority is only reachable through the confirmation-bound
+            # product mutation route, never through query-style registration.
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "task.retry requires the confirmation-bound product mutation route",
+                ErrorCode.PERMISSION_DENIED,
+            )
         if required_capabilities != frozenset({operation}):
             raise FormalTaskViolation(
                 "FORMAL_TASK_AUTHORIZATION_DENIED",
@@ -1285,6 +1320,162 @@ class P3AuthenticatedComposition:
                 now=now,
             )
 
+    @staticmethod
+    def _require_retry_task_identity(
+        *,
+        authority: ResolvedAuthority,
+        context: ResolvedTaskContext,
+        now: str,
+    ) -> None:
+        """Prove the persisted task still names the same clean project identity.
+
+        ``task.retry`` deliberately does not require revision equality: D-069
+        allows an externally established clean checkpoint to advance the project
+        revision between attempts.  Stable identity, scope, permission, expiry
+        and redaction facts are all revalidated instead, and the clean-worktree
+        guard remains owned by the authority resolver.
+        """
+
+        context.require_usable(
+            scope=authority.scope,
+            required_permissions=frozenset({"task.execute", "project.write"}),
+            destructive=True,
+            now=now,
+        )
+        current = authority.context
+        if (
+            context.scope != current.scope
+            or context.source != current.source
+            or context.stable_id != current.stable_id
+            or context.uri != current.uri
+        ):
+            raise FormalTaskViolation(
+                "EXECUTION_CONTEXT_SCOPE_MISMATCH",
+                "formal task context no longer matches the authenticated project",
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    @staticmethod
+    def _retry_product_request(
+        clean: Mapping[str, Any],
+    ) -> TaskRetryProductRequestFingerprint:
+        """Digest only the immutable product-owned facts of one retry request.
+
+        Server-derived predecessor, context, readiness and checkout facts are
+        excluded on purpose, and so are the transport ``request_id`` and the
+        per-issue ``confirmation_id``.  A reopened process that resubmits the
+        same external request therefore reproduces this digest and replays the
+        applied command instead of admitting a second attempt.
+        """
+
+        return TaskRetryProductRequestFingerprint(
+            hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "operation": "task.retry",
+                        "command_id": str(clean["command_id"]),
+                        "target_task_id": str(clean["task_id"]),
+                        "session_id": str(clean["session_id"]),
+                        "correlation_id": str(clean["correlation_id"]),
+                        "issued_at": str(clean["issued_at"]),
+                    }
+                )
+            ).hexdigest()
+        )
+
+    @staticmethod
+    def _retry_facts(
+        spec: FormalTaskSpec,
+        precondition: TaskRetryPrecondition,
+    ) -> PreparedP3RetryFacts:
+        return PreparedP3RetryFacts(
+            previous_attempt_id=precondition.previous_attempt_id,
+            previous_outcome=precondition.previous_outcome.value,
+            attempt_number=precondition.attempt_number,
+            name=spec.name,
+            instruction=spec.instruction,
+            executor_id=spec.executor_id,
+            required_capabilities=tuple(spec.required_capabilities),
+            side_effect_class=spec.side_effect_class,
+            attributes=tuple(spec.attributes),
+        )
+
+    def _require_retry_executor(self, spec: FormalTaskSpec) -> None:
+        """Reject a retry whose original Executor cannot serve this Task Core."""
+
+        if spec.executor_id != self._core.executor.executor_id:
+            raise FormalTaskViolation(
+                "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                "the original task Executor is not available in this Task Core",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        if spec.side_effect_class != "project_mutation":
+            raise FormalTaskViolation(
+                "EXECUTOR_SIDE_EFFECT_CLASS_MISMATCH",
+                "project Code Agent tasks require project_mutation side effects",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+
+    def _resolve_retry_snapshot(
+        self,
+        *,
+        authority: ResolvedAuthority,
+        clean: Mapping[str, Any],
+        now: str,
+    ) -> _PreparedRetrySnapshot:
+        """Freeze one exact retry admission without accepting client lineage.
+
+        Durable replay is evaluated before current admission so an already
+        applied command resolves from the command ledger even after the task
+        advanced.  Both branches produce a read-only snapshot: no attempt,
+        event, outbox, command, Executor, worktree or Git state is touched.
+
+        ``correlation_id`` is server-derived like every other retry lineage
+        fact.  The Store binds each admission command to the task's own
+        correlation identity, so a client-declared value must never reach the
+        command envelope.  The replay branch reuses the originally persisted
+        value because the durable command fingerprint covers it.
+        """
+
+        task_id = str(clean["task_id"])
+        product_request = self._retry_product_request(clean)
+        replay = self._core.read_applied_retry_replay(
+            scope=authority.scope,
+            command_id=str(clean["command_id"]),
+            task_id=task_id,
+            product_request=product_request,
+        )
+        if replay is not None:
+            replayed_spec = replay.resulting_spec
+            self._require_retry_executor(replayed_spec)
+            return _PreparedRetrySnapshot(
+                precondition=replay.precondition,
+                context=replayed_spec.context,
+                facts=self._retry_facts(replayed_spec, replay.precondition),
+                correlation_id=replay.original_command.correlation_id,
+                product_request=product_request,
+                replayed=True,
+            )
+        snapshot = self._core.read_current_retry_authority(
+            scope=authority.scope,
+            task_id=task_id,
+        )
+        spec = snapshot.task.spec
+        self._require_retry_executor(spec)
+        self._require_retry_task_identity(
+            authority=authority,
+            context=spec.context,
+            now=now,
+        )
+        return _PreparedRetrySnapshot(
+            precondition=snapshot.precondition,
+            context=authority.context,
+            facts=self._retry_facts(spec, snapshot.precondition),
+            correlation_id=snapshot.task.correlation_id,
+            product_request=product_request,
+            replayed=False,
+        )
+
     async def _verify_confirmation(
         self,
         *,
@@ -1295,6 +1486,7 @@ class P3AuthenticatedComposition:
         context: ResolvedTaskContext | None,
         model: ResolvedP3Model | None,
         now: str,
+        retry: PreparedP3RetryFacts | None = None,
     ) -> VerifiedP3Confirmation:
         if self._confirmation_verifier is None:
             raise FormalTaskViolation(
@@ -1303,7 +1495,9 @@ class P3AuthenticatedComposition:
                 ErrorCode.PERMISSION_DENIED,
             )
         command_id = str(clean["command_id"])
-        target_task_id = str(clean["task_id"]) if operation == "task.cancel" else None
+        target_task_id = (
+            str(clean["task_id"]) if operation in P3_TARGETED_MUTATIONS else None
+        )
         binding = P3ConfirmationBinding(
             principal_id=principal.principal_id,
             scope=scope,
@@ -1322,6 +1516,7 @@ class P3AuthenticatedComposition:
                 interaction_id=clean.get("interaction_id"),
                 turn_id=clean.get("turn_id"),
                 commit_id=clean.get("commit_id"),
+                retry=retry,
             ),
         )
         return await self._run_blocking(
@@ -1352,7 +1547,7 @@ class P3AuthenticatedComposition:
             if operation not in P3_MUTATIONS:
                 raise FormalTaskViolation(
                     "INVALID_P3_CONFIRMATION_OPERATION",
-                    "confirmation preparation supports task.create or task.cancel",
+                    "confirmation preparation supports the exact P3 mutations",
                     ErrorCode.UNSUPPORTED,
                 )
             now = self._clock()
@@ -1372,7 +1567,9 @@ class P3AuthenticatedComposition:
                 principal,
                 session_id=clean["session_id"],
                 now=now,
-                require_clean=operation == "task.create",
+                # A retry may only start from a clean checkout: D-069 forbids
+                # relaxing TASK_CONTEXT_WORKTREE_DIRTY for the new attempt.
+                require_clean=operation in {"task.create", "task.retry"},
             )
             authority.context.require_usable(
                 scope=authority.scope,
@@ -1386,6 +1583,14 @@ class P3AuthenticatedComposition:
                     authority=authority,
                     operation=operation,
                     task_id=str(clean["task_id"]),
+                    now=now,
+                )
+            retry_snapshot: _PreparedRetrySnapshot | None = None
+            if operation == "task.retry":
+                retry_snapshot = await self._run_blocking(
+                    self._resolve_retry_snapshot,
+                    authority=authority,
+                    clean=clean,
                     now=now,
                 )
             model: ResolvedP3Model | None = None
@@ -1410,8 +1615,14 @@ class P3AuthenticatedComposition:
                         instruction=str(clean["instruction"]),
                     )
             target_task_id = (
-                str(clean["task_id"]) if operation == "task.cancel" else None
+                str(clean["task_id"]) if operation in P3_TARGETED_MUTATIONS else None
             )
+            if operation == "task.create":
+                confirmation_context: ResolvedTaskContext | None = authority.context
+            elif retry_snapshot is not None:
+                confirmation_context = retry_snapshot.context
+            else:
+                confirmation_context = None
             binding = P3ConfirmationBinding(
                 principal_id=principal.principal_id,
                 scope=authority.scope,
@@ -1422,7 +1633,7 @@ class P3AuthenticatedComposition:
                     operation=operation,
                     command_id=str(clean["command_id"]),
                     target_task_id=target_task_id,
-                    context=(authority.context if operation == "task.create" else None),
+                    context=confirmation_context,
                     name=clean.get("name"),
                     instruction=clean.get("instruction"),
                     model=model,
@@ -1430,6 +1641,7 @@ class P3AuthenticatedComposition:
                     interaction_id=clean.get("interaction_id"),
                     turn_id=clean.get("turn_id"),
                     commit_id=clean.get("commit_id"),
+                    retry=(None if retry_snapshot is None else retry_snapshot.facts),
                 ),
             )
             return PreparedP3MutationConfirmation(
@@ -1459,7 +1671,7 @@ class P3AuthenticatedComposition:
             if operation not in P3_MUTATIONS:
                 raise FormalTaskViolation(
                     "INVALID_P3_CONFIRMATION_OPERATION",
-                    "mutation replay supports task.create or task.cancel",
+                    "mutation replay supports the exact P3 mutations",
                     ErrorCode.UNSUPPORTED,
                 )
             if not isinstance(expected_binding, P3ConfirmationBinding):
@@ -1494,7 +1706,7 @@ class P3AuthenticatedComposition:
                 now=now,
             )
             target_task_id = (
-                str(clean["task_id"]) if operation == "task.cancel" else None
+                str(clean["task_id"]) if operation in P3_TARGETED_MUTATIONS else None
             )
             if (
                 principal.principal_id != expected_binding.principal_id
@@ -1545,7 +1757,9 @@ class P3AuthenticatedComposition:
                 principal,
                 session_id=clean["session_id"],
                 now=now,
-                require_clean=operation == "task.create",
+                # A retry may only start from a clean checkout: D-069 forbids
+                # relaxing TASK_CONTEXT_WORKTREE_DIRTY for the new attempt.
+                require_clean=operation in {"task.create", "task.retry"},
             )
             destructive = operation in P3_MUTATIONS
             authority.context.require_usable(
@@ -1572,6 +1786,17 @@ class P3AuthenticatedComposition:
                     authority=authority,
                     now=now,
                 )
+            retry_snapshot: _PreparedRetrySnapshot | None = None
+            if operation == "task.retry":
+                # Durable replay is resolved before current admission and before
+                # any confirmation is consumed, so an already applied command
+                # cannot be re-admitted as a second attempt.
+                retry_snapshot = await self._run_blocking(
+                    self._resolve_retry_snapshot,
+                    authority=authority,
+                    clean=clean,
+                    now=now,
+                )
             resolved_model: ResolvedP3Model | None = None
             if operation == "task.create":
                 if self._model_resolver is None:
@@ -1585,15 +1810,22 @@ class P3AuthenticatedComposition:
                     clean.get("model_intent"),
                     instantiate=False,
                 )
+            if operation == "task.create":
+                confirmation_context: ResolvedTaskContext | None = authority.context
+            elif retry_snapshot is not None:
+                confirmation_context = retry_snapshot.context
+            else:
+                confirmation_context = None
             verified_confirmation = (
                 await self._verify_confirmation(
                     principal=principal,
                     scope=authority.scope,
                     operation=operation,
                     clean=clean,
-                    context=(authority.context if operation == "task.create" else None),
+                    context=confirmation_context,
                     model=resolved_model,
                     now=now,
+                    retry=(None if retry_snapshot is None else retry_snapshot.facts),
                 )
                 if destructive
                 else None
@@ -1630,7 +1862,11 @@ class P3AuthenticatedComposition:
                 request_id=_required_text(request_id, "request_id", maximum=256),
                 issued_at=clean.get("issued_at", now),
                 scope=authority.scope,
-                correlation_id=clean.get("correlation_id", request_id),
+                correlation_id=(
+                    clean.get("correlation_id", request_id)
+                    if retry_snapshot is None
+                    else retry_snapshot.correlation_id
+                ),
                 authorization=grant,
                 command_id=clean.get("command_id"),
                 interaction_id=clean.get("interaction_id"),
@@ -1639,7 +1875,10 @@ class P3AuthenticatedComposition:
                 task_id=clean.get("task_id"),
                 name=clean.get("name"),
                 instruction=clean.get("instruction"),
-                context=(authority.context if operation == "task.create" else None),
+                # ``task.create`` resolves a fresh context and ``task.retry``
+                # carries the frozen one its confirmation bound; every other
+                # operation stays context-free.
+                context=confirmation_context,
                 attributes=(
                     {
                         "model_identity": resolved_model.identity,
@@ -1656,6 +1895,12 @@ class P3AuthenticatedComposition:
                     else None
                 ),
                 after_seq=int(clean.get("after_seq", -1)),
+                retry_precondition=(
+                    None if retry_snapshot is None else retry_snapshot.precondition
+                ),
+                retry_product_request=(
+                    None if retry_snapshot is None else retry_snapshot.product_request
+                ),
             )
             invocation = self._policy.map(intent)
             if isinstance(invocation.envelope, CommandEnvelope):
@@ -1774,6 +2019,23 @@ class P3AuthenticatedComposition:
                     }
                 ),
                 frozenset({"source"}),
+            ),
+            # ``task.retry`` submits only its target task plus the immutable
+            # request facts its product fingerprint binds.  Predecessor,
+            # attempt ordinal, outcome, context and readiness stay server-owned.
+            "task.retry": (
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "command_id",
+                        "confirmation_id",
+                        "issued_at",
+                        "correlation_id",
+                        "task_id",
+                    }
+                ),
+                frozenset(),
             ),
             "task.list": (
                 frozenset({"auth_token", "session_id"}),
@@ -2012,7 +2274,9 @@ __all__ = [
     "P3ConfirmationBinding",
     "P3RouteResult",
     "P3RouteTelemetry",
+    "P3_MUTATIONS",
     "P3_ROUTE_METHODS",
+    "P3_TARGETED_MUTATIONS",
     "ServerSessionProjectAuthorityResolver",
     "SqliteP3ConfirmationLedger",
     "StaticBearerAuthenticator",

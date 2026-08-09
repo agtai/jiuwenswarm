@@ -40,6 +40,7 @@ from .agent_conversation_runtime import AgentConversationRuntime
 from .formal_task_models import FormalTaskViolation, ResolvedTaskContext
 from .interaction_engine import InteractionEnginePort
 from .p3_authenticated_composition import (
+    P3_MUTATIONS,
     P3AuthenticatedComposition,
     P3RouteResult,
 )
@@ -2851,10 +2852,10 @@ class AgentServerProductCompositionRegistry:
         session_id: str | None,
     ) -> tuple[str, dict[str, object]]:
         operation = _required_text(params.get("operation"), "operation")
-        if operation not in {"task.create", "task.cancel"}:
+        if operation not in P3_MUTATIONS:
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION_OPERATION",
-                "product mutation must be task.create or task.cancel",
+                "product mutation must be task.create, task.cancel or task.retry",
                 ErrorCode.UNSUPPORTED,
             )
         required = {
@@ -2873,10 +2874,29 @@ class AgentServerProductCompositionRegistry:
             optional.update(
                 {"model_intent", "source", "interaction_id", "turn_id", "commit_id"}
             )
+        elif operation == "task.retry":
+            # A bounded retry submits its target task only; predecessor,
+            # attempt ordinal, outcome, context and readiness are server-owned
+            # and a voice-committed origin cannot be claimed for it.
+            required.add("task_id")
         else:
             required.add("task_id")
             optional.add("source")
         _require_exact_params(params, frozenset(required | optional))
+        # ``_require_exact_params`` only rejects non-string or unknown keys.
+        # Proving the remaining required fields are present keeps every P3
+        # mutation fail closed with one stable reason instead of letting a
+        # missing field surface later as an unhandled lookup.  ``auth_token``
+        # stays an allowed field but is deliberately excluded here: a missing
+        # or invalid bearer is an authentication fact, and the existing
+        # authenticator must keep classifying it as
+        # FORMAL_TASK_AUTHENTICATION_REQUIRED / UNAUTHENTICATED.
+        if (required - {"auth_token"}) - set(params):
+            raise FormalTaskViolation(
+                "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                "product request fields are incomplete or unknown",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         routed_session = _required_text(session_id, "routed_session_id")
         if _required_text(params.get("session_id"), "session_id") != routed_session:
             raise FormalTaskViolation(
