@@ -1,0 +1,115 @@
+{
+  "schema": "machine-private.w2-manifest-wiring.v1",
+  "candidate_binding": null,
+  "expected_counts": {
+    "artifacts": 38,
+    "verification": 1,
+    "awards": 19,
+    "invariants": 10,
+    "showcase_runs": 3,
+    "journey_steps": 7,
+    "fault_planes": 4,
+    "restart": 1
+  },
+  "aliases": {
+    "G1": 1, "A1": 2, "G2": 3, "A2": 4, "G3": 5, "A3": 6, "A4": 7,
+    "AUTO8": 8, "AUTO9": 9, "AUTO10": 10, "AUTO11": 11, "REVIEW12": 12,
+    "H13": 13, "H14": 14, "H15": 15, "H16": 16, "H17": 17, "H18": 18,
+    "H19": 19, "H20": 20, "H21": 21, "H22": 22, "F23": 23, "F24": 24,
+    "F25": 25, "F26": 26, "F27": 27, "F28": 28, "F29": 29, "F30": 30,
+    "F31": 31, "F32": 32, "F33": 33, "F34": 34, "F35": 35, "H36": 36,
+    "H37": 37, "F38": 38
+  },
+  "showcase_runs": {
+    "1": ["G1", "A1", "H13"],
+    "2": ["G2", "A2", "H14"],
+    "3": ["G3", "A3", "H15"]
+  },
+  "showcase_receipt_chain": {
+    "H13": null,
+    "H14": "sha256-content:H13",
+    "H15": "sha256-content:H14"
+  },
+  "journey_steps": {
+    "real_agent_tool_speech_response": ["G1", "A1", "H16"],
+    "nonblocking_or_interruption": ["G1", "A1", "H17"],
+    "confirmed_formal_task_creation": ["G1", "A1", "H18"],
+    "conversation_while_task_runs": ["G1", "A1", "H19"],
+    "exact_task_progress_result": ["G1", "A1", "H20"],
+    "degradation_with_text_fallback": ["G1", "A1", "H21", "F23"],
+    "route_telemetry_inspection": ["G1", "A1", "H22"]
+  },
+  "faults": {
+    "p1.speech_media": {
+      "retriable": ["G1", "A1", "F24"],
+      "non_retriable": ["G2", "A2", "F25"],
+      "zero_effect": ["G3", "A3", "F26"]
+    },
+    "p2.conversation": {
+      "retriable": ["G1", "A1", "F27"],
+      "non_retriable": ["G2", "A2", "F28"],
+      "zero_effect": ["G3", "A3", "F29"]
+    },
+    "p3.task": {
+      "retriable": ["G1", "A1", "F30"],
+      "non_retriable": ["G2", "A2", "F31"],
+      "zero_effect": ["G3", "A3", "F32"]
+    },
+    "observability": {
+      "retriable": ["G1", "A1", "AUTO9", "F33"],
+      "non_retriable": ["G2", "A2", "AUTO10", "F34"],
+      "zero_effect": ["G3", "A3", "AUTO11", "F35"]
+    }
+  },
+  "restart": {
+    "evidence": ["A3", "A4"],
+    "inflight_task_count": 1,
+    "reconciliation_count": 1,
+    "exact_current_attempt_only": true
+  },
+  "verification": {
+    "evidence": ["AUTO8", "REVIEW12"],
+    "review_observes": ["AUTO8"],
+    "all_seven_booleans_true": true
+  },
+  "invariants": {
+    "committed_only": ["AUTO8"],
+    "at_most_once": ["AUTO8"],
+    "stale_effect_zero": ["AUTO8"],
+    "cancel_scope_exact": ["AUTO8"],
+    "authority_fails_closed": ["AUTO8"],
+    "nonterminal_truth": ["AUTO8"],
+    "destructive_confirmation": ["AUTO8"],
+    "feature_off_zero_effect": ["AUTO8"],
+    "claim_truth": ["AUTO8"],
+    "exit_closes_local_effects": ["AUTO8"]
+  },
+  "awards": {
+    "p1.audio_capture_playout": ["G1", "H36"],
+    "p1.recognition_port_adapter": ["G1"],
+    "p1.synthesis_port_adapter": ["G1"],
+    "p1.commit_clarification_text_degradation": ["G1", "A1"],
+    "p2.runtime_identity_lifecycle_fence": ["A1"],
+    "p2.realtime_media": ["G1"],
+    "p2.interaction_engine": ["A1"],
+    "p2.agent_bridge": ["A1"],
+    "p2.presentation_history_truth": ["A1"],
+    "p3.core_ledger_event_truth": ["A3"],
+    "p3.d0_executor": ["A3", "A4"],
+    "p3.voice_task_bridge": ["A3"],
+    "p3.progress_result_return": ["A3"],
+    "p3.ui_control_integration": ["A3", "H37"],
+    "cross.route_telemetry": ["G1", "A1"],
+    "cross.context": ["A1"],
+    "cross.failure_degradation": ["G1", "A1", "F38"],
+    "cross.observability_fault_injection": ["G1", "A1"],
+    "cross.feature_off_text_regression": ["AUTO8"]
+  },
+  "receipt_observation_rules": {
+    "showcase_and_journey_receipts_observe_all_claimed_runtime_digests": true,
+    "fault_receipts_observe_their_pair_runtime_digests": true,
+    "H36_observes": ["G1"],
+    "H37_observes": ["A3"],
+    "F38_observes": ["G1", "A1"]
+  }
+}

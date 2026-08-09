@@ -644,6 +644,59 @@ The next rehearsal must use a fresh descendant and execute both a real Gateway
 P1 operation and the required AgentServer operation set in every logical pair
 before seal.
 
+### 7.8 Discarded full-operation rehearsal result
+
+Descendant `a7de738d69af17fe611c2ca32bc4b962dcf0b8da` used a fresh externally
+signed rehearsal policy, fresh roots and an isolated Chrome profile. Pair1
+completed real physical-microphone STT, submitted the committed transcript to
+the JiuwenSwarm Agent, executed the registered real `read_file` Tool, displayed
+the returned fixture text, synthesized the Agent final and produced a complete
+user-heard playout. Both Gateway and AgentServer stopped gracefully, sealed and
+produced policy-bound signatures with clean footers.
+
+The wider seven-step journey did not close. Four deterministic findings remain:
+
+1. repeated P3 progress acknowledgements were rejected and no canonical
+   progress/UI success fact was exported;
+2. `product.voice_task_origin` omitted the full interaction/response/generation
+   binding needed for exact observer/Gate derivation;
+3. refresh/teardown left the durable P2 activation journal in `result_unknown`,
+   so Pair2's browser reported every formal route unavailable even though the
+   server logs contained activation and close completion;
+4. P3 browser state made cancel/retry inaccessible or `ineligible`, so the
+   required exact create→cancel→retry B→clean checkpoint→retry C sequence could
+   not be executed from the product UI.
+
+Pair2's AgentServer stopped and sealed, but the blocked browser never executed a
+Gateway operation, so the Gateway owner correctly produced no content or
+signature and the pair seal check failed. The entire candidate, policy, key,
+profile and evidence roots are discarded. Pair1's successful physical route is
+diagnostic truth only; none of these files grants Gate or Replacement Ledger
+credit. A later attempt must fix and review all four findings, pass one short
+no-evidence smoke, and then create fresh roots rather than reuse this attempt.
+That smoke must also close the choreography contract's two remaining production
+probes: P2 non-retriable presentation rejection and P3 non-retriable mutation
+rejection.
+
+### 7.9 Portable rehearsal handoff boundary
+
+The candidate-independent scaffold, policy derivation, controller, graceful
+service runner, D-069 diagnostic, manifest/choreography validators, tests and
+the deterministic 48 kHz WAV are now versioned under
+`scripts/live_voice/w2_rehearsal`. The two PowerShell entrypoints bind Python
+helpers and the default WAV to the detached exact-candidate worktree after it is
+created; they do not continue executing mutable source-repository helpers.
+Attempt-bound policies, signatures, keys, runtime databases, profiles and
+evidence remain excluded by design.
+
+Affected validation passed `35/35` tests without coverage, Ruff format/check,
+production-helper `py_compile`, PowerShell AST parsing and help invocation,
+38-slot manifest-wiring validation, seven-runtime choreography validation,
+document-route checks, private-value/path scanning, exact WAV hash/metadata and
+`git diff --check`. These checks prove portability and fail-closed static
+contracts only. They neither close section 7.8's runtime findings nor grant
+D-053, Gate or Replacement Ledger credit to a future candidate.
+
 ## 8. Machine-private continuation facts
 
 These facts are usable on the current machine but are not restored by Git:
@@ -689,12 +742,15 @@ These facts are usable on the current machine but are not restored by Git:
   than exact-text acceptance. `gpt-4o-mini-tts` voice `marin` produced 292844
   WAV bytes, 3050ms, 48 kHz/mono/PCM16. The key was removed from the child
   environment and secure buffer before the result window remained open;
-- deterministic user recording inputs are stored outside Git under
-  `D:\XGG AI\openjiuwen\jiuwenswarm-live-voice-w2-input-20260808-hongx`:
-  - `voice-command-48k-mono-pcm16.wav`, 48 kHz/mono/PCM16, 4523ms,
-    SHA-256 `4df35a6ceb9ca44dc033e74f7700fe476af3705a74580b2fb66156bcf4a58557`;
-  - `voice-command-16k-mono-pcm16.wav`, 16 kHz/mono/PCM16, 4523ms,
-    SHA-256 `14fcf370fd0a3aefb4cf3ae43392c8cc35c900921d4296b6b478ec7b01d0f215`.
+- the deterministic 48 kHz user recording is now Git-restored at
+  `scripts/live_voice/w2_rehearsal/assets/voice-command-48k-mono-pcm16.wav`;
+  it is 48 kHz/mono/PCM16, 4523ms, SHA-256
+  `4df35a6ceb9ca44dc033e74f7700fe476af3705a74580b2fb66156bcf4a58557`,
+  with machine-readable metadata in the adjacent `manifest.json`;
+- the optional 16 kHz derivative remains machine-private at
+  `D:\XGG AI\openjiuwen\jiuwenswarm-live-voice-w2-input-20260808-hongx\voice-command-16k-mono-pcm16.wav`,
+  4523ms, SHA-256
+  `14fcf370fd0a3aefb4cf3ae43392c8cc35c900921d4296b6b478ec7b01d0f215`.
 
 The WAV files pass the repository `inspect_pcm16_mono_wav` boundary. They may
 drive repeatable STT and cumulative-route diagnostics but do not replace final
@@ -702,8 +758,8 @@ microphone/device evidence or the user's complete-playout receipt.
 
 Existing service processes and detached candidate worktrees predate this repair
 and are diagnostic only. Do not count them as Gate evidence. The candidate must
-be recreated as one clean descendant after both P3 blockers and D-053 review
-close.
+be recreated as one clean descendant after section 7.8's four findings and two
+production probes close with their required review.
 
 ## 9. Implementation checklist when STATUS routes the current slice here
 
@@ -730,11 +786,15 @@ the active slice to D95.
 6. Commit coherent reviewed local batches under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
 7. Preserve the passed bounded P2 Agent/Tool composition and prepared-WAV real
-   OpenAI STT/TTS diagnostics without granting credit. Discard their diagnostic
-   runtimes, create a fresh clean descendant candidate, fresh Gate
-   runtime/evidence roots and the complete seven-slot policy, obtain
-   the user's external root signature plus expected-root hash acknowledgement,
-   and validate the policy before any evidence owner or Gate process starts.
-8. Run the controlled browser/fault/restart Gate only after policy preflight.
-   Ask the user for final microphone capture, complete audible playout and the
-   three exact showcase receipts; do not postpone root signing to this stage.
+   OpenAI STT/TTS diagnostics without granting credit. Close the four findings
+   in section 7.8, then run one short no-evidence smoke. Use the repository-local
+   `scripts/live_voice/w2_rehearsal` toolkit to create a fresh clean descendant,
+   fresh roots, leaf keys and the exact seven-runtime/38-artifact plan; do not
+   copy any prior attempt directory.
+8. Run the four discarded rehearsal runtime experiments and four same-shape
+   formal runtime experiments only after their respective signed-policy
+   preflight. Then create the 31 non-runtime artifacts, assemble the exact
+   38-slot manifest and evaluate it.
+9. Ask the user for final microphone capture, complete audible playout and the
+   three exact showcase receipts during the formal run; do not postpone
+   external-root signing to that stage.

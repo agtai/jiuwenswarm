@@ -1,0 +1,16 @@
+# Machine-private or attempt-bound outputs. Never commit these from this bundle.
+*.private
+*.public
+*.signature
+*.jsonl
+*runtime-config*.json
+*attempt-scaffold*.json
+*trust-policy*.json
+*subject-map*.json
+*scaffold-digest*.json
+candidate-plan.*.json
+rehearsal-import*.json
+browser-profile*/
+rehearsal-runtime-logs/
+__pycache__/
+.pytest_cache/

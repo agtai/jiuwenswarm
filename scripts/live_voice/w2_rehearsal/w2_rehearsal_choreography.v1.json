@@ -1,0 +1,95 @@
+{
+  "schema": "machine-private.w2-rehearsal-choreography.v1",
+  "binding_state": "candidate_unbound",
+  "candidate_sha": null,
+  "repository_path": null,
+  "policy_id": null,
+  "evidence_set_id": null,
+  "invariants": {
+    "runtime_slot_count": 7,
+    "one_persistent_session": true,
+    "one_browser_profile": true,
+    "one_page_lifecycle": true,
+    "hard_kill_forbidden": true,
+    "runtime_owner_start_before_policy_validation_forbidden": true,
+    "formal_reuses_rehearsal_root_forbidden": true
+  },
+  "journey_steps": [
+    "real_agent_tool_speech_response",
+    "nonblocking_or_interruption",
+    "confirmed_formal_task_creation",
+    "conversation_while_task_runs",
+    "exact_task_progress_result",
+    "degradation_with_text_fallback",
+    "route_telemetry_inspection"
+  ],
+  "runtime_slots": [
+    {"sequence": 1, "logical_slot": "showcase-1-gateway", "producer": "gateway", "run": 1, "predecessor": null, "fault_class": "retriable"},
+    {"sequence": 2, "logical_slot": "showcase-1-agentserver", "producer": "agentserver", "run": 1, "predecessor": null, "fault_class": "retriable", "task_database_symbol": "pair1"},
+    {"sequence": 3, "logical_slot": "showcase-2-gateway", "producer": "gateway", "run": 2, "predecessor": "showcase-1-gateway", "fault_class": "non_retriable"},
+    {"sequence": 4, "logical_slot": "showcase-2-agentserver", "producer": "agentserver", "run": 2, "predecessor": "showcase-1-agentserver", "fault_class": "non_retriable", "task_database_symbol": "pair2"},
+    {"sequence": 5, "logical_slot": "showcase-3-gateway", "producer": "gateway", "run": 3, "predecessor": "showcase-2-gateway", "fault_class": "zero_effect"},
+    {"sequence": 6, "logical_slot": "showcase-3-agentserver", "producer": "agentserver", "run": 3, "predecessor": "showcase-2-agentserver", "fault_class": "zero_effect", "task_database_symbol": "pair3", "restart_predecessor": true},
+    {"sequence": 7, "logical_slot": "restart-successor-agentserver", "producer": "agentserver", "run": null, "predecessor": "showcase-3-agentserver", "fault_class": null, "task_database_symbol": "pair3", "restart_successor": true}
+  ],
+  "run_contracts": [
+    {"run": 1, "gateway_slot": "showcase-1-gateway", "agentserver_slot": "showcase-1-agentserver", "fault_class": "retriable", "journey_steps": "all", "shutdown": ["gateway", "agentserver"]},
+    {"run": 2, "gateway_slot": "showcase-2-gateway", "agentserver_slot": "showcase-2-agentserver", "fault_class": "non_retriable", "journey_steps": "all", "shutdown": ["gateway", "agentserver"]},
+    {"run": 3, "gateway_slot": "showcase-3-gateway", "agentserver_slot": "showcase-3-agentserver", "fault_class": "zero_effect", "journey_steps": "all", "shutdown": ["agentserver_predecessor", "agentserver_successor", "page", "vite", "gateway"]}
+  ],
+  "task_database_contract": {
+    "pair1": "fresh_pair_scoped_database",
+    "pair2": "fresh_pair_scoped_database",
+    "pair3": "fresh_pair_scoped_database_shared_by_predecessor_and_successor",
+    "reason": "task.list evidence requires one exact task in each showcase database; old showcase tasks must not pollute later task.list results"
+  },
+  "fault_matrix": [
+    {"plane": "p1.speech_media", "class": "retriable", "operation": "speech.recognize.batch", "expected_codes": ["TIMEOUT", "CAPABILITY_UNAVAILABLE", "UNAVAILABLE"], "trigger": "loopback_openai_proxy_one_shot_503_or_timeout", "readiness": "source_confirmed_not_runtime_probed"},
+    {"plane": "p1.speech_media", "class": "non_retriable", "operation": "speech.recognize.batch", "expected_codes": ["INVALID_ARGUMENT", "UNSUPPORTED", "PROTOCOL_VIOLATION"], "trigger": "fresh_identity_clone_with_invalid_timeout_or_format_then_untouched_real_request", "readiness": "source_confirmed_not_runtime_probed"},
+    {"plane": "p1.speech_media", "class": "zero_effect", "operation": "speech.recognize.batch", "expected_codes": ["STALE"], "trigger": "reserved_capture_then_fresh_request_identity_clone_before_owner_cleanup", "readiness": "source_confirmed_not_runtime_probed"},
+    {"plane": "p2.conversation", "class": "retriable", "operation": "live_voice.composition.p2.presentation.ack", "expected_codes": ["UNAVAILABLE"], "trigger": "server_owned_exact_request_id_one_shot_fault_env", "readiness": "unit_proved_not_runtime_probed"},
+    {"plane": "p2.conversation", "class": "non_retriable", "operation": "live_voice.composition.p2.presentation.ack", "expected_codes": ["INVALID_ARGUMENT", "UNSUPPORTED", "CONFLICT", "PROTOCOL_VIOLATION"], "trigger": "canonical_handler_rejection_probe_pending", "readiness": "requires_non_evidence_runtime_probe"},
+    {"plane": "p2.conversation", "class": "zero_effect", "operation": "live_voice.composition.p2.presentation.ack", "expected_codes": ["STALE"], "trigger": "fresh_unknown_response_id_in_separate_interaction", "readiness": "source_confirmed_not_runtime_probed"},
+    {"plane": "p3.task", "class": "retriable", "operation": "live_voice.composition.p3.progress.ack", "expected_codes": ["UNAVAILABLE"], "trigger": "authority_valid_fresh_unknown_delivery_id", "readiness": "source_confirmed_not_runtime_probed"},
+    {"plane": "p3.task", "class": "non_retriable", "operation": "live_voice.composition.p3.mutate", "expected_codes": ["INVALID_ARGUMENT", "UNSUPPORTED", "CONFLICT", "PROTOCOL_VIOLATION"], "trigger": "task_retry_while_authoritative_attempt_is_nonterminal", "readiness": "requires_non_evidence_runtime_probe"},
+    {"plane": "p3.task", "class": "zero_effect", "operation": "live_voice.composition.p3.mutate", "expected_codes": ["STALE"], "trigger": "server_owned_exact_request_id_one_shot_stale_fault_env", "readiness": "unit_proved_not_runtime_probed"},
+    {"plane": "observability", "class": "retriable", "operation": "artifact_evaluation", "expected_codes": ["TIMEOUT", "CAPABILITY_UNAVAILABLE", "UNAVAILABLE"], "trigger": "runtime_pair_1_plus_distinct_fault_receipt_and_automated_report", "readiness": "static_wiring_proved"},
+    {"plane": "observability", "class": "non_retriable", "operation": "artifact_evaluation", "expected_codes": ["INVALID_ARGUMENT", "UNSUPPORTED", "CONFLICT", "PROTOCOL_VIOLATION"], "trigger": "runtime_pair_2_plus_distinct_fault_receipt_and_automated_report", "readiness": "static_wiring_proved"},
+    {"plane": "observability", "class": "zero_effect", "operation": "artifact_evaluation", "expected_codes": ["STALE"], "trigger": "runtime_pair_3_plus_distinct_fault_receipt_and_automated_report", "readiness": "static_wiring_proved"}
+  ],
+  "restart_contract": {
+    "predecessor_slot": "showcase-3-agentserver",
+    "successor_slot": "restart-successor-agentserver",
+    "predecessor_last_task_state": ["accepted", "running", "blocked", "decision_required"],
+    "successor_terminal_outcomes": ["interrupted", "unknown"],
+    "exact_one_task_attempt_pair": true,
+    "earlier_agentserver_boundaries_must_have_no_nonterminal_attempt": true,
+    "graceful_shutdown_required": true
+  },
+  "environment_names": {
+    "common_non_secret": ["JIUWENSWARM_DATA_DIR", "JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED", "JIUWENSWARM_LIVE_VOICE_W2_CANDIDATE_SHA", "JIUWENSWARM_LIVE_VOICE_W2_ENVIRONMENT_ID", "JIUWENSWARM_LIVE_VOICE_W2_SESSION_ID", "JIUWENSWARM_LIVE_VOICE_W2_MODE_ID", "JIUWENSWARM_LIVE_VOICE_W2_REPOSITORY_PATH", "JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_SET_ID"],
+    "agentserver_secret": ["JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_PRIVATE_KEY_PATH"],
+    "gateway_secret": ["JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "JIUWENSWARM_LIVE_VOICE_SPEECH_API_KEY", "JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_EVIDENCE_PRIVATE_KEY_PATH"],
+    "forbid_secret_values_in_contract": true
+  },
+  "discard_attempt_on": [
+    "candidate_sha_or_loaded_source_mismatch",
+    "candidate_dirty",
+    "policy_or_expected_root_hash_validation_failure",
+    "any_owner_start_before_policy_validation",
+    "runtime_slot_or_subject_set_drift",
+    "artifact_sequence_or_predecessor_drift",
+    "jsonl_reject_or_write_failure_or_unclosed_footer",
+    "runtime_signature_missing_or_invalid",
+    "fault_code_or_zero_effect_or_binding_mismatch",
+    "journey_order_or_exact_identity_mismatch",
+    "restart_missing_extra_duplicate_or_conflicting_attempt",
+    "hard_kill_or_cleanup_pending"
+  ],
+  "human_only_after_formal_policy_validation": [
+    "physical_microphone_capture",
+    "complete_audible_playout",
+    "three_consecutive_showcase_receipts",
+    "journey_and_ui_observation_receipts"
+  ]
+}

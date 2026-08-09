@@ -231,6 +231,57 @@ Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2
 - [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 只能作为 Gate 脚本，运行状态和 Week 2 分数只从 STATUS 读取；
 - 必须用下述 CLI 导入签名原件并输出机器 Gate 结果；手填分数、通用 lifecycle 事件、截图和人工 receipt 都不能创建 runtime credit。
 
+<a id="w2-portable-toolkit"></a>
+#### 7.1.0 可迁移 W2 rehearsal 工具包
+
+仓库内的 [W2 rehearsal portable toolkit](../../scripts/live_voice/w2_rehearsal/README.md)
+是新机器、新 Session 或 fresh candidate 的唯一脚本入口。它保存 candidate-independent
+的 scaffold、38-slot wiring、七 runtime 槽 choreography、graceful controller、校验器、
+测试和一份确定性的 48 kHz mono PCM16 WAV；不保存 Provider/P3 凭据、root/leaf 私钥、
+签名、Session/Project 注册、运行数据库、浏览器 profile、旧 policy 或旧 evidence。
+复制旧 attempt 目录、旧 key 或旧 policy 不能替代 fresh preparation。
+
+在已经 review-closed 且包含该工具包的 exact SHA 上，从源仓库根执行：
+
+```powershell
+$repo = '<源仓库绝对路径>'
+$sha = '<reviewed 40-character candidate SHA>'
+& "$repo\scripts\live_voice\w2_rehearsal\new_w2_rehearsal_attempt.ps1" `
+  -SourceRepository $repo `
+  -CandidateSha $sha `
+  -DataDir '<隔离且已准备的 JIUWENSWARM_DATA_DIR>' `
+  -SessionId '<持久 Session id>' `
+  -ProjectId '<已注册的可丢弃 project id>' `
+  -ProjectDir '<干净的可丢弃 project 根>'
+```
+
+该入口 exclusive-create detached candidate、staging/rehearsal/formal evidence、key 和
+isolated Chrome profile 路径，生成 12 组 rehearsal/formal leaf key，并完成七 runtime
+加 31 non-runtime 的 38-slot static plan。它不读取 Speech key，不启动 owner，也不签
+external-root policy。任何部分失败都废弃本 label，不在同一路径续跑。
+
+按工具包 README 完成 visible external-root 签名和 expected-root fingerprint 独立确认后，
+用 `finalize_w2_rehearsal_runtime_config.py` 生成 machine-private runtime config；随后只用：
+
+```powershell
+$bundle = "$repo\scripts\live_voice\w2_rehearsal"
+& "$bundle\start_w2_rehearsal.ps1" -Action Preflight -Config '<runtime-config.json>'
+& "$bundle\start_w2_rehearsal.ps1" -Action Controller -Config '<runtime-config.json>'
+# UI_READY 后，在第二个可见终端启动一次 isolated Chrome：
+& "$bundle\start_w2_rehearsal.ps1" -Action Chrome -Config '<runtime-config.json>'
+```
+
+只有 `Preflight=PASS` 才能输入隐藏 Provider key或启动 owner。controller 中每个 pair 必须
+先完成实际 Gateway 和 AgentServer 操作再 `stop n`；`PAIR_READY` 只证明端口监听。
+只能 graceful stop，禁止 kill/`Stop-Process` 后补签 runtime artifact。准备 WAV 可用于
+repeatability smoke/rehearsal，但不能替代正式物理麦克风、完整 audible playout 和人工 receipt。
+
+W2 的运行闭包固定为四次 discarded rehearsal runtime：Pair1 retriable full journey、
+Pair2 non-retriable full journey、Pair3 STALE/full A→B→C、A4 exact restart；formal policy
+签署后再同形重复四次。加上修复后的短 smoke，实际剩余运行轮次为九轮，其中八轮是
+rehearsal/formal runtime evidence experiments。当前能否开始这些运行只由
+[STATUS.md](../STATUS.md) 决定；工具可迁移不等于 source/runtime blockers 已关闭。
+
 #### 7.1.1 冻结 candidate、Session 和证据边界
 
 先在同一隔离数据目录完成机器私有的模型、code project 和一次持久 Session 注册，记录真实 `session_id`，然后停止全部服务。正式取证不能使用 `session_id=new`。在干净 candidate worktree 的新 PowerShell 中执行：
@@ -351,7 +402,7 @@ Set-Location jiuwenswarm\channels\web\frontend
 npm run dev
 ```
 
-在声明的单一桌面 Chrome、同一持久 Session 和同一页面生命周期内按 [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 完成累计 journey、两类 fault、restart/reconciliation 和连续三轮 showcase。每次调用必须保持由产品入口生成的同一 causal chain/correlation；不得手工拼接另一 Session、另一 attempt 或另一 task 的事实。浏览器实听、麦克风/扬声器生命周期和 P3 UI 只能由实际观察者为精确 subject 签收；receipt 必须绑定被观察 runtime 原件的 SHA-256，不能代替或制造原件。
+在声明的单一桌面 Chrome、同一持久 Session 和同一页面生命周期内按 [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 完成累计 journey、retriable/non-retriable/STALE zero-effect 三类 fault、restart/reconciliation 和连续三轮 showcase。每次调用必须保持由产品入口生成的同一 causal chain/correlation；不得手工拼接另一 Session、另一 attempt 或另一 task 的事实。浏览器实听、麦克风/扬声器生命周期和 P3 UI 只能由实际观察者为精确 subject 签收；receipt 必须绑定被观察 runtime 原件的 SHA-256，不能代替或制造原件。
 
 P2 Realtime Media 取证时，产品会在 Agent 下行播放前自动打开下一轮麦克风上行。保持该上行处于采集状态直至物理播放完成，再使用产品内的停止/识别控制完成这轮上行；不得提前关闭麦克风、手工伪造 overlap，或把网络收包 ACK 当作播放 ACK。有效 runtime 顺序必须是同一 interaction/response 下的 Gateway downlink 完成、浏览器 render receipt、Gateway 派生 duplex receipt、后续 capture 完成。
 
