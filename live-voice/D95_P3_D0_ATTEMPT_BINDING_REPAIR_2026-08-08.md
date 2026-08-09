@@ -3,8 +3,9 @@
 > Tier-3 implementation/review record for the P3 blockers found during the first
 > real W2 cumulative rehearsal. The exact-root runtime-ownership sub-batch is
 > **CLOSED** in `7be485e8c` with D-053 equivalent independent review PASS. D-069
-> same-task retry remains **IN PROGRESS** across the integrated Gate/Web/Core slices
-> and the still-unaccepted product slice. Nothing in this record grants Gate or
+> same-task retry source work is **CLOSED** across the integrated Gate/Web/Core/
+> product slices through `46616a138`; real A→B→C and restart evidence remain open.
+> Nothing in this record grants Gate or
 > Replacement Ledger credit. [STATUS.md](STATUS.md) remains the only authority for
 > mutable branch state and next action.
 
@@ -25,7 +26,7 @@ freeze because the real P3 D0 Executor exposed two code-level blockers:
 The first blocker is closed in reviewed source commit `7be485e8c`. The hardened
 Gate is integrated as `decec4a79`, the compatible Web retry consumer as
 `89237a075`, and its canonical delivery-terminal history follow-up as `99eb0453f`.
-D-069 Core/Store is frozen in isolated candidate `8067e1387`, rebased onto
+D-069 Core/Store was frozen in isolated candidate `8067e1387`, rebased onto
 governance/integration base `b5f3cec8b`. Its first
 independent review was NOT PASS with three P1 defects in schema authority,
 durable attempt lineage and reconciliation epoch isolation; a later replay-seam
@@ -43,9 +44,11 @@ passes default-coverage focused `344/344`, wide `1314/1314`, static checks and
 self/cold review. Opus reviewed this exact two-file delta, independently reran
 default-coverage focused `344/344`, wide `1314/1314` and static checks, and
 returned PASS with no actionable finding. Main integrated the exact Core tree as
-`3a6b54842`. The existing authenticated create/cancel product path is being
-extended with retry and executor readiness in the isolated product worker.
-No real A→B→C journey or cumulative Gate evidence exists.
+`3a6b54842`. Product candidate `6aac859ad` then closed its predecessor's two P2
+findings, passed GPT/Sol's pinned delta/final third round and was integrated by
+Main as `46616a138`. The authenticated create/cancel product path now includes
+bounded retry and executor readiness. No real A→B→C journey or cumulative Gate
+evidence exists.
 
 ## 2. Real failure and root cause
 
@@ -205,16 +208,15 @@ Current slice evidence at this checkpoint:
   the `62+/1-` correlation delta at exact SHA `8067e1387` with no actionable
   finding after independently rerunning the same `344/344` focused and `1314/1314`
   wide suites. Main integrated the exact 14-file Core tree as `3a6b54842`;
-- the isolated product branch produced rebased exact candidate `8bba26cb0` on
-  Core integration `3a6b54842`, containing six production files plus six direct
-  test files for executor readiness and the policy/auth/confirmation/composition
-  path. GPT/Sol independently reran default-coverage focused `337/337`, wide
-  `1375/1375`, Ruff, compile and diff checks, but its D-070 third round returned
-  `NOT PASS` with zero P1 and two actionable P2 findings: missing `auth_token`
-  is classified as a structural invalid argument before authentication, and a
-  canonical cancelled-before-dispatch predecessor is rejected solely because it
-  correctly has no Direct Executor journal. The candidate remains unaccepted.
-  W2 uses the existing
+- the isolated product branch repaired both P2 findings in exact candidate
+  `6aac859ad` on Core integration `3a6b54842`. GPT/Sol's pinned delta/final third
+  round independently matched the commit, tree and all twelve blobs; reran the
+  four new deterministic regressions, default-coverage focused `341/341`, a
+  final wide `1379/1379`, Ruff, compile and diff checks; and returned `PASS` with
+  no actionable finding. The first wide run had one failure in an unchanged P2
+  rollback timing test; that exact case passed `5/5` in isolation and the second
+  wide run was fully green. Main integrated the exact product tree as
+  `46616a138`. W2 uses the existing
   `live_voice.composition.p3.mutate` carrier, so a separate
   `live_voice.task.retry` ReqMethod/Gateway/AgentServer route is not part of this
   batch.
@@ -319,13 +321,13 @@ separate delta now frozen in `8067e1387`.
 ### 7.3 Product-worker state and formatting boundary
 
 The Opus product worker is isolated on `claude/w2-task-retry-product`. Exact
-candidate `8bba26cb0` is rebased onto accepted Core integration `3a6b54842` and
+candidate `6aac859ad` is rebased onto accepted Core integration `3a6b54842` and
 contains six production files and six direct test files for executor readiness
 plus policy/auth/confirmation/composition retry handling. Its self/cold review
-and reported tests are complete, but GPT/Sol's cross-model third round is
-`NOT PASS`; this is not an accepted slice.
+and GPT/Sol cross-model third round are `PASS`; Main integrated its exact twelve
+blobs as `46616a138`.
 
-The third round found two actionable P2 defects. First,
+The predecessor third round on `8bba26cb0` found two actionable P2 defects. First,
 `_validate_product_p3_mutation_params` includes `auth_token` in its structural
 required-field set, so an absent bearer returns
 `INVALID_PRODUCT_COMPOSITION_ARGUMENT / INVALID_ARGUMENT` before the existing
@@ -339,14 +341,19 @@ Executor dispatch and therefore no journal; that exact predecessor is eligible
 under D-069 once Store-owned outbox/reconciliation checks pass. The repair must
 admit only that complete shape and keep every other missing-journal case fail
 closed. Both fixes require positive, forged/incomplete-shape and zero-effect
-tests plus repeated self/cold and GPT/Sol delta/final review.
+tests plus repeated self/cold and GPT/Sol delta/final review. Candidate
+`6aac859ad` closes both defects: structural validation keeps `auth_token` allowed
+but leaves its absence to the authenticator, and Direct Executor readiness admits
+only the complete canonical cancelled-before-dispatch shape while every degraded
+or divergent missing-journal shape remains not ready. The product-level
+create→cancel-before-dispatch→retry regression creates exactly one successor.
 
-The handoff also reported stable patch-id `d1e50c69...`, while three independent
-`git diff/show | git patch-id --stable` computations on exact base `3a6b54842`
-and candidate `8bba26cb0` produced `0f45313cb4c2e1417b56fb3836fc4cdfcd2d28d6`.
-The exact SHA and parent made this review reproducible, so this is not a code
-finding, but the replacement handoff must publish a freshly reproducible
-patch-id rather than repeat the stale value.
+The two environments continued to produce different stable patch-id values for
+the same diff. Candidate `6aac859ad` resolved identity through stronger content
+facts instead: both sides matched commit `6aac859add1075021f71654f33db1f936fd1c6d3`,
+tree `79aef03edccdd6a03de7878403cd0c51aad0875f` and all twelve blob IDs. The
+patch-id difference is therefore recorded as a Git-environment rendering
+difference, not a candidate-integrity or code finding.
 
 The accepted W2 carrier is the existing authenticated
 `live_voice.composition.p3.mutate` method with `operation=task.retry`. A separate
@@ -411,13 +418,12 @@ Implementation and acceptance proceed in this order:
    `99eb0453f`;
 3. Core candidate `8067e1387` passed Opus's exact-SHA delta review and Main
    integrated its exact tree as `3a6b54842`;
-4. Opus's rebased product candidate `8bba26cb0` completed self/cold review and
-   cumulative tests, but GPT/Sol's exact-SHA third round found the two actionable
-   product findings in section 7.3. Opus must repair them without reopening the
-   accepted Core or `7be485e8c` ownership semantics, rerun affected and cumulative
-   verification, repeat self/cold review and return a new exact candidate before
-   Main integration;
-5. run a disposable A→B diagnostic, create and verify the external clean fixture
+4. Opus's rebased product candidate `6aac859ad` repaired the two findings in
+   section 7.3, completed self/cold review, passed GPT/Sol's pinned delta/final
+   third round and was integrated by Main as `46616a138` without reopening Core
+   or `7be485e8c` ownership semantics;
+5. Main's cumulative Contract/Core/Executor/product/route/Gate smoke passed
+   `602/602`; run a disposable A→B diagnostic, create and verify the external clean fixture
    checkpoint, run C across the exact predecessor/successor process set, and
    reject any extra attempt or cross-task join;
 6. only then create a fresh immutable candidate and run the hardened Gate with
@@ -475,25 +481,15 @@ the active slice to D95.
    user-owned or parallel work.
 3. Treat section 5's exact-root ownership repair as closed at `7be485e8c`; do not
    reopen or refactor it unless an affected D-069 regression proves necessary.
-4. Core preview `9bbb69e9d`, reviewed predecessor `ad7e36bc8` and accepted
-   predecessor `0c18810eb` are historical checkpoints. Final candidate
-   `8067e1387` is frozen. Opus must bind that exact SHA, review the correlation
-   delta and rerun the supplied exact default-coverage commands before Main
-   integration.
-5. After the Core seam checkpoint, Opus implements and reviews the remaining
-   task.retry product extension in its own worktree, then rebases it to the final
-   Core SHA and proves exact
-   replay/conflict, bounded eligibility, frozen confirmation, clean-checkpoint
-   separation, current-attempt subscription segments, restart reconciliation and
-   every rejection's zero-side-effect oracle. GPT/Sol performs its third round;
-   Main alone integrates. `project_code_executor.py` and
-   `p3_authenticated_composition.py` may add the retry path but must not reopen or
-   refactor the `7be485e8c` exact-root/lease/lock/cleanup/release boundaries. Do not
-   run whole-file `ruff format` on `project_code_executor.py`; for every other
-   allowed file, first prove the clean base is format-clean, and reject any
-   formatter output that changes unrelated baseline code. Keep the W2 carrier on
-   `live_voice.composition.p3.mutate`; do not add a direct retry ReqMethod,
-   Gateway allow-list or AgentServer dispatch route.
+4. Core `8067e1387` and product `6aac859ad` are accepted historical candidates;
+   Main integrated their exact trees as `3a6b54842` and `46616a138`. Do not reopen
+   their protocol, ownership or carrier semantics during diagnostic work.
+5. Main cumulative integration smoke is `602/602 PASS`; next prove exact
+   replay/conflict, bounded eligibility, frozen confirmation, clean-checkpoint separation,
+   current-attempt subscription segments, restart reconciliation and every
+   rejection's zero-side-effect oracle on the disposable real A→B→C diagnostic.
+   Keep the W2 carrier on `live_voice.composition.p3.mutate`; do not add a direct
+   retry ReqMethod, Gateway allow-list or AgentServer dispatch route.
 6. Commit coherent reviewed local batches under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
 7. Create one fresh clean descendant candidate and a disposable diagnostic
