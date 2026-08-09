@@ -205,12 +205,16 @@ Current slice evidence at this checkpoint:
   the `62+/1-` correlation delta at exact SHA `8067e1387` with no actionable
   finding after independently rerunning the same `344/344` focused and `1314/1314`
   wide suites. Main integrated the exact 14-file Core tree as `3a6b54842`;
-- the isolated product branch remains based on `ad7e36bc8`. Clean local candidate
-  `dc39e83fa` contains six production files plus six direct test files for
-  executor readiness and the policy/auth/confirmation/composition path; required-
-  field and direct-route findings still require amendment, while cumulative
-  verification, rebase and all product-batch review remain open. W2 uses the
-  existing
+- the isolated product branch produced rebased exact candidate `8bba26cb0` on
+  Core integration `3a6b54842`, containing six production files plus six direct
+  test files for executor readiness and the policy/auth/confirmation/composition
+  path. GPT/Sol independently reran default-coverage focused `337/337`, wide
+  `1375/1375`, Ruff, compile and diff checks, but its D-070 third round returned
+  `NOT PASS` with zero P1 and two actionable P2 findings: missing `auth_token`
+  is classified as a structural invalid argument before authentication, and a
+  canonical cancelled-before-dispatch predecessor is rejected solely because it
+  correctly has no Direct Executor journal. The candidate remains unaccepted.
+  W2 uses the existing
   `live_voice.composition.p3.mutate` carrier, so a separate
   `live_voice.task.retry` ReqMethod/Gateway/AgentServer route is not part of this
   batch.
@@ -314,13 +318,35 @@ separate delta now frozen in `8067e1387`.
 
 ### 7.3 Product-worker state and formatting boundary
 
-The Opus product worker is isolated on `claude/w2-task-retry-product`, based on
-reviewed predecessor `ad7e36bc8`. Main independently inspected clean local
-candidate `dc39e83fa`: it contains six production files and six direct test files
-for executor readiness plus policy/auth/confirmation/composition retry handling.
-Required-field and direct-route findings still require amendment; cumulative
-verification, rebase to the final accepted Core SHA and all three D-053 passes
-remain open. This is implementation-in-progress evidence, not an accepted slice.
+The Opus product worker is isolated on `claude/w2-task-retry-product`. Exact
+candidate `8bba26cb0` is rebased onto accepted Core integration `3a6b54842` and
+contains six production files and six direct test files for executor readiness
+plus policy/auth/confirmation/composition retry handling. Its self/cold review
+and reported tests are complete, but GPT/Sol's cross-model third round is
+`NOT PASS`; this is not an accepted slice.
+
+The third round found two actionable P2 defects. First,
+`_validate_product_p3_mutation_params` includes `auth_token` in its structural
+required-field set, so an absent bearer returns
+`INVALID_PRODUCT_COMPOSITION_ARGUMENT / INVALID_ARGUMENT` before the existing
+authenticator can preserve `FORMAL_TASK_AUTHENTICATION_REQUIRED /
+UNAUTHENTICATED`, contrary to D-069's stable authorization reasons. Second,
+`DirectProjectCodeExecutorAdapter.retry_readiness` treats every absent attempt
+journal as `ATTEMPT_JOURNAL_MISSING`. Core's canonical cancel-before-dispatch
+path intentionally produces a terminal cancelled attempt with
+`cancel_requested=true`, `dispatch_fenced=true`, `executor_ref=None`, no
+Executor dispatch and therefore no journal; that exact predecessor is eligible
+under D-069 once Store-owned outbox/reconciliation checks pass. The repair must
+admit only that complete shape and keep every other missing-journal case fail
+closed. Both fixes require positive, forged/incomplete-shape and zero-effect
+tests plus repeated self/cold and GPT/Sol delta/final review.
+
+The handoff also reported stable patch-id `d1e50c69...`, while three independent
+`git diff/show | git patch-id --stable` computations on exact base `3a6b54842`
+and candidate `8bba26cb0` produced `0f45313cb4c2e1417b56fb3836fc4cdfcd2d28d6`.
+The exact SHA and parent made this review reproducible, so this is not a code
+finding, but the replacement handoff must publish a freshly reproducible
+patch-id rather than repeat the stale value.
 
 The accepted W2 carrier is the existing authenticated
 `live_voice.composition.p3.mutate` method with `operation=task.retry`. A separate
@@ -383,16 +409,14 @@ Implementation and acceptance proceed in this order:
    closed in `7be485e8c` without relaxing exact-root or clean-worktree guards;
 2. the Gate and Web slices are integrated in `decec4a79`, `89237a075` and
    `99eb0453f`;
-3. keep rebased Core candidate `8067e1387` frozen and obtain Opus's exact-SHA
-   correlation-delta confirmation against accepted predecessor `0c18810eb`
-   before Main integrates Core; its Main-side focused/wide/static verification is
-   green at `344/344` and `1314/1314`;
-4. after the Core seam checkpoint, let Opus implement executor readiness and the
-   existing policy/auth/confirmation plus composition-mutation path in its
-   isolated worktree; findings pause only the product portions that depend on the
-   affected seam, with uncertain dependencies conservatively paused. After final
-   Core PASS the product branch must rebase, rerun and complete self/cold plus
-   GPT/Sol third-round review before Main integrates it;
+3. Core candidate `8067e1387` passed Opus's exact-SHA delta review and Main
+   integrated its exact tree as `3a6b54842`;
+4. Opus's rebased product candidate `8bba26cb0` completed self/cold review and
+   cumulative tests, but GPT/Sol's exact-SHA third round found the two actionable
+   product findings in section 7.3. Opus must repair them without reopening the
+   accepted Core or `7be485e8c` ownership semantics, rerun affected and cumulative
+   verification, repeat self/cold review and return a new exact candidate before
+   Main integration;
 5. run a disposable A→B diagnostic, create and verify the external clean fixture
    checkpoint, run C across the exact predecessor/successor process set, and
    reject any extra attempt or cross-task join;
