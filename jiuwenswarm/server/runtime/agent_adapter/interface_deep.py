@@ -8149,6 +8149,9 @@ class JiuWenSwarmDeepAdapter:
         session_id = request.session_id
         rid = request.request_id
         cid = request.channel_id
+        stream_event_rail: JiuSwarmStreamEventRail | None = None
+        tool_capture = None
+        tool_capture_released = False
         register_formal_no_history_session(session_id)
         history_release_safe = True
         try:
@@ -8177,7 +8180,43 @@ class JiuWenSwarmDeepAdapter:
                 "chat.tool_result",
                 "chat.error",
             }
+
+            def captured_response(raw_event: Any) -> AgentResponseChunk:
+                parsed_capture = self._parse_stream_chunk(raw_event)
+                event_type = (
+                    parsed_capture.get("event_type")
+                    if isinstance(parsed_capture, dict)
+                    else None
+                )
+                if event_type not in {
+                    "chat.tool_call",
+                    "chat.tool_update",
+                    "chat.tool_result",
+                }:
+                    raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INVALID")
+                return AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=parsed_capture,
+                    is_complete=False,
+                )
+
             try:
+                stream_event_rail = self._stream_event_rail
+                if not isinstance(stream_event_rail, JiuSwarmStreamEventRail):
+                    raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                is_registered_rail = getattr(
+                    self._instance,
+                    "is_registered_rail",
+                    None,
+                )
+                if not callable(is_registered_rail) or not is_registered_rail(
+                    stream_event_rail
+                ):
+                    raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                tool_capture = stream_event_rail.open_formal_tool_event_capture(
+                    session_id
+                )
                 interaction_stream = await self._instance.attach_output()
                 if interaction_stream is None:
                     raise RuntimeError("FORMAL_EXECUTION_OUTPUT_LEASE_UNAVAILABLE")
@@ -8186,6 +8225,10 @@ class JiuWenSwarmDeepAdapter:
                     SendInputRequest(request_id=rid, inputs=dict(inputs), mode=None)
                 )
                 async for raw_chunk in interaction_stream:
+                    if tool_capture is None:
+                        raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                    for captured_event in tool_capture.drain():
+                        yield captured_response(captured_event)
                     raw_event_type = getattr(raw_chunk, "type", None)
                     raw_event_type = getattr(raw_event_type, "value", raw_event_type)
                     if (
@@ -8240,18 +8283,53 @@ class JiuWenSwarmDeepAdapter:
                         has_streamed_content = has_streamed_content or (
                             isinstance(content, str) and bool(content)
                         )
+                    if event_type in {"chat.final", "chat.error"} and (
+                        tool_capture.has_pending_results
+                    ):
+                        raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INCOMPLETE")
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
                         payload=parsed,
                         is_complete=event_type in {"chat.final", "chat.error"},
                     )
+                try:
+                    if stream_event_rail is None or tool_capture is None:
+                        raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                    remaining_tool_events = (
+                        stream_event_rail.close_formal_tool_event_capture(
+                            session_id,
+                            tool_capture,
+                            abort=False,
+                        )
+                    )
+                finally:
+                    tool_capture_released = True
+                for captured_event in remaining_tool_events:
+                    yield captured_response(captured_event)
                 stream_exhausted = True
             except asyncio.CancelledError:
                 cancelled = True
                 raise
             finally:
                 try:
+                    tool_capture_close_error: BaseException | None = None
+                    if tool_capture is not None and not tool_capture_released:
+                        if stream_event_rail is None:
+                            tool_capture_close_error = RuntimeError(
+                                "FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE"
+                            )
+                        else:
+                            try:
+                                stream_event_rail.close_formal_tool_event_capture(
+                                    session_id,
+                                    tool_capture,
+                                    abort=True,
+                                )
+                            except BaseException as exc:
+                                tool_capture_close_error = exc
+                            finally:
+                                tool_capture_released = True
                     if interaction_stream is not None:
                         cleanup = asyncio.create_task(
                             interaction_stream.close(
@@ -8274,6 +8352,8 @@ class JiuWenSwarmDeepAdapter:
                                 )
                         await asyncio.shield(cleanup)
                         history_release_safe = True
+                    if tool_capture_close_error is not None:
+                        raise tool_capture_close_error
                 finally:
                     TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
                     cleanup_permission_context(token_perm)

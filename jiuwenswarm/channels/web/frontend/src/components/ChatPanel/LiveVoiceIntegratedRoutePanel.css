@@ -31,7 +31,11 @@
 
 .live-voice-integrated__body {
   gap: 12px;
+  max-height: min(70vh, 720px);
   padding: 0 10px 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .live-voice-integrated__warning {

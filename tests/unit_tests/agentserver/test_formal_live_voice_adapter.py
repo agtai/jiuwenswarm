@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    ToolCallInputs,
+)
 
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.message import ReqMethod
@@ -66,12 +71,16 @@ class FormalInstance:
     def __init__(self, lease: OutputLease) -> None:
         self.lease = lease
         self.sent = []
+        self.registered_rails = []
 
     async def attach_output(self):
         return self.lease
 
     async def send_input(self, request) -> None:
         self.sent.append(request)
+
+    def is_registered_rail(self, rail) -> bool:
+        return rail in self.registered_rails
 
 
 def formal_request(*, params_extra: dict | None = None) -> tuple[AgentRequest, dict]:
@@ -113,6 +122,8 @@ def adapter_with(instance: FormalInstance) -> JiuWenSwarmDeepAdapter:
     adapter = object.__new__(JiuWenSwarmDeepAdapter)
     adapter._is_session_scoped_adapter = True
     adapter._instance = instance
+    adapter._stream_event_rail = interface_deep.JiuSwarmStreamEventRail()
+    instance.registered_rails = [adapter._stream_event_rail]
     seen = []
 
     async def update(config) -> None:
@@ -121,6 +132,35 @@ def adapter_with(instance: FormalInstance) -> JiuWenSwarmDeepAdapter:
     adapter._update_runtime_config = update
     adapter.formal_runtime_configs = seen
     return adapter
+
+
+class CallbackFormalInstance(FormalInstance):
+    def __init__(self, lease: OutputLease, rail) -> None:
+        super().__init__(lease)
+        self.rail = rail
+        self.inner_session = AsyncMock()
+
+    async def send_input(self, request) -> None:
+        await super().send_input(request)
+        tool_call = SimpleNamespace(
+            id="tool-call-authoritative-1",
+            name="read_file",
+            arguments={"path": "fixture/README.md"},
+        )
+        inputs = ToolCallInputs(
+            tool_call=tool_call,
+            tool_name=tool_call.name,
+            tool_args=dict(tool_call.arguments),
+        )
+        context = AgentCallbackContext(
+            agent=MagicMock(),
+            inputs=inputs,
+            session=self.inner_session,
+            extra={self.rail._SID_KEY: request.inputs["conversation_id"]},
+        )
+        await self.rail.before_tool_call(context)
+        inputs.tool_result = {"content": "fixture tool result"}
+        await self.rail.after_tool_call(context)
 
 
 @pytest.mark.asyncio
@@ -179,6 +219,172 @@ async def test_formal_deep_seam_drops_passive_runtime_events_around_tool_output(
         "chat.final",
     ]
     assert lease.closed_with == [False]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_bridges_real_tool_callbacks_before_final() -> None:
+    rail = interface_deep.JiuSwarmStreamEventRail()
+    rail._symphony_stream_handler = MagicMock()
+    lease = OutputLease([RawChunk("answer", {"output": {"output": "formal result"}})])
+    instance = CallbackFormalInstance(lease, rail)
+    adapter = adapter_with(instance)
+    adapter._stream_event_rail = rail
+    instance.registered_rails = [rail]
+    request, inputs = formal_request()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        )
+    ]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == [
+        "chat.tool_call",
+        "chat.tool_update",
+        "chat.tool_result",
+        "chat.final",
+    ]
+    assert chunks[0].payload["tool_call"]["name"] == "read_file"
+    assert chunks[0].payload["tool_call"]["arguments"] == {"path": "fixture/README.md"}
+    assert chunks[0].payload["tool_call"]["tool_call_id"] == "tool-call-authoritative-1"
+    assert chunks[0].payload["tool_call"]["display_name"]
+    assert chunks[2].payload["tool_call_id"] == "tool-call-authoritative-1"
+    assert chunks[2].payload["result"] == "{'content': 'fixture tool result'}"
+    instance.inner_session.write_stream.assert_not_awaited()
+    assert rail._formal_tool_event_captures == {}
+    assert lease.closed_with == [False]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_rejects_terminal_with_unfinished_tool_callback() -> None:
+    rail = interface_deep.JiuSwarmStreamEventRail()
+    rail._symphony_stream_handler = MagicMock()
+    lease = OutputLease(
+        [RawChunk("answer", {"output": {"output": "must not complete"}})]
+    )
+    instance = FormalInstance(lease)
+
+    async def send_without_result(request) -> None:
+        instance.sent.append(request)
+        tool_call = SimpleNamespace(
+            id="tool-call-pending-1",
+            name="read_file",
+            arguments={"path": "fixture/README.md"},
+        )
+        context = AgentCallbackContext(
+            agent=MagicMock(),
+            inputs=ToolCallInputs(
+                tool_call=tool_call,
+                tool_name=tool_call.name,
+                tool_args=dict(tool_call.arguments),
+            ),
+            session=AsyncMock(),
+            extra={rail._SID_KEY: request.inputs["conversation_id"]},
+        )
+        await rail.before_tool_call(context)
+
+    instance.send_input = send_without_result
+    adapter = adapter_with(instance)
+    adapter._stream_event_rail = rail
+    instance.registered_rails = [rail]
+    request, inputs = formal_request()
+    emitted = []
+
+    with pytest.raises(RuntimeError, match="FORMAL_TOOL_EVENT_CAPTURE_INCOMPLETE"):
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        ):
+            emitted.append(chunk.payload["event_type"])
+
+    assert emitted == ["chat.tool_call", "chat.tool_update"]
+    assert rail._formal_tool_event_captures == {}
+    assert lease.closed_with == [True]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_bridges_authoritative_tool_exception_once() -> None:
+    rail = interface_deep.JiuSwarmStreamEventRail()
+    rail._symphony_stream_handler = MagicMock()
+    lease = OutputLease([RawChunk("answer", {"output": {"output": "formal recovery"}})])
+    instance = FormalInstance(lease)
+
+    async def send_with_tool_exception(request) -> None:
+        instance.sent.append(request)
+        tool_call = SimpleNamespace(
+            id="tool-call-error-1",
+            name="read_file",
+            arguments={"path": "fixture/missing.md"},
+        )
+        context = AgentCallbackContext(
+            agent=MagicMock(),
+            inputs=ToolCallInputs(
+                tool_call=tool_call,
+                tool_name=tool_call.name,
+                tool_args=dict(tool_call.arguments),
+            ),
+            session=AsyncMock(),
+            extra={rail._SID_KEY: request.inputs["conversation_id"]},
+            exception=RuntimeError("fixture read failed"),
+        )
+        await rail.before_tool_call(context)
+        await rail.on_tool_exception(context)
+        # The SDK may also run AFTER_TOOL_CALL for the same exception. It must
+        # not duplicate the already captured authoritative result.
+        await rail.after_tool_call(context)
+
+    instance.send_input = send_with_tool_exception
+    adapter = adapter_with(instance)
+    adapter._stream_event_rail = rail
+    instance.registered_rails = [rail]
+    request, inputs = formal_request()
+
+    chunks = [
+        chunk
+        async for chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        )
+    ]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == [
+        "chat.tool_call",
+        "chat.tool_update",
+        "chat.tool_result",
+        "chat.final",
+    ]
+    assert chunks[2].payload == {
+        "event_type": "chat.tool_result",
+        "tool_name": "read_file",
+        "tool_call_id": "tool-call-error-1",
+        "result": "fixture read failed",
+        "success": False,
+        "status": "error",
+        "is_error": True,
+    }
+    assert rail._inflight_tool_calls == {}
+    assert rail._formal_tool_event_captures == {}
+    assert lease.closed_with == [False]
+
+
+@pytest.mark.asyncio
+async def test_formal_deep_seam_requires_tool_callback_authority_before_send() -> None:
+    lease = OutputLease([RawChunk("answer", {"output": {"output": "must not run"}})])
+    instance = FormalInstance(lease)
+    adapter = adapter_with(instance)
+    adapter._stream_event_rail = None
+    request, inputs = formal_request()
+
+    with pytest.raises(
+        RuntimeError,
+        match="FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE",
+    ):
+        async for _chunk in adapter.process_formal_live_voice_stream_impl(
+            request, inputs
+        ):
+            pass
+
+    assert instance.sent == []
+    assert lease.closed_with == []
 
 
 @pytest.mark.asyncio

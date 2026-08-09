@@ -680,6 +680,16 @@ test('ChatPanel retains one integrated route owner across the first-message layo
   assert.equal(conversationComposerIndex > mountIndex, true);
 });
 
+test('integrated route diagnostics remain vertically reachable in a bounded panel', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.css', import.meta.url), 'utf8');
+  const bodyRule = source.match(/\.live-voice-integrated__body\s*\{(?<body>[\s\S]*?)\}/)?.groups?.body ?? '';
+
+  assert.match(bodyRule, /max-height:\s*min\(70vh, 720px\)/);
+  assert.match(bodyRule, /overflow-y:\s*auto/);
+  assert.match(bodyRule, /overscroll-behavior:\s*contain/);
+  assert.match(bodyRule, /scrollbar-gutter:\s*stable/);
+});
+
 test('recognized P1 text can enter P2 while every retained voice operation blocks it', async () => {
   for (const status of ['starting', 'capturing', 'recognizing', 'playing', 'cleanup_pending']) {
     assert.equal(productTextBlockedByP1Status(status), true, status);
