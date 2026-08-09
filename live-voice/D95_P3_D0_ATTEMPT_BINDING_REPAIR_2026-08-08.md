@@ -1,10 +1,12 @@
 # D95 P3 D0 attempt binding and W2 restart-evidence repair — 2026-08-08
 
-> Current Tier-3 implementation/review record for the P3 blocker found during
-> the first real W2 cumulative rehearsal. This batch is **IN PROGRESS**, remains
-> uncommitted, has not completed D-053 review, and grants no Gate or Replacement
-> Ledger credit. [STATUS.md](STATUS.md) remains the only authority for mutable
-> branch state and next action.
+> Tier-3 implementation/review record for the P3 blockers found during the first
+> real W2 cumulative rehearsal. The exact-root runtime-ownership sub-batch is
+> **CLOSED** in `7be485e8c` with D-053 equivalent independent review PASS. D-069
+> same-task retry remains **IN PROGRESS** across the integrated Gate/Web slices and
+> the still-unaccepted Core/product slices. Nothing in this record grants Gate or
+> Replacement Ledger credit. [STATUS.md](STATUS.md) remains the only authority for
+> mutable branch state and next action.
 
 ## 1. Outcome at this checkpoint
 
@@ -20,10 +22,20 @@ freeze because the real P3 D0 Executor exposed two code-level blockers:
    but the public P3 mutation surface currently has only create/cancel and no
    repeatable same-task retry transition.
 
-The first blocker has an uncommitted repair plus initial regressions. Independent
-review found additional cancellation and cleanup ownership gaps, so that repair
-is not accepted yet. D-069 now freezes the second blocker's bounded retry
-contract, but it has no implementation, review or Gate evidence yet.
+The first blocker is closed in reviewed source commit `7be485e8c`. The hardened
+Gate is integrated as `decec4a79`, the compatible Web retry consumer as
+`89237a075`, and its canonical delivery-terminal history follow-up as `99eb0453f`.
+D-069 Core/Store exists in an isolated uncommitted worker diff. Its first
+independent review was NOT PASS with three P1 defects in schema authority,
+durable attempt lineage and reconciliation epoch isolation; a later replay-seam
+review also found that a fresh product process could not reconstruct a stored
+retry from client-owned facts. The worker now implements all four repairs and
+reports green focused/wide checks plus self/cold review, but this is development
+evidence only: D-070 requires rebase, rerun and an Opus third-round PASS on the
+frozen exact SHA before Main may accept or integrate it. The existing
+authenticated create/cancel policy, auth, confirmation, composition and direct
+transport path has not yet been extended with retry or executor retry readiness.
+No real A→B→C journey or cumulative Gate evidence exists.
 
 ## 2. Real failure and root cause
 
@@ -47,23 +59,27 @@ The security check is correct and must not be relaxed. Existing positive tests
 used executors that trusted `request.params["project_dir"]` and therefore never
 exercised the real facade's exact-root guard.
 
-## 3. Current uncommitted repair scope
+## 3. Closed exact-root ownership repair scope
 
-The working tree currently changes four production files and two test files:
+Commit `7be485e8c` closes the coherent ownership batch across eight files:
 
-- `jiuwenswarm/server/live_voice/project_code_executor.py` adds an exact attempt-executor
-  lease, validates the isolated root, rechecks initialization side effects,
-  releases the attempt Agent before patch capture/application, and retains
-  cleanup ownership before deleting the checkout;
+- `jiuwenswarm/server/live_voice/project_code_executor.py` adds an exact
+  attempt-executor lease and a stable cross-process attempt lock, validates the
+  isolated root, rechecks initialization side effects, persists terminal/cleanup
+  truth before releasing ownership and never deletes a checkout while a live or
+  unknown predecessor may still touch it;
 - `jiuwenswarm/server/live_voice/p3_authenticated_composition.py` supplies the production
   attempt lease and prevents global resolver cleanup while a D0 worker remains
   live;
 - `jiuwenswarm/server/runtime/agent_manager.py` adds a dedicated attempt-Agent cache/pin
   boundary and exact identity release;
-- `jiuwenswarm/server/runtime/agent_adapter/interface.py` begins a strict formal-project
-  cleanup seam;
-- `tests/unit_tests/live_voice/test_project_code_executor.py` adds exact-root positive/order and wrong-root
-  zero-target-effect regressions;
+- `jiuwenswarm/server/runtime/agent_adapter/interface.py` and
+  `interface_deep.py` implement strict formal-project cleanup, retain partial
+  child initialization before the first await and keep ordinary TUI lifecycle
+  compatibility separate from the formal fail-closed path;
+- `tests/unit_tests/live_voice/test_project_code_executor.py` and
+  `test_p3_authenticated_composition.py` add exact-root, transition-race,
+  cross-process recovery, retryable close and production composition regressions;
 - `tests/unit_tests/agentserver/test_live_voice_p3_agent_profile.py` adds cache, borrower, identity and cleanup
   restoration regressions.
 
@@ -84,70 +100,66 @@ No path may delete a checkout while Agent initialization or a session child can
 still touch it. A release/cleanup failure must retain retryable ownership and
 must produce zero canonical-project mutation.
 
-## 4. Verification already run
+## 4. Closed ownership-batch verification
 
-These are development checks, not final acceptance evidence:
+These checks accept the source batch, not the W2 product journey:
 
-- before the new regressions were added, the three affected P3/AgentManager test
-  files passed `122/122` under the repository `.venv`;
-- the two newly edited test files then ran `62 passed, 1 failed`; the single
-  failure is intentional exposure of a production mismatch—the attempt cache
-  label is currently also passed as Code Agent `sub_mode="formal_attempt"`, while
-  the established Code Agent must keep `sub_mode=None` and use only the cache key
-  for isolation;
-- Ruff passed for the two edited test files;
-- `git diff --check` passes with only existing Windows line-ending notices.
+- the three focused D95 files passed `154/154` on the final diff;
+- the additional ordinary TUI/session lifecycle group passed `45` tests; one
+  known pre-existing Windows test with a hard-coded POSIX cache key was excluded
+  because it does not exercise the changed formal path;
+- deterministic oracles covered live expired predecessors, completion-before-lock
+  release, cleanup failure followed by successful close retry, real Deep/facade
+  partial-init and cleanup failures, and RuntimeError/CancelledError retention;
+- Ruff, production-file `py_compile` and `git diff --check` passed;
+- implementation self-review, cold complete-diff review and a separated read-only
+  equivalent independent review completed with zero remaining P1/P2 findings. It
+  was not `/review`, and the same-machine/repository limitation is recorded.
 
-No real P3 task has passed on this repair, no complete affected suite has run on
-the final diff, and no D-053 pass is closed.
+No new real P3 task or W2 acceptance Gate ran on this repair.
 
-## 5. Open review findings before the attempt-binding repair can pass
+## 5. Closed review findings for the attempt-binding repair
 
-The read-only lifecycle review found the following actionable blockers:
+The lifecycle review found the following blockers; all eight are closed by
+`7be485e8c` and the final regressions above:
 
-1. Exact release currently checks `has_session_runtime()` before strict cleanup;
-   partial initialization therefore cannot be cleaned and can remain permanently
-   pending. Strict cleanup must run first and quiescence must be verified after.
-2. Release removes cache/pin ownership before an awaited cleanup and does not
-   restore it on `CancelledError`. Ownership must remain retryable across both
-   ordinary failures and cancellation.
-3. Factory acquisition must hand cleanup ownership to D0 before any root getter
-   or capability check that may fail.
-4. The current facade strict-cleanup draft can clear `_adapter` before proving
-   adapter runtime is gone; the formal path must propagate child cleanup failure
-   and verify quiescence before discarding the adapter.
-5. Channel-wide formal-Agent cleanup currently swallows failures and the resolver
-   marks itself closed before cleanup succeeds. Both must remain retryable.
-6. Code Agent initialization uses executor-backed work that is not stopped by
-   cancellation of the awaiting coroutine. D0 must retain and await/shield the
-   acquire task, obtain/release any eventual lease, and only then delete the
-   checkout. Bounded close must expose cleanup-pending rather than globally
-   tearing down a still-owned Agent.
-7. `EXECUTOR_CAPABILITY_UNAVAILABLE` must remain a stable diagnostic rather than
-   regress to generic `PROJECT_EXECUTOR_FAILED`.
-8. The final test matrix still needs one composition test through the production
-   resolver, AgentManager and real `JiuWenSwarm` facade with a controlled fake
-   Code Adapter; an accept-any-root executor is not sufficient regression proof.
+1. Strict cleanup now runs before the post-cleanup `has_session_runtime()`
+   quiescence proof, including partial initialization.
+2. Cache/pin ownership remains observable and retryable across both ordinary
+   cleanup failures and `CancelledError`.
+3. Factory acquisition hands cleanup ownership to D0 before root getters or
+   capability checks that may fail.
+4. The facade retains `_adapter` until child cleanup succeeds and quiescence is
+   proven; swallowed lower-layer failure is covered by the real Deep regression.
+5. Channel-wide formal-Agent cleanup and resolver close retain pending ownership,
+   aggregate failures and retry instead of declaring a false closed state.
+6. D0 retains and shields Agent acquisition, obtains/releases any eventual lease
+   and deletes the checkout only after exact ownership and OS-lock quiescence.
+7. `EXECUTOR_CAPABILITY_UNAVAILABLE` remains a stable diagnostic rather than
+   regressing to generic `PROJECT_EXECUTOR_FAILED`.
+8. The matrix includes production resolver → AgentManager → real `JiuWenSwarm`
+   facade → controlled Code Adapter → D0 composition coverage; an
+   accept-any-root executor is not treated as sufficient proof.
 
-## 6. D-032/D-053 closure required for this Tier-3 batch
+## 6. D-032/D-053 closure for the exact-root ownership batch
 
 | Dimension | Required oracle before acceptance | Current state |
 |---|---|---|
-| Positive | exact detached-root Agent edits only the checkout; reviewed patch reaches only the canonical target | unit seam partial; real route not rerun |
-| Negative | wrong/missing root or capability fails with stable reason and zero canonical/external mutation | initial wrong-root regression added |
-| Boundary | HEAD/tree/support paths, one lease, one checkout and one exact cache identity remain bounded | partial |
-| State | Agent release, worktree cleanup and business terminal truth remain separate and retryable | review findings open |
-| Timing | cancellation during acquire, stream, release and apply cannot create late writes | acquire/release cases open |
-| Concurrency | duplicate acquire and global close cannot steal a live attempt lease | partial/open |
-| Recovery | cleanup failure retries Agent first, then worktree; process restart may clean only orphaned checkout | partial/open |
-| Identity/security | canonical authority root remains canonical; the temporary root never becomes product identity | design preserved; composition proof open |
-| Failure | initialization, stream, cleanup and worktree errors retain stable sanitized codes | partial/open |
-| Compatibility | legacy/manual binding tests and feature-off behavior remain unchanged | earlier regressions pass; final rerun pending |
-| Cross-module | production resolver → AgentManager → real facade → D0 → canonical patch | not yet covered or rerun |
+| Positive | exact detached-root Agent edits only the checkout; reviewed patch reaches only the canonical target | automated source oracle PASS; real route not rerun |
+| Negative | wrong/missing root or capability fails with stable reason and zero canonical/external mutation | PASS |
+| Boundary | HEAD/tree/support paths, one lease, one checkout and one exact cache identity remain bounded | PASS |
+| State | Agent release, worktree cleanup and business terminal truth remain separate and retryable | PASS |
+| Timing | cancellation during acquire, stream, release and apply cannot create late writes | PASS |
+| Concurrency | duplicate acquire and global close cannot steal a live attempt lease | PASS |
+| Recovery | cleanup failure retries Agent first, then worktree; process restart may clean only proven-orphan checkout | PASS within the frozen single-runtime/OS-lock boundary |
+| Identity/security | canonical authority root remains canonical; the temporary root never becomes product identity | PASS |
+| Failure | initialization, stream, cleanup and worktree errors retain stable sanitized codes | PASS |
+| Compatibility | legacy/manual binding tests and feature-off behavior remain unchanged | affected regression PASS |
+| Cross-module | production resolver → AgentManager → real facade → D0 → canonical patch | automated production composition PASS; real route remains open |
 
-After fixing all findings, run implementation self-review, a cold complete-diff
-review and an independent review equivalent. Every finding must be fixed and its
-affected tests rerun before a local implementation commit is accepted.
+This table closes only the exact-root ownership source batch. D-069 Core/product
+implementation and real W2 evidence keep their own independent review and Gate
+requirements.
 
 ## 7. Accepted D-069 W2 P3 restart-evidence contract
 
@@ -158,12 +170,80 @@ also appears in a valid predecessor/successor restart chain. The acceptance
 minimum is P3 `>=20/25`; without the six-point Executor item, the Core, Voice
 Bridge, Progress and UI items total only 19.
 
-The current formal Core and policy still implement only `task.create` and
-`task.cancel`; the authenticated route, Store, subscription and Web consumer do
-not yet implement retry. D-069 in [DECISIONS.md](decisions/DECISIONS.md) accepts a
-bounded, explicit and exactly confirmed `task.retry` contract. It does not make
-retry an automatic restart/recovery behavior and it does not grant implementation
-or Gate credit.
+D-069 in [DECISIONS.md](decisions/DECISIONS.md) accepts a bounded, explicit and
+exactly confirmed `task.retry` contract. D-070 fixes the two-batch execution and
+review split: GPT/Sol implements Core and reviews Opus's product batch; Opus
+performs Core's third round and implements product reachability; Main alone
+integrates. Gate derivation and the Web consumer are integrated, but Core/Store
+is only an unaccepted worker candidate and the authenticated product route has
+no retry extension yet. This does not make retry an automatic restart/recovery
+behavior and grants no Gate credit.
+
+Current slice evidence at this checkpoint:
+
+- Gate `decec4a79` completed self/cold/separated independent-equivalent review;
+  its focused Gate/CLI suite passed `77/77` before integration;
+- Web `89237a075` and follow-up `99eb0453f` completed the same three passes;
+  Python/TypeScript contract tests passed `32/32`, integrated Web tests `201/201`,
+  and frontend `tsc --noEmit` passed again on the integration branch;
+- Core/Store's isolated worker reports the independent review's three P1 repairs,
+  the later durable applied-replay repair, focused `342/342`, wide `1276/1276`,
+  static checks and self/cold review; none of those results has yet been rerun on
+  the rebased frozen candidate or confirmed by the D-070 Opus third round;
+- executor retry readiness and the authenticated product route's retry extension
+  have not started, so no current retry UI action can complete formal A→B→C.
+
+### 7.1 Normalized Core/Store independent-review findings
+
+The machine-local review scratchpad is recovery material only and is not a Git
+authority. The following stable findings are reconciled against the worker diff
+and reported deterministic tests; historical line numbers and superseded
+transcript inferences are intentionally omitted. Their implementation status is
+not acceptance: the rebased exact candidate still needs rerun and Opus review.
+
+1. **Schema authority failed open at construction.** A database containing only
+   generic/shared metadata could claim the Task Store v2 version without the
+   required tables, columns, constraints and indexes, so construction succeeded
+   and the first operation failed later. The repair validates the exact owned v1
+   topology before migration and the complete v2 topology at startup; unsupported
+   or corrupt ownership fails with zero DDL, while unrelated component tables may
+   coexist.
+2. **Retry admission did not prove the existing durable lineage.** A corrupted B
+   `task.retry_accepted` predecessor binding could still authorize B→C and reach
+   outbox claim/snapshot consumers. The repair makes one strict verifier serve
+   read authority and transaction re-CAS, proving contiguous attempt ordinals,
+   unique create/retry boundaries, exact command/result/dispatch/spec bindings,
+   eligible predecessor terminal truth and settled authority before any mutation
+   or readiness call.
+3. **Reconciliation publication crossed or aborted on attempt epochs.** An open
+   post-transaction task-global event read could publish C's retry boundary with
+   B's attempt after concurrent retry; a stale B callback could also abort the
+   wider restart audit instead of being recognized as superseded. The repair
+   returns the transaction's frozen attempt/event receipt, publishes only that
+   receipt, and treats exact old-attempt callbacks as an explicit superseded
+   no-op while unknown failures remain fail closed.
+4. **Applied-retry replay required server-derived request facts.** The first seam
+   expected a caller to retain the complete original `CommandEnvelope`, including
+   predecessor/outcome/ordinal values a fresh product process cannot reconstruct
+   after the task advances. The repair exposes Core read-only authority/replay
+   seams keyed by authenticated scope, task/command identity and one exact
+   product-owned opaque request fingerprint; Store reconstructs and verifies the
+   canonical command/result/lineage internally. A reopened process can replay B
+   after C with zero database, readiness or Executor effect, while changed
+   client-owned facts conflict.
+
+The worker's current regressions cover malformed or partial schemas, lineage
+corruption, cross-process replay without the original envelope, reconciliation
+commit→retry→publish races, superseded status races, current-attempt outbox/
+cancel/reconciliation behavior, attempt-segment subscription/progress and
+concurrent retry CAS. D-070 deliberately withholds D-053 PASS until Opus reruns
+and reviews the frozen rebased candidate.
+
+Each preview/candidate handoff to Opus must carry the exact SHA, worktree cwd,
+Python executable, focused and wide commands, expected collection/result and
+coverage mode. Iteration or single-failure diagnosis may use `--no-cov`, but it
+cannot substitute for the formal third-round focused/wide run with the repository
+default coverage configuration; the wide review window must allow for that cost.
 
 The deterministic evidence topology has exactly three distinct attempts:
 
@@ -200,19 +280,21 @@ current attempt's atomic segment boundary (`task.accepted` for A, latest
 must fail closed instead of skipping or translating it. Terminal irreversibility
 therefore remains per attempt epoch rather than being weakened globally.
 
-Implementation and acceptance must proceed in this order:
+Implementation and acceptance proceed in this order:
 
-1. close section 5's retained Agent/checkout ownership findings and its complete
-   Tier-3 reviews without relaxing the exact-root or clean-worktree guards;
-2. add the backend Store/Core atomic retry, reducer/event/subscription segment,
-   policy/auth/confirmation, facade/composition/Gateway and reconciliation/outbox
-   behavior together with migration, idempotency, concurrency and zero-effect
-   tests;
-3. update the Web TypeScript contract, formal control leaf, product activation
-   and route-panel consumer in the same compatible batch so no producer can emit
-   an event that the selected consumer silently ignores;
-4. complete implementation self-review, cold complete-diff review and an
-   independent review equivalent, fixing findings and rerunning affected suites;
+1. section 5's retained Agent/checkout ownership findings and Tier-3 reviews are
+   closed in `7be485e8c` without relaxing exact-root or clean-worktree guards;
+2. the Gate and Web slices are integrated in `decec4a79`, `89237a075` and
+   `99eb0453f`;
+3. freeze and pre-read the Core preview, rebase the implemented repairs to the
+   current integration base, rerun focused/wide/static checks and obtain Opus's
+   exact-SHA third-round PASS before Main integrates Core;
+4. after the Core seam checkpoint, let Opus implement executor readiness and the
+   existing policy/auth/confirmation, facade/composition/Gateway path in its
+   isolated worktree; findings pause only the product portions that depend on the
+   affected seam, with uncertain dependencies conservatively paused. After final
+   Core PASS the product branch must rebase, rerun and complete self/cold plus
+   GPT/Sol third-round review before Main integrates it;
 5. run a disposable A→B diagnostic, create and verify the external clean fixture
    checkpoint, run C across the exact predecessor/successor process set, and
    reject any extra attempt or cross-task join;
@@ -269,15 +351,23 @@ the active slice to D95.
 2. Run `git status --short --branch`, `git rev-parse HEAD` and upstream divergence;
    preserve every existing working-tree modification and do not overwrite
    user-owned or parallel work.
-3. Fix the eight attempt-binding review findings in section 5 without relaxing
-   the real facade's exact-root guard.
-4. Run the focused P3/AgentManager/facade/vertical suites, then complete all three
-   D-053 review passes and fix every finding.
-5. Implement accepted D-069 in its recorded backend/Web dependency order, then
-   prove exact replay/conflict, bounded eligibility, clean-checkpoint separation,
-   current-attempt subscription segments, restart reconciliation and every
-   rejection's zero-side-effect oracle before review acceptance.
-6. Commit the coherent reviewed local batch under the active D-063 exception;
+3. Treat section 5's exact-root ownership repair as closed at `7be485e8c`; do not
+   reopen or refactor it unless an affected D-069 regression proves necessary.
+4. Create an immutable Core preview, rebase the existing repairs to the current
+   integration base, rerun focused/wide/static checks and freeze the candidate.
+   Opus may pre-read the preview but the formal third round must bind the frozen
+   exact SHA and rerun the supplied exact commands; Codex fixes findings and Opus
+   confirms the final Core diff before Main integration.
+5. After the Core seam checkpoint, Opus implements and reviews the remaining
+   task.retry product extension in its own worktree, then rebases it to the final
+   Core SHA and proves exact
+   replay/conflict, bounded eligibility, frozen confirmation, clean-checkpoint
+   separation, current-attempt subscription segments, restart reconciliation and
+   every rejection's zero-side-effect oracle. GPT/Sol performs its third round;
+   Main alone integrates. `project_code_executor.py` and
+   `p3_authenticated_composition.py` may add the retry path but must not reopen or
+   refactor the `7be485e8c` exact-root/lease/lock/cleanup/release boundaries.
+6. Commit coherent reviewed local batches under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
 7. Create one fresh clean descendant candidate and a disposable diagnostic
    runtime. If the in-memory Speech credential is unavailable, ask the user for
