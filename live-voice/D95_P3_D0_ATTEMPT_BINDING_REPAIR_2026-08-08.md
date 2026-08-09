@@ -198,8 +198,12 @@ Current slice evidence at this checkpoint:
   and format/Ruff/compile/diff checks pass. Opus's review of predecessor
   `ad7e36bc8` was NOT PASS with zero P1 and two P2 findings; final exact-SHA delta
   confirmation is still required;
-- executor retry readiness and the authenticated product route's retry extension
-  have not started, so no current retry UI action can complete formal A→B→C.
+- the isolated product branch remains based on `ad7e36bc8`. Its only current
+  uncommitted source change is a narrow `DirectProjectCodeExecutorAdapter`
+  `retry_readiness` implementation (`75+/0-`), structurally verified by Main as
+  pure additions outside the `7be485e8c` ownership regions. It has no tests yet;
+  policy/auth/confirmation/composition/Gateway wiring and all product-batch review
+  remain open, so no current retry UI action can complete formal A→B→C.
 
 ### 7.1 Normalized Core/Store independent-review findings
 
@@ -287,6 +291,28 @@ found zero new P1 defects and returned NOT PASS on two P2 items:
 These changes do not expand the Core/product seam. Product work unrelated to F-2
 may continue; any still-disputed current-segment consumer wiring remains paused
 until Opus confirms the exact-candidate disposition.
+
+### 7.3 Product-worker state and formatting boundary
+
+The Opus product worker is isolated on `claude/w2-task-retry-product`, based on
+reviewed predecessor `ad7e36bc8`. Main independently inspected its current tracked
+diff: only `project_code_executor.py` is modified, with `75` added and zero removed
+lines. This is implementation-in-progress evidence, not an accepted source slice;
+the new readiness seam still needs direct positive, pending-owner, mismatch and
+zero-effect tests, completion of the remaining product route, rebase to the final
+accepted Core SHA and all three D-053 passes.
+
+Formatting is not an authority to rewrite protected history. Before running a
+whole-file formatter on any allowed product file, the worker must first test that
+exact file on the clean pinned base and record whether it is already format-clean.
+`project_code_executor.py` is not format-clean on the current base and must never
+receive a whole-file `ruff format` during this batch. Its retry addition must stay
+narrowly formatted and `ruff check`-clean without changing unrelated lines. The
+same rule applies to any other baseline-dirty file: reject unrelated formatter
+output and reapply a narrow change. In particular, formatting must not touch
+`_AttemptOwnershipLock`, worktree handling, journal state, exact-root, attempt
+lease, cross-process lock or retained cleanup/release semantics closed in
+`7be485e8c`.
 
 The deterministic evidence topology has exactly three distinct attempts:
 
@@ -408,7 +434,10 @@ the active slice to D95.
    every rejection's zero-side-effect oracle. GPT/Sol performs its third round;
    Main alone integrates. `project_code_executor.py` and
    `p3_authenticated_composition.py` may add the retry path but must not reopen or
-   refactor the `7be485e8c` exact-root/lease/lock/cleanup/release boundaries.
+   refactor the `7be485e8c` exact-root/lease/lock/cleanup/release boundaries. Do not
+   run whole-file `ruff format` on `project_code_executor.py`; for every other
+   allowed file, first prove the clean base is format-clean, and reject any
+   formatter output that changes unrelated baseline code.
 6. Commit coherent reviewed local batches under the active D-063 exception;
    do not update any remote ref without separate exact user approval.
 7. Create one fresh clean descendant candidate and a disposable diagnostic
