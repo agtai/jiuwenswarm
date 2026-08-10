@@ -20,16 +20,10 @@ import {
   type MediaRegistrationOwnerCloseResult,
 } from './browserGatewayMediaTransport.js';
 
-export {
-  decodeAudioFrame,
-  deserializeMediaControl,
-  encodeAudioFrame,
-  serializeMediaControl,
-} from './browserGatewayMediaTransport.js';
+export { decodeAudioFrame, deserializeMediaControl, encodeAudioFrame, serializeMediaControl } from './browserGatewayMediaTransport.js';
 
 export const DEDICATED_MEDIA_SUBPROTOCOL = 'live-voice.media.v1' as const;
-export const DEDICATED_MEDIA_ROUTE_EVIDENCE_SCOPE =
-  'browser_dedicated_media_socket_leaf_only' as const;
+export const DEDICATED_MEDIA_ROUTE_EVIDENCE_SCOPE = 'browser_dedicated_media_socket_leaf_only' as const;
 
 const SOCKET_CONNECTING = 0;
 const SOCKET_OPEN = 1;
@@ -94,10 +88,14 @@ export interface DedicatedMediaSocketLike {
   close(code?: number, reason?: string): void;
 }
 
-export type DedicatedMediaSocketFactory = (
-  url: string,
-  protocols: readonly string[],
-) => DedicatedMediaSocketLike;
+interface PendingUplinkCompletion {
+  readonly expected: MediaDetach;
+  readonly promise: Promise<MediaRegistrationOwnerCloseResult>;
+  readonly resolve: (value: MediaRegistrationOwnerCloseResult) => void;
+  readonly reject: (reason: unknown) => void;
+}
+
+export type DedicatedMediaSocketFactory = (url: string, protocols: readonly string[]) => DedicatedMediaSocketLike;
 
 export interface BrowserDedicatedMediaRouteRequest {
   readonly enabled: boolean;
@@ -144,9 +142,7 @@ export interface ActiveBrowserDedicatedMediaRoute {
   readonly capability: DedicatedMediaRouteCapability;
 }
 
-export type BrowserDedicatedMediaRouteActivation =
-  | InactiveBrowserDedicatedMediaRoute
-  | ActiveBrowserDedicatedMediaRoute;
+export type BrowserDedicatedMediaRouteActivation = InactiveBrowserDedicatedMediaRoute | ActiveBrowserDedicatedMediaRoute;
 
 function capability(socketAllocated: boolean): DedicatedMediaRouteCapability {
   return Object.freeze({
@@ -170,13 +166,14 @@ function canonicalOrigin(value: unknown): URL | null {
     return null;
   }
   if (
-    !['http:', 'https:'].includes(parsed.protocol)
-    || parsed.username !== ''
-    || parsed.password !== ''
-    || parsed.pathname !== '/'
-    || parsed.search !== ''
-    || parsed.hash !== ''
-  ) return null;
+    !['http:', 'https:'].includes(parsed.protocol) ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.pathname !== '/' ||
+    parsed.search !== '' ||
+    parsed.hash !== ''
+  )
+    return null;
   return parsed;
 }
 
@@ -191,24 +188,20 @@ function dedicatedEndpoint(expectedOrigin: unknown, endpointUrl: unknown): strin
   }
   const requiredProtocol = origin.protocol === 'https:' ? 'wss:' : 'ws:';
   if (
-    endpoint.protocol !== requiredProtocol
-    || endpoint.host !== origin.host
-    || endpoint.username !== ''
-    || endpoint.password !== ''
-    || endpoint.search !== ''
-    || endpoint.hash !== ''
-    || endpoint.pathname === '/'
-  ) return null;
+    endpoint.protocol !== requiredProtocol ||
+    endpoint.host !== origin.host ||
+    endpoint.username !== '' ||
+    endpoint.password !== '' ||
+    endpoint.search !== '' ||
+    endpoint.hash !== '' ||
+    endpoint.pathname === '/'
+  )
+    return null;
   return endpoint.href;
 }
 
 function closeReasonFrom(error: unknown): MediaDetachReason {
-  if (
-    typeof error === 'object'
-    && error !== null
-    && 'reasonId' in error
-    && typeof (error as { reasonId?: unknown }).reasonId === 'string'
-  ) {
+  if (typeof error === 'object' && error !== null && 'reasonId' in error && typeof (error as { reasonId?: unknown }).reasonId === 'string') {
     const reason = (error as { reasonId: string }).reasonId;
     if (DETACH_REASONS.has(reason)) {
       return reason as MediaDetachReason;
@@ -232,14 +225,11 @@ function boundedPositiveInteger(value: unknown, maximum: number, field: string):
   return value as number;
 }
 
-function hasExactFrozenDataFields(
-  value: unknown,
-  fields: readonly string[],
-): value is Readonly<Record<string, unknown>> {
+function hasExactFrozenDataFields(value: unknown, fields: readonly string[]): value is Readonly<Record<string, unknown>> {
   if (typeof value !== 'object' || value === null || Array.isArray(value) || !Object.isFrozen(value)) return false;
   const ownKeys = Reflect.ownKeys(value);
   if (ownKeys.length !== fields.length || ownKeys.some(key => typeof key !== 'string' || !fields.includes(key))) return false;
-  return fields.every((field) => {
+  return fields.every(field => {
     const descriptor = Object.getOwnPropertyDescriptor(value, field);
     return descriptor !== undefined && descriptor.enumerable === true && 'value' in descriptor;
   });
@@ -253,18 +243,11 @@ function isMonotonicFact(value: unknown): value is number | null {
   return value === null || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
 }
 
-function validateSourceActionConfirmation(
-  value: unknown,
-  sourceCount: number,
-): value is BrowserAudioLocalStopReceipt['browser_sources']['stop_request'] {
+function validateSourceActionConfirmation(value: unknown, sourceCount: number): value is BrowserAudioLocalStopReceipt['browser_sources']['stop_request'] {
   if (!hasExactFrozenDataFields(value, ['status', 'attempted_count', 'completed_count', 'failed_count'])) return false;
   const { status, attempted_count: attempted, completed_count: completed, failed_count: failed } = value;
-  if (
-    !isNonNegativeSafeInteger(attempted)
-    || !isNonNegativeSafeInteger(completed)
-    || !isNonNegativeSafeInteger(failed)
-    || attempted !== completed + failed
-  ) return false;
+  if (!isNonNegativeSafeInteger(attempted) || !isNonNegativeSafeInteger(completed) || !isNonNegativeSafeInteger(failed) || attempted !== completed + failed)
+    return false;
   if (status === 'not_attempted') return sourceCount === 0 && attempted === 0;
   if (status === 'not_applicable') return sourceCount === 0 && attempted === 0;
   if (status === 'completed') {
@@ -276,15 +259,8 @@ function validateSourceActionConfirmation(
   return false;
 }
 
-function validateLocalStopTiming(
-  value: unknown,
-): value is BrowserAudioLocalStopReceipt['timing'] {
-  if (!hasExactFrozenDataFields(value, [
-    'status',
-    'requested_at_monotonic_ms',
-    'confirmed_at_monotonic_ms',
-    'duration_ms',
-  ])) return false;
+function validateLocalStopTiming(value: unknown): value is BrowserAudioLocalStopReceipt['timing'] {
+  if (!hasExactFrozenDataFields(value, ['status', 'requested_at_monotonic_ms', 'confirmed_at_monotonic_ms', 'duration_ms'])) return false;
   const requested = value.requested_at_monotonic_ms;
   const confirmed = value.confirmed_at_monotonic_ms;
   const duration = value.duration_ms;
@@ -297,21 +273,23 @@ function validateLocalStopTiming(
 }
 
 function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserAudioLocalStopReceipt> {
-  if (!hasExactFrozenDataFields(value, [
-    'kind',
-    'outcome',
-    'response',
-    'reason',
-    'local_fence_established',
-    'confirmed_cursor_before_stop',
-    'browser_sources',
-    'timing',
-    'physical_heard',
-    'physical_silence',
-    'business_cancel_count_before',
-    'business_cancel_count_after',
-    'business_cancel_count_delta',
-  ])) {
+  if (
+    !hasExactFrozenDataFields(value, [
+      'kind',
+      'outcome',
+      'response',
+      'reason',
+      'local_fence_established',
+      'confirmed_cursor_before_stop',
+      'browser_sources',
+      'timing',
+      'physical_heard',
+      'physical_silence',
+      'business_cancel_count_before',
+      'business_cancel_count_after',
+      'business_cancel_count_delta',
+    ])
+  ) {
     throw new TypeError('local playback stop requires a closed BrowserAudio receipt');
   }
   if (value.kind !== 'browser_audio.local_stop.v1') {
@@ -320,38 +298,37 @@ function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserA
   if (typeof value.outcome !== 'string' || !BROWSER_AUDIO_LOCAL_STOP_OUTCOMES.has(value.outcome)) {
     throw new TypeError('local playback stop receipt has an invalid outcome');
   }
-  const localFenceEstablished = value.outcome === 'local_fence_established'
-    || value.outcome === 'local_fence_established_source_unknown';
+  const localFenceEstablished = value.outcome === 'local_fence_established' || value.outcome === 'local_fence_established_source_unknown';
   if (value.local_fence_established !== localFenceEstablished) {
     throw new TypeError('local playback stop outcome contradicts the local fence');
   }
   if (
-    !hasExactFrozenDataFields(value.response, ['interaction_id', 'response_id', 'response_generation'])
-    || typeof value.response.interaction_id !== 'string'
-    || value.response.interaction_id.trim().length === 0
-    || typeof value.response.response_id !== 'string'
-    || value.response.response_id.trim().length === 0
-    || !isNonNegativeSafeInteger(value.response.response_generation)
-    || typeof value.reason !== 'string'
-    || value.reason.trim().length === 0
+    !hasExactFrozenDataFields(value.response, ['interaction_id', 'response_id', 'response_generation']) ||
+    typeof value.response.interaction_id !== 'string' ||
+    value.response.interaction_id.trim().length === 0 ||
+    typeof value.response.response_id !== 'string' ||
+    value.response.response_id.trim().length === 0 ||
+    !isNonNegativeSafeInteger(value.response.response_generation) ||
+    typeof value.reason !== 'string' ||
+    value.reason.trim().length === 0
   ) {
     throw new TypeError('local playback stop receipt has invalid identity facts');
   }
   if (
-    !Array.isArray(value.confirmed_cursor_before_stop)
-    || !Object.isFrozen(value.confirmed_cursor_before_stop)
-    || value.confirmed_cursor_before_stop.length > MAX_LOCAL_STOP_CURSOR_FACTS
+    !Array.isArray(value.confirmed_cursor_before_stop) ||
+    !Object.isFrozen(value.confirmed_cursor_before_stop) ||
+    value.confirmed_cursor_before_stop.length > MAX_LOCAL_STOP_CURSOR_FACTS
   ) {
     throw new TypeError('local playback stop receipt has invalid cursor facts');
   }
   const cursorUnits = new Set<string>();
   for (const cursor of value.confirmed_cursor_before_stop) {
     if (
-      !hasExactFrozenDataFields(cursor, ['unit_id', 'contiguous_through_seq'])
-      || typeof cursor.unit_id !== 'string'
-      || cursor.unit_id.trim().length === 0
-      || (cursor.contiguous_through_seq !== null && !isNonNegativeSafeInteger(cursor.contiguous_through_seq))
-      || cursorUnits.has(cursor.unit_id)
+      !hasExactFrozenDataFields(cursor, ['unit_id', 'contiguous_through_seq']) ||
+      typeof cursor.unit_id !== 'string' ||
+      cursor.unit_id.trim().length === 0 ||
+      (cursor.contiguous_through_seq !== null && !isNonNegativeSafeInteger(cursor.contiguous_through_seq)) ||
+      cursorUnits.has(cursor.unit_id)
     ) {
       throw new TypeError('local playback stop receipt has invalid cursor facts');
     }
@@ -362,9 +339,9 @@ function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserA
   }
   const sourceCount = value.browser_sources.source_count;
   if (
-    !isNonNegativeSafeInteger(sourceCount)
-    || !validateSourceActionConfirmation(value.browser_sources.stop_request, sourceCount)
-    || !validateSourceActionConfirmation(value.browser_sources.disconnect, sourceCount)
+    !isNonNegativeSafeInteger(sourceCount) ||
+    !validateSourceActionConfirmation(value.browser_sources.stop_request, sourceCount) ||
+    !validateSourceActionConfirmation(value.browser_sources.disconnect, sourceCount)
   ) {
     throw new TypeError('local playback stop receipt has invalid browser source facts');
   }
@@ -382,11 +359,7 @@ function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserA
     if (cleanupUnknown !== (value.outcome === 'local_fence_established_source_unknown')) {
       throw new TypeError('local playback stop outcome contradicts source cleanup truth');
     }
-  } else if (
-    sourceCount !== 0
-    || stopStatus !== 'not_attempted'
-    || disconnectStatus !== 'not_attempted'
-  ) {
+  } else if (sourceCount !== 0 || stopStatus !== 'not_attempted' || disconnectStatus !== 'not_attempted') {
     throw new TypeError('non-fenced local playback stop cannot claim source cleanup');
   }
   if (!validateLocalStopTiming(value.timing)) {
@@ -398,13 +371,7 @@ function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserA
   const before = value.business_cancel_count_before;
   const after = value.business_cancel_count_after;
   const delta = value.business_cancel_count_delta;
-  if (
-    !isNonNegativeSafeInteger(before)
-    || !isNonNegativeSafeInteger(after)
-    || !Number.isSafeInteger(delta)
-    || delta !== after - before
-    || delta !== 0
-  ) {
+  if (!isNonNegativeSafeInteger(before) || !isNonNegativeSafeInteger(after) || !Number.isSafeInteger(delta) || delta !== after - before || delta !== 0) {
     throw new TypeError('local playback stop cannot carry business cancellation');
   }
   if (!localFenceEstablished) {
@@ -417,16 +384,13 @@ function validateBrowserAudioLocalStopReceipt(value: unknown): Readonly<BrowserA
  * Create only the route leaf. Registration, trusted binding lookup, and product
  * readiness remain Integration-Owner composition responsibilities.
  */
-export function createBrowserDedicatedMediaRoute(
-  request: BrowserDedicatedMediaRouteRequest,
-): BrowserDedicatedMediaRouteActivation {
-  const inactive = (
-    reason_id: InactiveBrowserDedicatedMediaRoute['reason_id'],
-  ): InactiveBrowserDedicatedMediaRoute => Object.freeze({
-    active: false,
-    reason_id,
-    capability: capability(false),
-  });
+export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaRouteRequest): BrowserDedicatedMediaRouteActivation {
+  const inactive = (reason_id: InactiveBrowserDedicatedMediaRoute['reason_id']): InactiveBrowserDedicatedMediaRoute =>
+    Object.freeze({
+      active: false,
+      reason_id,
+      capability: capability(false),
+    });
 
   // This ordering is intentional: feature-off reads no socket, authority,
   // origin, Provider, callback, queue, or transport field.
@@ -441,25 +405,14 @@ export function createBrowserDedicatedMediaRoute(
   if (typeof request.socket_factory !== 'function') {
     return inactive('MEDIA_TRANSPORT_UNAVAILABLE');
   }
-  const maxPendingFrames = boundedPositiveInteger(
-    request.max_pending_frames ?? 8,
-    MAX_PENDING_FRAMES,
-    'max_pending_frames',
-  );
-  const maxPendingBytes = boundedPositiveInteger(
-    request.max_pending_bytes ?? 131_072,
-    MAX_PENDING_BYTES,
-    'max_pending_bytes',
-  );
+  const maxPendingFrames = boundedPositiveInteger(request.max_pending_frames ?? 8, MAX_PENDING_FRAMES, 'max_pending_frames');
+  const maxPendingBytes = boundedPositiveInteger(request.max_pending_bytes ?? 131_072, MAX_PENDING_BYTES, 'max_pending_bytes');
   const highWaterBytes = boundedPositiveInteger(
     request.socket_high_water_bytes ?? DEFAULT_SOCKET_HIGH_WATER_BYTES,
     MAX_SOCKET_HIGH_WATER_BYTES,
-    'socket_high_water_bytes',
+    'socket_high_water_bytes'
   );
-  if (
-    request.defer_downlink_ack !== undefined
-    && typeof request.defer_downlink_ack !== 'boolean'
-  ) throw new TypeError('defer_downlink_ack must be boolean');
+  if (request.defer_downlink_ack !== undefined && typeof request.defer_downlink_ack !== 'boolean') throw new TypeError('defer_downlink_ack must be boolean');
 
   const activation = createBrowserGatewayMediaActivation({
     enabled: true,
@@ -486,7 +439,7 @@ export function createBrowserDedicatedMediaRoute(
       maxPendingBytes,
       highWaterBytes,
       request.defer_downlink_ack === true,
-      DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN,
+      DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN
     );
     return Object.freeze({
       active: true,
@@ -497,7 +450,11 @@ export function createBrowserDedicatedMediaRoute(
   } catch (error: unknown) {
     activation.owner.close('MEDIA_TRANSPORT_CLOSED');
     if (socket !== null && ![SOCKET_CLOSING, SOCKET_CLOSED].includes(socket.readyState)) {
-      try { socket.close(1000, 'live-voice media activation failed'); } catch { /* retained local fence */ }
+      try {
+        socket.close(1000, 'live-voice media activation failed');
+      } catch {
+        /* retained local fence */
+      }
     }
     throw error;
   }
@@ -511,15 +468,13 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly #maxPendingBytes: number;
   readonly #socketHighWaterBytes: number;
   readonly #deferDownlinkAck: boolean;
-  readonly #pendingDownlinkAcks = new Map<
-    number,
-    Readonly<{ ack: Readonly<MediaAck>; byteLength: number }>
-  >();
+  readonly #pendingDownlinkAcks = new Map<number, Readonly<{ ack: Readonly<MediaAck>; byteLength: number }>>();
   #pendingDownlinkBytes = 0;
   #lastDeferredDownlinkAck = -1;
   #attached = false;
   #closed = false;
   #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
+  #pendingUplinkCompletion: PendingUplinkCompletion | null = null;
 
   constructor(
     activation: ActiveMediaActivation,
@@ -528,7 +483,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     maxPendingBytes: number,
     socketHighWaterBytes: number,
     deferDownlinkAck: boolean,
-    constructionToken?: symbol,
+    constructionToken?: symbol
   ) {
     if (constructionToken !== DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN) {
       throw new TypeError('dedicated media socket leaves require the same-origin factory');
@@ -547,16 +502,26 @@ export class BrowserDedicatedMediaSocketLeaf {
         this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR', false);
       }
     };
-    socket.onmessage = (event) => { this.#acceptMessage(event.data); };
-    socket.onerror = () => { this.#terminate('MEDIA_TRANSPORT_CLOSED', false); };
-    socket.onclose = () => { this.#terminate('MEDIA_TRANSPORT_CLOSED', false); };
+    socket.onmessage = event => {
+      this.#acceptMessage(event.data);
+    };
+    socket.onerror = () => {
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+    };
+    socket.onclose = () => {
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+    };
   }
 
-  get attached(): boolean { return this.#attached; }
-  get closed(): boolean { return this.#closed; }
+  get attached(): boolean {
+    return this.#attached;
+  }
+  get closed(): boolean {
+    return this.#closed || this.#pendingUplinkCompletion !== null;
+  }
 
   sendCaptureFrame(frame: Readonly<CapturedAudioFrame>): MediaEnqueueResult {
-    if (this.#closed) return { accepted: false, reason_id: this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED' };
+    if (this.closed) return { accepted: false, reason_id: this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED' };
     if (!this.#attached) return { accepted: false, reason_id: 'MEDIA_NOT_ATTACHED' };
     if (this.binding.direction !== 'uplink' || this.binding.generation.kind !== 'capture') {
       this.#terminate('MEDIA_BINDING_MISMATCH');
@@ -570,22 +535,20 @@ export class BrowserDedicatedMediaSocketLeaf {
       return { accepted: false, reason_id: 'MEDIA_INVALID_FRAME' };
     }
     if (
-      normalized.capture.capture_id !== this.binding.generation.id
-      || normalized.capture.capture_generation !== this.binding.generation.value
-      || normalized.capture.track_id !== this.binding.track_id
+      normalized.capture.capture_id !== this.binding.generation.id ||
+      normalized.capture.capture_generation !== this.binding.generation.value ||
+      normalized.capture.track_id !== this.binding.track_id
     ) {
-      const reason = normalized.capture.capture_generation !== this.binding.generation.value
-        ? 'MEDIA_STALE_GENERATION'
-        : 'MEDIA_BINDING_MISMATCH';
+      const reason = normalized.capture.capture_generation !== this.binding.generation.value ? 'MEDIA_STALE_GENERATION' : 'MEDIA_BINDING_MISMATCH';
       this.#terminate(reason);
       return { accepted: false, reason_id: reason };
     }
     if (
-      normalized.format.sample_rate_hz !== this.binding.frame_format.sample_rate_hz
-      || normalized.format.samples_per_channel !== this.binding.frame_format.samples_per_channel
-      || normalized.format.encoding !== this.binding.frame_format.encoding
-      || normalized.format.channel_count !== this.binding.frame_format.channel_count
-      || normalized.format.frame_duration_ms !== this.binding.frame_format.frame_duration_ms
+      normalized.format.sample_rate_hz !== this.binding.frame_format.sample_rate_hz ||
+      normalized.format.samples_per_channel !== this.binding.frame_format.samples_per_channel ||
+      normalized.format.encoding !== this.binding.frame_format.encoding ||
+      normalized.format.channel_count !== this.binding.frame_format.channel_count ||
+      normalized.format.frame_duration_ms !== this.binding.frame_format.frame_duration_ms
     ) {
       this.#terminate('MEDIA_INVALID_FRAME');
       return { accepted: false, reason_id: 'MEDIA_INVALID_FRAME' };
@@ -604,16 +567,16 @@ export class BrowserDedicatedMediaSocketLeaf {
   }
 
   flush(): Readonly<{ sent_frames: number; pending_frames: number; pending_bytes: number; reason_id: string }> {
-    if (this.#closed || !this.#attached) {
+    if (this.closed || !this.#attached) {
       const snapshot = this.#activation.owner.lifecycleSnapshot();
       return {
         sent_frames: 0,
         pending_frames: snapshot.sender_pending_frames,
         pending_bytes: snapshot.sender_pending_bytes,
-        reason_id: this.#closed ? this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED' : 'MEDIA_NOT_ATTACHED',
+        reason_id: this.closed ? (this.#retainedClose?.reason_id ?? 'MEDIA_LEASE_CLOSED') : 'MEDIA_NOT_ATTACHED',
       };
     }
-    const drained = this.#activation.owner.drain((binary) => {
+    const drained = this.#activation.owner.drain(binary => {
       if (this.#socket.readyState !== SOCKET_OPEN) {
         return this.#socket.readyState === SOCKET_CONNECTING ? 'backpressured' : 'closed';
       }
@@ -631,56 +594,37 @@ export class BrowserDedicatedMediaSocketLeaf {
     const receipt = validateBrowserAudioLocalStopReceipt(value);
     const playout = this.binding.playout;
     if (
-      this.binding.direction !== 'downlink'
-      || playout === null
-      || receipt.response.interaction_id !== this.binding.interaction_id
-      || receipt.response.response_id !== playout.response_id
-      || receipt.response.response_generation !== playout.response_generation
+      this.binding.direction !== 'downlink' ||
+      playout === null ||
+      receipt.response.interaction_id !== this.binding.interaction_id ||
+      receipt.response.response_id !== playout.response_id ||
+      receipt.response.response_generation !== playout.response_generation
     ) {
       throw new TypeError('local playback stop does not match the media binding');
     }
-    const cursor = receipt.confirmed_cursor_before_stop.find((item) => item.unit_id === playout.unit_id);
+    const cursor = receipt.confirmed_cursor_before_stop.find(item => item.unit_id === playout.unit_id);
     const confirmedThroughSeq = cursor?.contiguous_through_seq ?? null;
     const receivedThroughSeq = this.#activation.owner.lifecycleSnapshot().receiver_last_ack;
-    if (
-      confirmedThroughSeq !== null
-      && (receivedThroughSeq === null || confirmedThroughSeq > receivedThroughSeq)
-    ) {
+    if (confirmedThroughSeq !== null && (receivedThroughSeq === null || confirmedThroughSeq > receivedThroughSeq)) {
       throw new TypeError('local playback stop cannot confirm an unreceived media frame');
     }
-    const control = createPlaybackStopReceipt(
-      this.binding,
-      receipt.outcome,
-      confirmedThroughSeq,
-    );
+    const control = createPlaybackStopReceipt(this.binding, receipt.outcome, confirmedThroughSeq);
     if (this.#closed) {
-      throw new MediaTransportViolation(
-        'MEDIA_STOP_NOT_DELIVERED',
-        'local playback stop was not delivered because the media leaf is closed',
-      );
+      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered because the media leaf is closed');
     }
     if (!this.#attached) {
       this.#terminate('MEDIA_LOCAL_CLOSE');
-      throw new MediaTransportViolation(
-        'MEDIA_STOP_NOT_DELIVERED',
-        'local playback stop was not delivered before server attach',
-      );
+      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered before server attach');
     }
     if (this.#socket.readyState !== SOCKET_OPEN) {
       this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
-      throw new MediaTransportViolation(
-        'MEDIA_STOP_NOT_DELIVERED',
-        'local playback stop was not delivered because the transport is unavailable',
-      );
+      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered because the transport is unavailable');
     }
     try {
       this.#socket.send(serializeMediaControl(control));
     } catch {
       this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false);
-      throw new MediaTransportViolation(
-        'MEDIA_STOP_NOT_DELIVERED',
-        'local playback stop transport send failed',
-      );
+      throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop transport send failed');
     }
     if (!this.#closed) {
       this.#terminate('MEDIA_LOCAL_CLOSE');
@@ -692,31 +636,56 @@ export class BrowserDedicatedMediaSocketLeaf {
     return this.#terminate(reasonId);
   }
 
+  async completeUplink(reasonId: MediaDetachReason = 'MEDIA_LOCAL_CLOSE'): Promise<MediaRegistrationOwnerCloseResult> {
+    if (this.binding.direction !== 'uplink') {
+      throw new TypeError('authoritative detach completion is uplink-only');
+    }
+    if (this.#pendingUplinkCompletion !== null) {
+      return this.#pendingUplinkCompletion.promise;
+    }
+    if (this.#closed || this.#retainedClose !== null) {
+      throw new MediaTransportViolation('MEDIA_LEASE_CLOSED', 'authoritative detach completion requires an active media leaf');
+    }
+    if (!this.#attached || this.#socket.readyState !== SOCKET_OPEN) {
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+      throw new MediaTransportViolation('MEDIA_TRANSPORT_CLOSED', 'authoritative detach completion requires an attached transport');
+    }
+    const closed = this.#activation.owner.close(reasonId);
+    const expected = closed.sender_detach;
+    if (expected === null) {
+      this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR', false);
+      throw new MediaTransportViolation('MEDIA_TRANSPORT_PROTOCOL_ERROR', 'uplink completion detach is unavailable');
+    }
+    this.#retainedClose = closed;
+    this.#pendingDownlinkAcks.clear();
+    this.#pendingDownlinkBytes = 0;
+    let resolve!: (value: MediaRegistrationOwnerCloseResult) => void;
+    let reject!: (reason: unknown) => void;
+    const promise = new Promise<MediaRegistrationOwnerCloseResult>((accept, fail) => {
+      resolve = accept;
+      reject = fail;
+    });
+    this.#pendingUplinkCompletion = Object.freeze({ expected, promise, resolve, reject });
+    try {
+      this.#socket.send(serializeMediaControl(expected));
+    } catch {
+      this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_SEND_FAILED');
+    }
+    return promise;
+  }
+
   acknowledgeDownlinkThrough(throughSeq: number): void {
-    if (
-      this.binding.direction !== 'downlink'
-      || !this.#deferDownlinkAck
-      || !Number.isSafeInteger(throughSeq)
-      || throughSeq < 0
-    ) throw new TypeError('deferred downlink ACK is unavailable');
-    if (this.#closed || !this.#attached) {
-      throw new MediaTransportViolation(
-        'MEDIA_LEASE_CLOSED',
-        'deferred downlink ACK requires an attached route',
-      );
+    if (this.binding.direction !== 'downlink' || !this.#deferDownlinkAck || !Number.isSafeInteger(throughSeq) || throughSeq < 0)
+      throw new TypeError('deferred downlink ACK is unavailable');
+    if (this.closed || !this.#attached) {
+      throw new MediaTransportViolation('MEDIA_LEASE_CLOSED', 'deferred downlink ACK requires an attached route');
     }
     const retained = this.#pendingDownlinkAcks.get(throughSeq);
     if (retained === undefined) {
-      throw new MediaTransportViolation(
-        'MEDIA_ACK_UNSENT',
-        'deferred downlink ACK does not match a received frame',
-      );
+      throw new MediaTransportViolation('MEDIA_ACK_UNSENT', 'deferred downlink ACK does not match a received frame');
     }
     if (throughSeq !== this.#lastDeferredDownlinkAck + 1) {
-      throw new MediaTransportViolation(
-        'MEDIA_ACK_OUT_OF_ORDER',
-        'deferred downlink ACK must follow browser render order',
-      );
+      throw new MediaTransportViolation('MEDIA_ACK_OUT_OF_ORDER', 'deferred downlink ACK must follow browser render order');
     }
     for (const seq of this.#pendingDownlinkAcks.keys()) {
       if (seq <= throughSeq) {
@@ -729,6 +698,21 @@ export class BrowserDedicatedMediaSocketLeaf {
   }
 
   #acceptMessage(value: unknown): void {
+    if (this.#pendingUplinkCompletion !== null) {
+      if (typeof value !== 'string') {
+        this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+        return;
+      }
+      let control: MediaControl;
+      try {
+        control = deserializeMediaControl(value);
+      } catch {
+        this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+        return;
+      }
+      this.#acceptUplinkCompletion(control);
+      return;
+    }
     if (this.#closed) return;
     if (typeof value === 'string') {
       let control: MediaControl;
@@ -747,21 +731,21 @@ export class BrowserDedicatedMediaSocketLeaf {
       return;
     }
     if (
-      this.#deferDownlinkAck
-      && (
-        this.#pendingDownlinkAcks.size >= this.#maxPendingFrames
-        || this.#pendingDownlinkBytes + binary.byteLength > this.#maxPendingBytes
-      )
+      this.#deferDownlinkAck &&
+      (this.#pendingDownlinkAcks.size >= this.#maxPendingFrames || this.#pendingDownlinkBytes + binary.byteLength > this.#maxPendingBytes)
     ) {
       this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR');
       return;
     }
     const result = this.#activation.owner.acceptBinary(binary);
     if (result.type === 'media.ack' && this.#deferDownlinkAck) {
-      this.#pendingDownlinkAcks.set(result.through_seq, Object.freeze({
-        ack: result,
-        byteLength: binary.byteLength,
-      }));
+      this.#pendingDownlinkAcks.set(
+        result.through_seq,
+        Object.freeze({
+          ack: result,
+          byteLength: binary.byteLength,
+        })
+      );
       this.#pendingDownlinkBytes += binary.byteLength;
     } else {
       this.#sendControl(result);
@@ -817,10 +801,50 @@ export class BrowserDedicatedMediaSocketLeaf {
     }
   }
 
-  #terminate(
-    reasonId: MediaDetachReason,
-    sendDetach = true,
-  ): MediaRegistrationOwnerCloseResult {
+  #acceptUplinkCompletion(control: MediaControl): void {
+    const pending = this.#pendingUplinkCompletion;
+    if (pending === null) return;
+    const expected = pending.expected;
+    if (
+      control.type !== 'media.detach' ||
+      control.lease_id !== expected.lease_id ||
+      control.generation !== expected.generation ||
+      control.reason_id !== expected.reason_id ||
+      control.through_seq !== expected.through_seq ||
+      control.business_cancel_count_delta !== 0
+    ) {
+      this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+      return;
+    }
+    const closed = this.#retainedClose;
+    if (closed === null) {
+      this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+      return;
+    }
+    this.#pendingUplinkCompletion = null;
+    this.#closed = true;
+    this.#attached = false;
+    this.#closeSocket();
+    pending.resolve(closed);
+  }
+
+  #failPendingUplinkCompletion(reasonId: MediaDetachReason): void {
+    const pending = this.#pendingUplinkCompletion;
+    if (pending === null) return;
+    this.#pendingUplinkCompletion = null;
+    this.#closed = true;
+    this.#attached = false;
+    this.#closeSocket();
+    pending.reject(new MediaTransportViolation(reasonId, 'authoritative media completion receipt was not observed'));
+  }
+
+  #terminate(reasonId: MediaDetachReason, sendDetach = true): MediaRegistrationOwnerCloseResult {
+    if (this.#pendingUplinkCompletion !== null) {
+      const retained = this.#retainedClose ?? this.#activation.owner.close(reasonId);
+      this.#retainedClose = retained;
+      this.#failPendingUplinkCompletion(reasonId);
+      return retained;
+    }
     if (this.#retainedClose !== null) return this.#retainedClose;
     const closed = this.#activation.owner.close(reasonId);
     this.#retainedClose = closed;
@@ -829,9 +853,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#closed = true;
     this.#attached = false;
     if (sendDetach && this.#socket.readyState === SOCKET_OPEN) {
-      const detach: MediaDetach | null = this.binding.direction === 'uplink'
-        ? closed.sender_detach
-        : closed.receiver_detach;
+      const detach: MediaDetach | null = this.binding.direction === 'uplink' ? closed.sender_detach : closed.receiver_detach;
       if (detach !== null) {
         try {
           this.#socket.send(serializeMediaControl(detach));

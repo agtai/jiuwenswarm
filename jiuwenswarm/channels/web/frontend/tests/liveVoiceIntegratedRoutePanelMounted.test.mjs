@@ -302,7 +302,13 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
     }
 
     send(value) {
-      if (typeof value === 'string') return;
+      if (typeof value === 'string') {
+        const control = JSON.parse(value);
+        if (control.type === 'media.detach') {
+          queueMicrotask(() => this.onmessage?.({ data: value }));
+        }
+        return;
+      }
       const binding = mediaBinding?.();
       const throughSeq = this.binarySeq;
       this.binarySeq += 1;

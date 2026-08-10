@@ -835,6 +835,81 @@ async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_
 
 
 @pytest.mark.asyncio
+async def test_uplink_completion_is_retained_before_physical_close() -> None:
+    binding = _binding()
+    effects = {"completed": False}
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+        through_seq=0,
+    )
+
+    class _OrderedCloseSocket(_FakeDedicatedSocket):
+        async def send(self, message: str | bytes) -> None:
+            await super().send(message)
+            if isinstance(message, str) and isinstance(
+                deserialize_media_control(message), MediaDetach
+            ):
+                assert effects["completed"] is True
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            assert effects["completed"] is True
+            await super().close(code, reason)
+
+    socket = _OrderedCloseSocket(
+        [
+            encode_audio_frame(binding, _frame()),
+            serialize_media_control(peer_detach),
+        ]
+    )
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding),
+        socket=socket,
+        on_audio_frame=lambda _frame: None,
+        on_complete=lambda _result: effects.__setitem__("completed", True),
+    )
+
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert effects == {"completed": True}
+    completion_receipt = deserialize_media_control(socket.sent[-1])
+    assert completion_receipt == peer_detach
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_uplink_completion_is_not_downgraded_when_receipt_send_fails() -> None:
+    binding = _binding()
+    effects = {"completed": False}
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+        through_seq=0,
+    )
+    socket = _FakeDedicatedSocket(
+        [
+            encode_audio_frame(binding, _frame()),
+            serialize_media_control(peer_detach),
+        ],
+        fail_send_at=2,
+    )
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding),
+        socket=socket,
+        on_audio_frame=lambda _frame: None,
+        on_complete=lambda _result: effects.__setitem__("completed", True),
+    )
+
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert effects == {"completed": True}
+    assert len(socket.sent) == 2
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_socket_leaf_flag_off_returns_before_socket_or_consumer_inspection() -> None:
     class _ForbiddenSocket:
         def __getattribute__(self, name: str) -> object:

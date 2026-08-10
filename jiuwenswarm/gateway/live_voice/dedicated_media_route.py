@@ -523,6 +523,7 @@ async def run_dedicated_media_socket_leaf(
     *,
     socket: DedicatedMediaSocket,
     on_audio_frame: Callable[[MediaAudioFrame], None],
+    on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
 ) -> DedicatedMediaSocketLeafResult:
     """Run one injected uplink WebSocket after the central handshake.
 
@@ -544,6 +545,10 @@ async def run_dedicated_media_socket_leaf(
             accepted_frames=0,
             close_result=None,
             reason_id=activation.reason_id,
+        )
+    if on_complete is not None and not callable(on_complete):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "uplink completion consumer must be callable"
         )
 
     session = activation.session
@@ -605,13 +610,33 @@ async def run_dedicated_media_socket_leaf(
             reason_id=closed.reason_id,
         )
 
+    async def terminate(
+        closed: MediaCloseResult,
+        *,
+        acknowledge_peer_detach: bool = False,
+    ) -> DedicatedMediaSocketLeafResult:
+        leaf_result = result(closed)
+        try:
+            if on_complete is not None:
+                on_complete(leaf_result)
+                if acknowledge_peer_detach:
+                    # This exact typed echo is the end-to-end completion
+                    # receipt.  It is sent only after the authority owner has
+                    # retained the route result, so a peer behind a WebSocket
+                    # proxy need not infer completion from transport close.
+                    await send_close_detach(closed)
+        finally:
+            # Completion must become registry-visible before the peer observes
+            # physical close and can submit its batch Speech request.
+            await close_socket()
+        return leaf_result
+
     attach = MediaAttach(binding)
     attach_failure = session.accept_server_attach(attach)
     assert attach_failure is None
     if not await send_control(attach):
         closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
-        await close_socket()
-        return result(closed)
+        return await terminate(closed)
     attach_sent = True
 
     while True:
@@ -622,8 +647,7 @@ async def run_dedicated_media_socket_leaf(
         if not callable(recv):
             closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
             await send_close_detach(closed)
-            await close_socket()
-            return result(closed)
+            return await terminate(closed)
         socket_touched = True
         try:
             message = await recv()
@@ -633,8 +657,7 @@ async def run_dedicated_media_socket_leaf(
             raise
         except Exception:
             closed = session.close(MediaDetachReason.TRANSPORT_CLOSED)
-            await close_socket()
-            return result(closed)
+            return await terminate(closed)
 
         if isinstance(message, str):
             try:
@@ -642,32 +665,26 @@ async def run_dedicated_media_socket_leaf(
             except MediaTransportViolation:
                 closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
                 await send_close_detach(closed)
-                await close_socket()
-                return result(closed)
+                return await terminate(closed)
             if not isinstance(control, MediaDetach):
                 closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
                 await send_close_detach(closed)
-                await close_socket()
-                return result(closed)
+                return await terminate(closed)
             closed = session.accept_detach(control)
-            await close_socket()
-            return result(closed)
+            return await terminate(closed, acknowledge_peer_detach=True)
 
         if not isinstance(message, (bytes, bytearray, memoryview)):
             closed = session.close(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
             await send_close_detach(closed)
-            await close_socket()
-            return result(closed)
+            return await terminate(closed)
 
         control = session.accept_binary(message)
         if not await send_control(control):
             closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
-            await close_socket()
-            return result(closed)
+            return await terminate(closed)
         if isinstance(control, MediaDetach):
             closed = session.close(control.reason_id)
-            await close_socket()
-            return result(closed)
+            return await terminate(closed)
 
 
 async def run_dedicated_media_downlink_socket_leaf(

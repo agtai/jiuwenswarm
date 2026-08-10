@@ -1554,6 +1554,7 @@ async def handle_registered_media_socket(
         provider_available=True,
         binary_transport_available=True,
     )
+    route_completion_retained = False
     try:
         downlink_complete = False
         if record.binding.direction is MediaDirection.DOWNLINK:
@@ -1562,8 +1563,14 @@ async def handle_registered_media_socket(
             def retain_downlink_completion(
                 leaf_result: DedicatedMediaSocketLeafResult,
             ) -> None:
-                nonlocal downlink_complete
+                nonlocal downlink_complete, route_completion_retained
+                if route_completion_retained:
+                    raise MediaTransportViolation(
+                        "MEDIA_ROUTE_COMPLETION_DUPLICATE",
+                        "media route completion callback was repeated",
+                    )
                 downlink_complete = registry.complete_downlink(record, leaf_result)
+                route_completion_retained = True
 
             result = await run_dedicated_media_downlink_socket_leaf(
                 request,
@@ -1575,34 +1582,51 @@ async def handle_registered_media_socket(
                 max_pending_bytes=131_072,
             )
         else:
+            def retain_uplink_completion(
+                leaf_result: DedicatedMediaSocketLeafResult,
+            ) -> None:
+                nonlocal route_completion_retained
+                if route_completion_retained:
+                    raise MediaTransportViolation(
+                        "MEDIA_ROUTE_COMPLETION_DUPLICATE",
+                        "media route completion callback was repeated",
+                    )
+                registry.complete_route(record, leaf_result)
+                route_completion_retained = True
+
             result = await run_dedicated_media_socket_leaf(
                 request,
                 socket=ws,
                 on_audio_frame=lambda frame: registry.accept_frame(record, frame),
+                on_complete=retain_uplink_completion,
+            )
+        if not route_completion_retained:
+            raise MediaTransportViolation(
+                "MEDIA_ROUTE_COMPLETION_UNAVAILABLE",
+                "media route completion callback was not retained",
             )
     except BaseException:
-        registry.abort_route(record)
-        observer = registry.evidence_observer
-        if observer is not None:
-            try:
-                await observer.observe_route(
-                    session_id=record.binding.session_id,
-                    correlation_id=record.binding.correlation_id,
-                    request_id=record.binding.lease_id,
-                    operation=(
-                        "media.downlink"
-                        if record.binding.direction is MediaDirection.DOWNLINK
-                        else "media.capture"
-                    ),
-                    result_ok=False,
-                    interaction_id=record.binding.interaction_id,
-                    error_code="UNAVAILABLE",
-                )
-            except Exception:
-                pass
+        if not route_completion_retained:
+            registry.abort_route(record)
+            observer = registry.evidence_observer
+            if observer is not None:
+                try:
+                    await observer.observe_route(
+                        session_id=record.binding.session_id,
+                        correlation_id=record.binding.correlation_id,
+                        request_id=record.binding.lease_id,
+                        operation=(
+                            "media.downlink"
+                            if record.binding.direction is MediaDirection.DOWNLINK
+                            else "media.capture"
+                        ),
+                        result_ok=False,
+                        interaction_id=record.binding.interaction_id,
+                        error_code="UNAVAILABLE",
+                    )
+                except Exception:
+                    pass
         raise
-    if record.binding.direction is not MediaDirection.DOWNLINK:
-        registry.complete_route(record, result)
     observer = registry.evidence_observer
     if observer is not None:
         try:

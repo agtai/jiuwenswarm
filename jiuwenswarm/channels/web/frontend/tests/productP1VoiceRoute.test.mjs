@@ -165,9 +165,25 @@ class FakeSocket {
   closeOnFirstBinary = false;
   acknowledgeBinary = true;
   binarySendCount = 0;
+  deferDetachReceipt = false;
+  pendingDetachReceipt = null;
 
   send(value) {
     this.sent.push(value);
+    if (typeof value === 'string') {
+      let control = null;
+      try {
+        control = JSON.parse(value);
+      } catch {
+        control = null;
+      }
+      if (control?.type === 'media.detach') {
+        this.pendingDetachReceipt = value;
+        if (!this.deferDetachReceipt) {
+          queueMicrotask(() => this.releaseDetachReceipt());
+        }
+      }
+    }
     if (typeof value !== 'string' && this.binding !== null && this.acknowledgeBinary) {
       const throughSeq = this.binarySendCount;
       this.binarySendCount += 1;
@@ -193,6 +209,12 @@ class FakeSocket {
   }
   close() {
     this.readyState = 3;
+  }
+  releaseDetachReceipt(overrides = {}) {
+    if (this.pendingDetachReceipt === null) return;
+    const control = { ...JSON.parse(this.pendingDetachReceipt), ...overrides };
+    this.pendingDetachReceipt = null;
+    this.onmessage?.({ data: JSON.stringify(control) });
   }
   open(binding) {
     this.binding = binding;
@@ -1359,7 +1381,13 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
     activation_generation: 7,
     locale: 'zh-CN',
   });
-  const recognition = await owner.stopAndRecognize();
+  socket.deferDetachReceipt = true;
+  const pendingRecognition = owner.stopAndRecognize();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 0);
+  assert.notEqual(socket.pendingDetachReceipt, null);
+  socket.releaseDetachReceipt();
+  const recognition = await pendingRecognition;
   assert.deepEqual(recognition, {
     text: 'formal text',
     voice_commit_receipt: 'voice-receipt-1',
@@ -1954,6 +1982,11 @@ async function runConcurrentCaptureJourney(options = {}) {
               }),
             })
           );
+        }
+      } else if (this.serverBinding.direction === 'uplink' && typeof value === 'string') {
+        const control = JSON.parse(value);
+        if (control.type === 'media.detach') {
+          queueMicrotask(() => this.onmessage?.({ data: value }));
         }
       } else if (this.serverBinding.direction === 'downlink' && typeof value === 'string') {
         const control = JSON.parse(value);

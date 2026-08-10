@@ -16,9 +16,11 @@ import {
 function binding(overrides = {}) {
   const direction = overrides.direction ?? 'uplink';
   const generationValue = overrides.generation?.value ?? 7;
-  const generation = overrides.generation ?? (direction === 'downlink'
-    ? { kind: 'response', id: 'response-01', value: generationValue }
-    : { kind: 'capture', id: 'capture-01', value: generationValue });
+  const generation =
+    overrides.generation ??
+    (direction === 'downlink'
+      ? { kind: 'response', id: 'response-01', value: generationValue }
+      : { kind: 'capture', id: 'capture-01', value: generationValue });
   const playout = Object.hasOwn(overrides, 'playout')
     ? overrides.playout
     : direction === 'downlink'
@@ -124,15 +126,7 @@ class FakeSocket {
   }
 }
 
-function active({
-  exactBinding = binding(),
-  socket = new FakeSocket(),
-  effects,
-  maxPendingFrames,
-  maxPendingBytes,
-  highWater,
-  deferDownlinkAck,
-} = {}) {
+function active({ exactBinding = binding(), socket = new FakeSocket(), effects, maxPendingFrames, maxPendingBytes, highWater, deferDownlinkAck } = {}) {
   const counters = effects ?? { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
   const factoryCalls = [];
   const activation = createBrowserDedicatedMediaRoute({
@@ -146,7 +140,9 @@ function active({
       factoryCalls.push({ url, protocols });
       return socket;
     },
-    on_audio_frame: () => { counters.audio += 1; },
+    on_audio_frame: () => {
+      counters.audio += 1;
+    },
     max_pending_frames: maxPendingFrames,
     max_pending_bytes: maxPendingBytes,
     socket_high_water_bytes: highWater,
@@ -171,9 +167,7 @@ function closedLocalStopReceipt(receipt, overrides = {}) {
   return Object.freeze({
     ...selected,
     response: Object.freeze({ ...response }),
-    confirmed_cursor_before_stop: Object.freeze(
-      [...cursors].map(cursor => Object.freeze({ ...cursor })),
-    ),
+    confirmed_cursor_before_stop: Object.freeze([...cursors].map(cursor => Object.freeze({ ...cursor }))),
     browser_sources: Object.freeze({
       ...sources,
       stop_request: Object.freeze({ ...sources.stop_request }),
@@ -184,9 +178,7 @@ function closedLocalStopReceipt(receipt, overrides = {}) {
 }
 
 function frozenWithout(value, omittedField) {
-  return Object.freeze(Object.fromEntries(
-    Object.entries(value).filter(([field]) => field !== omittedField),
-  ));
+  return Object.freeze(Object.fromEntries(Object.entries(value).filter(([field]) => field !== omittedField)));
 }
 
 function localStopReceipt(route, confirmedThroughSeq = null) {
@@ -200,10 +192,12 @@ function localStopReceipt(route, confirmedThroughSeq = null) {
     },
     reason: 'interrupted',
     local_fence_established: true,
-    confirmed_cursor_before_stop: [{
-      unit_id: 'unit-01',
-      contiguous_through_seq: confirmedThroughSeq,
-    }],
+    confirmed_cursor_before_stop: [
+      {
+        unit_id: 'unit-01',
+        contiguous_through_seq: confirmedThroughSeq,
+      },
+    ],
     browser_sources: {
       source_count: 1,
       stop_request: { status: 'completed', attempted_count: 1, completed_count: 1, failed_count: 0 },
@@ -221,10 +215,12 @@ function localStopReceipt(route, confirmedThroughSeq = null) {
 test('uplink requires server attach then sends bounded LVM1 frames retained through ACK', () => {
   const route = active({ maxPendingFrames: 1 });
   assert.equal(route.socket.binaryType, 'arraybuffer');
-  assert.deepEqual(route.factoryCalls, [{
-    url: 'wss://voice.example.test/live-voice/media',
-    protocols: [DEDICATED_MEDIA_SUBPROTOCOL],
-  }]);
+  assert.deepEqual(route.factoryCalls, [
+    {
+      url: 'wss://voice.example.test/live-voice/media',
+      protocols: [DEDICATED_MEDIA_SUBPROTOCOL],
+    },
+  ]);
   assert.deepEqual(route.activation.leaf.sendCaptureFrame(capturedFrame()), {
     accepted: false,
     reason_id: 'MEDIA_NOT_ATTACHED',
@@ -240,12 +236,14 @@ test('uplink requires server attach then sends bounded LVM1 frames retained thro
     reason_id: 'MEDIA_BACKPRESSURE_LIMIT',
   });
 
-  route.socket.message(serializeMediaControl({
-    type: 'media.ack',
-    lease_id: route.activation.binding.lease_id,
-    generation: route.activation.binding.generation.value,
-    through_seq: 0,
-  }));
+  route.socket.message(
+    serializeMediaControl({
+      type: 'media.ack',
+      lease_id: route.activation.binding.lease_id,
+      generation: route.activation.binding.generation.value,
+      through_seq: 0,
+    })
+  );
   assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame(1)).accepted, true);
   assert.equal(decodeAudioFrame(route.activation.binding, route.socket.sent[1]).seq, 1);
   assert.equal(route.effects.audio, 0);
@@ -255,10 +253,7 @@ test('uplink requires server attach then sends bounded LVM1 frames retained thro
 });
 
 test('socket leaf cannot bypass the same-origin activation factory', () => {
-  assert.throws(
-    () => new BrowserDedicatedMediaSocketLeaf({}, new FakeSocket(), 1024),
-    /require the same-origin factory/,
-  );
+  assert.throws(() => new BrowserDedicatedMediaSocketLeaf({}, new FakeSocket(), 1024), /require the same-origin factory/);
 });
 
 test('socket bufferedAmount and bounded owner apply backpressure without retry or drop', () => {
@@ -311,11 +306,11 @@ test('downlink can defer its bounded ACK until browser rendering confirms the fr
   assert.equal(route.socket.sent.length, 0);
   assert.throws(
     () => route.activation.leaf.acknowledgeDownlinkThrough(2),
-    error => error?.reasonId === 'MEDIA_ACK_UNSENT',
+    error => error?.reasonId === 'MEDIA_ACK_UNSENT'
   );
   assert.throws(
     () => route.activation.leaf.acknowledgeDownlinkThrough(1),
-    error => error?.reasonId === 'MEDIA_ACK_OUT_OF_ORDER',
+    error => error?.reasonId === 'MEDIA_ACK_OUT_OF_ORDER'
   );
 
   route.activation.leaf.acknowledgeDownlinkThrough(0);
@@ -350,41 +345,38 @@ test('deferred downlink rejects a peer that exceeds the advertised unrendered wi
 
   assert.equal(effects.audio, 1);
   assert.equal(route.activation.leaf.closed, true);
-  assert.equal(
-    deserializeMediaControl(route.socket.sent[0]).reason_id,
-    'MEDIA_TRANSPORT_PROTOCOL_ERROR',
-  );
+  assert.equal(deserializeMediaControl(route.socket.sent[0]).reason_id, 'MEDIA_TRANSPORT_PROTOCOL_ERROR');
 });
 
 test('wrong attach, stale capture, cursor gap, and malformed control terminally fence the leaf', () => {
   const cases = [
-    (route) => {
+    route => {
       route.socket.open();
-      route.socket.message(serializeMediaControl({
-        type: 'media.attach', binding: binding({ session_id: 'wrong-session' }),
-      }));
+      route.socket.message(
+        serializeMediaControl({
+          type: 'media.attach',
+          binding: binding({ session_id: 'wrong-session' }),
+        })
+      );
     },
-    (route) => {
+    route => {
       attach(route);
-      route.activation.leaf.sendCaptureFrame(capturedFrame(0, {
-        capture: { capture_generation: 8 },
-      }));
+      route.activation.leaf.sendCaptureFrame(
+        capturedFrame(0, {
+          capture: { capture_generation: 8 },
+        })
+      );
     },
-    (route) => {
+    route => {
       attach(route);
       route.activation.leaf.sendCaptureFrame(capturedFrame(0, { sample_cursor: 160 }));
     },
-    (route) => {
+    route => {
       route.socket.open();
       route.socket.message('{"not":"closed-control"}');
     },
   ];
-  const reasons = [
-    'MEDIA_BINDING_MISMATCH',
-    'MEDIA_STALE_GENERATION',
-    'MEDIA_INVALID_FRAME',
-    'MEDIA_TRANSPORT_PROTOCOL_ERROR',
-  ];
+  const reasons = ['MEDIA_BINDING_MISMATCH', 'MEDIA_STALE_GENERATION', 'MEDIA_INVALID_FRAME', 'MEDIA_TRANSPORT_PROTOCOL_ERROR'];
 
   for (let index = 0; index < cases.length; index += 1) {
     const route = active();
@@ -412,22 +404,26 @@ test('local playback stop maps the exact confirmed unit and never escalates busi
 
   assert.equal(control.confirmed_through_seq, 4);
   assert.equal(control.business_cancel_count_delta, 0);
-  const controls = route.socket.sent
-    .filter(item => typeof item === 'string')
-    .map(item => deserializeMediaControl(item));
-  assert.deepEqual(controls.find(item => item.type === 'media.playback_stop_receipt'), control);
+  const controls = route.socket.sent.filter(item => typeof item === 'string').map(item => deserializeMediaControl(item));
+  assert.deepEqual(
+    controls.find(item => item.type === 'media.playback_stop_receipt'),
+    control
+  );
   assert.equal(controls.at(-1).type, 'media.detach');
   assert.equal(controls.at(-1).business_cancel_count_delta, 0);
   assert.equal(route.activation.leaf.closed, true);
   assert.throws(
     () => route.activation.leaf.sendLocalPlaybackStop(closedLocalStopReceipt(localReceipt, { business_cancel_count_delta: 1 })),
-    /cannot carry business cancellation/,
+    /cannot carry business cancellation/
   );
   assert.throws(
-    () => route.activation.leaf.sendLocalPlaybackStop(closedLocalStopReceipt(localReceipt, {
-      confirmed_cursor_before_stop: [{ unit_id: 'unit-01', contiguous_through_seq: 5 }],
-    })),
-    /cannot confirm an unreceived media frame/,
+    () =>
+      route.activation.leaf.sendLocalPlaybackStop(
+        closedLocalStopReceipt(localReceipt, {
+          confirmed_cursor_before_stop: [{ unit_id: 'unit-01', contiguous_through_seq: 5 }],
+        })
+      ),
+    /cannot confirm an unreceived media frame/
   );
 });
 
@@ -443,27 +439,37 @@ test('active leaf rejects forged or contradictory BrowserAudio stop truth before
   });
   const invalidReceipts = [
     ...Object.keys(trusted).map(field => frozenWithout(trusted, field)),
-    ...Object.keys(trusted.response).map(field => closedLocalStopReceipt(trusted, {
-      response: frozenWithout(trusted.response, field),
-    })),
-    ...Object.keys(trusted.browser_sources.stop_request).map(field => closedLocalStopReceipt(trusted, {
-      browser_sources: {
-        ...trusted.browser_sources,
-        stop_request: frozenWithout(trusted.browser_sources.stop_request, field),
-      },
-    })),
-    ...Object.keys(trusted.browser_sources.disconnect).map(field => closedLocalStopReceipt(trusted, {
-      browser_sources: {
-        ...trusted.browser_sources,
-        disconnect: frozenWithout(trusted.browser_sources.disconnect, field),
-      },
-    })),
-    ...Object.keys(trusted.timing).map(field => closedLocalStopReceipt(trusted, {
-      timing: frozenWithout(trusted.timing, field),
-    })),
-    ...Object.keys(trusted.confirmed_cursor_before_stop[0]).map(field => closedLocalStopReceipt(trusted, {
-      confirmed_cursor_before_stop: [frozenWithout(trusted.confirmed_cursor_before_stop[0], field)],
-    })),
+    ...Object.keys(trusted.response).map(field =>
+      closedLocalStopReceipt(trusted, {
+        response: frozenWithout(trusted.response, field),
+      })
+    ),
+    ...Object.keys(trusted.browser_sources.stop_request).map(field =>
+      closedLocalStopReceipt(trusted, {
+        browser_sources: {
+          ...trusted.browser_sources,
+          stop_request: frozenWithout(trusted.browser_sources.stop_request, field),
+        },
+      })
+    ),
+    ...Object.keys(trusted.browser_sources.disconnect).map(field =>
+      closedLocalStopReceipt(trusted, {
+        browser_sources: {
+          ...trusted.browser_sources,
+          disconnect: frozenWithout(trusted.browser_sources.disconnect, field),
+        },
+      })
+    ),
+    ...Object.keys(trusted.timing).map(field =>
+      closedLocalStopReceipt(trusted, {
+        timing: frozenWithout(trusted.timing, field),
+      })
+    ),
+    ...Object.keys(trusted.confirmed_cursor_before_stop[0]).map(field =>
+      closedLocalStopReceipt(trusted, {
+        confirmed_cursor_before_stop: [frozenWithout(trusted.confirmed_cursor_before_stop[0], field)],
+      })
+    ),
     closedLocalStopReceipt(trusted, { kind: 'browser_audio.local_stop.v0' }),
     closedLocalStopReceipt(trusted, { local_fence_established: false }),
     closedLocalStopReceipt(trusted, {
@@ -506,11 +512,15 @@ test('active leaf rejects forged or contradictory BrowserAudio stop truth before
     assert.equal(route.activation.leaf.closed, false);
     assert.equal(route.activation.leaf.attached, true);
   }
-  const controls = route.socket.sent
-    .filter(item => typeof item === 'string')
-    .map(item => deserializeMediaControl(item));
-  assert.equal(controls.some(item => item.type === 'media.playback_stop_receipt'), false);
-  assert.equal(controls.some(item => item.type === 'media.detach'), false);
+  const controls = route.socket.sent.filter(item => typeof item === 'string').map(item => deserializeMediaControl(item));
+  assert.equal(
+    controls.some(item => item.type === 'media.playback_stop_receipt'),
+    false
+  );
+  assert.equal(
+    controls.some(item => item.type === 'media.detach'),
+    false
+  );
   assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
 });
 
@@ -564,31 +574,102 @@ test('unattached, closed, and send-failed stop paths return no false delivery re
         route.activation.leaf.sendLocalPlaybackStop(localStopReceipt(route));
         returnedReceipt = true;
       },
-      error => error?.reasonId === 'MEDIA_STOP_NOT_DELIVERED',
+      error => error?.reasonId === 'MEDIA_STOP_NOT_DELIVERED'
     );
     const retained = route.activation.leaf.close();
-    const controls = route.socket.sent
-      .filter(item => typeof item === 'string')
-      .map(item => deserializeMediaControl(item));
+    const controls = route.socket.sent.filter(item => typeof item === 'string').map(item => deserializeMediaControl(item));
     assert.equal(returnedReceipt, false);
-    assert.equal(controls.some(item => item.type === 'media.playback_stop_receipt'), false);
+    assert.equal(
+      controls.some(item => item.type === 'media.playback_stop_receipt'),
+      false
+    );
     assert.equal(retained.reason_id, expectedClose);
     assert.equal(retained.business_cancel_count_delta, 0);
     assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
   }
 });
 
+test('uplink completion waits for the exact server detach receipt before physical close', async () => {
+  const route = active();
+  attach(route);
+  assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame()).accepted, true);
+  route.socket.message(
+    serializeMediaControl({
+      type: 'media.ack',
+      lease_id: route.activation.binding.lease_id,
+      generation: route.activation.binding.generation.value,
+      through_seq: 0,
+    })
+  );
+
+  const completion = route.activation.leaf.completeUplink('MEDIA_LOCAL_CLOSE');
+  const detach = deserializeMediaControl(route.socket.sent.at(-1));
+  assert.equal(detach.type, 'media.detach');
+  assert.equal(route.socket.closes.length, 0);
+
+  route.socket.message(serializeMediaControl(detach));
+  const closed = await completion;
+
+  assert.equal(closed.reason_id, 'MEDIA_LOCAL_CLOSE');
+  assert.equal(closed.business_cancel_count_delta, 0);
+  assert.equal(route.activation.leaf.closed, true);
+  assert.equal(route.socket.closes.length, 1);
+});
+
+test('uplink completion rejects missing or foreign server receipts without business effects', async () => {
+  const cases = [
+    detach => ({ ...detach, lease_id: 'foreign-lease' }),
+    detach => ({ ...detach, generation: detach.generation + 1 }),
+    detach => ({ ...detach, reason_id: 'MEDIA_PEER_CLOSE' }),
+    detach => ({ ...detach, through_seq: 1 }),
+  ];
+
+  for (const mutate of cases) {
+    const route = active();
+    attach(route);
+    const completion = route.activation.leaf.completeUplink('MEDIA_LOCAL_CLOSE');
+    const detach = deserializeMediaControl(route.socket.sent.at(-1));
+    route.socket.message(serializeMediaControl(mutate(detach)));
+    await assert.rejects(completion, error => error?.reasonId === 'MEDIA_TRANSPORT_PROTOCOL_ERROR');
+    assert.equal(route.activation.leaf.closed, true);
+    assert.equal(route.socket.closes.length, 1);
+    assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+  }
+
+  const lost = active();
+  attach(lost);
+  const completion = lost.activation.leaf.completeUplink('MEDIA_LOCAL_CLOSE');
+  lost.socket.transportClose();
+  await assert.rejects(completion, error => error?.reasonId === 'MEDIA_TRANSPORT_CLOSED');
+  assert.equal(lost.activation.leaf.closed, true);
+  assert.equal(lost.socket.closes.length, 0);
+});
+
 test('flag-off and rejected origin allocate no socket and expose no effects', () => {
   let socketAllocations = 0;
   const disabled = createBrowserDedicatedMediaRoute({
     enabled: false,
-    get expected_origin() { throw new Error('must not inspect origin'); },
-    get endpoint_url() { throw new Error('must not inspect endpoint'); },
-    get binding() { throw new Error('must not inspect authority'); },
-    get provider_available() { throw new Error('must not inspect Provider'); },
-    get transport_available() { throw new Error('must not inspect transport'); },
-    get socket_factory() { throw new Error('must not inspect factory'); },
-    get on_audio_frame() { throw new Error('must not inspect consumer'); },
+    get expected_origin() {
+      throw new Error('must not inspect origin');
+    },
+    get endpoint_url() {
+      throw new Error('must not inspect endpoint');
+    },
+    get binding() {
+      throw new Error('must not inspect authority');
+    },
+    get provider_available() {
+      throw new Error('must not inspect Provider');
+    },
+    get transport_available() {
+      throw new Error('must not inspect transport');
+    },
+    get socket_factory() {
+      throw new Error('must not inspect factory');
+    },
+    get on_audio_frame() {
+      throw new Error('must not inspect consumer');
+    },
   });
   const rejected = createBrowserDedicatedMediaRoute({
     enabled: true,
@@ -597,8 +678,13 @@ test('flag-off and rejected origin allocate no socket and expose no effects', ()
     binding: binding(),
     provider_available: true,
     transport_available: true,
-    socket_factory: () => { socketAllocations += 1; return new FakeSocket(); },
-    on_audio_frame: () => { throw new Error('must not consume'); },
+    socket_factory: () => {
+      socketAllocations += 1;
+      return new FakeSocket();
+    },
+    on_audio_frame: () => {
+      throw new Error('must not consume');
+    },
   });
 
   assert.equal(disabled.reason_id, 'MEDIA_FEATURE_DISABLED');
@@ -625,18 +711,24 @@ test('public queue and socket limits are practical safe integers before allocati
     let socketAllocations = 0;
     let audioEffects = 0;
     assert.throws(
-      () => createBrowserDedicatedMediaRoute({
-        enabled: true,
-        expected_origin: 'https://voice.example.test',
-        endpoint_url: 'wss://voice.example.test/live-voice/media',
-        binding: binding(),
-        provider_available: true,
-        transport_available: true,
-        socket_factory: () => { socketAllocations += 1; return new FakeSocket(); },
-        on_audio_frame: () => { audioEffects += 1; },
-        ...limits,
-      }),
-      /must be a positive safe integer no greater than/,
+      () =>
+        createBrowserDedicatedMediaRoute({
+          enabled: true,
+          expected_origin: 'https://voice.example.test',
+          endpoint_url: 'wss://voice.example.test/live-voice/media',
+          binding: binding(),
+          provider_available: true,
+          transport_available: true,
+          socket_factory: () => {
+            socketAllocations += 1;
+            return new FakeSocket();
+          },
+          on_audio_frame: () => {
+            audioEffects += 1;
+          },
+          ...limits,
+        }),
+      /must be a positive safe integer no greater than/
     );
     assert.equal(socketAllocations, 0);
     assert.equal(audioEffects, 0);
@@ -664,17 +756,18 @@ test('subprotocol mismatch and reused socket fail closed without sending media c
   reused.readyState = 1;
   reused.protocol = DEDICATED_MEDIA_SUBPROTOCOL;
   assert.throws(
-    () => createBrowserDedicatedMediaRoute({
-      enabled: true,
-      expected_origin: 'https://voice.example.test',
-      endpoint_url: 'wss://voice.example.test/live-voice/media',
-      binding: binding(),
-      provider_available: true,
-      transport_available: true,
-      socket_factory: () => reused,
-      on_audio_frame: () => {},
-    }),
-    /must return a new connecting socket/,
+    () =>
+      createBrowserDedicatedMediaRoute({
+        enabled: true,
+        expected_origin: 'https://voice.example.test',
+        endpoint_url: 'wss://voice.example.test/live-voice/media',
+        binding: binding(),
+        provider_available: true,
+        transport_available: true,
+        socket_factory: () => reused,
+        on_audio_frame: () => {},
+      }),
+    /must return a new connecting socket/
   );
   assert.equal(reused.closes.length, 1);
 });
@@ -689,7 +782,10 @@ test('transport loss closes once and performs no implicit retry', () => {
     binding: binding(),
     provider_available: true,
     transport_available: true,
-    socket_factory: () => { allocations += 1; return socket; },
+    socket_factory: () => {
+      allocations += 1;
+      return socket;
+    },
     on_audio_frame: () => {},
   });
   assert.equal(route.active, true);

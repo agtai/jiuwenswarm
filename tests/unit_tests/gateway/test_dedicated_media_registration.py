@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import base64
 import logging
@@ -17,8 +18,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
+    MediaDetach,
     MediaDetachReason,
     MediaTransportViolation,
+    deserialize_media_control,
+    encode_audio_frame,
+    serialize_media_control,
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
     DedicatedMediaProductRegistry,
@@ -568,7 +573,9 @@ async def test_completed_media_socket_emits_only_exact_p1_trace_binding(
         kwargs["on_audio_frame"](  # type: ignore[operator]
             MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320)
         )
-        return SimpleNamespace(activated=True, accepted_frames=1)
+        result = SimpleNamespace(activated=True, accepted_frames=1)
+        kwargs["on_complete"](result)  # type: ignore[operator]
+        return result
 
     monkeypatch.setattr(
         dedicated_media_registration,
@@ -590,6 +597,193 @@ async def test_completed_media_socket_emits_only_exact_p1_trace_binding(
     assert observed[0]["result_ok"] is True
     assert "subject_id" not in observed[0]
     assert "pcm" not in observed[0]
+    ticket = endpoint_path.rsplit("/", 1)[1]
+    assert registry._records[ticket].route_completed is True
+    assert registry._records[ticket].recognition_content_sha256 is not None
+
+
+@pytest.mark.asyncio
+async def test_media_socket_success_without_completion_callback_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    endpoint_path = str(activation["endpoint_path"])
+    ticket = endpoint_path.rsplit("/", 1)[1]
+    observed: list[dict[str, object]] = []
+
+    class Observer:
+        async def observe_route(self, **kwargs: object) -> bool:
+            observed.append(kwargs)
+            return True
+
+    registry.set_evidence_observer(Observer())
+
+    async def omit_completion(*_args: object, **kwargs: object) -> object:
+        kwargs["on_audio_frame"](  # type: ignore[operator]
+            MediaAudioFrame(seq=0, sample_cursor=0, samples=(0.25,) * 320)
+        )
+        return SimpleNamespace(activated=True, accepted_frames=1)
+
+    monkeypatch.setattr(
+        dedicated_media_registration,
+        "run_dedicated_media_socket_leaf",
+        omit_completion,
+    )
+    ws = SimpleNamespace(
+        subprotocol="live-voice.media.v1",
+        request_headers={"Origin": ORIGIN},
+    )
+
+    with pytest.raises(
+        MediaTransportViolation, match="completion callback was not retained"
+    ):
+        await handle_registered_media_socket(registry, ws, endpoint_path)
+
+    record = registry._records[ticket]
+    assert record.route_completed is True
+    assert record.recognition_content_sha256 is None
+    assert record.pcm == bytearray()
+    assert len(observed) == 1
+    assert observed[0]["result_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_uplink_registry_authority_is_visible_before_socket_close() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    endpoint_path = str(activation["endpoint_path"])
+    ticket = endpoint_path.rsplit("/", 1)[1]
+    record = registry._records[ticket]
+    frame = MediaAudioFrame(
+        seq=0,
+        sample_cursor=0,
+        samples=(0.25,) * record.binding.frame_format.samples_per_channel,
+    )
+    peer_detach = MediaDetach(
+        lease_id=record.binding.lease_id,
+        generation=record.binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+        through_seq=0,
+    )
+    close_observations: list[tuple[bool, bool]] = []
+    receipt_observations: list[tuple[bool, bool]] = []
+
+    class _OrderedSocket:
+        subprotocol = "live-voice.media.v1"
+        request_headers = {"Origin": ORIGIN}
+
+        def __init__(self) -> None:
+            self.incoming = [
+                encode_audio_frame(record.binding, frame),
+                serialize_media_control(peer_detach),
+            ]
+            self.sent: list[str | bytes] = []
+
+        async def recv(self) -> str | bytes:
+            return self.incoming.pop(0)
+
+        async def send(self, message: str | bytes) -> None:
+            self.sent.append(message)
+            if isinstance(message, str) and isinstance(
+                deserialize_media_control(message), MediaDetach
+            ):
+                receipt_observations.append(
+                    (
+                        record.route_completed,
+                        record.recognition_content_sha256 is not None,
+                    )
+                )
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            assert code == 1000
+            assert reason == "live-voice media leaf closed"
+            close_observations.append(
+                (
+                    record.route_completed,
+                    record.recognition_content_sha256 is not None,
+                )
+            )
+
+    assert await handle_registered_media_socket(
+        registry, _OrderedSocket(), endpoint_path
+    )
+    assert record.route_completed is True
+    assert receipt_observations == [(True, True)]
+    assert close_observations == [(True, True)]
+
+
+@pytest.mark.asyncio
+async def test_uplink_completion_is_not_aborted_when_close_wait_is_cancelled() -> None:
+    registry = _active_registry()
+    activation = _activate(
+        registry,
+        params=_params(),
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+    )
+    endpoint_path = str(activation["endpoint_path"])
+    ticket = endpoint_path.rsplit("/", 1)[1]
+    record = registry._records[ticket]
+    frame = MediaAudioFrame(
+        seq=0,
+        sample_cursor=0,
+        samples=(0.25,) * record.binding.frame_format.samples_per_channel,
+    )
+    peer_detach = MediaDetach(
+        lease_id=record.binding.lease_id,
+        generation=record.binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+        through_seq=0,
+    )
+    close_started = asyncio.Event()
+
+    class _BlockingCloseSocket:
+        subprotocol = "live-voice.media.v1"
+        request_headers = {"Origin": ORIGIN}
+
+        def __init__(self) -> None:
+            self.incoming = [
+                encode_audio_frame(record.binding, frame),
+                serialize_media_control(peer_detach),
+            ]
+
+        async def recv(self) -> str | bytes:
+            return self.incoming.pop(0)
+
+        async def send(self, _message: str | bytes) -> None:
+            return None
+
+        async def close(self, _code: int = 1000, _reason: str = "") -> None:
+            close_started.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(
+        handle_registered_media_socket(
+            registry, _BlockingCloseSocket(), endpoint_path
+        )
+    )
+    await asyncio.wait_for(close_started.wait(), timeout=1)
+    retained_hash = record.recognition_content_sha256
+    assert record.route_completed is True
+    assert retained_hash is not None
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert record.route_completed is True
+    assert record.recognition_content_sha256 == retained_hash
 
 
 @pytest.mark.asyncio

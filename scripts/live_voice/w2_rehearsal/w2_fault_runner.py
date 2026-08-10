@@ -1528,16 +1528,43 @@ class GatewayDedicatedSpeechFactory:
                 or ack.through_seq != seq
             ):
                 raise FaultRunnerError("dedicated media frame ACK mismatch")
-        await socket.send(
-            serialize_media_control(
-                MediaDetach(
-                    lease_id=binding.lease_id,
-                    generation=binding.generation.value,
-                    reason_id=MediaDetachReason.LOCAL_CLOSE,
-                    through_seq=len(frames) - 1,
-                )
-            )
+        expected_completion = MediaDetach(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            reason_id=MediaDetachReason.LOCAL_CLOSE,
+            through_seq=len(frames) - 1,
         )
+        await socket.send(serialize_media_control(expected_completion))
+        try:
+            completion_raw = await asyncio.wait_for(
+                socket.recv(), timeout=self.timeout
+            )
+            completion = deserialize_media_control(completion_raw)
+        except asyncio.TimeoutError as exc:
+            raise FaultRunnerError(
+                "dedicated media completion receipt was not observed"
+            ) from exc
+        except (MediaTransportViolation, TypeError) as exc:
+            raise FaultRunnerError(
+                "dedicated media completion receipt is malformed"
+            ) from exc
+        except Exception as exc:
+            raise FaultRunnerError(
+                "dedicated media completion receipt was not observed"
+            ) from exc
+        if completion != expected_completion:
+            raise FaultRunnerError("dedicated media completion receipt mismatch")
+        wait_closed = getattr(socket, "wait_closed", None)
+        if not callable(wait_closed):
+            raise FaultRunnerError(
+                "dedicated media detach completion is unavailable"
+            )
+        try:
+            await asyncio.wait_for(wait_closed(), timeout=self.timeout)
+        except asyncio.TimeoutError as exc:
+            raise FaultRunnerError(
+                "dedicated media detach completion was not observed"
+            ) from exc
 
 
 def _typed_media_binding(value: Any) -> MediaAuthorityBinding:
@@ -1899,19 +1926,20 @@ class ProductFaultPairRunner:
 
     async def _stock_speech_template(self) -> StockSpeechTemplate:
         while True:
-            p2_request, p2_response = await self.observer.wait_exchange(
-                P2_ACTIVATE_METHOD
-            )
-            p2_result = _stock_product_success(p2_response, status="active")
-            if p2_result is None or p2_result.get("replayed") is not False:
+            speech_request, speech_response = await self.observer.wait_exchange(P1_METHOD)
+            if _stock_product_success(speech_response) is None:
                 continue
-            p2 = _mapping(p2_request.get("params"), "stock P2 activation params")
+            speech = _mapping(speech_request.get("params"), "stock Speech params")
+            capture = _mapping(speech.get("capture"), "stock Speech capture")
             activation_request, activation_response = await self.observer.wait_exchange(
                 MEDIA_ACTIVATE_METHOD,
                 predicate=lambda params: (
-                    params.get("session_id") == p2.get("session_id")
-                    and params.get("interaction_id") == p2.get("interaction_id")
-                    and params.get("activation_id") == p2.get("activation_id")
+                    params.get("session_id") == speech.get("session_id")
+                    and params.get("correlation_id") == speech.get("correlation_id")
+                    and params.get("capture_id") == capture.get("capture_id")
+                    and params.get("capture_generation")
+                    == capture.get("capture_generation")
+                    and params.get("track_id") == capture.get("track_id")
                 ),
             )
             if not _direct_stock_success(activation_response, status="active"):
@@ -1919,24 +1947,35 @@ class ProductFaultPairRunner:
             activation = _mapping(
                 activation_request.get("params"), "stock media activation params"
             )
-            speech_request, speech_response = await self.observer.wait_exchange(
-                P1_METHOD,
+            p2_request, p2_response = await self.observer.wait_exchange(
+                P2_ACTIVATE_METHOD,
                 predicate=lambda params: (
                     params.get("session_id") == activation.get("session_id")
-                    and params.get("correlation_id") == activation.get("correlation_id")
-                    and isinstance(params.get("capture"), Mapping)
-                    and params["capture"].get("capture_id")
-                    == activation.get("capture_id")
+                    and params.get("correlation_id")
+                    == activation.get("correlation_id")
+                    and params.get("interaction_id")
+                    == activation.get("interaction_id")
+                    and params.get("activation_id")
+                    == activation.get("activation_id")
+                    and params.get("activation_generation")
+                    == activation.get("activation_generation")
                 ),
             )
-            if _stock_product_success(speech_response) is None:
+            p2_result = _stock_product_success(p2_response, status="active")
+            if p2_result is None or p2_result.get("replayed") is not False:
                 continue
+            p2 = _mapping(p2_request.get("params"), "stock P2 activation params")
             close_request, close_response = await self.observer.wait_exchange(
                 MEDIA_CLOSE_METHOD,
                 predicate=lambda params: (
                     params.get("session_id") == activation.get("session_id")
-                    and params.get("interaction_id") == activation.get("interaction_id")
-                    and params.get("activation_id") == activation.get("activation_id")
+                    and params.get("correlation_id") == activation.get("correlation_id")
+                    and params.get("interaction_id")
+                    == activation.get("interaction_id")
+                    and params.get("activation_id")
+                    == activation.get("activation_id")
+                    and params.get("activation_generation")
+                    == activation.get("activation_generation")
                 ),
             )
             del close_request
@@ -1945,9 +1984,7 @@ class ProductFaultPairRunner:
             return StockSpeechTemplate(
                 p2_activation_params=dict(p2),
                 media_activation_params=dict(activation),
-                speech_params=dict(
-                    _mapping(speech_request.get("params"), "stock Speech params")
-                ),
+                speech_params=dict(speech),
             )
 
     async def _canonical_p2_ack(self) -> Mapping[str, Any]:

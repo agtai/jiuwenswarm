@@ -25,6 +25,7 @@ const MAX_CAPTURE_FRAMES = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / LIVE_VOICE_AUDIO
 export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
 const ROUTE_READY_TIMEOUT_MS = 3_000;
 const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
+const ROUTE_COMPLETION_TIMEOUT_MS = 3_000;
 const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
 
 export type ProductP1VoiceStatus = 'idle' | 'starting' | 'capturing' | 'recognizing' | 'recognized' | 'playing' | 'cleanup_pending' | 'failed' | 'closed';
@@ -141,6 +142,24 @@ function routeUnavailable(reason: unknown): Error & { readonly reason_id: string
 
 function waitTurn(): Promise<void> {
   return new Promise(resolve => globalThis.setTimeout(resolve, 10));
+}
+
+async function awaitRouteCompletion<T>(operation: Promise<T>): Promise<T> {
+  let timeoutHandle: ReturnType<typeof globalThis.setTimeout> | null = null;
+  const timeout = new Promise<T>((_resolve, reject) => {
+    timeoutHandle = globalThis.setTimeout(() => {
+      reject(
+        Object.assign(new Error('media route completion timed out'), {
+          reason_id: 'MEDIA_ROUTE_COMPLETION_TIMEOUT',
+        })
+      );
+    }, ROUTE_COMPLETION_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timeoutHandle !== null) globalThis.clearTimeout(timeoutHandle);
+  }
 }
 
 function mediaEndpoint(origin: string, endpointPath: string): string {
@@ -432,7 +451,8 @@ export class ProductP1VoiceRouteOwner {
         throw new Error('dedicated media route did not acknowledge the complete capture');
       }
       this.#captureFramesAcked = this.#mediaSentFrames;
-      route.leaf.close('MEDIA_LOCAL_CLOSE');
+      await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+      this.#requireCurrent(operationGeneration);
       const result = await speech.recognizeFinal({
         frames: this.#frames,
         locale: this.#locale,

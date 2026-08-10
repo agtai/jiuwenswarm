@@ -12,6 +12,9 @@ import pytest
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAck,
     MediaAttach,
+    MediaDetach,
+    MediaDetachReason,
+    deserialize_media_control,
     serialize_media_control,
 )
 from scripts.live_voice.w2_rehearsal.w2_fault_runner import (
@@ -55,13 +58,18 @@ class _MediaSocket:
     def __init__(self, received: list[str]) -> None:
         self.received = list(received)
         self.sent: list[str | bytes] = []
+        self.wait_closed_calls = 0
 
     async def recv(self) -> str:
-        assert self.received, "unexpected media receive"
+        if not self.received:
+            raise ConnectionError("media socket closed before the next control")
         return self.received.pop(0)
 
     async def send(self, value: str | bytes) -> None:
         self.sent.append(value)
+
+    async def wait_closed(self) -> None:
+        self.wait_closed_calls += 1
 
 
 class _CdpEventSocket:
@@ -784,6 +792,76 @@ async def test_media_transfer_rejects_tampered_attach_and_ack() -> None:
 
 
 @pytest.mark.asyncio
+async def test_media_transfer_waits_for_authoritative_detach_completion() -> None:
+    binding = _media_binding()
+    factory = GatewayDedicatedSpeechFactory(
+        _ScriptedRpc([]),
+        _stock_template(),
+        gateway_endpoint="ws://127.0.0.1:8000/ws",
+        origin="http://127.0.0.1:3000",
+    )
+    socket = _MediaSocket(
+        [
+            serialize_media_control(MediaAttach(binding)),
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 0)
+            ),
+            serialize_media_control(
+                MediaDetach(
+                    binding.lease_id,
+                    binding.generation.value,
+                    MediaDetachReason.LOCAL_CLOSE,
+                    0,
+                )
+            ),
+        ]
+    )
+
+    await factory._transfer(socket, binding, [b"frame"])
+
+    assert socket.wait_closed_calls == 1
+    assert isinstance(deserialize_media_control(socket.sent[-1]), MediaDetach)
+    assert socket.received == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "completion",
+    [
+        None,
+        MediaDetach("foreign-lease", 1, MediaDetachReason.LOCAL_CLOSE, 0),
+        MediaDetach("lease-1", 2, MediaDetachReason.LOCAL_CLOSE, 0),
+        MediaDetach("lease-1", 1, MediaDetachReason.PEER_CLOSE, 0),
+        MediaDetach("lease-1", 1, MediaDetachReason.LOCAL_CLOSE, None),
+    ],
+)
+async def test_media_transfer_requires_exact_server_completion_receipt(
+    completion: MediaDetach | None,
+) -> None:
+    binding = _media_binding()
+    factory = GatewayDedicatedSpeechFactory(
+        _ScriptedRpc([]),
+        _stock_template(),
+        gateway_endpoint="ws://127.0.0.1:8000/ws",
+        origin="http://127.0.0.1:3000",
+    )
+    received = [
+        serialize_media_control(MediaAttach(binding)),
+        serialize_media_control(
+            MediaAck(binding.lease_id, binding.generation.value, 0)
+        ),
+    ]
+    if completion is not None:
+        received.append(serialize_media_control(completion))
+    socket = _MediaSocket(received)
+
+    with pytest.raises(Exception, match="completion receipt"):
+        await factory._transfer(socket, binding, [b"frame"])
+
+    assert socket.wait_closed_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_companion_owns_p2_before_media_and_closes_exact_route() -> None:
     owner_label = "companion-owner"
     capture_label = "companion-capture"
@@ -1016,7 +1094,10 @@ async def test_cdp_observer_accepts_only_project_bound_stock_socket_query() -> N
 
 
 @pytest.mark.asyncio
-async def test_stock_template_skips_durable_predecessor_activation_replay() -> None:
+@pytest.mark.parametrize("predecessor_replayed", [True, False])
+async def test_stock_template_skips_durable_or_abandoned_predecessor_activation(
+    predecessor_replayed: bool,
+) -> None:
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
         gateway_url="ws://127.0.0.1:8000/ws",
@@ -1075,7 +1156,12 @@ async def test_stock_template_skips_durable_predecessor_activation_replay() -> N
                 "activate-1",
                 predecessor,
                 _success(
-                    "activate-1", {"status": "active", "replayed": True, **predecessor}
+                    "activate-1",
+                    {
+                        "status": "active",
+                        "replayed": predecessor_replayed,
+                        **predecessor,
+                    },
                 ),
             ),
             *exchange(
