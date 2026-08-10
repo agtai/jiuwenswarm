@@ -107,7 +107,12 @@ def _is_text(value: Any) -> bool:
 
 
 def _required_text(value: Any, field: str, *, maximum: int = 256) -> str:
-    if not isinstance(value, str) or not value or value != value.strip() or len(value) > maximum:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or len(value) > maximum
+    ):
         raise FaultRunnerError(f"{field} is invalid")
     return value
 
@@ -122,10 +127,45 @@ def _normalized_ws_url(value: str) -> str:
         or parsed.query
         or parsed.fragment
     ):
-        raise FaultRunnerError("Gateway endpoint must be an explicit loopback WebSocket")
+        raise FaultRunnerError(
+            "Gateway endpoint must be an explicit loopback WebSocket"
+        )
     port = parsed.port or (443 if parsed.scheme == "wss" else 80)
     host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
     return f"{parsed.scheme}://{host}:{port}{parsed.path or '/'}"
+
+
+def _normalized_stock_ws_url(value: str) -> str:
+    """Match the stock socket without retaining its machine-local project path."""
+
+    parsed = urllib.parse.urlsplit(value)
+    if not parsed.query:
+        return _normalized_ws_url(value)
+    try:
+        query = urllib.parse.parse_qsl(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=True,
+            max_num_fields=1,
+        )
+    except ValueError as exc:
+        raise FaultRunnerError("stock WebSocket query is invalid") from exc
+    if len(query) != 1 or query[0][0] != "project_dir":
+        raise FaultRunnerError("stock WebSocket query is outside the safe allowlist")
+    project_dir = query[0][1]
+    if (
+        not project_dir
+        or project_dir != project_dir.strip()
+        or len(project_dir) > 2048
+        or any(
+            ord(character) < 32 or ord(character) == 127 for character in project_dir
+        )
+    ):
+        raise FaultRunnerError("stock WebSocket project binding is invalid")
+    query_free = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment)
+    )
+    return _normalized_ws_url(query_free)
 
 
 def _normalized_http_origin(value: str) -> str:
@@ -237,7 +277,9 @@ def _require_error(
     ):
         raise FaultRunnerError("product fault returned the wrong nested business code")
     if reasons is not None and reason not in reasons:
-        raise FaultRunnerError("product fault returned the wrong nested business reason")
+        raise FaultRunnerError(
+            "product fault returned the wrong nested business reason"
+        )
     return payload
 
 
@@ -253,14 +295,11 @@ def _require_success(
     return result
 
 
-def _require_p1_success(
-    result: Mapping[str, Any], params: Mapping[str, Any]
-) -> None:
+def _require_p1_success(result: Mapping[str, Any], params: Mapping[str, Any]) -> None:
     expected_capture = _mapping(params.get("capture"), "P1 request capture")
     capture = _mapping(result.get("capture"), "P1 recovery capture")
-    if (
-        result.get("operation") != P1_OPERATION
-        or dict(capture) != dict(expected_capture)
+    if result.get("operation") != P1_OPERATION or dict(capture) != dict(
+        expected_capture
     ):
         raise FaultRunnerError("P1 recovery did not bind the exact capture")
     event = _mapping(result.get("event"), "P1 recovery event")
@@ -311,7 +350,9 @@ class W2FaultRunner:
         _required_text(method, "Gateway method")
         _required_text(request_id, "Gateway request_id")
         _reject_credentials(params)
-        return await self._rpc.request(method, _copy_params(params), request_id=request_id)
+        return await self._rpc.request(
+            method, _copy_params(params), request_id=request_id
+        )
 
     async def _fault_replay(
         self,
@@ -478,7 +519,9 @@ class W2FaultRunner:
             fault_class="retriable",
             operation=P2_METHOD,
         )
-        first = await self._request(P2_METHOD, canonical_ack, request_id=identity.request_id)
+        first = await self._request(
+            P2_METHOD, canonical_ack, request_id=identity.request_id
+        )
         _require_error(
             first,
             identity.request_id,
@@ -486,8 +529,12 @@ class W2FaultRunner:
             reasons={"PRODUCT_W2_RETRIABLE_FAULT_INJECTED"},
             retriable=True,
         )
-        recovery = await self._request(P2_METHOD, canonical_ack, request_id=identity.request_id)
-        _require_success(recovery, identity.request_id, status="presentation_acknowledged")
+        recovery = await self._request(
+            P2_METHOD, canonical_ack, request_id=identity.request_id
+        )
+        _require_success(
+            recovery, identity.request_id, status="presentation_acknowledged"
+        )
 
     async def probe_p2_non_retriable(
         self, identity: FaultIdentity, canonical_ack: Mapping[str, Any]
@@ -581,9 +628,12 @@ class W2FaultRunner:
             or not _is_text(recovered.get("attempt_id"))
             or not _is_text(recovered.get("source_event_id"))
             or not _is_text(recovered.get("progress_event_id"))
-            or recovered.get("delivery_id") in {canonical_delivery, identity.source_record_id}
+            or recovered.get("delivery_id")
+            in {canonical_delivery, identity.source_record_id}
         ):
-            raise FaultRunnerError("stock UI did not own the canonical positive progress ACK")
+            raise FaultRunnerError(
+                "stock UI did not own the canonical positive progress ACK"
+            )
 
     async def _issue_retry_confirmation(
         self,
@@ -604,22 +654,29 @@ class W2FaultRunner:
         }
         response = await self._request(P3_CONFIRM_METHOD, mutation, request_id=issue_id)
         receipt = _require_success(response, issue_id, status="confirmation_issued")
-        confirmation_id = _required_text(receipt.get("confirmation_id"), "confirmation_id")
+        confirmation_id = _required_text(
+            receipt.get("confirmation_id"), "confirmation_id"
+        )
         return mutation, confirmation_id
 
     @staticmethod
     def _require_terminal(snapshot: Mapping[str, Any], task_id: str) -> None:
         if snapshot.get("task_id") != task_id or snapshot.get("state") != "terminal":
-            raise FaultRunnerError("P3 retry confirmation requires authoritative terminal A")
+            raise FaultRunnerError(
+                "P3 retry confirmation requires authoritative terminal A"
+            )
 
     @staticmethod
     def _require_nonterminal_b(snapshot: Mapping[str, Any], task_id: str) -> None:
         if (
             snapshot.get("task_id") != task_id
-            or snapshot.get("state") not in {"accepted", "running", "blocked", "decision_required"}
+            or snapshot.get("state")
+            not in {"accepted", "running", "blocked", "decision_required"}
             or snapshot.get("attempt_number") != 2
         ):
-            raise FaultRunnerError("stock UI winner did not establish authoritative nonterminal B")
+            raise FaultRunnerError(
+                "stock UI winner did not establish authoritative nonterminal B"
+            )
 
     @staticmethod
     def _require_no_successor(
@@ -630,10 +687,14 @@ class W2FaultRunner:
     ) -> None:
         for field in ("task_id", "attempt_id", "attempt_number", "retry_count"):
             if before.get(field) != after.get(field):
-                raise FaultRunnerError("rejected P3 mutation created or adopted a successor")
+                raise FaultRunnerError(
+                    "rejected P3 mutation created or adopted a successor"
+                )
         before_history = before.get("event_facts")
         after_history = after.get("event_facts")
-        if not isinstance(before_history, tuple) or not isinstance(after_history, tuple):
+        if not isinstance(before_history, tuple) or not isinstance(
+            after_history, tuple
+        ):
             raise FaultRunnerError("P3 event-history oracle is unavailable")
         if after_history[: len(before_history)] != before_history:
             raise FaultRunnerError("rejected P3 mutation rewrote authoritative history")
@@ -651,7 +712,9 @@ class W2FaultRunner:
                 or fact[3] not in allowed_progress
                 or fact[4] == rejected_command_id
             ):
-                raise FaultRunnerError("rejected P3 mutation appended command side effects")
+                raise FaultRunnerError(
+                    "rejected P3 mutation appended command side effects"
+                )
 
     async def probe_p3_non_retriable(
         self,
@@ -678,7 +741,9 @@ class W2FaultRunner:
         )
         winner = _mapping(await oracle.wait_stock_retry(task_id), "stock retry B")
         if winner.get("operation") != "task.retry" or winner.get("task_id") != task_id:
-            raise FaultRunnerError("stock UI did not submit the independent winner retry")
+            raise FaultRunnerError(
+                "stock UI did not submit the independent winner retry"
+            )
         before = _mapping(await oracle.snapshot(task_id), "P3 nonterminal snapshot")
         self._require_nonterminal_b(before, task_id)
         params = {**mutation, "confirmation_id": confirmation_id}
@@ -807,10 +872,14 @@ class GatewayWebSocketClient:
                 value = json.loads(raw)
                 message = _mapping(value, "Gateway Web message")
                 if message.get("type") == "res":
-                    request_id = _required_text(message.get("id"), "Gateway response id")
+                    request_id = _required_text(
+                        message.get("id"), "Gateway response id"
+                    )
                     pending = self._pending.get(request_id)
                     if pending is None or pending.done():
-                        raise FaultRunnerError("Gateway returned an unknown response id")
+                        raise FaultRunnerError(
+                            "Gateway returned an unknown response id"
+                        )
                     pending.set_result(dict(message))
                 elif message.get("type") == "event":
                     if self._events.full():
@@ -838,7 +907,12 @@ class GatewayWebSocketClient:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[Mapping[str, Any]] = loop.create_future()
         self._pending[request_id] = future
-        envelope = {"type": "req", "id": request_id, "method": method, "params": dict(params)}
+        envelope = {
+            "type": "req",
+            "id": request_id,
+            "method": method,
+            "params": dict(params),
+        }
         try:
             await self._socket.send(json.dumps(envelope, separators=(",", ":")))
             return await asyncio.wait_for(future, timeout=self.request_timeout)
@@ -880,7 +954,11 @@ class ChromeNetworkObserver:
         timeout: float = 30.0,
     ) -> None:
         parsed = urllib.parse.urlsplit(debugger_url)
-        if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
             raise FaultRunnerError("CDP debugger endpoint must be loopback HTTP")
         self.debugger_url = debugger_url.rstrip("/")
         self.gateway_url = _normalized_ws_url(gateway_url)
@@ -899,7 +977,9 @@ class ChromeNetworkObserver:
         from websockets.asyncio.client import connect
 
         self._socket = await connect(
-            _required_text(target.get("webSocketDebuggerUrl"), "CDP target WebSocket", maximum=2048),
+            _required_text(
+                target.get("webSocketDebuggerUrl"), "CDP target WebSocket", maximum=2048
+            ),
             max_size=16 * 1024 * 1024,
             open_timeout=self.timeout,
             close_timeout=5,
@@ -912,11 +992,17 @@ class ChromeNetworkObserver:
         await self.close()
 
     def _discover_target(self) -> Mapping[str, Any]:
-        with urllib.request.urlopen(f"{self.debugger_url}/json/list", timeout=self.timeout) as response:
+        with urllib.request.urlopen(
+            f"{self.debugger_url}/json/list", timeout=self.timeout
+        ) as response:
             targets = json.load(response)
         if not isinstance(targets, list):
             raise FaultRunnerError("CDP target list is invalid")
-        pages = [item for item in targets if isinstance(item, Mapping) and item.get("type") == "page"]
+        pages = [
+            item
+            for item in targets
+            if isinstance(item, Mapping) and item.get("type") == "page"
+        ]
         if len(pages) != 1:
             raise FaultRunnerError("isolated Chrome must expose exactly one page")
         page_url = _required_text(pages[0].get("url"), "CDP page URL", maximum=2048)
@@ -925,10 +1011,14 @@ class ChromeNetworkObserver:
             (parsed_page.scheme, parsed_page.netloc, "", "", "")
         )
         if _normalized_http_origin(page_origin) != self.page_origin:
-            raise FaultRunnerError("isolated Chrome page origin is not the stock Web origin")
+            raise FaultRunnerError(
+                "isolated Chrome page origin is not the stock Web origin"
+            )
         return pages[0]
 
-    async def _command(self, method: str, params: Mapping[str, Any]) -> Mapping[str, Any]:
+    async def _command(
+        self, method: str, params: Mapping[str, Any]
+    ) -> Mapping[str, Any]:
         if method not in _CDP_READ_ONLY_COMMANDS:
             raise FaultRunnerError("CDP command is outside the read-only allowlist")
         if self._socket is None:
@@ -938,7 +1028,9 @@ class ChromeNetworkObserver:
         future = asyncio.get_running_loop().create_future()
         self._command_waiters[command_id] = future
         try:
-            await self._socket.send(json.dumps({"id": command_id, "method": method, "params": dict(params)}))
+            await self._socket.send(
+                json.dumps({"id": command_id, "method": method, "params": dict(params)})
+            )
             response = await asyncio.wait_for(future, timeout=self.timeout)
             if "error" in response:
                 raise FaultRunnerError("CDP read-only network command failed")
@@ -966,13 +1058,16 @@ class ChromeNetworkObserver:
                 url = str(params.get("url", ""))
                 if request_id and url:
                     try:
-                        normalized = _normalized_ws_url(url)
+                        normalized = _normalized_stock_ws_url(url)
                     except FaultRunnerError:
                         continue
                     if normalized == self.gateway_url:
                         self._web_sockets[request_id] = normalized
                 continue
-            if method not in {"Network.webSocketFrameSent", "Network.webSocketFrameReceived"}:
+            if method not in {
+                "Network.webSocketFrameSent",
+                "Network.webSocketFrameReceived",
+            }:
                 continue
             socket_id = str(params.get("requestId", ""))
             socket_url = self._web_sockets.get(socket_id)
@@ -1040,10 +1135,12 @@ class ChromeNetworkObserver:
         self, method: str, *, timeout: float | None = None
     ) -> ObservedWebMessage:
         return await self.wait_message(
-            lambda item: item.direction == "sent"
-            and item.socket_url == self.gateway_url
-            and item.message.get("type") == "req"
-            and item.message.get("method") == method,
+            lambda item: (
+                item.direction == "sent"
+                and item.socket_url == self.gateway_url
+                and item.message.get("type") == "req"
+                and item.message.get("method") == method
+            ),
             timeout=timeout,
         )
 
@@ -1055,11 +1152,13 @@ class ChromeNetworkObserver:
         timeout: float | None = None,
     ) -> ObservedWebMessage:
         return await self.wait_message(
-            lambda item: item.direction == "received"
-            and item.socket_id == socket_id
-            and item.socket_url == self.gateway_url
-            and item.message.get("type") == "res"
-            and item.message.get("id") == request_id,
+            lambda item: (
+                item.direction == "received"
+                and item.socket_id == socket_id
+                and item.socket_url == self.gateway_url
+                and item.message.get("type") == "res"
+                and item.message.get("id") == request_id
+            ),
             timeout=timeout,
         )
 
@@ -1081,7 +1180,9 @@ class ChromeNetworkObserver:
             params = _mapping(request.message.get("params"), "stock Web request params")
             if predicate is not None and not predicate(params):
                 continue
-            request_id = _required_text(request.message.get("id"), "stock Web request_id")
+            request_id = _required_text(
+                request.message.get("id"), "stock Web request_id"
+            )
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError("stock Web exchange deadline elapsed")
@@ -1119,7 +1220,11 @@ class StockSpeechTemplate:
         ):
             raise FaultRunnerError("stock Speech/media template binding mismatch")
         audio = _mapping(speech.get("audio"), "stock Speech audio")
-        _required_text(audio.get("data_base64"), "memory-only Speech audio", maximum=8 * 1024 * 1024)
+        _required_text(
+            audio.get("data_base64"),
+            "memory-only Speech audio",
+            maximum=8 * 1024 * 1024,
+        )
 
 
 class GatewaySpeechLease:
@@ -1146,16 +1251,18 @@ class GatewaySpeechLease:
             request_id=self._close_request_id,
         )
         outer = _mapping(response, "media close response")
-        if outer.get("type") != "res" or outer.get("id") != self._close_request_id or outer.get("ok") is not True:
+        if (
+            outer.get("type") != "res"
+            or outer.get("id") != self._close_request_id
+            or outer.get("ok") is not True
+        ):
             raise FaultRunnerError("companion media route did not close gracefully")
         payload = _mapping(outer.get("payload"), "media close payload")
         if (
             payload.get("status") != "closed"
-            or set(payload)
-            != {"status", "reason_id", *self._close_params}
+            or set(payload) != {"status", "reason_id", *self._close_params}
             or any(
-                payload.get(key) != value
-                for key, value in self._close_params.items()
+                payload.get(key) != value for key, value in self._close_params.items()
             )
         ):
             raise FaultRunnerError("companion media authority did not close")
@@ -1198,7 +1305,9 @@ class GatewayDedicatedSpeechFactory:
                 "activation_generation": 1,
             }
         )
-        request_id = _required_text(f"{label}-p2-activate", "companion P2 activate request_id")
+        request_id = _required_text(
+            f"{label}-p2-activate", "companion P2 activate request_id"
+        )
         binding = {
             key: source[key]
             for key in (
@@ -1256,15 +1365,24 @@ class GatewayDedicatedSpeechFactory:
                 "track_id": track_id,
             }
         )
-        activation_id = _required_text(f"{label}-media-activate", "media activation request_id")
+        activation_id = _required_text(
+            f"{label}-media-activate", "media activation request_id"
+        )
         response = await self.rpc.request(
             MEDIA_ACTIVATE_METHOD, activation, request_id=activation_id
         )
         outer = _mapping(response, "media activation response")
-        if outer.get("type") != "res" or outer.get("id") != activation_id or outer.get("ok") is not True:
+        if (
+            outer.get("type") != "res"
+            or outer.get("id") != activation_id
+            or outer.get("ok") is not True
+        ):
             raise FaultRunnerError("companion media activation failed")
         payload = _mapping(outer.get("payload"), "media activation payload")
-        if payload.get("status") != "active" or payload.get("subprotocol") != MEDIA_SUBPROTOCOL:
+        if (
+            payload.get("status") != "active"
+            or payload.get("subprotocol") != MEDIA_SUBPROTOCOL
+        ):
             raise FaultRunnerError("companion media route is unavailable")
         subject_id = _required_text(payload.get("subject_id"), "media subject_id")
         close_params = {
@@ -1279,7 +1397,9 @@ class GatewayDedicatedSpeechFactory:
             rpc=self.rpc,
             params={},
             close_params=close_params,
-            close_request_id=_required_text(f"{label}-media-close", "media close request_id"),
+            close_request_id=_required_text(
+                f"{label}-media-close", "media close request_id"
+            ),
         )
         try:
             if set(payload) != {
@@ -1299,7 +1419,9 @@ class GatewayDedicatedSpeechFactory:
                 "raw_audio_logged": False,
                 "memory_only": True,
             }:
-                raise FaultRunnerError("companion media privacy boundary is unavailable")
+                raise FaultRunnerError(
+                    "companion media privacy boundary is unavailable"
+                )
             binding = _typed_media_binding(payload.get("binding"))
             if (
                 binding.session_id != activation["session_id"]
@@ -1344,7 +1466,9 @@ class GatewayDedicatedSpeechFactory:
 
     def _media_url(self, endpoint_path: str) -> str:
         base = urllib.parse.urlsplit(self.gateway_endpoint)
-        return urllib.parse.urlunsplit((base.scheme, base.netloc, endpoint_path, "", ""))
+        return urllib.parse.urlunsplit(
+            (base.scheme, base.netloc, endpoint_path, "", "")
+        )
 
     async def _upload(
         self,
@@ -1356,7 +1480,11 @@ class GatewayDedicatedSpeechFactory:
 
         audio = _mapping(speech.get("audio"), "stock Speech audio")
         frames = _wav_frames(
-            _required_text(audio.get("data_base64"), "memory-only Speech audio", maximum=8 * 1024 * 1024),
+            _required_text(
+                audio.get("data_base64"),
+                "memory-only Speech audio",
+                maximum=8 * 1024 * 1024,
+            ),
             binding,
         )
         async with connect(
@@ -1390,7 +1518,9 @@ class GatewayDedicatedSpeechFactory:
                 ack_raw = await asyncio.wait_for(socket.recv(), timeout=self.timeout)
                 ack = deserialize_media_control(ack_raw)
             except (MediaTransportViolation, TypeError) as exc:
-                raise FaultRunnerError("dedicated media frame ACK is malformed") from exc
+                raise FaultRunnerError(
+                    "dedicated media frame ACK is malformed"
+                ) from exc
             if (
                 not isinstance(ack, MediaAck)
                 or ack.lease_id != binding.lease_id
@@ -1429,9 +1559,7 @@ def _typed_media_binding(value: Any) -> MediaAuthorityBinding:
     return control.binding
 
 
-def _wav_frames(
-    data_base64: str, binding: MediaAuthorityBinding
-) -> tuple[bytes, ...]:
+def _wav_frames(data_base64: str, binding: MediaAuthorityBinding) -> tuple[bytes, ...]:
     try:
         wav_bytes = base64.b64decode(data_base64, validate=True)
         with wave.open(io.BytesIO(wav_bytes), "rb") as source:
@@ -1526,7 +1654,10 @@ class ChromeP3Oracle:
         status_result = _require_success(status_response, status_id)
         task = _mapping(status_result.get("task"), "P3 status task")
         attempt = _mapping(status_result.get("attempt"), "P3 status attempt")
-        if task.get("task_id") != exact_task_id or attempt.get("task_id") != exact_task_id:
+        if (
+            task.get("task_id") != exact_task_id
+            or attempt.get("task_id") != exact_task_id
+        ):
             raise FaultRunnerError("P3 status returned a foreign task")
         events_id = self._next_id("events")
         events_response = await self.rpc.request(
@@ -1536,7 +1667,10 @@ class ChromeP3Oracle:
         )
         events_result = _require_success(events_response, events_id)
         events = events_result.get("events")
-        if not isinstance(events, list) or events_result.get("task_id") != exact_task_id:
+        if (
+            not isinstance(events, list)
+            or events_result.get("task_id") != exact_task_id
+        ):
             raise FaultRunnerError("P3 events returned a foreign task")
         event_head = events_result.get("head_seq")
         if type(event_head) is not int or event_head < 0:
@@ -1590,18 +1724,24 @@ class ChromeP3Oracle:
                 return snapshot
             await asyncio.sleep(delay)
             delay = min(delay * 2, 1.0)
-        raise FaultRunnerError("P3 task did not reach terminal authority before timeout")
+        raise FaultRunnerError(
+            "P3 task did not reach terminal authority before timeout"
+        )
 
     async def wait_stock_retry(self, task_id: str) -> Mapping[str, Any]:
         request, response = await self.observer.wait_exchange(
             P3_MUTATE_METHOD,
-            predicate=lambda params: params.get("operation") == "task.retry"
-            and params.get("task_id") == task_id,
+            predicate=lambda params: (
+                params.get("operation") == "task.retry"
+                and params.get("task_id") == task_id
+            ),
         )
         request_id = _required_text(request.get("id"), "stock retry request_id")
         result = _stock_product_success(response, status="mutation_processed")
         if result is None or result.get("operation") != "task.retry":
-            raise FaultRunnerError("stock UI retry did not receive an authoritative success")
+            raise FaultRunnerError(
+                "stock UI retry did not receive an authoritative success"
+            )
         formal = _mapping(result.get("formal_task_result"), "stock retry formal result")
         if formal.get("task_id") != task_id:
             raise FaultRunnerError("stock UI retry returned a foreign task")
@@ -1628,18 +1768,26 @@ class ChromeP3Oracle:
         if expected_session != self.session_id:
             raise FaultRunnerError("stock progress expected a foreign oracle session")
         event = await self.observer.wait_message(
-            lambda item: item.direction == "received"
-            and item.message.get("type") == "event"
-            and item.message.get("event") == "live_voice.task.progress"
-            and isinstance(item.message.get("payload"), Mapping)
-            and item.message["payload"].get("session_id") == expected_session
-            and item.message["payload"].get("task_id") == expected_task
-            and item.message["payload"].get("delivery_id") != after_delivery_id
+            lambda item: (
+                item.direction == "received"
+                and item.message.get("type") == "event"
+                and item.message.get("event") == "live_voice.task.progress"
+                and isinstance(item.message.get("payload"), Mapping)
+                and item.message["payload"].get("session_id") == expected_session
+                and item.message["payload"].get("task_id") == expected_task
+                and item.message["payload"].get("delivery_id") != after_delivery_id
+            )
         )
         payload = _mapping(event.message.get("payload"), "stock progress event")
-        delivery_id = _required_text(payload.get("delivery_id"), "stock progress delivery_id")
-        source_event = _mapping(payload.get("source_event"), "stock progress source event")
-        progress_event = _mapping(payload.get("progress_event"), "stock progress projection event")
+        delivery_id = _required_text(
+            payload.get("delivery_id"), "stock progress delivery_id"
+        )
+        source_event = _mapping(
+            payload.get("source_event"), "stock progress source event"
+        )
+        progress_event = _mapping(
+            payload.get("progress_event"), "stock progress projection event"
+        )
         source_event_id = _required_text(
             source_event.get("event_id"), "stock progress source_event_id"
         )
@@ -1649,7 +1797,9 @@ class ChromeP3Oracle:
         seq = source_event.get("seq")
         if type(seq) is not int or seq < 0 or progress_event.get("seq") != seq:
             raise FaultRunnerError("stock progress event sequence mismatch")
-        extensions = _mapping(source_event.get("extensions"), "stock progress extensions")
+        extensions = _mapping(
+            source_event.get("extensions"), "stock progress extensions"
+        )
         progress_return = _mapping(
             extensions.get("jiuwenswarm.task_progress_return"),
             "stock progress return extension",
@@ -1659,9 +1809,8 @@ class ChromeP3Oracle:
             "stock progress attempt_id",
         )
         persistent_source = progress_return.get("persistent_source_event_id")
-        if (
-            progress_return.get("persistent_event_seq") != seq
-            or (persistent_source is not None and not _is_text(persistent_source))
+        if progress_return.get("persistent_event_seq") != seq or (
+            persistent_source is not None and not _is_text(persistent_source)
         ):
             raise FaultRunnerError("stock progress persistent lineage mismatch")
         expected_ack = {
@@ -1670,7 +1819,9 @@ class ChromeP3Oracle:
             "correlation_id": _required_text(
                 payload.get("correlation_id"), "stock progress correlation_id"
             ),
-            "origin_id": _required_text(payload.get("origin_id"), "stock progress origin_id"),
+            "origin_id": _required_text(
+                payload.get("origin_id"), "stock progress origin_id"
+            ),
             "generation_id": _required_text(
                 payload.get("generation_id"), "stock progress generation_id"
             ),
@@ -1683,7 +1834,10 @@ class ChromeP3Oracle:
                 payload.get("evidence_id"), "stock progress evidence_id"
             ),
         }
-        if type(expected_ack["generation"]) is not int or expected_ack["generation"] <= 0:
+        if (
+            type(expected_ack["generation"]) is not int
+            or expected_ack["generation"] <= 0
+        ):
             raise FaultRunnerError("stock progress generation is invalid")
         request, response = await self.observer.wait_exchange(
             P3_ACK_METHOD,
@@ -1748,14 +1902,17 @@ class ProductFaultPairRunner:
             p2_request, p2_response = await self.observer.wait_exchange(
                 P2_ACTIVATE_METHOD
             )
-            if _stock_product_success(p2_response, status="active") is None:
+            p2_result = _stock_product_success(p2_response, status="active")
+            if p2_result is None or p2_result.get("replayed") is not False:
                 continue
             p2 = _mapping(p2_request.get("params"), "stock P2 activation params")
             activation_request, activation_response = await self.observer.wait_exchange(
                 MEDIA_ACTIVATE_METHOD,
-                predicate=lambda params: params.get("session_id") == p2.get("session_id")
-                and params.get("interaction_id") == p2.get("interaction_id")
-                and params.get("activation_id") == p2.get("activation_id"),
+                predicate=lambda params: (
+                    params.get("session_id") == p2.get("session_id")
+                    and params.get("interaction_id") == p2.get("interaction_id")
+                    and params.get("activation_id") == p2.get("activation_id")
+                ),
             )
             if not _direct_stock_success(activation_response, status="active"):
                 continue
@@ -1764,18 +1921,23 @@ class ProductFaultPairRunner:
             )
             speech_request, speech_response = await self.observer.wait_exchange(
                 P1_METHOD,
-                predicate=lambda params: params.get("session_id") == activation.get("session_id")
-                and params.get("correlation_id") == activation.get("correlation_id")
-                and isinstance(params.get("capture"), Mapping)
-                and params["capture"].get("capture_id") == activation.get("capture_id"),
+                predicate=lambda params: (
+                    params.get("session_id") == activation.get("session_id")
+                    and params.get("correlation_id") == activation.get("correlation_id")
+                    and isinstance(params.get("capture"), Mapping)
+                    and params["capture"].get("capture_id")
+                    == activation.get("capture_id")
+                ),
             )
             if _stock_product_success(speech_response) is None:
                 continue
             close_request, close_response = await self.observer.wait_exchange(
                 MEDIA_CLOSE_METHOD,
-                predicate=lambda params: params.get("session_id") == activation.get("session_id")
-                and params.get("interaction_id") == activation.get("interaction_id")
-                and params.get("activation_id") == activation.get("activation_id"),
+                predicate=lambda params: (
+                    params.get("session_id") == activation.get("session_id")
+                    and params.get("interaction_id") == activation.get("interaction_id")
+                    and params.get("activation_id") == activation.get("activation_id")
+                ),
             )
             del close_request
             if not _direct_stock_success(close_response, status="closed"):
@@ -1783,13 +1945,18 @@ class ProductFaultPairRunner:
             return StockSpeechTemplate(
                 p2_activation_params=dict(p2),
                 media_activation_params=dict(activation),
-                speech_params=dict(_mapping(speech_request.get("params"), "stock Speech params")),
+                speech_params=dict(
+                    _mapping(speech_request.get("params"), "stock Speech params")
+                ),
             )
 
     async def _canonical_p2_ack(self) -> Mapping[str, Any]:
         while True:
             request, response = await self.observer.wait_exchange(P2_METHOD)
-            if _stock_product_success(response, status="presentation_acknowledged") is not None:
+            if (
+                _stock_product_success(response, status="presentation_acknowledged")
+                is not None
+            ):
                 return dict(_mapping(request.get("params"), "stock P2 ACK params"))
 
     async def _canonical_p3_ack(self) -> Mapping[str, Any]:
@@ -1798,20 +1965,28 @@ class ProductFaultPairRunner:
             if _stock_product_success(response, status="acknowledged") is not None:
                 return dict(_mapping(request.get("params"), "stock P3 ACK params"))
 
-    async def _terminal_task(self, identity: FaultIdentity) -> tuple[str, str, str, ChromeP3Oracle]:
+    async def _terminal_task(
+        self, identity: FaultIdentity
+    ) -> tuple[str, str, str, ChromeP3Oracle]:
         while True:
             create_request, create_response = await self.observer.wait_exchange(
                 P3_MUTATE_METHOD,
                 predicate=lambda params: params.get("operation") == "task.create",
             )
-            create_result = _stock_product_success(create_response, status="mutation_processed")
+            create_result = _stock_product_success(
+                create_response, status="mutation_processed"
+            )
             if create_result is None:
                 continue
-            formal = _mapping(create_result.get("formal_task_result"), "stock task.create result")
+            formal = _mapping(
+                create_result.get("formal_task_result"), "stock task.create result"
+            )
             task_id = _required_text(formal.get("task_id"), "stock task_id")
             params = _mapping(create_request.get("params"), "stock task.create params")
             session_id = _required_text(params.get("session_id"), "stock P3 session_id")
-            correlation_id = _required_text(params.get("correlation_id"), "stock P3 correlation_id")
+            correlation_id = _required_text(
+                params.get("correlation_id"), "stock P3 correlation_id"
+            )
             oracle = ChromeP3Oracle(
                 self.rpc,
                 self.observer,
@@ -1821,14 +1996,18 @@ class ProductFaultPairRunner:
             )
             _cancel_request, cancel_response = await self.observer.wait_exchange(
                 P3_MUTATE_METHOD,
-                predicate=lambda candidate: candidate.get("operation") == "task.cancel"
-                and candidate.get("task_id") == task_id,
+                predicate=lambda candidate: (
+                    candidate.get("operation") == "task.cancel"
+                    and candidate.get("task_id") == task_id
+                ),
             )
             cancel_result = _stock_product_success(
                 cancel_response, status="mutation_processed"
             )
             if cancel_result is None or cancel_result.get("operation") != "task.cancel":
-                raise FaultRunnerError("stock UI cancel did not receive authoritative success")
+                raise FaultRunnerError(
+                    "stock UI cancel did not receive authoritative success"
+                )
             cancel_formal = _mapping(
                 cancel_result.get("formal_task_result"), "stock task.cancel result"
             )
@@ -1879,12 +2058,10 @@ class ProductFaultPairRunner:
                     request_prefix=_control_id(p3_identity, "oracle"),
                     timeout=self.timeout,
                 )
-                await self.runner.probe_p3_retriable(
-                    p3_identity, canonical_p3, oracle
-                )
+                await self.runner.probe_p3_retriable(p3_identity, canonical_p3, oracle)
             else:
-                task_id, session_id, correlation_id, oracle = (
-                    await self._terminal_task(p3_identity)
+                task_id, session_id, correlation_id, oracle = await self._terminal_task(
+                    p3_identity
                 )
                 if self.pair == 2:
                     await self.runner.probe_p3_non_retriable(
@@ -1939,7 +2116,9 @@ def derive_public_fault_plan(
         derivation_version=W2_FAULT_DERIVATION_VERSION,
     )
     if getattr(plan, "derivation_version", None) != W2_FAULT_DERIVATION_VERSION:
-        raise FaultRunnerError("public W2 fault plan returned the wrong derivation version")
+        raise FaultRunnerError(
+            "public W2 fault plan returned the wrong derivation version"
+        )
     return plan
 
 
@@ -1965,9 +2144,13 @@ async def _run_cli(args: argparse.Namespace) -> None:
         evidence_set_id=args.evidence_set_id,
     )
     identities = tuple(getattr(plan, "items", ()))
-    selected = tuple(item for item in identities if getattr(item, "pair", None) == args.pair)
+    selected = tuple(
+        item for item in identities if getattr(item, "pair", None) == args.pair
+    )
     if len(selected) != 3:
-        raise FaultRunnerError("public W2 fault plan did not provide exactly three pair faults")
+        raise FaultRunnerError(
+            "public W2 fault plan did not provide exactly three pair faults"
+        )
     if args.timeout <= 0 or args.timeout > 300:
         raise FaultRunnerError("runner timeout must be in (0, 300] seconds")
     async with ChromeNetworkObserver(
@@ -1999,8 +2182,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     asyncio.run(_run_cli(args))
     print(
-        "W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS "
-        f"pair={args.pair} faults=3 routes=closed"
+        f"W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS pair={args.pair} faults=3 routes=closed"
     )
     return 0
 

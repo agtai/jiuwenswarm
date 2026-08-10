@@ -20,6 +20,7 @@ from scripts.live_voice.w2_rehearsal.w2_fault_runner import (
     GatewayDedicatedSpeechFactory,
     GatewayWebSocketClient,
     ObservedWebMessage,
+    ProductFaultPairRunner,
     StockSpeechTemplate,
     W2FaultRunner,
     _typed_media_binding,
@@ -63,8 +64,25 @@ class _MediaSocket:
         self.sent.append(value)
 
 
+class _CdpEventSocket:
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self._events = iter(json.dumps(event) for event in events)
+
+    def __aiter__(self) -> _CdpEventSocket:
+        return self
+
+    async def __anext__(self) -> str:
+        try:
+            return next(self._events)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+
 def _media_binding(
-    *, interaction_id: str = "interaction-1", capture_id: str = "capture-1", track_id: str = "track-1"
+    *,
+    interaction_id: str = "interaction-1",
+    capture_id: str = "capture-1",
+    track_id: str = "track-1",
 ) -> Any:
     return _typed_media_binding(
         {
@@ -223,7 +241,11 @@ def _error(request_id: str, code: str, reason: str) -> dict[str, Any]:
             "request_id": request_id,
             "ok": False,
             "result": None,
-            "error": {"code": code, "reason": reason, "retriable": code in {"TIMEOUT", "UNAVAILABLE"}},
+            "error": {
+                "code": code,
+                "reason": reason,
+                "retriable": code in {"TIMEOUT", "UNAVAILABLE"},
+            },
         },
     }
 
@@ -302,23 +324,27 @@ async def test_p1_retriable_exact_replay_recovers_only_on_fresh_capture() -> Non
         [
             failed,
             failed,
-            _speech_success(
-                recovery_id, f"{fault.source_record_id}-recovery-capture"
-            ),
+            _speech_success(recovery_id, f"{fault.source_record_id}-recovery-capture"),
         ]
     )
     media = _SpeechFactory()
 
     await W2FaultRunner(rpc).probe_p1_retriable(fault, media)
 
-    assert [call[2] for call in rpc.calls] == [fault.request_id, fault.request_id, recovery_id]
+    assert [call[2] for call in rpc.calls] == [
+        fault.request_id,
+        fault.request_id,
+        recovery_id,
+    ]
     assert len(media.leases) == 2
     assert media.leases[0].params["capture"] != media.leases[1].params["capture"]
     assert all(lease.closed for lease in media.leases)
 
 
 @pytest.mark.asyncio
-async def test_p1_non_retriable_replays_invalid_timeout_then_uses_untouched_binding() -> None:
+async def test_p1_non_retriable_replays_invalid_timeout_then_uses_untouched_binding() -> (
+    None
+):
     fault = _fault(2, "p1.speech_media", "non_retriable", "speech.recognize.batch")
     failed = _error(fault.request_id, "INVALID_ARGUMENT", "INVALID_SPEECH_TIMEOUT")
     recovery_id = f"{fault.source_record_id}-recovery"
@@ -373,14 +399,22 @@ async def test_p1_zero_effect_never_allows_same_capture_success_after_stale() ->
 
 @pytest.mark.asyncio
 async def test_p2_retriable_exact_replay_recovers_after_one_shot_failure() -> None:
-    fault = _fault(1, "p2.conversation", "retriable", "live_voice.composition.p2.presentation.ack")
-    failed = _error(fault.request_id, "UNAVAILABLE", "PRODUCT_W2_RETRIABLE_FAULT_INJECTED")
+    fault = _fault(
+        1, "p2.conversation", "retriable", "live_voice.composition.p2.presentation.ack"
+    )
+    failed = _error(
+        fault.request_id, "UNAVAILABLE", "PRODUCT_W2_RETRIABLE_FAULT_INJECTED"
+    )
     recovered = _success(
         fault.request_id,
         {"status": "presentation_acknowledged", "replayed": False},
     )
     rpc = _ScriptedRpc([failed, recovered])
-    canonical = {"session_id": "session-1", "response_id": "response-1", "contiguous_cursor": 12}
+    canonical = {
+        "session_id": "session-1",
+        "response_id": "response-1",
+        "contiguous_cursor": 12,
+    }
 
     await W2FaultRunner(rpc).probe_p2_retriable(fault, canonical)
 
@@ -390,11 +424,24 @@ async def test_p2_retriable_exact_replay_recovers_after_one_shot_failure() -> No
 
 @pytest.mark.asyncio
 async def test_p2_non_retriable_uses_schema_valid_beyond_produced_cursor() -> None:
-    fault = _fault(2, "p2.conversation", "non_retriable", "live_voice.composition.p2.presentation.ack")
-    failed = _error(fault.request_id, "PROTOCOL_VIOLATION", "ACK_BEYOND_PRODUCED_CURSOR")
+    fault = _fault(
+        2,
+        "p2.conversation",
+        "non_retriable",
+        "live_voice.composition.p2.presentation.ack",
+    )
+    failed = _error(
+        fault.request_id, "PROTOCOL_VIOLATION", "ACK_BEYOND_PRODUCED_CURSOR"
+    )
     recovery_id = f"{fault.source_record_id}-recovery"
-    rpc = _ScriptedRpc([failed, failed, _success(recovery_id, {"status": "presentation_acknowledged"})])
-    canonical = {"session_id": "session-1", "response_id": "response-1", "contiguous_cursor": 12}
+    rpc = _ScriptedRpc(
+        [failed, failed, _success(recovery_id, {"status": "presentation_acknowledged"})]
+    )
+    canonical = {
+        "session_id": "session-1",
+        "response_id": "response-1",
+        "contiguous_cursor": 12,
+    }
 
     await W2FaultRunner(rpc).probe_p2_non_retriable(fault, canonical)
 
@@ -405,15 +452,26 @@ async def test_p2_non_retriable_uses_schema_valid_beyond_produced_cursor() -> No
 
 @pytest.mark.asyncio
 async def test_p2_zero_effect_keeps_canonical_ack_binding_and_recovers() -> None:
-    fault = _fault(3, "p2.conversation", "zero_effect", "live_voice.composition.p2.presentation.ack")
+    fault = _fault(
+        3,
+        "p2.conversation",
+        "zero_effect",
+        "live_voice.composition.p2.presentation.ack",
+    )
     failed = _error(
         fault.request_id,
         "STALE",
         "PRODUCT_W2_STALE_FAULT_INJECTED",
     )
     recovery_id = f"{fault.source_record_id}-recovery"
-    rpc = _ScriptedRpc([failed, failed, _success(recovery_id, {"status": "presentation_acknowledged"})])
-    canonical = {"session_id": "session-1", "response_id": "response-1", "contiguous_cursor": 12}
+    rpc = _ScriptedRpc(
+        [failed, failed, _success(recovery_id, {"status": "presentation_acknowledged"})]
+    )
+    canonical = {
+        "session_id": "session-1",
+        "response_id": "response-1",
+        "contiguous_cursor": 12,
+    }
 
     await W2FaultRunner(rpc).probe_p2_zero_effect(fault, canonical)
 
@@ -463,9 +521,13 @@ class _P3Oracle:
 
 
 @pytest.mark.asyncio
-async def test_p3_retriable_negative_ack_is_companion_only_and_positive_recovery_is_stock_ui() -> None:
+async def test_p3_retriable_negative_ack_is_companion_only_and_positive_recovery_is_stock_ui() -> (
+    None
+):
     fault = _fault(1, "p3.task", "retriable", "live_voice.composition.p3.progress.ack")
-    failed = _error(fault.request_id, "UNAVAILABLE", "TASK_PROGRESS_DELIVERY_UNAVAILABLE")
+    failed = _error(
+        fault.request_id, "UNAVAILABLE", "TASK_PROGRESS_DELIVERY_UNAVAILABLE"
+    )
     rpc = _ScriptedRpc([failed, failed])
     canonical = {
         "session_id": "session-1",
@@ -487,7 +549,9 @@ async def test_p3_retriable_negative_ack_is_companion_only_and_positive_recovery
 @pytest.mark.asyncio
 async def test_p3_retriable_rejects_foreign_task_stock_ack_recovery() -> None:
     fault = _fault(1, "p3.task", "retriable", "live_voice.composition.p3.progress.ack")
-    failed = _error(fault.request_id, "UNAVAILABLE", "TASK_PROGRESS_DELIVERY_UNAVAILABLE")
+    failed = _error(
+        fault.request_id, "UNAVAILABLE", "TASK_PROGRESS_DELIVERY_UNAVAILABLE"
+    )
     canonical = {
         "session_id": "session-1",
         "task_id": "task-1",
@@ -516,13 +580,21 @@ async def test_p3_retriable_rejects_foreign_task_stock_ack_recovery() -> None:
 
 
 @pytest.mark.asyncio
-async def test_p3_non_retriable_presigns_terminal_then_rejects_mutate_against_nonterminal_b() -> None:
+async def test_p3_non_retriable_presigns_terminal_then_rejects_mutate_against_nonterminal_b() -> (
+    None
+):
     fault = _fault(2, "p3.task", "non_retriable", "live_voice.composition.p3.mutate")
     issue_id = f"{fault.source_record_id}-confirmation"
     failed = _error(fault.request_id, "CONFLICT", "TASK_RETRY_REQUIRES_TERMINAL")
     rpc = _ScriptedRpc(
         [
-            _success(issue_id, {"status": "confirmation_issued", "confirmation_id": "confirmation-probe"}),
+            _success(
+                issue_id,
+                {
+                    "status": "confirmation_issued",
+                    "confirmation_id": "confirmation-probe",
+                },
+            ),
             failed,
             failed,
         ]
@@ -533,7 +605,9 @@ async def test_p3_non_retriable_presigns_terminal_then_rejects_mutate_against_no
         "attempt_number": 1,
         "state": "terminal",
         "retry_count": 0,
-        "event_facts": ((3, "event-a-terminal", "attempt-a", "task.terminal", "executor-a"),),
+        "event_facts": (
+            (3, "event-a-terminal", "attempt-a", "task.terminal", "executor-a"),
+        ),
     }
     nonterminal_b = {
         "task_id": "task-1",
@@ -541,16 +615,29 @@ async def test_p3_non_retriable_presigns_terminal_then_rejects_mutate_against_no
         "attempt_number": 2,
         "state": "running",
         "retry_count": 1,
-        "event_facts": ((4, "event-b-retry", "attempt-b", "task.retry_accepted", "ui-retry-command"),),
+        "event_facts": (
+            (
+                4,
+                "event-b-retry",
+                "attempt-b",
+                "task.retry_accepted",
+                "ui-retry-command",
+            ),
+        ),
     }
     after = {
         **nonterminal_b,
         "event_facts": nonterminal_b["event_facts"]
         + ((5, "event-b-running", "attempt-b", "task.running", "executor-b"),),
     }
-    oracle = _P3Oracle([terminal_a, nonterminal_b, after], winner={"operation": "task.retry", "task_id": "task-1"})
+    oracle = _P3Oracle(
+        [terminal_a, nonterminal_b, after],
+        winner={"operation": "task.retry", "task_id": "task-1"},
+    )
 
-    await W2FaultRunner(rpc).probe_p3_non_retriable(fault, "task-1", "session-1", "correlation-1", oracle)
+    await W2FaultRunner(rpc).probe_p3_non_retriable(
+        fault, "task-1", "session-1", "correlation-1", oracle
+    )
 
     assert rpc.calls[0][0] == "live_voice.composition.p3.confirmation.issue"
     assert rpc.calls[1][0] == rpc.calls[2][0] == fault.operation
@@ -622,7 +709,13 @@ async def test_p3_zero_effect_uses_exact_planned_id_before_fresh_ui_retry() -> N
     failed = _error(fault.request_id, "STALE", "PRODUCT_W2_STALE_FAULT_INJECTED")
     rpc = _ScriptedRpc(
         [
-            _success(issue_id, {"status": "confirmation_issued", "confirmation_id": "confirmation-stale"}),
+            _success(
+                issue_id,
+                {
+                    "status": "confirmation_issued",
+                    "confirmation_id": "confirmation-stale",
+                },
+            ),
             failed,
             failed,
         ]
@@ -634,7 +727,9 @@ async def test_p3_zero_effect_uses_exact_planned_id_before_fresh_ui_retry() -> N
         "state": "terminal",
         "retry_count": 0,
         "event_head": 3,
-        "event_facts": ((3, "event-a-terminal", "attempt-a", "task.terminal", "executor-a"),),
+        "event_facts": (
+            (3, "event-a-terminal", "attempt-a", "task.terminal", "executor-a"),
+        ),
     }
     successor_b = {
         "task_id": "task-1",
@@ -643,11 +738,18 @@ async def test_p3_zero_effect_uses_exact_planned_id_before_fresh_ui_retry() -> N
         "state": "running",
         "retry_count": 1,
         "event_head": 5,
-        "event_facts": ((5, "event-b-running", "attempt-b", "task.running", "executor-b"),),
+        "event_facts": (
+            (5, "event-b-running", "attempt-b", "task.running", "executor-b"),
+        ),
     }
-    oracle = _P3Oracle([terminal_a, dict(terminal_a), successor_b], winner={"operation": "task.retry", "task_id": "task-1"})
+    oracle = _P3Oracle(
+        [terminal_a, dict(terminal_a), successor_b],
+        winner={"operation": "task.retry", "task_id": "task-1"},
+    )
 
-    await W2FaultRunner(rpc).probe_p3_zero_effect(fault, "task-1", "session-1", "correlation-1", oracle)
+    await W2FaultRunner(rpc).probe_p3_zero_effect(
+        fault, "task-1", "session-1", "correlation-1", oracle
+    )
 
     assert rpc.calls[1][2] == rpc.calls[2][2] == fault.request_id
     assert rpc.calls[1][1] == rpc.calls[2][1]
@@ -753,7 +855,9 @@ async def test_companion_owns_p2_before_media_and_closes_exact_route() -> None:
 
     await factory.activate(owner_label)
     lease = await factory.create(capture_label)
-    await rpc.request("live_voice.speech.recognize_batch", lease.params, request_id=speech_id)
+    await rpc.request(
+        "live_voice.speech.recognize_batch", lease.params, request_id=speech_id
+    )
     await lease.close()
     await factory.close()
 
@@ -861,7 +965,167 @@ async def test_cdp_exchange_requires_normalized_gateway_and_same_socket() -> Non
 
 
 @pytest.mark.asyncio
-async def test_chrome_p3_recovery_skips_foreign_task_and_requires_exact_ack_lineage() -> None:
+async def test_cdp_observer_accepts_only_project_bound_stock_socket_query() -> None:
+    observer = ChromeNetworkObserver(
+        "http://127.0.0.1:9222",
+        gateway_url="ws://127.0.0.1:8000/ws",
+        page_origin="http://127.0.0.1:3000",
+    )
+    observer._socket = _CdpEventSocket(
+        [
+            {
+                "method": "Network.webSocketCreated",
+                "params": {
+                    "requestId": "stock-socket",
+                    "url": "ws://127.0.0.1:8000/ws?project_dir=C%3A%5Ctmp%5Cproject",
+                },
+            },
+            {
+                "method": "Network.webSocketCreated",
+                "params": {
+                    "requestId": "credential-socket",
+                    "url": "ws://127.0.0.1:8000/ws?api_key=must-not-be-observed",
+                },
+            },
+            {
+                "method": "Network.webSocketFrameSent",
+                "params": {
+                    "requestId": "stock-socket",
+                    "response": {
+                        "opcode": 1,
+                        "payloadData": json.dumps(
+                            {
+                                "type": "req",
+                                "id": "request-1",
+                                "method": "live_voice.composition.p2.activate",
+                                "params": {"session_id": "session-1"},
+                            }
+                        ),
+                    },
+                },
+            },
+        ]
+    )
+
+    await observer._receive_loop()
+
+    assert observer._web_sockets == {"stock-socket": "ws://127.0.0.1:8000/ws"}
+    observed = observer._messages.get_nowait()
+    assert observed.socket_url == "ws://127.0.0.1:8000/ws"
+    assert observed.message["id"] == "request-1"
+
+
+@pytest.mark.asyncio
+async def test_stock_template_skips_durable_predecessor_activation_replay() -> None:
+    observer = ChromeNetworkObserver(
+        "http://127.0.0.1:9222",
+        gateway_url="ws://127.0.0.1:8000/ws",
+        page_origin="http://127.0.0.1:3000",
+        timeout=0.05,
+    )
+    socket = "gateway-socket"
+    gateway_url = "ws://127.0.0.1:8000/ws"
+
+    def exchange(
+        method: str, request_id: str, params: dict[str, Any], response: dict[str, Any]
+    ) -> list[ObservedWebMessage]:
+        return [
+            ObservedWebMessage(
+                "sent",
+                socket,
+                gateway_url,
+                {"type": "req", "id": request_id, "method": method, "params": params},
+            ),
+            ObservedWebMessage("received", socket, gateway_url, response),
+        ]
+
+    predecessor = {
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+    }
+    successor = {
+        **predecessor,
+        "activation_id": "activation-2",
+        "activation_generation": 2,
+    }
+    media = {
+        **successor,
+        "capture_id": "capture-1",
+        "capture_generation": 1,
+        "track_id": "track-1",
+    }
+    speech = {
+        "operation": "speech.recognize.batch",
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "capture": {
+            "capture_id": "capture-1",
+            "capture_generation": 1,
+            "track_id": "track-1",
+        },
+        "audio": {"data_base64": "memory-only-audio"},
+    }
+    observer._backlog.extend(
+        [
+            *exchange(
+                "live_voice.composition.p2.activate",
+                "activate-1",
+                predecessor,
+                _success(
+                    "activate-1", {"status": "active", "replayed": True, **predecessor}
+                ),
+            ),
+            *exchange(
+                "live_voice.composition.p2.activate",
+                "activate-2",
+                successor,
+                _success(
+                    "activate-2", {"status": "active", "replayed": False, **successor}
+                ),
+            ),
+            *exchange(
+                "live_voice.media.activate",
+                "media-1",
+                media,
+                _direct("media-1", {"status": "active"}),
+            ),
+            *exchange(
+                "live_voice.speech.recognize_batch",
+                "speech-1",
+                speech,
+                _success("speech-1", {"status": "recognized"}),
+            ),
+            *exchange(
+                "live_voice.media.close",
+                "media-close-1",
+                media,
+                _direct("media-close-1", {"status": "closed"}),
+            ),
+        ]
+    )
+    runner = ProductFaultPairRunner(
+        pair=1,
+        plan=SimpleNamespace(),
+        rpc=_ScriptedRpc([]),
+        observer=observer,
+        gateway_endpoint=gateway_url,
+        origin="http://127.0.0.1:3000",
+        timeout=0.05,
+    )
+
+    template = await runner._stock_speech_template()
+
+    assert template.p2_activation_params == successor
+    assert template.media_activation_params == media
+
+
+@pytest.mark.asyncio
+async def test_chrome_p3_recovery_skips_foreign_task_and_requires_exact_ack_lineage() -> (
+    None
+):
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
         gateway_url="ws://127.0.0.1:8000/ws",
@@ -958,9 +1222,7 @@ async def test_chrome_p3_recovery_skips_foreign_task_and_requires_exact_ack_line
             },
         ),
     )
-    observer._backlog.extend(
-        [foreign_event, exact_event, ack_request, ack_response]
-    )
+    observer._backlog.extend([foreign_event, exact_event, ack_request, ack_response])
     oracle = ChromeP3Oracle(
         _ScriptedRpc([]),
         observer,
@@ -1040,9 +1302,7 @@ async def test_observation_and_gateway_event_waits_have_one_noisy_deadline() -> 
     for index in range(200):
         gateway._events.put_nowait({"type": "event", "event": f"noise-{index}"})
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(
-            gateway.wait_event("target", timeout=0.01), timeout=0.1
-        )
+        await asyncio.wait_for(gateway.wait_event("target", timeout=0.01), timeout=0.1)
 
 
 @pytest.mark.asyncio
@@ -1120,9 +1380,7 @@ async def test_p1_runner_contract_matches_real_fault_seam() -> None:
             )
             return lease
 
-    await W2FaultRunner(ServiceRpc()).probe_p1_retriable(
-        fault, RealSpeechFactory()
-    )
+    await W2FaultRunner(ServiceRpc()).probe_p1_retriable(fault, RealSpeechFactory())
 
     assert provider.recognize_calls == 1
 
