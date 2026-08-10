@@ -36,6 +36,38 @@ def test_runtime_entrypoint_delegates_to_candidate_bound_python() -> None:
     assert "machine-private.w2-rehearsal-runtime-config.v2" not in script
 
 
+def test_runtime_entrypoint_forwards_only_the_private_config_reference() -> None:
+    script = (_BUNDLE / "start_w2_rehearsal.ps1").read_text(encoding="utf-8")
+
+    assert "[string] $PrivateConfig" in script
+    assert "-PrivateConfig must be an absolute regular file" in script
+    assert "@('--private-config', $privateConfigPath)" in script
+    assert "$privateConfigValue" not in script
+    assert "machine-private.live-voice-no-evidence-smoke.v1" not in script
+
+
+def test_chrome_audio_modes_have_mutually_exclusive_argv_and_physical_has_no_wav_dependency() -> None:
+    script = (_BUNDLE / "start_w2_rehearsal.ps1").read_text(encoding="utf-8")
+    audio_modes = script.split("if ($PhysicalAudio) {", 1)[1]
+    physical, prepared_tail = audio_modes.split("} else {", 1)
+    prepared = prepared_tail.split("$process = Start-Process", 1)[0]
+    fake_flags = (
+        "--use-fake-device-for-media-stream",
+        "--use-file-for-fake-audio-capture",
+        "--use-fake-ui-for-media-stream",
+    )
+
+    assert "[switch] $PhysicalAudio" in script
+    assert "$audioMode = 'physical'" in physical
+    assert "Resolve-ExistingFile" not in physical
+    assert all(flag not in physical for flag in fake_flags)
+    assert "$audioMode = 'prepared_wav'" in prepared
+    assert "Resolve-ExistingFile" in prepared
+    assert all(flag in prepared for flag in fake_flags)
+    assert "--autoplay-policy=no-user-gesture-required" in script
+    assert "audio_mode=$audioMode" in script
+
+
 def test_runtime_entrypoint_accepts_only_exact_v3_config_schema(
     tmp_path: Path,
 ) -> None:

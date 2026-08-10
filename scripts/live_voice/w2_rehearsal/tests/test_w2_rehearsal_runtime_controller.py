@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,7 @@ def _config(tmp_path: Path) -> dict[str, object]:
         "evidence_set_id": authority["evidence_set_id"],
         "policy_id": authority["policy_id"],
         "evidence_root": str(tmp_path / "evidence"),
+        "staging_root": str(tmp_path / "staging"),
         "leaf_key_root": str(tmp_path / "keys"),
         "principal_id": "principal-1",
         "project_id": "project-1",
@@ -212,6 +214,34 @@ def test_server_owned_fault_plans_are_scoped_to_exact_rehearsal_slots(
     assert pair3[P3_STALE_FAULT_OPERATION_ENV] == p3_stale["operation"]
 
 
+def _private_payload(config: dict[str, object]) -> dict[str, object]:
+    speech = config["speech"]
+    assert isinstance(speech, dict)
+    return {
+        "schema": "machine-private.live-voice-no-evidence-smoke.v1",
+        "agent": {
+            "provider": "OpenAI",
+            "api_base": "https://agent.example.invalid/v1",
+            "api_key": "private-agent-key",
+            "model": "agent-model",
+        },
+        "speech": {
+            "provider": speech["provider"],
+            "api_base": speech["api_base"],
+            "api_key": "private-speech-key",
+            "stt_model": speech["stt_model"],
+            "tts_model": speech["tts_model"],
+            "voice": speech["voice"],
+        },
+    }
+
+
+def _write_private_config(tmp_path: Path, config: dict[str, object]) -> Path:
+    path = (tmp_path / "machine-private.json").resolve()
+    path.write_text(json.dumps(_private_payload(config)), encoding="utf-8")
+    return path
+
+
 def test_parent_secrets_are_scrubbed_and_reintroduced_only_to_the_right_child(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -260,6 +290,222 @@ def test_parent_secrets_are_scrubbed_and_reintroduced_only_to_the_right_child(
     )
 
 
+def test_private_config_is_strict_and_routes_values_only_to_the_owned_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    path = _write_private_config(tmp_path, config)
+    for name, value in {
+        "API_KEY": "stale-parent-agent-key",
+        "API_BASE": "https://stale-parent.invalid/v1",
+        "MODEL_NAME": "stale-parent-model",
+        "MODEL_PROVIDER": "stale-parent-provider",
+        "LIVE_VOICE_SPEECH_API_KEY": "stale-parent-speech-key",
+    }.items():
+        monkeypatch.setenv(name, value)
+
+    private = controller._load_private_config(path, config)
+    agent_env = controller._agent_provider_env(private)
+    common = _base_env(config)
+    gateway = _slot_env(
+        config,
+        _slot(pair=1, sequence=1, producer="gateway"),
+        p3_token="p3-token",
+        speech_key=private.speech.api_key,
+        agent_env=agent_env,
+    )
+    agentserver = _slot_env(
+        config,
+        _slot(pair=1),
+        p3_token="p3-token",
+        speech_key=private.speech.api_key,
+        agent_env=agent_env,
+    )
+
+    private_values = {
+        "OpenAI",
+        "https://agent.example.invalid/v1",
+        "private-agent-key",
+        "agent-model",
+        "private-speech-key",
+    }
+    assert private_values.isdisjoint(common.values())
+    assert gateway["LIVE_VOICE_SPEECH_API_KEY"] == "private-speech-key"
+    assert all(name not in gateway for name in controller._AGENT_RUNTIME_ENV_NAMES)
+    assert agentserver["MODEL_PROVIDER"] == "OpenAI"
+    assert agentserver["API_BASE"] == "https://agent.example.invalid/v1"
+    assert agentserver["API_KEY"] == "private-agent-key"
+    assert agentserver["MODEL_NAME"] == "agent-model"
+    assert "LIVE_VOICE_SPEECH_API_KEY" not in agentserver
+    assert private_values.isdisjoint(
+        value
+        for value in (
+            str(config),
+            "python runner agentserver --port 18092",
+        )
+    )
+    output = capsys.readouterr()
+    assert all(value not in output.out and value not in output.err for value in private_values)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda value: value.__setitem__("schema", "foreign"),
+        lambda value: value.__setitem__("extra", True),
+        lambda value: value["agent"].pop("model"),
+        lambda value: value["agent"].__setitem__("api_key", ""),
+        lambda value: value["agent"].__setitem__("provider", 1),
+        lambda value: value["speech"].__setitem__("extra", "closed"),
+        lambda value: value["speech"].__setitem__("api_key", "x" * 4097),
+        lambda value: value["agent"].__setitem__(
+            "api_key", "do-not-leak-\ud800"
+        ),
+    ),
+)
+def test_private_config_rejects_open_incomplete_or_unbounded_content_without_leak(
+    tmp_path: Path,
+    mutate: object,
+) -> None:
+    config = _config(tmp_path)
+    value = _private_payload(config)
+    mutate(value)
+    path = (tmp_path / "invalid-private.json").resolve()
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(RuntimeError) as raised:
+        controller._load_private_config(path, config)
+
+    assert "private-agent-key" not in str(raised.value)
+    assert "private-speech-key" not in str(raised.value)
+    assert "do-not-leak" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("provider", "foreign-provider"),
+        ("api_base", "https://foreign.invalid/v1"),
+        ("stt_model", "foreign-stt"),
+        ("tts_model", "foreign-tts"),
+        ("voice", "foreign-voice"),
+    ),
+)
+def test_private_speech_metadata_must_exactly_match_runtime_config(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    config = _config(tmp_path)
+    value = _private_payload(config)
+    value["speech"][field] = replacement
+    path = (tmp_path / "mismatched-private.json").resolve()
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="speech metadata"):
+        controller._load_private_config(path, config)
+
+
+@pytest.mark.parametrize("root_field", ("candidate_root", "evidence_root", "log"))
+def test_private_config_must_be_absolute_regular_and_outside_runtime_roots(
+    tmp_path: Path,
+    root_field: str,
+) -> None:
+    config = _config(tmp_path)
+    root = (
+        Path(str(config["staging_root"])) / "rehearsal-runtime-logs"
+        if root_field == "log"
+        else Path(str(config[root_field]))
+    )
+    root.mkdir(parents=True)
+    path = (root / "private.json").resolve()
+    path.write_text(json.dumps(_private_payload(config)), encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="outside candidate, evidence, and log roots"):
+        controller._load_private_config(path, config)
+
+    with pytest.raises(RuntimeError, match="absolute regular file"):
+        controller._load_private_config(Path("relative-private.json"), config)
+
+
+def test_private_config_skips_hidden_prompt_and_never_enters_runtime_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = _config(tmp_path)
+    evidence_root = Path(str(config["evidence_root"]))
+    evidence_root.mkdir()
+    path = _write_private_config(tmp_path, config)
+    config_path = (tmp_path / "runtime.json").resolve()
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class FakeController:
+        processes: dict[str, object] = {}
+
+        def __init__(
+            self,
+            loaded: dict[str, object],
+            slots: list[Slot],
+            speech_key: str,
+            agent_env: dict[str, str],
+        ) -> None:
+            self.speech_key = speech_key
+            self.agent_env = dict(agent_env)
+            captured.update(
+                loaded=loaded,
+                slots=slots,
+                speech_key=speech_key,
+                agent_env=dict(agent_env),
+            )
+
+    monkeypatch.setattr(controller, "_load", lambda _path: config)
+    monkeypatch.setattr(controller, "_slots", lambda _config: [])
+    monkeypatch.setattr(controller, "_policy_preflight", lambda *_args: None)
+    monkeypatch.setattr(controller, "_assert_port_free", lambda _port: None)
+    monkeypatch.setattr(controller, "_loop", lambda _controller: None)
+    monkeypatch.setattr(controller, "Controller", FakeController)
+    monkeypatch.setattr(
+        controller.getpass,
+        "getpass",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("private config must skip hidden prompt")
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "controller",
+            "--config",
+            str(config_path),
+            "--private-config",
+            str(path),
+        ],
+    )
+
+    assert controller.main() == 0
+    assert captured["speech_key"] == "private-speech-key"
+    assert captured["agent_env"] == {
+        "MODEL_PROVIDER": "OpenAI",
+        "API_BASE": "https://agent.example.invalid/v1",
+        "API_KEY": "private-agent-key",
+        "MODEL_NAME": "agent-model",
+    }
+    output = capsys.readouterr()
+    for value in (
+        "private-speech-key",
+        "private-agent-key",
+        "https://agent.example.invalid/v1",
+        "agent-model",
+    ):
+        assert value not in output.out
+        assert value not in output.err
+
+
 @pytest.mark.parametrize(
     "name",
     (
@@ -282,13 +528,16 @@ def test_shared_dotenv_rejects_real_and_legacy_speech_key_names(
         _assert_shared_dotenv_secret_boundary(tmp_path)
 
 
-def test_shared_dotenv_rejects_agent_provider_key(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "name", ("API_KEY", "API_BASE", "MODEL_NAME", "MODEL_PROVIDER", "OPENAI_API_KEY")
+)
+def test_shared_dotenv_rejects_agent_provider_runtime_names(
+    tmp_path: Path, name: str
 ) -> None:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / ".env").write_text(
-        "OPENAI_API_KEY=agent-only\n",
+        f"{name}=agent-only\n",
         encoding="utf-8",
     )
 
@@ -302,7 +551,7 @@ def test_shared_dotenv_allows_nonsecret_config_and_commented_secret_names(
     config_dir = tmp_path / "config"
     config_dir.mkdir()
     (config_dir / ".env").write_text(
-        "MODEL_NAME=agent-model\n# LIVE_VOICE_SPEECH_API_KEY=disabled\n",
+        "SAFE_RUNTIME_CONFIG=enabled\n# LIVE_VOICE_SPEECH_API_KEY=disabled\n",
         encoding="utf-8",
     )
 

@@ -14,7 +14,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from jiuwenswarm.server.live_voice.w2_fault_plan import (
     P1_RETRIABLE_FAULT_OPERATION_ENV,
@@ -37,6 +37,12 @@ from w2_product_fault_binding import (
 CREATE_NEW_PROCESS_GROUP = 0x00000200
 _LEGACY_SPEECH_API_KEY_ENV = "JIUWENSWARM_LIVE_VOICE_SPEECH_API_KEY"
 _SPEECH_API_KEY_ENV = "LIVE_VOICE_SPEECH_API_KEY"
+_PRIVATE_CONFIG_SCHEMA = "machine-private.live-voice-no-evidence-smoke.v1"
+_PRIVATE_VALUE_MAX_CHARACTERS = 4_096
+_PRIVATE_VALUE_MAX_UTF8_BYTES = 16_384
+_AGENT_RUNTIME_ENV_NAMES = frozenset(
+    {"API_KEY", "API_BASE", "MODEL_NAME", "MODEL_PROVIDER"}
+)
 _AGENT_PROVIDER_SECRET_ENV_NAMES = frozenset(
     {
         "API_KEY",
@@ -73,15 +79,50 @@ class Slot:
     showcase_run: int | None
 
 
+@dataclass(frozen=True, repr=False, slots=True)
+class PrivateAgentConfig:
+    provider: str
+    api_base: str
+    api_key: str
+    model: str
+
+
+@dataclass(frozen=True, repr=False, slots=True)
+class PrivateSpeechConfig:
+    provider: str
+    api_base: str
+    api_key: str
+    stt_model: str
+    tts_model: str
+    voice: str
+
+
+@dataclass(frozen=True, repr=False, slots=True)
+class PrivateRuntimeConfig:
+    agent: PrivateAgentConfig
+    speech: PrivateSpeechConfig
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Control the signed, discarded W2 rehearsal runtime slots."
     )
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument(
+        "--private-config",
+        type=Path,
+        help=(
+            "Absolute reference to the machine-private Agent/Speech config; "
+            "the values never enter runtime config or child argv."
+        ),
+    )
+    parser.add_argument(
         "--preflight-only",
         action="store_true",
-        help="Validate all bindings without reading secrets or starting a process.",
+        help=(
+            "Validate all bindings without starting a process; a supplied private "
+            "config is also validated without printing its values."
+        ),
     )
     return parser
 
@@ -99,6 +140,116 @@ def _load(path: Path) -> dict[str, Any]:
         evidence_set_id=value.get("evidence_set_id"),
     )
     return value
+
+
+def _private_string(value: object, *, field: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > _PRIVATE_VALUE_MAX_CHARACTERS
+        or "\x00" in value
+        or "\r" in value
+        or "\n" in value
+    ):
+        raise RuntimeError(f"private runtime config {field} must be a bounded string")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        raise RuntimeError(
+            f"private runtime config {field} must contain Unicode scalar values"
+        ) from None
+    if len(encoded) > _PRIVATE_VALUE_MAX_UTF8_BYTES:
+        raise RuntimeError(f"private runtime config {field} exceeds its byte limit")
+    return value
+
+
+def _exact_private_object(
+    value: object, *, keys: frozenset[str], label: str
+) -> dict[str, object]:
+    if type(value) is not dict or frozenset(value) != keys:
+        raise RuntimeError(f"private runtime config {label} must use exact keys")
+    return value
+
+
+def _private_config_path(path: Path, config: Mapping[str, Any]) -> Path:
+    if not path.is_absolute():
+        raise RuntimeError("-PrivateConfig must be an absolute regular file")
+    try:
+        if path.is_symlink():
+            raise RuntimeError("-PrivateConfig must be an absolute regular file")
+        resolved = path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise RuntimeError("-PrivateConfig must be an absolute regular file") from exc
+    if not resolved.is_file():
+        raise RuntimeError("-PrivateConfig must be an absolute regular file")
+    try:
+        forbidden_roots = (
+            Path(str(config["candidate_root"])).resolve(),
+            Path(str(config["evidence_root"])).resolve(),
+            (
+                Path(str(config["staging_root"])) / "rehearsal-runtime-logs"
+            ).resolve(),
+        )
+    except (KeyError, OSError) as exc:
+        raise RuntimeError("runtime config does not define closed private roots") from exc
+    if any(resolved == root or resolved.is_relative_to(root) for root in forbidden_roots):
+        raise RuntimeError(
+            "-PrivateConfig must remain outside candidate, evidence, and log roots"
+        )
+    return resolved
+
+
+def _load_private_config(
+    path: Path, config: Mapping[str, Any]
+) -> PrivateRuntimeConfig:
+    resolved = _private_config_path(path, config)
+    try:
+        value = json.loads(resolved.read_text(encoding="utf-8-sig", errors="strict"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise RuntimeError("private runtime config is not valid UTF-8 JSON") from None
+    root = _exact_private_object(
+        value,
+        keys=frozenset({"schema", "agent", "speech"}),
+        label="root",
+    )
+    if root["schema"] != _PRIVATE_CONFIG_SCHEMA:
+        raise RuntimeError("private runtime config schema is unsupported")
+    agent = _exact_private_object(
+        root["agent"],
+        keys=frozenset({"provider", "api_base", "api_key", "model"}),
+        label="agent",
+    )
+    speech = _exact_private_object(
+        root["speech"],
+        keys=frozenset(
+            {"provider", "api_base", "api_key", "stt_model", "tts_model", "voice"}
+        ),
+        label="speech",
+    )
+    private_agent = PrivateAgentConfig(
+        provider=_private_string(agent["provider"], field="agent.provider"),
+        api_base=_private_string(agent["api_base"], field="agent.api_base"),
+        api_key=_private_string(agent["api_key"], field="agent.api_key"),
+        model=_private_string(agent["model"], field="agent.model"),
+    )
+    private_speech = PrivateSpeechConfig(
+        provider=_private_string(speech["provider"], field="speech.provider"),
+        api_base=_private_string(speech["api_base"], field="speech.api_base"),
+        api_key=_private_string(speech["api_key"], field="speech.api_key"),
+        stt_model=_private_string(speech["stt_model"], field="speech.stt_model"),
+        tts_model=_private_string(speech["tts_model"], field="speech.tts_model"),
+        voice=_private_string(speech["voice"], field="speech.voice"),
+    )
+    runtime_speech = config.get("speech")
+    if type(runtime_speech) is not dict or any(
+        runtime_speech.get(field) != getattr(private_speech, field)
+        for field in ("provider", "api_base", "stt_model", "tts_model", "voice")
+    ):
+        raise RuntimeError(
+            "private speech metadata does not exactly match runtime config"
+        )
+    return PrivateRuntimeConfig(agent=private_agent, speech=private_speech)
 
 
 def _run_checked(argv: list[str], *, cwd: Path, env: dict[str, str]) -> str:
@@ -122,8 +273,10 @@ def _base_env(config: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
     for name in tuple(env):
         upper_name = name.upper()
-        if upper_name.startswith("LIVE_VOICE_SPEECH_") or _SECRET_ENV_NAME.search(
-            upper_name
+        if (
+            upper_name.startswith("LIVE_VOICE_SPEECH_")
+            or upper_name in _AGENT_RUNTIME_ENV_NAMES
+            or _SECRET_ENV_NAME.search(upper_name)
         ):
             env.pop(name, None)
     env.pop(_LEGACY_SPEECH_API_KEY_ENV, None)
@@ -145,10 +298,20 @@ def _base_env(config: dict[str, Any]) -> dict[str, str]:
     return env
 
 
-def _agent_provider_secret_env() -> dict[str, str]:
+def _agent_provider_env(
+    private_config: PrivateRuntimeConfig | None,
+) -> dict[str, str]:
+    if private_config is not None:
+        agent = private_config.agent
+        return {
+            "MODEL_PROVIDER": agent.provider,
+            "API_BASE": agent.api_base,
+            "API_KEY": agent.api_key,
+            "MODEL_NAME": agent.model,
+        }
     return {
         name: value
-        for name in _AGENT_PROVIDER_SECRET_ENV_NAMES
+        for name in (*_AGENT_RUNTIME_ENV_NAMES, *_AGENT_PROVIDER_SECRET_ENV_NAMES)
         if (value := os.environ.get(name))
     }
 
@@ -162,6 +325,7 @@ def _assert_shared_dotenv_secret_boundary(data_dir: Path) -> None:
     forbidden = {
         _SPEECH_API_KEY_ENV,
         _LEGACY_SPEECH_API_KEY_ENV,
+        *_AGENT_RUNTIME_ENV_NAMES,
         *_AGENT_PROVIDER_SECRET_ENV_NAMES,
     }
     for line in path.read_text(encoding="utf-8-sig", errors="strict").splitlines():
@@ -323,6 +487,7 @@ def _slot_env(
     *,
     p3_token: str,
     speech_key: str,
+    agent_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     env = _base_env(config)
     for name in (
@@ -348,7 +513,9 @@ def _slot_env(
     if slot.producer == "agentserver":
         pair = 3 if slot.showcase_run is None else slot.showcase_run
         fault_plan = config["product_fault_plan"]
-        env.update(_agent_provider_secret_env())
+        env.update(
+            _agent_provider_env(None) if agent_env is None else dict(agent_env)
+        )
         env.update(
             {
                 "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED": "true",
@@ -459,11 +626,18 @@ def _slot_env(
 
 class Controller:
     def __init__(
-        self, config: dict[str, Any], slots: list[Slot], speech_key: str
+        self,
+        config: dict[str, Any],
+        slots: list[Slot],
+        speech_key: str,
+        agent_env: Mapping[str, str] | None = None,
     ) -> None:
         self.config = config
         self.slots = slots
         self.speech_key = speech_key
+        self.agent_env = dict(
+            _agent_provider_env(None) if agent_env is None else agent_env
+        )
         self.p3_token = secrets.token_urlsafe(32)
         self.processes: dict[str, subprocess.Popen[bytes]] = {}
         self.log_handles: dict[str, Any] = {}
@@ -606,7 +780,11 @@ class Controller:
                 str(self.config["ports"]["agentserver"]),
             ],
             _slot_env(
-                self.config, as_slot, p3_token=self.p3_token, speech_key=self.speech_key
+                self.config,
+                as_slot,
+                p3_token=self.p3_token,
+                speech_key=self.speech_key,
+                agent_env=self.agent_env,
             ),
         )
         _wait_port(self.config["ports"]["agentserver"], open_state=True)
@@ -624,7 +802,11 @@ class Controller:
                 str(self.config["ports"]["web"]),
             ],
             _slot_env(
-                self.config, gw_slot, p3_token=self.p3_token, speech_key=self.speech_key
+                self.config,
+                gw_slot,
+                p3_token=self.p3_token,
+                speech_key=self.speech_key,
+                agent_env=self.agent_env,
             ),
         )
         _wait_port(self.config["ports"]["web"], open_state=True)
@@ -662,7 +844,11 @@ class Controller:
                 str(self.config["ports"]["agentserver"]),
             ],
             _slot_env(
-                self.config, slot, p3_token=self.p3_token, speech_key=self.speech_key
+                self.config,
+                slot,
+                p3_token=self.p3_token,
+                speech_key=self.speech_key,
+                agent_env=self.agent_env,
             ),
         )
         _wait_port(self.config["ports"]["agentserver"], open_state=True)
@@ -748,19 +934,31 @@ def main() -> int:
             raise RuntimeError(f"rehearsal database already exists: {path}")
     for port in config["ports"].values():
         _assert_port_free(int(port))
+    private_config = (
+        None
+        if args.private_config is None
+        else _load_private_config(args.private_config, config)
+    )
     print("W2_REHEARSAL_RUNTIME_PREFLIGHT=PASS")
     if args.preflight_only:
         return 0
-    speech_key = getpass.getpass(
-        "Enter OpenAI API key (hidden; process memory only): "
-    ).strip()
-    if not speech_key:
-        raise RuntimeError("OpenAI API key is required")
-    controller = Controller(config, slots, speech_key)
+    if private_config is None:
+        speech_key = getpass.getpass(
+            "Enter Speech API key (hidden; process memory only): "
+        ).strip()
+        if not speech_key:
+            raise RuntimeError("Speech API key is required")
+    else:
+        speech_key = private_config.speech.api_key
+    agent_env = _agent_provider_env(private_config)
+    controller = Controller(config, slots, speech_key, agent_env)
     try:
         _loop(controller)
     finally:
         speech_key = ""
+        agent_env.clear()
+        controller.speech_key = ""
+        controller.agent_env.clear()
     return 0
 
 

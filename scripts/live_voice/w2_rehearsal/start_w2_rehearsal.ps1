@@ -5,8 +5,10 @@ param(
     [string] $Action,
 
     [string] $Config,
+    [string] $PrivateConfig,
     [string] $Python,
-    [string] $Wav
+    [string] $Wav,
+    [switch] $PhysicalAudio
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,6 +25,21 @@ function Resolve-ExistingFile {
 
 $configValue = $null
 $candidateBundle = $null
+$privateConfigPath = $null
+if ($PrivateConfig) {
+    $isDriveAbsolute = $PrivateConfig -match '^[A-Za-z]:[\\/]'
+    $isUncAbsolute = $PrivateConfig -match '^[\\/]{2}[^\\/]'
+    if (-not ($isDriveAbsolute -or $isUncAbsolute)) {
+        throw '-PrivateConfig must be an absolute regular file'
+    }
+    $privateConfigPath = Resolve-ExistingFile -Path $PrivateConfig -Label 'Private config'
+    if ($Action -notin @('Preflight', 'Controller')) {
+        throw '-PrivateConfig is supported only for Preflight and Controller'
+    }
+}
+if ($PhysicalAudio -and $Action -ne 'Chrome') {
+    throw '-PhysicalAudio is supported only for Chrome'
+}
 if ($Config) {
     $configPath = Resolve-ExistingFile -Path $Config -Label 'Runtime config'
     $configValue = Get-Content -LiteralPath $configPath -Raw -Encoding utf8 | ConvertFrom-Json
@@ -48,12 +65,20 @@ $Python = Resolve-ExistingFile -Path $Python -Label 'Python interpreter'
 switch ($Action) {
     'Preflight' {
         if (-not $configValue) { throw '-Config is required for Preflight' }
-        & $Python (Join-Path $candidateBundle 'w2_rehearsal_runtime_controller.py') --config $configPath --preflight-only
+        $controllerArgs = @('--config', $configPath, '--preflight-only')
+        if ($privateConfigPath) {
+            $controllerArgs += @('--private-config', $privateConfigPath)
+        }
+        & $Python (Join-Path $candidateBundle 'w2_rehearsal_runtime_controller.py') @controllerArgs
         exit $LASTEXITCODE
     }
     'Controller' {
         if (-not $configValue) { throw '-Config is required for Controller' }
-        & $Python -u (Join-Path $candidateBundle 'w2_rehearsal_runtime_controller.py') --config $configPath
+        $controllerArgs = @('--config', $configPath)
+        if ($privateConfigPath) {
+            $controllerArgs += @('--private-config', $privateConfigPath)
+        }
+        & $Python -u (Join-Path $candidateBundle 'w2_rehearsal_runtime_controller.py') @controllerArgs
         exit $LASTEXITCODE
     }
     'Chrome' {
@@ -63,7 +88,6 @@ switch ($Action) {
         if (Test-Path -LiteralPath $profile) {
             throw "Isolated Chrome profile already exists; use a fresh attempt path: $profile"
         }
-        $preparedWav = Resolve-ExistingFile -Path ([string] $configValue.prepared_wav) -Label 'Prepared WAV'
         $vitePort = [int] $configValue.ports.vite
         $debugPort = [int] $configValue.ports.chrome_debug
         if (-not (Get-NetTCPConnection -State Listen -LocalPort $vitePort -ErrorAction SilentlyContinue)) {
@@ -76,16 +100,24 @@ switch ($Action) {
             "`"--user-data-dir=$profile`"",
             '--no-first-run',
             '--no-default-browser-check',
-            '--use-fake-device-for-media-stream',
-            "`"--use-file-for-fake-audio-capture=$preparedWav`"",
-            '--use-fake-ui-for-media-stream',
             '--autoplay-policy=no-user-gesture-required',
             '--remote-debugging-address=127.0.0.1',
-            "--remote-debugging-port=$debugPort",
-            "http://127.0.0.1:$vitePort"
+            "--remote-debugging-port=$debugPort"
         )
+        if ($PhysicalAudio) {
+            $audioMode = 'physical'
+        } else {
+            $preparedWav = Resolve-ExistingFile -Path ([string] $configValue.prepared_wav) -Label 'Prepared WAV'
+            $arguments += @(
+                '--use-fake-device-for-media-stream',
+                "`"--use-file-for-fake-audio-capture=$preparedWav`"",
+                '--use-fake-ui-for-media-stream'
+            )
+            $audioMode = 'prepared_wav'
+        }
+        $arguments += "http://127.0.0.1:$vitePort"
         $process = Start-Process -FilePath $chrome -ArgumentList $arguments -PassThru
-        Write-Host "W2_REHEARSAL_CHROME_STARTED pid=$($process.Id) profile=$profile" -ForegroundColor Green
+        Write-Host "W2_REHEARSAL_CHROME_STARTED pid=$($process.Id) profile=$profile audio_mode=$audioMode" -ForegroundColor Green
         exit 0
     }
     'SpeechPreflight' {
