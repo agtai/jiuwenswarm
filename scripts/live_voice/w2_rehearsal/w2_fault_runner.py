@@ -46,12 +46,27 @@ P3_CONFIRM_METHOD = "live_voice.composition.p3.confirmation.issue"
 P3_MUTATE_METHOD = "live_voice.composition.p3.mutate"
 P3_STATUS_METHOD = "live_voice.task.status"
 P3_EVENTS_METHOD = "live_voice.task.events"
+P3_PROGRESS_CLOSE_METHOD = "live_voice.composition.p3.progress.close"
 MEDIA_ACTIVATE_METHOD = "live_voice.media.activate"
 MEDIA_CLOSE_METHOD = "live_voice.media.close"
 MEDIA_SUBPROTOCOL = "live-voice.media.v1"
 MEDIA_CONTRACT_VERSION = "live-voice.media.v1"
 MAX_SAFE_INTEGER = (1 << 53) - 1
 _CDP_READ_ONLY_COMMANDS = frozenset({"Network.enable", "Network.disable"})
+_STOCK_OBSERVED_REQUEST_METHODS = frozenset(
+    {
+        P1_METHOD,
+        P2_ACTIVATE_METHOD,
+        P2_CLOSE_METHOD,
+        P2_METHOD,
+        P3_ACK_METHOD,
+        P3_MUTATE_METHOD,
+        P3_PROGRESS_CLOSE_METHOD,
+        MEDIA_ACTIVATE_METHOD,
+        MEDIA_CLOSE_METHOD,
+    }
+)
+_STOCK_OBSERVED_EVENT_TYPES = frozenset({"live_voice.task.progress"})
 
 
 class FaultRunnerError(RuntimeError):
@@ -971,6 +986,7 @@ class ChromeNetworkObserver:
         self._command_waiters: dict[int, asyncio.Future[Mapping[str, Any]]] = {}
         self._web_sockets: dict[str, str] = {}
         self._stock_socket_marker_emitted = False
+        self._observed_requests: set[tuple[str, str]] = set()
         self._messages: asyncio.Queue[ObservedWebMessage] = asyncio.Queue(maxsize=512)
         self._backlog: deque[ObservedWebMessage] = deque()
 
@@ -1091,8 +1107,38 @@ class ChromeNetworkObserver:
                 continue
             if not isinstance(envelope, Mapping):
                 continue
+            direction = "sent" if method.endswith("Sent") else "received"
+            envelope_type = envelope.get("type")
+            if direction == "sent":
+                request_id = envelope.get("id")
+                request_method = envelope.get("method")
+                if (
+                    envelope_type != "req"
+                    or type(request_id) is not str
+                    or not request_id
+                    or request_method not in _STOCK_OBSERVED_REQUEST_METHODS
+                ):
+                    continue
+                request_key = (socket_id, request_id)
+                if len(self._observed_requests) >= 512:
+                    raise FaultRunnerError("CDP observed request ledger is full")
+                self._observed_requests.add(request_key)
+            elif envelope_type == "res":
+                request_id = envelope.get("id")
+                request_key = (socket_id, request_id)
+                if (
+                    type(request_id) is not str
+                    or request_key not in self._observed_requests
+                ):
+                    continue
+                self._observed_requests.discard(request_key)
+            elif (
+                envelope_type != "event"
+                or envelope.get("event") not in _STOCK_OBSERVED_EVENT_TYPES
+            ):
+                continue
             observed = ObservedWebMessage(
-                "sent" if method.endswith("Sent") else "received",
+                direction,
                 socket_id,
                 socket_url,
                 dict(envelope),
@@ -2137,7 +2183,7 @@ class ProductFaultPairRunner:
             raise FaultRunnerError("stock P2 route did not close gracefully")
         del p2_request
         p3_request, p3_response = await self.observer.wait_exchange(
-            "live_voice.composition.p3.progress.close"
+            P3_PROGRESS_CLOSE_METHOD
         )
         p3_status = _stock_product_success(p3_response, status="closed")
         if p3_status is None:

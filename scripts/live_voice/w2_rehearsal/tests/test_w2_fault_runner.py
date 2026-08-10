@@ -1103,6 +1103,83 @@ async def test_cdp_observer_accepts_public_stock_query_and_rejects_credentials(
 
 
 @pytest.mark.asyncio
+async def test_cdp_observer_discards_high_volume_irrelevant_stock_polling() -> None:
+    observer = ChromeNetworkObserver(
+        "http://127.0.0.1:9222",
+        stock_websocket_url="ws://127.0.0.1:5173/ws",
+        page_origin="http://127.0.0.1:3000",
+    )
+    socket_id = "stock-socket"
+
+    def frame(direction: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "method": f"Network.webSocketFrame{direction}",
+            "params": {
+                "requestId": socket_id,
+                "response": {"opcode": 1, "payloadData": json.dumps(payload)},
+            },
+        }
+
+    events: list[dict[str, Any]] = [
+        {
+            "method": "Network.webSocketCreated",
+            "params": {"requestId": socket_id, "url": "ws://127.0.0.1:5173/ws"},
+        }
+    ]
+    for index in range(600):
+        request_id = f"notification-{index}"
+        events.extend(
+            [
+                frame(
+                    "Sent",
+                    {
+                        "type": "req",
+                        "id": request_id,
+                        "method": "live_voice.composition.p2.notification.next",
+                        "params": {"notification_sequence": index + 1},
+                    },
+                ),
+                frame("Received", _success(request_id)),
+            ]
+        )
+    events.extend(
+        [
+            frame(
+                "Sent",
+                {
+                    "type": "req",
+                    "id": "speech-1",
+                    "method": "live_voice.speech.recognize_batch",
+                    "params": {"session_id": "session-1"},
+                },
+            ),
+            frame("Received", _success("speech-1", {"status": "recognized"})),
+            frame(
+                "Received",
+                {
+                    "type": "event",
+                    "event": "live_voice.task.progress",
+                    "payload": {"task_id": "task-1"},
+                },
+            ),
+        ]
+    )
+    observer._socket = _CdpEventSocket(events)
+
+    await observer._receive_loop()
+
+    retained = [observer._messages.get_nowait() for _ in range(3)]
+    assert [item.message.get("type") for item in retained] == [
+        "req",
+        "res",
+        "event",
+    ]
+    assert retained[0].message.get("method") == "live_voice.speech.recognize_batch"
+    assert observer._observed_requests == set()
+    assert observer._messages.empty()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("predecessor_replayed", [True, False])
 async def test_stock_template_skips_durable_or_abandoned_predecessor_activation(
     predecessor_replayed: bool,
