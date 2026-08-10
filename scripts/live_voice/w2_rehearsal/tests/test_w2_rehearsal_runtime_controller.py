@@ -755,9 +755,13 @@ def test_fault_runner_starts_with_public_authority_and_no_child_secret(
     assert argv[argv.index("--evidence-set-id") + 1] == "evidence-set-1"
     assert argv[argv.index("--pair") + 1] == "1"
     assert argv[argv.index("--gateway-url") + 1] == "ws://127.0.0.1:19000/ws"
+    assert (
+        argv[argv.index("--stock-websocket-url") + 1]
+        == "ws://127.0.0.1:15173/ws"
+    )
     assert argv[argv.index("--origin") + 1] == "http://127.0.0.1:15173"
     assert argv[argv.index("--cdp-url") + 1] == "http://127.0.0.1:19223"
-    assert argv[argv.index("--timeout") + 1] == "300"
+    assert argv[argv.index("--timeout") + 1] == "900"
     assert "speech-secret" not in argv
     assert "agent-secret" not in argv
     env = captured["env"]

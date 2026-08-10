@@ -223,13 +223,22 @@ reused for the physical attempt.
 
 `PAIR_READY=n` means only that the ports are listening. It does not mean the
 journey passed. For each pair, start the fault runner after the stock page and
-pair are ready with `start faults n`. Complete the UI journey and gracefully
-disconnect its P2/P3 routes, then run `wait faults n`. Only the exact
-`W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS ... routes=closed` marker permits the normal
-`stop n` success path. Before each stop, both the Gateway and AgentServer must
-also have performed at least one policy-authorized operation; otherwise the pair
-is invalid. Never hard-kill a runtime owner: only graceful stop creates the
-closed footer and runtime signature.
+pair are ready with `start faults n`. The runner uses the direct Gateway socket
+only for active fault RPCs and observes the stock page's same-origin Vite-proxy
+socket through read-only CDP. Refresh the existing single stock page after the
+runner starts, and do not begin P1 until its log contains the sanitized
+`W2_FAULT_RUNNER_STOCK_SOCKET_OBSERVED` marker. The complete assisted journey is
+bounded to 15 minutes.
+
+Complete the UI journey and gracefully disconnect its P2/P3 routes, then run
+`wait faults n`. The Live Voice control panel and the Integrated Web route-facts
+diagnostic panel are distinct: close the actual Live Voice control after the
+journey; collapsing the route-facts panel does not close the composition routes.
+Only the exact `W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS ... routes=closed` marker
+permits the normal `stop n` success path. Before each stop, both the Gateway and
+AgentServer must also have performed at least one policy-authorized operation;
+otherwise the pair is invalid. Never hard-kill a runtime owner: only graceful
+stop creates the closed footer and runtime signature.
 
 ## Runtime matrix
 

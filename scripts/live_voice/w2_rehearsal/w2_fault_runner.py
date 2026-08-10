@@ -136,7 +136,7 @@ def _normalized_ws_url(value: str) -> str:
 
 
 def _normalized_stock_ws_url(value: str) -> str:
-    """Match the stock socket without retaining its machine-local project path."""
+    """Match the stock socket without retaining its public connection options."""
 
     parsed = urllib.parse.urlsplit(value)
     if not parsed.query:
@@ -146,22 +146,23 @@ def _normalized_stock_ws_url(value: str) -> str:
             parsed.query,
             keep_blank_values=True,
             strict_parsing=True,
-            max_num_fields=1,
+            max_num_fields=4,
         )
     except ValueError as exc:
         raise FaultRunnerError("stock WebSocket query is invalid") from exc
-    if len(query) != 1 or query[0][0] != "project_dir":
+    allowed = {"provider", "api_base", "model", "project_dir"}
+    keys = [key for key, _value in query]
+    if not query or len(keys) != len(set(keys)) or any(key not in allowed for key in keys):
         raise FaultRunnerError("stock WebSocket query is outside the safe allowlist")
-    project_dir = query[0][1]
-    if (
-        not project_dir
-        or project_dir != project_dir.strip()
-        or len(project_dir) > 2048
-        or any(
-            ord(character) < 32 or ord(character) == 127 for character in project_dir
-        )
-    ):
-        raise FaultRunnerError("stock WebSocket project binding is invalid")
+    for key, option in query:
+        maximum = 2048 if key in {"api_base", "project_dir"} else 256
+        if (
+            not option
+            or option != option.strip()
+            or len(option) > maximum
+            or any(ord(character) < 32 or ord(character) == 127 for character in option)
+        ):
+            raise FaultRunnerError(f"stock WebSocket {key} option is invalid")
     query_free = urllib.parse.urlunsplit(
         (parsed.scheme, parsed.netloc, parsed.path, "", parsed.fragment)
     )
@@ -949,7 +950,7 @@ class ChromeNetworkObserver:
         self,
         debugger_url: str,
         *,
-        gateway_url: str,
+        stock_websocket_url: str,
         page_origin: str,
         timeout: float = 30.0,
     ) -> None:
@@ -961,7 +962,7 @@ class ChromeNetworkObserver:
         }:
             raise FaultRunnerError("CDP debugger endpoint must be loopback HTTP")
         self.debugger_url = debugger_url.rstrip("/")
-        self.gateway_url = _normalized_ws_url(gateway_url)
+        self.stock_websocket_url = _normalized_ws_url(stock_websocket_url)
         self.page_origin = _normalized_http_origin(page_origin)
         self.timeout = timeout
         self._socket: Any = None
@@ -969,6 +970,7 @@ class ChromeNetworkObserver:
         self._command_seq = 0
         self._command_waiters: dict[int, asyncio.Future[Mapping[str, Any]]] = {}
         self._web_sockets: dict[str, str] = {}
+        self._stock_socket_marker_emitted = False
         self._messages: asyncio.Queue[ObservedWebMessage] = asyncio.Queue(maxsize=512)
         self._backlog: deque[ObservedWebMessage] = deque()
 
@@ -1061,8 +1063,15 @@ class ChromeNetworkObserver:
                         normalized = _normalized_stock_ws_url(url)
                     except FaultRunnerError:
                         continue
-                    if normalized == self.gateway_url:
+                    if normalized == self.stock_websocket_url:
                         self._web_sockets[request_id] = normalized
+                        if not self._stock_socket_marker_emitted:
+                            print(
+                                "W2_FAULT_RUNNER_STOCK_SOCKET_OBSERVED "
+                                f"url={normalized}",
+                                flush=True,
+                            )
+                            self._stock_socket_marker_emitted = True
                 continue
             if method not in {
                 "Network.webSocketFrameSent",
@@ -1071,7 +1080,7 @@ class ChromeNetworkObserver:
                 continue
             socket_id = str(params.get("requestId", ""))
             socket_url = self._web_sockets.get(socket_id)
-            if socket_url != self.gateway_url:
+            if socket_url != self.stock_websocket_url:
                 continue
             response = _mapping(params.get("response"), "CDP WebSocket frame")
             if response.get("opcode") != 1:
@@ -1137,7 +1146,7 @@ class ChromeNetworkObserver:
         return await self.wait_message(
             lambda item: (
                 item.direction == "sent"
-                and item.socket_url == self.gateway_url
+                and item.socket_url == self.stock_websocket_url
                 and item.message.get("type") == "req"
                 and item.message.get("method") == method
             ),
@@ -1155,7 +1164,7 @@ class ChromeNetworkObserver:
             lambda item: (
                 item.direction == "received"
                 and item.socket_id == socket_id
-                and item.socket_url == self.gateway_url
+                and item.socket_url == self.stock_websocket_url
                 and item.message.get("type") == "res"
                 and item.message.get("id") == request_id
             ),
@@ -2168,6 +2177,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-set-id", required=True)
     parser.add_argument("--pair", required=True, type=int, choices=(1, 2, 3))
     parser.add_argument("--gateway-url", required=True)
+    parser.add_argument("--stock-websocket-url", required=True)
     parser.add_argument("--origin", required=True)
     parser.add_argument("--cdp-url", required=True)
     parser.add_argument("--timeout", type=float, default=30.0)
@@ -2188,11 +2198,11 @@ async def _run_cli(args: argparse.Namespace) -> None:
         raise FaultRunnerError(
             "public W2 fault plan did not provide exactly three pair faults"
         )
-    if args.timeout <= 0 or args.timeout > 300:
-        raise FaultRunnerError("runner timeout must be in (0, 300] seconds")
+    if args.timeout <= 0 or args.timeout > 900:
+        raise FaultRunnerError("runner timeout must be in (0, 900] seconds")
     async with ChromeNetworkObserver(
         args.cdp_url,
-        gateway_url=args.gateway_url,
+        stock_websocket_url=args.stock_websocket_url,
         page_origin=args.origin,
         timeout=args.timeout,
     ) as observer:

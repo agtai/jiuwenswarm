@@ -41,7 +41,7 @@ _SPEECH_API_KEY_ENV = "LIVE_VOICE_SPEECH_API_KEY"
 _PRIVATE_CONFIG_SCHEMA = "machine-private.live-voice-no-evidence-smoke.v1"
 _PRIVATE_VALUE_MAX_CHARACTERS = 4_096
 _PRIVATE_VALUE_MAX_UTF8_BYTES = 16_384
-_FAULT_RUNNER_TIMEOUT_SECONDS = 300
+_FAULT_RUNNER_TIMEOUT_SECONDS = 900
 _AGENT_RUNTIME_ENV_NAMES = frozenset(
     {"API_KEY", "API_BASE", "MODEL_NAME", "MODEL_PROVIDER"}
 )
@@ -935,6 +935,8 @@ class Controller:
                 str(pair),
                 "--gateway-url",
                 f"ws://127.0.0.1:{self.config['ports']['web']}/ws",
+                "--stock-websocket-url",
+                f"ws://127.0.0.1:{self.config['ports']['vite']}/ws",
                 "--origin",
                 f"http://127.0.0.1:{self.config['ports']['vite']}",
                 "--cdp-url",

@@ -1003,7 +1003,7 @@ async def test_companion_retains_cleanup_after_ambiguous_activation_result() -> 
 async def test_cdp_exchange_requires_normalized_gateway_and_same_socket() -> None:
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
-        gateway_url="ws://127.0.0.1:8000/ws",
+        stock_websocket_url="ws://127.0.0.1:8000/ws",
         page_origin="http://127.0.0.1:3000",
     )
     gateway_url = "ws://127.0.0.1:8000/ws"
@@ -1043,10 +1043,12 @@ async def test_cdp_exchange_requires_normalized_gateway_and_same_socket() -> Non
 
 
 @pytest.mark.asyncio
-async def test_cdp_observer_accepts_only_project_bound_stock_socket_query() -> None:
+async def test_cdp_observer_accepts_public_stock_query_and_rejects_credentials(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
-        gateway_url="ws://127.0.0.1:8000/ws",
+        stock_websocket_url="ws://127.0.0.1:5173/ws",
         page_origin="http://127.0.0.1:3000",
     )
     observer._socket = _CdpEventSocket(
@@ -1055,14 +1057,18 @@ async def test_cdp_observer_accepts_only_project_bound_stock_socket_query() -> N
                 "method": "Network.webSocketCreated",
                 "params": {
                     "requestId": "stock-socket",
-                    "url": "ws://127.0.0.1:8000/ws?project_dir=C%3A%5Ctmp%5Cproject",
+                    "url": (
+                        "ws://127.0.0.1:5173/ws?provider=openai&"
+                        "api_base=https%3A%2F%2Fapi.example.invalid%2Fv1&"
+                        "model=example-model&project_dir=C%3A%5Ctmp%5Cproject"
+                    ),
                 },
             },
             {
                 "method": "Network.webSocketCreated",
                 "params": {
                     "requestId": "credential-socket",
-                    "url": "ws://127.0.0.1:8000/ws?api_key=must-not-be-observed",
+                    "url": "ws://127.0.0.1:5173/ws?api_key=must-not-be-observed",
                 },
             },
             {
@@ -1087,10 +1093,13 @@ async def test_cdp_observer_accepts_only_project_bound_stock_socket_query() -> N
 
     await observer._receive_loop()
 
-    assert observer._web_sockets == {"stock-socket": "ws://127.0.0.1:8000/ws"}
+    assert observer._web_sockets == {"stock-socket": "ws://127.0.0.1:5173/ws"}
     observed = observer._messages.get_nowait()
-    assert observed.socket_url == "ws://127.0.0.1:8000/ws"
+    assert observed.socket_url == "ws://127.0.0.1:5173/ws"
     assert observed.message["id"] == "request-1"
+    assert capsys.readouterr().out == (
+        "W2_FAULT_RUNNER_STOCK_SOCKET_OBSERVED url=ws://127.0.0.1:5173/ws\n"
+    )
 
 
 @pytest.mark.asyncio
@@ -1100,7 +1109,7 @@ async def test_stock_template_skips_durable_or_abandoned_predecessor_activation(
 ) -> None:
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
-        gateway_url="ws://127.0.0.1:8000/ws",
+        stock_websocket_url="ws://127.0.0.1:8000/ws",
         page_origin="http://127.0.0.1:3000",
         timeout=0.05,
     )
@@ -1214,7 +1223,7 @@ async def test_chrome_p3_recovery_skips_foreign_task_and_requires_exact_ack_line
 ):
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
-        gateway_url="ws://127.0.0.1:8000/ws",
+        stock_websocket_url="ws://127.0.0.1:8000/ws",
         page_origin="http://127.0.0.1:3000",
     )
     gateway_url = "ws://127.0.0.1:8000/ws"
@@ -1341,7 +1350,7 @@ def test_cdp_target_requires_exact_stock_page_origin(
 ) -> None:
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
-        gateway_url="ws://127.0.0.1:8000/ws",
+        stock_websocket_url="ws://127.0.0.1:8000/ws",
         page_origin="http://127.0.0.1:3000",
     )
     target = [
@@ -1364,7 +1373,7 @@ def test_cdp_target_requires_exact_stock_page_origin(
 async def test_observation_and_gateway_event_waits_have_one_noisy_deadline() -> None:
     observer = ChromeNetworkObserver(
         "http://127.0.0.1:9222",
-        gateway_url="ws://127.0.0.1:8000/ws",
+        stock_websocket_url="ws://127.0.0.1:8000/ws",
         page_origin="http://127.0.0.1:3000",
     )
     for index in range(200):
