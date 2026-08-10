@@ -16,6 +16,7 @@ import {
   inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   productP2WebRequestOptions,
+  recognizedSpeechConfirmationMatches,
   productTextBlockedByP1Status,
   progressMatchesOwnedBinding,
   resolveProductTaskCreateOrigin,
@@ -286,6 +287,70 @@ test('formal P1 discloses the 30-second capture bound and disables restart on te
   assert.match(html, /<button type="button" disabled="">Start formal voice turn<\/button>/);
 });
 
+test('recognized Speech confirmation is an explicit in-page second action that locks dispatch inputs', async () => {
+  const html = await renderPanel({
+    viewProps: {
+      p2Activation: { status: 'active', binding: null, reason: null },
+      productInput: 'Confirm this exact recognized text.',
+      productTextStatus: 'idle',
+      p1VoiceEnabled: true,
+      p1VoiceStatus: 'recognized',
+      onP1VoiceStart: () => {},
+      onP1VoiceStop: () => {},
+      onProductInput: () => {},
+      onProductSubmit: () => {},
+      recognizedSpeechConfirmation: 'agent',
+      onRecognizedSpeechConfirm: () => {},
+      onRecognizedSpeechCancel: () => {},
+    },
+  });
+
+  assert.match(html, /data-testid="live-voice-integrated-recognized-confirmation"/);
+  assert.match(html, /Review recognized speech/);
+  assert.match(html, /Confirm and dispatch/);
+  assert.match(html, /Cancel/);
+  assert.match(html, /<textarea[^>]*disabled=""[^>]*>Confirm this exact recognized text\.<\/textarea>/);
+  assert.match(html, /<button type="submit" disabled="">Submit committed turn<\/button>/);
+
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /window\.confirm\('Confirm that the recognized speech/);
+});
+
+test('recognized Speech confirmation is fenced to its exact Session and displayed text', () => {
+  const pending = Object.freeze({
+    intent: 'agent',
+    phase: 'confirming',
+    session_id: 'session-1',
+    text: 'exact text',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 2,
+  });
+  const recognized = Object.freeze({
+    session_id: 'session-1',
+    text: 'exact text',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 2,
+  });
+  const binding = Object.freeze({
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 2,
+  });
+
+  assert.equal(recognizedSpeechConfirmationMatches(pending, recognized, 'session-1', 'exact text', binding), true);
+  assert.equal(recognizedSpeechConfirmationMatches(pending, recognized, 'session-2', 'exact text', binding), false);
+  assert.equal(recognizedSpeechConfirmationMatches(pending, recognized, 'session-1', 'changed text', binding), false);
+  assert.equal(recognizedSpeechConfirmationMatches(pending, null, 'session-1', 'exact text', binding), false);
+  assert.equal(recognizedSpeechConfirmationMatches(pending, recognized, 'session-1', 'exact text', { ...binding, activation_generation: 3 }), false);
+  assert.equal(recognizedSpeechConfirmationMatches(pending, { ...recognized, activation_generation: 1 }, 'session-1', 'exact text', binding), false);
+});
+
 test('P2 notification classification surfaces errors and terminal-without-final', () => {
   assert.deepEqual(
     classifyProductP2Notification({
@@ -373,11 +438,25 @@ test('unknown retained P2 operation locks editing and second submission', async 
       productOperationRetained: true,
       onProductInput: () => {},
       onProductSubmit: () => {},
+      p3MutationEnabled: true,
+      p3MutationOperation: 'task.create',
+      p3TaskName: 'retained task',
+      p3TaskInstruction: 'retained instruction',
+      p3MutationStatus: 'idle',
+      onP3MutationOperation: () => {},
+      onP3TaskName: () => {},
+      onP3TaskInstruction: () => {},
+      onP3TargetTaskId: () => {},
+      onP3Issue: () => {},
+      onP3Execute: () => {},
     },
   });
 
   assert.match(html, /<textarea[^>]*disabled=""[^>]*>retained exact text<\/textarea>/);
   assert.match(html, /<button[^>]*type="submit"[^>]*disabled=""/);
+  assert.match(html, /<select[^>]*disabled=""/);
+  assert.match(html, /<input[^>]*disabled=""[^>]*value="retained task"/);
+  assert.match(html, /<button[^>]*disabled="">Issue confirmation<\/button>/);
 });
 
 test('route panel renders a distinct two-action formal P3 task control', async () => {
@@ -708,7 +787,8 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   assert.match(source, /const recognition = await owner\.stopAndRecognize\(\)/);
   assert.match(source, /voice_commit_receipt: recognition\.voice_commit_receipt/);
-  assert.match(source, /\? 'voice'\s*: 'structured'/);
+  assert.match(source, /intent: 'agent'[\s\S]{0,300}session_id: recognized\.session_id[\s\S]{0,120}text: recognized\.text/);
+  assert.match(source, /await submitProductText\(undefined, 'voice'\)/);
   assert.match(source, /p1VoiceOwnerRef\.current\?\.status\(\)\.status/);
   assert.match(source, /if \(props\.isConnected\) return;/);
   assert.match(source, /voiceOwner\s*\.close\(\)\s*\.then/);

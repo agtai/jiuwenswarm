@@ -2111,6 +2111,13 @@
         "submit": "提交已确认轮次",
         "status": "P2 文本 / 展示确认"
       },
+      "recognizedConfirmation": {
+        "title": "检查识别文本",
+        "agent": "确认屏幕上的语音识别文本完全正确，然后发送给 Agent。",
+        "task": "确认屏幕上的语音识别文本完全正确，然后用作任务指令。",
+        "confirm": "确认并发送",
+        "cancel": "取消"
+      },
       "taskControl": {
         "title": "正式 P3 任务控制",
         "disclosure": "必须执行两个独立的用户动作：签发精确且短时有效的确认，然后再执行。接受不代表任务完成。",

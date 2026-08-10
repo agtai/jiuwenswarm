@@ -2113,6 +2113,13 @@
         "submit": "Submit committed turn",
         "status": "P2 text / presentation ACK"
       },
+      "recognizedConfirmation": {
+        "title": "Review recognized speech",
+        "agent": "Confirm the recognized speech shown on screen is exact before dispatching it to the Agent.",
+        "task": "Confirm the recognized speech shown on screen is exact before using it as the task instruction.",
+        "confirm": "Confirm and dispatch",
+        "cancel": "Cancel"
+      },
       "taskControl": {
         "title": "Formal P3 task control",
         "disclosure": "Two distinct user actions are required: issue an exact short-lived confirmation, then execute it. Acceptance is not task completion.",
