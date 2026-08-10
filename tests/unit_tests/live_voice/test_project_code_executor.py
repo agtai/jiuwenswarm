@@ -60,6 +60,11 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
 )
 from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
+from scripts.live_voice.w2_rehearsal.w2_d069_runtime_diagnostic import (
+    _P3_CANCEL_ENTRY_DELTA,
+    _P3_FROZEN_ENTRY_COUNTS,
+    _P3NonterminalBarrier,
+)
 
 
 class _ProjectExecutor:
@@ -1887,6 +1892,85 @@ async def test_direct_dispatch_retry_reuses_attempt_and_task_cancel_is_exact(
     assert len(executor.requests) == 1
     assert cancelled.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
     assert releases == ["released"]
+
+
+@pytest.mark.asyncio
+async def test_d069_barrier_uses_real_direct_checkout_cancel_and_stop(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    attempt_roots: list[Path] = []
+    releases: list[str] = []
+
+    class ToolManager:
+        async def execute(self, *_args, **_kwargs):
+            return None
+
+    class AttemptAgent:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+            self.child = None
+
+            async def prepare(_session_id: str) -> None:
+                self.child = SimpleNamespace(
+                    _instance=SimpleNamespace(ability_manager=ToolManager())
+                )
+
+            self._adapter = SimpleNamespace(
+                prepare_background_project_session=prepare,
+                _get_cached_session_adapter=lambda _session_id: self.child,
+            )
+
+        def get_project_execution_root(self) -> str:
+            return str(self.root)
+
+        async def process_background_code_task_stream(self, request):
+            await self._adapter.prepare_background_project_session(
+                request.session_id
+            )
+            if False:
+                yield None
+
+    async def acquire(attempt_root: str) -> AttemptProjectExecutorLease:
+        root = Path(attempt_root).resolve()
+        attempt_roots.append(root)
+
+        async def release() -> None:
+            releases.append("released")
+
+        return AttemptProjectExecutorLease(AttemptAgent(root), str(root), release)
+
+    binding = replace(
+        _direct_binding(project, _DirectProjectExecutor(project)),
+        attempt_executor_factory=acquire,
+    )
+    direct = DirectProjectCodeExecutorAdapter(
+        _Resolver(binding), tmp_path / "p3.sqlite3"
+    )
+    core = SimpleNamespace(executor=direct)
+    barrier = _P3NonterminalBarrier(core)
+    barrier.install()
+    try:
+        delivered = await core.executor.dispatch(_item(project))
+        await barrier.wait_frozen(timeout=2)
+        assert attempt_roots[0].is_dir()
+        assert barrier.snapshot() == _P3_FROZEN_ENTRY_COUNTS
+        before_cancel = barrier.snapshot()
+        cancel_item = replace(
+            _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+            executor_ref=delivered.executor_ref,
+        )
+        cancelled = await core.executor.cancel(cancel_item)
+        await barrier.wait_agent_stopped(timeout=2)
+        assert barrier.delta(before_cancel) == _P3_CANCEL_ENTRY_DELTA
+        assert cancelled.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
+        assert releases == ["released"]
+        assert not attempt_roots[0].exists()
+    finally:
+        barrier.restore()
+        await direct.close(interrupt_running=True)
+    assert direct.has_live_workers is False
 
 
 @pytest.mark.asyncio

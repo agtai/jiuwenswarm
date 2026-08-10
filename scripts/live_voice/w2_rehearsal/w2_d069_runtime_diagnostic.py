@@ -8,8 +8,22 @@ import secrets
 import sqlite3
 import sys
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+
+
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+_DIRECT_EXECUTOR_TABLE = "live_voice_formal_project_attempts_v1"
+_P3_FROZEN_ENTRY_COUNTS = {
+    "retry_readiness": 0,
+    "dispatch": 1,
+    "cancel": 0,
+    "agent": 1,
+    "tool": 0,
+}
+_P3_CANCEL_ENTRY_DELTA = {**_P3_FROZEN_ENTRY_COUNTS, "dispatch": 0, "agent": 0, "cancel": 1}
 
 
 def _iso_now() -> str:
@@ -53,6 +67,231 @@ def _configure(args: argparse.Namespace) -> str:
     return token
 
 
+def _assert_zero_effect(before: object, after: object, *, label: str) -> None:
+    if after != before:
+        raise RuntimeError(f"{label} produced a forbidden side effect")
+
+
+def _read_sqlite_dump(
+    database: Path,
+    *,
+    excluded_tables: frozenset[str] = frozenset(),
+) -> tuple[str, ...]:
+    """Read committed SQLite truth, optionally excluding separately snapshotted rows."""
+
+    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    try:
+        return tuple(
+            line
+            for line in connection.iterdump()
+            if not any(table in line.partition("(")[0] for table in excluded_tables)
+        )
+    finally:
+        connection.close()
+
+
+class _P3BarrierAgent:
+    def __init__(self, agent: object, owner: "_P3NonterminalBarrier") -> None:
+        self._agent = agent
+        self._owner = owner
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._agent, name)
+
+    async def process_background_code_task_stream(self, request: object):
+        adapter = getattr(self._agent, "_adapter", None)
+        original_prepare = getattr(adapter, "prepare_background_project_session", None)
+        get_child = getattr(adapter, "_get_cached_session_adapter", None)
+        if not callable(original_prepare) or not callable(get_child):
+            raise RuntimeError("P3 probe requires real Code Agent session routing")
+
+        async def observed_prepare(session_id: str) -> None:
+            await original_prepare(session_id)
+            child = get_child(session_id)
+            instance = getattr(child, "_instance", None)
+            manager = getattr(instance, "ability_manager", None)
+            original_execute = getattr(manager, "execute", None)
+            if child is None or child is adapter or not callable(original_execute):
+                raise RuntimeError("P3 probe cannot observe the session Tool entrypoint")
+
+            async def observed_execute(*args: object, **kwargs: object) -> object:
+                self._owner._record("tool")
+                return await original_execute(*args, **kwargs)
+
+            manager.execute = observed_execute
+            self._owner._agent_entered.set()
+            try:
+                await self._owner._agent_barrier.wait()
+            finally:
+                if getattr(manager, "execute", None) is observed_execute:
+                    manager.execute = original_execute
+                self._owner._agent_stopped.set()
+
+        adapter.prepare_background_project_session = observed_prepare
+        self._owner._record("agent")
+        try:
+            async for chunk in self._agent.process_background_code_task_stream(request):
+                yield chunk
+        finally:
+            if (
+                getattr(adapter, "prepare_background_project_session", None)
+                is observed_prepare
+            ):
+                adapter.prepare_background_project_session = original_prepare
+
+
+class _P3NonterminalBarrier:
+    """Freeze one real D0 worker before Agent/Tool execution and count entries."""
+
+    _MAX_ENTRY_COUNT = 4
+
+    def __init__(self, core: object) -> None:
+        self._core = core
+        self._executor = core.executor
+        self._counts = {name: 0 for name in _P3_FROZEN_ENTRY_COUNTS}
+        self._agent_barrier = asyncio.Event()
+        self._agent_entered = asyncio.Event()
+        self._agent_stopped = asyncio.Event()
+        self._original_resolve: object | None = None
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._executor, name)
+
+    def _record(self, name: str) -> None:
+        count = self._counts[name] + 1
+        if count > self._MAX_ENTRY_COUNT:
+            raise RuntimeError(f"P3 probe {name} entry count exceeded its bound")
+        self._counts[name] = count
+
+    def snapshot(self) -> dict[str, int]:
+        return dict(self._counts)
+
+    def delta(self, before: Mapping[str, int]) -> dict[str, int]:
+        return {name: self._counts[name] - before[name] for name in self._counts}
+
+    async def wait_frozen(self, *, timeout: float) -> None:
+        await asyncio.wait_for(self._agent_entered.wait(), timeout=timeout)
+
+    async def wait_agent_stopped(self, *, timeout: float) -> None:
+        await asyncio.wait_for(self._agent_stopped.wait(), timeout=timeout)
+
+    def retry_readiness(self, task: object, attempt: object) -> object:
+        self._record("retry_readiness")
+        return self._executor.retry_readiness(task, attempt)
+
+    async def dispatch(self, item: object) -> object:
+        self._record("dispatch")
+        return await self._executor.dispatch(item)
+
+    async def cancel(self, item: object) -> object:
+        self._record("cancel")
+        return await self._executor.cancel(item)
+
+    def install(self) -> None:
+        if self._original_resolve is not None:
+            raise RuntimeError("P3 nonterminal barrier is already installed")
+        resolver = self._executor._resolver
+        original_resolve = resolver.resolve
+
+        async def observed_resolve(
+            spec: object, *, for_dispatch: bool
+        ) -> object:
+            binding = await original_resolve(spec, for_dispatch=for_dispatch)
+            factory = getattr(binding, "attempt_executor_factory", None)
+            if not for_dispatch or not callable(factory):
+                return binding
+
+            async def acquire(attempt_root: str) -> object:
+                lease = await factory(attempt_root)
+                return replace(
+                    lease,
+                    project_executor=_P3BarrierAgent(lease.project_executor, self),
+                )
+
+            return replace(binding, attempt_executor_factory=acquire)
+
+        self._original_resolve = original_resolve
+        resolver.resolve = observed_resolve
+        self._core.executor = self
+
+    def restore(self) -> None:
+        if self._core.executor is self:
+            self._core.executor = self._executor
+        if self._original_resolve is not None:
+            self._executor._resolver.resolve = self._original_resolve
+            self._original_resolve = None
+
+
+async def _exercise_p2_non_retriable_ack(
+    registry: object,
+    *,
+    base: Mapping[str, object],
+    response: Mapping[str, object],
+    presentation: Mapping[str, object],
+    suffix: str,
+    business_snapshot: Callable[[], object],
+    error_receipt_snapshot: Callable[[], tuple[str, ...]],
+) -> dict[str, object]:
+    request_id = f"w2-p2-fault-probe-non-retriable-{suffix}"
+    rejected = {
+        **base,
+        "response_id": response["response_id"],
+        "response_generation": response["response_generation"],
+        "surface": presentation["surface"],
+        "unit_id": presentation["unit_id"],
+        "contiguous_cursor": _MAX_SAFE_INTEGER,
+        "presented_at": _iso_now(),
+    }
+    before = business_snapshot()
+    receipts_before = error_receipt_snapshot()
+    first = await registry.handle_p2_presentation_ack(
+        params=rejected, request_id=request_id, session_id=str(base["session_id"])
+    )
+    _assert_zero_effect(before, business_snapshot(), label="P2 non-retriable ACK")
+    receipts_after = error_receipt_snapshot()
+    if (
+        set(receipts_after) - set(receipts_before) != {request_id}
+        or len(receipts_after) != len(receipts_before) + 1
+    ):
+        raise RuntimeError("P2 rejection did not retain one bounded error receipt")
+    replayed = await registry.handle_p2_presentation_ack(
+        params=rejected, request_id=request_id, session_id=str(base["session_id"])
+    )
+    error = first.payload.get("error") if not first.ok else None
+    if (
+        replayed.ok
+        or replayed.payload != first.payload
+        or not isinstance(error, dict)
+        or error.get("code") != "PROTOCOL_VIOLATION"
+        or error.get("reason") != "ACK_BEYOND_PRODUCED_CURSOR"
+    ):
+        raise RuntimeError(
+            f"P2 non-retriable ACK was not an exact semantic replay: {error!r}"
+        )
+    _assert_zero_effect(before, business_snapshot(), label="P2 rejected ACK replay")
+    _assert_zero_effect(
+        receipts_after, error_receipt_snapshot(), label="P2 error receipt replay"
+    )
+    accepted = await registry.handle_p2_presentation_ack(
+        params={
+            **rejected,
+            "contiguous_cursor": presentation["seq"],
+            "presented_at": _iso_now(),
+        },
+        request_id=f"w2-p2-fault-probe-recovery-{suffix}",
+        session_id=str(base["session_id"]),
+    )
+    result = accepted.payload.get("result") if accepted.ok else None
+    if not isinstance(result, dict) or not result.get("accepted"):
+        raise RuntimeError(f"P2 legal ACK after rejection failed: {accepted.payload!r}")
+    return {
+        "code": str(error["code"]),
+        "reason": str(error["reason"]),
+        "replayed": True,
+        "recovery_accepted": True,
+    }
+
+
 def _read_attempt_lineage(
     database: Path, task_id: str
 ) -> tuple[tuple[str, int, str, str | None], ...]:
@@ -78,6 +317,138 @@ def _read_attempt_lineage(
         )
     finally:
         connection.close()
+
+
+def _require_no_evidence_owner(server: object) -> None:
+    if (
+        getattr(server, "_live_voice_w2_observability", None) is not None
+        or os.getenv("JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED") is not None
+    ):
+        raise RuntimeError("no-evidence diagnostic unexpectedly has an evidence owner")
+
+
+def _p2_business_snapshot(
+    server: object, registry: object, base: Mapping[str, object]
+) -> tuple[object, ...]:
+    from jiuwenswarm.server.runtime.session.session_history import (
+        load_history_records,
+    )
+
+    _require_no_evidence_owner(server)
+    route = registry._p2_routes.get(
+        (str(base["session_id"]), str(base["interaction_id"]))
+    )
+    if route is None:
+        raise RuntimeError("P2 fault probe lost its active route")
+    runtime = route.activation_lease._runtime
+    agent_id = id(runtime._facade)
+    return (
+        route.binding,
+        route.activation_lease.snapshot(),
+        runtime.snapshot(),  # includes presentation/history/Agent/Tool/notification truth
+        tuple(
+            json.dumps(item, ensure_ascii=False, sort_keys=True)
+            for item in load_history_records(str(base["session_id"]))
+        ),
+        tuple(sorted(registry._progress_routes)),
+        tuple(sorted(registry._progress_generations.items())),
+        tuple(sorted(registry._progress_targets.items())),
+        tuple(sorted(registry._progress_deliveries)),
+        server._agent_manager._agent_pins.get(agent_id, 0),
+    )
+
+
+def _p3_zero_effect_snapshot(
+    server: object,
+    composition: object,
+    registry: object,
+    scope: object,
+    database: Path,
+    task_id: str,
+) -> tuple[object, ...]:
+    from jiuwenswarm.server.live_voice.project_code_executor import (
+        _attempt_worktree_paths,
+        _git_head,
+        _project_tree_fingerprint,
+    )
+
+    _require_no_evidence_owner(server)
+    store = composition._core.store
+    executor = composition._core.executor
+    task = store.get_task(task_id, scope)
+    attempt = store.get_attempt(task.attempt_id)
+    direct = executor._journal.get(attempt.attempt_id)
+    if direct is None:
+        raise RuntimeError("P3 zero-effect oracle found no Executor journal")
+    root = Path(direct.project_root)
+    _parent, checkout = _attempt_worktree_paths(root, attempt.attempt_id)
+    checkout_state = (
+        (True, _git_head(checkout), _project_tree_fingerprint(checkout))
+        if checkout.is_dir()
+        else (False, None, None)
+    )
+    owner = server._live_voice_p3_confirmation_owner
+    confirmation_database = Path(owner.raw_verifier.database_path)
+    formal_agents = server._agent_manager.agents.get("live_voice_formal_task", {})
+    formal_agent_ids = tuple(sorted(id(agent) for agent in formal_agents.values()))
+    direct_attempts = tuple(
+        replace(item, lease_expires_at=None)
+        for item in executor._journal.all_attempts()
+    )
+    return (
+        task,
+        attempt,
+        _read_sqlite_dump(
+            database, excluded_tables=frozenset({_DIRECT_EXECUTOR_TABLE})
+        ),
+        direct_attempts,
+        _read_sqlite_dump(confirmation_database),
+        tuple(sorted(executor._running)),
+        tuple(sorted(executor._applying)),
+        tuple(sorted(executor._interruptions)),
+        executor.retained_cleanup_attempt_ids(),
+        formal_agent_ids,
+        tuple(
+            sorted(
+                (agent_id, server._agent_manager._agent_pins.get(agent_id, 0))
+                for agent_id in formal_agent_ids
+            )
+        ),
+        tuple(sorted(registry._p3_issue_operations)),
+        tuple(sorted(registry._p3_mutation_operations)),
+        (_git_head(root), _project_tree_fingerprint(root)),
+        checkout_state,
+    )
+
+
+async def _wait_outbox_settled(
+    composition: object,
+    scope: object,
+    database: Path,
+    task_id: str,
+    *,
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+        try:
+            rows = connection.execute(
+                "SELECT state,claimed_by,claimed_at,claim_token FROM outbox "
+                "WHERE task_id=? ORDER BY outbox_id",
+                (task_id,),
+            ).fetchall()
+        finally:
+            connection.close()
+        task = composition._core.store.get_task(task_id, scope)
+        if rows and task.state.value == "running" and all(
+            row == ("delivered", None, None, None) for row in rows
+        ):
+            return
+        if task.state.value == "terminal":
+            raise RuntimeError("P3 probe task terminated before outbox settled")
+        await asyncio.sleep(0.05)
+    raise TimeoutError("P3 probe outbox did not settle")
 
 
 async def _wait_task(
@@ -669,15 +1040,6 @@ async def _run_p2_fault_probe(args: argparse.Namespace, token: str) -> None:
         "activation_id": f"activation-w2-p2-fault-probe-{suffix}",
         "activation_generation": 1,
     }
-    ack: dict[str, object] = {
-        **base,
-        "response_id": f"missing-response-{suffix}",
-        "response_generation": 1,
-        "surface": "text",
-        "unit_id": f"missing-unit-{suffix}",
-        "contiguous_cursor": 0,
-        "presented_at": _iso_now(),
-    }
     try:
         await server._start_live_voice_p3_composition()
         await server._start_live_voice_product_composition()
@@ -694,39 +1056,123 @@ async def _run_p2_fault_probe(args: argparse.Namespace, token: str) -> None:
         if not activated.ok:
             raise RuntimeError(f"P2 activation failed: {activated.payload!r}")
 
+        submitted = await registry.handle_p2_submit(
+            params={
+                **base,
+                "commit_id": f"commit-w2-p2-fault-probe-{suffix}",
+                "turn_id": f"turn-w2-p2-fault-probe-{suffix}",
+                "response_id": f"response-w2-p2-fault-probe-{suffix}",
+                "committed_at": _iso_now(),
+                "text": args.instruction,
+                "dispatch_target": "agent",
+            },
+            request_id=f"w2-p2-fault-probe-submit-{suffix}",
+            session_id=args.session_id,
+            channel_id="web",
+        )
+        if not submitted.ok:
+            raise RuntimeError(f"P2 submit failed: {submitted.payload!r}")
+
+        response: dict[str, object] | None = None
+        presentation: dict[str, object] | None = None
+        terminal = False
+        for sequence in range(1, 257):
+            polled = await asyncio.wait_for(
+                registry.handle_p2_notification_next(
+                    params={**base, "notification_sequence": sequence},
+                    request_id=f"w2-p2-fault-notification-{suffix}-{sequence}",
+                    session_id=args.session_id,
+                ),
+                timeout=180,
+            )
+            if not polled.ok:
+                raise RuntimeError(f"P2 notification failed: {polled.payload!r}")
+            notification = dict(polled.payload["result"])
+            unit = notification.get("presentation_unit")
+            ref = notification.get("response")
+            if response is None and isinstance(unit, dict) and isinstance(ref, dict):
+                if ref.get("interaction_id") != base["interaction_id"]:
+                    raise RuntimeError("P2 presentation changed interaction")
+                response, presentation = dict(ref), dict(unit)
+            progress = notification.get("progress_event")
+            payload = progress.get("payload") if isinstance(progress, dict) else None
+            terminal = terminal or (
+                isinstance(payload, dict) and payload.get("state") == "terminal"
+            )
+            if terminal and presentation is not None:
+                break
+        if response is None or presentation is None or not terminal:
+            raise RuntimeError("P2 probe obtained no terminal canonical presentation")
+        route = registry._p2_routes[(args.session_id, base["interaction_id"])]
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            runtime = route.activation_lease._runtime.snapshot()
+            if not runtime.active_requests and runtime.pending_history_intents == 0:
+                break
+            await asyncio.sleep(0.05)
+        else:
+            raise TimeoutError("P2 runtime did not settle before its ACK probe")
+
+        valid_ack = {
+            **base,
+            "response_id": response["response_id"],
+            "response_generation": response["response_generation"],
+            "surface": presentation["surface"],
+            "unit_id": presentation["unit_id"],
+            "contiguous_cursor": presentation["seq"],
+            "presented_at": _iso_now(),
+        }
+        before_retriable = _p2_business_snapshot(server, registry, base)
         retriable = await registry.handle_p2_presentation_ack(
-            params=ack,
+            params=valid_ack,
             request_id="w2-p2-fault-probe-retriable",
             session_id=args.session_id,
         )
-        non_retriable = await registry.handle_p2_presentation_ack(
-            params={**ack, "fault": "client-claim"},
-            request_id=f"w2-p2-fault-probe-non-retriable-{suffix}",
-            session_id=args.session_id,
+        if retriable.ok or dict(retriable.payload["error"]).get("code") != "UNAVAILABLE":
+            raise RuntimeError(f"P2 retriable probe returned {retriable.payload!r}")
+        _assert_zero_effect(
+            before_retriable,
+            _p2_business_snapshot(server, registry, base),
+            label="P2 retriable ACK",
         )
+
+        non_retriable = await _exercise_p2_non_retriable_ack(
+            registry,
+            base=base,
+            response=response,
+            presentation=presentation,
+            suffix=suffix,
+            business_snapshot=lambda: _p2_business_snapshot(server, registry, base),
+            error_receipt_snapshot=lambda: tuple(sorted(registry._p2_ack_operations)),
+        )
+
+        missing_ack = {
+            **valid_ack,
+            "response_id": f"missing-response-{suffix}",
+            "unit_id": f"missing-unit-{suffix}",
+            "contiguous_cursor": 0,
+        }
         stale = await registry.handle_p2_presentation_ack(
-            params=ack,
+            params=missing_ack,
             request_id=f"w2-p2-fault-probe-stale-{suffix}",
             session_id=args.session_id,
         )
 
-        results: dict[str, dict[str, object]] = {}
-        for fault_class, result, expected in (
-            ("retriable", retriable, "UNAVAILABLE"),
-            ("non_retriable", non_retriable, "INVALID_ARGUMENT"),
-            ("zero_effect", stale, "STALE"),
-        ):
-            if result.ok:
-                raise RuntimeError(f"P2 {fault_class} probe unexpectedly succeeded")
-            error = dict(result.payload["error"])
-            if error.get("code") != expected:
-                raise RuntimeError(
-                    f"P2 {fault_class} probe returned {error!r}, expected {expected}"
-                )
-            results[fault_class] = {
-                "code": str(error["code"]),
-                "reason": str(error["reason"]),
-            }
+        stale_error = dict(stale.payload["error"])
+        if stale.ok or stale_error.get("code") != "STALE":
+            raise RuntimeError(f"P2 zero-effect probe returned {stale.payload!r}")
+        retriable_error = dict(retriable.payload["error"])
+        results = {
+            "retriable": {
+                "code": str(retriable_error["code"]),
+                "reason": str(retriable_error["reason"]),
+            },
+            "non_retriable": non_retriable,
+            "zero_effect": {
+                "code": str(stale_error["code"]),
+                "reason": str(stale_error["reason"]),
+            },
+        }
         closed = await registry.handle_p2_close(
             params=base,
             request_id=f"w2-p2-fault-probe-close-{suffix}",
@@ -749,6 +1195,7 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
         raise RuntimeError("P3 fault probe database already exists")
     server = AgentWebSocketServer()
     started = False
+    barrier: _P3NonterminalBarrier | None = None
     try:
         await server._start_live_voice_p3_composition()
         await server._start_live_voice_product_composition()
@@ -757,6 +1204,8 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
         if composition is None or registry is None:
             raise RuntimeError("production P3/product composition failed to start")
         started = True
+        barrier = _P3NonterminalBarrier(composition._core)
+        barrier.install()
         scope = ScopeRef(
             args.principal_id,
             args.project_id,
@@ -775,8 +1224,19 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
         )
         task_id = str(created["task_id"])
         await _wait_task(composition, scope, task_id, terminal=False, timeout=60)
+        await _wait_outbox_settled(
+            composition, scope, args.database, task_id, timeout=60
+        )
+        await barrier.wait_frozen(timeout=60)
+        if barrier.snapshot() != _P3_FROZEN_ENTRY_COUNTS:
+            raise RuntimeError(
+                f"P3 nonterminal barrier entry mismatch: {barrier.snapshot()!r}"
+            )
 
-        before_non_retriable = composition._core.store.counts()
+        before_non_retriable = _p3_zero_effect_snapshot(
+            server, composition, registry, scope, args.database, task_id
+        )
+        entries_before_non_retriable = barrier.snapshot()
         _non_retriable_params, non_retriable = await _issue_mutation(
             registry,
             token=token,
@@ -797,9 +1257,21 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
             raise RuntimeError(
                 f"P3 non-retriable probe returned {non_retriable_error!r}"
             )
-        if composition._core.store.counts() != before_non_retriable:
-            raise RuntimeError("P3 non-retriable probe changed formal Task state")
+        _assert_zero_effect(
+            before_non_retriable,
+            _p3_zero_effect_snapshot(
+                server, composition, registry, scope, args.database, task_id
+            ),
+            label="P3 non-retriable task.retry",
+        )
+        _assert_zero_effect(
+            entries_before_non_retriable,
+            barrier.snapshot(),
+            label="P3 rejected retry entrypoints",
+        )
+        rejected_entry_delta = barrier.delta(entries_before_non_retriable)
 
+        entries_before_cancel = barrier.snapshot()
         await _mutate(
             registry,
             token=token,
@@ -811,8 +1283,16 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
         predecessor = await _wait_task(
             composition, scope, task_id, terminal=True, timeout=180
         )
-        if predecessor.outcome.value not in {"cancelled", "completed"}:
-            raise RuntimeError("P3 fault probe predecessor is not retry eligible")
+        await barrier.wait_agent_stopped(timeout=60)
+        cancel_entry_delta = barrier.delta(entries_before_cancel)
+        if cancel_entry_delta != _P3_CANCEL_ENTRY_DELTA:
+            raise RuntimeError(
+                f"P3 legal cancel entry mismatch: {cancel_entry_delta!r}"
+            )
+        if predecessor.outcome.value != "cancelled":
+            raise RuntimeError("P3 frozen predecessor was not legally cancelled")
+        barrier.restore()
+        barrier = None
 
         stale_params, stale_issue = await _issue_mutation(
             registry,
@@ -884,7 +1364,9 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
                     "non_retriable": {
                         "code": str(non_retriable_error["code"]),
                         "reason": str(non_retriable_error["reason"]),
+                        "entry_delta": rejected_entry_delta,
                     },
+                    "legal_cancel_entry_delta": cancel_entry_delta,
                     "zero_effect": {
                         "code": str(stale_error["code"]),
                         "reason": str(stale_error["reason"]),
@@ -897,8 +1379,12 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
             flush=True,
         )
     finally:
-        if started:
-            await _stop(server)
+        try:
+            if started:
+                await _stop(server)
+        finally:
+            if barrier is not None:
+                barrier.restore()
 
 
 def _parser() -> argparse.ArgumentParser:

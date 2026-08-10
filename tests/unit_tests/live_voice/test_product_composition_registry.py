@@ -1904,6 +1904,33 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
         contiguous_cursor=presentation["seq"],
         presented_at=NOW,
     )
+    await asyncio.sleep(0)
+    runtime_before_rejection = route.activation_lease._runtime.snapshot()
+    rejected_ack_params = {
+        **ack_params,
+        "contiguous_cursor": MAX_SAFE_INTEGER,
+    }
+    rejected = await registry.handle_p2_presentation_ack(
+        params=rejected_ack_params,
+        request_id="request-ack-beyond-produced",
+        session_id="session-product",
+    )
+    rejected_replay = await registry.handle_p2_presentation_ack(
+        params=rejected_ack_params,
+        request_id="request-ack-beyond-produced",
+        session_id="session-product",
+    )
+
+    assert rejected.ok is False
+    assert rejected_replay.payload == rejected.payload
+    assert cast(dict, rejected.payload["error"])["code"] == "PROTOCOL_VIOLATION"
+    assert cast(dict, rejected.payload["error"])["reason"] == (
+        "ACK_BEYOND_PRODUCED_CURSOR"
+    )
+    assert route.activation_lease._runtime.snapshot() == runtime_before_rejection
+    assert history.assistants == []
+    assert tuple(registry._p2_ack_operations) == ("request-ack-beyond-produced",)
+
     acknowledged = await registry.handle_p2_presentation_ack(
         params=ack_params,
         request_id="request-ack-1",
