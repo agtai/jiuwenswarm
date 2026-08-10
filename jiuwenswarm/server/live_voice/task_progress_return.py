@@ -448,11 +448,21 @@ def _evidence_id(
     origin: TaskProgressOriginBinding,
     event: PersistentTaskEvent | None = None,
 ) -> str:
-    suffix = "activation" if event is None else f"{event.seq}:{event.event_id}"
-    return (
-        f"task-progress-return:{origin.task_id}:{origin.correlation_id}:"
-        f"{origin.generation_kind}:{origin.generation_id}:{origin.generation}:{suffix}"
-    )
+    identity = {
+        "task_id": origin.task_id,
+        "correlation_id": origin.correlation_id,
+        "generation_kind": origin.generation_kind,
+        "generation_id": origin.generation_id,
+        "generation": origin.generation,
+        "event": (
+            "activation"
+            if event is None
+            else {"seq": event.seq, "event_id": event.event_id}
+        ),
+    }
+    return _PROGRESS_EVENT_PREFIX + hashlib.sha256(
+        canonical_json_bytes(identity)
+    ).hexdigest()
 
 
 def project_task_progress_event(

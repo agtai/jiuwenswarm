@@ -83,7 +83,7 @@ async def _run(wav_path: Path) -> int:
                 "output_channels": rendered.channel_count,
                 "output_sample_width_bytes": rendered.sample_width_bytes,
             },
-            ensure_ascii=False,
+            ensure_ascii=True,
             sort_keys=True,
         ),
         flush=True,

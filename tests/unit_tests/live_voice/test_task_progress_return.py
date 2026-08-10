@@ -53,6 +53,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressSourceDecision,
     TaskProgressTextEvent,
     TaskEventAuthorityProgressSource,
+    _evidence_id,
     project_task_progress_event,
 )
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
@@ -562,6 +563,33 @@ def test_projection_preserves_source_truth_and_omits_unknown_business_facts() ->
     assert "percent" not in projected.progress_event.payload
     assert "error" not in projected.progress_event.payload
     assert "completed" not in projected.progress_event.payload
+
+
+def test_progress_evidence_id_is_bounded_for_canonical_transport() -> None:
+    binding = replace(
+        _binding(TaskProgressOriginKind.TEXT),
+        task_id="task-" + ("t" * 120),
+        correlation_id="correlation-" + ("c" * 120),
+        generation_id="generation-" + ("g" * 120),
+    )
+    task_event = _event(
+        9,
+        "task.running",
+        "running",
+        task_id=binding.task_id,
+        correlation_id=binding.correlation_id,
+        event_id="event-" + ("e" * 120),
+    )
+
+    evidence_id = _evidence_id(binding, task_event)
+
+    assert evidence_id.startswith("task-progress-return:")
+    assert len(evidence_id) <= 256
+    assert evidence_id == _evidence_id(binding, task_event)
+    assert evidence_id != _evidence_id(
+        binding,
+        replace(task_event, event_id="event-other"),
+    )
 
 
 @pytest.mark.asyncio
