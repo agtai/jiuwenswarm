@@ -26,7 +26,14 @@ export interface FormalTaskControlBinding {
 export interface FormalTaskControlRecord {
   readonly task_id: string;
   readonly attempt_id: string | null;
-  readonly correlation_id: string;
+  /**
+   * The Task's authoritative correlation, or `null` while still unconfirmed.
+   * A mutation result does not carry one, so it must never be inferred from
+   * the local control binding: every read path enforces this field by
+   * equality, and one inferred value that later disagreed with Task Core would
+   * fail `task.list` permanently for the entire scope.
+   */
+  readonly correlation_id: string | null;
   readonly state: FormalTaskState | null;
   readonly outcome: FormalTerminalOutcome | null;
   readonly event_head: number | null;
@@ -451,7 +458,7 @@ function mergeObservedTask(
 ): FormalTaskControlRecord {
   if (existing === undefined) return next;
   if (
-    existing.correlation_id !== next.correlation_id
+    (existing.correlation_id !== null && existing.correlation_id !== next.correlation_id)
     || (existing.attempt_id !== null && existing.attempt_id !== next.attempt_id)
     || (existing.event_head !== null && next.event_head !== null && next.event_head < existing.event_head)
   ) {
@@ -966,7 +973,9 @@ export class FormalTaskControlLeaf {
         const task: FormalTaskControlRecord = Object.freeze({
           task_id: taskId,
           attempt_id: attemptId,
-          correlation_id: this.#binding.correlation_id,
+          // Task Core does not echo a correlation on a mutation result, so it
+          // stays unconfirmed until an authoritative query supplies it.
+          correlation_id: null,
           state: null,
           outcome: null,
           event_head: null,
@@ -982,6 +991,14 @@ export class FormalTaskControlLeaf {
     return this.snapshot();
   }
 
+  /**
+   * Bind one WorkProgress observation to its exact retained TaskEvent source.
+   *
+   * Source/conformance only: no product path calls this today. The panel's
+   * progress route goes through `ProductWebP3ProgressOwner` and does not pass
+   * through this leaf, so passing tests here are not evidence that product
+   * progress carries authoritative TaskEvent provenance.
+   */
   adoptProgress(
     origin: FormalTaskProgressOrigin,
     connectionGeneration: number,
@@ -1003,6 +1020,8 @@ export class FormalTaskControlLeaf {
       throw new Error('formal progress terminal outcome mismatch');
     }
     const record = this.#tasks.get(taskId);
+    // A record whose correlation is still unconfirmed (`null`) cannot validate
+    // a progress origin, so it is rejected here until a query confirms it.
     if (
       record === undefined ||
       origin.correlation_id !== record.correlation_id ||
@@ -1083,7 +1102,9 @@ export class FormalTaskControlLeaf {
     if (afterSeq !== -1 && checkpoint === null) {
       throw new Error('task.events cursor has no retained lifecycle checkpoint');
     }
-    let selectedCorrelationId: string | undefined = existing?.correlation_id;
+    // `null` means unconfirmed, so the first authoritative event establishes it
+    // rather than conflicting with it.
+    let selectedCorrelationId: string | undefined = existing?.correlation_id ?? undefined;
     const projectedEventIdentities = new Map(this.#eventIdentities);
     const projectedEventSequences = new Map(this.#eventSequences);
     for (const value of result.events) {
@@ -1195,7 +1216,7 @@ export class FormalTaskControlLeaf {
         Object.freeze({
           task_id: taskId,
           attempt_id: existing?.attempt_id ?? null,
-          correlation_id: existing?.correlation_id ?? this.#binding.correlation_id,
+          correlation_id: existing?.correlation_id ?? null,
           state: existing?.state ?? null,
           outcome: existing?.outcome ?? null,
           event_head: head,

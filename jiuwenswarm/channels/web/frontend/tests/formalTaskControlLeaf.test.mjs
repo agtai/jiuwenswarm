@@ -190,6 +190,47 @@ test('create get list status cancel and events retain authoritative task truth',
   );
 });
 
+test('a created task takes its correlation from Task Core, never from the control binding', async () => {
+  // Task Core owns the Task correlation and a mutation result does not echo
+  // it. Inferring it from the local control binding made every later query
+  // throw as soon as the two disagreed, and because task.list is all-or-
+  // nothing that permanently broke the whole scope's list view.
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  const prepared = prepareFormalTaskMutation(
+    binding,
+    { operation: 'task.create', command_id: 'command-1', task_id: null },
+    confirmation()
+  );
+  await leaf.submitMutation(prepared, async () => ({ ok: true }));
+  leaf.adopt('task.create', {
+    status: 'mutation_processed',
+    operation: 'task.create',
+    formal_task_result: { command_id: 'command-1', task_id: 'task-1', attempt_id: 'attempt-1' },
+  }, adoption(leaf, { command_id: 'command-1' }));
+  assert.equal(leaf.snapshot().tasks[0].correlation_id, null);
+
+  // An authoritative correlation that differs from the control binding is
+  // adopted rather than rejected.
+  const authoritative = task({ correlation_id: 'task-core-correlation-9' });
+  const adopted = leaf.adopt('task.get', {
+    ok: true,
+    result: { task: authoritative, attempt: { task_id: 'task-1', attempt_id: 'attempt-1' } },
+  }, adoption(leaf, { query_task_id: 'task-1' }));
+  assert.equal(adopted.tasks[0].correlation_id, 'task-core-correlation-9');
+
+  // Once confirmed it is immutable.
+  assert.throws(
+    () => leaf.adopt('task.get', {
+      ok: true,
+      result: {
+        task: task({ correlation_id: 'task-core-correlation-10' }),
+        attempt: { task_id: 'task-1', attempt_id: 'attempt-1' },
+      },
+    }, adoption(leaf, { query_task_id: 'task-1' })),
+    /retained task identity/
+  );
+});
+
 test('response and round cancellation never widen into formal task cancellation', () => {
   assert.equal(mapFormalTaskCancel('playback.stop', 'task-1'), null);
   assert.equal(mapFormalTaskCancel('response.cancel', 'task-1'), null);

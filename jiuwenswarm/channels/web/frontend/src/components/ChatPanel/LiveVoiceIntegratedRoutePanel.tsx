@@ -2513,7 +2513,7 @@ export function LiveVoiceIntegratedRoutePanelView({
                     label={t('liveVoice.integrated.taskQuery.outcome')}
                     value={task.state === null ? 'unavailable' : task.state === 'terminal' ? (task.outcome ?? 'unavailable') : 'not_terminal'}
                   />
-                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.correlation')} value={task.correlation_id} />
+                  <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.correlation')} value={task.correlation_id ?? 'unconfirmed'} />
                   <DiagnosticsFact label={t('liveVoice.integrated.taskQuery.cursor')} value={String(task.last_event_seq ?? -1)} />
                 </div>
               ))}
