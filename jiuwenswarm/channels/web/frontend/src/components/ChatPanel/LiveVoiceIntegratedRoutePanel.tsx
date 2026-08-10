@@ -1409,7 +1409,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   useEffect(() => {
     if (!props.isConnected) {
       cancelP3RetryInspection();
+      setP3RetryEligibility(null);
+      setP3RetryInspectionStatus('idle');
       formalTaskControlLeafRef.current?.disconnect();
+      return;
+    }
+    const leaf = formalTaskControlLeafRef.current;
+    if (leaf !== null && !leaf.snapshot().connected) {
+      leaf.reconnect(leaf.snapshot().binding);
     }
   }, [props.isConnected]);
 
@@ -1822,6 +1829,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
 
   const issueP3MutationConfirmation = async () => {
+    const inspectionWasChecking = p3RetryInspectionStatus === 'checking';
+    cancelP3RetryInspection();
+    if (inspectionWasChecking) {
+      setP3RetryEligibility(null);
+      setP3RetryInspectionStatus('idle');
+      return;
+    }
     const owner = p3MutationOwnerRef.current;
     let mutation = pendingP3MutationRef.current;
     if (
@@ -2435,8 +2449,7 @@ export function LiveVoiceIntegratedRoutePanelView({
                   type="button"
                   onClick={onP3Issue}
                   disabled={
-                    p3MutationStatus === 'issuing'
-                    || p3MutationStatus === 'mutating'
+                    p3MutationLocked
                     || (p3MutationOperation === 'task.retry' && !p3RetryEligible)
                   }
                 >

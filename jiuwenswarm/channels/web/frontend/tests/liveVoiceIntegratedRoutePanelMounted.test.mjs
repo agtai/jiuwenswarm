@@ -251,13 +251,13 @@ function mountedP1Element(i18n, sessionId, request) {
   );
 }
 
-function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait) {
+function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait, isConnected = true) {
   return React.createElement(
     I18nextProvider,
     { i18n },
     React.createElement(P3EnabledLiveVoiceIntegratedRoutePanel, {
       activeSessionId: sessionId,
-      isConnected: true,
+      isConnected,
       agentRouteAvailable: true,
       taskCompatibilityAvailable: false,
       request,
@@ -689,11 +689,25 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
         'nonterminal task.cancel did not retain an authoritative retry inspection'
       );
     });
+    assert.equal(mountedP3Controls(renderer).button('Issue confirmation').props.disabled, true);
+    const confirmationsBeforeDefensiveFence = calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length;
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => retryWaiters.length === 0 && !JSON.stringify(renderer.toJSON()).includes('checking'),
+        'defensive confirmation entry did not fence the retained retry inspection'
+      );
+    });
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length,
+      confirmationsBeforeDefensiveFence,
+      'a programmatic confirmation during inspection must allocate zero confirmation effects'
+    );
     assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
 
     terminalA = true;
     await act(async () => {
-      retryWaiters[0].resolve();
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
       await waitForMounted(
         () => mountedP3Controls(renderer).select.props.value === 'task.retry',
         'terminal cancelled attempt did not automatically expose task.retry'
@@ -715,6 +729,21 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       );
     });
     assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+
+    const mutationsBeforeDisconnect = calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length;
+    await act(async () => {
+      renderer.update(mountedP3Element(i18n, 'mounted-p3-session', request, p3RetryInspectionWait, false));
+      await Promise.resolve();
+    });
+    assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-p3-mutation' }).length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, mutationsBeforeDisconnect);
+    await act(async () => {
+      renderer.update(mountedP3Element(i18n, 'mounted-p3-session', request, p3RetryInspectionWait, true));
+      await waitForMounted(
+        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-p3-mutation' }).length === 1,
+        'formal P3 controls did not recover after reconnect'
+      );
+    });
 
     terminalB = true;
     await act(async () => {
