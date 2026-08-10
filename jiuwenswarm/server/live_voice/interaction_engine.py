@@ -105,6 +105,13 @@ CASCADE_GOLDEN_SCRIPT = (
 # valid CR lifecycle trace and does not imply that every action occurs within
 # one product response.
 _CASCADE_ACTION_BY_OBSERVATION = dict(CASCADE_GOLDEN_SCRIPT)
+if set(_CASCADE_ACTION_BY_OBSERVATION) != set(CascadeObservationKind):
+    # Fail at import rather than letting a newly added observation kind reach a
+    # lookup that has no frozen intention for it.
+    raise InteractionEngineViolation(
+        "INCOMPLETE_CASCADE_SCRIPT",
+        "every CascadeObservationKind requires one frozen golden intention",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -473,7 +480,13 @@ class ScriptedCascadeInteractionEngine:
                     "OBSERVATION_LEDGER_FULL",
                     "bounded Cascade observation ledger is full",
                 )
-            operation = _CASCADE_ACTION_BY_OBSERVATION[observation.kind].value
+            mapped = _CASCADE_ACTION_BY_OBSERVATION.get(observation.kind)
+            if mapped is None:
+                raise InteractionEngineViolation(
+                    "UNMAPPED_OBSERVATION_KIND",
+                    "observation kind has no frozen Cascade intention",
+                )
+            operation = mapped.value
             if operation not in self._supported_actions:
                 raise InteractionEngineViolation(
                     "CAPABILITY_UNSUPPORTED",
@@ -505,13 +518,15 @@ class ScriptedCascadeInteractionEngine:
             observation_sequence, "observation_sequence"
         )
         with self._lock:
+            # An already-released cursor is a no-op at every state, including a
+            # fresh engine where cursor 0 would otherwise read as "ahead".
+            if cursor <= self._released_through:
+                return 0
             if cursor >= self._next_observation_sequence:
                 raise InteractionEngineViolation(
                     "RELEASE_CURSOR_AHEAD",
                     "release cursor cannot advance beyond accepted observations",
                 )
-            if cursor <= self._released_through:
-                return 0
             released = 0
             for sequence in tuple(self._records_by_sequence):
                 if sequence > cursor:

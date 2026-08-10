@@ -842,9 +842,13 @@ class StreamingSpeechConformance:
             retained_recognition=len(self._recognition),
             retained_synthesis=len(self._synthesis),
             pending_provider_controls=len(self._pending_controls),
+            # Every never-evicted identity ledger is counted. Omitting one lets
+            # a capacity monitor under-report retention and meet
+            # RESPONSE_IDENTITY_CAPACITY_EXHAUSTED without warning.
             retained_identity_tombstones=(
                 len(self._recognition_generations)
                 + len(self._synthesis_generations)
+                + len(self._response_generations)
                 + len(self._response_ids)
             ),
             retained_synthesis_unit_identities=sum(

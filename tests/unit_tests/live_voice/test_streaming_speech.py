@@ -300,6 +300,28 @@ def test_flag_off_rejects_before_allocating_response_or_sessions() -> None:
     assert_zero_authority_effects(runtime)
 
 
+def test_retained_tombstones_count_every_never_evicted_identity_ledger() -> None:
+    """Response interaction identities are retained, so they must be reported.
+
+    Omitting a ledger lets a capacity monitor under-report retention and reach
+    RESPONSE_IDENTITY_CAPACITY_EXHAUSTED without warning.
+    """
+
+    runtime = StreamingSpeechConformance(native_capability(), enabled=True)
+    assert runtime.snapshot().retained_identity_tombstones == 0
+
+    runtime.activate_response(
+        response(interaction_id="interaction-1", response_id="response-1")
+    )
+    # One interaction generation ledger entry plus one response id ledger entry.
+    assert runtime.snapshot().retained_identity_tombstones == 2
+
+    runtime.activate_response(
+        response(interaction_id="interaction-2", response_id="response-2")
+    )
+    assert runtime.snapshot().retained_identity_tombstones == 4
+
+
 def test_unavailable_provider_rejects_without_session_side_effects() -> None:
     runtime = StreamingSpeechConformance(
         native_capability(available=False), enabled=True

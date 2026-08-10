@@ -147,10 +147,25 @@ def _is_enabled(value: object) -> bool:
 
 
 def _require_exact_params(
-    params: Mapping[str, object], allowed: frozenset[str]
+    params: Mapping[str, object],
+    allowed: frozenset[str],
+    *,
+    required: frozenset[str] = frozenset(),
 ) -> None:
+    """Reject unknown keys and, when declared, absent required keys.
+
+    The error message promises completeness, so a caller that has a genuine
+    required set must declare it here.  Folding that set into ``allowed`` and
+    relying on a downstream validator makes this check silently one-directional
+    and leaves the required set as dead code at the call site.
+    """
+
     keys = set(params)
-    if any(type(key) is not str for key in keys) or keys - allowed:
+    if (
+        any(type(key) is not str for key in keys)
+        or keys - allowed
+        or required - keys
+    ):
         raise FormalTaskViolation(
             "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
             "product request fields are incomplete or unknown",
@@ -2806,7 +2821,15 @@ class AgentServerProductCompositionRegistry:
         else:
             required.add("task_id")
             optional.add("source")
-        _require_exact_params(params, frozenset(required | optional))
+        _require_exact_params(
+            params,
+            frozenset(required | optional),
+            # auth_token stays out of the structural required set on purpose. A
+            # missing credential must reach the authenticator and return
+            # FORMAL_TASK_AUTHENTICATION_REQUIRED / UNAUTHENTICATED rather than
+            # being downgraded to an argument error here.
+            required=frozenset(required - {"auth_token"}),
+        )
         routed_session = _required_text(session_id, "routed_session_id")
         if _required_text(params.get("session_id"), "session_id") != routed_session:
             raise FormalTaskViolation(

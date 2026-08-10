@@ -566,6 +566,31 @@ def test_bounded_replay_release_reuses_capacity_without_reopening_stale_input() 
     assert engine.retained_actions() == (second_action, third_action)
 
 
+def test_every_observation_kind_has_one_frozen_intention() -> None:
+    """A kind with no scripted intention would escape as an uncaught KeyError.
+
+    The lookup is guarded and the module refuses to import when the script is
+    incomplete, so this pins the completeness the guard depends on.
+    """
+
+    assert {kind for kind, _ in CASCADE_GOLDEN_SCRIPT} == set(CascadeObservationKind)
+
+
+def test_release_cursor_zero_is_a_no_op_at_every_engine_state() -> None:
+    """An already-released cursor never raises, including on a fresh engine."""
+
+    engine = ScriptedCascadeInteractionEngine(
+        scope=_CASCADE_SCOPE,
+        interaction_id="interaction-1",
+        response_generation=7,
+    )
+    assert engine.release_through(0) == 0
+    engine.observe(_observation(1, CascadeObservationKind.SPEECH_STARTED))
+    assert engine.release_through(0) == 0
+    assert engine.snapshot().released_through == 0
+    assert engine.snapshot().retained_observations == 1
+
+
 def test_unsupported_cascade_capability_is_fail_closed_and_consumes_no_sequence() -> None:
     engine = ScriptedCascadeInteractionEngine(
         scope=_CASCADE_SCOPE,
