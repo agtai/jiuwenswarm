@@ -90,6 +90,12 @@ switch ($Action) {
         }
         $vitePort = [int] $configValue.ports.vite
         $debugPort = [int] $configValue.ports.chrome_debug
+        $sessionId = [string] $configValue.session_id
+        if (-not $sessionId.StartsWith('sess_') -or $sessionId -eq 'new') {
+            throw "Runtime config must bind Chrome to one persistent session_id: $sessionId"
+        }
+        $sessionSegment = [Uri]::EscapeDataString($sessionId)
+        $targetUrl = "http://127.0.0.1:$vitePort/chat/$sessionSegment"
         if (-not (Get-NetTCPConnection -State Listen -LocalPort $vitePort -ErrorAction SilentlyContinue)) {
             throw "Vite is not listening on port $vitePort"
         }
@@ -115,9 +121,9 @@ switch ($Action) {
             )
             $audioMode = 'prepared_wav'
         }
-        $arguments += "http://127.0.0.1:$vitePort"
+        $arguments += $targetUrl
         $process = Start-Process -FilePath $chrome -ArgumentList $arguments -PassThru
-        Write-Host "W2_REHEARSAL_CHROME_STARTED pid=$($process.Id) profile=$profile audio_mode=$audioMode" -ForegroundColor Green
+        Write-Host "W2_REHEARSAL_CHROME_STARTED pid=$($process.Id) profile=$profile audio_mode=$audioMode url=$targetUrl" -ForegroundColor Green
         exit 0
     }
     'SpeechPreflight' {

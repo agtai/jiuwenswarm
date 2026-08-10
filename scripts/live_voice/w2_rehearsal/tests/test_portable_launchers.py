@@ -68,6 +68,18 @@ def test_chrome_audio_modes_have_mutually_exclusive_argv_and_physical_has_no_wav
     assert "audio_mode=$audioMode" in script
 
 
+def test_chrome_launches_the_exact_persistent_session() -> None:
+    script = (_BUNDLE / "start_w2_rehearsal.ps1").read_text(encoding="utf-8")
+
+    assert "$sessionId = [string] $configValue.session_id" in script
+    assert "$sessionId.StartsWith('sess_')" in script
+    assert "$sessionId -eq 'new'" in script
+    assert '"http://127.0.0.1:$vitePort/chat/$sessionSegment"' in script
+    assert "$arguments += $targetUrl" in script
+    assert '$arguments += "http://127.0.0.1:$vitePort"' not in script
+    assert "url=$targetUrl" in script
+
+
 def test_authoritative_runbooks_distinguish_prepared_and_physical_launches() -> None:
     toolkit = (_BUNDLE / "README.md").read_text(encoding="utf-8")
     e2e = (
