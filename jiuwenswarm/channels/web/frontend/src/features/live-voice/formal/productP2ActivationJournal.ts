@@ -238,9 +238,8 @@ export class ProductP2ActivationJournal {
   }
 
   predecessorForRecovery(): ProductWebP2ActivationBinding | null {
-    if (this.#record.phase === 'result_unknown') {
-      throw new Error(PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED);
-    }
+    // Unknown local results retain an exact binding so recovery can adopt the
+    // server's active replay or closed-generation truth without a successor.
     if (this.#record.phase === 'closed') return null;
     if (this.#record.binding === null) {
       throw new Error('product P2 activation journal predecessor is missing');

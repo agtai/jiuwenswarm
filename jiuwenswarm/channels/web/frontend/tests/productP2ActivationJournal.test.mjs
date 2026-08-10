@@ -155,28 +155,98 @@ test('unknown reconcile or close result preserves the barrier and creates no suc
   }
 });
 
-test('result-unknown, corrupt, and unavailable journals fail closed', async () => {
+test('result-unknown active predecessor is exactly replayed, closed, then advances', async () => {
   const storage = memoryStorage();
   const firstPage = openJournal(storage);
   const first = firstPage.prepareSuccessor('page-a');
   firstPage.markResultUnknown(first);
   const refreshedPage = openJournal(storage, 'client-b');
-  let activationCalls = 0;
+  const effects = [];
   const recovered = await reconcileProductP2Predecessor({
     journal: refreshedPage,
-    activate_exact: async () => {
-      activationCalls += 1;
+    activate_exact: async binding => {
+      effects.push(['activate', binding]);
       return { replayed: true };
     },
-    close_exact: async () => {},
+    close_exact: async binding => {
+      effects.push(['close', binding]);
+    },
     error_reason: () => undefined,
     activation_retryable: () => false,
   });
+
+  assert.deepEqual(recovered, { kind: 'ready' });
+  assert.deepEqual(effects, [
+    ['activate', first],
+    ['close', first],
+  ]);
+  assert.equal(refreshedPage.snapshot().phase, 'closed');
+  const successor = refreshedPage.prepareSuccessor('page-b');
+  assert.equal(successor.activation_generation, first.activation_generation + 1);
+});
+
+test('result-unknown closed predecessor adopts authoritative stale truth without another close', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage);
+  const first = firstPage.prepareSuccessor('page-a');
+  firstPage.markResultUnknown(first);
+  const refreshedPage = openJournal(storage, 'client-b');
+  let closeCalls = 0;
+
+  const recovered = await reconcileProductP2Predecessor({
+    journal: refreshedPage,
+    activate_exact: async binding => {
+      assert.deepEqual(binding, first);
+      throw { reason: 'ACTIVATION_GENERATION_STALE' };
+    },
+    close_exact: async () => {
+      closeCalls += 1;
+    },
+    error_reason: error => error?.reason,
+    activation_retryable: () => false,
+  });
+
+  assert.deepEqual(recovered, { kind: 'ready' });
+  assert.equal(closeCalls, 0);
+  assert.equal(refreshedPage.snapshot().phase, 'closed');
+  const successor = refreshedPage.prepareSuccessor('page-b');
+  assert.equal(successor.activation_generation, first.activation_generation + 1);
+});
+
+test('result-unknown missing server state is exactly cleaned but remains blocked', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage);
+  const first = firstPage.prepareSuccessor('page-a');
+  firstPage.markResultUnknown(first);
+  const refreshedPage = openJournal(storage, 'client-b');
+  let closeCalls = 0;
+
+  const recovered = await reconcileProductP2Predecessor({
+    journal: refreshedPage,
+    activate_exact: async binding => {
+      assert.deepEqual(binding, first);
+      return { replayed: false };
+    },
+    close_exact: async binding => {
+      assert.deepEqual(binding, first);
+      closeCalls += 1;
+    },
+    error_reason: () => undefined,
+    activation_retryable: () => false,
+  });
+
   assert.deepEqual(recovered, {
     kind: 'blocked',
-    reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
+    reason: PRODUCT_P2_REFRESH_SERVER_STATE_LOST,
   });
-  assert.equal(activationCalls, 0);
+  assert.equal(closeCalls, 1);
+  assert.equal(refreshedPage.snapshot().phase, 'result_unknown');
+  assert.throws(() => refreshedPage.prepareSuccessor('page-b'), new RegExp(PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED));
+});
+
+test('corrupt and unavailable journals fail closed', () => {
+  const storage = memoryStorage();
+  openJournal(storage);
 
   const corrupt = memoryStorage(new Map(storage.values));
   const [key] = corrupt.values.keys();
