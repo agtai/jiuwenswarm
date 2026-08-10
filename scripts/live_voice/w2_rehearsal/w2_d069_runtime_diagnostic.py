@@ -23,7 +23,13 @@ _P3_FROZEN_ENTRY_COUNTS = {
     "agent": 1,
     "tool": 0,
 }
-_P3_CANCEL_ENTRY_DELTA = {**_P3_FROZEN_ENTRY_COUNTS, "dispatch": 0, "agent": 0, "cancel": 1}
+_P3_CANCEL_ENTRY_DELTA = {
+    **_P3_FROZEN_ENTRY_COUNTS,
+    "dispatch": 0,
+    "agent": 0,
+    "cancel": 1,
+}
+_P3_RECONCILE_PAUSE_SECONDS = 3600.0
 
 
 def _iso_now() -> str:
@@ -69,7 +75,17 @@ def _configure(args: argparse.Namespace) -> str:
 
 def _assert_zero_effect(before: object, after: object, *, label: str) -> None:
     if after != before:
-        raise RuntimeError(f"{label} produced a forbidden side effect")
+        detail = ""
+        if isinstance(before, tuple) and isinstance(after, tuple):
+            changed = [
+                index
+                for index, (left, right) in enumerate(zip(before, after, strict=False))
+                if left != right
+            ]
+            if len(before) != len(after):
+                changed.append(min(len(before), len(after)))
+            detail = f" at tuple indices {changed}"
+        raise RuntimeError(f"{label} produced a forbidden side effect{detail}")
 
 
 def _read_sqlite_dump(
@@ -112,7 +128,9 @@ class _P3BarrierAgent:
             manager = getattr(instance, "ability_manager", None)
             original_execute = getattr(manager, "execute", None)
             if child is None or child is adapter or not callable(original_execute):
-                raise RuntimeError("P3 probe cannot observe the session Tool entrypoint")
+                raise RuntimeError(
+                    "P3 probe cannot observe the session Tool entrypoint"
+                )
 
             async def observed_execute(*args: object, **kwargs: object) -> object:
                 self._owner._record("tool")
@@ -193,9 +211,7 @@ class _P3NonterminalBarrier:
         resolver = self._executor._resolver
         original_resolve = resolver.resolve
 
-        async def observed_resolve(
-            spec: object, *, for_dispatch: bool
-        ) -> object:
+        async def observed_resolve(spec: object, *, for_dispatch: bool) -> object:
             binding = await original_resolve(spec, for_dispatch=for_dispatch)
             factory = getattr(binding, "attempt_executor_factory", None)
             if not for_dispatch or not callable(factory):
@@ -289,6 +305,56 @@ async def _exercise_p2_non_retriable_ack(
         "reason": str(error["reason"]),
         "replayed": True,
         "recovery_accepted": True,
+    }
+
+
+async def _exercise_p3_non_retriable_issue(
+    registry: object,
+    *,
+    params: Mapping[str, object],
+    request_id: str,
+    session_id: str,
+    business_snapshot: Callable[[], object],
+    issue_ledger_snapshot: Callable[[], tuple[str, ...]],
+) -> dict[str, object]:
+    """Prove retry preflight rejection is stable and reserves no receipt."""
+
+    before = business_snapshot()
+    ledger_before = issue_ledger_snapshot()
+    first = await registry.handle_p3_confirmation_issue(
+        params=params, request_id=request_id, session_id=session_id
+    )
+    error = first.payload.get("error") if not first.ok else None
+    if (
+        not isinstance(error, dict)
+        or error.get("code") != "CONFLICT"
+        or error.get("reason") != "TASK_RETRY_REQUIRES_TERMINAL"
+    ):
+        raise RuntimeError(f"P3 non-retriable probe returned {error!r}")
+    _assert_zero_effect(
+        before, business_snapshot(), label="P3 non-retriable task.retry"
+    )
+    _assert_zero_effect(
+        ledger_before,
+        issue_ledger_snapshot(),
+        label="P3 rejected retry confirmation ledger",
+    )
+
+    replayed = await registry.handle_p3_confirmation_issue(
+        params=params, request_id=request_id, session_id=session_id
+    )
+    if replayed.ok or replayed.payload != first.payload:
+        raise RuntimeError("P3 rejection was not an exact replay")
+    _assert_zero_effect(before, business_snapshot(), label="P3 rejected retry replay")
+    _assert_zero_effect(
+        ledger_before,
+        issue_ledger_snapshot(),
+        label="P3 rejected retry replay ledger",
+    )
+    return {
+        "code": str(error["code"]),
+        "reason": str(error["reason"]),
+        "repeat_stable": True,
     }
 
 
@@ -421,6 +487,174 @@ def _p3_zero_effect_snapshot(
     )
 
 
+def _assert_p3_probe_closed_state(
+    server: object,
+    composition: object,
+    scope: object,
+    database: Path,
+    task_id: str,
+    attempt_ids: tuple[str, str],
+) -> None:
+    """Require exact durable cleanup before a production probe may pass."""
+
+    from jiuwenswarm.server.live_voice.project_code_executor import (
+        _attempt_worktree_paths,
+        _git_head,
+        _project_tree_fingerprint,
+    )
+
+    _require_no_evidence_owner(server)
+    store = composition._core.store
+    executor = composition._core.executor
+    task = store.get_task(task_id, scope)
+    if (
+        task.state.value != "terminal"
+        or task.outcome is None
+        or task.outcome.value != "cancelled"
+        or task.attempt_id != attempt_ids[1]
+    ):
+        raise RuntimeError("P3 probe did not close on the cancelled successor")
+    expected_lineage = tuple(
+        (attempt_id, number, "terminal", "cancelled")
+        for number, attempt_id in enumerate(attempt_ids, start=1)
+    )
+    if _read_attempt_lineage(database, task_id) != expected_lineage:
+        raise RuntimeError("P3 probe did not retain exact cancelled A/B lineage")
+
+    direct_attempts = {
+        item.attempt_id: item for item in executor._journal.all_attempts()
+    }
+    if set(direct_attempts) != set(attempt_ids):
+        raise RuntimeError("P3 probe retained unexpected Executor attempts")
+    roots: set[Path] = set()
+    for attempt_id in attempt_ids:
+        record = direct_attempts[attempt_id]
+        if (
+            record.state.value != "terminal"
+            or record.outcome is None
+            or record.outcome.value != "cancelled"
+            or record.raw_status != "cancelled"
+            or not record.cancel_requested
+            or record.owner_id is not None
+            or record.lease_expires_at is not None
+        ):
+            raise RuntimeError("P3 probe left nonterminal Executor ownership")
+        root = Path(record.project_root).resolve(strict=True)
+        roots.add(root)
+        parent, checkout = _attempt_worktree_paths(root, attempt_id)
+        if parent.exists() or checkout.exists():
+            raise RuntimeError("P3 probe left an attempt worktree behind")
+        if (
+            _git_head(root) != record.before_head
+            or _project_tree_fingerprint(root) != record.before_tree
+        ):
+            raise RuntimeError("P3 probe changed the disposable project")
+    if len(roots) != 1:
+        raise RuntimeError("P3 probe attempts used different project roots")
+    if (
+        executor.has_live_workers
+        or executor._running
+        or executor._applying
+        or executor._interruptions
+        or executor.retained_cleanup_attempt_ids()
+    ):
+        raise RuntimeError("P3 probe left Executor worker or cleanup ownership")
+
+    connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)
+    try:
+        outbox = connection.execute(
+            """
+            SELECT kind, state, claimed_by, claimed_at, claim_token, last_error
+              FROM outbox WHERE task_id=? ORDER BY created_at, outbox_id
+            """,
+            (task_id,),
+        ).fetchall()
+        commands = connection.execute(
+            "SELECT command_type FROM commands ORDER BY created_at, command_id"
+        ).fetchall()
+    finally:
+        connection.close()
+    if (
+        len(outbox) != 4
+        or sorted(row[0] for row in outbox)
+        != ["attempt.cancel", "attempt.cancel", "attempt.dispatch", "attempt.dispatch"]
+        or any(row[1:] != ("delivered", None, None, None, None) for row in outbox)
+    ):
+        raise RuntimeError("P3 probe left incomplete or claimed outbox work")
+    if sorted(row[0] for row in commands) != [
+        "task.cancel",
+        "task.cancel",
+        "task.create",
+        "task.retry",
+    ]:
+        raise RuntimeError("P3 probe retained an unexpected formal command")
+
+    if server._agent_manager.agents.get("live_voice_formal_task"):
+        raise RuntimeError("P3 probe left a formal Agent lease behind")
+    if any(server._agent_manager._agent_pins.values()):
+        raise RuntimeError("P3 probe left an Agent pin behind")
+
+
+async def _wait_quiescent_snapshot(
+    snapshot: Callable[[], object],
+    *,
+    timeout: float,
+    interval: float = 0.1,
+    confirmations: int = 3,
+) -> object:
+    if confirmations < 2 or interval < 0:
+        raise ValueError("quiescence requires at least two nonnegative samples")
+    deadline = time.monotonic() + timeout
+    previous = snapshot()
+    stable = 1
+    changed_indices: set[int] = set()
+    while time.monotonic() < deadline:
+        await asyncio.sleep(interval)
+        current = snapshot()
+        if current == previous:
+            stable += 1
+            if stable >= confirmations:
+                return current
+        else:
+            if isinstance(previous, tuple) and isinstance(current, tuple):
+                changed_indices.update(
+                    index
+                    for index, (left, right) in enumerate(
+                        zip(previous, current, strict=False)
+                    )
+                    if left != right
+                )
+                if len(previous) != len(current):
+                    changed_indices.add(min(len(previous), len(current)))
+            previous = current
+            stable = 1
+    detail = (
+        f"; changing tuple indices={sorted(changed_indices)}" if changed_indices else ""
+    )
+    raise TimeoutError(f"P3 business state did not become quiescent{detail}")
+
+
+def _pause_p3_periodic_reconciliation(composition: object) -> float:
+    """Let one last real reconciliation run, then remove periodic DB churn."""
+
+    interval = getattr(composition, "_reconcile_interval", None)
+    wake = getattr(composition, "_wake", None)
+    if (
+        isinstance(interval, bool)
+        or not isinstance(interval, (int, float))
+        or interval <= 0
+        or not callable(getattr(wake, "set", None))
+    ):
+        raise RuntimeError("P3 probe cannot coordinate the production reconciler")
+    composition._reconcile_interval = max(float(interval), _P3_RECONCILE_PAUSE_SECONDS)
+    wake.set()
+    return float(interval)
+
+
+def _resume_p3_periodic_reconciliation(composition: object, interval: float) -> None:
+    composition._reconcile_interval = interval
+
+
 async def _wait_outbox_settled(
     composition: object,
     scope: object,
@@ -441,8 +675,10 @@ async def _wait_outbox_settled(
         finally:
             connection.close()
         task = composition._core.store.get_task(task_id, scope)
-        if rows and task.state.value == "running" and all(
-            row == ("delivered", None, None, None) for row in rows
+        if (
+            rows
+            and task.state.value == "running"
+            and all(row == ("delivered", None, None, None) for row in rows)
         ):
             return
         if task.state.value == "terminal":
@@ -1128,7 +1364,10 @@ async def _run_p2_fault_probe(args: argparse.Namespace, token: str) -> None:
             request_id="w2-p2-fault-probe-retriable",
             session_id=args.session_id,
         )
-        if retriable.ok or dict(retriable.payload["error"]).get("code") != "UNAVAILABLE":
+        if (
+            retriable.ok
+            or dict(retriable.payload["error"]).get("code") != "UNAVAILABLE"
+        ):
             raise RuntimeError(f"P2 retriable probe returned {retriable.payload!r}")
         _assert_zero_effect(
             before_retriable,
@@ -1196,6 +1435,9 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
     server = AgentWebSocketServer()
     started = False
     barrier: _P3NonterminalBarrier | None = None
+    composition: object | None = None
+    reconcile_interval: float | None = None
+    closure: tuple[object, str, tuple[str, str], dict[str, object]] | None = None
     try:
         await server._start_live_voice_p3_composition()
         await server._start_live_voice_product_composition()
@@ -1223,6 +1465,7 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
             model_intent=args.model_intent,
         )
         task_id = str(created["task_id"])
+        predecessor_attempt_id = str(created["attempt_id"])
         await _wait_task(composition, scope, task_id, terminal=False, timeout=60)
         await _wait_outbox_settled(
             composition, scope, args.database, task_id, timeout=60
@@ -1233,36 +1476,32 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
                 f"P3 nonterminal barrier entry mismatch: {barrier.snapshot()!r}"
             )
 
-        before_non_retriable = _p3_zero_effect_snapshot(
-            server, composition, registry, scope, args.database, task_id
-        )
-        entries_before_non_retriable = barrier.snapshot()
-        _non_retriable_params, non_retriable = await _issue_mutation(
-            registry,
-            token=token,
-            session_id=args.session_id,
-            operation="task.retry",
-            command_id=f"w2-p3-fault-nonterminal-{suffix}",
-            task_id=task_id,
-        )
-        if non_retriable.ok:
-            raise RuntimeError(
-                "P3 non-retriable probe unexpectedly issued confirmation"
-            )
-        non_retriable_error = dict(non_retriable.payload["error"])
-        if (
-            non_retriable_error.get("code") != "CONFLICT"
-            or non_retriable_error.get("reason") != "TASK_RETRY_REQUIRES_TERMINAL"
-        ):
-            raise RuntimeError(
-                f"P3 non-retriable probe returned {non_retriable_error!r}"
-            )
-        _assert_zero_effect(
-            before_non_retriable,
-            _p3_zero_effect_snapshot(
+        def business_snapshot() -> tuple[object, ...]:
+            return _p3_zero_effect_snapshot(
                 server, composition, registry, scope, args.database, task_id
-            ),
-            label="P3 non-retriable task.retry",
+            )
+
+        reconcile_interval = _pause_p3_periodic_reconciliation(composition)
+        await _wait_quiescent_snapshot(business_snapshot, timeout=10)
+
+        entries_before_non_retriable = barrier.snapshot()
+        non_retriable_command = f"w2-p3-fault-nonterminal-{suffix}"
+        non_retriable_params: dict[str, object] = {
+            "auth_token": token,
+            "session_id": args.session_id,
+            "operation": "task.retry",
+            "command_id": non_retriable_command,
+            "issued_at": _iso_now(),
+            "correlation_id": f"correlation:{non_retriable_command}",
+            "task_id": task_id,
+        }
+        non_retriable_error = await _exercise_p3_non_retriable_issue(
+            registry,
+            params=non_retriable_params,
+            request_id=f"issue:{non_retriable_command}",
+            session_id=args.session_id,
+            business_snapshot=business_snapshot,
+            issue_ledger_snapshot=lambda: tuple(sorted(registry._p3_issue_operations)),
         )
         _assert_zero_effect(
             entries_before_non_retriable,
@@ -1271,6 +1510,8 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
         )
         rejected_entry_delta = barrier.delta(entries_before_non_retriable)
 
+        _resume_p3_periodic_reconciliation(composition, reconcile_interval)
+        reconcile_interval = None
         entries_before_cancel = barrier.snapshot()
         await _mutate(
             registry,
@@ -1293,6 +1534,11 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
             raise RuntimeError("P3 frozen predecessor was not legally cancelled")
         barrier.restore()
         barrier = None
+
+        # Freeze the successor independently so the probe cannot race the
+        # supported terminal-before-dispatch cancellation path.
+        barrier = _P3NonterminalBarrier(composition._core)
+        barrier.install()
 
         stale_params, stale_issue = await _issue_mutation(
             registry,
@@ -1338,6 +1584,21 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
             raise RuntimeError("P3 stale recovery changed the task cardinality")
         winner_formal = dict(dict(winner.payload["result"])["formal_task_result"])
         successor_attempt = str(winner_formal["attempt_id"])
+        await _wait_task(composition, scope, task_id, terminal=False, timeout=60)
+        await _wait_outbox_settled(
+            composition, scope, args.database, task_id, timeout=60
+        )
+        await barrier.wait_frozen(timeout=60)
+        successor_entries = barrier.snapshot()
+        if (
+            successor_entries["dispatch"] != 1
+            or successor_entries["agent"] != 1
+            or successor_entries["tool"] != 0
+        ):
+            raise RuntimeError(
+                f"P3 successor barrier entry mismatch: {successor_entries!r}"
+            )
+        entries_before_successor_cancel = barrier.snapshot()
         await _mutate(
             registry,
             token=token,
@@ -1346,7 +1607,20 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
             command_id=f"w2-p3-fault-cancel-b-{suffix}",
             task_id=task_id,
         )
-        await _wait_task(composition, scope, task_id, terminal=True, timeout=180)
+        successor = await _wait_task(
+            composition, scope, task_id, terminal=True, timeout=180
+        )
+        if successor.outcome is None or successor.outcome.value != "cancelled":
+            raise RuntimeError("P3 successor was not legally cancelled")
+        await barrier.wait_agent_stopped(timeout=60)
+        successor_cancel_entry_delta = barrier.delta(entries_before_successor_cancel)
+        if successor_cancel_entry_delta != _P3_CANCEL_ENTRY_DELTA:
+            raise RuntimeError(
+                "P3 successor legal cancel entry mismatch: "
+                f"{successor_cancel_entry_delta!r}"
+            )
+        barrier.restore()
+        barrier = None
 
         stale_error = dict(stale.payload["error"])
         if (
@@ -1357,34 +1631,50 @@ async def _run_p3_fault_probe(args: argparse.Namespace, token: str) -> None:
         current = composition._core.store.get_task(task_id, scope)
         if current.attempt_id != successor_attempt:
             raise RuntimeError("P3 stale probe changed the authoritative successor")
-        print(
-            "W2_P3_FAULT_PROBE "
-            + json.dumps(
-                {
-                    "non_retriable": {
-                        "code": str(non_retriable_error["code"]),
-                        "reason": str(non_retriable_error["reason"]),
-                        "entry_delta": rejected_entry_delta,
-                    },
-                    "legal_cancel_entry_delta": cancel_entry_delta,
-                    "zero_effect": {
-                        "code": str(stale_error["code"]),
-                        "reason": str(stale_error["reason"]),
-                    },
-                    "task_id": task_id,
-                    "successor_attempt_id": successor_attempt,
+        closure = (
+            scope,
+            task_id,
+            (predecessor_attempt_id, successor_attempt),
+            {
+                "non_retriable": {
+                    "code": str(non_retriable_error["code"]),
+                    "reason": str(non_retriable_error["reason"]),
+                    "entry_delta": rejected_entry_delta,
                 },
-                sort_keys=True,
-            ),
-            flush=True,
+                "legal_cancel_entry_delta": cancel_entry_delta,
+                "successor_cancel_entry_delta": successor_cancel_entry_delta,
+                "zero_effect": {
+                    "code": str(stale_error["code"]),
+                    "reason": str(stale_error["reason"]),
+                },
+                "task_id": task_id,
+                "successor_attempt_id": successor_attempt,
+            },
         )
     finally:
         try:
+            if composition is not None and reconcile_interval is not None:
+                _resume_p3_periodic_reconciliation(composition, reconcile_interval)
             if started:
                 await _stop(server)
         finally:
             if barrier is not None:
                 barrier.restore()
+    if closure is None or composition is None:
+        raise RuntimeError("P3 probe did not reach its closure oracle")
+    closed_scope, closed_task_id, attempt_ids, report = closure
+    _assert_p3_probe_closed_state(
+        server,
+        composition,
+        closed_scope,
+        args.database,
+        closed_task_id,
+        attempt_ids,
+    )
+    print(
+        "W2_P3_FAULT_PROBE " + json.dumps(report, sort_keys=True),
+        flush=True,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:

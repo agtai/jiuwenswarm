@@ -18,10 +18,184 @@ from w2_d069_runtime_diagnostic import (
     _P3_CANCEL_ENTRY_DELTA,
     _P3_FROZEN_ENTRY_COUNTS,
     _P3NonterminalBarrier,
+    _assert_p3_probe_closed_state,
     _assert_zero_effect,
     _exercise_p2_non_retriable_ack,
+    _exercise_p3_non_retriable_issue,
+    _pause_p3_periodic_reconciliation,
     _read_sqlite_dump,
+    _resume_p3_periodic_reconciliation,
+    _wait_quiescent_snapshot,
 )
+
+
+def _closed_p3_probe_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[object, object, Path, dict[str, object]]:
+    from jiuwenswarm.server.live_voice import project_code_executor
+
+    database = tmp_path / "closed.sqlite3"
+    attempt_ids = ("attempt-a", "attempt-b")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE attempts("
+            "attempt_id TEXT, task_id TEXT, attempt_number INTEGER, "
+            "state TEXT, outcome TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO attempts VALUES(?, 'task-1', ?, 'terminal', 'cancelled')",
+            ((attempt_id, number) for number, attempt_id in enumerate(attempt_ids, 1)),
+        )
+        connection.execute(
+            "CREATE TABLE outbox("
+            "outbox_id TEXT, task_id TEXT, kind TEXT, state TEXT, "
+            "claimed_by TEXT, claimed_at TEXT, claim_token TEXT, "
+            "last_error TEXT, created_at TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO outbox VALUES(?, 'task-1', ?, 'delivered', "
+            "NULL, NULL, NULL, NULL, ?)",
+            (
+                ("outbox-1", "attempt.dispatch", "1"),
+                ("outbox-2", "attempt.cancel", "2"),
+                ("outbox-3", "attempt.dispatch", "3"),
+                ("outbox-4", "attempt.cancel", "4"),
+            ),
+        )
+        connection.execute(
+            "CREATE TABLE commands("
+            "command_id TEXT, command_type TEXT, created_at TEXT)"
+        )
+        connection.executemany(
+            "INSERT INTO commands VALUES(?, ?, ?)",
+            (
+                ("command-1", "task.create", "1"),
+                ("command-2", "task.cancel", "2"),
+                ("command-3", "task.retry", "3"),
+                ("command-4", "task.cancel", "4"),
+            ),
+        )
+
+    def value(name: str) -> SimpleNamespace:
+        return SimpleNamespace(value=name)
+
+    task = SimpleNamespace(
+        state=value("terminal"),
+        outcome=value("cancelled"),
+        attempt_id=attempt_ids[1],
+    )
+    records = {
+        attempt_id: SimpleNamespace(
+            attempt_id=attempt_id,
+            state=value("terminal"),
+            outcome=value("cancelled"),
+            raw_status="cancelled",
+            cancel_requested=True,
+            owner_id=None,
+            lease_expires_at=None,
+            project_root=str(tmp_path),
+            before_head="head-1",
+            before_tree="tree-1",
+        )
+        for attempt_id in attempt_ids
+    }
+    journal = SimpleNamespace(all_attempts=lambda: tuple(records.values()))
+    executor = SimpleNamespace(
+        _journal=journal,
+        has_live_workers=False,
+        _running=set(),
+        _applying=set(),
+        _interruptions=set(),
+        retained_cleanup_attempt_ids=lambda: (),
+    )
+    store = SimpleNamespace(get_task=lambda _task_id, _scope: task)
+    composition = SimpleNamespace(_core=SimpleNamespace(store=store, executor=executor))
+    server = SimpleNamespace(
+        _live_voice_w2_observability=None,
+        _agent_manager=SimpleNamespace(agents={}, _agent_pins={}),
+    )
+    monkeypatch.delenv("JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED", raising=False)
+    monkeypatch.setattr(
+        project_code_executor,
+        "_attempt_worktree_paths",
+        lambda _root, attempt_id: (
+            tmp_path / f"parent-{attempt_id}",
+            tmp_path / f"checkout-{attempt_id}",
+        ),
+    )
+    monkeypatch.setattr(project_code_executor, "_git_head", lambda _root: "head-1")
+    monkeypatch.setattr(
+        project_code_executor,
+        "_project_tree_fingerprint",
+        lambda _root: "tree-1",
+    )
+    return server, composition, database, {
+        "task": task,
+        "records": records,
+        "attempt_ids": attempt_ids,
+    }
+
+
+def test_p3_closed_state_oracle_rejects_wrong_successor_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, composition, database, fixture = _closed_p3_probe_fixture(
+        tmp_path, monkeypatch
+    )
+    fixture["task"].outcome = SimpleNamespace(value="completed")
+
+    with pytest.raises(RuntimeError, match="cancelled successor"):
+        _assert_p3_probe_closed_state(
+            server,
+            composition,
+            object(),
+            database,
+            "task-1",
+            fixture["attempt_ids"],
+        )
+
+
+def test_p3_closed_state_oracle_rejects_residual_outbox_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, composition, database, fixture = _closed_p3_probe_fixture(
+        tmp_path, monkeypatch
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE outbox SET claimed_by='worker-1', claim_token='claim-1' "
+            "WHERE outbox_id='outbox-4'"
+        )
+
+    with pytest.raises(RuntimeError, match="incomplete or claimed outbox"):
+        _assert_p3_probe_closed_state(
+            server,
+            composition,
+            object(),
+            database,
+            "task-1",
+            fixture["attempt_ids"],
+        )
+
+
+@pytest.mark.parametrize("field", ["owner_id", "lease_expires_at"])
+def test_p3_closed_state_oracle_rejects_residual_executor_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
+) -> None:
+    server, composition, database, fixture = _closed_p3_probe_fixture(
+        tmp_path, monkeypatch
+    )
+    setattr(fixture["records"]["attempt-b"], field, "residual")
+
+    with pytest.raises(RuntimeError, match="nonterminal Executor ownership"):
+        _assert_p3_probe_closed_state(
+            server,
+            composition,
+            object(),
+            database,
+            "task-1",
+            fixture["attempt_ids"],
+        )
 
 
 class _AbilityManager:
@@ -34,9 +208,7 @@ class _AbilityManager:
 
 
 class _RoutingCodeAdapter(JiuwenSwarmCodeAdapter):
-    async def create_instance(
-        self, config=None, *, mode="code", sub_mode=None
-    ) -> None:
+    async def create_instance(self, config=None, *, mode="code", sub_mode=None) -> None:
         self._session_instance_config = dict(config or {})
         self._session_instance_mode = mode
         self._session_instance_sub_mode = sub_mode
@@ -194,6 +366,93 @@ async def test_p2_probe_replays_semantic_error_then_uses_a_new_legal_ack() -> No
     assert registry.calls[0][1]["contiguous_cursor"] == (1 << 53) - 1
     assert registry.calls[2][0] == "w2-p2-fault-probe-recovery-fixed"
     assert registry.calls[2][1]["contiguous_cursor"] == registry.cursor == 0
+
+
+class _P3Registry:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, dict[str, object]]] = []
+        self.receipts: dict[str, dict[str, object]] = {}
+        self.business_state = ("running", "attempt-1")
+
+    async def handle_p3_confirmation_issue(self, *, params, request_id, session_id):
+        self.calls.append((request_id, session_id, dict(params)))
+        payload = {
+            "request_id": request_id,
+            "ok": False,
+            "result": None,
+            "error": {
+                "code": "CONFLICT",
+                "reason": "TASK_RETRY_REQUIRES_TERMINAL",
+            },
+        }
+        return SimpleNamespace(ok=False, payload=payload)
+
+
+@pytest.mark.asyncio
+async def test_p3_probe_repeats_preflight_error_without_reserving_receipt() -> None:
+    registry = _P3Registry()
+    params = {
+        "session_id": "session-1",
+        "operation": "task.retry",
+        "command_id": "command-1",
+        "task_id": "task-1",
+    }
+
+    result = await _exercise_p3_non_retriable_issue(
+        registry,
+        params=params,
+        request_id="issue:command-1",
+        session_id="session-1",
+        business_snapshot=lambda: registry.business_state,
+        issue_ledger_snapshot=lambda: tuple(registry.receipts),
+    )
+
+    assert result == {
+        "code": "CONFLICT",
+        "reason": "TASK_RETRY_REQUIRES_TERMINAL",
+        "repeat_stable": True,
+    }
+    assert registry.receipts == {}
+    assert registry.calls[0] == registry.calls[1]
+
+
+@pytest.mark.asyncio
+async def test_p3_probe_waits_for_preexisting_async_tail_before_baseline() -> None:
+    observed = iter(
+        [
+            ("running", 1),
+            ("running", 2),
+            ("running", 2),
+            ("running", 2),
+        ]
+    )
+
+    settled = await _wait_quiescent_snapshot(
+        lambda: next(observed),
+        timeout=1,
+        interval=0,
+        confirmations=3,
+    )
+
+    assert settled == ("running", 2)
+
+
+def test_p3_probe_pauses_only_periodic_reconciliation_until_rejection_is_checked() -> (
+    None
+):
+    composition = SimpleNamespace(
+        _reconcile_interval=0.2,
+        _wake=asyncio.Event(),
+    )
+
+    interval = _pause_p3_periodic_reconciliation(composition)
+
+    assert interval == 0.2
+    assert composition._reconcile_interval == 3600.0
+    assert composition._wake.is_set()
+
+    _resume_p3_periodic_reconciliation(composition, interval)
+    assert composition._reconcile_interval == 0.2
 
 
 def test_sqlite_oracle_excludes_only_separate_journal_and_detects_claim(
