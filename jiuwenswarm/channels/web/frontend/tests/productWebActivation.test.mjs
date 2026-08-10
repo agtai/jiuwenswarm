@@ -17,6 +17,7 @@ import {
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
   pollProductP2RouteWithRecovery,
+  replayProductP2DurableOperation,
   retryRetainedProductOperation,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productWebActivation.js';
 
@@ -220,6 +221,47 @@ function response(status, changes = {}) {
   };
 }
 
+function durableResponse(requestId, status, changes = {}) {
+  return {
+    request_id: requestId,
+    ok: true,
+    result: {
+      status,
+      session_id: binding.session_id,
+      correlation_id: binding.correlation_id,
+      interaction_id: binding.interaction_id,
+      activation_id: binding.activation_id,
+      activation_generation: binding.activation_generation,
+      ...changes,
+    },
+    error: null,
+  };
+}
+
+function agentSubmitResponse(requestId, params, changes = {}) {
+  return durableResponse(requestId, 'round_accepted', {
+    turn_id: params.turn_id,
+    commit_id: params.commit_id,
+    round_id: 'round-1',
+    response: {
+      interaction_id: params.interaction_id,
+      response_id: params.response_id,
+      response_generation: 0,
+    },
+    ...changes,
+  });
+}
+
+function presentationAckResponse(requestId, changes = {}) {
+  return durableResponse(requestId, 'presentation_acknowledged', {
+    accepted: true,
+    replayed: false,
+    history_records_written: 1,
+    history_pending: false,
+    ...changes,
+  });
+}
+
 function webError(message, code, retriable = false) {
   return Object.assign(new Error(message), { code, retriable });
 }
@@ -296,21 +338,17 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
   });
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
-    request: async (method, params) => {
+    request: async (method, params, requestId) => {
       calls.push([method, params]);
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       if (method === PRODUCT_P2_SUBMIT_METHOD) {
-        return bound('round_accepted', {
-          round_id: 'round-1',
-          turn_id: params.turn_id,
-          commit_id: params.commit_id,
-        });
+        return agentSubmitResponse(requestId, params);
       }
       if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
         return bound('notification', { kind: 'agent.output' });
       }
       if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
-        return bound('presentation_acknowledged', { accepted: true });
+        return presentationAckResponse(requestId);
       }
       return response('closed');
     },
@@ -353,6 +391,324 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
 });
 
+test('durable submit ACK and barge-in checkpoint before transport and settle only after exact validation', async () => {
+  const effects = [];
+  const journal = {
+    checkpointOperation: operation => effects.push(['checkpoint', operation]),
+    settleOperation: operation => effects.push(['settle', operation]),
+  };
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    durable_operation_journal: journal,
+    request: async (method, params, requestId) => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      effects.push(['request', { method, request_id: requestId, params }]);
+      if (method === PRODUCT_P2_SUBMIT_METHOD) return agentSubmitResponse(requestId, params);
+      if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) return presentationAckResponse(requestId);
+      if (method === PRODUCT_P2_BARGE_IN_METHOD) {
+        return durableResponse(requestId, 'barge_in_applied', {
+          action_id: params.action_id,
+          response_id: params.response_id,
+          response_generation: params.response_generation,
+          cancel_response: params.cancel_response,
+          applied: true,
+          replayed: false,
+          effect_ids: ['effect-1'],
+        });
+      }
+      throw new Error(`unexpected ${method}`);
+    },
+  });
+  await owner.start(binding);
+
+  await owner.submitText({
+    commit_id: 'commit-durable',
+    turn_id: 'turn-durable',
+    response_id: 'response-durable',
+    committed_at: '2026-08-10T00:00:00Z',
+    text: 'durable turn',
+  });
+  await owner.acknowledgePresentation({
+    response_id: 'response-durable',
+    response_generation: 0,
+    surface: 'text',
+    unit_id: 'unit-durable',
+    contiguous_cursor: 12,
+    presented_at: '2026-08-10T00:00:01Z',
+  });
+  await owner.bargeIn({
+    action_id: 'barge-durable',
+    response_id: 'response-durable',
+    response_generation: 0,
+    cancel_response: true,
+  });
+
+  assert.deepEqual(
+    effects.map(([kind, operation]) => [kind, operation.method]),
+    [
+      ['checkpoint', PRODUCT_P2_SUBMIT_METHOD],
+      ['request', PRODUCT_P2_SUBMIT_METHOD],
+      ['settle', PRODUCT_P2_SUBMIT_METHOD],
+      ['checkpoint', PRODUCT_P2_PRESENTATION_ACK_METHOD],
+      ['request', PRODUCT_P2_PRESENTATION_ACK_METHOD],
+      ['settle', PRODUCT_P2_PRESENTATION_ACK_METHOD],
+      ['checkpoint', PRODUCT_P2_BARGE_IN_METHOD],
+      ['request', PRODUCT_P2_BARGE_IN_METHOD],
+      ['settle', PRODUCT_P2_BARGE_IN_METHOD],
+    ]
+  );
+  for (let index = 0; index < effects.length; index += 3) {
+    assert.deepEqual(effects[index][1], effects[index + 1][1]);
+    assert.deepEqual(effects[index][1], effects[index + 2][1]);
+  }
+});
+
+test('durable checkpoint failure creates zero submit ACK or barge-in transport effect', async () => {
+  const operations = [
+    owner =>
+      owner.submitText({
+        commit_id: 'commit-blocked',
+        turn_id: 'turn-blocked',
+        response_id: 'response-blocked',
+        committed_at: '2026-08-10T00:00:00Z',
+        text: 'blocked turn',
+      }),
+    owner =>
+      owner.acknowledgePresentation({
+        response_id: 'response-blocked',
+        response_generation: 0,
+        surface: 'text',
+        unit_id: 'unit-blocked',
+        contiguous_cursor: 0,
+        presented_at: '2026-08-10T00:00:01Z',
+      }),
+    owner =>
+      owner.bargeIn({
+        action_id: 'barge-blocked',
+        response_id: 'response-blocked',
+        response_generation: 0,
+        cancel_response: true,
+      }),
+  ];
+
+  for (const invoke of operations) {
+    let businessCalls = 0;
+    const owner = new ProductWebP2ActivationOwner({
+      enabled: true,
+      durable_operation_journal: {
+        checkpointOperation: () => {
+          throw new Error('checkpoint unavailable');
+        },
+        settleOperation: () => {
+          throw new Error('settle must not run');
+        },
+      },
+      request: async method => {
+        if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+        businessCalls += 1;
+        throw new Error('business request must not run');
+      },
+    });
+    await owner.start(binding);
+    await assert.rejects(invoke(owner), /checkpoint unavailable/);
+    assert.equal(businessCalls, 0);
+  }
+});
+
+test('direct durable replay reuses the exact request and accepts a server-owned task response', async () => {
+  const operation = {
+    method: PRODUCT_P2_SUBMIT_METHOD,
+    request_id: 'request-task-replay',
+    params: {
+      ...binding,
+      commit_id: 'commit-task-replay',
+      turn_id: 'turn-task-replay',
+      committed_at: '2026-08-10T00:00:00Z',
+      text: 'create from voice',
+      dispatch_target: 'task',
+      voice_commit_receipt: 'r'.repeat(32),
+      critical_confirmation: true,
+    },
+  };
+  const calls = [];
+  const result = await replayProductP2DurableOperation({
+    operation,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      return durableResponse(requestId, 'task_origin_accepted', {
+        turn_id: operation.params.turn_id,
+        commit_id: operation.params.commit_id,
+        response: {
+          interaction_id: binding.interaction_id,
+          response_id: 'server-response-task-replay',
+          response_generation: 0,
+        },
+      });
+    },
+  });
+
+  assert.equal(result.response.response_id, 'server-response-task-replay');
+  assert.deepEqual(calls, [[operation.method, operation.params, operation.request_id]]);
+});
+
+test('direct durable replay rejects malformed or secret-bearing envelopes before transport', async () => {
+  const valid = {
+    method: PRODUCT_P2_SUBMIT_METHOD,
+    request_id: 'request-task-replay-invalid',
+    params: {
+      ...binding,
+      commit_id: 'commit-task-replay-invalid',
+      turn_id: 'turn-task-replay-invalid',
+      committed_at: '2026-08-10T00:00:00Z',
+      text: 'create from voice',
+      dispatch_target: 'task',
+      voice_commit_receipt: 'r'.repeat(32),
+      critical_confirmation: true,
+    },
+  };
+  const malformed = [
+    { ...valid, method: PRODUCT_P2_NOTIFICATION_NEXT_METHOD },
+    { ...valid, auth_token: 'secret' },
+    { ...valid, params: { ...valid.params, raw_audio: 'secret-audio' } },
+    { ...valid, params: { ...valid.params, activation_generation: 0 } },
+    { ...valid, params: { ...valid.params, session_id: '' } },
+  ];
+  let calls = 0;
+
+  for (const operation of malformed) {
+    await assert.rejects(
+      replayProductP2DurableOperation({
+        operation,
+        request: async () => {
+          calls += 1;
+          throw new Error('transport must not run');
+        },
+      }),
+      /durable product|activation_generation|session_id/
+    );
+  }
+
+  assert.equal(calls, 0);
+});
+
+test('direct durable replay rejects foreign envelopes and forged canonical operation results', async () => {
+  const agentOperation = {
+    method: PRODUCT_P2_SUBMIT_METHOD,
+    request_id: 'request-agent-result-binding',
+    params: {
+      ...binding,
+      commit_id: 'commit-agent-result-binding',
+      turn_id: 'turn-agent-result-binding',
+      response_id: 'response-agent-result-binding',
+      committed_at: '2026-08-10T00:00:00Z',
+      text: 'agent result binding',
+      dispatch_target: 'agent',
+    },
+  };
+  const validAgentResult = {
+    turn_id: agentOperation.params.turn_id,
+    commit_id: agentOperation.params.commit_id,
+    round_id: 'round-agent-result-binding',
+    response: {
+      interaction_id: binding.interaction_id,
+      response_id: agentOperation.params.response_id,
+      response_generation: 0,
+    },
+  };
+  const invalidAgentEnvelopes = [
+    durableResponse('foreign-request', 'round_accepted', validAgentResult),
+    { ...durableResponse(agentOperation.request_id, 'round_accepted', validAgentResult), ok: 1 },
+    { ...durableResponse(agentOperation.request_id, 'round_accepted', validAgentResult), error: {} },
+    durableResponse(agentOperation.request_id, 'round_accepted', { ...validAgentResult, turn_id: 'foreign-turn' }),
+    durableResponse(agentOperation.request_id, 'round_accepted', { ...validAgentResult, response: undefined }),
+    durableResponse(agentOperation.request_id, 'round_accepted', {
+      ...validAgentResult,
+      response: { ...validAgentResult.response, response_id: 'foreign-response' },
+    }),
+  ];
+
+  for (const envelope of invalidAgentEnvelopes) {
+    await assert.rejects(
+      replayProductP2DurableOperation({
+        operation: agentOperation,
+        request: async () => envelope,
+      }),
+      /request|response|binding|unavailable/
+    );
+  }
+
+  const ackOperation = {
+    method: PRODUCT_P2_PRESENTATION_ACK_METHOD,
+    request_id: 'request-ack-result-binding',
+    params: {
+      ...binding,
+      response_id: 'response-ack-result-binding',
+      response_generation: 0,
+      surface: 'text',
+      unit_id: 'unit-ack-result-binding',
+      contiguous_cursor: 0,
+      presented_at: '2026-08-10T00:00:01Z',
+    },
+  };
+  for (const changes of [
+    { accepted: true },
+    { accepted: true, replayed: false, history_records_written: -1, history_pending: false },
+    { accepted: false, replayed: false, history_records_written: 1, history_pending: false },
+    { accepted: true, replayed: false, history_records_written: 1, history_pending: true },
+    { accepted: true, replayed: 'false', history_records_written: 1, history_pending: false },
+  ]) {
+    await assert.rejects(
+      replayProductP2DurableOperation({
+        operation: ackOperation,
+        request: async () => durableResponse(ackOperation.request_id, 'presentation_acknowledged', changes),
+      }),
+      /ACK|binding/
+    );
+  }
+});
+
+test('task submit rejects a client response id and UTF-8 overflow before transport', async () => {
+  const valid = {
+    method: PRODUCT_P2_SUBMIT_METHOD,
+    request_id: 'request-task-strict-envelope',
+    params: {
+      ...binding,
+      commit_id: 'commit-task-strict-envelope',
+      turn_id: 'turn-task-strict-envelope',
+      committed_at: '2026-08-10T00:00:00Z',
+      text: 'create from voice',
+      dispatch_target: 'task',
+      voice_commit_receipt: 'r'.repeat(32),
+      critical_confirmation: true,
+    },
+  };
+  let calls = 0;
+  for (const operation of [
+    { ...valid, params: { ...valid.params, response_id: 'client-forged-response' } },
+    { ...valid, params: { ...valid.params, text: '你'.repeat(45_000) } },
+  ]) {
+    await assert.rejects(
+      replayProductP2DurableOperation({
+        operation,
+        request: async () => {
+          calls += 1;
+          return durableResponse(operation.request_id, 'task_origin_accepted', {
+            turn_id: operation.params.turn_id,
+            commit_id: operation.params.commit_id,
+            response: {
+              interaction_id: binding.interaction_id,
+              response_id: 'server-owned-response',
+              response_generation: 0,
+            },
+          });
+        },
+      }),
+      /unexpected fields|bound/
+    );
+  }
+  assert.equal(calls, 0);
+});
+
 test('task-origin submit requires the exact canonical CR response binding', async () => {
   const turn = {
     commit_id: 'commit-task-origin',
@@ -362,61 +718,70 @@ test('task-origin submit requires the exact canonical CR response binding', asyn
     dispatch_target: 'task',
     voice_commit_receipt: 'receipt-task-origin',
   };
-  const submitParams = [];
-  const makeOwner = submitResult => new ProductWebP2ActivationOwner({
-    enabled: true,
-    request: async (method, params) => {
-      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
-      submitParams.push(params);
-      return {
-        ok: true,
-        result: {
-          status: 'task_origin_accepted',
-          ...binding,
-          turn_id: turn.turn_id,
-          commit_id: turn.commit_id,
+  const makeOwner = submitResult =>
+    new ProductWebP2ActivationOwner({
+      enabled: true,
+      request: async (method, params, requestId) => {
+        if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+        assert.equal('response_id' in params, false);
+        return durableResponse(requestId, 'task_origin_accepted', {
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
           ...submitResult,
-        },
-      };
-    },
-  });
+        });
+      },
+    });
 
   const missingResponse = makeOwner({});
   await missingResponse.start(binding);
-  await assert.rejects(
-    missingResponse.submitText(turn),
-    /task_origin_accepted response binding mismatch/
-  );
+  await assert.rejects(missingResponse.submitText(turn), /task_origin_accepted response binding mismatch/);
 
   const conflictingResponse = makeOwner({
     response: {
       interaction_id: 'interaction-foreign',
-      response_id: 'response-server-owned',
+      response_id: 'server-owned-response',
       response_generation: 0,
     },
   });
   await conflictingResponse.start(binding);
-  await assert.rejects(
-    conflictingResponse.submitText(turn),
-    /task_origin_accepted response binding mismatch/
-  );
+  await assert.rejects(conflictingResponse.submitText(turn), /task_origin_accepted response binding mismatch/);
 
-  const exact = makeOwner({
+  const serverOwnedResponse = makeOwner({
     response: {
       interaction_id: binding.interaction_id,
-      response_id: 'response-server-owned',
+      response_id: 'server-owned-response',
       response_generation: 0,
     },
   });
-  await exact.start(binding);
-  const accepted = await exact.submitText(turn);
-  assert.equal(accepted.response.response_id, 'response-server-owned');
-  assert.equal(accepted.response.response_generation, 0);
-  assert.equal('response_id' in submitParams.at(-1), false);
-  assert.notEqual(
-    accepted.response.response_generation,
-    accepted.activation_generation
+  await serverOwnedResponse.start(binding);
+  const serverAccepted = await serverOwnedResponse.submitText(turn);
+  assert.equal(serverAccepted.response.response_id, 'server-owned-response');
+  assert.equal(serverAccepted.response.response_generation, 0);
+  assert.notEqual(serverAccepted.response.response_generation, serverAccepted.activation_generation);
+});
+
+test('agent submit still requires a client response id before transport', async () => {
+  let submitCalls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async method => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      submitCalls += 1;
+      throw new Error('submit transport must not run');
+    },
+  });
+  await owner.start(binding);
+
+  await assert.rejects(
+    owner.submitText({
+      commit_id: 'commit-agent-missing-response',
+      turn_id: 'turn-agent-missing-response',
+      committed_at: '2026-08-10T00:00:00Z',
+      text: 'agent submission',
+    }),
+    /response_id is required/
   );
+  assert.equal(submitCalls, 0);
 });
 
 test('agent submit requires exact server-owned turn and commit binding', async () => {
@@ -431,16 +796,11 @@ test('agent submit requires exact server-owned turn and commit binding', async (
     let submitCalls = 0;
     const owner = new ProductWebP2ActivationOwner({
       enabled: true,
-      request: async method => {
+      request: async (method, params, requestId) => {
         if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
         submitCalls += 1;
-        return response('round_accepted', {
+        return agentSubmitResponse(requestId, params, {
           round_id: 'round-agent-binding',
-          response: {
-            interaction_id: binding.interaction_id,
-            response_id: turn.response_id,
-            response_generation: 0,
-          },
           ...resultBinding,
         });
       },
@@ -449,16 +809,13 @@ test('agent submit requires exact server-owned turn and commit binding', async (
   };
 
   for (const resultBinding of [
-    {},
+    { turn_id: undefined, commit_id: undefined },
     { turn_id: 'turn-foreign', commit_id: turn.commit_id },
     { turn_id: turn.turn_id, commit_id: 'commit-foreign' },
   ]) {
     const { owner } = makeOwner(resultBinding);
     await owner.start(binding);
-    await assert.rejects(
-      owner.submitText(turn),
-      /round_accepted response binding mismatch/
-    );
+    await assert.rejects(owner.submitText(turn), /round_accepted response binding mismatch/);
   }
 
   const exact = makeOwner({
@@ -490,16 +847,12 @@ test('active stock Web owner replays exact P2 operations after response loss', a
       attempts.set(method, attempt);
       if (attempt === 1) throw webError(`${method} response lost`, 'REQUEST_TIMEOUT', true);
       if (method === PRODUCT_P2_SUBMIT_METHOD) {
-        return bound('round_accepted', {
-          round_id: 'round-1',
-          turn_id: params.turn_id,
-          commit_id: params.commit_id,
-        });
+        return agentSubmitResponse(requestId, params);
       }
       if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
         return bound('notification', { kind: 'agent.output' });
       }
-      return bound('presentation_acknowledged', { accepted: true });
+      return presentationAckResponse(requestId);
     },
   });
   await owner.start(binding);
@@ -546,11 +899,7 @@ test('unknown P2 submit locks semantic changes but exact retry stays stable', as
       calls.push([method, params, requestId]);
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       if (unavailable) throw webError('submit outcome unknown', 'UNAVAILABLE');
-      return response('round_accepted', {
-        round_id: 'round-1',
-        turn_id: params.turn_id,
-        commit_id: params.commit_id,
-      });
+      return agentSubmitResponse(requestId, params);
     },
   });
   await owner.start(binding);
@@ -586,13 +935,9 @@ test('unresolved presentation ACK blocks a second turn and preserves exact retry
         throw webError('ACK outcome unknown', 'UNAVAILABLE');
       }
       if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
-        return response('presentation_acknowledged', { accepted: true });
+        return presentationAckResponse(requestId);
       }
-      return response('round_accepted', {
-        round_id: 'round-2',
-        turn_id: params.turn_id,
-        commit_id: params.commit_id,
-      });
+      return agentSubmitResponse(requestId, params, { round_id: 'round-2' });
     },
   });
   await owner.start(binding);
@@ -631,14 +976,10 @@ test('completed Web submission capacity recovers and old replay fails closed', a
   let submissionCalls = 0;
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
-    request: async (method, params) => {
+    request: async (method, params, requestId) => {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       submissionCalls += 1;
-      return response('round_accepted', {
-        round_id: `round-${submissionCalls}`,
-        turn_id: params.turn_id,
-        commit_id: params.commit_id,
-      });
+      return agentSubmitResponse(requestId, params, { round_id: `round-${submissionCalls}` });
     },
   });
   await owner.start(binding);
@@ -769,7 +1110,10 @@ test('stock Web task.retry sends only the exact task target through two-step con
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0][1], retry);
   assert.deepEqual(calls[1][1], { ...retry, confirmation_id: 'confirmation-retry' });
-  assert.equal(calls.some(([, params]) => 'previous_attempt_id' in params || 'attempt_number' in params || 'context' in params), false);
+  assert.equal(
+    calls.some(([, params]) => 'previous_attempt_id' in params || 'attempt_number' in params || 'context' in params),
+    false
+  );
   assert.notEqual(calls[0][2], calls[1][2]);
 });
 
@@ -809,7 +1153,7 @@ test('stock Web owner retains one exact playback-scoped barge-in', async () => {
       calls.push([method, params, requestId]);
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       if (method === PRODUCT_P2_BARGE_IN_METHOD) {
-        return response('barge_in_applied', {
+        return durableResponse(requestId, 'barge_in_applied', {
           action_id: params.action_id,
           response_id: params.response_id,
           response_generation: params.response_generation,
@@ -847,7 +1191,7 @@ test('barge-in response loss stays pending until the exact input is replayed', a
   let bargeCalls = 0;
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
-    request: async (method, params) => {
+    request: async (method, params, requestId) => {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       if (method === PRODUCT_P2_BARGE_IN_METHOD) {
         bargeCalls += 1;
@@ -857,7 +1201,7 @@ test('barge-in response loss stays pending until the exact input is replayed', a
           error.retriable = true;
           throw error;
         }
-        return response('barge_in_applied', {
+        return durableResponse(requestId, 'barge_in_applied', {
           action_id: params.action_id,
           response_id: params.response_id,
           response_generation: params.response_generation,

@@ -12,9 +12,7 @@ import { act, create } from 'react-test-renderer';
 
 import { LiveVoiceIntegratedRoutePanel } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 
-const mountedBundleDirectory = await mkdtemp(
-  fileURLToPath(new URL('../node_modules/.cache/jiuwenswarm-live-voice-mounted-', import.meta.url))
-);
+const mountedBundleDirectory = await mkdtemp(fileURLToPath(new URL('../node_modules/.cache/jiuwenswarm-live-voice-mounted-', import.meta.url)));
 after(async () => {
   await rm(mountedBundleDirectory, { recursive: true, force: true });
 });
@@ -71,6 +69,89 @@ async function createI18n() {
     interpolation: { escapeValue: false },
   });
   return i18n;
+}
+
+function createFakeWebLocks() {
+  const held = new Set();
+  return {
+    async request(name, options, callback) {
+      assert.deepEqual(options, { mode: 'exclusive', ifAvailable: true });
+      if (held.has(name)) return callback(null);
+      held.add(name);
+      try {
+        return await callback({ name });
+      } finally {
+        held.delete(name);
+      }
+    },
+  };
+}
+
+function installP2RecoveryBrowser(storage) {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  globalThis.window = {
+    sessionStorage: storage,
+    location: { origin: 'http://localhost:5173' },
+    setTimeout: globalThis.setTimeout.bind(globalThis),
+    clearTimeout: globalThis.clearTimeout.bind(globalThis),
+    addEventListener() {},
+    removeEventListener() {},
+    isSecureContext: true,
+  };
+  globalThis.document = {
+    visibilityState: 'visible',
+    wasDiscarded: false,
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: {
+      userAgent: 'Mozilla/5.0 Chrome/150.0.0.0 Safari/537.36',
+      platform: 'Win32',
+      onLine: true,
+      userActivation: { hasBeenActive: true, isActive: true },
+      locks: createFakeWebLocks(),
+      permissions: {
+        query: async () => ({
+          state: 'granted',
+          addEventListener() {},
+          removeEventListener() {},
+        }),
+      },
+      mediaDevices: {
+        enumerateDevices: async () => [{ kind: 'audioinput' }, { kind: 'audiooutput' }],
+      },
+    },
+  });
+  return () => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else delete globalThis.navigator;
+  };
+}
+
+function pendingP2Journal(binding, operation) {
+  return {
+    schema: 'live-voice.product-p2-activation-journal.v2',
+    revision: 3,
+    client_instance_id: 'pre-refresh-client',
+    session_id: binding.session_id,
+    correlation_id: binding.correlation_id,
+    interaction_id: binding.interaction_id,
+    binding,
+    phase: 'operation_result_unknown',
+    last_generation: binding.activation_generation,
+    pending_operation: operation,
+    recovery_owner_id: null,
+    recovery_token: null,
+    recovery_epoch: 0,
+  };
 }
 
 function installP1BrowserEnvironment() {
@@ -207,6 +288,7 @@ function installP1BrowserEnvironment() {
       platform: 'Win32',
       onLine: true,
       userActivation: { hasBeenActive: true, isActive: true },
+      locks: createFakeWebLocks(),
       permissions: {
         query: async () => ({
           state: 'granted',
@@ -279,13 +361,7 @@ function mountedP3Controls(renderer) {
   return { root, select, button, hasButton };
 }
 
-function mountedP3Status(binding, {
-  attemptId = 'attempt-a',
-  attemptNumber = 1,
-  state = 'running',
-  outcome = null,
-  eventHead = 1,
-} = {}) {
+function mountedP3Status(binding, { attemptId = 'attempt-a', attemptNumber = 1, state = 'running', outcome = null, eventHead = 1 } = {}) {
   return {
     ok: true,
     result: {
@@ -503,22 +579,23 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
   let releaseDeferredStatus = null;
   let renderer;
 
-  const p3RetryInspectionWait = (_delayMs, signal) => new Promise((resolve, reject) => {
-    const waiter = { resolve, reject };
-    const abort = () => {
-      const index = retryWaiters.indexOf(waiter);
-      if (index >= 0) retryWaiters.splice(index, 1);
-      reject(new Error('mounted P3 inspection wait aborted'));
-    };
-    signal.addEventListener('abort', abort, { once: true });
-    waiter.resolve = () => {
-      signal.removeEventListener('abort', abort);
-      const index = retryWaiters.indexOf(waiter);
-      if (index >= 0) retryWaiters.splice(index, 1);
-      resolve();
-    };
-    retryWaiters.push(waiter);
-  });
+  const p3RetryInspectionWait = (_delayMs, signal) =>
+    new Promise((resolve, reject) => {
+      const waiter = { resolve, reject };
+      const abort = () => {
+        const index = retryWaiters.indexOf(waiter);
+        if (index >= 0) retryWaiters.splice(index, 1);
+        reject(new Error('mounted P3 inspection wait aborted'));
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      waiter.resolve = () => {
+        signal.removeEventListener('abort', abort);
+        const index = retryWaiters.indexOf(waiter);
+        if (index >= 0) retryWaiters.splice(index, 1);
+        resolve();
+      };
+      retryWaiters.push(waiter);
+    });
 
   const request = async (method, params, options) => {
     calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
@@ -619,12 +696,15 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       if (deferNextStatus) {
         deferNextStatus = false;
         return new Promise(resolve => {
-          releaseDeferredStatus = () => resolve(mountedP3Status(binding, {
-            attemptId: 'attempt-c',
-            attemptNumber: 3,
-            state: 'accepted',
-            eventHead: 6,
-          }));
+          releaseDeferredStatus = () =>
+            resolve(
+              mountedP3Status(binding, {
+                attemptId: 'attempt-c',
+                attemptNumber: 3,
+                state: 'accepted',
+                eventHead: 6,
+              })
+            );
         });
       }
       if (authoritativeAttempt === 2 && terminalB) {
@@ -636,9 +716,10 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
           eventHead: 5,
         });
       }
-      return mountedP3Status(binding, terminalA
-        ? { state: 'terminal', outcome: 'cancelled', eventHead: 2 }
-        : { state: 'running', outcome: null, eventHead: 1 });
+      return mountedP3Status(
+        binding,
+        terminalA ? { state: 'terminal', outcome: 'cancelled', eventHead: 2 } : { state: 'running', outcome: null, eventHead: 1 }
+      );
     }
     if (method === 'live_voice.task.events') return mountedP3Events(binding, { terminalA, terminalB });
     throw new Error(`unexpected mounted P3 request: ${method}`);
@@ -647,10 +728,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
   try {
     await act(async () => {
       renderer = create(mountedP3Element(i18n, 'mounted-p3-session', request, p3RetryInspectionWait));
-      await waitForMounted(
-        () => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'),
-        'formal P3 controls did not mount'
-      );
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'formal P3 controls did not mount');
     });
 
     await act(async () => {
@@ -661,10 +739,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
     });
     await act(async () => {
       mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-      await waitForMounted(
-        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
-        'task.create confirmation did not settle'
-      );
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.create confirmation did not settle');
     });
     await act(async () => {
       mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
@@ -677,10 +752,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
 
     await act(async () => {
       mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-      await waitForMounted(
-        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
-        'task.cancel confirmation did not settle'
-      );
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.cancel confirmation did not settle');
     });
     await act(async () => {
       mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
@@ -703,7 +775,12 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       confirmationsBeforeDefensiveFence,
       'a programmatic confirmation during inspection must allocate zero confirmation effects'
     );
-    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+    assert.equal(
+      mountedP3Controls(renderer)
+        .select.findAllByType('option')
+        .some(option => option.props.value === 'task.retry'),
+      false
+    );
 
     terminalA = true;
     await act(async () => {
@@ -716,10 +793,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
     assert.equal(retryWaiters.length, 0, 'terminal reconciliation must release its deterministic waiter');
     await act(async () => {
       mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-      await waitForMounted(
-        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
-        'task.retry confirmation did not settle'
-      );
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.retry confirmation did not settle');
     });
     await act(async () => {
       mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
@@ -728,7 +802,12 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
         'accepted retry B did not return the mounted controller to task.cancel'
       );
     });
-    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+    assert.equal(
+      mountedP3Controls(renderer)
+        .select.findAllByType('option')
+        .some(option => option.props.value === 'task.retry'),
+      false
+    );
 
     const mutationsBeforeDisconnect = calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length;
     await act(async () => {
@@ -755,10 +834,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
     });
     await act(async () => {
       mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
-      await waitForMounted(
-        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
-        'task.retry C confirmation did not settle'
-      );
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.retry C confirmation did not settle');
     });
     await act(async () => {
       mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
@@ -769,18 +845,29 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
     });
     assert.equal(authoritativeAttempt, 3);
     assert.equal(mountedP3Controls(renderer).root.findByType('input').props.value, 'task-a');
-    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
-    assert.deepEqual(
-      calls
-        .filter(call => call.method === 'live_voice.composition.p3.confirmation.issue')
-        .map(call => [call.params.operation, call.params.task_id ?? null]),
-      [['task.create', null], ['task.cancel', 'task-a'], ['task.retry', 'task-a'], ['task.retry', 'task-a']]
+    assert.equal(
+      mountedP3Controls(renderer)
+        .select.findAllByType('option')
+        .some(option => option.props.value === 'task.retry'),
+      false
     );
     assert.deepEqual(
-      calls
-        .filter(call => call.method === 'live_voice.composition.p3.mutate')
-        .map(call => [call.params.operation, call.params.task_id ?? null]),
-      [['task.create', null], ['task.cancel', 'task-a'], ['task.retry', 'task-a'], ['task.retry', 'task-a']]
+      calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').map(call => [call.params.operation, call.params.task_id ?? null]),
+      [
+        ['task.create', null],
+        ['task.cancel', 'task-a'],
+        ['task.retry', 'task-a'],
+        ['task.retry', 'task-a'],
+      ]
+    );
+    assert.deepEqual(
+      calls.filter(call => call.method === 'live_voice.composition.p3.mutate').map(call => [call.params.operation, call.params.task_id ?? null]),
+      [
+        ['task.create', null],
+        ['task.cancel', 'task-a'],
+        ['task.retry', 'task-a'],
+        ['task.retry', 'task-a'],
+      ]
     );
 
     const eventsBeforeFence = calls.filter(call => call.method === 'live_voice.task.events').length;
@@ -797,7 +884,12 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
     });
     assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, eventsBeforeFence);
     assert.equal(mountedP3Controls(renderer).select.props.value, 'task.create');
-    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+    assert.equal(
+      mountedP3Controls(renderer)
+        .select.findAllByType('option')
+        .some(option => option.props.value === 'task.retry'),
+      false
+    );
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 4);
   } finally {
     if (renderer) {
@@ -1235,6 +1327,263 @@ test('mounted P1 retains failed exact authority and blocks two user Start attemp
   }
 });
 
+test('mounted pending operation is checkpointed before replay and unmount performs zero close', async () => {
+  const i18n = await createI18n();
+  const values = new Map();
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const binding = {
+    session_id: 'mounted-pending-unmount-session',
+    correlation_id: 'mounted-pending-unmount-correlation',
+    interaction_id: 'mounted-pending-unmount-interaction',
+    activation_id: 'mounted-pending-unmount-activation',
+    activation_generation: 1,
+  };
+  const operation = {
+    method: 'live_voice.composition.p2.presentation.ack',
+    request_id: 'mounted-pending-unmount-request',
+    params: {
+      ...binding,
+      response_id: 'mounted-pending-unmount-response',
+      response_generation: 0,
+      surface: 'text',
+      unit_id: 'mounted-pending-unmount-unit',
+      contiguous_cursor: 0,
+      presented_at: '2026-08-10T12:00:00.000Z',
+    },
+  };
+  const key = `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(binding.session_id)}`;
+  values.set(key, JSON.stringify(pendingP2Journal(binding, operation)));
+  const restore = installP2RecoveryBrowser(storage);
+  const effects = [];
+  let renderer;
+  try {
+    const request = async (method, params, options) => {
+      effects.push([method, params, options]);
+      if (method === operation.method) {
+        const checkpoint = JSON.parse(values.get(key));
+        assert.equal(checkpoint.phase, 'operation_reconciling');
+        assert.deepEqual(checkpoint.pending_operation, operation);
+        assert.equal(options.requestId, operation.request_id);
+        return new Promise(() => {});
+      }
+      throw new Error(`pending unmount must not call ${method}`);
+    };
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, binding.session_id, request));
+    });
+    await act(async () => {
+      await waitForMounted(() => effects.filter(([method]) => method === operation.method).length === 1, 'pending operation did not begin exact replay');
+    });
+    await act(async () => {
+      renderer.unmount();
+      renderer = null;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+
+    assert.equal(effects.filter(([method]) => method === operation.method).length, 1);
+    assert.equal(
+      effects.some(([method]) => method === 'live_voice.composition.p2.activate' || method === 'live_voice.composition.p2.close'),
+      false
+    );
+    assert.equal(JSON.parse(values.get(key)).pending_operation.request_id, operation.request_id);
+  } finally {
+    if (renderer) renderer.unmount();
+    restore();
+  }
+});
+
+test('mounted teardown performs zero close after a newer recovery CAS owns the journal', async () => {
+  const i18n = await createI18n();
+  const values = new Map();
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const sessionId = 'mounted-cas-stolen-session';
+  const key = `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(sessionId)}`;
+  const restore = installP2RecoveryBrowser(storage);
+  const calls = [];
+  let renderer;
+  try {
+    const request = async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'live_voice.composition.p2.activate') {
+        return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      }
+      if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+        return new Promise(() => {});
+      }
+      if (method === 'live_voice.composition.p2.close') {
+        return { ok: true, result: { status: 'closed', ...params } };
+      }
+      throw new Error(`unexpected CAS-stolen request: ${method}`);
+    };
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, sessionId, request));
+    });
+    await act(async () => {
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.activate').length === 1,
+        'current route did not activate before CAS takeover'
+      );
+    });
+    const stolen = JSON.parse(values.get(key));
+    stolen.revision += 1;
+    stolen.recovery_owner_id = 'newer-page';
+    stolen.recovery_token = 'newer-page-token';
+    stolen.recovery_epoch += 1;
+    values.set(key, JSON.stringify(stolen));
+
+    await act(async () => {
+      renderer.unmount();
+      renderer = null;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.close').length, 0);
+    assert.equal(JSON.parse(values.get(key)).recovery_token, 'newer-page-token');
+  } finally {
+    if (renderer) renderer.unmount();
+    restore();
+  }
+});
+
+test('mounted task submit recovery restores the exact voice origin for P3 create', async () => {
+  const i18n = await createI18n();
+  const values = new Map();
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  const binding = {
+    session_id: 'mounted-task-recovery-session',
+    correlation_id: 'mounted-task-recovery-correlation',
+    interaction_id: 'mounted-task-recovery-interaction',
+    activation_id: 'mounted-task-recovery-activation',
+    activation_generation: 1,
+  };
+  const operation = {
+    method: 'live_voice.composition.p2.submit',
+    request_id: 'mounted-task-recovery-request',
+    params: {
+      ...binding,
+      commit_id: 'mounted-task-recovery-commit',
+      turn_id: 'mounted-task-recovery-turn',
+      committed_at: '2026-08-10T12:00:00.000Z',
+      text: 'Create the recovered voice task.',
+      dispatch_target: 'task',
+      voice_commit_receipt: 'r'.repeat(32),
+      critical_confirmation: true,
+    },
+  };
+  const key = `jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(binding.session_id)}`;
+  values.set(key, JSON.stringify(pendingP2Journal(binding, operation)));
+  const restore = installP2RecoveryBrowser(storage);
+  const calls = [];
+  let renderer;
+  try {
+    const request = async (method, params, options) => {
+      calls.push({ method, params, options });
+      if (method === operation.method) {
+        assert.deepEqual(params, operation.params);
+        assert.equal(options.requestId, operation.request_id);
+        return {
+          request_id: operation.request_id,
+          ok: true,
+          result: {
+            status: 'task_origin_accepted',
+            ...binding,
+            turn_id: operation.params.turn_id,
+            commit_id: operation.params.commit_id,
+            response: {
+              interaction_id: binding.interaction_id,
+              response_id: 'mounted-server-owned-response',
+              response_generation: 0,
+            },
+          },
+          error: null,
+        };
+      }
+      if (method === 'live_voice.composition.p2.activate') {
+        return { ok: true, result: { status: 'active', ...params, replayed: params.activation_generation === 1 } };
+      }
+      if (method === 'live_voice.composition.p2.close') {
+        return { ok: true, result: { status: 'closed', ...params } };
+      }
+      if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+        return new Promise(() => {});
+      }
+      if (method === 'live_voice.composition.p3.confirmation.issue') {
+        return {
+          ok: true,
+          result: {
+            status: 'confirmation_issued',
+            operation: params.operation,
+            command_id: params.command_id,
+            target_task_id: null,
+            confirmation_id: 'mounted-task-recovery-confirmation',
+            expires_at: '2999-08-10T12:00:00.000Z',
+            task_control_binding: {
+              subject_id: 'mounted-task-recovery-subject',
+              session_id: binding.session_id,
+              project_id: 'mounted-task-recovery-project',
+              correlation_id: params.correlation_id,
+              generation: 1,
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected mounted task recovery request: ${method}`);
+    };
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, binding.session_id, request));
+    });
+    await act(async () => {
+      await waitForMounted(
+        () => mountedP3Controls(renderer).root.findByType('textarea').props.value === operation.params.text,
+        'recovered task instruction was not restored'
+      );
+    });
+    assert.equal(mountedP3Controls(renderer).root.findAllByType('input')[0].props.value, 'Voice task');
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'recovered voice origin did not issue P3 confirmation');
+    });
+
+    const confirmations = calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue');
+    assert.equal(confirmations.length, 1);
+    assert.deepEqual(
+      {
+        source: confirmations[0].params.source,
+        interaction_id: confirmations[0].params.interaction_id,
+        turn_id: confirmations[0].params.turn_id,
+        commit_id: confirmations[0].params.commit_id,
+        instruction: confirmations[0].params.instruction,
+      },
+      {
+        source: 'voice',
+        interaction_id: binding.interaction_id,
+        turn_id: operation.params.turn_id,
+        commit_id: operation.params.commit_id,
+        instruction: operation.params.text,
+      }
+    );
+    assert.equal(calls.filter(call => call.method === operation.method).length, 1);
+    assert.equal(JSON.parse(values.get(key)).pending_operation, null);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+    }
+    restore();
+  }
+});
+
 test('enabled mounted panel remount reconciles the exact predecessor and reopens P1', async () => {
   const i18n = await createI18n();
   const values = new Map();
@@ -1268,6 +1617,7 @@ test('enabled mounted panel remount reconciles the exact predecessor and reopens
       platform: 'Win32',
       onLine: true,
       userActivation: { hasBeenActive: true, isActive: true },
+      locks: createFakeWebLocks(),
       permissions: {
         query: async () => ({
           state: 'granted',
@@ -1481,7 +1831,7 @@ test('enabled mounted panel remount reconciles the exact predecessor and reopens
     const retainedMissingReplayJournal = JSON.parse(
       values.get(`jiuwenswarm.liveVoice.productP2ActivationJournal.v1:${encodeURIComponent(missingReplayBinding.session_id)}`)
     );
-    assert.equal(retainedMissingReplayJournal.phase, 'closing');
+    assert.equal(retainedMissingReplayJournal.phase, 'closing_unconfirmed');
     assert.deepEqual(retainedMissingReplayJournal.binding, missingReplayBinding);
     assert.equal(
       missingReplayEffects.some(([kind, , generation]) => kind === 'activate' && generation === 2),

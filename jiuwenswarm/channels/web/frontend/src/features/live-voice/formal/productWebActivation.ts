@@ -105,6 +105,129 @@ function allocateProductRequestId(prefix: string): string {
 
 export type ProductWebRequest = (method: string, params: Record<string, unknown>, request_id?: string) => Promise<unknown>;
 
+export type ProductP2DurableOperationMethod = typeof PRODUCT_P2_SUBMIT_METHOD | typeof PRODUCT_P2_PRESENTATION_ACK_METHOD | typeof PRODUCT_P2_BARGE_IN_METHOD;
+
+export type ProductP2DurableOperation = Readonly<{
+  method: ProductP2DurableOperationMethod;
+  request_id: string;
+  params: Readonly<Record<string, unknown>>;
+}>;
+
+export interface ProductP2DurableOperationJournal {
+  checkpointOperation(operation: Readonly<ProductP2DurableOperation>): void;
+  settleOperation(operation: Readonly<ProductP2DurableOperation>): void;
+}
+
+const PRODUCT_P2_DURABLE_OPERATION_MAX_BYTES = 131_072;
+const PRODUCT_P2_DURABLE_TEXT_MAX_LENGTH = 100_000;
+
+function exactRecord(value: unknown, keys: readonly string[], field: string): Record<string, unknown> {
+  const record = objectValue(value);
+  if (record === null || Object.getOwnPropertySymbols(record).length !== 0) throw new Error(`${field} is invalid`);
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error(`${field} has unexpected fields`);
+  }
+  return record;
+}
+
+function exactDurableText(value: unknown, field: string, maxLength = 256): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > maxLength) throw new Error(`${field} is invalid`);
+  return value;
+}
+
+function exactDurableGeneration(value: unknown, field: string, allowZero = false): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
+    throw new Error(`${field} is invalid`);
+  }
+  return value;
+}
+
+function durableOperationParamKeys(method: ProductP2DurableOperationMethod, params: Record<string, unknown>): readonly string[] {
+  const binding = ['session_id', 'correlation_id', 'interaction_id', 'activation_id', 'activation_generation'];
+  if (method === PRODUCT_P2_SUBMIT_METHOD) {
+    const keys = [...binding, 'commit_id', 'turn_id', 'committed_at', 'text', 'dispatch_target'];
+    if (params.dispatch_target === 'agent') keys.push('response_id');
+    if (Object.prototype.hasOwnProperty.call(params, 'voice_commit_receipt')) keys.push('voice_commit_receipt');
+    if (Object.prototype.hasOwnProperty.call(params, 'critical_confirmation')) keys.push('critical_confirmation');
+    return keys;
+  }
+  if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
+    return [...binding, 'response_id', 'response_generation', 'surface', 'unit_id', 'contiguous_cursor', 'presented_at'];
+  }
+  return [...binding, 'action_id', 'response_id', 'response_generation', 'cancel_response'];
+}
+
+/** Strictly parse one bounded, secret-free request envelope before transport or persistence. */
+export function validateProductP2DurableOperation(value: unknown, expectedBinding?: Readonly<ProductWebP2ActivationBinding>): ProductP2DurableOperation {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    throw new Error('durable product operation cannot be serialized');
+  }
+  if (!serialized || new TextEncoder().encode(serialized).byteLength > PRODUCT_P2_DURABLE_OPERATION_MAX_BYTES) {
+    throw new Error('durable product operation exceeds its bound');
+  }
+  const operation = exactRecord(value, ['method', 'request_id', 'params'], 'durable product operation');
+  if (
+    operation.method !== PRODUCT_P2_SUBMIT_METHOD &&
+    operation.method !== PRODUCT_P2_PRESENTATION_ACK_METHOD &&
+    operation.method !== PRODUCT_P2_BARGE_IN_METHOD
+  ) {
+    throw new Error('durable product operation method is invalid');
+  }
+  const method = operation.method;
+  const looseParams = objectValue(operation.params);
+  if (looseParams === null) throw new Error('durable product operation params are invalid');
+  const params = exactRecord(looseParams, durableOperationParamKeys(method, looseParams), 'durable product operation params');
+  const binding = freezeBinding({
+    session_id: exactDurableText(params.session_id, 'session_id'),
+    correlation_id: exactDurableText(params.correlation_id, 'correlation_id'),
+    interaction_id: exactDurableText(params.interaction_id, 'interaction_id'),
+    activation_id: exactDurableText(params.activation_id, 'activation_id'),
+    activation_generation: exactDurableGeneration(params.activation_generation, 'activation_generation'),
+  });
+  if (expectedBinding !== undefined && !sameBinding(binding, expectedBinding)) {
+    throw new Error('durable product operation binding mismatch');
+  }
+  if (method === PRODUCT_P2_SUBMIT_METHOD) {
+    exactDurableText(params.commit_id, 'commit_id');
+    exactDurableText(params.turn_id, 'turn_id');
+    exactDurableText(params.committed_at, 'committed_at');
+    exactDurableText(params.text, 'text', PRODUCT_P2_DURABLE_TEXT_MAX_LENGTH);
+    if (params.dispatch_target !== 'agent' && params.dispatch_target !== 'task') {
+      throw new Error('durable product submission target is invalid');
+    }
+    if (params.dispatch_target === 'agent') exactDurableText(params.response_id, 'response_id');
+    if (params.voice_commit_receipt !== undefined) exactDurableText(params.voice_commit_receipt, 'voice_commit_receipt');
+    if (params.critical_confirmation !== undefined && params.critical_confirmation !== true) {
+      throw new Error('durable product critical confirmation is invalid');
+    }
+    if (params.dispatch_target === 'task' && typeof params.voice_commit_receipt !== 'string') {
+      throw new Error('durable product task receipt is missing');
+    }
+  } else if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
+    exactDurableText(params.response_id, 'response_id');
+    exactDurableGeneration(params.response_generation, 'response_generation', true);
+    if (params.surface !== 'text' && params.surface !== 'audio') throw new Error('durable product ACK surface is invalid');
+    exactDurableText(params.unit_id, 'unit_id');
+    exactDurableGeneration(params.contiguous_cursor, 'contiguous_cursor', true);
+    exactDurableText(params.presented_at, 'presented_at');
+  } else {
+    exactDurableText(params.action_id, 'action_id');
+    exactDurableText(params.response_id, 'response_id');
+    exactDurableGeneration(params.response_generation, 'response_generation', true);
+    if (typeof params.cancel_response !== 'boolean') throw new Error('durable product barge-in policy is invalid');
+  }
+  return Object.freeze({
+    method,
+    request_id: exactDurableText(operation.request_id, 'request_id'),
+    params: Object.freeze({ ...params }),
+  });
+}
+
 function objectValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -245,6 +368,14 @@ function freezeBinding(input: Readonly<ProductWebP2ActivationBinding>): ProductW
   });
 }
 
+function freezeDurableOperation(
+  method: ProductP2DurableOperationMethod,
+  requestId: string,
+  params: Readonly<Record<string, unknown>>
+): ProductP2DurableOperation {
+  return validateProductP2DurableOperation({ method, request_id: requestId, params });
+}
+
 function sameBinding(left: Readonly<ProductWebP2ActivationBinding>, right: Readonly<ProductWebP2ActivationBinding>): boolean {
   return (
     left.session_id === right.session_id &&
@@ -302,6 +433,94 @@ function requireP2BoundOperationResult(
     throw new Error(`product P2 ${expectedStatus} binding mismatch`);
   }
   return Object.freeze({ ...result });
+}
+
+function requireDurableP2Envelope(operation: Readonly<ProductP2DurableOperation>, value: unknown): JsonObject {
+  const payload = objectValue(value);
+  if (payload?.request_id !== operation.request_id || payload.ok !== true || payload.error !== null) {
+    throw new Error('durable product operation response envelope is unavailable');
+  }
+  return payload;
+}
+
+function requireDurableP2OperationResult(operation: Readonly<ProductP2DurableOperation>, value: unknown): JsonObject {
+  const payload = requireDurableP2Envelope(operation, value);
+  const params = operation.params;
+  if (
+    typeof params.session_id !== 'string' ||
+    typeof params.correlation_id !== 'string' ||
+    typeof params.interaction_id !== 'string' ||
+    typeof params.activation_id !== 'string'
+  ) {
+    throw new Error('durable product operation binding is invalid');
+  }
+  const binding = freezeBinding({
+    session_id: params.session_id,
+    correlation_id: params.correlation_id,
+    interaction_id: params.interaction_id,
+    activation_id: params.activation_id,
+    activation_generation: params.activation_generation as number,
+  });
+  if (operation.method === PRODUCT_P2_SUBMIT_METHOD) {
+    const dispatchTarget = params.dispatch_target;
+    if (dispatchTarget !== 'agent' && dispatchTarget !== 'task') {
+      throw new Error('durable product submission target is invalid');
+    }
+    const result = requireP2BoundOperationResult(payload, dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted', binding);
+    const response = objectValue(result.response);
+    if (
+      result.turn_id !== params.turn_id ||
+      result.commit_id !== params.commit_id ||
+      response?.interaction_id !== binding.interaction_id ||
+      typeof response.response_id !== 'string' ||
+      !response.response_id.trim() ||
+      (dispatchTarget === 'agent' && response.response_id !== params.response_id) ||
+      !Number.isSafeInteger(response.response_generation) ||
+      (response.response_generation as number) < 0
+    ) {
+      throw new Error(`product P2 ${dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted'} response binding mismatch`);
+    }
+    return result;
+  }
+  if (operation.method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
+    const result = requireP2BoundOperationResult(payload, 'presentation_acknowledged', binding);
+    if (
+      typeof result.accepted !== 'boolean' ||
+      typeof result.replayed !== 'boolean' ||
+      !Number.isSafeInteger(result.history_records_written) ||
+      (result.history_records_written as number) < 0 ||
+      typeof result.history_pending !== 'boolean' ||
+      (result.accepted === false && (result.history_records_written !== 0 || result.history_pending !== false)) ||
+      (result.history_pending === true && result.history_records_written !== 0)
+    ) {
+      throw new Error('product P2 presentation ACK result binding is invalid');
+    }
+    return result;
+  }
+  const result = requireP2BoundOperationResult(payload, 'barge_in_applied', binding);
+  if (
+    result.action_id !== params.action_id ||
+    result.response_id !== params.response_id ||
+    result.response_generation !== params.response_generation ||
+    result.cancel_response !== params.cancel_response ||
+    typeof result.applied !== 'boolean' ||
+    typeof result.replayed !== 'boolean' ||
+    !Array.isArray(result.effect_ids) ||
+    result.effect_ids.some(item => typeof item !== 'string' || !item)
+  ) {
+    throw new Error('barge-in response binding is invalid');
+  }
+  return result;
+}
+
+/** Replay one persisted business operation with its original request identity. */
+export async function replayProductP2DurableOperation(input: {
+  operation: Readonly<ProductP2DurableOperation>;
+  request: ProductWebRequest;
+}): Promise<JsonObject> {
+  const operation = validateProductP2DurableOperation(input.operation);
+  const value = await input.request(operation.method, { ...operation.params }, operation.request_id);
+  return requireDurableP2OperationResult(operation, value);
 }
 
 function freezeP3MutationInput(input: ProductWebP3MutationInput): ProductWebP3MutationInput {
@@ -499,6 +718,7 @@ function closeWithBoundedRetry<TSnapshot>(input: {
 export class ProductWebP2ActivationOwner {
   private readonly enabled: boolean;
   private readonly request: ProductWebRequest;
+  private readonly durableOperationJournal?: ProductP2DurableOperationJournal;
   private readonly onSnapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void;
   private binding: ProductWebP2ActivationBinding | null = null;
   private status: ProductWebP2ActivationStatus;
@@ -520,10 +740,16 @@ export class ProductWebP2ActivationOwner {
   private notificationPromise: Promise<JsonObject> | null = null;
   private notificationSequence = 0;
 
-  constructor(input: { enabled: boolean; request: ProductWebRequest; on_snapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void }) {
+  constructor(input: {
+    enabled: boolean;
+    request: ProductWebRequest;
+    on_snapshot?: (snapshot: ProductWebP2ActivationSnapshot) => void;
+    durable_operation_journal?: ProductP2DurableOperationJournal;
+  }) {
     if (typeof input.request !== 'function') throw new Error('product request owner is required');
     this.enabled = input.enabled;
     this.request = input.request;
+    this.durableOperationJournal = input.durable_operation_journal;
     this.onSnapshot = input.on_snapshot;
     this.status = input.enabled ? 'idle' : 'disabled';
     this.publish();
@@ -622,9 +848,7 @@ export class ProductWebP2ActivationOwner {
     if (dispatchTarget === 'agent' && input.response_id === undefined) {
       throw new Error('response_id is required');
     }
-    const responseId = dispatchTarget === 'agent'
-      ? requiredText(input.response_id!, 'response_id')
-      : null;
+    const responseId = dispatchTarget === 'agent' ? requiredText(input.response_id!, 'response_id') : null;
     const params = {
       ...binding,
       commit_id: requiredText(input.commit_id, 'commit_id'),
@@ -654,33 +878,21 @@ export class ProductWebP2ActivationOwner {
       this.submissions.set(fingerprint, retained);
     }
     const entry = retained;
+    const operation = freezeDurableOperation(PRODUCT_P2_SUBMIT_METHOD, entry.requestId, params);
+    this.durableOperationJournal?.checkpointOperation(operation);
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_SUBMIT_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(value, dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted', binding);
-        if (
-          result.turn_id !== params.turn_id ||
-          result.commit_id !== params.commit_id
-        ) {
-          throw new Error(`product P2 ${result.status as string} response binding mismatch`);
-        }
-        if (dispatchTarget === 'task') {
-          const response = objectValue(result.response);
-          if (
-            response?.interaction_id !== binding.interaction_id ||
-            typeof response.response_id !== 'string' ||
-            !response.response_id.trim() ||
-            !Number.isSafeInteger(response.response_generation) ||
-            (response.response_generation as number) < 0
-          ) {
-            throw new Error('product P2 task_origin_accepted response binding mismatch');
-          }
-        }
+        const result = requireDurableP2OperationResult(operation, value);
+        this.durableOperationJournal?.settleOperation(operation);
         entry.result = result;
         return result;
       })
       .catch(error => {
-        if (isDefinitiveProductOperationError(error)) this.submissions.delete(fingerprint);
+        if (isDefinitiveProductOperationError(error)) {
+          this.durableOperationJournal?.settleOperation(operation);
+          this.submissions.delete(fingerprint);
+        }
         throw error;
       })
       .finally(() => {
@@ -743,27 +955,21 @@ export class ProductWebP2ActivationOwner {
       this.bargeIns.set(fingerprint, retained);
     }
     const entry = retained;
+    const operation = freezeDurableOperation(PRODUCT_P2_BARGE_IN_METHOD, entry.requestId, params);
+    this.durableOperationJournal?.checkpointOperation(operation);
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_BARGE_IN_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(value, 'barge_in_applied', binding);
-        if (
-          result.action_id !== params.action_id ||
-          result.response_id !== params.response_id ||
-          result.response_generation !== params.response_generation ||
-          result.cancel_response !== params.cancel_response ||
-          typeof result.applied !== 'boolean' ||
-          typeof result.replayed !== 'boolean' ||
-          !Array.isArray(result.effect_ids) ||
-          result.effect_ids.some(item => typeof item !== 'string' || !item)
-        ) {
-          throw new Error('barge-in response binding is invalid');
-        }
+        const result = requireDurableP2OperationResult(operation, value);
+        this.durableOperationJournal?.settleOperation(operation);
         entry.result = result;
         return result;
       })
       .catch(error => {
-        if (isDefinitiveProductOperationError(error)) this.bargeIns.delete(fingerprint);
+        if (isDefinitiveProductOperationError(error)) {
+          this.durableOperationJournal?.settleOperation(operation);
+          this.bargeIns.delete(fingerprint);
+        }
         throw error;
       })
       .finally(() => {
@@ -818,15 +1024,19 @@ export class ProductWebP2ActivationOwner {
       this.presentationAcks.set(fingerprint, retained);
     }
     const entry = retained;
+    const operation = freezeDurableOperation(PRODUCT_P2_PRESENTATION_ACK_METHOD, entry.requestId, params);
+    this.durableOperationJournal?.checkpointOperation(operation);
     let promise: Promise<JsonObject>;
     promise = this.request(PRODUCT_P2_PRESENTATION_ACK_METHOD, params, entry.requestId)
       .then(value => {
-        const result = requireP2BoundOperationResult(value, 'presentation_acknowledged', binding);
+        const result = requireDurableP2OperationResult(operation, value);
+        this.durableOperationJournal?.settleOperation(operation);
         entry.result = result;
         return result;
       })
       .catch(error => {
         if (isDefinitiveProductOperationError(error)) {
+          this.durableOperationJournal?.settleOperation(operation);
           this.presentationAcks.delete(fingerprint);
         }
         throw error;
@@ -930,7 +1140,8 @@ export class ProductWebP2ActivationOwner {
 }
 
 export type ProductP2PollRecoveryResult<TSuccessor> =
-  { readonly kind: 'notification'; readonly notification: JsonObject } | { readonly kind: 'recovered'; readonly successor: TSuccessor | null };
+  | { readonly kind: 'notification'; readonly notification: JsonObject }
+  | { readonly kind: 'recovered'; readonly successor: TSuccessor | null };
 
 /**
  * Poll one retained P2 notification and own the exact closed-route handoff.

@@ -22,6 +22,7 @@ import {
 } from '../../features/live-voice/formal/productTextProgress';
 import {
   PRODUCT_P2_NOTIFICATION_NEXT_METHOD,
+  PRODUCT_P2_SUBMIT_METHOD,
   PRODUCT_P3_TASK_EVENTS_METHOD,
   PRODUCT_P3_TASK_STATUS_METHOD,
   ProductWebP2ActivationOwner,
@@ -29,6 +30,7 @@ import {
   ProductWebP3ProgressOwner,
   isRetriableProductOperationError,
   pollProductP2RouteWithRecovery,
+  replayProductP2DurableOperation,
   requiresProductActivationCleanup,
   retryRetainedProductOperation,
   type ProductWebP2ActivationSnapshot,
@@ -138,14 +140,16 @@ type ProductWebRequest = NonNullable<LiveVoiceIntegratedRoutePanelProps['request
  * the already-validated event history may update the live replica, and only
  * while the caller's Session/target generation is still current.
  */
-export async function inspectProductP3RetryCandidate(input: Readonly<{
-  request: ProductWebRequest;
-  leaf: FormalTaskControlLeaf;
-  session_id: string;
-  task_id: string;
-  request_nonce: string;
-  is_current: () => boolean;
-}>): Promise<Readonly<FormalTaskControlRecord>> {
+export async function inspectProductP3RetryCandidate(
+  input: Readonly<{
+    request: ProductWebRequest;
+    leaf: FormalTaskControlLeaf;
+    session_id: string;
+    task_id: string;
+    request_nonce: string;
+    is_current: () => boolean;
+  }>
+): Promise<Readonly<FormalTaskControlRecord>> {
   const taskId = input.task_id.trim();
   if (!taskId || !input.session_id || !input.request_nonce || !input.is_current()) {
     throw new Error('formal task retry inspection is stale or incomplete');
@@ -156,15 +160,11 @@ export async function inspectProductP3RetryCandidate(input: Readonly<{
   }
   const ownedGeneration = initialSnapshot.connection_generation;
   const probe = new FormalTaskControlLeaf({ enabled: true, binding: initialSnapshot.binding });
-  const stillCurrent = () => (
-    input.is_current()
-    && input.leaf.snapshot().connected
-    && input.leaf.snapshot().connection_generation === ownedGeneration
-  );
+  const stillCurrent = () => input.is_current() && input.leaf.snapshot().connected && input.leaf.snapshot().connection_generation === ownedGeneration;
   const statusResponse = await input.request(
     PRODUCT_P3_TASK_STATUS_METHOD,
     { session_id: input.session_id, task_id: taskId },
-    { requestId: `web-task-status-${input.request_nonce}` },
+    { requestId: `web-task-status-${input.request_nonce}` }
   );
   if (!stillCurrent()) throw new Error('formal task retry inspection became stale');
   probe.adopt('task.status', statusResponse, {
@@ -176,7 +176,7 @@ export async function inspectProductP3RetryCandidate(input: Readonly<{
   const eventsResponse = await input.request(
     PRODUCT_P3_TASK_EVENTS_METHOD,
     { session_id: input.session_id, task_id: taskId, after_seq: -1 },
-    { requestId: `web-task-events-${input.request_nonce}` },
+    { requestId: `web-task-events-${input.request_nonce}` }
   );
   if (!stillCurrent()) throw new Error('formal task retry inspection became stale');
   probe.adopt('task.events', eventsResponse, {
@@ -195,12 +195,12 @@ export async function inspectProductP3RetryCandidate(input: Readonly<{
   });
   const adopted = input.leaf.snapshot().tasks.find(task => task.task_id === taskId) ?? null;
   if (
-    adopted === null
-    || adopted.attempt_id !== selected.attempt_id
-    || adopted.attempt_number !== selected.attempt_number
-    || adopted.state !== selected.state
-    || adopted.outcome !== selected.outcome
-    || adopted.event_head !== selected.event_head
+    adopted === null ||
+    adopted.attempt_id !== selected.attempt_id ||
+    adopted.attempt_number !== selected.attempt_number ||
+    adopted.state !== selected.state ||
+    adopted.outcome !== selected.outcome ||
+    adopted.event_head !== selected.event_head
   ) {
     throw new Error('formal task retry inspection lost its exact task revision');
   }
@@ -624,51 +624,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   };
 
-  const p2JournalBinding = (
-    owner: ProductWebP2ActivationOwner
-  ): Readonly<{
-    journal: ProductP2ActivationJournal;
-    binding: NonNullable<ProductWebP2ActivationSnapshot['binding']>;
-  }> | null => {
-    const journal = p2ActivationJournalRef.current;
-    const binding = owner.snapshot().binding;
-    if (journal === null || binding === null) return null;
-    const snapshot = journal.snapshot();
-    if (
-      snapshot.session_id !== binding.session_id ||
-      snapshot.correlation_id !== binding.correlation_id ||
-      snapshot.interaction_id !== binding.interaction_id ||
-      snapshot.binding === null ||
-      snapshot.binding.activation_id !== binding.activation_id ||
-      snapshot.binding.activation_generation !== binding.activation_generation
-    )
-      return null;
-    return Object.freeze({ journal, binding });
-  };
-
-  const markP2OperationUnknown = (owner: ProductWebP2ActivationOwner): boolean => {
-    const owned = p2JournalBinding(owner);
-    if (owned === null) return false;
-    try {
-      owned.journal.markResultUnknown(owned.binding);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  const markP2OperationSettled = (owner: ProductWebP2ActivationOwner): boolean => {
-    if (owner.hasPendingSubmission() || owner.hasPendingPresentationAck() || owner.hasPendingBargeIn()) return false;
-    const owned = p2JournalBinding(owner);
-    if (owned === null) return false;
-    try {
-      owned.journal.markActive(owned.binding);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
   const settleRetainedP2Operations = async (owner: ProductWebP2ActivationOwner) => {
     const ownerSession = owner.snapshot().binding?.session_id;
     const isCurrent = () => activationOwnerRef.current === owner && ownerSession !== undefined && activeSessionRef.current === ownerSession;
@@ -683,12 +638,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (pendingTurn.input.dispatch_target === 'task' && ownerSession) {
             const interactionId = owner.snapshot().binding?.interaction_id;
             if (!interactionId) throw new Error('recovered voice Task origin lost its interaction');
-            voiceTaskOriginRef.current = bindProductVoiceTaskOrigin(
-              pendingTurn.input,
-              result,
-              ownerSession,
-              interactionId
-            );
+            voiceTaskOriginRef.current = bindProductVoiceTaskOrigin(pendingTurn.input, result, ownerSession, interactionId);
           }
           pendingProductTurnRef.current = null;
           setProductInput('');
@@ -751,9 +701,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           pendingBargeInRef.current = null;
         }
       }
-    }
-    if (!owner.hasPendingSubmission() && !owner.hasPendingPresentationAck() && !owner.hasPendingBargeIn()) {
-      markP2OperationSettled(owner);
     }
   };
 
@@ -936,15 +883,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           try {
             await settleRetainedP2Operations(previous);
             operationsSettled = true;
-            if (snapshot.binding && journalReady) {
+            if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosing(snapshot.binding);
             }
             await previous.closeWithRetry();
-            if (snapshot.binding && journalReady) {
+            if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosed(snapshot.binding);
             }
           } catch {
-            if (!operationsSettled && snapshot.binding && journalReady) {
+            if (!operationsSettled && snapshot.binding && journalReady && sameSession && journal!.snapshot().pending_operation === null) {
               try {
                 journal!.markResultUnknown(snapshot.binding);
               } catch {
@@ -978,7 +925,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         if (previous.needsCleanup()) {
           try {
-            if (snapshot.binding && journalReady) {
+            if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosing(snapshot.binding);
             }
             await previous.closeWithRetry({
@@ -988,11 +935,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 }
               },
             });
-            if (snapshot.binding && journalReady) {
+            if (snapshot.binding && journalReady && sameSession) {
               journal!.markClosed(snapshot.binding);
             }
           } catch {
-            if (journalReady && journal!.snapshot().phase !== 'result_unknown' && activationOwnerRef.current === previous) {
+            if (
+              journalReady &&
+              journal!.snapshot().phase !== 'result_unknown' &&
+              journal!.snapshot().pending_operation === null &&
+              activationOwnerRef.current === previous
+            ) {
               activationOwnerRef.current = null;
             }
             scheduleRecovery();
@@ -1021,6 +973,47 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       };
       const recovered = await reconcileProductP2Predecessor({
         journal,
+        replay_operation: operation =>
+          replayProductP2DurableOperation({
+            operation,
+            request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
+          }),
+        on_operation_recovered: (operation, result) => {
+          if (operation.method !== PRODUCT_P2_SUBMIT_METHOD || operation.params.dispatch_target !== 'task') return;
+          const {
+            session_id: sessionId,
+            interaction_id: interactionId,
+            turn_id: turnId,
+            commit_id: commitId,
+            committed_at: committedAt,
+            text,
+          } = operation.params;
+          if (
+            typeof sessionId !== 'string' ||
+            typeof interactionId !== 'string' ||
+            typeof turnId !== 'string' ||
+            typeof commitId !== 'string' ||
+            typeof committedAt !== 'string' ||
+            typeof text !== 'string'
+          ) {
+            throw new Error('recovered task origin is invalid');
+          }
+          const recoveredInput: ProductTurnInput = {
+            turn_id: turnId,
+            commit_id: commitId,
+            committed_at: committedAt,
+            text,
+            dispatch_target: 'task',
+          };
+          voiceTaskOriginRef.current = bindProductVoiceTaskOrigin(recoveredInput, result, sessionId, interactionId);
+          recognizedVoiceRef.current = null;
+          pendingProductTurnRef.current = null;
+          pendingP3MutationRef.current = null;
+          setP3MutationOperation('task.create');
+          setP3TaskName('Voice task');
+          setP3TaskInstruction(text);
+          setP3MutationStatus('idle');
+        },
         activate_exact: async binding => {
           recovery.owner = new ProductWebP2ActivationOwner({
             enabled: true,
@@ -1041,6 +1034,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         },
         error_reason: extractWebErrorReason,
         activation_retryable: error => requiresProductActivationCleanup(error) || isRetriableProductOperationError(error),
+        operation_retryable: isRetriableProductOperationError,
         is_current: isCurrentRun,
       });
       if (!isCurrentRun()) {
@@ -1050,9 +1044,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           void (async () => {
             if (staleBinding) {
               try {
+                const latest = journal.refresh();
+                if (latest.pending_operation !== null || latest.recovery_token !== null) return;
                 journal.markClosing(staleBinding);
               } catch {
-                // A newer exact journal owner may already have advanced.
+                // A newer journal owner exclusively decides exact cleanup.
+                return;
               }
             }
             try {
@@ -1076,9 +1073,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         const unresolvedBinding = unresolvedOwner?.snapshot().binding ?? null;
         if (unresolvedOwner?.needsCleanup() && unresolvedBinding) {
           try {
+            const latest = journal.refresh();
+            if (latest.pending_operation !== null || latest.recovery_token !== null) return;
             journal.markClosing(unresolvedBinding);
           } catch {
-            // Exact cleanup still runs; journal ownership is re-read below.
+            // A newer journal owner exclusively decides exact cleanup.
+            return;
           }
           try {
             await unresolvedOwner.closeWithRetry();
@@ -1134,6 +1134,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       owner = new ProductWebP2ActivationOwner({
         enabled: true,
         request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
+        durable_operation_journal: journal,
         on_snapshot: snapshot => {
           if (!cancelled && activeSessionRef.current === ownedSessionId && activationOwnerRef.current === owner && snapshot.status !== 'active') {
             setP2Activation(snapshot);
@@ -1145,9 +1146,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         const activated = await owner.start(binding);
         if (!isCurrentRun() || activationOwnerRef.current !== owner) {
           try {
+            const latest = journal.refresh();
+            if (latest.pending_operation !== null || latest.recovery_token !== null) return;
             journal.markClosing(binding);
           } catch {
-            // Continue exact cleanup when the stale journal was superseded.
+            // A newer journal owner exclusively decides exact cleanup.
+            return;
           }
           try {
             await owner.closeWithRetry();
@@ -1168,9 +1172,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       } catch (error) {
         if (owner.snapshot().status === 'active') {
           try {
+            const latest = journal.refresh();
+            if (latest.pending_operation !== null || latest.recovery_token !== null) return;
             journal.markClosing(binding);
           } catch {
-            // Continue exact cleanup even if the browser checkpoint failed.
+            // A newer journal owner exclusively decides exact cleanup.
+            return;
           }
           try {
             await owner.closeWithRetry();
@@ -1216,7 +1223,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           const reason = extractWebErrorReason(error);
           try {
             if (reason === 'ACTIVATION_BINDING_CONFLICT' || reason === 'ACTIVATION_BINDING_MISMATCH' || reason === 'ACTIVATION_GENERATION_STALE') {
-              journal.markResultUnknown(binding);
+              journal.markActivationResultUnknown(binding);
             } else {
               journal.markClosed(binding);
             }
@@ -1243,8 +1250,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         return;
       }
       const binding = closing.snapshot().binding;
-      const resultUnknown = Boolean(
-        journal?.snapshot().phase === 'result_unknown' ||
+      let journalSnapshot: ReturnType<ProductP2ActivationJournal['snapshot']> | undefined;
+      try {
+        journalSnapshot = journal?.refresh();
+      } catch {
+        if (activationOwnerRef.current === closing) activationOwnerRef.current = null;
+        return;
+      }
+      const recoveryBarrier = Boolean(
+        journalSnapshot?.phase === 'result_unknown' ||
+        journalSnapshot?.phase === 'activation_result_unknown' ||
+        journalSnapshot?.pending_operation !== null ||
+        journalSnapshot?.recovery_token !== null ||
         pendingProductTurnRef.current?.owner === closing ||
         pendingPresentationAttemptRef.current?.owner === closing ||
         pendingBargeInRef.current?.owner === closing ||
@@ -1252,18 +1269,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         closing.hasPendingPresentationAck() ||
         closing.hasPendingBargeIn()
       );
+      if (recoveryBarrier) {
+        if (activationOwnerRef.current === closing) activationOwnerRef.current = null;
+        return;
+      }
       if (binding && journal) {
         try {
-          if (resultUnknown) journal.markResultUnknown(binding);
-          else journal.markClosing(binding);
+          journal.markClosing(binding);
         } catch {
-          // Cleanup still runs, but no successor may rely on a missing journal write.
+          if (activationOwnerRef.current === closing) activationOwnerRef.current = null;
+          return;
         }
       }
       void closing
         .closeWithRetry()
         .then(() => {
-          if (binding && journal && !resultUnknown) {
+          if (binding && journal) {
             try {
               journal.markClosed(binding);
             } catch {
@@ -1318,6 +1339,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               successor = new ProductWebP2ActivationOwner({
                 enabled: true,
                 request: (method, params, requestId) => productRequest(method, params, productP2WebRequestOptions(method, requestId)),
+                durable_operation_journal: journal,
                 on_snapshot: snapshot => {
                   if (activeSessionRef.current === binding.session_id && activationOwnerRef.current === successor && snapshot.status !== 'active') {
                     setP2Activation(snapshot);
@@ -1343,6 +1365,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             !cancelled &&
             retained?.needsCleanup() &&
             journal.snapshot().phase !== 'result_unknown' &&
+            journal.snapshot().pending_operation === null &&
             !retained.hasPendingSubmission() &&
             !retained.hasPendingPresentationAck() &&
             !retained.hasPendingBargeIn()
@@ -1391,10 +1414,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       };
       pendingPresentationAttemptRef.current = retained;
     }
-    if (!markP2OperationUnknown(owner)) {
-      setProductTextStatus('failed');
-      return;
-    }
     let cancelled = false;
     void retryRetainedProductOperation({
       operation: () => owner.acknowledgePresentation(retained.input),
@@ -1405,12 +1424,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           pendingPresentationAttemptRef.current = null;
           setPendingPresentationAck(null);
           setProductTextStatus('acknowledged');
-          markP2OperationSettled(owner);
         }
       })
       .catch(() => {
         if (!cancelled && activationOwnerRef.current === owner) {
-          if (!owner.hasPendingPresentationAck()) markP2OperationSettled(owner);
           setProductTextStatus('failed');
         }
       });
@@ -1514,10 +1531,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setProductOutput(null);
     }
     setProductTextStatus('submitting');
-    if (!markP2OperationUnknown(owner)) {
-      setProductTextStatus('failed');
-      return null;
-    }
     try {
       await retryRetainedProductOperation({
         operation: () => owner.submitText(retained.input),
@@ -1525,7 +1538,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       });
       if (activationOwnerRef.current === owner && pendingProductTurnRef.current === retained) {
         pendingProductTurnRef.current = null;
-        markP2OperationSettled(owner);
         setProductInput('');
         setProductTextStatus('waiting');
         if (source === 'voice' && recognizedVoiceRef.current === recognized) {
@@ -1538,7 +1550,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (activationOwnerRef.current === owner) {
         if (!owner.hasPendingSubmission()) {
           pendingProductTurnRef.current = null;
-          markP2OperationSettled(owner);
         }
         setProductTextStatus('failed');
       }
@@ -1658,10 +1669,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const locallyStopped = p1Owner.stopAgentPlayout(response);
     if (!locallyStopped) return;
     activeVoiceResponseRef.current = null;
-    if (!markP2OperationUnknown(p2Owner)) {
-      setProductTextStatus('failed');
-      return;
-    }
     let retained = pendingBargeInRef.current;
     if (retained !== null && retained.owner !== p2Owner) {
       setProductTextStatus('failed');
@@ -1684,11 +1691,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (pendingBargeInRef.current === retained) {
         pendingBargeInRef.current = null;
       }
-      markP2OperationSettled(p2Owner);
     } catch {
       if (!p2Owner.hasPendingBargeIn() && pendingBargeInRef.current === retained) {
         pendingBargeInRef.current = null;
-        markP2OperationSettled(p2Owner);
       }
       setProductTextStatus('failed');
     }
@@ -1727,10 +1732,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     };
     const retained = { owner, input };
     pendingProductTurnRef.current = retained;
-    if (!markP2OperationUnknown(owner)) {
-      pendingProductTurnRef.current = null;
-      return null;
-    }
     try {
       const result = await retryRetainedProductOperation({
         operation: () => owner.submitText(input),
@@ -1738,29 +1739,24 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       });
       if (pendingProductTurnRef.current !== retained) return null;
       pendingProductTurnRef.current = null;
-      markP2OperationSettled(owner);
-      const origin = bindProductVoiceTaskOrigin(
-        input,
-        result,
-        recognized.session_id,
-        activationBinding.interaction_id
-      );
+      const origin = bindProductVoiceTaskOrigin(input, result, recognized.session_id, activationBinding.interaction_id);
       voiceTaskOriginRef.current = origin;
       recognizedVoiceRef.current = null;
       return origin;
     } catch {
       if (activationOwnerRef.current === owner && !owner.hasPendingSubmission()) {
         pendingProductTurnRef.current = null;
-        markP2OperationSettled(owner);
       }
       return null;
     }
   };
 
-  const inspectP3RetryEligibility = async (input: Readonly<{
-    task_id?: string;
-    follow_nonterminal?: boolean;
-  }> = {}): Promise<Readonly<FormalTaskControlRecord> | null> => {
+  const inspectP3RetryEligibility = async (
+    input: Readonly<{
+      task_id?: string;
+      follow_nonterminal?: boolean;
+    }> = {}
+  ): Promise<Readonly<FormalTaskControlRecord> | null> => {
     const sessionId = props.activeSessionId;
     const taskId = (input.task_id ?? p3TargetTaskId).trim();
     const leaf = formalTaskControlLeafRef.current;
@@ -1775,14 +1771,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const abortController = new AbortController();
     p3RetryInspectionAbortRef.current = abortController;
     const waitForRetry = props.p3RetryInspectionWait ?? defaultP3RetryInspectionWait;
-    const isCurrent = () => (
-      !abortController.signal.aborted
-      && mountedRef.current
-      && formalTaskControlLeafRef.current === leaf
-      && activeSessionRef.current === sessionId
-      && p3RetryInspectionGenerationRef.current === inspectionGeneration
-      && p3RetryInspectionAbortRef.current === abortController
-    );
+    const isCurrent = () =>
+      !abortController.signal.aborted &&
+      mountedRef.current &&
+      formalTaskControlLeafRef.current === leaf &&
+      activeSessionRef.current === sessionId &&
+      p3RetryInspectionGenerationRef.current === inspectionGeneration &&
+      p3RetryInspectionAbortRef.current === abortController;
     setP3RetryEligibility(null);
     setP3RetryInspectionStatus('checking');
     try {
@@ -1802,11 +1797,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           setP3MutationOperation('task.retry');
           return selected;
         }
-        if (
-          selected.state === 'terminal'
-          || input.follow_nonterminal !== true
-          || attempt >= PRODUCT_P3_RETRY_INSPECTION_DELAYS_MS.length
-        ) {
+        if (selected.state === 'terminal' || input.follow_nonterminal !== true || attempt >= PRODUCT_P3_RETRY_INSPECTION_DELAYS_MS.length) {
           setP3RetryEligibility(null);
           setP3RetryInspectionStatus('ineligible');
           return null;
@@ -1840,13 +1831,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     };
     if (p3MutationOperation === 'task.cancel' || p3MutationOperation === 'task.retry') {
       if (!p3TargetTaskId.trim()) return null;
-      if (
-        p3MutationOperation === 'task.retry'
-        && (
-          p3RetryEligibility?.task_id !== p3TargetTaskId.trim()
-          || !isFormalTaskRetryEligible(p3RetryEligibility)
-        )
-      ) return null;
+      if (p3MutationOperation === 'task.retry' && (p3RetryEligibility?.task_id !== p3TargetTaskId.trim() || !isFormalTaskRetryEligible(p3RetryEligibility)))
+        return null;
       return p3MutationOperation === 'task.cancel'
         ? {
             operation: 'task.cancel',
@@ -2305,9 +2291,10 @@ export function LiveVoiceIntegratedRoutePanelView({
   const browserEvidence = platform?.browser_version
     ? `${platform.browser_family} ${platform.browser_version}`
     : (platform?.browser_family ?? t('liveVoice.integrated.diagnostics.pending'));
-  const p3MutationLocked = ['issuing', 'confirmed', 'mutating'].includes(p3MutationStatus)
-    || p3RetryInspectionStatus === 'checking'
-    || (p3MutationStatus === 'failed' && p3MutationRetained);
+  const p3MutationLocked =
+    ['issuing', 'confirmed', 'mutating'].includes(p3MutationStatus) ||
+    p3RetryInspectionStatus === 'checking' ||
+    (p3MutationStatus === 'failed' && p3MutationRetained);
   const productTextLocked =
     ['submitting', 'waiting', 'presented'].includes(productTextStatus) ||
     productOperationRetained ||
@@ -2468,33 +2455,20 @@ export function LiveVoiceIntegratedRoutePanelView({
                 />
               )}
               {p3MutationOperation !== 'task.create' && onP3InspectRetry && (
-                <button
-                  type="button"
-                  onClick={onP3InspectRetry}
-                  disabled={!p3TargetTaskId.trim() || p3MutationLocked}
-                >
+                <button type="button" onClick={onP3InspectRetry} disabled={!p3TargetTaskId.trim() || p3MutationLocked}>
                   {t('liveVoice.integrated.taskControl.inspectRetry')}
                 </button>
               )}
               <DiagnosticsFact
                 label={t('liveVoice.integrated.taskControl.retryStatus')}
-                value={p3RetryEligible && p3RetryAttemptNumber !== null
-                  ? `eligible:${p3RetryAttemptNumber}/3`
-                  : p3RetryInspectionStatus}
+                value={p3RetryEligible && p3RetryAttemptNumber !== null ? `eligible:${p3RetryAttemptNumber}/3` : p3RetryInspectionStatus}
               />
               {p3MutationStatus === 'confirmed' ? (
                 <button type="button" onClick={onP3Execute}>
                   {t('liveVoice.integrated.taskControl.execute')}
                 </button>
               ) : (
-                <button
-                  type="button"
-                  onClick={onP3Issue}
-                  disabled={
-                    p3MutationLocked
-                    || (p3MutationOperation === 'task.retry' && !p3RetryEligible)
-                  }
-                >
+                <button type="button" onClick={onP3Issue} disabled={p3MutationLocked || (p3MutationOperation === 'task.retry' && !p3RetryEligible)}>
                   {t('liveVoice.integrated.taskControl.confirm')}
                 </button>
               )}
