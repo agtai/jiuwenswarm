@@ -115,6 +115,17 @@ from .task_progress_return import (
     TaskProgressReturnState,
     TaskProgressTextEvent,
 )
+from .w2_fault_plan import (
+    P2_PRESENTATION_ACK_OPERATION,
+    P2_RETRIABLE_FAULT_OPERATION_ENV,
+    P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    P2_STALE_FAULT_OPERATION_ENV,
+    P2_STALE_FAULT_REQUEST_ID_ENV,
+    P3_MUTATION_OPERATION,
+    P3_RETRY_OPERATION,
+    P3_STALE_FAULT_OPERATION_ENV,
+    P3_STALE_FAULT_REQUEST_ID_ENV,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -122,20 +133,14 @@ PRODUCT_COMPOSITION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENA
 PRODUCT_P2_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 PRODUCT_P3_TEXT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED"
 PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED"
-PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV = (
-    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID"
-)
-PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV = (
-    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_OPERATION"
-)
-PRODUCT_P3_STALE_FAULT_REQUEST_ID_ENV = (
-    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_STALE_FAULT_REQUEST_ID"
-)
-PRODUCT_P3_STALE_FAULT_OPERATION_ENV = (
-    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_STALE_FAULT_OPERATION"
-)
-_PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
-_PRODUCT_P3_RETRY_OPERATION = "task.retry"
+PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV = P2_RETRIABLE_FAULT_REQUEST_ID_ENV
+PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV = P2_RETRIABLE_FAULT_OPERATION_ENV
+PRODUCT_P2_STALE_FAULT_REQUEST_ID_ENV = P2_STALE_FAULT_REQUEST_ID_ENV
+PRODUCT_P2_STALE_FAULT_OPERATION_ENV = P2_STALE_FAULT_OPERATION_ENV
+PRODUCT_P3_STALE_FAULT_REQUEST_ID_ENV = P3_STALE_FAULT_REQUEST_ID_ENV
+PRODUCT_P3_STALE_FAULT_OPERATION_ENV = P3_STALE_FAULT_OPERATION_ENV
+_PRODUCT_P2_PRESENTATION_ACK_OPERATION = P2_PRESENTATION_ACK_OPERATION
+_PRODUCT_P3_RETRY_OPERATION = P3_RETRY_OPERATION
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -221,6 +226,45 @@ def _p2_retriable_fault_plan_from_environment() -> ProductP2RetriableFaultPlan |
 
 
 @dataclass(frozen=True, slots=True)
+class ProductP2StaleFaultPlan:
+    """One immutable server-owned W2 stale ACK, never a client claim."""
+
+    request_id: str
+    operation: str
+
+    def __post_init__(self) -> None:
+        request_id = self.request_id
+        if (
+            type(request_id) is not str
+            or not request_id
+            or request_id != request_id.strip()
+            or len(request_id) > 256
+            or any(character.isspace() for character in request_id)
+        ):
+            raise ValueError("P2 stale fault request_id must be an opaque label")
+        try:
+            request_id.encode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            raise ValueError(
+                "P2 stale fault request_id must contain Unicode scalar values"
+            ) from exc
+        if self.operation != _PRODUCT_P2_PRESENTATION_ACK_OPERATION:
+            raise ValueError(
+                "P2 stale fault operation must be the exact presentation ACK"
+            )
+
+
+def _p2_stale_fault_plan_from_environment() -> ProductP2StaleFaultPlan | None:
+    request_id = os.getenv(PRODUCT_P2_STALE_FAULT_REQUEST_ID_ENV)
+    operation = os.getenv(PRODUCT_P2_STALE_FAULT_OPERATION_ENV)
+    if request_id is None and operation is None:
+        return None
+    if request_id is None or operation is None:
+        raise ValueError("P2 stale fault plan requires exact request_id and operation")
+    return ProductP2StaleFaultPlan(request_id=request_id, operation=operation)
+
+
+@dataclass(frozen=True, slots=True)
 class ProductP3StaleFaultPlan:
     """One immutable server-owned W2 stale retry, never a client claim."""
 
@@ -243,8 +287,16 @@ class ProductP3StaleFaultPlan:
             raise ValueError(
                 "P3 stale fault request_id must contain Unicode scalar values"
             ) from exc
-        if self.operation != _PRODUCT_P3_RETRY_OPERATION:
-            raise ValueError("P3 stale fault operation must be the exact task.retry")
+        if self.operation not in {_PRODUCT_P3_RETRY_OPERATION, P3_MUTATION_OPERATION}:
+            raise ValueError(
+                "P3 stale fault operation must be task.retry or the product mutation carrier"
+            )
+
+    def matches(self, operation: str) -> bool:
+        return operation == _PRODUCT_P3_RETRY_OPERATION and self.operation in {
+            _PRODUCT_P3_RETRY_OPERATION,
+            P3_MUTATION_OPERATION,
+        }
 
 
 def _p3_stale_fault_plan_from_environment() -> ProductP3StaleFaultPlan | None:
@@ -264,6 +316,16 @@ class ProductCompositionSettings:
     p3_mutation_enabled: bool = False
     p2_retriable_fault_plan: ProductP2RetriableFaultPlan | None = None
     p3_stale_fault_plan: ProductP3StaleFaultPlan | None = None
+    p2_stale_fault_plan: ProductP2StaleFaultPlan | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            self.p2_retriable_fault_plan is not None
+            and self.p2_stale_fault_plan is not None
+            and self.p2_retriable_fault_plan.request_id
+            == self.p2_stale_fault_plan.request_id
+        ):
+            raise ValueError("P2 fault plans must use distinct request identities")
 
     @classmethod
     def from_environment(cls) -> ProductCompositionSettings:
@@ -272,6 +334,7 @@ class ProductCompositionSettings:
             p3_text_enabled=_is_enabled(os.getenv(PRODUCT_P3_TEXT_ENABLE_ENV)),
             p3_mutation_enabled=_is_enabled(os.getenv(PRODUCT_P3_MUTATION_ENABLE_ENV)),
             p2_retriable_fault_plan=_p2_retriable_fault_plan_from_environment(),
+            p2_stale_fault_plan=_p2_stale_fault_plan_from_environment(),
             p3_stale_fault_plan=_p3_stale_fault_plan_from_environment(),
         )
 
@@ -667,6 +730,10 @@ class AgentServerProductCompositionRegistry:
         self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_retriable_fault_consumed = False
+        self._p2_stale_fault_consumed = False
+        self._p2_stale_fault_fingerprint: bytes | None = None
+        self._p2_stale_fault_binding: P2InteractionBinding | None = None
+        self._p2_stale_fault_manifest: ProductCompositionManifest | None = None
         self._p3_stale_fault_consumed = False
         self._p3_issue_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
@@ -2517,6 +2584,20 @@ class AgentServerProductCompositionRegistry:
                 request_id, reason=exc.reason, code=exc.code, message=str(exc)
             )
 
+    @staticmethod
+    def _p2_stale_fault_result(
+        *,
+        request_id: str,
+        manifest: ProductCompositionManifest,
+    ) -> P3RouteResult:
+        return _error_result(
+            request_id,
+            reason="PRODUCT_W2_STALE_FAULT_INJECTED",
+            code=ErrorCode.STALE,
+            message="the signed W2 plan injected a stale presentation fault",
+            manifest=manifest,
+        )
+
     async def handle_p2_presentation_ack(
         self,
         *,
@@ -2585,6 +2666,36 @@ class AgentServerProductCompositionRegistry:
                 {key: value for key, value in params.items() if key != "auth_token"}
             )
             async with self._lock:
+                stale_fault_plan = self._settings.p2_stale_fault_plan
+                if (
+                    stale_fault_plan is not None
+                    and stale_fault_plan.request_id == request_id
+                    and self._p2_stale_fault_consumed
+                ):
+                    binding = self._p2_stale_fault_binding
+                    manifest = self._p2_stale_fault_manifest
+                    if binding is None or manifest is None:
+                        raise RuntimeError("retained P2 stale fault lost its binding")
+                    await self._require_p2_binding_authority_locked(
+                        params=params,
+                        routed_session=parsed[0],
+                        correlation_id=parsed[1],
+                        interaction_id=parsed[2],
+                        activation_id=parsed[3],
+                        generation=parsed[4],
+                        route=parsed[5],
+                        binding=binding,
+                    )
+                    if self._p2_stale_fault_fingerprint != fingerprint:
+                        raise FormalTaskViolation(
+                            "PRODUCT_REQUEST_ID_CONFLICT",
+                            "presentation ACK request_id cannot change binding",
+                            ErrorCode.CONFLICT,
+                        )
+                    return self._p2_stale_fault_result(
+                        request_id=request_id,
+                        manifest=manifest,
+                    )
                 entry = self._p2_ack_operations.get(request_id)
                 if entry is not None:
                     if entry.p2_binding is None:
@@ -2633,6 +2744,20 @@ class AgentServerProductCompositionRegistry:
                                 "the externally frozen W2 plan injected a "
                                 "retriable presentation fault"
                             ),
+                            manifest=retained.manifest,
+                        )
+                    if (
+                        stale_fault_plan is not None
+                        and stale_fault_plan.request_id == request_id
+                        and stale_fault_plan.operation
+                        == _PRODUCT_P2_PRESENTATION_ACK_OPERATION
+                    ):
+                        self._p2_stale_fault_consumed = True
+                        self._p2_stale_fault_fingerprint = fingerprint
+                        self._p2_stale_fault_binding = retained.binding
+                        self._p2_stale_fault_manifest = retained.manifest
+                        return self._p2_stale_fault_result(
+                            request_id=request_id,
                             manifest=retained.manifest,
                         )
                     if (
@@ -3629,7 +3754,7 @@ class AgentServerProductCompositionRegistry:
                             fault_plan is not None
                             and not self._p3_stale_fault_consumed
                             and fault_plan.request_id == request_id
-                            and fault_plan.operation == operation
+                            and fault_plan.matches(operation)
                         )
                         if inject_stale:
                             self._p3_stale_fault_consumed = True
@@ -4779,6 +4904,8 @@ __all__ = [
     "PRODUCT_P2_ENABLE_ENV",
     "PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV",
     "PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV",
+    "PRODUCT_P2_STALE_FAULT_OPERATION_ENV",
+    "PRODUCT_P2_STALE_FAULT_REQUEST_ID_ENV",
     "PRODUCT_P3_STALE_FAULT_OPERATION_ENV",
     "PRODUCT_P3_STALE_FAULT_REQUEST_ID_ENV",
     "PRODUCT_P3_QUERY_OPERATIONS",
@@ -4786,6 +4913,7 @@ __all__ = [
     "PRODUCT_P3_TEXT_ENABLE_ENV",
     "ProductCompositionSettings",
     "ProductP2RetriableFaultPlan",
+    "ProductP2StaleFaultPlan",
     "ProductP3StaleFaultPlan",
     "create_product_composition_registry_from_environment",
     "product_composition_enabled_from_environment",

@@ -52,11 +52,14 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P2_RETRIABLE_FAULT_OPERATION_ENV,
     PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    PRODUCT_P2_STALE_FAULT_OPERATION_ENV,
+    PRODUCT_P2_STALE_FAULT_REQUEST_ID_ENV,
     PRODUCT_P3_STALE_FAULT_OPERATION_ENV,
     PRODUCT_P3_STALE_FAULT_REQUEST_ID_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
     ProductP2RetriableFaultPlan,
+    ProductP2StaleFaultPlan,
     ProductP3StaleFaultPlan,
     _ProgressDelivery,
     create_product_composition_registry_from_environment,
@@ -476,6 +479,7 @@ def _registry(
     push_success: bool = True,
     commit_ledger: TurnCommitLedger | None = None,
     p2_retriable_fault_plan: ProductP2RetriableFaultPlan | None = None,
+    p2_stale_fault_plan: ProductP2StaleFaultPlan | None = None,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -490,6 +494,7 @@ def _registry(
             p2_enabled=p2,
             p3_text_enabled=p3,
             p2_retriable_fault_plan=p2_retriable_fault_plan,
+            p2_stale_fault_plan=p2_stale_fault_plan,
         ),
         p3_composition=p3_composition,
         agent_manager=manager,
@@ -651,7 +656,7 @@ def test_p3_stale_fault_plan_is_default_off_and_requires_exact_retry(
         ProductCompositionSettings.from_environment()
 
     monkeypatch.setenv(PRODUCT_P3_STALE_FAULT_OPERATION_ENV, "task.cancel")
-    with pytest.raises(ValueError, match="exact task.retry"):
+    with pytest.raises(ValueError, match="task.retry or the product mutation carrier"):
         ProductCompositionSettings.from_environment()
 
     monkeypatch.setenv(PRODUCT_P3_STALE_FAULT_OPERATION_ENV, "task.retry")
@@ -661,6 +666,64 @@ def test_p3_stale_fault_plan_is_default_off_and_requires_exact_retry(
         request_id="request-p3-stale-fault",
         operation="task.retry",
     )
+
+    monkeypatch.setenv(
+        PRODUCT_P3_STALE_FAULT_OPERATION_ENV,
+        "live_voice.composition.p3.mutate",
+    )
+    plan_compatible = ProductCompositionSettings.from_environment()
+    assert plan_compatible.p3_stale_fault_plan == ProductP3StaleFaultPlan(
+        request_id="request-p3-stale-fault",
+        operation="live_voice.composition.p3.mutate",
+    )
+
+
+def test_p2_stale_fault_plan_is_default_off_and_requires_exact_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PRODUCT_P2_STALE_FAULT_REQUEST_ID_ENV, raising=False)
+    monkeypatch.delenv(PRODUCT_P2_STALE_FAULT_OPERATION_ENV, raising=False)
+
+    assert ProductCompositionSettings.from_environment().p2_stale_fault_plan is None
+
+    monkeypatch.setenv(
+        PRODUCT_P2_STALE_FAULT_REQUEST_ID_ENV,
+        "request-p2-stale-fault",
+    )
+    with pytest.raises(ValueError, match="requires exact request_id and operation"):
+        ProductCompositionSettings.from_environment()
+
+    monkeypatch.setenv(
+        PRODUCT_P2_STALE_FAULT_OPERATION_ENV,
+        "live_voice.composition.p2.submit",
+    )
+    with pytest.raises(ValueError, match="exact presentation ACK"):
+        ProductCompositionSettings.from_environment()
+
+    monkeypatch.setenv(
+        PRODUCT_P2_STALE_FAULT_OPERATION_ENV,
+        "live_voice.composition.p2.presentation.ack",
+    )
+    settings = ProductCompositionSettings.from_environment()
+
+    assert settings.p2_stale_fault_plan == ProductP2StaleFaultPlan(
+        request_id="request-p2-stale-fault",
+        operation="live_voice.composition.p2.presentation.ack",
+    )
+
+    with pytest.raises(ValueError, match="distinct request identities"):
+        ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=True,
+            p2_retriable_fault_plan=ProductP2RetriableFaultPlan(
+                request_id="shared-p2-fault-request",
+                operation="live_voice.composition.p2.presentation.ack",
+            ),
+            p2_stale_fault_plan=ProductP2StaleFaultPlan(
+                request_id="shared-p2-fault-request",
+                operation="live_voice.composition.p2.presentation.ack",
+            ),
+        )
 
 
 def test_factory_requires_real_authenticated_authority_when_enabled(
@@ -2293,6 +2356,201 @@ async def test_p2_retriable_fault_concurrency_consumes_exact_plan_once(
     assert manager.agent.calls == 0
     assert history.users == []
     assert history.assistants == []
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_stale_fault_is_authorized_exact_retained_and_effect_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault_request_id = "request-p2-stale-presentation-fault"
+    registry, p3, manager, pushed = _registry(
+        tmp_path,
+        p2_stale_fault_plan=ProductP2StaleFaultPlan(
+            request_id=fault_request_id,
+            operation="live_voice.composition.p2.presentation.ack",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-stale-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    acknowledgement_calls: list[object] = []
+
+    async def track_acknowledgement(*args: object) -> object:
+        acknowledgement_calls.append(args)
+        return SimpleNamespace(
+            accepted=True,
+            replayed=False,
+            history_records_written=0,
+            history_pending=False,
+        )
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "acknowledge_presentation",
+        track_acknowledgement,
+    )
+    params = _p2_params(
+        response_id="response-p2-stale-fault",
+        response_generation=1,
+        surface="text",
+        unit_id="unit-p2-stale-fault",
+        contiguous_cursor=1,
+        presented_at=NOW,
+    )
+    authority_calls_before = len(p3.authority_calls)
+    runtime_before = route.activation_lease._runtime.snapshot()
+    manager_before = (
+        tuple(manager.get_calls),
+        manager.pins,
+        manager.unpins,
+        manager.agent.calls,
+    )
+
+    malformed = await registry.handle_p2_presentation_ack(
+        params={**params, "fault": "client-claim"},
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    wrong_binding = await registry.handle_p2_presentation_ack(
+        params={**params, "activation_generation": 2},
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    injected = await registry.handle_p2_presentation_ack(
+        params=params,
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p2_presentation_ack(
+        params=params,
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    conflicted = await registry.handle_p2_presentation_ack(
+        params={**params, "unit_id": "unit-p2-stale-conflict"},
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+
+    assert cast(dict, malformed.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert cast(dict, wrong_binding.payload["error"])["reason"] == (
+        "ACTIVATION_BINDING_MISMATCH"
+    )
+    assert cast(dict, injected.payload["error"]) == {
+        "code": "STALE",
+        "reason": "PRODUCT_W2_STALE_FAULT_INJECTED",
+        "message": "the signed W2 plan injected a stale presentation fault",
+    }
+    assert replayed.payload == injected.payload
+    assert cast(dict, conflicted.payload["error"])["reason"] == (
+        "PRODUCT_REQUEST_ID_CONFLICT"
+    )
+    assert len(p3.authority_calls) == authority_calls_before + 4
+    assert acknowledgement_calls == []
+    assert registry._p2_ack_operations == {}
+    assert registry._p2_stale_fault_consumed is True
+    assert route.activation_lease._runtime.snapshot() == runtime_before
+    assert (
+        tuple(manager.get_calls),
+        manager.pins,
+        manager.unpins,
+        manager.agent.calls,
+    ) == manager_before
+    assert p3.query_calls == []
+    assert p3.subscription_calls == []
+    assert pushed == []
+
+    next_legal = await registry.handle_p2_presentation_ack(
+        params=params,
+        request_id="request-p2-after-stale-fault",
+        session_id="session-product",
+    )
+    assert next_legal.ok is True
+    assert len(acknowledgement_calls) == 1
+    await registry.close_active_routes()
+    replayed_after_close = await registry.handle_p2_presentation_ack(
+        params=params,
+        request_id=fault_request_id,
+        session_id="session-product",
+    )
+    assert replayed_after_close.payload == injected.payload
+    assert len(acknowledgement_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_p2_stale_fault_concurrency_retains_one_exact_zero_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fault_request_id = "request-p2-stale-concurrent"
+    registry, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        p2_stale_fault_plan=ProductP2StaleFaultPlan(
+            request_id=fault_request_id,
+            operation="live_voice.composition.p2.presentation.ack",
+        ),
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-stale-concurrent-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    acknowledgement_calls: list[object] = []
+
+    async def unexpected_acknowledgement(*args: object) -> object:
+        acknowledgement_calls.append(args)
+        raise AssertionError("stale fault reached the presentation effect")
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "acknowledge_presentation",
+        unexpected_acknowledgement,
+    )
+    params = _p2_params(
+        response_id="response-p2-stale-concurrent",
+        response_generation=1,
+        surface="text",
+        unit_id="unit-p2-stale-concurrent",
+        contiguous_cursor=1,
+        presented_at=NOW,
+    )
+
+    results = await asyncio.gather(
+        *(
+            registry.handle_p2_presentation_ack(
+                params=params,
+                request_id=fault_request_id,
+                session_id="session-product",
+            )
+            for _ in range(2)
+        )
+    )
+
+    assert results[0].payload == results[1].payload
+    assert cast(dict, results[0].payload["error"])["code"] == "STALE"
+    assert acknowledgement_calls == []
+    assert registry._p2_ack_operations == {}
+    assert registry._p2_stale_fault_consumed is True
     await registry.close_active_routes()
 
 
@@ -4285,7 +4543,7 @@ async def test_product_retry_stale_fault_is_exact_retained_and_effect_free(
         tmp_path,
         p3_stale_fault_plan=ProductP3StaleFaultPlan(
             request_id=planned_request_id,
-            operation="task.retry",
+            operation="live_voice.composition.p3.mutate",
         ),
     )
     issued = await registry.handle_p3_confirmation_issue(

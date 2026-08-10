@@ -39,6 +39,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     canonical_json_bytes,
 )
+from jiuwenswarm.server.live_voice.critical_token_safety import CriticalTokenPolicy
 from jiuwenswarm.server.live_voice.speech_ports import (
     ProviderRef,
     RecognitionAlternative,
@@ -52,7 +53,11 @@ from jiuwenswarm.server.live_voice.speech_ports import (
     SynthesisPort,
     SynthesisRequest,
 )
-from jiuwenswarm.server.live_voice.critical_token_safety import CriticalTokenPolicy
+from jiuwenswarm.server.live_voice.w2_fault_plan import (
+    P1_RECOGNIZE_OPERATION,
+    P1_RETRIABLE_FAULT_OPERATION_ENV,
+    P1_RETRIABLE_FAULT_REQUEST_ID_ENV,
+)
 
 
 FORMAL_BATCH_SPEECH_FLAG = "LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED"
@@ -104,6 +109,10 @@ _REBUILT_BODY_STALE_HEADERS = frozenset(
 _LOCALE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
 _PROVIDER_ID = "openai-compatible-batch-speech"
 _IMPLEMENTATION_CLASS = "formal"
+_FAULT_PLAN_FROM_ENVIRONMENT = object()
+
+if RECOGNIZE_OPERATION != P1_RECOGNIZE_OPERATION:
+    raise RuntimeError("W2 P1 fault operation drifted from formal Speech")
 
 
 def _contract_error(
@@ -131,6 +140,51 @@ class BatchSpeechError(Exception):
     def __init__(self, error: ContractError) -> None:
         super().__init__(error.message)
         self.error = error
+
+
+@dataclass(frozen=True, slots=True)
+class BatchSpeechP1RetriableFaultPlan:
+    """One server-owned W2 P1 request identity, never a client fault claim."""
+
+    request_id: str
+    operation: str
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.request_id) is not str
+            or not self.request_id
+            or self.request_id != self.request_id.strip()
+            or len(self.request_id) > 256
+            or any(character.isspace() for character in self.request_id)
+        ):
+            raise ValueError("P1 retriable fault request_id must be an opaque label")
+        try:
+            self.request_id.encode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            raise ValueError(
+                "P1 retriable fault request_id must contain Unicode scalar values"
+            ) from exc
+        if self.operation != RECOGNIZE_OPERATION:
+            raise ValueError(
+                "P1 retriable fault operation must be the exact recognition operation"
+            )
+
+
+def _p1_retriable_fault_plan_from_environment() -> (
+    BatchSpeechP1RetriableFaultPlan | None
+):
+    request_id = os.getenv(P1_RETRIABLE_FAULT_REQUEST_ID_ENV)
+    operation = os.getenv(P1_RETRIABLE_FAULT_OPERATION_ENV)
+    if request_id is None and operation is None:
+        return None
+    if request_id is None or operation is None:
+        raise ValueError(
+            "P1 retriable fault plan requires exact request_id and operation"
+        )
+    return BatchSpeechP1RetriableFaultPlan(
+        request_id=request_id,
+        operation=operation,
+    )
 
 
 def _fail(
@@ -1318,6 +1372,9 @@ class FormalBatchSpeechService:
         monotonic: Callable[[], float] = time.monotonic,
         max_completed_operations: int = MAX_COMPLETED_OPERATIONS,
         max_identity_tombstones: int = MAX_IDENTITY_TOMBSTONES,
+        p1_retriable_fault_plan: BatchSpeechP1RetriableFaultPlan | None | object = (
+            _FAULT_PLAN_FROM_ENVIRONMENT
+        ),
     ) -> None:
         self._provider = provider
         self._provider_capability = provider.capability()
@@ -1343,6 +1400,14 @@ class FormalBatchSpeechService:
         self._monotonic = monotonic
         self._max_completed = max(1, max_completed_operations)
         self._max_identity_tombstones = max(1, max_identity_tombstones)
+        if p1_retriable_fault_plan is _FAULT_PLAN_FROM_ENVIRONMENT:
+            p1_retriable_fault_plan = _p1_retriable_fault_plan_from_environment()
+        if p1_retriable_fault_plan is not None and not isinstance(
+            p1_retriable_fault_plan, BatchSpeechP1RetriableFaultPlan
+        ):
+            raise TypeError("P1 retriable fault plan is invalid")
+        self._p1_retriable_fault_plan = p1_retriable_fault_plan
+        self._p1_retriable_fault_fingerprint: bytes | None = None
         self._lock = asyncio.Lock()
         self._closed = False
         self._close_task: asyncio.Task[dict[str, object]] | None = None
@@ -1556,6 +1621,9 @@ class FormalBatchSpeechService:
                     }
                 )
             ).digest()
+            injected = await self._p1_retriable_fault_result(request, fingerprint)
+            if injected is not None:
+                return injected
             return await self._execute(
                 request.operation_id,
                 request.request_id,
@@ -1577,6 +1645,45 @@ class FormalBatchSpeechService:
                     ErrorCode.INTERNAL,
                     "SPEECH_ADAPTER_INTERNAL",
                     "formal batch speech failed internally",
+                ),
+            )
+
+    async def _p1_retriable_fault_result(
+        self, request: RecognitionBatchRequest, fingerprint: bytes
+    ) -> dict[str, object] | None:
+        plan = self._p1_retriable_fault_plan
+        if (
+            plan is None
+            or plan.request_id != request.request_id
+            or plan.operation != RECOGNIZE_OPERATION
+        ):
+            return None
+        async with self._lock:
+            if self._closed:
+                raise _fail(
+                    ErrorCode.UNAVAILABLE,
+                    "SPEECH_SERVICE_CLOSED",
+                    "formal batch speech service is closed",
+                )
+            retained = self._p1_retriable_fault_fingerprint
+            if retained is not None and retained != fingerprint:
+                raise _fail(
+                    ErrorCode.CONFLICT,
+                    "SPEECH_REQUEST_ID_CONFLICT",
+                    "planned P1 fault request_id cannot change binding",
+                    correlation_id=request.correlation_id,
+                )
+            if retained is None:
+                self._p1_retriable_fault_fingerprint = fingerprint
+            return _result_envelope(
+                request.request_id,
+                request.operation_id,
+                error=_contract_error(
+                    ErrorCode.UNAVAILABLE,
+                    "SPEECH_W2_RETRIABLE_FAULT_INJECTED",
+                    "the signed W2 plan injected a retriable recognition fault",
+                    retriable=True,
+                    correlation_id=request.correlation_id,
                 ),
             )
 
