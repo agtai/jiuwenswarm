@@ -60,7 +60,7 @@ from .product_p3_text_adapter import ProductP3AuthorizedQuery
 from .project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
-    _project_content_fingerprint,
+    project_content_fingerprint,
 )
 from .task_event_subscription import TaskEventSubscription
 from .task_progress_return import TaskProgressOriginBinding
@@ -546,10 +546,66 @@ class ClosableBindingResolver(Protocol):
 
 
 class _AttemptScopedProjectExecutor:
-    """Create and retire the formal Code Agent at the isolated attempt root."""
+    """Create and retire the formal Code Agent at the isolated attempt root.
+
+    Retirement never replaces an authoritative in-flight failure.  A teardown
+    problem becomes the terminal cause only when the attempt itself produced no
+    error; otherwise it is logged and the original cause keeps propagating, so
+    ``PROJECT_EXECUTOR_AGENT_ERROR`` or a cancellation is never downgraded to
+    ``PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED``.
+
+    Consumers must finalize this stream deterministically.  ``async for`` alone
+    does not close an abandoned async generator, so the caller wraps iteration
+    in :func:`~jiuwenswarm.server.live_voice.project_code_executor
+    ._closing_attempt_stream`; without it an early exit would defer Agent
+    retirement to event-loop generator finalization, which is neither ordered
+    against attempt worktree cleanup nor able to report its outcome.
+    """
 
     def __init__(self, agent_manager: Any) -> None:
         self._agent_manager = agent_manager
+
+    @staticmethod
+    async def _retire(
+        cleanup: Callable[..., Awaitable[bool]],
+        agent: Any,
+        attempt_root: Path,
+        fingerprint: Callable[[str], Awaitable[str]],
+        *,
+        terminal_content: str | None,
+    ) -> str | None:
+        """Retire the attempt Agent, returning one reason string on failure.
+
+        This never raises for a teardown problem; the caller decides whether the
+        reason may become terminal truth.
+        """
+
+        before_cleanup: str | None = None
+        if terminal_content is not None:
+            try:
+                before_cleanup = await fingerprint(
+                    "PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET"
+                )
+            except RuntimeError as error:
+                return str(error)
+        try:
+            cleaned = await cleanup(str(attempt_root), expected_agent=agent)
+        except Exception:  # noqa: BLE001 -- teardown never owns terminal truth
+            logger.exception("[LiveVoiceP3] attempt Agent retirement raised")
+            return "PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED"
+        if not cleaned:
+            return "PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED"
+        if before_cleanup is None:
+            return None
+        try:
+            after_cleanup = await fingerprint(
+                "PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET"
+            )
+        except RuntimeError as error:
+            return str(error)
+        if after_cleanup != before_cleanup:
+            return "PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET"
+        return None
 
     async def process_background_code_task_stream(
         self, request: Any
@@ -567,7 +623,7 @@ class _AttemptScopedProjectExecutor:
         async def fingerprint(failure_reason: str) -> str:
             try:
                 return await asyncio.to_thread(
-                    _project_content_fingerprint, attempt_root
+                    project_content_fingerprint, attempt_root
                 )
             except Exception as error:
                 raise RuntimeError(failure_reason) from error
@@ -613,24 +669,26 @@ class _AttemptScopedProjectExecutor:
             stream_error = error
             raise
         finally:
-            before_cleanup = (
-                await fingerprint("PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET")
-                if terminal_content is not None
-                else None
+            retirement_reason = await self._retire(
+                cleanup,
+                agent,
+                attempt_root,
+                fingerprint,
+                terminal_content=terminal_content,
             )
-            try:
-                cleaned = await cleanup(str(attempt_root), expected_agent=agent)
-            except Exception as error:
-                raise RuntimeError("PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED") from error
-            if not cleaned:
-                raise RuntimeError("PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED")
-            if before_cleanup is not None and (
-                await fingerprint("PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET")
-                != before_cleanup
-            ):
-                raise RuntimeError(
-                    "PROJECT_EXECUTOR_AGENT_CLEANUP_MUTATED_TARGET"
-                ) from stream_error
+            if retirement_reason is not None:
+                if stream_error is None:
+                    raise RuntimeError(retirement_reason)
+                # An abandoned, cancelled, or already-failed attempt keeps its
+                # authoritative cause. Raising here would replace the exception
+                # in flight, and during GeneratorExit it would also break
+                # generator finalization.
+                logger.warning(
+                    "[LiveVoiceP3] attempt Agent retirement reported %s while %s"
+                    " was already propagating",
+                    retirement_reason,
+                    type(stream_error).__name__,
+                )
 
 
 class AgentManagerProjectBindingResolver:

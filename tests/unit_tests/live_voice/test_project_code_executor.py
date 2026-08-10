@@ -932,6 +932,51 @@ def test_attempt_apply_attribution_failure_restores_exact_authority_bytes(
     assert project_code_executor._project_tree_fingerprint(project) == before_tree
 
 
+def test_attempt_rollback_removes_only_directories_the_attempt_created(
+    tmp_path: Path,
+) -> None:
+    """A rolled-back attempt must leave behind no directory it created.
+
+    Git cannot represent an empty directory, so a residual one is invisible to
+    both project fingerprints: the zero-side-effect assertions below would pass
+    while the target kept a real change. The explicit path assertions are the
+    reliable oracle here. A directory that already existed must still survive.
+    """
+
+    project = tmp_path / "project"
+    attempt = tmp_path / "attempt"
+    _git_project(project)
+    _git_project(attempt)
+    # An untracked empty directory that predates the attempt.
+    (project / "kept").mkdir()
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    protected_support = project_code_executor._target_support_fingerprints(project)
+
+    for relative in ("created/deep/new.txt", "kept/also-new.txt"):
+        added = attempt / relative
+        added.parent.mkdir(parents=True, exist_ok=True)
+        added.write_text("added\n", encoding="utf-8")
+    patch, _expected_tree, changed_paths = project_code_executor._attempt_patch(attempt)
+
+    with pytest.raises(RuntimeError, match="PROJECT_CHANGE_ATTRIBUTION_FAILED"):
+        project_code_executor._apply_attempt_patch(
+            project,
+            patch,
+            source_worktree=attempt,
+            changed_paths=changed_paths,
+            expected_tree="forced-mismatch",
+            before_tree=before_tree,
+            before_head=before_head,
+            protected_support=protected_support,
+        )
+
+    assert not (project / "created").exists()
+    assert (project / "kept").is_dir()
+    assert not any((project / "kept").iterdir())
+    assert project_code_executor._project_tree_fingerprint(project) == before_tree
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction regression")
 @pytest.mark.parametrize("authority_file_exists", [True, False])
 def test_attempt_content_mirror_rejects_junction_before_external_effect(

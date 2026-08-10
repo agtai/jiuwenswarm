@@ -1,8 +1,9 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+﻿# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import sqlite3
 import subprocess
@@ -414,11 +415,52 @@ def _issued_cancel_params(harness: _Harness, task_id: str) -> dict[str, object]:
 
 
 def _store_counts(database: Path) -> tuple[int, ...]:
+    """Count the core Task tables, for assertions about absolute row counts."""
+
     with sqlite3.connect(database) as connection:
         return tuple(
             connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
             for table in ("tasks", "attempts", "task_events", "outbox", "commands")
         )
+
+
+def _store_content(database: Path) -> tuple[str, ...]:
+    """Capture logical Store content as the zero-side-effect oracle.
+
+    Counts are the wrong oracle for "nothing changed": they cannot see an
+    in-place mutation, and the five tables above exclude confirmation, lease,
+    and reconciliation state entirely. ``iterdump`` compares the actual logical
+    content of every table, so a rejected path cannot hide a write.
+
+    A snapshot must be taken after the last authorized setup step. Capturing it
+    earlier attributes legitimate setup writes to the rejected path under test.
+    """
+
+    with sqlite3.connect(database) as connection:
+        return tuple(connection.iterdump())
+
+
+async def _settled_store_content(
+    database: Path, *, stable_reads: int = 3
+) -> tuple[str, ...]:
+    """Snapshot the Store only after its durable write tail stops changing.
+
+    A dispatch or cancel counter reaching its target does not mean the durable
+    tail has landed: outbox and attempt rows are still being written. Capturing
+    the zero-effect baseline before that settles charges the tail of an
+    authorized step to the rejected path under test.
+    """
+
+    stable = 0
+    previous = _store_content(database)
+    for _ in range(300):
+        await asyncio.sleep(0.01)
+        current = _store_content(database)
+        stable = stable + 1 if current == previous else 0
+        previous = current
+        if stable >= stable_reads:
+            return current
+    raise AssertionError("Store did not settle before the zero-effect snapshot")
 
 
 async def _wait_until(predicate, *, attempts: int = 100) -> None:
@@ -865,17 +907,21 @@ async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_
         )
         assert cancelled.ok is True
         await _wait_until(lambda: len(harness.executor.cancels) == 1)
-        before_new_create = _store_counts(harness.database)
+        # Issuing the confirmation is itself an authorized durable write, so the
+        # snapshot is taken after it. Otherwise the assertion below would charge
+        # the setup to the denied create.
+        denied_params = _issued_create_params(harness, "command-after-dirty")
+        before_new_create = await _settled_store_content(harness.database)
 
         denied = await harness.composition.handle(
             operation="task.create",
-            params=_issued_create_params(harness, "command-after-dirty"),
+            params=denied_params,
             request_id="request-dirty-create",
             session_id="session-1",
         )
 
         assert denied.payload["error"]["reason"] == "TASK_CONTEXT_WORKTREE_DIRTY"
-        assert _store_counts(harness.database) == before_new_create
+        assert _store_content(harness.database) == before_new_create
         assert len(harness.executor.dispatches) == 1
         assert len(harness.executor.cancels) == 1
         assert harness.authority.calls[0] == ("session-1", True)
@@ -915,11 +961,14 @@ async def test_dirty_read_and_cancel_still_fail_closed_on_context_drift(
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        # The cancel confirmation is authorized setup and writes durably, so it
+        # is issued before the drift and before the zero-effect snapshot.
+        cancel_params = _issued_cancel_params(harness, task_id)
         harness.authority.dirty = True
         harness.authority.contexts["session-1"] = replace(
             harness.authority.contexts["session-1"], **change
         )
-        before = _store_counts(harness.database)
+        before = await _settled_store_content(harness.database)
 
         read = await harness.composition.handle(
             operation="task.get",
@@ -935,7 +984,7 @@ async def test_dirty_read_and_cancel_still_fail_closed_on_context_drift(
         )
         cancel = await harness.composition.handle(
             operation="task.cancel",
-            params=_issued_cancel_params(harness, task_id),
+            params=cancel_params,
             request_id="request-drift-cancel",
             session_id="session-1",
         )
@@ -943,7 +992,7 @@ async def test_dirty_read_and_cancel_still_fail_closed_on_context_drift(
         assert read.payload["error"]["reason"] == reason
         assert listed.payload["error"]["reason"] == reason
         assert cancel.payload["error"]["reason"] == reason
-        assert _store_counts(harness.database) == before
+        assert _store_content(harness.database) == before
         assert harness.executor.cancels == []
     finally:
         await harness.composition.stop()
@@ -1078,7 +1127,7 @@ async def test_authority_failures_have_zero_persistence_and_executor_effects(
         }
     harness = _harness(tmp_path, contexts=contexts, expires_at=expiry)
     await harness.composition.start()
-    before = _store_counts(harness.database)
+    before = _store_content(harness.database)
     try:
         result = await harness.composition.handle(
             operation="task.create",
@@ -1089,7 +1138,7 @@ async def test_authority_failures_have_zero_persistence_and_executor_effects(
         await asyncio.sleep(0)
         assert result.ok is False
         assert result.payload["error"]["reason"] == expected
-        assert _store_counts(harness.database) == before
+        assert _store_content(harness.database) == before
         assert harness.executor.dispatches == []
         assert harness.executor.cancels == []
     finally:
@@ -1105,7 +1154,7 @@ async def test_authenticated_wrong_project_scope_fails_before_store_and_executor
         allowed_project_ids=frozenset({"project-1"}),
     )
     await harness.composition.start()
-    before = _store_counts(harness.database)
+    before = _store_content(harness.database)
     try:
         denied_create = await harness.composition.handle(
             operation="task.create",
@@ -1126,7 +1175,7 @@ async def test_authenticated_wrong_project_scope_fails_before_store_and_executor
         assert denied_list.payload["error"]["reason"] == (
             "FORMAL_TASK_AUTHORIZATION_DENIED"
         )
-        assert _store_counts(harness.database) == before
+        assert _store_content(harness.database) == before
         assert harness.executor.dispatches == []
         assert harness.executor.cancels == []
     finally:
@@ -1139,7 +1188,7 @@ async def test_browser_authority_fields_and_unconfirmed_cancel_fail_before_core(
 ) -> None:
     harness = _harness(tmp_path)
     await harness.composition.start()
-    before = _store_counts(harness.database)
+    before = _store_content(harness.database)
     try:
         claimed = await harness.composition.handle(
             operation="task.create",
@@ -1155,7 +1204,7 @@ async def test_browser_authority_fields_and_unconfirmed_cancel_fail_before_core(
         )
         assert claimed.payload["error"]["reason"] == "INVALID_P3_ROUTE_ARGUMENT"
         assert unconfirmed.payload["error"]["reason"] == "INVALID_P3_ROUTE_ARGUMENT"
-        assert _store_counts(harness.database) == before
+        assert _store_content(harness.database) == before
         assert harness.executor.dispatches == []
         assert harness.executor.cancels == []
     finally:
@@ -1168,8 +1217,32 @@ async def test_confirmation_forgery_cross_binding_and_expiry_have_zero_effects(
 ) -> None:
     harness = _harness(tmp_path)
     await harness.composition.start()
-    before = _store_counts(harness.database)
     try:
+        # Every confirmation below is issued through the authorized path and
+        # writes durably. The zero-effect snapshot must come after all of them,
+        # otherwise it captures the setup rather than the rejected requests.
+        command_bound = _issued_create_params(harness, "command-bound")
+        principal_bound = _issue_confirmation(
+            harness,
+            _create_params("command-principal"),
+            operation="task.create",
+            principal_id="user-other",
+        )
+        scope_bound = _issue_confirmation(
+            harness,
+            _create_params("command-scope"),
+            operation="task.create",
+            scope=_scope(project_id="project-2", session_id="session-2"),
+        )
+        expired = _issue_confirmation(
+            harness,
+            _create_params("command-expired"),
+            operation="task.create",
+            expires_at="2026-08-05T11:30:00Z",
+            now="2026-08-05T11:00:00Z",
+        )
+        before = await _settled_store_content(harness.database)
+
         forged_claim = await harness.composition.handle(
             operation="task.create",
             params={**_create_params(), "confirmed": True},
@@ -1182,20 +1255,11 @@ async def test_confirmation_forgery_cross_binding_and_expiry_have_zero_effects(
             request_id="request-forged-id",
             session_id="session-1",
         )
-
-        command_bound = _issued_create_params(harness, "command-bound")
         cross_command = await harness.composition.handle(
             operation="task.create",
             params={**command_bound, "command_id": "command-other"},
             request_id="request-cross-command",
             session_id="session-1",
-        )
-
-        principal_bound = _issue_confirmation(
-            harness,
-            _create_params("command-principal"),
-            operation="task.create",
-            principal_id="user-other",
         )
         cross_principal = await harness.composition.handle(
             operation="task.create",
@@ -1203,26 +1267,11 @@ async def test_confirmation_forgery_cross_binding_and_expiry_have_zero_effects(
             request_id="request-cross-principal",
             session_id="session-1",
         )
-
-        scope_bound = _issue_confirmation(
-            harness,
-            _create_params("command-scope"),
-            operation="task.create",
-            scope=_scope(project_id="project-2", session_id="session-2"),
-        )
         cross_scope = await harness.composition.handle(
             operation="task.create",
             params=scope_bound,
             request_id="request-cross-scope",
             session_id="session-1",
-        )
-
-        expired = _issue_confirmation(
-            harness,
-            _create_params("command-expired"),
-            operation="task.create",
-            expires_at="2026-08-05T11:30:00Z",
-            now="2026-08-05T11:00:00Z",
         )
         expired_result = await harness.composition.handle(
             operation="task.create",
@@ -1238,7 +1287,7 @@ async def test_confirmation_forgery_cross_binding_and_expiry_have_zero_effects(
                 "P3_CONFIRMATION_BINDING_MISMATCH"
             )
         assert expired_result.payload["error"]["reason"] == "P3_CONFIRMATION_EXPIRED"
-        assert _store_counts(harness.database) == before
+        assert _store_content(harness.database) == before
         assert harness.executor.dispatches == []
         assert harness.executor.cancels == []
     finally:
@@ -1266,7 +1315,7 @@ async def test_confirmation_is_single_use_with_exact_idempotent_replay_only(
             session_id="session-1",
         )
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
-        before_conflict = _store_counts(harness.database)
+        before_conflict = await _settled_store_content(harness.database)
         conflict = await harness.composition.handle(
             operation="task.create",
             params={**params, "command_id": "command-reuse-other"},
@@ -1279,7 +1328,7 @@ async def test_confirmation_is_single_use_with_exact_idempotent_replay_only(
         assert conflict.payload["error"]["reason"] == (
             "P3_CONFIRMATION_BINDING_MISMATCH"
         )
-        assert _store_counts(harness.database) == before_conflict
+        assert _store_content(harness.database) == before_conflict
         assert len(harness.executor.dispatches) == 1
         assert harness.executor.cancels == []
     finally:
@@ -1339,7 +1388,7 @@ async def test_real_mutation_replay_reauthorizes_current_scope_without_reexecuti
         )
         assert result.ok is True
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
-        before_counts = _store_counts(harness.database)
+        before_counts = await _settled_store_content(harness.database)
         before_dispatches = list(harness.executor.dispatches)
         with sqlite3.connect(harness.database) as connection:
             before_confirmations = connection.execute(
@@ -1400,7 +1449,7 @@ async def test_real_mutation_replay_reauthorizes_current_scope_without_reexecuti
                 expected_binding=cancel_binding,
             )
 
-        assert _store_counts(harness.database) == before_counts
+        assert _store_content(harness.database) == before_counts
         assert harness.executor.dispatches == before_dispatches
         assert harness.executor.cancels == []
         with sqlite3.connect(harness.database) as connection:
@@ -1429,7 +1478,7 @@ async def test_cross_task_confirmation_rejected_without_cancel_effect(
             created.append(str(result.payload["result"]["task_id"]))
         await _wait_until(lambda: len(harness.executor.dispatches) == 2)
         cancel_one = _issued_cancel_params(harness, created[0])
-        before = _store_counts(harness.database)
+        before = await _settled_store_content(harness.database)
 
         result = await harness.composition.handle(
             operation="task.cancel",
@@ -1439,7 +1488,7 @@ async def test_cross_task_confirmation_rejected_without_cancel_effect(
         )
 
         assert result.payload["error"]["reason"] == ("P3_CONFIRMATION_BINDING_MISMATCH")
-        assert _store_counts(harness.database) == before
+        assert _store_content(harness.database) == before
         assert harness.executor.cancels == []
     finally:
         await harness.composition.stop()
@@ -1461,7 +1510,7 @@ async def test_mutation_without_trusted_confirmation_owner_fails_closed(
         clock=lambda: NOW,
     )
     await composition.start()
-    before = _store_counts(database)
+    before = _store_content(database)
     try:
         result = await composition.handle(
             operation="task.create",
@@ -1473,7 +1522,7 @@ async def test_mutation_without_trusted_confirmation_owner_fails_closed(
         assert result.payload["error"]["reason"] == (
             "FORMAL_TASK_CONFIRMATION_REQUIRED"
         )
-        assert _store_counts(database) == before
+        assert _store_content(database) == before
         assert executor.dispatches == []
         assert executor.cancels == []
     finally:
@@ -2517,6 +2566,18 @@ async def test_attempt_agent_lifecycle_changes_never_become_authority_output(
             chunks.append(chunk)
 
     assert len(chunks) == (0 if mutation_phase == "setup" else 1)
+    # Prove the mutation actually reached the attempt root, so the raised reason
+    # is real detection rather than an unrelated failure. Nothing in this test
+    # can write to the authority root, so the assertions below are a boundary
+    # check on the wrapper, not the detection under test.
+    assert (
+        attempt_root
+        / {
+            "setup": "setup.txt",
+            "post_terminal": "late.txt",
+            "cleanup": "cleanup.txt",
+        }[mutation_phase]
+    ).exists()
     assert (authority_root / "tracked.txt").read_bytes() == authority_bytes
     assert subprocess.run(
         ["git", "status", "--porcelain=v2", "-z"],
@@ -2526,13 +2587,183 @@ async def test_attempt_agent_lifecycle_changes_never_become_authority_output(
     ).stdout == authority_status
 
 
+def _seed_git_root(root: Path) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "tracked.txt").write_bytes(b"baseline\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True)
+    subprocess.run(
+        [
+            "git", "-c", "user.name=P3 Test", "-c",
+            "user.email=p3@example.invalid", "commit", "-qm", "seed",
+        ],
+        cwd=root,
+        check=True,
+    )
+
+
+async def _attempt_dispatch_binding(authority_root: Path, manager: object):
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(authority_root),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),
+        agent_manager=manager,
+        service=object(),
+        model_resolver=_ModelResolver(),
+        principal=_principal(),
+        clock=lambda: NOW,
+    )
+    return await resolver.resolve(
+        SimpleNamespace(
+            context=object(),
+            attributes=(
+                ("model_identity", "default#0"),
+                ("model_config_version", "catalog-v1"),
+            ),
+        ),
+        for_dispatch=True,
+    )
+
+
+def _retirement_manager(
+    attempt_root: Path, *, agent_fails: bool, cleanup_raises: bool = False
+) -> object:
+    class Agent:
+        def get_project_execution_root(self) -> str:
+            return str(attempt_root)
+
+        def get_instance(self):
+            return object()
+
+        async def process_background_code_task_stream(self, _request):
+            yield SimpleNamespace(is_complete=False, value="running")
+            if agent_fails:
+                raise RuntimeError("PROJECT_EXECUTOR_AGENT_ERROR")
+            yield SimpleNamespace(is_complete=True, value="completed")
+
+    class Manager:
+        def __init__(self) -> None:
+            self.agent = Agent()
+            self.cleanup_calls = 0
+
+        async def get_live_voice_formal_task_agent(self, _project_dir: str):
+            return self.agent
+
+        async def cleanup_live_voice_formal_task_agent(
+            self, _project_dir: str, *, expected_agent: object
+        ) -> bool:
+            assert expected_agent is self.agent
+            self.cleanup_calls += 1
+            if cleanup_raises:
+                raise RuntimeError("attempt Agent cleanup exploded")
+            return False
+
+    return Manager()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_raises", [False, True])
+async def test_attempt_agent_retirement_never_replaces_authoritative_failure(
+    tmp_path: Path,
+    cleanup_raises: bool,
+) -> None:
+    """Teardown trouble must not downgrade the Agent's own terminal cause.
+
+    A retirement reason raised from the stream's ``finally`` would replace the
+    exception in flight, so every Executor failure would reach the attempt
+    journal as ``PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED`` and lose its stable
+    classification. Both a refused and a raising retirement are covered.
+    """
+
+    authority_root = tmp_path / "authority"
+    attempt_root = tmp_path / "attempt"
+    for root in (authority_root, attempt_root):
+        _seed_git_root(root)
+    manager = _retirement_manager(
+        attempt_root, agent_fails=True, cleanup_raises=cleanup_raises
+    )
+    binding = await _attempt_dispatch_binding(authority_root, manager)
+
+    with pytest.raises(RuntimeError, match="PROJECT_EXECUTOR_AGENT_ERROR"):
+        async for _chunk in (
+            binding.project_executor.process_background_code_task_stream(
+                SimpleNamespace(params={"project_dir": str(attempt_root)})
+            )
+        ):
+            pass
+    assert manager.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_attempt_agent_retirement_failure_is_terminal_without_other_cause(
+    tmp_path: Path,
+) -> None:
+    """A refused retirement stays fail-closed when the attempt itself succeeded."""
+
+    authority_root = tmp_path / "authority"
+    attempt_root = tmp_path / "attempt"
+    for root in (authority_root, attempt_root):
+        _seed_git_root(root)
+    manager = _retirement_manager(attempt_root, agent_fails=False)
+    binding = await _attempt_dispatch_binding(authority_root, manager)
+
+    with pytest.raises(RuntimeError, match="PROJECT_EXECUTOR_AGENT_CLEANUP_FAILED"):
+        async for _chunk in (
+            binding.project_executor.process_background_code_task_stream(
+                SimpleNamespace(params={"project_dir": str(attempt_root)})
+            )
+        ):
+            pass
+    assert manager.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_abandoned_attempt_stream_still_retires_its_agent(
+    tmp_path: Path,
+) -> None:
+    """An early consumer exit must still retire the attempt-root Agent.
+
+    ``async for`` does not close an abandoned async generator, so the Executor
+    closes it explicitly. Retirement must then run deterministically and must
+    not raise into the GeneratorExit that is already unwinding the stream.
+    """
+
+    authority_root = tmp_path / "authority"
+    attempt_root = tmp_path / "attempt"
+    for root in (authority_root, attempt_root):
+        _seed_git_root(root)
+    manager = _retirement_manager(attempt_root, agent_fails=False)
+    binding = await _attempt_dispatch_binding(authority_root, manager)
+
+    stream = binding.project_executor.process_background_code_task_stream(
+        SimpleNamespace(params={"project_dir": str(attempt_root)})
+    )
+    seen = []
+    async with contextlib.aclosing(stream):
+        async for chunk in stream:
+            seen.append(chunk.value)
+            break
+
+    assert seen == ["running"]
+    # Retirement ran during aclose even though this manager refuses it, and the
+    # refusal did not surface as an exception.
+    assert manager.cleanup_calls == 1
+
+
 @pytest.mark.asyncio
 async def test_unknown_model_fails_before_store_executor_or_agent(
     tmp_path: Path,
 ) -> None:
     harness = _harness(tmp_path)
     await harness.composition.start()
-    before = _store_counts(harness.database)
+    before = _store_content(harness.database)
     try:
         result = await harness.composition.handle(
             operation="task.create",
@@ -2542,7 +2773,7 @@ async def test_unknown_model_fails_before_store_executor_or_agent(
         )
         await asyncio.sleep(0)
         assert result.payload["error"]["reason"] == "P3_MODEL_INTENT_UNKNOWN"
-        assert _store_counts(harness.database) == before
+        assert _store_content(harness.database) == before
         assert harness.executor.dispatches == []
         assert harness.executor.cancels == []
     finally:

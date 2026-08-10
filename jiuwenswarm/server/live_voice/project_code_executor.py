@@ -22,7 +22,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -458,6 +458,13 @@ def _project_content_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
+#: Public boundary alias. The attempt-scoped P3 Executor in
+#: ``p3_authenticated_composition`` compares the same Git-visible bytes across
+#: Agent setup, terminal, and retirement, so this is a supported cross-module
+#: contract rather than an internal detail that may change silently.
+project_content_fingerprint = _project_content_fingerprint
+
+
 def _path_fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
     if not path.exists() and not path.is_symlink():
@@ -709,14 +716,18 @@ def _mirror_git_visible_content(
         _require_safe_mirror_path(worktree, relative)
         source = root.joinpath(*relative.parts)
         destination = worktree.joinpath(*relative.parts)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        _require_safe_mirror_path(worktree, relative)
         if not source.exists() and not source.is_symlink():
+            # Never materialize parents for a path that is being removed. Git
+            # cannot represent an empty directory, so a residual one escapes
+            # every content/tree fingerprint used as the zero-side-effect
+            # oracle and would be an undetected effect of a rejected attempt.
             if destination.is_symlink() or destination.is_file():
                 destination.unlink()
             elif destination.is_dir():
                 shutil.rmtree(destination)
             continue
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _require_safe_mirror_path(worktree, relative)
         if source.is_symlink():
             if destination.is_dir() and not destination.is_symlink():
                 shutil.rmtree(destination)
@@ -734,6 +745,55 @@ def _mirror_git_visible_content(
                 shutil.rmtree(destination)
             shutil.copy2(source, destination)
         _require_safe_mirror_path(worktree, relative)
+
+
+def _mirror_parent_directories(raw_paths: tuple[bytes, ...]) -> tuple[tuple[str, ...], ...]:
+    parents: set[tuple[str, ...]] = set()
+    for raw_relative in (item for item in raw_paths if item):
+        relative = Path(raw_relative.decode("utf-8", errors="strict"))
+        for depth in range(1, len(relative.parts)):
+            parents.add(relative.parts[:depth])
+    return tuple(sorted(parents, key=len, reverse=True))
+
+
+def _existing_mirror_parents(
+    root: Path, raw_paths: tuple[bytes, ...]
+) -> frozenset[tuple[str, ...]]:
+    """Record which mirrored parent directories already exist in the target."""
+
+    return frozenset(
+        parts
+        for parts in _mirror_parent_directories(raw_paths)
+        if root.joinpath(*parts).is_dir()
+    )
+
+
+def _prune_created_empty_parents(
+    root: Path,
+    raw_paths: tuple[bytes, ...],
+    preexisting: frozenset[tuple[str, ...]],
+) -> None:
+    """Remove only directories this attempt created and then left empty.
+
+    ``git apply`` materializes parents for every added path.  Git cannot
+    represent an empty directory, so one left behind by a rollback is invisible
+    to ``_project_content_fingerprint`` and ``_project_tree_fingerprint`` and
+    would pass the zero-side-effect assertions while still mutating the target.
+
+    Directories recorded as present before the attempt are never removed, so a
+    pre-existing untracked empty directory survives a rollback unchanged.
+    """
+
+    for parts in _mirror_parent_directories(raw_paths):
+        if parts in preexisting:
+            continue
+        candidate = root.joinpath(*parts)
+        if _is_unsafe_filesystem_link(candidate) or not candidate.is_dir():
+            continue
+        # rmdir only succeeds on an empty directory, so a surviving sibling
+        # keeps the whole branch.
+        with contextlib.suppress(OSError):
+            candidate.rmdir()
 
 
 def _require_safe_mirror_path(root: Path, relative: Path) -> None:
@@ -815,6 +875,7 @@ def _apply_attempt_patch(
         prefix="jiuwenswarm-live-voice-d0-rollback-"
     ) as snapshot_raw:
         snapshot = Path(snapshot_raw)
+        preexisting_parents = _existing_mirror_parents(root, changed_paths)
         _mirror_git_visible_content(root, snapshot, raw_paths=changed_paths)
         try:
             _git_run_with_input(root, ("apply", "--check", "--binary", "-"), patch)
@@ -829,6 +890,9 @@ def _apply_attempt_patch(
         except Exception as error:
             try:
                 _mirror_git_visible_content(snapshot, root, raw_paths=changed_paths)
+                _prune_created_empty_parents(
+                    root, changed_paths, preexisting_parents
+                )
                 if (
                     _git_head(root) != before_head
                     or _project_tree_fingerprint(root) != before_tree
@@ -839,6 +903,30 @@ def _apply_attempt_patch(
             except Exception as rollback_error:
                 raise RuntimeError("PROJECT_CHANGE_ROLLBACK_FAILED") from rollback_error
             raise error
+
+
+@contextlib.asynccontextmanager
+async def _closing_attempt_stream(stream: Any) -> AsyncIterator[None]:
+    """Deterministically finalize an Executor stream that ends early.
+
+    ``async for`` does not close an abandoned async generator: on ``break``, an
+    exception, or task cancellation the generator stays suspended until the
+    event loop finalizes it.  The attempt-scoped Executor retires its Agent in
+    that generator's ``finally``, so without this the retirement would be
+    unordered against attempt worktree cleanup below and its outcome would be
+    swallowed by the finalizer hook.
+
+    Close failures are suppressed on purpose: this runs while an authoritative
+    cause is normally already propagating, and teardown must not replace it.
+    """
+
+    try:
+        yield
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        if callable(aclose):
+            with contextlib.suppress(Exception):
+                await aclose()
 
 
 def _is_within(path: Path, root: Path) -> bool:
@@ -1807,16 +1895,18 @@ class DirectProjectCodeExecutorAdapter:
             terminal = False
             agent_error = False
             started.set()
-            with forbid_background_project_shell_commands():
-                async for (
-                    chunk
-                ) in binding.project_executor.process_background_code_task_stream(
-                    request
-                ):
-                    terminal = terminal or chunk.is_complete
-                    payload = chunk.payload if isinstance(chunk.payload, dict) else None
-                    if payload and payload.get("event_type") == "chat.error":
-                        agent_error = True
+            stream = binding.project_executor.process_background_code_task_stream(
+                request
+            )
+            async with _closing_attempt_stream(stream):
+                with forbid_background_project_shell_commands():
+                    async for chunk in stream:
+                        terminal = terminal or chunk.is_complete
+                        payload = (
+                            chunk.payload if isinstance(chunk.payload, dict) else None
+                        )
+                        if payload and payload.get("event_type") == "chat.error":
+                            agent_error = True
             if agent_error:
                 raise RuntimeError("PROJECT_EXECUTOR_AGENT_ERROR")
             if not terminal:
