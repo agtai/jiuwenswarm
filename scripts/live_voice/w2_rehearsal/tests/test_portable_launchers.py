@@ -4,6 +4,7 @@ import asyncio
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 
 from jiuwenswarm.server.live_voice import batch_speech
@@ -31,6 +32,54 @@ def test_runtime_entrypoint_delegates_to_candidate_bound_python() -> None:
     assert "Join-Path ([string] $configValue.candidate_root)" in script
     assert "Join-Path $candidateBundle 'w2_rehearsal_runtime_controller.py'" in script
     assert "Join-Path $candidateBundle 'w2_wav_speech_preflight.py'" in script
+    assert "machine-private.w2-rehearsal-runtime-config.v3" in script
+    assert "machine-private.w2-rehearsal-runtime-config.v2" not in script
+
+
+def test_runtime_entrypoint_accepts_only_exact_v3_config_schema(
+    tmp_path: Path,
+) -> None:
+    script = _BUNDLE / "start_w2_rehearsal.ps1"
+
+    def invoke(schema: str) -> subprocess.CompletedProcess[str]:
+        config = tmp_path / f"{schema.rsplit('.', 1)[-1]}.json"
+        config.write_text(
+            json.dumps(
+                {
+                    "schema": schema,
+                    "candidate_root": str(tmp_path / "missing-candidate"),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+                "-Action",
+                "Preflight",
+                "-Config",
+                str(config),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+    legacy = invoke("machine-private.w2-rehearsal-runtime-config.v2")
+    current = invoke("machine-private.w2-rehearsal-runtime-config.v3")
+
+    assert legacy.returncode != 0
+    assert "Runtime config schema is unsupported" in legacy.stderr
+    assert current.returncode != 0
+    assert "Runtime config schema is unsupported" not in current.stderr
+    assert "Candidate-bound rehearsal toolkit is missing" in current.stderr
 
 
 def test_wav_speech_preflight_emits_ascii_safe_json(monkeypatch) -> None:

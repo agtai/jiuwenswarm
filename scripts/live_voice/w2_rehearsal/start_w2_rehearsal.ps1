@@ -26,7 +26,7 @@ $candidateBundle = $null
 if ($Config) {
     $configPath = Resolve-ExistingFile -Path $Config -Label 'Runtime config'
     $configValue = Get-Content -LiteralPath $configPath -Raw -Encoding utf8 | ConvertFrom-Json
-    if ($configValue.schema -ne 'machine-private.w2-rehearsal-runtime-config.v2') {
+    if ($configValue.schema -ne 'machine-private.w2-rehearsal-runtime-config.v3') {
         throw 'Runtime config schema is unsupported'
     }
     $candidateBundle = Join-Path ([string] $configValue.candidate_root) 'scripts\live_voice\w2_rehearsal'

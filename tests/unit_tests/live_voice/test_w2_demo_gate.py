@@ -35,6 +35,7 @@ from jiuwenswarm.server.live_voice.w2_demo_gate import (
     W2RestartEvidence,
     W2ReconciliationOutcome,
     W2RouteClass,
+    W2RuntimeArtifactSlot,
     W2Section,
     W2ShowcaseRun,
     W2TaskReconciliationEvidence,
@@ -47,10 +48,16 @@ from jiuwenswarm.server.live_voice.w2_demo_gate import (
     _common_v2_journey_runtime_ids,
     _observations_are_ordered,
     evaluate_w2_demo_gate,
+    verify_w2_planned_product_faults,
     verify_w2_assisted_receipt_content,
     verify_w2_evidence_content,
     verify_w2_runtime_jsonl_content,
     w2_artifact_signature_payload,
+)
+from jiuwenswarm.server.live_voice.w2_fault_plan import (
+    W2FaultClass as W2PlannedFaultClass,
+    W2FaultPlane as W2PlannedFaultPlane,
+    derive_w2_product_fault_plan,
 )
 from jiuwenswarm.server.live_voice.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
@@ -685,6 +692,8 @@ def _v2_failure_artifact(
     segment_name: str,
     reason_code: str,
     error_code: str,
+    source_record_id: str | None = None,
+    source_component: str | None = None,
 ) -> W2EvidenceArtifact:
     producer_id = "gateway" if segment_name.startswith("speech.") else "agentserver"
     legacy = _runtime_content(artifact_id, segment_name, fault=True)
@@ -692,6 +701,10 @@ def _v2_failure_artifact(
     failed = envelopes[0]["record"]
     failed["reason_code"] = reason_code
     failed["error_code"] = error_code
+    if source_record_id is not None:
+        failed["source_record_id"] = source_record_id
+    if source_component is not None:
+        failed["source_component"] = source_component
     legacy = ("\n".join(json.dumps(item) for item in envelopes) + "\n").encode()
     content = _v2_runtime_content(
         legacy,
@@ -2001,6 +2014,302 @@ def test_v2_fault_classes_are_derived_from_exact_failure_facts() -> None:
         plane=W2CapabilityPlane.OBSERVABILITY,
         fault_class="zero_effect",
     )
+
+
+def test_v2_product_fault_class_requires_the_exact_planned_source_record() -> None:
+    planned_source = "w2-request-" + "1" * 32
+    foreign_source = "w2-request-" + "2" * 32
+    exact = _v2_failure_artifact(
+        artifact_id="p2-planned-retriable-v2",
+        artifact_sequence=1,
+        segment_name="runtime.presentation",
+        reason_code="UNAVAILABLE",
+        error_code="UNAVAILABLE",
+        source_record_id=planned_source,
+    )
+    foreign = _v2_failure_artifact(
+        artifact_id="p2-foreign-retriable-v2",
+        artifact_sequence=2,
+        segment_name="runtime.presentation",
+        reason_code="UNAVAILABLE",
+        error_code="UNAVAILABLE",
+        source_record_id=foreign_source,
+    )
+
+    assert _derive_v2_fault_class(
+        (exact,),
+        plane=W2CapabilityPlane.P2_CONVERSATION,
+        fault_class="retriable",
+        expected_source_record_id=planned_source,
+        expected_source_component="product.w2.p2.presentation",
+        expected_segment_name="runtime.presentation",
+    )
+    assert not _derive_v2_fault_class(
+        (foreign,),
+        plane=W2CapabilityPlane.P2_CONVERSATION,
+        fault_class="retriable",
+        expected_source_record_id=planned_source,
+        expected_source_component="product.w2.p2.presentation",
+        expected_segment_name="runtime.presentation",
+    )
+    assert not _derive_v2_fault_class(
+        (),
+        plane=W2CapabilityPlane.P2_CONVERSATION,
+        fault_class="retriable",
+        expected_source_record_id=planned_source,
+        expected_source_component="product.w2.p2.presentation",
+        expected_segment_name="runtime.presentation",
+    )
+    assert not _derive_v2_fault_class(
+        (exact,),
+        plane=W2CapabilityPlane.P3_TASK,
+        fault_class="retriable",
+        expected_source_record_id=planned_source,
+        expected_source_component="product.w2.p2.presentation",
+        expected_segment_name="runtime.presentation",
+    )
+    assert not _derive_v2_fault_class(
+        (exact,),
+        plane=W2CapabilityPlane.P2_CONVERSATION,
+        fault_class="non_retriable",
+        expected_source_record_id=planned_source,
+        expected_source_component="product.w2.p2.presentation",
+        expected_segment_name="runtime.presentation",
+    )
+    assert not _derive_v2_fault_class(
+        (
+            _v2_failure_artifact(
+                artifact_id="p2-wrong-operation-retriable-v2",
+                artifact_sequence=3,
+                segment_name="runtime.presentation",
+                reason_code="UNAVAILABLE",
+                error_code="UNAVAILABLE",
+                source_record_id=planned_source,
+                source_component="product.w2.p2.activate",
+            ),
+        ),
+        plane=W2CapabilityPlane.P2_CONVERSATION,
+        fault_class="retriable",
+        expected_source_record_id=planned_source,
+        expected_source_component="product.w2.p2.presentation",
+        expected_segment_name="runtime.presentation",
+    )
+
+
+def _planned_fault_runtime_set(
+    *,
+    foreign_source: tuple[W2PlannedFaultPlane, W2PlannedFaultClass] | None = None,
+    wrong_error: tuple[W2PlannedFaultPlane, W2PlannedFaultClass] | None = None,
+) -> tuple[
+    tuple[W2EvidenceArtifact, ...],
+    tuple[W2FaultEvidence, ...],
+    W2EvidenceTrustPolicy,
+]:
+    plan = derive_w2_product_fault_plan(
+        policy_id="policy-planned-faults",
+        candidate_sha=_CANDIDATE_SHA,
+        evidence_set_id="evidence-set-1",
+    )
+    runtime_bindings = {
+        W2PlannedFaultPlane.P1_SPEECH_MEDIA: (
+            "product.w2.speech.recognize",
+            "speech.recognition",
+        ),
+        W2PlannedFaultPlane.P2_CONVERSATION: (
+            "product.w2.p2.presentation",
+            "runtime.presentation",
+        ),
+        W2PlannedFaultPlane.P3_TASK: ("product.w2.p3.progress", "task.progress"),
+    }
+    artifact_ids = {
+        (pair, producer): f"planned-{producer}-pair-{pair}"
+        for pair in (1, 2, 3)
+        for producer in ("gateway", "agentserver")
+    }
+    slots: list[W2RuntimeArtifactSlot] = []
+    artifacts: list[W2EvidenceArtifact] = []
+    previous: dict[str, str | None] = {"gateway": None, "agentserver": None}
+    sequence = 1
+    for pair in (1, 2, 3):
+        for producer in ("gateway", "agentserver"):
+            artifact_id = artifact_ids[pair, producer]
+            slots.append(
+                W2RuntimeArtifactSlot(
+                    artifact_id=artifact_id,
+                    artifact_sequence=sequence,
+                    producer_id=producer,
+                    process_epoch=f"{producer}-epoch-{pair}",
+                    predecessor_artifact_id=previous[producer],
+                    showcase_run=pair,
+                )
+            )
+            previous[producer] = artifact_id
+            identities = [
+                item
+                for item in plan.items
+                if item.pair == pair
+                and (
+                    item.plane is W2PlannedFaultPlane.P1_SPEECH_MEDIA
+                )
+                is (producer == "gateway")
+            ]
+            envelopes: list[dict[str, object]] = []
+            for identity in identities:
+                source_component, segment_name = runtime_bindings[identity.plane]
+                if (
+                    identity.plane is W2PlannedFaultPlane.P3_TASK
+                    and identity.fault_class
+                    is not W2PlannedFaultClass.RETRIABLE
+                ):
+                    source_component, segment_name = (
+                        "product.w2.task.retry",
+                        "task.command",
+                    )
+                envelope = json.loads(
+                    _runtime_content(artifact_id, segment_name, fault=True)
+                    .decode()
+                    .splitlines()[0]
+                )
+                record = envelope["record"]
+                assert isinstance(record, dict)
+                record["source_component"] = source_component
+                record["source_record_id"] = (
+                    "w2-request-" + "f" * 32
+                    if foreign_source == (identity.plane, identity.fault_class)
+                    else identity.source_record_id
+                )
+                record["reason_code"] = {
+                    W2PlannedFaultClass.RETRIABLE: "UNAVAILABLE",
+                    W2PlannedFaultClass.NON_RETRIABLE: "PROTOCOL_REJECTED",
+                    W2PlannedFaultClass.ZERO_EFFECT: "PROTOCOL_REJECTED",
+                }[identity.fault_class]
+                record["error_code"] = {
+                    W2PlannedFaultClass.RETRIABLE: "UNAVAILABLE",
+                    W2PlannedFaultClass.NON_RETRIABLE: "INVALID_ARGUMENT",
+                    W2PlannedFaultClass.ZERO_EFFECT: "STALE",
+                }[identity.fault_class]
+                if wrong_error == (identity.plane, identity.fault_class):
+                    record["reason_code"] = "UNAVAILABLE"
+                    record["error_code"] = "UNAVAILABLE"
+                envelopes.append(envelope)
+            for index, envelope in enumerate(envelopes):
+                envelope["sequence"] = index
+            legacy = (
+                "\n".join(json.dumps(item) for item in envelopes) + "\n"
+            ).encode()
+            content = _v2_runtime_content(
+                legacy,
+                artifact_id=artifact_id,
+                artifact_sequence=sequence,
+                producer_id=producer,
+                process_epoch=f"{producer}-epoch-{pair}",
+                predecessor_artifact_id=slots[-1].predecessor_artifact_id,
+            )
+            artifacts.append(
+                verify_w2_runtime_jsonl_content(
+                    artifact_id=artifact_id,
+                    sequence=sequence,
+                    content=content,
+                    **_runtime_trust_args(
+                        content,
+                        artifact_id=artifact_id,
+                        sequence=sequence,
+                        producer_id=producer,
+                    ),
+                )
+            )
+            sequence += 1
+    policy = replace(
+        _TRUST_POLICY,
+        candidate_binding=(
+            _CANDIDATE_SHA,
+            "environment-1",
+            "session-1",
+            "integrated-formal",
+        ),
+        evidence_set_id="evidence-set-1",
+        runtime_slots=tuple(slots),
+        artifact_slots=tuple(
+            W2EvidenceArtifactSlot(
+                artifact_id=slot.artifact_id,
+                artifact_sequence=slot.artifact_sequence,
+                evidence_kind=W2EvidenceKind.REAL_RUNTIME,
+                signer_id=(
+                    _GATEWAY_RUNTIME_SIGNER
+                    if slot.producer_id == "gateway"
+                    else _SIGNERS[W2EvidenceKind.REAL_RUNTIME]
+                ),
+                expected_subjects=("runtime:test",),
+            )
+            for slot in slots
+        ),
+        policy_id="policy-planned-faults",
+        repository_path=str(Path(__file__).resolve().parents[3]),
+    )
+    faults = tuple(
+        W2FaultEvidence(
+            plane=W2CapabilityPlane(plane.value),
+            active=True,
+            retriable_observed=True,
+            non_retriable_observed=True,
+            stale_effects_zero=True,
+            false_success_zero=True,
+            retriable_evidence_ids=tuple(artifact_ids[1, item] for item in ("gateway", "agentserver")),
+            non_retriable_evidence_ids=tuple(artifact_ids[2, item] for item in ("gateway", "agentserver")),
+            zero_effect_evidence_ids=tuple(artifact_ids[3, item] for item in ("gateway", "agentserver")),
+        )
+        for plane in W2PlannedFaultPlane
+    )
+    return tuple(artifacts), faults, policy
+
+
+def test_signed_plan_binds_all_nine_product_faults_to_exact_runtime_pairs() -> None:
+    artifacts, faults, policy = _planned_fault_runtime_set()
+
+    verify_w2_planned_product_faults(
+        artifacts=artifacts,
+        faults=faults,
+        trust_policy=policy,
+    )
+
+
+@pytest.mark.parametrize(
+    ("foreign_source", "wrong_error", "omit_runtime_slot"),
+    [
+        (
+            (W2PlannedFaultPlane.P2_CONVERSATION, W2PlannedFaultClass.RETRIABLE),
+            None,
+            False,
+        ),
+        (
+            None,
+            (W2PlannedFaultPlane.P3_TASK, W2PlannedFaultClass.NON_RETRIABLE),
+            False,
+        ),
+        (None, None, True),
+    ],
+)
+def test_signed_plan_rejects_foreign_wrong_class_or_omitted_runtime_faults(
+    foreign_source: tuple[W2PlannedFaultPlane, W2PlannedFaultClass] | None,
+    wrong_error: tuple[W2PlannedFaultPlane, W2PlannedFaultClass] | None,
+    omit_runtime_slot: bool,
+) -> None:
+    artifacts, faults, policy = _planned_fault_runtime_set(
+        foreign_source=foreign_source,
+        wrong_error=wrong_error,
+    )
+    if omit_runtime_slot:
+        faults = (
+            replace(faults[0], retriable_evidence_ids=("planned-gateway-pair-1",)),
+            *faults[1:],
+        )
+
+    with pytest.raises(W2GateContractViolation, match="planned product fault"):
+        verify_w2_planned_product_faults(
+            artifacts=artifacts,
+            faults=faults,
+            trust_policy=policy,
+        )
 
 
 def test_v2_journey_requires_one_time_ordered_cross_producer_causal_chain() -> None:

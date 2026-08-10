@@ -14,6 +14,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+import jiuwenswarm.server.live_voice.w2_gate_cli as gate_cli
+
 from jiuwenswarm.server.live_voice.w2_demo_gate import (
     W2EvidenceKind,
     W2GateContractViolation,
@@ -25,6 +27,79 @@ from jiuwenswarm.server.live_voice.w2_gate_cli import (
     _verify_root_authorized_scope,
     main,
 )
+
+
+def test_formal_manifest_verifies_signed_product_fault_plan_before_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema": "live-voice.w2-gate-manifest.v1",
+                "repository_path": str(tmp_path.resolve()),
+                "candidate": {},
+                "artifacts": [],
+                "verification": {},
+                "awards": [],
+                "invariants": [],
+                "showcase_runs": [],
+                "journey_steps": [],
+                "faults": [],
+                "restart": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    candidate = SimpleNamespace(candidate_sha="a" * 40)
+    artifacts = (SimpleNamespace(artifact_id="runtime"),)
+    faults = (SimpleNamespace(plane="p1.speech_media"),)
+    runs = (SimpleNamespace(run_number=1),)
+    policy = SimpleNamespace(policy_id="signed-policy")
+    expected_result = SimpleNamespace(status="PASS")
+    order: list[str] = []
+
+    monkeypatch.setattr(gate_cli, "_candidate", lambda value: candidate)
+    monkeypatch.setattr(gate_cli, "verify_w2_candidate_checkout", lambda **kw: None)
+    monkeypatch.setattr(gate_cli, "_artifacts", lambda *args, **kwargs: artifacts)
+    monkeypatch.setattr(gate_cli, "_showcase", lambda value: runs)
+    monkeypatch.setattr(gate_cli, "_faults", lambda value: faults)
+    monkeypatch.setattr(
+        gate_cli,
+        "_verify_root_authorized_scope",
+        lambda **kwargs: order.append("scope"),
+    )
+
+    def verify_faults(**kwargs: object) -> None:
+        assert kwargs == {
+            "artifacts": artifacts,
+            "faults": faults,
+            "trust_policy": policy,
+        }
+        order.append("fault-plan")
+
+    monkeypatch.setattr(gate_cli, "verify_w2_planned_product_faults", verify_faults)
+    for parser in (
+        "_verification",
+        "_awards",
+        "_invariants",
+        "_journey",
+        "_restart",
+    ):
+        monkeypatch.setattr(gate_cli, parser, lambda value: SimpleNamespace())
+
+    def evaluate(**kwargs: object) -> object:
+        assert kwargs["faults"] is faults
+        order.append("gate")
+        return expected_result
+
+    monkeypatch.setattr(gate_cli, "evaluate_w2_demo_gate", evaluate)
+
+    assert gate_cli.evaluate_w2_gate_manifest(
+        manifest,
+        trust_policy=policy,  # type: ignore[arg-type]
+    ) is expected_result
+    assert order == ["scope", "fault-plan", "gate"]
 
 
 def test_cli_generates_new_keys_and_signs_exact_artifact(tmp_path: Path) -> None:

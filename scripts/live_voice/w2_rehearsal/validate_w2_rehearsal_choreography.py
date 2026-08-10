@@ -4,6 +4,18 @@ import argparse
 import json
 from pathlib import Path
 
+from jiuwenswarm.server.live_voice.w2_fault_plan import (
+    P1_RETRIABLE_FAULT_OPERATION_ENV,
+    P1_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    P2_RETRIABLE_FAULT_OPERATION_ENV,
+    P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    P2_STALE_FAULT_OPERATION_ENV,
+    P2_STALE_FAULT_REQUEST_ID_ENV,
+    P3_STALE_FAULT_OPERATION_ENV,
+    P3_STALE_FAULT_REQUEST_ID_ENV,
+    derive_w2_product_fault_plan,
+)
+
 
 SCHEMA = "machine-private.w2-rehearsal-choreography.v1"
 JOURNEY_STEPS = (
@@ -17,6 +29,16 @@ JOURNEY_STEPS = (
 )
 PLANES = ("p1.speech_media", "p2.conversation", "p3.task", "observability")
 FAULT_CLASSES = ("retriable", "non_retriable", "zero_effect")
+FAULT_PLAN_ENVIRONMENT = (
+    P1_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    P1_RETRIABLE_FAULT_OPERATION_ENV,
+    P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    P2_RETRIABLE_FAULT_OPERATION_ENV,
+    P2_STALE_FAULT_REQUEST_ID_ENV,
+    P2_STALE_FAULT_OPERATION_ENV,
+    P3_STALE_FAULT_REQUEST_ID_ENV,
+    P3_STALE_FAULT_OPERATION_ENV,
+)
 
 
 class ChoreographyError(ValueError):
@@ -96,6 +118,44 @@ def validate(path: Path) -> dict[str, object]:
         raise ChoreographyError(
             "fault matrix must cover each plane and class exactly once"
         )
+    by_identity = {
+        (item["plane"], item["class"]): item
+        for item in matrix
+    }
+    public_plan = derive_w2_product_fault_plan(
+        policy_id="choreography-policy",
+        candidate_sha="0" * 40,
+        evidence_set_id="choreography-evidence",
+    )
+    for planned in public_plan.items:
+        item = by_identity[(planned.plane.value, planned.fault_class.value)]
+        if (
+            item.get("pair") != planned.pair
+            or item.get("operation") != planned.operation
+            or item.get("driver") != "gateway_rpc"
+            or item.get("request_identity") != "signed_policy_derived"
+            or item.get("readiness") != "production_runner_contract_defined"
+        ):
+            raise ChoreographyError(
+                "product fault matrix differs from public fault-plan authority"
+            )
+    for pair, fault_class, automated_slot in (
+        (1, "retriable", "AUTO9"),
+        (2, "non_retriable", "AUTO10"),
+        (3, "zero_effect", "AUTO11"),
+    ):
+        item = by_identity[("observability", fault_class)]
+        if (
+            item.get("pair") != pair
+            or item.get("operation") != "artifact_evaluation"
+            or item.get("driver") != "automated_report_plus_receipt"
+            or item.get("request_identity") != "root_authorized_artifact_slots"
+            or automated_slot not in str(item.get("trigger"))
+            or item.get("readiness") != "static_wiring_proved"
+        ):
+            raise ChoreographyError(
+                "observability faults must remain artifact-and-receipt derived"
+            )
     unresolved = sorted(
         f"{item['plane']}:{item['class']}"
         for item in matrix
@@ -112,10 +172,23 @@ def validate(path: Path) -> dict[str, object]:
         if group == "forbid_secret_values_in_contract":
             continue
         if not isinstance(names, list) or any(
-            not isinstance(name, str) or not name.startswith("JIUWENSWARM_")
+            not isinstance(name, str)
+            or (
+                not name.startswith("JIUWENSWARM_")
+                and name != "LIVE_VOICE_SPEECH_API_KEY"
+            )
             for name in names
         ):
             raise ChoreographyError("environment contract may contain names only")
+    gateway_secrets = environment.get("gateway_secret")
+    if (
+        not isinstance(gateway_secrets, list)
+        or gateway_secrets.count("LIVE_VOICE_SPEECH_API_KEY") != 1
+        or "JIUWENSWARM_LIVE_VOICE_SPEECH_API_KEY" in gateway_secrets
+    ):
+        raise ChoreographyError("Gateway Speech credential name is not canonical")
+    if tuple(environment.get("fault_plan_non_secret", ())) != FAULT_PLAN_ENVIRONMENT:
+        raise ChoreographyError("fault-plan carrier environment names drifted")
 
     return {
         "status": "PREPARED_WITH_PROBES" if unresolved else "PREPARED",

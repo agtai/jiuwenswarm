@@ -43,6 +43,9 @@ def test_candidate_unbound_manifest_wiring_is_closed() -> None:
         lambda value: value["showcase_runs"]["2"].append("G1"),
         lambda value: value["journey_steps"]["route_telemetry_inspection"].remove("A1"),
         lambda value: value["faults"]["p3.task"]["zero_effect"].append("G2"),
+        lambda value: value["faults"]["observability"]["retriable"].__setitem__(
+            2, "F33"
+        ),
         lambda value: value["restart"].__setitem__("evidence", ["A2", "A4"]),
         lambda value: value["awards"].pop("cross.feature_off_text_regression"),
     ],

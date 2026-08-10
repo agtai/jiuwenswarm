@@ -9,6 +9,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from w2_product_fault_binding import derive_product_fault_plan_payload
+
 
 def _canonical(value: object) -> bytes:
     return (
@@ -102,9 +104,27 @@ def finalize(args: argparse.Namespace) -> dict[str, Any]:
     )
     if validated.get("status") != "VALID":
         raise RuntimeError("signed rehearsal policy did not validate")
+    expected_candidate_binding = [
+        scaffold["candidate_sha"],
+        scaffold["environment_id"],
+        scaffold["session_id"],
+        "integrated-formal",
+    ]
+    if (
+        validated.get("candidate_binding") != expected_candidate_binding
+        or validated.get("policy_id") != scaffold["policy_id"]
+        or validated.get("evidence_set_id") != scaffold["evidence_set_id"]
+        or Path(str(validated.get("repository_path"))).resolve() != candidate
+    ):
+        raise RuntimeError("signed rehearsal policy differs from attempt scaffold")
+    product_fault_plan = derive_product_fault_plan_payload(
+        policy_id=validated["policy_id"],
+        candidate_sha=scaffold["candidate_sha"],
+        evidence_set_id=scaffold["evidence_set_id"],
+    )
 
     config = {
-        "schema": "machine-private.w2-rehearsal-runtime-config.v2",
+        "schema": "machine-private.w2-rehearsal-runtime-config.v3",
         "candidate_root": scaffold["candidate_root"],
         "candidate_sha": scaffold["candidate_sha"],
         "python": scaffold["python"],
@@ -120,6 +140,7 @@ def finalize(args: argparse.Namespace) -> dict[str, Any]:
         "trust_policy_signature": str(signature),
         "root_public_key": str(root_public),
         "expected_root_sha256": args.expected_root_sha256,
+        "policy_id": validated["policy_id"],
         "leaf_key_root": str(Path(scaffold["key_root"]) / "rehearsal"),
         "environment_id": scaffold["environment_id"],
         "evidence_set_id": scaffold["evidence_set_id"],
@@ -131,7 +152,7 @@ def finalize(args: argparse.Namespace) -> dict[str, Any]:
         "ports": scaffold["ports"],
         "speech": scaffold["speech"],
         "p3_databases": scaffold["p3_databases"],
-        "fault_request_ids": scaffold["fault_request_ids"],
+        "product_fault_plan": product_fault_plan,
         "runtime_slots": [
             {
                 "artifact_id": slot["artifact_id"],

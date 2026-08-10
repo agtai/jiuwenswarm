@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import secrets
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -341,6 +340,7 @@ try {{
         "project_id": args.project_id,
         "project_dir": str(args.project_dir.resolve(strict=True)),
         "environment_id": rehearsal_policy["candidate"]["environment_id"],
+        "policy_id": rehearsal_policy["policy_id"],
         "evidence_set_id": rehearsal_policy["evidence_set_id"],
         "ports": {
             "agentserver": 18092,
@@ -364,10 +364,6 @@ try {{
                 / f"w2-rehearsal-{args.label}-pair{pair}.sqlite3"
             )
             for pair in (1, 2, 3)
-        },
-        "fault_request_ids": {
-            "p2_retriable": f"w2-{suffix}-p2-retriable-{secrets.token_hex(8)}",
-            "p3_stale": f"w2-{suffix}-p3-stale-{secrets.token_hex(8)}",
         },
         "runtime_slots": rehearsal_slots,
     }

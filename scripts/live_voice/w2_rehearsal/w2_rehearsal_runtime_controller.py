@@ -5,6 +5,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import secrets
 import signal
 import socket
@@ -15,8 +16,51 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from jiuwenswarm.server.live_voice.w2_fault_plan import (
+    P1_RETRIABLE_FAULT_OPERATION_ENV,
+    P1_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    P2_RETRIABLE_FAULT_OPERATION_ENV,
+    P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+    P2_STALE_FAULT_OPERATION_ENV,
+    P2_STALE_FAULT_REQUEST_ID_ENV,
+    P3_STALE_FAULT_OPERATION_ENV,
+    P3_STALE_FAULT_REQUEST_ID_ENV,
+    W2FaultClass,
+    W2FaultPlane,
+)
+from w2_product_fault_binding import (
+    require_product_fault,
+    validate_product_fault_plan_payload,
+)
+
 
 CREATE_NEW_PROCESS_GROUP = 0x00000200
+_LEGACY_SPEECH_API_KEY_ENV = "JIUWENSWARM_LIVE_VOICE_SPEECH_API_KEY"
+_SPEECH_API_KEY_ENV = "LIVE_VOICE_SPEECH_API_KEY"
+_AGENT_PROVIDER_SECRET_ENV_NAMES = frozenset(
+    {
+        "API_KEY",
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "AUDIO_API_KEY",
+        "EMBED_API_KEY",
+        "IMAGE_GEN_API_KEY",
+        "TASK_MEMORY_API_KEY",
+        "VIDEO_API_KEY",
+        "VISION_API_KEY",
+        "BOCHA_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "SERPER_API_KEY",
+        "JINA_API_KEY",
+        "ACR_ACCESS_SECRET",
+        "EMAIL_TOKEN",
+        "MCP_TOKEN",
+    }
+)
+_SECRET_ENV_NAME = re.compile(
+    r"(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|"
+    r"AUTHORIZATION|PRIVATE_KEY|PRIVATE_KEY_PATH)(?:$|_)",
+)
 
 
 @dataclass(frozen=True)
@@ -44,25 +88,16 @@ def _parser() -> argparse.ArgumentParser:
 
 def _load(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
-    if value.get("schema") != "machine-private.w2-rehearsal-runtime-config.v2":
+    if value.get("schema") != "machine-private.w2-rehearsal-runtime-config.v3":
         raise RuntimeError("unsupported rehearsal runtime config")
-    faults = value.get("fault_request_ids")
-    if not isinstance(faults, dict) or set(faults) != {
-        "p2_retriable",
-        "p3_stale",
-    }:
-        raise RuntimeError("rehearsal fault request IDs are incomplete or unknown")
-    for name, request_id in faults.items():
-        if (
-            type(request_id) is not str
-            or not request_id
-            or request_id != request_id.strip()
-            or len(request_id) > 256
-            or any(character.isspace() for character in request_id)
-        ):
-            raise RuntimeError(f"rehearsal {name} request ID is not an opaque label")
-    if len(set(faults.values())) != len(faults):
-        raise RuntimeError("rehearsal fault request IDs must be unique")
+    if "fault_request_ids" in value:
+        raise RuntimeError("legacy random rehearsal fault IDs are forbidden")
+    validate_product_fault_plan_payload(
+        value.get("product_fault_plan"),
+        policy_id=value.get("policy_id"),
+        candidate_sha=value.get("candidate_sha"),
+        evidence_set_id=value.get("evidence_set_id"),
+    )
     return value
 
 
@@ -85,6 +120,13 @@ def _run_checked(argv: list[str], *, cwd: Path, env: dict[str, str]) -> str:
 
 def _base_env(config: dict[str, Any]) -> dict[str, str]:
     env = os.environ.copy()
+    for name in tuple(env):
+        upper_name = name.upper()
+        if upper_name.startswith("LIVE_VOICE_SPEECH_") or _SECRET_ENV_NAME.search(
+            upper_name
+        ):
+            env.pop(name, None)
+    env.pop(_LEGACY_SPEECH_API_KEY_ENV, None)
     candidate = str(config["candidate_root"])
     env["PYTHONPATH"] = candidate
     env["JIUWENSWARM_DATA_DIR"] = str(config["data_dir"])
@@ -101,6 +143,42 @@ def _base_env(config: dict[str, Any]) -> dict[str, str]:
     env["JIUWENSWARM_LIVE_VOICE_W2_REPOSITORY_PATH"] = candidate
     env["JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_SET_ID"] = str(config["evidence_set_id"])
     return env
+
+
+def _agent_provider_secret_env() -> dict[str, str]:
+    return {
+        name: value
+        for name in _AGENT_PROVIDER_SECRET_ENV_NAMES
+        if (value := os.environ.get(name))
+    }
+
+
+def _assert_shared_dotenv_secret_boundary(data_dir: Path) -> None:
+    path = data_dir / "config" / ".env"
+    if not path.exists():
+        return
+    if not path.is_file():
+        raise RuntimeError("shared config/.env is not a regular file")
+    forbidden = {
+        _SPEECH_API_KEY_ENV,
+        _LEGACY_SPEECH_API_KEY_ENV,
+        *_AGENT_PROVIDER_SECRET_ENV_NAMES,
+    }
+    for line in path.read_text(encoding="utf-8-sig", errors="strict").splitlines():
+        match = re.match(
+            r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=",
+            line,
+        )
+        if match is not None and match.group(1).upper() in forbidden:
+            name = match.group(1).upper()
+            label = (
+                "Speech"
+                if name in {_SPEECH_API_KEY_ENV, _LEGACY_SPEECH_API_KEY_ENV}
+                else "Agent/provider"
+            )
+            raise RuntimeError(
+                f"shared config/.env contains a forbidden {label} credential name"
+            )
 
 
 def _assert_port_free(port: int) -> None:
@@ -135,6 +213,7 @@ def _policy_preflight(config: dict[str, Any], env: dict[str, str]) -> None:
         env=env,
     ):
         raise RuntimeError("candidate checkout is dirty")
+    _assert_shared_dotenv_secret_boundary(Path(config["data_dir"]))
     imported = _run_checked(
         [
             python,
@@ -165,8 +244,20 @@ def _policy_preflight(config: dict[str, Any], env: dict[str, str]) -> None:
         env=env,
     )
     result = json.loads(output)
-    if result.get("status") != "VALID":
-        raise RuntimeError("signed rehearsal policy is not valid")
+    expected_binding = [
+        config["candidate_sha"],
+        config["environment_id"],
+        config["session_id"],
+        config["mode_id"],
+    ]
+    if (
+        result.get("status") != "VALID"
+        or result.get("policy_id") != config["policy_id"]
+        or result.get("candidate_binding") != expected_binding
+        or result.get("evidence_set_id") != config["evidence_set_id"]
+        or Path(str(result.get("repository_path"))).resolve() != candidate
+    ):
+        raise RuntimeError("runtime config does not exactly match signed policy")
     data_dir = Path(config["data_dir"])
     session = data_dir / "agent" / "sessions" / config["session_id"] / "metadata.json"
     if not session.is_file():
@@ -235,10 +326,14 @@ def _slot_env(
 ) -> dict[str, str]:
     env = _base_env(config)
     for name in (
-        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID",
-        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_OPERATION",
-        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_STALE_FAULT_REQUEST_ID",
-        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_STALE_FAULT_OPERATION",
+        P1_RETRIABLE_FAULT_REQUEST_ID_ENV,
+        P1_RETRIABLE_FAULT_OPERATION_ENV,
+        P2_RETRIABLE_FAULT_REQUEST_ID_ENV,
+        P2_RETRIABLE_FAULT_OPERATION_ENV,
+        P2_STALE_FAULT_REQUEST_ID_ENV,
+        P2_STALE_FAULT_OPERATION_ENV,
+        P3_STALE_FAULT_REQUEST_ID_ENV,
+        P3_STALE_FAULT_OPERATION_ENV,
     ):
         env.pop(name, None)
     content, signature = _artifact_paths(config, slot)
@@ -252,7 +347,8 @@ def _slot_env(
         env.pop("JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_PREDECESSOR_ARTIFACT_ID", None)
     if slot.producer == "agentserver":
         pair = 3 if slot.showcase_run is None else slot.showcase_run
-        fault_request_ids = config["fault_request_ids"]
+        fault_plan = config["product_fault_plan"]
+        env.update(_agent_provider_secret_env())
         env.update(
             {
                 "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED": "true",
@@ -279,23 +375,37 @@ def _slot_env(
             }
         )
         if pair == 1 and slot.showcase_run == 1:
+            fault = require_product_fault(
+                fault_plan,
+                pair=1,
+                plane=W2FaultPlane.P2_CONVERSATION,
+                fault_class=W2FaultClass.RETRIABLE,
+            )
             env.update(
                 {
-                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_REQUEST_ID": str(
-                        fault_request_ids["p2_retriable"]
-                    ),
-                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_RETRIABLE_FAULT_OPERATION": (
-                        "live_voice.composition.p2.presentation.ack"
-                    ),
+                    P2_RETRIABLE_FAULT_REQUEST_ID_ENV: str(fault["request_id"]),
+                    P2_RETRIABLE_FAULT_OPERATION_ENV: str(fault["operation"]),
                 }
             )
         if pair == 3 and slot.showcase_run == 3:
+            p2_fault = require_product_fault(
+                fault_plan,
+                pair=3,
+                plane=W2FaultPlane.P2_CONVERSATION,
+                fault_class=W2FaultClass.ZERO_EFFECT,
+            )
+            p3_fault = require_product_fault(
+                fault_plan,
+                pair=3,
+                plane=W2FaultPlane.P3_TASK,
+                fault_class=W2FaultClass.ZERO_EFFECT,
+            )
             env.update(
                 {
-                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_STALE_FAULT_REQUEST_ID": str(
-                        fault_request_ids["p3_stale"]
-                    ),
-                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_STALE_FAULT_OPERATION": "task.retry",
+                    P2_STALE_FAULT_REQUEST_ID_ENV: str(p2_fault["request_id"]),
+                    P2_STALE_FAULT_OPERATION_ENV: str(p2_fault["operation"]),
+                    P3_STALE_FAULT_REQUEST_ID_ENV: str(p3_fault["request_id"]),
+                    P3_STALE_FAULT_OPERATION_ENV: str(p3_fault["operation"]),
                 }
             )
         if slot.predecessor is not None:
@@ -307,7 +417,7 @@ def _slot_env(
                 "LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED": "true",
                 "LIVE_VOICE_SPEECH_PROVIDER": str(speech["provider"]),
                 "LIVE_VOICE_SPEECH_API_BASE": str(speech["api_base"]),
-                "LIVE_VOICE_SPEECH_API_KEY": speech_key,
+                _SPEECH_API_KEY_ENV: speech_key,
                 "LIVE_VOICE_SPEECH_STT_MODEL": str(speech["stt_model"]),
                 "LIVE_VOICE_SPEECH_TTS_MODEL": str(speech["tts_model"]),
                 "LIVE_VOICE_SPEECH_TTS_VOICE": str(speech["voice"]),
@@ -327,6 +437,19 @@ def _slot_env(
                 "JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_PROCESS_EPOCH": slot.epoch,
             }
         )
+        if slot.showcase_run == 1:
+            fault = require_product_fault(
+                config["product_fault_plan"],
+                pair=1,
+                plane=W2FaultPlane.P1_SPEECH_MEDIA,
+                fault_class=W2FaultClass.RETRIABLE,
+            )
+            env.update(
+                {
+                    P1_RETRIABLE_FAULT_REQUEST_ID_ENV: str(fault["request_id"]),
+                    P1_RETRIABLE_FAULT_OPERATION_ENV: str(fault["operation"]),
+                }
+            )
         if slot.predecessor is not None:
             env["JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_PREDECESSOR_ARTIFACT_ID"] = (
                 slot.predecessor

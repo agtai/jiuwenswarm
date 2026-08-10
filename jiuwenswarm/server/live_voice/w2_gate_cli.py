@@ -48,6 +48,7 @@ from jiuwenswarm.server.live_voice.w2_demo_gate import (
     evaluate_w2_demo_gate,
     verify_w2_assisted_receipt_content,
     verify_w2_evidence_content,
+    verify_w2_planned_product_faults,
     verify_w2_runtime_jsonl_content,
     w2_artifact_signature_payload,
 )
@@ -639,11 +640,17 @@ def evaluate_w2_gate_manifest(
         trust_policy=trust_policy,
     )
     showcase_runs = _showcase(data["showcase_runs"])
+    faults = _faults(data["faults"])
     _verify_root_authorized_scope(
         repository=repository,
         candidate=candidate,
         artifacts=artifacts,
         showcase_runs=showcase_runs,
+        trust_policy=trust_policy,
+    )
+    verify_w2_planned_product_faults(
+        artifacts=artifacts,
+        faults=faults,
         trust_policy=trust_policy,
     )
     return evaluate_w2_demo_gate(
@@ -654,7 +661,7 @@ def evaluate_w2_gate_manifest(
         invariants=_invariants(data["invariants"]),
         showcase_runs=showcase_runs,
         journey_steps=_journey(data["journey_steps"]),
-        faults=_faults(data["faults"]),
+        faults=faults,
         restart=_restart(data["restart"]),
     )
 

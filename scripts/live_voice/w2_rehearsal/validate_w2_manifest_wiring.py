@@ -79,6 +79,37 @@ def validate(path: Path) -> dict[str, int | str]:
             for right in groups[index + 1 :]
         ):
             raise WiringError(f"fault groups must be disjoint within {plane}")
+    expected_faults = {
+        "p1.speech_media": {
+            "retriable": {"G1", "A1", "F24"},
+            "non_retriable": {"G2", "A2", "F25"},
+            "zero_effect": {"G3", "A3", "F26"},
+        },
+        "p2.conversation": {
+            "retriable": {"G1", "A1", "F27"},
+            "non_retriable": {"G2", "A2", "F28"},
+            "zero_effect": {"G3", "A3", "F29"},
+        },
+        "p3.task": {
+            "retriable": {"G1", "A1", "F30"},
+            "non_retriable": {"G2", "A2", "F31"},
+            "zero_effect": {"G3", "A3", "F32"},
+        },
+        "observability": {
+            "retriable": {"G1", "A1", "AUTO9", "F33"},
+            "non_retriable": {"G2", "A2", "AUTO10", "F34"},
+            "zero_effect": {"G3", "A3", "AUTO11", "F35"},
+        },
+    }
+    if any(
+        refs(faults[plane][fault_class])
+        != expected_faults[plane][fault_class]
+        for plane in expected_faults
+        for fault_class in FAULT_CLASSES
+    ):
+        raise WiringError(
+            "fault evidence must bind exact runtime pairs and independent receipts"
+        )
 
     restart = value.get("restart")
     if not isinstance(restart, dict) or refs(restart.get("evidence")) != {"A3", "A4"}:

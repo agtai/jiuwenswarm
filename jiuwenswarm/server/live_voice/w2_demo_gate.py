@@ -30,6 +30,11 @@ from jiuwenswarm.server.live_voice.observability import (
     create_metric,
     create_observation,
 )
+from jiuwenswarm.server.live_voice.w2_fault_plan import (
+    W2FaultClass as W2PlannedFaultClass,
+    W2FaultPlane as W2PlannedFaultPlane,
+    derive_w2_product_fault_plan,
+)
 
 
 class W2GateContractViolation(ValueError):
@@ -3101,6 +3106,9 @@ def _derive_v2_fault_class(
     *,
     plane: W2CapabilityPlane,
     fault_class: str,
+    expected_source_record_id: str | None = None,
+    expected_source_component: str | None = None,
+    expected_segment_name: str | None = None,
 ) -> bool:
     """Derive one injected-fault class from closed runtime facts, not booleans."""
 
@@ -3116,7 +3124,20 @@ def _derive_v2_fault_class(
     failures = [
         (artifact, index, item)
         for artifact, index, item in governed
-        if item.event_name == "segment.failed" and _v2_fault_matches_plane(item, plane)
+        if item.event_name == "segment.failed"
+        and _v2_fault_matches_plane(item, plane)
+        and (
+            expected_source_record_id is None
+            or item.source_record_id == expected_source_record_id
+        )
+        and (
+            expected_source_component is None
+            or item.source_component == expected_source_component
+        )
+        and (
+            expected_segment_name is None
+            or item.segment_name == expected_segment_name
+        )
     ]
     if fault_class == "retriable":
         return any(item.error_code in _V2_RETRIABLE_ERRORS for _, _, item in failures)
@@ -3142,6 +3163,161 @@ def _derive_v2_fault_class(
         )
         for _, _, failed_item in stale_failures
     )
+
+
+_W2_PRODUCT_FAULT_RUNTIME_BINDINGS: Final = MappingProxyType(
+    {
+        (W2PlannedFaultPlane.P1_SPEECH_MEDIA, W2PlannedFaultClass.RETRIABLE): (
+            "product.w2.speech.recognize",
+            "speech.recognition",
+        ),
+        (W2PlannedFaultPlane.P1_SPEECH_MEDIA, W2PlannedFaultClass.NON_RETRIABLE): (
+            "product.w2.speech.recognize",
+            "speech.recognition",
+        ),
+        (W2PlannedFaultPlane.P1_SPEECH_MEDIA, W2PlannedFaultClass.ZERO_EFFECT): (
+            "product.w2.speech.recognize",
+            "speech.recognition",
+        ),
+        (W2PlannedFaultPlane.P2_CONVERSATION, W2PlannedFaultClass.RETRIABLE): (
+            "product.w2.p2.presentation",
+            "runtime.presentation",
+        ),
+        (W2PlannedFaultPlane.P2_CONVERSATION, W2PlannedFaultClass.NON_RETRIABLE): (
+            "product.w2.p2.presentation",
+            "runtime.presentation",
+        ),
+        (W2PlannedFaultPlane.P2_CONVERSATION, W2PlannedFaultClass.ZERO_EFFECT): (
+            "product.w2.p2.presentation",
+            "runtime.presentation",
+        ),
+        (W2PlannedFaultPlane.P3_TASK, W2PlannedFaultClass.RETRIABLE): (
+            "product.w2.p3.progress",
+            "task.progress",
+        ),
+        (W2PlannedFaultPlane.P3_TASK, W2PlannedFaultClass.NON_RETRIABLE): (
+            "product.w2.task.retry",
+            "task.command",
+        ),
+        (W2PlannedFaultPlane.P3_TASK, W2PlannedFaultClass.ZERO_EFFECT): (
+            "product.w2.task.retry",
+            "task.command",
+        ),
+    }
+)
+
+
+def verify_w2_planned_product_faults(
+    *,
+    artifacts: Sequence[W2EvidenceArtifact],
+    faults: Sequence[W2FaultEvidence],
+    trust_policy: W2EvidenceTrustPolicy,
+) -> None:
+    """Require all nine product faults to match the signed policy-derived plan."""
+
+    if not isinstance(trust_policy, W2EvidenceTrustPolicy):
+        raise W2GateContractViolation("signed W2 trust policy is required")
+    if (
+        trust_policy.policy_id is None
+        or trust_policy.candidate_binding is None
+        or trust_policy.evidence_set_id is None
+    ):
+        raise W2GateContractViolation(
+            "signed W2 trust policy lacks exact fault-plan authority"
+        )
+    plan = derive_w2_product_fault_plan(
+        policy_id=trust_policy.policy_id,
+        candidate_sha=trust_policy.candidate_binding[0],
+        evidence_set_id=trust_policy.evidence_set_id,
+    )
+    artifact_by_id = _unique_by_key(
+        artifacts,
+        lambda artifact: artifact.artifact_id,
+        W2EvidenceArtifact,
+        "artifact",
+    )
+    fault_by_plane = _unique_by_key(
+        faults,
+        lambda evidence: evidence.plane,
+        W2FaultEvidence,
+        "fault plane",
+    )
+    slots_by_run = {
+        run: tuple(
+            slot for slot in trust_policy.runtime_slots if slot.showcase_run == run
+        )
+        for run in (1, 2, 3)
+    }
+
+    for identity in plan.items:
+        plane = W2CapabilityPlane(identity.plane.value)
+        evidence = fault_by_plane.get(plane)
+        if evidence is None:
+            raise W2GateContractViolation(
+                f"planned product fault is omitted: {identity.plane.value}:"
+                f"{identity.fault_class.value}"
+            )
+        evidence_ids = {
+            W2PlannedFaultClass.RETRIABLE: evidence.retriable_evidence_ids,
+            W2PlannedFaultClass.NON_RETRIABLE: evidence.non_retriable_evidence_ids,
+            W2PlannedFaultClass.ZERO_EFFECT: evidence.zero_effect_evidence_ids,
+        }[identity.fault_class]
+        slots = slots_by_run[identity.pair]
+        expected_runtime_ids = {slot.artifact_id for slot in slots}
+        if (
+            len(slots) != 2
+            or {slot.producer_id for slot in slots} != {"gateway", "agentserver"}
+        ):
+            raise W2GateContractViolation(
+                f"planned product fault pair {identity.pair} lacks exact runtime slots"
+            )
+        declared_runtime_ids = {
+            evidence_id
+            for evidence_id in evidence_ids
+            if evidence_id in artifact_by_id
+            and W2EvidenceKind.REAL_RUNTIME
+            in artifact_by_id[evidence_id].evidence_kinds
+        }
+        if declared_runtime_ids != expected_runtime_ids:
+            raise W2GateContractViolation(
+                f"planned product fault uses the wrong runtime pair: "
+                f"{identity.plane.value}:{identity.fault_class.value}"
+            )
+        pair_artifacts = tuple(artifact_by_id[item] for item in expected_runtime_ids)
+        source_component, segment_name = _W2_PRODUCT_FAULT_RUNTIME_BINDINGS[
+            (identity.plane, identity.fault_class)
+        ]
+        _, governed = _v2_runtime_facts(pair_artifacts)
+        relevant_failures = [
+            observation
+            for _, _, observation in governed
+            if observation.event_name == "segment.failed"
+            and observation.source_component == source_component
+            and observation.segment_name == segment_name
+        ]
+        expected_errors = {
+            W2PlannedFaultClass.RETRIABLE: _V2_RETRIABLE_ERRORS,
+            W2PlannedFaultClass.NON_RETRIABLE: _V2_NON_RETRIABLE_ERRORS,
+            W2PlannedFaultClass.ZERO_EFFECT: frozenset({"STALE"}),
+        }[identity.fault_class]
+        if (
+            not relevant_failures
+            or {item.source_record_id for item in relevant_failures}
+            != {identity.source_record_id}
+            or any(item.error_code not in expected_errors for item in relevant_failures)
+            or not _derive_v2_fault_class(
+                pair_artifacts,
+                plane=plane,
+                fault_class=identity.fault_class.value,
+                expected_source_record_id=identity.source_record_id,
+                expected_source_component=source_component,
+                expected_segment_name=segment_name,
+            )
+        ):
+            raise W2GateContractViolation(
+                f"planned product fault lacks one exact runtime failure: "
+                f"{identity.plane.value}:{identity.fault_class.value}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -4243,6 +4419,7 @@ __all__ = [
     "W2ShowcaseRun",
     "W2TaskReconciliationEvidence",
     "evaluate_w2_demo_gate",
+    "verify_w2_planned_product_faults",
     "verify_w2_assisted_receipt_content",
     "verify_w2_evidence_content",
     "verify_w2_runtime_jsonl_content",
