@@ -68,6 +68,25 @@ def test_chrome_audio_modes_have_mutually_exclusive_argv_and_physical_has_no_wav
     assert "audio_mode=$audioMode" in script
 
 
+def test_authoritative_runbooks_distinguish_prepared_and_physical_launches() -> None:
+    toolkit = (_BUNDLE / "README.md").read_text(encoding="utf-8")
+    e2e = (
+        _BUNDLE.parents[2] / "live-voice" / "runbooks" / "E2E_RUNBOOK.md"
+    ).read_text(encoding="utf-8")
+
+    for document in (toolkit, e2e):
+        assert "-PrivateConfig $privateConfig" in document
+        assert "-Action Chrome -Config $config -PhysicalAudio" in document
+        assert "audio_mode=physical" in document
+        assert "start faults n" in document
+        assert "wait faults n" in document
+    assert "start faults 1" in toolkit
+    assert "wait faults 3" in toolkit
+    assert "Current diagnostic blockers" not in toolkit
+    assert "machine-private.live-voice-no-evidence-smoke.v1" in toolkit
+    assert "README.md#machine-private-provider-file" in e2e
+
+
 def test_runtime_entrypoint_accepts_only_exact_v3_config_schema(
     tmp_path: Path,
 ) -> None:

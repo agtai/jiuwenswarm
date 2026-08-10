@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -53,7 +54,13 @@ def _config(tmp_path: Path) -> dict[str, object]:
         "leaf_key_root": str(tmp_path / "keys"),
         "principal_id": "principal-1",
         "project_id": "project-1",
-        "ports": {"agentserver": 18092, "web": 19000, "gateway": 19001},
+        "ports": {
+            "agentserver": 18092,
+            "web": 19000,
+            "gateway": 19001,
+            "vite": 15173,
+            "chrome_debug": 19223,
+        },
         "p3_databases": {
             "1": str(tmp_path / "pair1.sqlite3"),
             "2": str(tmp_path / "pair2.sqlite3"),
@@ -252,6 +259,10 @@ def test_parent_secrets_are_scrubbed_and_reintroduced_only_to_the_right_child(
         "JIUWENSWARM_LIVE_VOICE_SPEECH_API_KEY": "legacy-speech-secret",
         "OPENAI_API_KEY": "agent-provider-secret",
         "GITHUB_TOKEN": "unrelated-parent-secret",
+        "EMBED_KEY": "legacy-embed-secret",
+        "GOOGLE_APPLICATION_CREDENTIALS": "google-credential-path",
+        "AZURE_STORAGE_CONNECTION_STRING": "azure-connection-secret",
+        "DATABASE_URL": "database-url-secret",
         "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN": "stale-p3-secret",
     }
     for name, value in values.items():
@@ -545,6 +556,29 @@ def test_shared_dotenv_rejects_agent_provider_runtime_names(
         _assert_shared_dotenv_secret_boundary(tmp_path)
 
 
+@pytest.mark.parametrize(
+    "name",
+    (
+        "GITHUB_TOKEN",
+        "EMBED_KEY",
+        "MEM0_API_KEY",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DATABASE_URL",
+    ),
+)
+def test_shared_dotenv_rejects_generic_secret_names(tmp_path: Path, name: str) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / ".env").write_text(
+        f"{name}=must-not-cross-child-boundaries\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="forbidden secret credential name"):
+        _assert_shared_dotenv_secret_boundary(tmp_path)
+
+
 def test_shared_dotenv_allows_nonsecret_config_and_commented_secret_names(
     tmp_path: Path,
 ) -> None:
@@ -621,3 +655,238 @@ def test_policy_preflight_rejects_foreign_public_authority(
 
     with pytest.raises(RuntimeError, match="exactly match signed policy"):
         controller._policy_preflight(config, {})
+
+
+class _FakeProcess:
+    def __init__(self, return_code: int | None) -> None:
+        self.return_code = return_code
+
+    def poll(self) -> int | None:
+        return self.return_code
+
+    def wait(self, timeout: float | None = None) -> int:
+        del timeout
+        if self.return_code is None:
+            raise AssertionError("live fake process must not be waited")
+        return self.return_code
+
+
+class _FakeHandle:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _TimeoutProcess(_FakeProcess):
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    def wait(self, timeout: float | None = None) -> int:
+        raise subprocess.TimeoutExpired("fault-runner", timeout)
+
+
+def _runtime_controller(tmp_path: Path) -> controller.Controller:
+    config = _config(tmp_path)
+    config.update(
+        {
+            "python": sys.executable,
+            "frontend_root": str(tmp_path / "frontend"),
+        }
+    )
+    return controller.Controller(
+        config,
+        [
+            _slot(pair=pair, producer=producer)
+            for pair in (1, 2, 3)
+            for producer in ("agentserver", "gateway")
+        ],
+        "speech-secret",
+        {"API_KEY": "agent-secret"},
+    )
+
+
+def test_fault_runner_starts_with_public_authority_and_no_child_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in (
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "AZURE_STORAGE_CONNECTION_STRING",
+        "DATABASE_URL",
+    ):
+        monkeypatch.setenv(name, f"secret-{name}")
+    runtime = _runtime_controller(tmp_path)
+    runtime.processes.update(
+        {
+            "vite": _FakeProcess(None),
+            "agentserver-1": _FakeProcess(None),
+            "gateway-1": _FakeProcess(None),
+        }
+    )
+    captured: dict[str, object] = {}
+
+    def capture_start(
+        name: str,
+        argv: list[str],
+        env: dict[str, str],
+        *,
+        cwd: Path | None = None,
+    ) -> None:
+        captured.update(name=name, argv=argv, env=env, cwd=cwd)
+
+    monkeypatch.setattr(runtime, "_start", capture_start)
+    monkeypatch.setattr(controller, "_wait_port", lambda *_args, **_kwargs: None)
+
+    runtime.start_fault_runner(1)
+
+    assert captured["name"] == "fault-runner-1"
+    argv = captured["argv"]
+    assert isinstance(argv, list)
+    assert argv[0] == sys.executable
+    assert Path(argv[1]).name == "w2_fault_runner.py"
+    assert argv[argv.index("--policy-id") + 1] == "policy-1"
+    assert argv[argv.index("--candidate-sha") + 1] == "a" * 40
+    assert argv[argv.index("--evidence-set-id") + 1] == "evidence-set-1"
+    assert argv[argv.index("--pair") + 1] == "1"
+    assert argv[argv.index("--gateway-url") + 1] == "ws://127.0.0.1:19000/ws"
+    assert argv[argv.index("--origin") + 1] == "http://127.0.0.1:15173"
+    assert argv[argv.index("--cdp-url") + 1] == "http://127.0.0.1:19223"
+    assert argv[argv.index("--timeout") + 1] == "300"
+    assert "speech-secret" not in argv
+    assert "agent-secret" not in argv
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env["JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED"] == "false"
+    assert "LIVE_VOICE_SPEECH_API_KEY" not in env
+    assert "API_KEY" not in env
+    assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
+    assert "AZURE_STORAGE_CONNECTION_STRING" not in env
+    assert "DATABASE_URL" not in env
+    assert runtime.p3_token not in env.values()
+
+
+def test_pair_stop_refuses_live_runner_then_requires_exact_pass_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime_controller(tmp_path)
+    log_dir = Path(str(runtime.config["staging_root"])) / "rehearsal-runtime-logs"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "fault-runner-1.log"
+    log_path.write_text("runner is still active\n", encoding="utf-8")
+    runtime.processes.update(
+        {
+            "agentserver-1": _FakeProcess(None),
+            "gateway-1": _FakeProcess(None),
+            "fault-runner-1": _FakeProcess(None),
+        }
+    )
+    runtime.log_handles["fault-runner-1"] = _FakeHandle()
+    runtime.log_paths["fault-runner-1"] = log_path
+    stopped: list[str] = []
+    monkeypatch.setattr(runtime, "_signal_and_wait", lambda name, **_kwargs: stopped.append(name))
+    monkeypatch.setattr(controller, "_wait_port", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_verify_sealed", lambda slot: None)
+
+    with pytest.raises(RuntimeError, match="still running"):
+        runtime.stop_pair(1)
+    assert stopped == []
+
+    runtime.processes["fault-runner-1"] = _FakeProcess(0)
+    log_path.write_text(
+        "W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS pair=1 faults=3 routes=closed\n",
+        encoding="utf-8",
+    )
+    runtime.wait_fault_runner(1)
+    runtime.stop_pair(1)
+
+    assert stopped == ["gateway-1", "agentserver-1"]
+
+
+def test_failed_fault_runner_allows_graceful_cleanup_but_invalidates_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = _runtime_controller(tmp_path)
+    log_dir = Path(str(runtime.config["staging_root"])) / "rehearsal-runtime-logs"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "fault-runner-2.log"
+    log_path.write_text("foreign or missing marker\n", encoding="utf-8")
+    runtime.processes.update(
+        {
+            "agentserver-2": _FakeProcess(None),
+            "gateway-2": _FakeProcess(None),
+            "fault-runner-2": _FakeProcess(2),
+        }
+    )
+    runtime.log_handles["fault-runner-2"] = _FakeHandle()
+    runtime.log_paths["fault-runner-2"] = log_path
+    stopped: list[str] = []
+    monkeypatch.setattr(runtime, "_signal_and_wait", lambda name, **_kwargs: stopped.append(name))
+    monkeypatch.setattr(controller, "_wait_port", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(runtime, "_verify_sealed", lambda slot: None)
+
+    with pytest.raises(RuntimeError, match="product fault runner did not pass"):
+        runtime.stop_pair(2)
+
+    assert stopped == ["gateway-2", "agentserver-2"]
+
+
+def test_fault_runner_timeout_retains_process_and_log_ownership_for_retry(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime_controller(tmp_path)
+    log_dir = Path(str(runtime.config["staging_root"])) / "rehearsal-runtime-logs"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "fault-runner-3.log"
+    log_path.write_text("still waiting for stock closure\n", encoding="utf-8")
+    process = _TimeoutProcess()
+    handle = _FakeHandle()
+    runtime.processes["fault-runner-3"] = process
+    runtime.log_handles["fault-runner-3"] = handle
+    runtime.log_paths["fault-runner-3"] = log_path
+
+    with pytest.raises(RuntimeError, match="still running"):
+        runtime.wait_fault_runner(3)
+
+    assert runtime.processes["fault-runner-3"] is process
+    assert runtime.log_handles["fault-runner-3"] is handle
+    assert runtime.log_paths["fault-runner-3"] == log_path
+    assert handle.closed is False
+    assert 3 not in runtime.fault_passed_pairs
+
+
+@pytest.mark.parametrize(
+    "lines",
+    (
+        ["wrong marker"],
+        [
+            "W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS pair=1 faults=3 routes=closed",
+            "W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS pair=1 faults=3 routes=closed",
+        ],
+        [
+            "W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS pair=1 faults=3 routes=closed",
+            "unexpected trailing output",
+        ],
+    ),
+)
+def test_zero_exit_requires_one_exact_final_fault_runner_marker(
+    tmp_path: Path, lines: list[str]
+) -> None:
+    runtime = _runtime_controller(tmp_path)
+    log_dir = Path(str(runtime.config["staging_root"])) / "rehearsal-runtime-logs"
+    log_dir.mkdir(parents=True)
+    log_path = log_dir / "fault-runner-1.log"
+    log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    handle = _FakeHandle()
+    runtime.processes["fault-runner-1"] = _FakeProcess(0)
+    runtime.log_handles["fault-runner-1"] = handle
+    runtime.log_paths["fault-runner-1"] = log_path
+
+    with pytest.raises(RuntimeError, match="did not pass"):
+        runtime.wait_fault_runner(1)
+
+    assert "fault-runner-1" not in runtime.processes
+    assert "fault-runner-1" not in runtime.log_handles
+    assert "fault-runner-1" not in runtime.log_paths
+    assert handle.closed is True
+    assert 1 not in runtime.fault_passed_pairs

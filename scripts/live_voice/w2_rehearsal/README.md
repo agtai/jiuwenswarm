@@ -21,6 +21,9 @@ from a prior attempt.
   for rehearsal policy, runtime configuration and the later formal policy.
 - `w2_rehearsal_runtime_controller.py`: graceful lifecycle controller for
   `G1/A1`, `G2/A2`, `G3/A3` and restart successor `A4`.
+- `w2_fault_runner.py`: policy-bound companion that drives the nine P1/P2/P3
+  product fault probes through the real Gateway while observing the stock
+  Chrome page through read-only CDP Network events. It does not write evidence.
 - `w2_d069_runtime_diagnostic.py`: no-evidence diagnostic for the same-task
   A→B→C topology and the bounded P2/P3 fault probes.
 - `validate_*` plus the candidate-unbound choreography and manifest-wiring
@@ -39,11 +42,47 @@ Before preparation, independently restore:
    dependencies match the candidate.
 2. One isolated `JIUWENSWARM_DATA_DIR`, a persisted Session, and one registered
    disposable Git project with repository-local `core.autocrlf=false`.
-3. The real Provider key. Enter it only into the hidden prompt; never put it in a
-   command line, config file, policy, evidence, Git or chat.
+3. Real Agent and Speech Provider settings. Prefer the strict, ACL-protected
+   machine-private JSON described below, stored outside the candidate, evidence
+   and runtime-log roots. The launcher passes only its absolute path; values must
+   never enter a command line, public runtime config, policy, evidence, Git,
+   logs or chat. The hidden Speech-key prompt remains the fallback when no
+   private file is supplied.
 4. Browser permission/device state. The bundled WAV and isolated fake-audio
    Chrome are repeatability diagnostics only; final microphone and complete
    audible playout still require the user.
+
+### Machine-private Provider file
+
+Create one ACL-protected UTF-8 JSON file outside the repository candidate,
+evidence roots and rehearsal log root. Its shape is closed; replace every
+angle-bracket placeholder locally and never paste the resulting values into Git,
+policy, evidence, command lines, logs or chat:
+
+```json
+{
+  "schema": "machine-private.live-voice-no-evidence-smoke.v1",
+  "agent": {
+    "provider": "<agent-provider>",
+    "api_base": "<agent-api-base>",
+    "api_key": "<agent-api-key>",
+    "model": "<agent-model>"
+  },
+  "speech": {
+    "provider": "<speech-provider>",
+    "api_base": "<speech-api-base>",
+    "api_key": "<speech-api-key>",
+    "stt_model": "<speech-stt-model>",
+    "tts_model": "<speech-tts-model>",
+    "voice": "<speech-voice>"
+  }
+}
+```
+
+The controller accepts only these exact keys and requires the non-secret Speech
+metadata to match the signed runtime configuration. It routes Agent values only
+to AgentServer and the Speech key only to Gateway. The shared data-directory
+`.env` must not contain credentials.
 
 If the persisted Session does not yet exist, create it before preparing an
 attempt. The model remains an explicit machine choice rather than a value frozen
@@ -115,6 +154,7 @@ $bundle = "$repo\scripts\live_voice\w2_rehearsal"
 $staging = '<staging_root printed above>'
 $expectedRoot = '<acknowledged 64-character fingerprint>'
 $config = Join-Path $staging 'rehearsal-runtime-config.json'
+$privateConfig = '<absolute ACL-protected live-voice-smoke.private.json>'
 
 & "$repo\.venv\Scripts\python.exe" `
   "$bundle\finalize_w2_rehearsal_runtime_config.py" `
@@ -122,18 +162,19 @@ $config = Join-Path $staging 'rehearsal-runtime-config.json'
   --expected-root-sha256 $expectedRoot `
   --output $config
 
-& "$bundle\start_w2_rehearsal.ps1" -Action Preflight -Config $config
+& "$bundle\start_w2_rehearsal.ps1" -Action Preflight -Config $config -PrivateConfig $privateConfig
 ```
 
-Preflight must return `W2_REHEARSAL_RUNTIME_PREFLIGHT=PASS` before entering a
-Provider key or starting any owner.
+Preflight validates a referenced private file without starting an owner. It must
+return `W2_REHEARSAL_RUNTIME_PREFLIGHT=PASS` before the hidden Speech-key fallback
+is entered (when no private file is used) or before any owner starts.
 
 ## Run the controller without popup ambiguity
 
 Use one visible PowerShell window and keep it open:
 
 ```powershell
-& "$bundle\start_w2_rehearsal.ps1" -Action Controller -Config $config
+& "$bundle\start_w2_rehearsal.ps1" -Action Controller -Config $config -PrivateConfig $privateConfig
 ```
 
 At the `w2-rehearsal>` prompt:
@@ -141,11 +182,17 @@ At the `w2-rehearsal>` prompt:
 ```text
 start ui
 start 1
+start faults 1
 status
+wait faults 1
 stop 1
 start 2
+start faults 2
+wait faults 2
 stop 2
 start 3
+start faults 3
+wait faults 3
 stop 3
 start 4
 stop 4
@@ -153,18 +200,34 @@ stop ui
 quit
 ```
 
-After `UI_READY`, open a second PowerShell and start the isolated deterministic
-Chrome exactly once:
+After `UI_READY`, open a second PowerShell and start isolated Chrome exactly
+once. For automatic rehearsal and repeatability diagnostics, use prepared WAV:
 
 ```powershell
 & "$bundle\start_w2_rehearsal.ps1" -Action Chrome -Config $config
 ```
 
+For the final physical intervention window, use the separate physical command:
+
+```powershell
+& "$bundle\start_w2_rehearsal.ps1" -Action Chrome -Config $config -PhysicalAudio
+```
+
+It must print `audio_mode=physical`. That mode omits
+`--use-fake-device-for-media-stream`, `--use-file-for-fake-audio-capture` and
+`--use-fake-ui-for-media-stream`; verify the marker before granting microphone
+permission. A profile already created by the prepared-WAV command cannot be
+reused for the physical attempt.
+
 `PAIR_READY=n` means only that the ports are listening. It does not mean the
-journey passed. Before each `stop n`, verify that both the Gateway and AgentServer
-performed at least one policy-authorized operation; otherwise one producer may
-correctly have no artifact and the pair must be discarded. Never hard-kill a
-runtime owner: only graceful stop creates the closed footer and runtime signature.
+journey passed. For each pair, start the fault runner after the stock page and
+pair are ready with `start faults n`. Complete the UI journey and gracefully
+disconnect its P2/P3 routes, then run `wait faults n`. Only the exact
+`W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS ... routes=closed` marker permits the normal
+`stop n` success path. Before each stop, both the Gateway and AgentServer must
+also have performed at least one policy-authorized operation; otherwise the pair
+is invalid. Never hard-kill a runtime owner: only graceful stop creates the
+closed footer and runtime signature.
 
 ## Runtime matrix
 
@@ -181,31 +244,12 @@ journey. Faults are embedded, not separate Gate runs.
 The 12 fault claims are four planes (`P1`, `P2`, `P3`, observability) × three
 classes. The 38-slot mapping is frozen in `w2_manifest_wiring.v1.json`.
 
-## Current diagnostic blockers (2026-08-10)
+## Current readiness
 
-Do not start a new signed rehearsal merely because the toolkit is portable. The
-discarded `a7de738d69` run found source/runtime blockers that require a reviewed
-descendant first:
-
-1. repeated P3 progress ACK rejection generated no canonical progress/UI success
-   and inflated AgentServer observations;
-2. `product.voice_task_origin` lacked the full interaction/response/generation
-   binding required by the observer;
-3. refresh during Pair1→Pair2 left the browser P2 activation journal in
-   `result_unknown`, so every formal route stayed unavailable even though server
-   logs showed activate and close completion;
-4. P3 UI state made cancel/retry controls inaccessible or incorrectly
-   `ineligible`, preventing the exact A→B→C journey.
-
-The candidate-unbound choreography validator also keeps two production probes
-explicitly unresolved: P2 non-retriable presentation rejection and P3
-non-retriable mutation rejection. They must pass in the same short no-evidence
-smoke after the four source/runtime fixes and before any new policy is signed.
-
-Until those findings are fixed, reviewed, integrated and both probes pass, use
-this bundle only for static validation or explicitly discarded diagnostics. The
-prior Pair1/Pair2 artifacts and all prior policies/keys/evidence roots remain
-discarded.
+This toolkit is an operating procedure, not a mutable status source. Consult
+[`live-voice/STATUS.md`](../../../live-voice/STATUS.md) before creating a signed
+attempt. Prior policies, keys, browser profiles, databases and evidence roots
+remain non-reusable after their attempt closes or is discarded.
 
 ## Speech probe
 

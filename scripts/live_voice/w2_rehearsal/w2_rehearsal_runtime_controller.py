@@ -40,6 +40,7 @@ _SPEECH_API_KEY_ENV = "LIVE_VOICE_SPEECH_API_KEY"
 _PRIVATE_CONFIG_SCHEMA = "machine-private.live-voice-no-evidence-smoke.v1"
 _PRIVATE_VALUE_MAX_CHARACTERS = 4_096
 _PRIVATE_VALUE_MAX_UTF8_BYTES = 16_384
+_FAULT_RUNNER_TIMEOUT_SECONDS = 300
 _AGENT_RUNTIME_ENV_NAMES = frozenset(
     {"API_KEY", "API_BASE", "MODEL_NAME", "MODEL_PROVIDER"}
 )
@@ -63,9 +64,57 @@ _AGENT_PROVIDER_SECRET_ENV_NAMES = frozenset(
         "MCP_TOKEN",
     }
 )
+_SAFE_PARENT_ENV_NAMES = frozenset(
+    {
+        "ALLUSERSPROFILE",
+        "APPDATA",
+        "COMMONPROGRAMFILES",
+        "COMMONPROGRAMFILES(X86)",
+        "COMPUTERNAME",
+        "COMSPEC",
+        "CURL_CA_BUNDLE",
+        "DRIVERDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LANG",
+        "LC_ALL",
+        "LOCALAPPDATA",
+        "LOGONSERVER",
+        "NUMBER_OF_PROCESSORS",
+        "OS",
+        "PATH",
+        "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_IDENTIFIER",
+        "PROCESSOR_LEVEL",
+        "PROCESSOR_REVISION",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PUBLIC",
+        "PYTHONIOENCODING",
+        "PYTHONUNBUFFERED",
+        "PYTHONUTF8",
+        "REQUESTS_CA_BUNDLE",
+        "SESSIONNAME",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TZ",
+        "USERDOMAIN",
+        "USERDNSDOMAIN",
+        "USERNAME",
+        "USERPROFILE",
+        "WINDIR",
+    }
+)
 _SECRET_ENV_NAME = re.compile(
-    r"(?:^|_)(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|"
-    r"AUTHORIZATION|PRIVATE_KEY|PRIVATE_KEY_PATH)(?:$|_)",
+    r"(?:^|_)(?:API_KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|"
+    r"CREDENTIALS|AUTHORIZATION|PRIVATE_KEY|PRIVATE_KEY_PATH|"
+    r"CONNECTION_STRING|DATABASE_URL)(?:$|_)",
 )
 
 
@@ -270,16 +319,11 @@ def _run_checked(argv: list[str], *, cwd: Path, env: dict[str, str]) -> str:
 
 
 def _base_env(config: dict[str, Any]) -> dict[str, str]:
-    env = os.environ.copy()
-    for name in tuple(env):
-        upper_name = name.upper()
-        if (
-            upper_name.startswith("LIVE_VOICE_SPEECH_")
-            or upper_name in _AGENT_RUNTIME_ENV_NAMES
-            or _SECRET_ENV_NAME.search(upper_name)
-        ):
-            env.pop(name, None)
-    env.pop(_LEGACY_SPEECH_API_KEY_ENV, None)
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in _SAFE_PARENT_ENV_NAMES
+    }
     candidate = str(config["candidate_root"])
     env["PYTHONPATH"] = candidate
     env["JIUWENSWARM_DATA_DIR"] = str(config["data_dir"])
@@ -322,23 +366,29 @@ def _assert_shared_dotenv_secret_boundary(data_dir: Path) -> None:
         return
     if not path.is_file():
         raise RuntimeError("shared config/.env is not a regular file")
-    forbidden = {
-        _SPEECH_API_KEY_ENV,
-        _LEGACY_SPEECH_API_KEY_ENV,
-        *_AGENT_RUNTIME_ENV_NAMES,
-        *_AGENT_PROVIDER_SECRET_ENV_NAMES,
-    }
     for line in path.read_text(encoding="utf-8-sig", errors="strict").splitlines():
         match = re.match(
             r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=",
             line,
         )
-        if match is not None and match.group(1).upper() in forbidden:
+        if match is not None:
             name = match.group(1).upper()
+            is_speech = name in {
+                _SPEECH_API_KEY_ENV,
+                _LEGACY_SPEECH_API_KEY_ENV,
+            }
+            is_agent = name in {
+                *_AGENT_RUNTIME_ENV_NAMES,
+                *_AGENT_PROVIDER_SECRET_ENV_NAMES,
+            }
+            if not (is_speech or is_agent or _SECRET_ENV_NAME.search(name)):
+                continue
             label = (
                 "Speech"
-                if name in {_SPEECH_API_KEY_ENV, _LEGACY_SPEECH_API_KEY_ENV}
+                if is_speech
                 else "Agent/provider"
+                if is_agent
+                else "secret"
             )
             raise RuntimeError(
                 f"shared config/.env contains a forbidden {label} credential name"
@@ -641,6 +691,8 @@ class Controller:
         self.p3_token = secrets.token_urlsafe(32)
         self.processes: dict[str, subprocess.Popen[bytes]] = {}
         self.log_handles: dict[str, Any] = {}
+        self.log_paths: dict[str, Path] = {}
+        self.fault_passed_pairs: set[int] = set()
 
     def _start(
         self,
@@ -669,6 +721,7 @@ class Controller:
         )
         self.processes[name] = process
         self.log_handles[name] = handle
+        self.log_paths[name] = log_path
         print(f"STARTED {name} pid={process.pid} log={log_path}")
 
     def start_ui(self) -> None:
@@ -712,6 +765,14 @@ class Controller:
         print("UI_READY=http://127.0.0.1:5173")
 
     def stop_ui(self) -> None:
+        if any(
+            name.startswith("fault-runner-") and process.poll() is None
+            for name, process in self.processes.items()
+        ):
+            raise RuntimeError(
+                "a product fault runner is still running; close the stock UI routes "
+                "and wait for its PASS marker before stopping UI"
+            )
         self._signal_and_wait("vite", timeout=45.0)
         _wait_port(self.config["ports"]["vite"], open_state=False)
 
@@ -727,6 +788,7 @@ class Controller:
             ) from exc
         self.processes.pop(name)
         self.log_handles.pop(name)
+        self.log_paths.pop(name, None)
         handle.close()
         if return_code not in (0, 130, 3221225786, -1073741510):
             raise RuntimeError(f"{name} exited unexpectedly: {return_code}")
@@ -813,7 +875,111 @@ class Controller:
         _wait_port(self.config["ports"]["gateway"], open_state=True)
         print(f"PAIR_READY={pair}")
 
+    def _require_live_process(self, name: str) -> None:
+        process = self.processes.get(name)
+        if process is None or process.poll() is not None:
+            raise RuntimeError(f"required runtime process is not live: {name}")
+
+    def start_fault_runner(self, pair: int) -> None:
+        if pair not in (1, 2, 3):
+            raise RuntimeError("pair must be 1, 2, or 3")
+        if pair in self.fault_passed_pairs:
+            raise RuntimeError(f"product fault runner already passed for pair {pair}")
+        for name in ("vite", f"agentserver-{pair}", f"gateway-{pair}"):
+            self._require_live_process(name)
+        name = f"fault-runner-{pair}"
+        if name in self.processes:
+            raise RuntimeError(f"process is already running: {name}")
+        _wait_port(self.config["ports"]["chrome_debug"], open_state=True)
+        runner = Path(__file__).with_name("w2_fault_runner.py")
+        if not runner.is_file():
+            raise RuntimeError("candidate-bound W2 product fault runner is unavailable")
+        env = _base_env(self.config)
+        env["JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED"] = "false"
+        self._start(
+            name,
+            [
+                str(self.config["python"]),
+                str(runner),
+                "--policy-id",
+                str(self.config["policy_id"]),
+                "--candidate-sha",
+                str(self.config["candidate_sha"]),
+                "--evidence-set-id",
+                str(self.config["evidence_set_id"]),
+                "--pair",
+                str(pair),
+                "--gateway-url",
+                f"ws://127.0.0.1:{self.config['ports']['web']}/ws",
+                "--origin",
+                f"http://127.0.0.1:{self.config['ports']['vite']}",
+                "--cdp-url",
+                f"http://127.0.0.1:{self.config['ports']['chrome_debug']}",
+                "--timeout",
+                str(_FAULT_RUNNER_TIMEOUT_SECONDS),
+            ],
+            env,
+        )
+        print(f"FAULT_RUNNER_STARTED={pair}")
+
+    def wait_fault_runner(self, pair: int) -> None:
+        if pair not in (1, 2, 3):
+            raise RuntimeError("pair must be 1, 2, or 3")
+        name = f"fault-runner-{pair}"
+        process = self.processes.get(name)
+        if process is None:
+            if pair in self.fault_passed_pairs:
+                print(f"FAULT_RUNNER_ALREADY_PASSED={pair}")
+                return
+            raise RuntimeError(f"product fault runner was not started for pair {pair}")
+        handle = self.log_handles[name]
+        log_path = self.log_paths[name]
+        try:
+            return_code = process.wait(timeout=_FAULT_RUNNER_TIMEOUT_SECONDS + 10)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                "product fault runner is still running; complete the stock UI "
+                "journey and close its P2/P3 routes before retrying"
+            ) from exc
+        self.processes.pop(name)
+        self.log_handles.pop(name)
+        self.log_paths.pop(name)
+        handle.close()
+        expected = (
+            "W2_FAULT_RUNNER_PRODUCT_FAULTS_PASS "
+            f"pair={pair} faults=3 routes=closed"
+        )
+        try:
+            lines = [
+                line
+                for line in log_path.read_text(
+                    encoding="utf-8", errors="strict"
+                ).splitlines()
+                if line
+            ]
+        except (OSError, UnicodeError) as exc:
+            raise RuntimeError("product fault runner log is unreadable") from exc
+        if return_code != 0 or not lines or lines[-1] != expected or lines.count(expected) != 1:
+            raise RuntimeError(
+                f"product fault runner did not pass for pair {pair}; attempt is invalid"
+            )
+        self.fault_passed_pairs.add(pair)
+        print(f"FAULT_RUNNER_VERIFIED={pair}")
+
     def stop_pair(self, pair: int) -> None:
+        runner_name = f"fault-runner-{pair}"
+        runner = self.processes.get(runner_name)
+        if runner is not None and runner.poll() is None:
+            raise RuntimeError(
+                "product fault runner is still running; gracefully close the stock "
+                "UI P2/P3 routes and wait faults before stopping the pair"
+            )
+        runner_failure: RuntimeError | None = None
+        if runner is not None:
+            try:
+                self.wait_fault_runner(pair)
+            except RuntimeError as exc:
+                runner_failure = exc
         self._signal_and_wait(f"gateway-{pair}")
         _wait_port(self.config["ports"]["web"], open_state=False)
         _wait_port(self.config["ports"]["gateway"], open_state=False)
@@ -826,6 +992,11 @@ class Controller:
                 if s.producer == producer and s.showcase_run == pair
             )
             self._verify_sealed(slot)
+        if runner_failure is not None or pair not in self.fault_passed_pairs:
+            raise RuntimeError(
+                f"pair {pair} stopped cleanly but its product fault runner did not pass; "
+                "attempt is invalid"
+            ) from runner_failure
 
     def start_successor(self) -> None:
         _assert_port_free(self.config["ports"]["agentserver"])
@@ -868,7 +1039,7 @@ class Controller:
 def _loop(controller: Controller) -> None:
     print(
         "Commands: start ui, stop ui, start 1|2|3, stop 1|2|3, "
-        "start 4, stop 4, status, quit"
+        "start faults 1|2|3, wait faults 1|2|3, start 4, stop 4, status, quit"
     )
     while True:
         command = input("w2-rehearsal> ").strip().lower().split()
@@ -898,6 +1069,18 @@ def _loop(controller: Controller) -> None:
                 and command[1] in {"1", "2", "3"}
             ):
                 controller.stop_pair(int(command[1]))
+            elif (
+                len(command) == 3
+                and command[:2] == ["start", "faults"]
+                and command[2] in {"1", "2", "3"}
+            ):
+                controller.start_fault_runner(int(command[2]))
+            elif (
+                len(command) == 3
+                and command[:2] == ["wait", "faults"]
+                and command[2] in {"1", "2", "3"}
+            ):
+                controller.wait_fault_runner(int(command[2]))
             elif command == ["start", "4"]:
                 controller.start_successor()
             elif command == ["stop", "4"]:

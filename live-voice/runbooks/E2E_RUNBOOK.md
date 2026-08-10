@@ -265,11 +265,26 @@ external-root policy。任何部分失败都废弃本 label，不在同一路径
 
 ```powershell
 $bundle = "$repo\scripts\live_voice\w2_rehearsal"
-& "$bundle\start_w2_rehearsal.ps1" -Action Preflight -Config '<runtime-config.json>'
-& "$bundle\start_w2_rehearsal.ps1" -Action Controller -Config '<runtime-config.json>'
+$config = '<runtime-config.json>'
+$privateConfig = '<absolute ACL-protected live-voice-smoke.private.json>'
+& "$bundle\start_w2_rehearsal.ps1" -Action Preflight -Config $config -PrivateConfig $privateConfig
+& "$bundle\start_w2_rehearsal.ps1" -Action Controller -Config $config -PrivateConfig $privateConfig
 # UI_READY 后，在第二个可见终端启动一次 isolated Chrome：
-& "$bundle\start_w2_rehearsal.ps1" -Action Chrome -Config '<runtime-config.json>'
+& "$bundle\start_w2_rehearsal.ps1" -Action Chrome -Config $config
+# Final physical intervention uses a fresh profile/attempt and this command instead:
+& "$bundle\start_w2_rehearsal.ps1" -Action Chrome -Config $config -PhysicalAudio
 ```
+
+The private file is a reference-only, strict-schema machine input outside the
+candidate/evidence/log roots; neither its path nor values belong in policy or
+evidence. Agent credentials are exposed only to AgentServer and the Speech key
+only to Gateway. Use the exact sanitized schema in the
+[portable toolkit README](../../scripts/live_voice/w2_rehearsal/README.md#machine-private-provider-file).
+`-PhysicalAudio` must print `audio_mode=physical` and must not
+contain any Chrome fake-device, fake-file or fake-permission flag. For each Pair
+1-3, use `start faults n`, finish and gracefully disconnect the stock UI routes,
+then `wait faults n` before `stop n`; the controller accepts only the exact
+product-fault PASS marker and then stops Gateway/AgentServer.
 
 只有 `Preflight=PASS` 才能输入隐藏 Provider key或启动 owner。controller 中每个 pair 必须
 先完成实际 Gateway 和 AgentServer 操作再 `stop n`；`PAIR_READY` 只证明端口监听。
