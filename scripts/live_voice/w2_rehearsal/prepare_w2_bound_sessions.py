@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from jiuwenswarm.server.runtime.session.project_store import get_project_by_id
 from jiuwenswarm.server.runtime.session.session_metadata import (
     get_session_metadata,
     init_session_metadata,
@@ -29,6 +30,24 @@ def _create(
     project_id: str,
     project_dir: Path,
 ) -> None:
+    registered_project = get_project_by_id(project_id, cache_bust=True)
+    if registered_project is None:
+        raise RuntimeError(
+            "project is not registered in the current JIUWENSWARM_DATA_DIR: "
+            f"{project_id}"
+        )
+    if registered_project.hidden:
+        raise RuntimeError(f"registered project is hidden: {project_id}")
+    if registered_project.work_mode != "code":
+        raise RuntimeError(
+            f"registered project work mode must be code: {project_id}"
+        )
+    registered_dir = Path(registered_project.project_dir).resolve()
+    if registered_dir != project_dir.resolve():
+        raise RuntimeError(
+            "registered project path mismatch: "
+            f"{project_id} uses {registered_dir}, requested {project_dir.resolve()}"
+        )
     existing = get_session_metadata(session_id, cache_bust=True)
     if existing:
         raise RuntimeError(f"refusing to replace existing session: {session_id}")
