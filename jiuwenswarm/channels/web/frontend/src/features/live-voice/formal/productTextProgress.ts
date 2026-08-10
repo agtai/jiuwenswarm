@@ -27,6 +27,7 @@ export interface ProductTextProgressEvent {
   readonly delivery_id: string;
   readonly session_id: string;
   readonly task_id: string;
+  readonly attempt_id: string;
   readonly project_id: string;
   readonly correlation_id: string;
   readonly origin_id: string;
@@ -147,6 +148,12 @@ export function parseProductTextProgressEvent(
   const evidenceId = textValue(raw.evidence_id);
   const sourceEvent = parseEnvelope(raw.source_event);
   const progressEvent = parseEnvelope(raw.progress_event);
+  const sourceExtensions = objectValue(sourceEvent?.raw.extensions);
+  const progressReturn = objectValue(sourceExtensions?.['jiuwenswarm.task_progress_return']);
+  const attemptId = textValue(progressReturn?.persistent_attempt_id);
+  const persistentEventSeq = uintValue(progressReturn?.persistent_event_seq);
+  const persistentEventType = textValue(progressReturn?.persistent_event_type);
+  const persistentSourceEventId = progressReturn?.persistent_source_event_id;
   const progressPayload = progressEvent?.payload;
   const workRef = objectValue(progressPayload?.work_ref);
   const state = textValue(progressPayload?.state);
@@ -155,6 +162,12 @@ export function parseProductTextProgressEvent(
     !sessionId ||
     !deliveryId ||
     !taskId ||
+    !attemptId ||
+    persistentEventSeq !== sourceEvent?.seq ||
+    persistentEventType !== sourceEvent?.event_type ||
+    (persistentSourceEventId !== undefined &&
+      persistentSourceEventId !== null &&
+      !textValue(persistentSourceEventId)) ||
     !projectId ||
     !correlationId ||
     !originId ||
@@ -192,6 +205,7 @@ export function parseProductTextProgressEvent(
     delivery_id: deliveryId,
     session_id: sessionId,
     task_id: taskId,
+    attempt_id: attemptId,
     project_id: projectId,
     correlation_id: correlationId,
     origin_id: originId,
@@ -287,6 +301,7 @@ export type ProductTextProgressAckRequest = (
 
 interface RetainedDeliveryAck {
   readonly ack: ProductTextProgressDeliveryAck;
+  readonly expected_attempt_id: string;
   status: ProductTextProgressAckStatus;
   attempts: number;
   in_flight: boolean;
@@ -312,13 +327,14 @@ function sameDeliveryAck(
   );
 }
 
-function requireAckResponse(value: unknown, ack: ProductTextProgressDeliveryAck): void {
+function requireAckResponse(value: unknown, retained: RetainedDeliveryAck): void {
+  const ack = retained.ack;
   const payload = objectValue(value);
   const result = objectValue(payload?.result);
   if (
     payload?.ok !== true ||
     result?.status !== 'acknowledged' ||
-    !textValue(result.attempt_id) ||
+    result.attempt_id !== retained.expected_attempt_id ||
     result.session_id !== ack.session_id ||
     result.delivery_id !== ack.delivery_id ||
     result.task_id !== ack.task_id ||
@@ -378,7 +394,12 @@ export class ProductTextProgressAckOwner {
     const ack = createProductTextProgressDeliveryAck(event);
     const prior = this.deliveries.get(ack.delivery_id);
     if (prior) {
-      if (!sameDeliveryAck(prior.ack, ack)) throw new Error('delivery_id binding conflict');
+      if (
+        !sameDeliveryAck(prior.ack, ack) ||
+        prior.expected_attempt_id !== event.attempt_id
+      ) {
+        throw new Error('delivery_id binding conflict');
+      }
       if (prior.status !== 'acknowledged' && this.connected) this.send(prior);
       return this.snapshot(prior);
     }
@@ -389,6 +410,7 @@ export class ProductTextProgressAckOwner {
     }
     const retained: RetainedDeliveryAck = {
       ack,
+      expected_attempt_id: event.attempt_id,
       status: this.connected ? 'pending' : 'failed',
       attempts: 0,
       in_flight: false,
@@ -434,7 +456,7 @@ export class ProductTextProgressAckOwner {
     void Promise.resolve()
       .then(() => this.request(PRODUCT_PROGRESS_ACK_METHOD, retained.ack))
       .then(value => {
-        requireAckResponse(value, retained.ack);
+        requireAckResponse(value, retained);
         if (!this.closed) retained.status = 'acknowledged';
       })
       .catch(() => {

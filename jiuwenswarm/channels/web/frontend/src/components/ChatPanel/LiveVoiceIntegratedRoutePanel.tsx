@@ -106,7 +106,7 @@ export type ProductPresentationAckInput = {
 type ProductTurnInput = {
   commit_id: string;
   turn_id: string;
-  response_id: string;
+  response_id?: string;
   committed_at: string;
   text: string;
   dispatch_target?: 'agent' | 'task';
@@ -125,6 +125,8 @@ export type ProductVoiceTaskOrigin = Readonly<{
   interaction_id: string;
   turn_id: string;
   commit_id: string;
+  response_id: string;
+  response_generation: number;
   instruction: string;
 }>;
 
@@ -263,6 +265,38 @@ export type ProductP2NotificationDisposition =
 
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+export function bindProductVoiceTaskOrigin(
+  input: Readonly<ProductTurnInput>,
+  result: unknown,
+  sessionId: string,
+  interactionId: string
+): ProductVoiceTaskOrigin {
+  const body = recordValue(result);
+  const response = recordValue(body?.response);
+  if (
+    input.dispatch_target !== 'task' ||
+    body?.status !== 'task_origin_accepted' ||
+    body.turn_id !== input.turn_id ||
+    body.commit_id !== input.commit_id ||
+    response?.interaction_id !== interactionId ||
+    typeof response.response_id !== 'string' ||
+    !response.response_id.trim() ||
+    !Number.isSafeInteger(response.response_generation) ||
+    (response.response_generation as number) < 0
+  ) {
+    throw new Error('product voice Task origin response binding mismatch');
+  }
+  return Object.freeze({
+    session_id: sessionId,
+    interaction_id: interactionId,
+    turn_id: input.turn_id,
+    commit_id: input.commit_id,
+    response_id: response.response_id,
+    response_generation: response.response_generation as number,
+    instruction: input.text,
+  });
 }
 
 export function classifyProductP2Notification(notification: Readonly<Record<string, unknown>>, hasPresentedOutput = false): ProductP2NotificationDisposition {
@@ -641,11 +675,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const pendingTurn = pendingProductTurnRef.current;
     if (pendingTurn?.owner === owner) {
       try {
-        await retryRetainedProductOperation({
+        const result = await retryRetainedProductOperation({
           operation: () => owner.submitText(pendingTurn.input),
           is_current: isCurrent,
         });
         if (pendingProductTurnRef.current === pendingTurn) {
+          if (pendingTurn.input.dispatch_target === 'task' && ownerSession) {
+            const interactionId = owner.snapshot().binding?.interaction_id;
+            if (!interactionId) throw new Error('recovered voice Task origin lost its interaction');
+            voiceTaskOriginRef.current = bindProductVoiceTaskOrigin(
+              pendingTurn.input,
+              result,
+              ownerSession,
+              interactionId
+            );
+          }
           pendingProductTurnRef.current = null;
           setProductInput('');
           setProductTextStatus('waiting');
@@ -1675,7 +1719,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const input: ProductTurnInput = {
       commit_id: `web-commit-${identity}`,
       turn_id: `web-turn-${identity}`,
-      response_id: `web-response-${identity}`,
       committed_at: new Date().toISOString(),
       text: recognized.text,
       dispatch_target: 'task',
@@ -1689,20 +1732,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       return null;
     }
     try {
-      await retryRetainedProductOperation({
+      const result = await retryRetainedProductOperation({
         operation: () => owner.submitText(input),
         is_current: () => props.isConnected && activationOwnerRef.current === owner && activeSessionRef.current === recognized.session_id,
       });
       if (pendingProductTurnRef.current !== retained) return null;
       pendingProductTurnRef.current = null;
       markP2OperationSettled(owner);
-      const origin = Object.freeze({
-        session_id: recognized.session_id,
-        interaction_id: activationBinding.interaction_id,
-        turn_id: input.turn_id,
-        commit_id: input.commit_id,
-        instruction: input.text,
-      });
+      const origin = bindProductVoiceTaskOrigin(
+        input,
+        result,
+        recognized.session_id,
+        activationBinding.interaction_id
+      );
       voiceTaskOriginRef.current = origin;
       recognizedVoiceRef.current = null;
       return origin;

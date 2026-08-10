@@ -979,11 +979,41 @@ class AgentConversationRuntime:
             except BaseException:
                 # All caller-controlled conflicts are checked before the first
                 # CR write. Retain a claim after an unexpected partial CR
-                # failure so no other path can reuse that identity.
-                partial_write = response_ref is not None or any(
-                    item.turn_id == commit.turn_id
-                    for item in self._cr.snapshot().conversation.turns
+                # failure so no other path can reuse that identity.  A transport
+                # or wrapper may raise after the CR has durably reached its exact
+                # terminal result, so reconcile that authority before reporting
+                # RESULT_UNKNOWN.
+                snapshot = self._cr.snapshot().conversation
+                exact_turn = next(
+                    (
+                        item
+                        for item in snapshot.turns
+                        if item.turn_id == commit.turn_id
+                        and item.interaction_id == commit.interaction_id
+                        and item.commit_id == commit.commit_id
+                    ),
+                    None,
                 )
+                exact_response = next(
+                    (
+                        item
+                        for item in snapshot.responses
+                        if item.ref.response_id == response_id
+                        and item.ref.interaction_id == commit.interaction_id
+                        and item.turn_id == commit.turn_id
+                    ),
+                    None,
+                )
+                if (
+                    exact_turn is not None
+                    and exact_turn.state is TurnState.COMMITTED
+                    and exact_response is not None
+                    and exact_response.state is ResponseState.TERMINAL
+                    and exact_response.outcome is TerminalOutcome.COMPLETED
+                ):
+                    self._commits[commit.turn_id] = commit
+                    return exact_response.ref
+                partial_write = response_ref is not None or exact_turn is not None
                 if not partial_write:
                     self._release_product_identity(claim)
                     raise

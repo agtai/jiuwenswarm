@@ -14,6 +14,7 @@ function progressEvent(overrides = {}) {
   const taskId = overrides.task_id ?? 'task-1';
   const correlationId = overrides.correlation_id ?? 'correlation-1';
   const seq = overrides.seq ?? 7;
+  const attemptId = overrides.attempt_id ?? 'attempt-1';
   const sourceId = `source-${seq}`;
   const scope = {
     subject_id: overrides.subject_id ?? 'principal-1',
@@ -42,6 +43,15 @@ function progressEvent(overrides = {}) {
       stream_ref: { kind: 'task', id: taskId },
       scope: { ...scope },
       payload: { state: 'running' },
+      extensions: {
+        'jiuwenswarm.task_progress_return': {
+          persistent_event_seq: seq,
+          persistent_event_type: 'task.running',
+          persistent_event_producer: 'task_core',
+          persistent_attempt_id: attemptId,
+          persistent_source_event_id: null,
+        },
+      },
     },
     progress_event: {
       event_id: `progress-${seq}`,
@@ -66,6 +76,7 @@ test('parses an exact session/task/correlation/causation progress binding', () =
   assert.equal(parsed?.task_id, 'task-1');
   assert.equal(parsed?.state, 'running');
   assert.equal(parsed?.source_event.seq, 7);
+  assert.equal(parsed?.attempt_id, 'attempt-1');
   assert.equal(Object.isFrozen(parsed), true);
 });
 
@@ -99,6 +110,8 @@ test('rejects correlation, task, canonical scope, and causation mismatches', () 
     event => { delete event.source_event.scope.subject_id; },
     event => { event.source_event.scope.extra = 'unknown'; },
     event => { event.progress_event.causation_id = 'wrong-source'; },
+    event => { event.source_event.extensions['jiuwenswarm.task_progress_return'].persistent_event_seq = 8; },
+    event => { delete event.source_event.extensions['jiuwenswarm.task_progress_return'].persistent_attempt_id; },
   ]) {
     const event = progressEvent();
     mutate(event);
@@ -267,6 +280,55 @@ test('ACK owner rejects a success response without server-owned attempt identity
   }
 
   assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
+  owner.close();
+});
+
+test('ACK owner rejects a foreign server attempt without reporting it in request params', async () => {
+  const parsed = parseProductTextProgressEvent(progressEvent({ attempt_id: 'attempt-authoritative' }));
+  assert.notEqual(parsed, null);
+  const calls = [];
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 1000,
+    request: async (_method, params) => {
+      calls.push(params);
+      return {
+        ok: true,
+        result: {
+          status: 'acknowledged',
+          replayed: false,
+          attempt_id: 'attempt-foreign',
+          ...params,
+          acknowledgement: 'web_ui_text_consumed',
+        },
+      };
+    },
+  });
+  owner.setConnected(true);
+  owner.retain(parsed);
+  for (let attempt = 0; attempt < 50 && owner.status(parsed.delivery_id)?.status === 'pending'; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
+  assert.equal(calls.length, 1);
+  assert.equal('attempt_id' in calls[0], false);
+  owner.close();
+});
+
+test('ACK owner rejects a retained delivery whose source attempt changes', () => {
+  const first = parseProductTextProgressEvent(progressEvent({ attempt_id: 'attempt-1' }));
+  const foreign = parseProductTextProgressEvent(progressEvent({ attempt_id: 'attempt-foreign' }));
+  assert.notEqual(first, null);
+  assert.notEqual(foreign, null);
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    request: async () => { throw new Error('offline'); },
+  });
+
+  owner.retain(first);
+  assert.throws(() => owner.retain(foreign), /delivery_id binding conflict/);
+  assert.equal(owner.status(first.delivery_id)?.retained_deliveries, 1);
   owner.close();
 });
 

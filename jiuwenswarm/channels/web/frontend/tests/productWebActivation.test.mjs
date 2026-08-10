@@ -300,7 +300,11 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
       calls.push([method, params]);
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       if (method === PRODUCT_P2_SUBMIT_METHOD) {
-        return bound('round_accepted', { round_id: 'round-1' });
+        return bound('round_accepted', {
+          round_id: 'round-1',
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+        });
       }
       if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
         return bound('notification', { kind: 'agent.output' });
@@ -353,16 +357,17 @@ test('task-origin submit requires the exact canonical CR response binding', asyn
   const turn = {
     commit_id: 'commit-task-origin',
     turn_id: 'turn-task-origin',
-    response_id: 'response-task-origin',
     committed_at: '2026-08-07T10:00:00Z',
     text: 'create the task from this voice turn',
     dispatch_target: 'task',
     voice_commit_receipt: 'receipt-task-origin',
   };
+  const submitParams = [];
   const makeOwner = submitResult => new ProductWebP2ActivationOwner({
     enabled: true,
-    request: async method => {
+    request: async (method, params) => {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      submitParams.push(params);
       return {
         ok: true,
         result: {
@@ -385,8 +390,8 @@ test('task-origin submit requires the exact canonical CR response binding', asyn
 
   const conflictingResponse = makeOwner({
     response: {
-      interaction_id: binding.interaction_id,
-      response_id: 'transport-conflict',
+      interaction_id: 'interaction-foreign',
+      response_id: 'response-server-owned',
       response_generation: 0,
     },
   });
@@ -399,18 +404,74 @@ test('task-origin submit requires the exact canonical CR response binding', asyn
   const exact = makeOwner({
     response: {
       interaction_id: binding.interaction_id,
-      response_id: turn.response_id,
+      response_id: 'response-server-owned',
       response_generation: 0,
     },
   });
   await exact.start(binding);
   const accepted = await exact.submitText(turn);
-  assert.equal(accepted.response.response_id, turn.response_id);
+  assert.equal(accepted.response.response_id, 'response-server-owned');
   assert.equal(accepted.response.response_generation, 0);
+  assert.equal('response_id' in submitParams.at(-1), false);
   assert.notEqual(
     accepted.response.response_generation,
     accepted.activation_generation
   );
+});
+
+test('agent submit requires exact server-owned turn and commit binding', async () => {
+  const turn = {
+    commit_id: 'commit-agent-binding',
+    turn_id: 'turn-agent-binding',
+    response_id: 'response-agent-binding',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: 'bind the agent round to this committed turn',
+  };
+  const makeOwner = resultBinding => {
+    let submitCalls = 0;
+    const owner = new ProductWebP2ActivationOwner({
+      enabled: true,
+      request: async method => {
+        if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+        submitCalls += 1;
+        return response('round_accepted', {
+          round_id: 'round-agent-binding',
+          response: {
+            interaction_id: binding.interaction_id,
+            response_id: turn.response_id,
+            response_generation: 0,
+          },
+          ...resultBinding,
+        });
+      },
+    });
+    return { owner, submitCalls: () => submitCalls };
+  };
+
+  for (const resultBinding of [
+    {},
+    { turn_id: 'turn-foreign', commit_id: turn.commit_id },
+    { turn_id: turn.turn_id, commit_id: 'commit-foreign' },
+  ]) {
+    const { owner } = makeOwner(resultBinding);
+    await owner.start(binding);
+    await assert.rejects(
+      owner.submitText(turn),
+      /round_accepted response binding mismatch/
+    );
+  }
+
+  const exact = makeOwner({
+    turn_id: turn.turn_id,
+    commit_id: turn.commit_id,
+  });
+  await exact.owner.start(binding);
+  const accepted = await exact.owner.submitText(turn);
+  const replayed = await exact.owner.submitText(turn);
+  assert.deepEqual(replayed, accepted);
+  assert.equal(accepted.turn_id, turn.turn_id);
+  assert.equal(accepted.commit_id, turn.commit_id);
+  assert.equal(exact.submitCalls(), 1);
 });
 
 test('active stock Web owner replays exact P2 operations after response loss', async () => {
@@ -429,7 +490,11 @@ test('active stock Web owner replays exact P2 operations after response loss', a
       attempts.set(method, attempt);
       if (attempt === 1) throw webError(`${method} response lost`, 'REQUEST_TIMEOUT', true);
       if (method === PRODUCT_P2_SUBMIT_METHOD) {
-        return bound('round_accepted', { round_id: 'round-1' });
+        return bound('round_accepted', {
+          round_id: 'round-1',
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+        });
       }
       if (method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD) {
         return bound('notification', { kind: 'agent.output' });
@@ -481,7 +546,11 @@ test('unknown P2 submit locks semantic changes but exact retry stays stable', as
       calls.push([method, params, requestId]);
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       if (unavailable) throw webError('submit outcome unknown', 'UNAVAILABLE');
-      return response('round_accepted', { round_id: 'round-1' });
+      return response('round_accepted', {
+        round_id: 'round-1',
+        turn_id: params.turn_id,
+        commit_id: params.commit_id,
+      });
     },
   });
   await owner.start(binding);
@@ -519,7 +588,11 @@ test('unresolved presentation ACK blocks a second turn and preserves exact retry
       if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
         return response('presentation_acknowledged', { accepted: true });
       }
-      return response('round_accepted', { round_id: 'round-2' });
+      return response('round_accepted', {
+        round_id: 'round-2',
+        turn_id: params.turn_id,
+        commit_id: params.commit_id,
+      });
     },
   });
   await owner.start(binding);
@@ -558,10 +631,14 @@ test('completed Web submission capacity recovers and old replay fails closed', a
   let submissionCalls = 0;
   const owner = new ProductWebP2ActivationOwner({
     enabled: true,
-    request: async method => {
+    request: async (method, params) => {
       if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
       submissionCalls += 1;
-      return response('round_accepted', { round_id: `round-${submissionCalls}` });
+      return response('round_accepted', {
+        round_id: `round-${submissionCalls}`,
+        turn_id: params.turn_id,
+        commit_id: params.commit_id,
+      });
     },
   });
   await owner.start(binding);

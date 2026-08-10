@@ -437,6 +437,7 @@ class _RetainedProductOperation:
     p2_binding: P2InteractionBinding | None = None
     p3_binding: P3ConfirmationBinding | None = None
     operation_sequence: int | None = None
+    voice_commit_id: str | None = None
 
 
 def _formal_fact(segment: ProductSegment) -> ProductRouteFact:
@@ -656,6 +657,12 @@ class AgentServerProductCompositionRegistry:
         self._accepted_turn_commits_by_commit: dict[str, TurnCommit] = {}
         self._accepted_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._accepted_voice_commit_routes: dict[str, tuple[str, str]] = {}
+        self._unknown_turn_commits_by_commit: dict[str, TurnCommit] = {}
+        self._unknown_turn_commits_by_turn: dict[str, TurnCommit] = {}
+        self._unknown_voice_commit_routes: dict[str, tuple[str, str]] = {}
+        self._reserved_voice_origin_requests: dict[str, str] = {}
+        self._consumed_turn_commits_by_commit: dict[str, TurnCommit] = {}
+        self._consumed_turn_commits_by_turn: dict[str, TurnCommit] = {}
         self._p2_notification_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_ack_operations: dict[str, _RetainedProductOperation] = {}
         self._p2_barge_operations: dict[str, _RetainedProductOperation] = {}
@@ -1204,6 +1211,30 @@ class AgentServerProductCompositionRegistry:
                 self._advance_notification_replay_floor(entry)
             elif namespace is not None:
                 self._mark_evicted_product_request(namespace, retained_request_id)
+                if namespace == "p3.mutate" and entry.voice_commit_id is not None:
+                    commit = self._consumed_turn_commits_by_commit.get(
+                        entry.voice_commit_id
+                    )
+                    if commit is None:
+                        accepted = self._accepted_turn_commits_by_commit.get(
+                            entry.voice_commit_id
+                        )
+                        if (
+                            accepted is not None
+                            and self._reserved_voice_origin_requests.get(
+                                entry.voice_commit_id
+                            )
+                            == retained_request_id
+                        ):
+                            commit = accepted
+                    if commit is not None:
+                        self._retire_voice_origin_locked(commit)
+                elif namespace == "p2.submit" and entry.voice_commit_id is not None:
+                    unknown = self._unknown_turn_commits_by_commit.get(
+                        entry.voice_commit_id
+                    )
+                    if unknown is not None:
+                        self._retire_voice_origin_locked(unknown)
             return True
         return False
 
@@ -1237,6 +1268,26 @@ class AgentServerProductCompositionRegistry:
             raise FormalTaskViolation(
                 "PRODUCT_OPERATION_REPLAY_EXPIRED",
                 "the completed operation replay has expired",
+                ErrorCode.CONFLICT,
+            )
+
+    def _require_turn_commit_not_retired_locked(self, commit: TurnCommit) -> None:
+        if any(
+            all(
+                self._evicted_operation_replay_fence[index >> 3]
+                & (1 << (index & 7))
+                for index in self._evicted_product_request_indices(
+                    namespace, identity
+                )
+            )
+            for namespace, identity in (
+                ("voice.commit", commit.commit_id),
+                ("voice.turn", commit.turn_id),
+            )
+        ):
+            raise FormalTaskViolation(
+                "TURN_COMMIT_RETIRED",
+                "the bounded committed-turn identity has been retired",
                 ErrorCode.CONFLICT,
             )
 
@@ -1727,6 +1778,7 @@ class AgentServerProductCompositionRegistry:
         dispatch_target: str,
         route_key: tuple[str, str],
     ) -> P3RouteResult:
+        result_unknown = False
         try:
             common = {
                 "session_id": retained.binding.session_id,
@@ -1758,6 +1810,7 @@ class AgentServerProductCompositionRegistry:
                         commit=commit,
                     )
                 except asyncio.CancelledError:
+                    result_unknown = True
                     return _error_result(
                         request_id,
                         reason="TASK_ORIGIN_RESULT_UNKNOWN",
@@ -1768,7 +1821,9 @@ class AgentServerProductCompositionRegistry:
                         manifest=retained.manifest,
                     )
                 except Exception as exc:
-                    if getattr(exc, "code", None) is not ErrorCode.RESULT_UNKNOWN:
+                    if getattr(exc, "code", None) is ErrorCode.RESULT_UNKNOWN:
+                        result_unknown = True
+                    else:
                         self._commit_ledger.release_origin(
                             OriginRef(
                                 "committed_turn", commit.turn_id, commit.commit_id
@@ -1819,6 +1874,8 @@ class AgentServerProductCompositionRegistry:
                 {
                     "status": "round_accepted",
                     **common,
+                    "turn_id": commit.turn_id,
+                    "commit_id": commit.commit_id,
                     "request_id": handle.request_id,
                     "round_id": handle.round_id,
                     "response": {
@@ -1839,6 +1896,14 @@ class AgentServerProductCompositionRegistry:
             )
         finally:
             async with self._lock:
+                if (
+                    result_unknown
+                    and commit.commit_id not in self._accepted_turn_commits_by_commit
+                    and commit.commit_id not in self._consumed_turn_commits_by_commit
+                ):
+                    self._unknown_turn_commits_by_commit[commit.commit_id] = commit
+                    self._unknown_turn_commits_by_turn[commit.turn_id] = commit
+                    self._unknown_voice_commit_routes[commit.commit_id] = route_key
                 if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
                     self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
                 if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
@@ -1848,11 +1913,16 @@ class AgentServerProductCompositionRegistry:
     def _reserve_turn_commit_locked(
         self, commit: TurnCommit, route_key: tuple[str, str]
     ) -> None:
+        self._require_turn_commit_not_retired_locked(commit)
         existing = (
             self._pending_turn_commits_by_commit.get(commit.commit_id)
             or self._pending_turn_commits_by_turn.get(commit.turn_id)
             or self._accepted_turn_commits_by_commit.get(commit.commit_id)
             or self._accepted_turn_commits_by_turn.get(commit.turn_id)
+            or self._unknown_turn_commits_by_commit.get(commit.commit_id)
+            or self._unknown_turn_commits_by_turn.get(commit.turn_id)
+            or self._consumed_turn_commits_by_commit.get(commit.commit_id)
+            or self._consumed_turn_commits_by_turn.get(commit.turn_id)
         )
         if existing is not None:
             reason = (
@@ -1865,9 +1935,26 @@ class AgentServerProductCompositionRegistry:
                 "commit_id and turn_id are immutable and may submit only once",
                 ErrorCode.CONFLICT,
             )
-        retained_count = len(self._pending_turn_commits_by_commit) + len(
-            self._accepted_turn_commits_by_commit
+        retained_count = (
+            len(self._pending_turn_commits_by_commit)
+            + len(self._accepted_turn_commits_by_commit)
+            + len(self._unknown_turn_commits_by_commit)
+            + len(self._consumed_turn_commits_by_commit)
         )
+        while retained_count >= self._TURN_COMMIT_CAPACITY:
+            evicted = self._evict_completed_product_operation(
+                self._p3_mutation_operations, namespace="p3.mutate"
+            ) or self._evict_completed_product_operation(
+                self._p2_submit_operations, namespace="p2.submit"
+            )
+            if not evicted:
+                break
+            retained_count = (
+                len(self._pending_turn_commits_by_commit)
+                + len(self._accepted_turn_commits_by_commit)
+                + len(self._unknown_turn_commits_by_commit)
+                + len(self._consumed_turn_commits_by_commit)
+            )
         if retained_count >= self._TURN_COMMIT_CAPACITY:
             raise FormalTaskViolation(
                 "PRODUCT_TURN_COMMIT_LEDGER_FULL",
@@ -1880,7 +1967,28 @@ class AgentServerProductCompositionRegistry:
         ) + sum(
             retained_route == route_key
             for retained_route in self._accepted_voice_commit_routes.values()
+        ) + sum(
+            retained_route == route_key
+            for retained_route in self._unknown_voice_commit_routes.values()
         )
+        while retained_for_route >= self._TURN_COMMIT_CAPACITY_PER_ROUTE:
+            evicted = self._evict_completed_product_operation(
+                self._p3_mutation_operations, namespace="p3.mutate"
+            ) or self._evict_completed_product_operation(
+                self._p2_submit_operations, namespace="p2.submit"
+            )
+            if not evicted:
+                break
+            retained_for_route = sum(
+                retained_route == route_key
+                for retained_route in self._pending_voice_commit_routes.values()
+            ) + sum(
+                retained_route == route_key
+                for retained_route in self._accepted_voice_commit_routes.values()
+            ) + sum(
+                retained_route == route_key
+                for retained_route in self._unknown_voice_commit_routes.values()
+            )
         if retained_for_route >= self._TURN_COMMIT_CAPACITY_PER_ROUTE:
             raise FormalTaskViolation(
                 "PRODUCT_ROUTE_TURN_COMMIT_LEDGER_FULL",
@@ -1895,22 +2003,28 @@ class AgentServerProductCompositionRegistry:
         self._accepted_turn_commits_by_commit.pop(commit.commit_id, None)
         self._accepted_turn_commits_by_turn.pop(commit.turn_id, None)
         self._accepted_voice_commit_routes.pop(commit.commit_id, None)
+        self._unknown_turn_commits_by_commit.pop(commit.commit_id, None)
+        self._unknown_turn_commits_by_turn.pop(commit.turn_id, None)
+        self._unknown_voice_commit_routes.pop(commit.commit_id, None)
+        self._reserved_voice_origin_requests.pop(commit.commit_id, None)
+        self._consumed_turn_commits_by_commit.pop(commit.commit_id, None)
+        self._consumed_turn_commits_by_turn.pop(commit.turn_id, None)
         self._commit_ledger.release_origin(
             OriginRef("committed_turn", commit.turn_id, commit.commit_id),
             commit.scope,
         )
 
-    def _release_voice_origins_for_route_locked(
-        self, route_key: tuple[str, str]
-    ) -> None:
-        for commit_id, retained_route in tuple(
-            self._accepted_voice_commit_routes.items()
-        ):
-            if retained_route != route_key:
-                continue
-            commit = self._accepted_turn_commits_by_commit.get(commit_id)
-            if commit is not None:
-                self._release_voice_origin_locked(commit)
+    def _retire_voice_origin_locked(self, commit: TurnCommit) -> None:
+        self._mark_evicted_product_request("voice.commit", commit.commit_id)
+        self._mark_evicted_product_request("voice.turn", commit.turn_id)
+        self._release_voice_origin_locked(commit)
+
+    def _consume_voice_origin_locked(self, commit: TurnCommit) -> None:
+        self._accepted_turn_commits_by_commit.pop(commit.commit_id, None)
+        self._accepted_turn_commits_by_turn.pop(commit.turn_id, None)
+        self._accepted_voice_commit_routes.pop(commit.commit_id, None)
+        self._consumed_turn_commits_by_commit[commit.commit_id] = commit
+        self._consumed_turn_commits_by_turn[commit.turn_id] = commit
 
     @staticmethod
     def _gateway_voice_provenance(
@@ -2023,7 +2137,6 @@ class AgentServerProductCompositionRegistry:
             parsed = self._parse_p2_route_binding(params, session_id=session_id)
             commit_id = _required_text(params.get("commit_id"), "commit_id")
             turn_id = _required_text(params.get("turn_id"), "turn_id")
-            response_id = _required_text(params.get("response_id"), "response_id")
             committed_at = _required_text(
                 params.get("committed_at"), "committed_at", maximum=64
             )
@@ -2036,6 +2149,16 @@ class AgentServerProductCompositionRegistry:
                     "product committed input must target Agent or Task exactly once",
                     ErrorCode.INVALID_ARGUMENT,
                 )
+            if dispatch_target == "task":
+                if "response_id" in params:
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        "Task-bound input cannot declare a canonical response_id",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                response_id = f"response-{secrets.token_urlsafe(24)}"
+            else:
+                response_id = _required_text(params.get("response_id"), "response_id")
             voice_claim = params.get("gateway_voice_claim")
             if dispatch_target == "task" and voice_claim is None:
                 raise FormalTaskViolation(
@@ -2154,6 +2277,9 @@ class AgentServerProductCompositionRegistry:
                         fingerprint,
                         task,
                         p2_binding=retained.binding,
+                        voice_commit_id=(
+                            commit.commit_id if dispatch_target == "task" else None
+                        ),
                     )
                     self._p2_submit_operations[request_id] = existing
             return await asyncio.shield(existing.task)
@@ -2890,7 +3016,6 @@ class AgentServerProductCompositionRegistry:
                 if authority.lease is not None:
                     await authority.lease.close()
             key = (routed_session, interaction_id)
-            self._release_voice_origins_for_route_locked(key)
             self._p2_routes.pop(key, None)
             self._retain_closed_p2_route(
                 key,
@@ -3014,7 +3139,7 @@ class AgentServerProductCompositionRegistry:
             )
         async with self._p3_operation_lock:
             try:
-                await self._require_current_voice_origin_route(
+                await self._require_voice_origin(
                     forwarded=forwarded,
                     session_id=session_id,
                 )
@@ -3278,7 +3403,7 @@ class AgentServerProductCompositionRegistry:
                     async with self._lock:
                         commit = self._accepted_turn_commits_by_commit.get(commit_id)
                         if commit is not None and commit.turn_id == turn_id:
-                            self._release_voice_origin_locked(commit)
+                            self._consume_voice_origin_locked(commit)
                 return _success_result(
                     request_id,
                     {
@@ -3326,7 +3451,7 @@ class AgentServerProductCompositionRegistry:
                 ErrorCode.UNAVAILABLE,
             )
         async with self._p3_operation_lock:
-            await self._require_current_voice_origin_route(
+            await self._require_voice_origin(
                 forwarded=forwarded,
                 session_id=session_id,
             )
@@ -3351,7 +3476,7 @@ class AgentServerProductCompositionRegistry:
             )
             return prepared.binding
 
-    async def _require_current_voice_origin_route(
+    async def _require_voice_origin(
         self, *, forwarded: Mapping[str, object], session_id: str
     ) -> None:
         if forwarded.get("source") != "voice":
@@ -3366,16 +3491,50 @@ class AgentServerProductCompositionRegistry:
             commit = self._accepted_turn_commits_by_commit.get(commit_id)
             if (
                 self._accepted_voice_commit_routes.get(commit_id) != route_key
-                or self._p2_routes.get(route_key) is None
                 or commit is None
                 or commit.turn_id != turn_id
                 or commit.interaction_id != interaction_id
             ):
                 raise FormalTaskViolation(
                     "VOICE_TASK_ROUTE_MISMATCH",
-                    "voice task origin must belong to the exact active P2 interaction",
+                    "voice task origin must belong to the exact retained P2 interaction",
                     ErrorCode.PERMISSION_DENIED,
                 )
+
+    def _reserve_voice_origin_mutation_locked(
+        self,
+        *,
+        operation: str,
+        forwarded: Mapping[str, object],
+        session_id: str,
+        request_id: str,
+    ) -> str | None:
+        """Atomically bind one retained voice origin to one create request."""
+
+        if operation != "task.create" or forwarded.get("source") != "voice":
+            return None
+        interaction_id = _required_text(
+            forwarded.get("interaction_id"), "interaction_id"
+        )
+        commit_id = _required_text(forwarded.get("commit_id"), "commit_id")
+        turn_id = _required_text(forwarded.get("turn_id"), "turn_id")
+        route_key = (session_id, interaction_id)
+        commit = self._accepted_turn_commits_by_commit.get(commit_id)
+        reserved_request = self._reserved_voice_origin_requests.get(commit_id)
+        if (
+            self._accepted_voice_commit_routes.get(commit_id) != route_key
+            or commit is None
+            or commit.turn_id != turn_id
+            or commit.interaction_id != interaction_id
+            or (reserved_request is not None and reserved_request != request_id)
+        ):
+            raise FormalTaskViolation(
+                "VOICE_TASK_ROUTE_MISMATCH",
+                "voice task origin is not available for this exact create request",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        self._reserved_voice_origin_requests[commit_id] = request_id
+        return commit_id
 
     async def handle_p3_mutation(
         self,
@@ -3459,6 +3618,12 @@ class AgentServerProductCompositionRegistry:
                                 "bounded mutation replay ledger is full",
                                 ErrorCode.UNAVAILABLE,
                             )
+                        voice_commit_id = self._reserve_voice_origin_mutation_locked(
+                            operation=operation,
+                            forwarded=forwarded,
+                            session_id=routed_session,
+                            request_id=request_id,
+                        )
                         fault_plan = self._settings.p3_stale_fault_plan
                         inject_stale = (
                             fault_plan is not None
@@ -3483,7 +3648,10 @@ class AgentServerProductCompositionRegistry:
                                 name=f"live-voice-product-p3-mutation:{request_id}",
                             )
                         existing = _RetainedProductOperation(
-                            fingerprint, task, p3_binding=p3_binding
+                            fingerprint,
+                            task,
+                            p3_binding=p3_binding,
+                            voice_commit_id=voice_commit_id,
                         )
                         self._p3_mutation_operations[request_id] = existing
             assert existing is not None
@@ -4514,7 +4682,6 @@ class AgentServerProductCompositionRegistry:
                     logger.exception("[LiveVoiceProduct] P2 disconnect cleanup pending")
                     continue
                 self._p2_routes.pop(p2_key, None)
-                self._release_voice_origins_for_route_locked(p2_key)
                 self._retain_closed_p2_route(
                     p2_key,
                     _ClosedP2Route(
@@ -4565,6 +4732,14 @@ class AgentServerProductCompositionRegistry:
             await asyncio.shield(
                 asyncio.gather(*retained_tasks, return_exceptions=True)
             )
+        async with self._lock:
+            retained_voice_origins = tuple(
+                self._accepted_turn_commits_by_commit.values()
+            ) + tuple(
+                self._unknown_turn_commits_by_commit.values()
+            ) + tuple(self._consumed_turn_commits_by_commit.values())
+            for commit in retained_voice_origins:
+                self._release_voice_origin_locked(commit)
 
 
 def create_product_composition_registry_from_environment(

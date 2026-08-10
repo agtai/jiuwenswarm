@@ -601,7 +601,7 @@ export class ProductWebP2ActivationOwner {
   async submitText(input: {
     commit_id: string;
     turn_id: string;
-    response_id: string;
+    response_id?: string;
     committed_at: string;
     text: string;
     dispatch_target?: 'agent' | 'task';
@@ -616,11 +616,20 @@ export class ProductWebP2ActivationOwner {
     if (dispatchTarget === 'task' && !input.voice_commit_receipt) {
       throw new Error('voice task origin requires a formal speech receipt');
     }
+    if (dispatchTarget === 'task' && input.response_id !== undefined) {
+      throw new Error('voice task origin cannot declare a canonical response_id');
+    }
+    if (dispatchTarget === 'agent' && input.response_id === undefined) {
+      throw new Error('response_id is required');
+    }
+    const responseId = dispatchTarget === 'agent'
+      ? requiredText(input.response_id!, 'response_id')
+      : null;
     const params = {
       ...binding,
       commit_id: requiredText(input.commit_id, 'commit_id'),
       turn_id: requiredText(input.turn_id, 'turn_id'),
-      response_id: requiredText(input.response_id, 'response_id'),
+      ...(responseId === null ? {} : { response_id: responseId }),
       committed_at: requiredText(input.committed_at, 'committed_at'),
       text: requiredContent(input.text, 'text'),
       dispatch_target: dispatchTarget,
@@ -649,13 +658,18 @@ export class ProductWebP2ActivationOwner {
     promise = this.request(PRODUCT_P2_SUBMIT_METHOD, params, entry.requestId)
       .then(value => {
         const result = requireP2BoundOperationResult(value, dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted', binding);
+        if (
+          result.turn_id !== params.turn_id ||
+          result.commit_id !== params.commit_id
+        ) {
+          throw new Error(`product P2 ${result.status as string} response binding mismatch`);
+        }
         if (dispatchTarget === 'task') {
           const response = objectValue(result.response);
           if (
-            result.turn_id !== params.turn_id ||
-            result.commit_id !== params.commit_id ||
             response?.interaction_id !== binding.interaction_id ||
-            response.response_id !== params.response_id ||
+            typeof response.response_id !== 'string' ||
+            !response.response_id.trim() ||
             !Number.isSafeInteger(response.response_generation) ||
             (response.response_generation as number) < 0
           ) {

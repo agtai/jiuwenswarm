@@ -956,10 +956,12 @@ def test_d0_executor_proof_rejects_nonterminal_or_legacy_attempts() -> None:
 
 
 def test_p2_observation_requires_exact_semantic_result_and_real_ids() -> None:
-    params = {"turn_id": "turn-1"}
+    params = {"turn_id": "turn-1", "commit_id": "commit-1"}
     payload = {
         "result": {
             "status": "round_accepted",
+            "turn_id": "turn-1",
+            "commit_id": "commit-1",
             "round_id": "round-1",
             "response": {
                 "interaction_id": "interaction-1",
@@ -974,12 +976,44 @@ def test_p2_observation_requires_exact_semantic_result_and_real_ids() -> None:
         "round-1",
     )
     assert product_result_observation_ok(
-        "live_voice.composition.p2.submit", result_ok=True, payload=payload
+        "live_voice.composition.p2.submit",
+        result_ok=True,
+        payload=payload,
+        params=params,
+    )
+    missing_binding = {
+        "result": {
+            "status": "round_accepted",
+            "round_id": "round-missing",
+            "response": payload["result"]["response"],
+        }
+    }
+    assert product_result_execution_binding(params, missing_binding) == (
+        None,
+        "round-missing",
+    )
+    assert not product_result_observation_ok(
+        "live_voice.composition.p2.submit",
+        result_ok=True,
+        payload=missing_binding,
+        params=params,
+    )
+    assert not product_result_observation_ok(
+        "live_voice.composition.p2.submit",
+        result_ok=True,
+        payload={
+            "result": {
+                **payload["result"],
+                "turn_id": "turn-foreign",
+            }
+        },
+        params=params,
     )
     assert not product_result_observation_ok(
         "live_voice.composition.p2.submit",
         result_ok=True,
         payload={"result": {"status": "round_accepted"}},
+        params=params,
     )
     for event_type, expected in (
         ("chat.tool_call", "tool_call"),
@@ -1004,10 +1038,15 @@ def test_p2_observation_requires_exact_semantic_result_and_real_ids() -> None:
         )
     assert product_result_voice_task_origin(
         {
+            "request_id": "request-voice-1",
+            "ok": True,
             "result": {
                 "status": "task_origin_accepted",
+                "session_id": "session-voice-1",
                 "correlation_id": "correlation-voice-1",
                 "interaction_id": "interaction-voice-1",
+                "activation_id": "activation-voice-1",
+                "activation_generation": 1,
                 "turn_id": "turn-voice-1",
                 "commit_id": "commit-voice-1",
                 "response": {
@@ -1015,7 +1054,8 @@ def test_p2_observation_requires_exact_semantic_result_and_real_ids() -> None:
                     "response_id": "response-voice-1",
                     "response_generation": 0,
                 },
-            }
+            },
+            "error": None,
         }
     )
     assert not product_result_voice_task_origin(

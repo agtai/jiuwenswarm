@@ -11,6 +11,8 @@ import time
 from datetime import UTC, datetime
 from typing import Final
 
+from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
+
 from jiuwenswarm.server.live_voice.observability import (
     LIVE_VOICE_CONTRACT_VERSION,
     OBSERVABILITY_SCHEMA_VERSION,
@@ -402,23 +404,19 @@ def product_result_response_binding(
 
 
 def product_result_execution_binding(
-    params: object, payload: object
+    _params: object, payload: object
 ) -> tuple[str | None, str | None]:
-    """Project only real turn/round identities from closed product results."""
+    """Project execution identity only from the closed server result."""
 
-    containers: list[object] = [params, payload]
-    if isinstance(payload, dict):
-        containers.append(payload.get("result"))
-    turn_id: str | None = None
-    round_id: str | None = None
-    for container in containers:
-        if not isinstance(container, dict):
-            continue
-        if turn_id is None and isinstance(container.get("turn_id"), str):
-            turn_id = container["turn_id"]
-        if round_id is None and isinstance(container.get("round_id"), str):
-            round_id = container["round_id"]
-    return turn_id, round_id
+    if not isinstance(payload, dict):
+        return None, None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None, None
+    return (
+        _non_empty_identity(result.get("turn_id")),
+        _non_empty_identity(result.get("round_id")),
+    )
 
 
 def product_result_agent_output_kind(payload: object) -> str | None:
@@ -565,7 +563,11 @@ def product_result_task_event_facts(payload: object) -> tuple[dict[str, object],
 
 
 def product_result_observation_ok(
-    operation: str, *, result_ok: bool, payload: object
+    operation: str,
+    *,
+    result_ok: bool,
+    payload: object,
+    params: object = None,
 ) -> bool:
     """Reject successful envelopes that do not prove the claimed product effect."""
 
@@ -583,11 +585,18 @@ def product_result_observation_ok(
     if operation == "live_voice.composition.p2.close":
         return result.get("status") == "closed"
     if operation == "live_voice.composition.p2.submit":
+        round_turn_id = _non_empty_identity(result.get("turn_id"))
+        round_commit_id = _non_empty_identity(result.get("commit_id"))
         return bool(
             (
                 result.get("status") == "round_accepted"
-                and isinstance(result.get("round_id"), str)
+                and _non_empty_identity(result.get("round_id")) is not None
+                and round_turn_id is not None
+                and round_commit_id is not None
                 and isinstance(result.get("response"), dict)
+                and isinstance(params, dict)
+                and params.get("turn_id") == round_turn_id
+                and params.get("commit_id") == round_commit_id
             )
             or product_result_voice_task_origin(payload)
         )
@@ -633,10 +642,18 @@ def product_result_voice_task_origin(payload: object) -> bool:
     result = payload.get("result")
     response = result.get("response") if isinstance(result, dict) else None
     return bool(
-        isinstance(result, dict)
+        payload.get("ok") is True
+        and "error" in payload
+        and payload.get("error") is None
+        and _non_empty_identity(payload.get("request_id")) is not None
+        and isinstance(result, dict)
         and result.get("status") == "task_origin_accepted"
+        and _non_empty_identity(result.get("session_id")) is not None
         and _non_empty_identity(result.get("correlation_id")) is not None
         and _non_empty_identity(result.get("interaction_id")) is not None
+        and _non_empty_identity(result.get("activation_id")) is not None
+        and type(result.get("activation_generation")) is int
+        and result["activation_generation"] > 0
         and _non_empty_identity(result.get("turn_id")) is not None
         and _non_empty_identity(result.get("commit_id")) is not None
         and isinstance(response, dict)
@@ -648,7 +665,11 @@ def product_result_voice_task_origin(payload: object) -> bool:
 
 
 def product_result_voice_task_origin_binding(
-    params: object, payload: object
+    params: object,
+    payload: object,
+    *,
+    request_id: str,
+    session_id: str,
 ) -> tuple[str, str, str, int, str, str] | None:
     """Return the canonical CR Task-origin binding after exact claim matching.
 
@@ -661,13 +682,19 @@ def product_result_voice_task_origin_binding(
     result = payload["result"]
     response = result["response"]
     claims = {
+        "session_id": result["session_id"],
         "correlation_id": result["correlation_id"],
         "interaction_id": result["interaction_id"],
-        "response_id": response["response_id"],
+        "activation_id": result["activation_id"],
+        "activation_generation": result["activation_generation"],
         "turn_id": result["turn_id"],
         "commit_id": result["commit_id"],
     }
-    if any(params.get(key) != value for key, value in claims.items()):
+    if (
+        payload.get("request_id") != request_id
+        or result["session_id"] != session_id
+        or any(params.get(key) != value for key, value in claims.items())
+    ):
         return None
     return (
         result["correlation_id"],
@@ -680,11 +707,22 @@ def product_result_voice_task_origin_binding(
 
 
 def product_result_progress_ack_binding(
-    params: object, payload: object
+    params: object,
+    payload: object,
+    *,
+    request_id: str,
+    session_id: str,
 ) -> tuple[str, str, str] | None:
     """Return authority-owned progress identity after exact request matching."""
 
     if not isinstance(params, dict) or not isinstance(payload, dict):
+        return None
+    if (
+        payload.get("ok") is not True
+        or "error" not in payload
+        or payload.get("error") is not None
+        or payload.get("request_id") != request_id
+    ):
         return None
     result = payload.get("result")
     if (
@@ -696,13 +734,63 @@ def product_result_progress_ack_binding(
     task_id = _non_empty_identity(result.get("task_id"))
     attempt_id = _non_empty_identity(result.get("attempt_id"))
     correlation_id = _non_empty_identity(result.get("correlation_id"))
+    result_claims = {
+        "session_id": result.get("session_id"),
+        "task_id": result.get("task_id"),
+        "correlation_id": result.get("correlation_id"),
+        "origin_id": result.get("origin_id"),
+        "generation_id": result.get("generation_id"),
+        "generation": result.get("generation"),
+        "delivery_id": result.get("delivery_id"),
+        "source_event_id": result.get("source_event_id"),
+        "progress_event_id": result.get("progress_event_id"),
+        "seq": result.get("seq"),
+        "evidence_id": result.get("evidence_id"),
+    }
+    required_text_claims = (
+        "session_id",
+        "origin_id",
+        "generation_id",
+        "delivery_id",
+        "source_event_id",
+        "progress_event_id",
+        "evidence_id",
+    )
     if (
         task_id is None
         or attempt_id is None
         or correlation_id is None
-        or params.get("task_id") != task_id
-        or params.get("correlation_id") != correlation_id
+        or any(
+            _non_empty_identity(result.get(key)) is None
+            for key in required_text_claims
+        )
+        or type(result.get("replayed")) is not bool
+        or type(result.get("generation")) is not int
+        or result["generation"] <= 0
+        or type(result.get("seq")) is not int
+        or result["seq"] < 0
+        or any(params.get(key) != value for key, value in result_claims.items())
+        or result.get("session_id") != session_id
     ):
+        return None
+    canonical_delivery_id = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "session_id": result["session_id"],
+                "task_id": task_id,
+                "attempt_id": attempt_id,
+                "correlation_id": correlation_id,
+                "origin_id": result["origin_id"],
+                "generation_id": result["generation_id"],
+                "generation": result["generation"],
+                "source_event_id": result["source_event_id"],
+                "progress_event_id": result["progress_event_id"],
+                "seq": result["seq"],
+                "evidence_id": result["evidence_id"],
+            }
+        )
+    ).hexdigest()
+    if result.get("delivery_id") != canonical_delivery_id:
         return None
     return correlation_id, task_id, attempt_id
 

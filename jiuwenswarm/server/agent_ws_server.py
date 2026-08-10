@@ -8612,7 +8612,6 @@ class AgentWebSocketServer:
                     product_result_task_id,
                     product_result_task_event_facts,
                     product_result_voice_task_bridge,
-                    product_result_voice_task_origin,
                 )
 
                 if query_binding is None:
@@ -8635,6 +8634,7 @@ class AgentWebSocketServer:
                             operation,
                             result_ok=result_ok,
                             payload=payload,
+                            params=formal_params,
                         ),
                         task_id=task_id,
                         attempt_id=attempt_id,
@@ -8650,7 +8650,11 @@ class AgentWebSocketServer:
                         voice_task_bridge=product_result_voice_task_bridge(
                             formal_params, payload
                         ),
-                        voice_task_origin=product_result_voice_task_origin(payload),
+                        # Voice Task-origin authority exists only on the exact
+                        # product P2 submit path, where request/session/
+                        # activation claims are bound below. A P3 route result
+                        # can never mint that observation from payload shape.
+                        voice_task_origin=False,
                         task_operation=(
                             formal_params.get("operation")
                             if isinstance(formal_params.get("operation"), str)
@@ -8812,13 +8816,28 @@ class AgentWebSocketServer:
                     and isinstance(result_payload, dict)
                     and result_payload.get("status") == "task_origin_accepted"
                 )
+                is_agent_round = bool(
+                    observed_operation == "live_voice.composition.p2.submit"
+                    and isinstance(result_payload, dict)
+                    and result_payload.get("status") == "round_accepted"
+                )
                 voice_task_origin_binding = (
-                    product_result_voice_task_origin_binding(params, payload)
+                    product_result_voice_task_origin_binding(
+                        params,
+                        payload,
+                        request_id=request.request_id,
+                        session_id=request.session_id,
+                    )
                     if is_voice_task_origin
                     else None
                 )
                 progress_ack_binding = (
-                    product_result_progress_ack_binding(params, payload)
+                    product_result_progress_ack_binding(
+                        params,
+                        payload,
+                        request_id=request.request_id,
+                        session_id=request.session_id,
+                    )
                     if observed_operation
                     == "live_voice.composition.p3.progress.ack"
                     else None
@@ -8827,6 +8846,7 @@ class AgentWebSocketServer:
                     observed_operation,
                     result_ok=result_ok,
                     payload=payload,
+                    params=params,
                 )
                 if is_voice_task_origin:
                     task_id = None
@@ -8853,6 +8873,12 @@ class AgentWebSocketServer:
                         observation_ok = False
                     else:
                         correlation_id, task_id, attempt_id = progress_ack_binding
+                elif is_agent_round and not observation_ok:
+                    interaction_id = None
+                    response_id = None
+                    response_generation = None
+                    turn_id = None
+                    round_id = None
                 try:
                     await observer.observe_route(
                         session_id=request.session_id,

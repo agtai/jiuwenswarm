@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.common.schema.live_voice_contract_v2 import canonical_json_bytes
 from jiuwenswarm.common.schema.message import ReqMethod
 from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _FORWARD_NO_LOCAL_HANDLER_METHODS,
@@ -98,6 +100,9 @@ class _ProductRegistry:
         p3_text_enabled: bool = True,
         stop_failures: int = 0,
         progress_attempt_id: str | None = "attempt-1",
+        progress_result_overrides: dict[str, object] | None = None,
+        progress_minimal_result: bool = False,
+        progress_payload_request_id: str | None = None,
     ) -> None:
         self.p2_enabled = True
         self.p3_text_enabled = p3_text_enabled
@@ -106,6 +111,9 @@ class _ProductRegistry:
         self.stop_calls = 0
         self.stop_failures = stop_failures
         self.progress_attempt_id = progress_attempt_id
+        self.progress_result_overrides = progress_result_overrides or {}
+        self.progress_minimal_result = progress_minimal_result
+        self.progress_payload_request_id = progress_payload_request_id
 
     async def handle_p3_query(self, **kwargs):
         self.calls.append(("query", kwargs))
@@ -156,21 +164,42 @@ class _ProductRegistry:
 
     async def handle_p3_progress_ack(self, **kwargs):
         self.calls.append(("progress.ack", kwargs))
+        params = kwargs["params"]
+        result = {
+            "status": "acknowledged",
+            "replayed": False,
+            "acknowledgement": "web_ui_text_consumed",
+            "session_id": params.get("session_id"),
+            "task_id": params.get("task_id"),
+            "correlation_id": params.get("correlation_id"),
+            "origin_id": params.get("origin_id"),
+            "generation_id": params.get("generation_id"),
+            "generation": params.get("generation"),
+            "delivery_id": params.get("delivery_id"),
+            "source_event_id": params.get("source_event_id"),
+            "progress_event_id": params.get("progress_event_id"),
+            "seq": params.get("seq"),
+            "evidence_id": params.get("evidence_id"),
+        }
+        if self.progress_minimal_result:
+            result = {
+                "status": "acknowledged",
+                "acknowledgement": "web_ui_text_consumed",
+                "task_id": params.get("task_id"),
+                "correlation_id": params.get("correlation_id"),
+            }
+        if self.progress_attempt_id is not None:
+            result["attempt_id"] = self.progress_attempt_id
+        result.update(self.progress_result_overrides)
         return P3RouteResult(
             True,
             {
+                "request_id": (
+                    self.progress_payload_request_id or kwargs["request_id"]
+                ),
                 "ok": True,
-                "result": {
-                    "status": "acknowledged",
-                    "acknowledgement": "web_ui_text_consumed",
-                    "task_id": kwargs["params"].get("task_id"),
-                    **(
-                        {"attempt_id": self.progress_attempt_id}
-                        if self.progress_attempt_id is not None
-                        else {}
-                    ),
-                    "correlation_id": kwargs["params"].get("correlation_id"),
-                },
+                "result": result,
+                "error": None,
             },
         )
 
@@ -192,28 +221,94 @@ class _QueuedQueryRegistry(_ProductRegistry):
 
 
 class _TaskOriginRegistry(_ProductRegistry):
-    def __init__(self, *, response_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        response_id: str,
+        response_interaction_id: str = "interaction-origin",
+        payload_request_id: str = "request-origin",
+        payload_ok: bool = True,
+        payload_error: object = None,
+        result_session_id: str = "session-1",
+        result_activation_id: str = "activation-origin",
+        result_activation_generation: int = 99,
+    ) -> None:
         super().__init__()
         self._response_id = response_id
+        self._response_interaction_id = response_interaction_id
+        self._payload_request_id = payload_request_id
+        self._payload_ok = payload_ok
+        self._payload_error = payload_error
+        self._result_session_id = result_session_id
+        self._result_activation_id = result_activation_id
+        self._result_activation_generation = result_activation_generation
 
     async def handle_p2_submit(self, **kwargs):
         self.calls.append(("p2.submit", kwargs))
         return P3RouteResult(
             True,
             {
-                "ok": True,
+                "request_id": self._payload_request_id,
+                "ok": self._payload_ok,
                 "result": {
                     "status": "task_origin_accepted",
+                    "session_id": self._result_session_id,
                     "correlation_id": "correlation-origin",
                     "interaction_id": "interaction-origin",
+                    "activation_id": self._result_activation_id,
+                    "activation_generation": self._result_activation_generation,
                     "turn_id": "turn-origin",
                     "commit_id": "commit-origin",
                     "response": {
-                        "interaction_id": "interaction-origin",
+                        "interaction_id": self._response_interaction_id,
                         "response_id": self._response_id,
                         "response_generation": 3,
                     },
                 },
+                "error": self._payload_error,
+            },
+        )
+
+
+class _RoundAcceptedRegistry(_ProductRegistry):
+    def __init__(
+        self,
+        *,
+        turn_id: str | None = "turn-round",
+        commit_id: str | None = "commit-round",
+    ) -> None:
+        super().__init__()
+        self._turn_id = turn_id
+        self._commit_id = commit_id
+
+    async def handle_p2_submit(self, **kwargs):
+        self.calls.append(("p2.submit", kwargs))
+        params = kwargs["params"]
+        result = {
+            "status": "round_accepted",
+            "session_id": params["session_id"],
+            "correlation_id": params["correlation_id"],
+            "interaction_id": params["interaction_id"],
+            "activation_id": params["activation_id"],
+            "activation_generation": params["activation_generation"],
+            "round_id": "round-round",
+            "response": {
+                "interaction_id": params["interaction_id"],
+                "response_id": params["response_id"],
+                "response_generation": 0,
+            },
+        }
+        if self._turn_id is not None:
+            result["turn_id"] = self._turn_id
+        if self._commit_id is not None:
+            result["commit_id"] = self._commit_id
+        return P3RouteResult(
+            True,
+            {
+                "request_id": kwargs["request_id"],
+                "ok": True,
+                "result": result,
+                "error": None,
             },
         )
 
@@ -846,15 +941,57 @@ async def test_product_business_methods_dispatch_only_exact_rpc_context(
     assert json.loads(ws.sent[0])["status"] == "succeeded"
 
 
+def _progress_delivery_id(attempt_id: str) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "session_id": "session-1",
+                "task_id": "task-1",
+                "attempt_id": attempt_id,
+                "correlation_id": "correlation-task",
+                "origin_id": "web-surface-1",
+                "generation_id": "web-generation-1",
+                "generation": 1,
+                "source_event_id": "source-7",
+                "progress_event_id": "progress-7",
+                "seq": 7,
+                "evidence_id": "evidence-7",
+            }
+        )
+    ).hexdigest()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("server_attempt_id", "expected_result_ok"),
-    [("attempt-1", True), (None, False)],
+    (
+        "server_attempt_id",
+        "result_overrides",
+        "minimal_result",
+        "payload_request_id",
+        "expected_result_ok",
+    ),
+    [
+        ("attempt-1", {}, False, None, True),
+        (None, {}, False, None, False),
+        ("attempt-foreign", {}, False, None, False),
+        ("attempt-1", {"delivery_id": "delivery-old"}, False, None, False),
+        ("attempt-1", {}, True, None, False),
+        ("attempt-1", {}, False, "request-progress-ack-old", False),
+    ],
 )
 async def test_product_progress_ack_preserves_exact_rpc_context(
-    server_attempt_id: str | None, expected_result_ok: bool
+    server_attempt_id: str | None,
+    result_overrides: dict[str, object],
+    minimal_result: bool,
+    payload_request_id: str | None,
+    expected_result_ok: bool,
 ) -> None:
-    registry = _ProductRegistry(progress_attempt_id=server_attempt_id)
+    registry = _ProductRegistry(
+        progress_attempt_id=server_attempt_id,
+        progress_result_overrides=result_overrides,
+        progress_minimal_result=minimal_result,
+        progress_payload_request_id=payload_request_id,
+    )
     server = _server(object())
     server._live_voice_product_composition = registry
     observer = _Observer()
@@ -870,7 +1007,14 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
             "session_id": "session-1",
             "task_id": "task-1",
             "correlation_id": "correlation-task",
-            "delivery_id": "delivery-1",
+            "origin_id": "web-surface-1",
+            "generation_id": "web-generation-1",
+            "generation": 1,
+            "delivery_id": _progress_delivery_id("attempt-1"),
+            "source_event_id": "source-7",
+            "progress_event_id": "progress-7",
+            "seq": 7,
+            "evidence_id": "evidence-7",
             "mode": "agent",
         },
     )
@@ -886,7 +1030,14 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
                     "session_id": "session-1",
                     "task_id": "task-1",
                     "correlation_id": "correlation-task",
-                    "delivery_id": "delivery-1",
+                    "origin_id": "web-surface-1",
+                    "generation_id": "web-generation-1",
+                    "generation": 1,
+                    "delivery_id": _progress_delivery_id("attempt-1"),
+                    "source_event_id": "source-7",
+                    "progress_event_id": "progress-7",
+                    "seq": 7,
+                    "evidence_id": "evidence-7",
                 },
                 "request_id": "request-progress-ack",
                 "session_id": "session-1",
@@ -911,18 +1062,79 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("canonical_response_id", "expected_result_ok", "expected_response_id"),
+    (
+        "canonical_response_id",
+        "response_interaction_id",
+        "registry_overrides",
+        "expected_result_ok",
+        "expected_response_id",
+    ),
     [
-        ("response-origin", True, "response-origin"),
-        ("response-conflict", False, None),
+        ("response-origin", "interaction-origin", {}, True, "response-origin"),
+        (
+            "response-server-other",
+            "interaction-origin",
+            {},
+            True,
+            "response-server-other",
+        ),
+        ("response-origin", "interaction-foreign", {}, False, None),
+        (
+            "response-origin",
+            "interaction-origin",
+            {"payload_request_id": "request-origin-old"},
+            False,
+            None,
+        ),
+        (
+            "response-origin",
+            "interaction-origin",
+            {"result_session_id": "session-old"},
+            False,
+            None,
+        ),
+        (
+            "response-origin",
+            "interaction-origin",
+            {"result_activation_id": "activation-old"},
+            False,
+            None,
+        ),
+        (
+            "response-origin",
+            "interaction-origin",
+            {"result_activation_generation": 98},
+            False,
+            None,
+        ),
+        (
+            "response-origin",
+            "interaction-origin",
+            {"payload_ok": False},
+            False,
+            None,
+        ),
+        (
+            "response-origin",
+            "interaction-origin",
+            {"payload_error": {"code": "STALE"}},
+            False,
+            None,
+        ),
     ],
 )
 async def test_product_voice_origin_projects_only_exact_canonical_response_binding(
     canonical_response_id: str,
+    response_interaction_id: str,
+    registry_overrides: dict[str, object],
     expected_result_ok: bool,
     expected_response_id: str | None,
 ) -> None:
-    registry = _TaskOriginRegistry(response_id=canonical_response_id)
+    registry = _TaskOriginRegistry(
+        response_id=canonical_response_id,
+        response_interaction_id=response_interaction_id,
+        **registry_overrides,
+    )
     server = _server(object())
     server._live_voice_product_composition = registry
     observer = _Observer()
@@ -938,8 +1150,8 @@ async def test_product_voice_origin_projects_only_exact_canonical_response_bindi
             "session_id": "session-1",
             "correlation_id": "correlation-origin",
             "interaction_id": "interaction-origin",
+            "activation_id": "activation-origin",
             "activation_generation": 99,
-            "response_id": "response-origin",
             "turn_id": "turn-origin",
             "commit_id": "commit-origin",
             "dispatch_target": "task",
@@ -962,6 +1174,63 @@ async def test_product_voice_origin_projects_only_exact_canonical_response_bindi
     assert projected["turn_id"] == ("turn-origin" if expected_result_ok else None)
     assert projected["task_id"] is None
     assert projected["attempt_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server_turn_id", "server_commit_id", "expected_ok"),
+    [
+        ("turn-round", "commit-round", True),
+        (None, "commit-round", False),
+        ("turn-round", None, False),
+        ("turn-foreign", "commit-round", False),
+        ("turn-round", "commit-foreign", False),
+    ],
+)
+async def test_product_round_observation_requires_exact_server_execution_binding(
+    server_turn_id: str | None,
+    server_commit_id: str | None,
+    expected_ok: bool,
+) -> None:
+    registry = _RoundAcceptedRegistry(
+        turn_id=server_turn_id,
+        commit_id=server_commit_id,
+    )
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    observer = _Observer()
+    server._live_voice_w2_observability = observer
+    request = AgentRequest(
+        request_id="request-round",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "correlation_id": "correlation-round",
+            "interaction_id": "interaction-round",
+            "activation_id": "activation-round",
+            "activation_generation": 1,
+            "turn_id": "turn-round",
+            "commit_id": "commit-round",
+            "response_id": "response-round",
+            "dispatch_target": "agent",
+        },
+    )
+
+    for _ in range(2):
+        await server._handle_live_voice_product_request(
+            _WebSocket(), request, asyncio.Lock()
+        )
+
+    assert len(observer.calls) == 2
+    for projected in observer.calls:
+        assert projected["result_ok"] is expected_ok
+        assert projected["turn_id"] == ("turn-round" if expected_ok else None)
+        assert projected["round_id"] == ("round-round" if expected_ok else None)
+        assert projected["voice_task_origin"] is False
+    assert len(registry.calls) == 2
 
 
 @pytest.mark.asyncio

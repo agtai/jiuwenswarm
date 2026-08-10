@@ -10,6 +10,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
+  bindProductVoiceTaskOrigin,
   classifyProductP2Notification,
   extractWebErrorReason,
   inspectProductP3RetryCandidate,
@@ -223,6 +224,15 @@ test('route panel renders only a validated authenticated text progress fact', as
         assurance: 'authenticated',
       },
       payload: { state: 'running' },
+      extensions: {
+        'jiuwenswarm.task_progress_return': {
+          persistent_event_seq: 11,
+          persistent_event_type: 'task.running',
+          persistent_event_producer: 'task_core',
+          persistent_attempt_id: 'attempt-product-1',
+          persistent_source_event_id: null,
+        },
+      },
     },
     progress_event: {
       event_id: 'progress-product-1',
@@ -711,6 +721,8 @@ test('voice Task origin is exact-session and exact-committed-text only', () => {
     interaction_id: 'interaction-voice',
     turn_id: 'turn-voice',
     commit_id: 'commit-voice',
+    response_id: 'response-server-voice',
+    response_generation: 4,
     instruction: 'Create the bounded voice task.',
   });
   assert.deepEqual(resolveProductTaskCreateOrigin('Create the bounded voice task.', 'session-voice', origin), {
@@ -721,6 +733,37 @@ test('voice Task origin is exact-session and exact-committed-text only', () => {
   });
   assert.deepEqual(resolveProductTaskCreateOrigin('Changed text.', 'session-voice', origin), { source: 'structured' });
   assert.deepEqual(resolveProductTaskCreateOrigin('Create the bounded voice task.', 'session-other', origin), { source: 'structured' });
+});
+
+test('voice Task origin adopts only the canonical CR response returned by the server', () => {
+  const origin = bindProductVoiceTaskOrigin(
+    {
+      commit_id: 'commit-voice',
+      turn_id: 'turn-voice',
+      committed_at: '2026-08-10T00:00:00Z',
+      text: 'Create the bounded voice task.',
+      dispatch_target: 'task',
+      voice_commit_receipt: 'receipt-voice',
+      critical_confirmation: true,
+    },
+    {
+      status: 'task_origin_accepted',
+      turn_id: 'turn-voice',
+      commit_id: 'commit-voice',
+      activation_generation: 99,
+      response: {
+        interaction_id: 'interaction-voice',
+        response_id: 'response-server-voice',
+        response_generation: 4,
+      },
+    },
+    'session-voice',
+    'interaction-voice'
+  );
+
+  assert.equal(origin.response_id, 'response-server-voice');
+  assert.equal(origin.response_generation, 4);
+  assert.notEqual(origin.response_generation, 99);
 });
 
 test('fresh task.create rebinds the panel progress owner to its exact task', async () => {
