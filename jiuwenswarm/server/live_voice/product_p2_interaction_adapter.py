@@ -636,6 +636,41 @@ class P2ActivationLease:
                 )
             return outcome
 
+    async def accept_task_origin(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+    ) -> ResponseRef:
+        """Bind a Task-bound commit to one canonical CR response without dispatch."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            accept = getattr(self._runtime, "accept_task_origin", None)
+            if not callable(accept):
+                raise _violation(
+                    "PRODUCT_TASK_ORIGIN_UNAVAILABLE",
+                    "retained runtime has no canonical Task-origin response owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await accept(
+                request_id=request_id,
+                response_id=response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+            )
+            if not isinstance(outcome, ResponseRef):
+                raise _violation(
+                    "PRODUCT_TASK_ORIGIN_UNAVAILABLE",
+                    "retained runtime returned no canonical Task-origin response",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
     async def next_notification(
         self, binding: P2InteractionBinding
     ) -> AgentConversationNotification:

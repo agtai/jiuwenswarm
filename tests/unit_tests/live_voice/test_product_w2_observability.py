@@ -1006,6 +1006,24 @@ def test_p2_observation_requires_exact_semantic_result_and_real_ids() -> None:
         {
             "result": {
                 "status": "task_origin_accepted",
+                "correlation_id": "correlation-voice-1",
+                "interaction_id": "interaction-voice-1",
+                "turn_id": "turn-voice-1",
+                "commit_id": "commit-voice-1",
+                "response": {
+                    "interaction_id": "interaction-voice-1",
+                    "response_id": "response-voice-1",
+                    "response_generation": 0,
+                },
+            }
+        }
+    )
+    assert not product_result_voice_task_origin(
+        {
+            "result": {
+                "status": "task_origin_accepted",
+                "correlation_id": "correlation-voice-1",
+                "interaction_id": "interaction-voice-1",
                 "turn_id": "turn-voice-1",
                 "commit_id": "commit-voice-1",
             }
@@ -1207,13 +1225,33 @@ async def test_origin_barge_and_ui_progress_emit_only_exact_product_facts(
     owner = create_product_w2_observability_owner_from_environment()
     assert owner is not None
 
-    assert await owner.observe_route(
+    assert not await owner.observe_route(
         session_id="session-w2",
         correlation_id="correlation-exact",
         request_id="origin-request",
         operation="live_voice.composition.p2.submit",
         result_ok=True,
         interaction_id="interaction-exact",
+        turn_id="turn-exact",
+        voice_task_origin=True,
+    )
+    assert not await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-exact",
+        request_id="progress-request-missing-attempt",
+        operation="live_voice.composition.p3.progress.ack",
+        result_ok=True,
+        task_id="task-exact",
+    )
+    assert await owner.observe_route(
+        session_id="session-w2",
+        correlation_id="correlation-exact",
+        request_id="origin-request-exact",
+        operation="live_voice.composition.p2.submit",
+        result_ok=True,
+        interaction_id="interaction-exact",
+        response_id="response-origin-exact",
+        response_generation=0,
         turn_id="turn-exact",
         voice_task_origin=True,
     )
@@ -1234,6 +1272,7 @@ async def test_origin_barge_and_ui_progress_emit_only_exact_product_facts(
         operation="live_voice.composition.p3.progress.ack",
         result_ok=True,
         task_id="task-exact",
+        attempt_id="attempt-exact",
     )
     await owner.close()
 
@@ -1249,3 +1288,6 @@ async def test_origin_barge_and_ui_progress_emit_only_exact_product_facts(
     ]
     assert records[2]["event_name"] == "cancel.acknowledged"
     assert records[2]["cancel_scope"] == "playback.stop"
+    for record in records[3:]:
+        assert record["binding"]["task_id"] == "task-exact"
+        assert record["binding"]["attempt_id"] == "attempt-exact"

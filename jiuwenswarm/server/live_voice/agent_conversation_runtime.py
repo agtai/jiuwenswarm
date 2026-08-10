@@ -920,6 +920,79 @@ class AgentConversationRuntime:
 
         return self._unwrap_admission(await asyncio.shield(outcome))
 
+    async def accept_task_origin(
+        self,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+    ) -> ResponseRef:
+        """Commit one Task-bound turn and return its canonical CR response fence.
+
+        This path deliberately creates no Harness round, Agent dispatch,
+        presentation unit, history write, Tool call, or Task mutation.  The
+        Conversation Runtime remains the sole response-generation authority.
+        """
+
+        self._require_admission()
+        self._validate_turn_commit(commit)
+        HarnessRoundBinding(
+            request_id=request_id,
+            response_id=response_id,
+            correlation_id=correlation_id,
+            commit=commit,
+        )
+        async with self._identity_claim_lock:
+            snapshot = self._cr.snapshot().conversation
+            if any(item.turn_id == commit.turn_id for item in snapshot.turns) or any(
+                item.ref.response_id == response_id for item in snapshot.responses
+            ):
+                raise AgentConversationRuntimeViolation(
+                    "TASK_ORIGIN_IDENTITY_CONFLICT",
+                    "Task-origin turn or response identity is already owned",
+                    ErrorCode.CONFLICT,
+                )
+            claim = self._claim_product_identity(commit, request_id=request_id)
+            response_ref: ResponseRef | None = None
+            try:
+                await self._cr.start_turn(commit.interaction_id, commit.turn_id)
+                accepted, _event = await self._cr.commit_turn(commit)
+                if accepted is not True:
+                    raise AgentConversationRuntimeViolation(
+                        "TASK_ORIGIN_COMMIT_REJECTED",
+                        "Task-origin turn was not accepted exactly once",
+                        ErrorCode.CONFLICT,
+                    )
+                response_ref, _event = await self._cr.accept_response(
+                    commit.turn_id,
+                    response_id,
+                    history_policy=HistorySurfacePolicy.TEXT,
+                )
+                await self._cr.transition_response(
+                    response_ref,
+                    ResponseState.TERMINAL,
+                    outcome=TerminalOutcome.COMPLETED,
+                )
+                self._commits[commit.turn_id] = commit
+                return response_ref
+            except BaseException:
+                # All caller-controlled conflicts are checked before the first
+                # CR write. Retain a claim after an unexpected partial CR
+                # failure so no other path can reuse that identity.
+                partial_write = response_ref is not None or any(
+                    item.turn_id == commit.turn_id
+                    for item in self._cr.snapshot().conversation.turns
+                )
+                if not partial_write:
+                    self._release_product_identity(claim)
+                    raise
+                raise AgentConversationRuntimeViolation(
+                    "TASK_ORIGIN_RESULT_UNKNOWN",
+                    "Task-origin CR write did not reach a provable terminal result",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+
     def _register_committed_turn_submission(
         self,
         *,

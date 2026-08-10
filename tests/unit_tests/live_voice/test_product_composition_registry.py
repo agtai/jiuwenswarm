@@ -478,6 +478,32 @@ def _p2_params(**changes: object) -> dict[str, object]:
     return params
 
 
+def _p2_task_origin_params(*, stem: str, text: str) -> dict[str, object]:
+    commit_id = f"commit-{stem}"
+    turn_id = f"turn-{stem}"
+    return _p2_params(
+        commit_id=commit_id,
+        turn_id=turn_id,
+        response_id=f"response-{stem}",
+        committed_at=NOW,
+        text=text,
+        dispatch_target="task",
+        gateway_voice_claim={
+            "kind": "formal_speech_recognition",
+            "speech_operation_id": f"speech-operation-{stem}",
+            "capture_id": f"capture-{stem}",
+            "capture_generation": 1,
+            "session_id": "session-product",
+            "correlation_id": "correlation-p2",
+            "interaction_id": "interaction-1",
+            "turn_id": turn_id,
+            "commit_id": commit_id,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "critical_policy": "eligible",
+        },
+    )
+
+
 def _progress_params(**changes: object) -> dict[str, object]:
     params: dict[str, object] = {
         "auth_token": "trusted-token",
@@ -2244,28 +2270,11 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
         )
 
     voice_text = "create the bounded voice task"
+    voice_origin_params = _p2_task_origin_params(
+        stem="voice-origin", text=voice_text
+    )
     submitted = await registry.handle_p2_submit(
-        params=_p2_params(
-            commit_id="commit-voice-origin",
-            turn_id="turn-voice-origin",
-            response_id="response-voice-origin",
-            committed_at=NOW,
-            text=voice_text,
-            dispatch_target="task",
-            gateway_voice_claim={
-                "kind": "formal_speech_recognition",
-                "speech_operation_id": "speech-operation-1",
-                "capture_id": "capture-1",
-                "capture_generation": 1,
-                "session_id": "session-product",
-                "correlation_id": "correlation-p2",
-                "interaction_id": "interaction-1",
-                "turn_id": "turn-voice-origin",
-                "commit_id": "commit-voice-origin",
-                "text_sha256": hashlib.sha256(voice_text.encode("utf-8")).hexdigest(),
-                "critical_policy": "eligible",
-            },
-        ),
+        params=voice_origin_params,
         request_id="request-submit-voice-origin",
         session_id="session-product",
         channel_id="web",
@@ -2274,6 +2283,33 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
     assert cast(dict, submitted.payload["result"])["status"] == (
         "task_origin_accepted"
     )
+    response = cast(dict, submitted.payload["result"])["response"]
+    assert response == {
+        "interaction_id": "interaction-1",
+        "response_id": "response-voice-origin",
+        "response_generation": 0,
+    }
+    runtime = registry._p2_routes[
+        ("session-product", "interaction-1")
+    ].activation_lease._runtime
+    response_records = runtime.snapshot().conversation.conversation.responses
+    canonical = next(
+        item for item in response_records if item.ref.response_id == "response-voice-origin"
+    )
+    assert canonical.ref.response_generation == response["response_generation"]
+    assert canonical.state.value == "terminal"
+    assert canonical.outcome.value == "completed"
+    replayed = await registry.handle_p2_submit(
+        params=voice_origin_params,
+        request_id="request-submit-voice-origin",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert replayed.payload == submitted.payload
+    assert sum(
+        item.ref.response_id == "response-voice-origin"
+        for item in runtime.snapshot().conversation.conversation.responses
+    ) == 1
     accepted = ledger.require_origin(
         OriginRef("committed_turn", "turn-voice-origin", "commit-voice-origin"),
         SCOPE,
@@ -2301,6 +2337,229 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
             OriginRef("committed_turn", "turn-agent-chat", "commit-agent-chat"),
             SCOPE,
         )
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_task_origin_caller_cancellation_retains_exact_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(
+        tmp_path, commit_ledger=ledger
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-task-origin-cancel",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    original_accept = route.activation_lease.accept_task_origin
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_accept(*args: object, **kwargs: object):
+        entered.set()
+        await release.wait()
+        return await original_accept(*args, **kwargs)
+
+    monkeypatch.setattr(route.activation_lease, "accept_task_origin", blocked_accept)
+    text = "retain the exact voice task origin"
+    params = _p2_task_origin_params(stem="task-origin-cancel", text=text)
+    caller = asyncio.create_task(
+        registry.handle_p2_submit(
+            params=params,
+            request_id="request-submit-task-origin-cancel",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    release.set()
+    retained = registry._p2_submit_operations[
+        "request-submit-task-origin-cancel"
+    ]
+    first = await asyncio.wait_for(asyncio.shield(retained.task), timeout=1)
+    replayed = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-task-origin-cancel",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert first.ok is True
+    assert replayed.payload == first.payload
+    assert manager.agent.calls == 0
+    assert ledger.require_origin(
+        OriginRef(
+            "committed_turn",
+            "turn-task-origin-cancel",
+            "commit-task-origin-cancel",
+        ),
+        SCOPE,
+    ).text == text
+    runtime = route.activation_lease._runtime
+    assert sum(
+        item.ref.response_id == "response-task-origin-cancel"
+        for item in runtime.snapshot().conversation.conversation.responses
+    ) == 1
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_task_origin_canonical_accept_wins_concurrent_route_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(
+        tmp_path, commit_ledger=ledger
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-task-origin-close-race",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+    original_accept = runtime.accept_task_origin
+    canonical_accepted = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_after_canonical_accept(**kwargs: object):
+        response_ref = await original_accept(**kwargs)
+        canonical_accepted.set()
+        await release.wait()
+        return response_ref
+
+    monkeypatch.setattr(runtime, "accept_task_origin", blocked_after_canonical_accept)
+    text = "canonical acceptance must win the close race"
+    params = _p2_task_origin_params(stem="task-origin-close-race", text=text)
+    submit = asyncio.create_task(
+        registry.handle_p2_submit(
+            params=params,
+            request_id="request-submit-task-origin-close-race",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(canonical_accepted.wait(), timeout=1)
+    close = asyncio.create_task(
+        registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-close-task-origin-close-race",
+            session_id="session-product",
+        )
+    )
+
+    async def wait_for_closing() -> None:
+        while route.activation_lease.snapshot().state.value != "closing":
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_closing(), timeout=1)
+    release.set()
+    submitted, closed = await asyncio.gather(submit, close)
+    replayed = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-task-origin-close-race",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert submitted.ok is True
+    assert cast(dict, submitted.payload["result"])["status"] == (
+        "task_origin_accepted"
+    )
+    assert closed.ok is True
+    assert replayed.payload == submitted.payload
+    assert manager.agent.calls == 0
+    assert "commit-task-origin-close-race" not in (
+        registry._accepted_turn_commits_by_commit
+    )
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-task-origin-close-race",
+                "commit-task-origin-close-race",
+            ),
+            SCOPE,
+        )
+
+
+@pytest.mark.asyncio
+async def test_p2_task_origin_partial_cr_failure_is_stable_result_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(
+        tmp_path, commit_ledger=ledger
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-task-origin-unknown",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    runtime = route.activation_lease._runtime
+
+    async def fail_terminal_transition(*_args: object, **_kwargs: object):
+        raise RuntimeError("injected transition loss")
+
+    monkeypatch.setattr(
+        runtime._cr, "transition_response", fail_terminal_transition
+    )
+    text = "retain unknown after partial canonical write"
+    params = _p2_task_origin_params(stem="task-origin-unknown", text=text)
+    first = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-task-origin-unknown",
+        session_id="session-product",
+        channel_id="web",
+    )
+    replayed = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-task-origin-unknown",
+        session_id="session-product",
+        channel_id="web",
+    )
+    second_request = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-task-origin-unknown-second",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert first.ok is False
+    assert cast(dict, first.payload["error"])["code"] == (
+        ErrorCode.RESULT_UNKNOWN.value
+    )
+    assert replayed.payload == first.payload
+    assert second_request.ok is False
+    assert cast(dict, second_request.payload["error"])["reason"] == (
+        "TURN_COMMIT_ALREADY_SUBMITTED"
+    )
+    assert manager.agent.calls == 0
+    assert ledger.require_origin(
+        OriginRef(
+            "committed_turn",
+            "turn-task-origin-unknown",
+            "commit-task-origin-unknown",
+        ),
+        SCOPE,
+    ).text == text
+    assert sum(
+        item.ref.response_id == "response-task-origin-unknown"
+        for item in runtime.snapshot().conversation.conversation.responses
+    ) == 1
     await registry.close_active_routes()
 
 

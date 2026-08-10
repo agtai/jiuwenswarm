@@ -649,6 +649,19 @@ export class ProductWebP2ActivationOwner {
     promise = this.request(PRODUCT_P2_SUBMIT_METHOD, params, entry.requestId)
       .then(value => {
         const result = requireP2BoundOperationResult(value, dispatchTarget === 'task' ? 'task_origin_accepted' : 'round_accepted', binding);
+        if (dispatchTarget === 'task') {
+          const response = objectValue(result.response);
+          if (
+            result.turn_id !== params.turn_id ||
+            result.commit_id !== params.commit_id ||
+            response?.interaction_id !== binding.interaction_id ||
+            response.response_id !== params.response_id ||
+            !Number.isSafeInteger(response.response_generation) ||
+            (response.response_generation as number) < 0
+          ) {
+            throw new Error('product P2 task_origin_accepted response binding mismatch');
+          }
+        }
         entry.result = result;
         return result;
       })

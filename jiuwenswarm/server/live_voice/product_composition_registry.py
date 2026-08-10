@@ -1749,14 +1749,47 @@ class AgentServerProductCompositionRegistry:
                             "a committed turn cannot be submitted under a second request",
                             ErrorCode.CONFLICT,
                         )
-                    self._accepted_turn_commits_by_commit[commit.commit_id] = commit
-                    self._accepted_turn_commits_by_turn[commit.turn_id] = commit
-                    self._accepted_voice_commit_routes[commit.commit_id] = route_key
-                    if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
-                        self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
-                    if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
-                        self._pending_turn_commits_by_turn.pop(commit.turn_id, None)
-                    self._pending_voice_commit_routes.pop(commit.commit_id, None)
+                try:
+                    response_ref = await retained.activation_lease.accept_task_origin(
+                        retained.binding,
+                        request_id=request_id,
+                        response_id=response_id,
+                        correlation_id=correlation_id,
+                        commit=commit,
+                    )
+                except asyncio.CancelledError:
+                    return _error_result(
+                        request_id,
+                        reason="TASK_ORIGIN_RESULT_UNKNOWN",
+                        code=ErrorCode.RESULT_UNKNOWN,
+                        message=(
+                            "Task-origin acceptance was interrupted after admission"
+                        ),
+                        manifest=retained.manifest,
+                    )
+                except Exception as exc:
+                    if getattr(exc, "code", None) is not ErrorCode.RESULT_UNKNOWN:
+                        self._commit_ledger.release_origin(
+                            OriginRef(
+                                "committed_turn", commit.turn_id, commit.commit_id
+                            ),
+                            commit.scope,
+                        )
+                    raise
+                # accept_task_origin linearizes under the lease operation lock.
+                # Once it returns, a concurrent close may be waiting for that
+                # lock but cannot have closed the runtime. Complete these
+                # event-loop-owned maps synchronously, before yielding, so close
+                # observes and retires the accepted origin normally instead of
+                # rewriting an irreversible canonical success as route-closed.
+                self._accepted_turn_commits_by_commit[commit.commit_id] = commit
+                self._accepted_turn_commits_by_turn[commit.turn_id] = commit
+                self._accepted_voice_commit_routes[commit.commit_id] = route_key
+                if self._pending_turn_commits_by_commit.get(commit.commit_id) is commit:
+                    self._pending_turn_commits_by_commit.pop(commit.commit_id, None)
+                if self._pending_turn_commits_by_turn.get(commit.turn_id) is commit:
+                    self._pending_turn_commits_by_turn.pop(commit.turn_id, None)
+                self._pending_voice_commit_routes.pop(commit.commit_id, None)
                 return _success_result(
                     request_id,
                     {
@@ -1764,6 +1797,11 @@ class AgentServerProductCompositionRegistry:
                         **common,
                         "turn_id": commit.turn_id,
                         "commit_id": commit.commit_id,
+                        "response": {
+                            "interaction_id": response_ref.interaction_id,
+                            "response_id": response_ref.response_id,
+                            "response_generation": response_ref.response_generation,
+                        },
                     },
                     retained.manifest,
                 )

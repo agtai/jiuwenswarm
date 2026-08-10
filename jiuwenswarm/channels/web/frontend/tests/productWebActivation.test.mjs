@@ -349,6 +349,70 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
 });
 
+test('task-origin submit requires the exact canonical CR response binding', async () => {
+  const turn = {
+    commit_id: 'commit-task-origin',
+    turn_id: 'turn-task-origin',
+    response_id: 'response-task-origin',
+    committed_at: '2026-08-07T10:00:00Z',
+    text: 'create the task from this voice turn',
+    dispatch_target: 'task',
+    voice_commit_receipt: 'receipt-task-origin',
+  };
+  const makeOwner = submitResult => new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async method => {
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      return {
+        ok: true,
+        result: {
+          status: 'task_origin_accepted',
+          ...binding,
+          turn_id: turn.turn_id,
+          commit_id: turn.commit_id,
+          ...submitResult,
+        },
+      };
+    },
+  });
+
+  const missingResponse = makeOwner({});
+  await missingResponse.start(binding);
+  await assert.rejects(
+    missingResponse.submitText(turn),
+    /task_origin_accepted response binding mismatch/
+  );
+
+  const conflictingResponse = makeOwner({
+    response: {
+      interaction_id: binding.interaction_id,
+      response_id: 'transport-conflict',
+      response_generation: 0,
+    },
+  });
+  await conflictingResponse.start(binding);
+  await assert.rejects(
+    conflictingResponse.submitText(turn),
+    /task_origin_accepted response binding mismatch/
+  );
+
+  const exact = makeOwner({
+    response: {
+      interaction_id: binding.interaction_id,
+      response_id: turn.response_id,
+      response_generation: 0,
+    },
+  });
+  await exact.start(binding);
+  const accepted = await exact.submitText(turn);
+  assert.equal(accepted.response.response_id, turn.response_id);
+  assert.equal(accepted.response.response_generation, 0);
+  assert.notEqual(
+    accepted.response.response_generation,
+    accepted.activation_generation
+  );
+});
+
 test('active stock Web owner replays exact P2 operations after response loss', async () => {
   const calls = [];
   const attempts = new Map();

@@ -185,6 +185,7 @@ test('retained ACK owner retries the identical delivery after response loss', as
         result: {
           status: 'acknowledged',
           replayed: true,
+          attempt_id: 'attempt-1',
           ...params,
           acknowledgement: 'web_ui_text_consumed',
         },
@@ -221,6 +222,7 @@ test('ACK owner retains every delivery and retries them on reconnect', async () 
         result: {
           status: 'acknowledged',
           replayed: false,
+          attempt_id: 'attempt-1',
           ...params,
           acknowledgement: 'web_ui_text_consumed',
         },
@@ -239,6 +241,32 @@ test('ACK owner retains every delivery and retries them on reconnect', async () 
   assert.deepEqual(calls.sort(), [first.delivery_id, second.delivery_id].sort());
   assert.equal(owner.status(first.delivery_id)?.status, 'acknowledged');
   assert.equal(owner.status(second.delivery_id)?.status, 'acknowledged');
+  owner.close();
+});
+
+test('ACK owner rejects a success response without server-owned attempt identity', async () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+  const owner = new ProductTextProgressAckOwner({
+    enabled: true,
+    retry_delay_ms: 1000,
+    request: async (_method, params) => ({
+      ok: true,
+      result: {
+        status: 'acknowledged',
+        replayed: false,
+        ...params,
+        acknowledgement: 'web_ui_text_consumed',
+      },
+    }),
+  });
+  owner.setConnected(true);
+  owner.retain(parsed);
+  for (let attempt = 0; attempt < 50 && owner.status(parsed.delivery_id)?.status === 'pending'; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.equal(owner.status(parsed.delivery_id)?.status, 'failed');
   owner.close();
 });
 
@@ -283,6 +311,7 @@ test('closing an ACK owner fences a late request completion callback', async () 
     result: {
       status: 'acknowledged',
       replayed: false,
+      attempt_id: 'attempt-1',
       ...createProductTextProgressDeliveryAck(parsed),
       acknowledgement: 'web_ui_text_consumed',
     },

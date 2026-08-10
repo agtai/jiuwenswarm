@@ -318,6 +318,7 @@ function requireAckResponse(value: unknown, ack: ProductTextProgressDeliveryAck)
   if (
     payload?.ok !== true ||
     result?.status !== 'acknowledged' ||
+    !textValue(result.attempt_id) ||
     result.session_id !== ack.session_id ||
     result.delivery_id !== ack.delivery_id ||
     result.task_id !== ack.task_id ||

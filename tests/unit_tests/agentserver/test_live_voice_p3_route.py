@@ -92,13 +92,20 @@ class _LifecycleComposition:
 
 
 class _ProductRegistry:
-    def __init__(self, *, p3_text_enabled: bool = True, stop_failures: int = 0) -> None:
+    def __init__(
+        self,
+        *,
+        p3_text_enabled: bool = True,
+        stop_failures: int = 0,
+        progress_attempt_id: str | None = "attempt-1",
+    ) -> None:
         self.p2_enabled = True
         self.p3_text_enabled = p3_text_enabled
         self.p3_mutation_enabled = True
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.stop_calls = 0
         self.stop_failures = stop_failures
+        self.progress_attempt_id = progress_attempt_id
 
     async def handle_p3_query(self, **kwargs):
         self.calls.append(("query", kwargs))
@@ -157,7 +164,11 @@ class _ProductRegistry:
                     "status": "acknowledged",
                     "acknowledgement": "web_ui_text_consumed",
                     "task_id": kwargs["params"].get("task_id"),
-                    "attempt_id": "attempt-1",
+                    **(
+                        {"attempt_id": self.progress_attempt_id}
+                        if self.progress_attempt_id is not None
+                        else {}
+                    ),
                     "correlation_id": kwargs["params"].get("correlation_id"),
                 },
             },
@@ -178,6 +189,33 @@ class _QueuedQueryRegistry(_ProductRegistry):
     async def handle_p3_query(self, **kwargs):
         self.calls.append(("query", kwargs))
         return P3RouteResult(True, self._payloads.pop(0))
+
+
+class _TaskOriginRegistry(_ProductRegistry):
+    def __init__(self, *, response_id: str) -> None:
+        super().__init__()
+        self._response_id = response_id
+
+    async def handle_p2_submit(self, **kwargs):
+        self.calls.append(("p2.submit", kwargs))
+        return P3RouteResult(
+            True,
+            {
+                "ok": True,
+                "result": {
+                    "status": "task_origin_accepted",
+                    "correlation_id": "correlation-origin",
+                    "interaction_id": "interaction-origin",
+                    "turn_id": "turn-origin",
+                    "commit_id": "commit-origin",
+                    "response": {
+                        "interaction_id": "interaction-origin",
+                        "response_id": self._response_id,
+                        "response_generation": 3,
+                    },
+                },
+            },
+        )
 
 
 class _StaleMutationRegistry(_ProductRegistry):
@@ -809,8 +847,14 @@ async def test_product_business_methods_dispatch_only_exact_rpc_context(
 
 
 @pytest.mark.asyncio
-async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
-    registry = _ProductRegistry()
+@pytest.mark.parametrize(
+    ("server_attempt_id", "expected_result_ok"),
+    [("attempt-1", True), (None, False)],
+)
+async def test_product_progress_ack_preserves_exact_rpc_context(
+    server_attempt_id: str | None, expected_result_ok: bool
+) -> None:
+    registry = _ProductRegistry(progress_attempt_id=server_attempt_id)
     server = _server(object())
     server._live_voice_product_composition = registry
     observer = _Observer()
@@ -855,10 +899,69 @@ async def test_product_progress_ack_preserves_exact_rpc_context() -> None:
     assert observer.calls[0]["operation"] == (
         "live_voice.composition.p3.progress.ack"
     )
-    assert observer.calls[0]["task_id"] == "task-1"
-    assert observer.calls[0]["attempt_id"] == "attempt-1"
+    assert observer.calls[0]["task_id"] == (
+        "task-1" if expected_result_ok else None
+    )
+    assert observer.calls[0]["attempt_id"] == (
+        "attempt-1" if expected_result_ok else None
+    )
     assert observer.calls[0]["correlation_id"] == "correlation-task"
-    assert observer.calls[0]["result_ok"] is True
+    assert observer.calls[0]["result_ok"] is expected_result_ok
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("canonical_response_id", "expected_result_ok", "expected_response_id"),
+    [
+        ("response-origin", True, "response-origin"),
+        ("response-conflict", False, None),
+    ],
+)
+async def test_product_voice_origin_projects_only_exact_canonical_response_binding(
+    canonical_response_id: str,
+    expected_result_ok: bool,
+    expected_response_id: str | None,
+) -> None:
+    registry = _TaskOriginRegistry(response_id=canonical_response_id)
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    observer = _Observer()
+    server._live_voice_w2_observability = observer
+    ws = _WebSocket()
+    request = AgentRequest(
+        request_id="request-origin",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "correlation_id": "correlation-origin",
+            "interaction_id": "interaction-origin",
+            "activation_generation": 99,
+            "response_id": "response-origin",
+            "turn_id": "turn-origin",
+            "commit_id": "commit-origin",
+            "dispatch_target": "task",
+        },
+    )
+
+    await server._handle_live_voice_product_request(ws, request, asyncio.Lock())
+
+    assert json.loads(ws.sent[0])["status"] == "succeeded"
+    assert len(observer.calls) == 1
+    projected = observer.calls[0]
+    assert projected["result_ok"] is expected_result_ok
+    assert projected["voice_task_origin"] is expected_result_ok
+    assert projected["correlation_id"] == "correlation-origin"
+    assert projected["interaction_id"] == (
+        "interaction-origin" if expected_result_ok else None
+    )
+    assert projected["response_id"] == expected_response_id
+    assert projected["response_generation"] == (3 if expected_result_ok else None)
+    assert projected["turn_id"] == ("turn-origin" if expected_result_ok else None)
+    assert projected["task_id"] is None
+    assert projected["attempt_id"] is None
 
 
 @pytest.mark.asyncio

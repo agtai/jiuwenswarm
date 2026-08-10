@@ -8787,12 +8787,13 @@ class AgentWebSocketServer:
                     product_result_execution_binding,
                     product_result_has_terminal_d0_attempt,
                     product_result_observation_ok,
+                    product_result_progress_ack_binding,
                     product_result_response_binding,
                     product_result_agent_output_kind,
                     product_result_task_id,
                     product_result_task_event_facts,
                     product_result_voice_task_bridge,
-                    product_result_voice_task_origin,
+                    product_result_voice_task_origin_binding,
                 )
 
                 task_id, attempt_id = product_result_task_id(params, payload)
@@ -8803,17 +8804,62 @@ class AgentWebSocketServer:
                 observed_operation = (
                     request.req_method.value if request.req_method is not None else ""
                 )
+                result_payload = (
+                    payload.get("result") if isinstance(payload, dict) else None
+                )
+                is_voice_task_origin = bool(
+                    observed_operation == "live_voice.composition.p2.submit"
+                    and isinstance(result_payload, dict)
+                    and result_payload.get("status") == "task_origin_accepted"
+                )
+                voice_task_origin_binding = (
+                    product_result_voice_task_origin_binding(params, payload)
+                    if is_voice_task_origin
+                    else None
+                )
+                progress_ack_binding = (
+                    product_result_progress_ack_binding(params, payload)
+                    if observed_operation
+                    == "live_voice.composition.p3.progress.ack"
+                    else None
+                )
+                observation_ok = product_result_observation_ok(
+                    observed_operation,
+                    result_ok=result_ok,
+                    payload=payload,
+                )
+                if is_voice_task_origin:
+                    task_id = None
+                    attempt_id = None
+                    interaction_id = None
+                    response_id = None
+                    response_generation = None
+                    turn_id = None
+                    if voice_task_origin_binding is None:
+                        observation_ok = False
+                    else:
+                        (
+                            correlation_id,
+                            interaction_id,
+                            response_id,
+                            response_generation,
+                            turn_id,
+                            _commit_id,
+                        ) = voice_task_origin_binding
+                elif observed_operation == "live_voice.composition.p3.progress.ack":
+                    task_id = None
+                    attempt_id = None
+                    if progress_ack_binding is None:
+                        observation_ok = False
+                    else:
+                        correlation_id, task_id, attempt_id = progress_ack_binding
                 try:
                     await observer.observe_route(
                         session_id=request.session_id,
                         correlation_id=correlation_id,
                         request_id=request.request_id,
                         operation=observed_operation,
-                        result_ok=product_result_observation_ok(
-                            observed_operation,
-                            result_ok=result_ok,
-                            payload=payload,
-                        ),
+                        result_ok=observation_ok,
                         task_id=task_id,
                         attempt_id=attempt_id,
                         interaction_id=interaction_id,
@@ -8828,7 +8874,9 @@ class AgentWebSocketServer:
                         voice_task_bridge=product_result_voice_task_bridge(
                             params, payload
                         ),
-                        voice_task_origin=product_result_voice_task_origin(payload),
+                        voice_task_origin=(
+                            voice_task_origin_binding is not None
+                        ),
                         task_operation=(
                             params.get("operation")
                             if isinstance(params.get("operation"), str)

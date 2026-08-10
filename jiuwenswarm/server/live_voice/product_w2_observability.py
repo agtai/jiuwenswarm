@@ -163,6 +163,10 @@ def _enabled(value: object) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _non_empty_identity(value: object) -> str | None:
+    return value if isinstance(value, str) and bool(value.strip()) else None
+
+
 def _failure_facts(segment_name: str, error_code: str | None) -> tuple[str, str] | None:
     if not isinstance(error_code, str):
         return None
@@ -585,11 +589,7 @@ def product_result_observation_ok(
                 and isinstance(result.get("round_id"), str)
                 and isinstance(result.get("response"), dict)
             )
-            or (
-                result.get("status") == "task_origin_accepted"
-                and isinstance(result.get("turn_id"), str)
-                and isinstance(result.get("commit_id"), str)
-            )
+            or product_result_voice_task_origin(payload)
         )
     if operation == "live_voice.composition.p2.notification.next":
         return result.get("status") == "notification" and isinstance(
@@ -618,7 +618,9 @@ def product_result_observation_ok(
         return (
             result.get("status") == "acknowledged"
             and result.get("acknowledgement") == "web_ui_text_consumed"
-            and isinstance(result.get("task_id"), str)
+            and _non_empty_identity(result.get("task_id")) is not None
+            and _non_empty_identity(result.get("attempt_id")) is not None
+            and _non_empty_identity(result.get("correlation_id")) is not None
         )
     return True
 
@@ -629,14 +631,80 @@ def product_result_voice_task_origin(payload: object) -> bool:
     if not isinstance(payload, dict):
         return False
     result = payload.get("result")
+    response = result.get("response") if isinstance(result, dict) else None
     return bool(
         isinstance(result, dict)
         and result.get("status") == "task_origin_accepted"
-        and isinstance(result.get("turn_id"), str)
-        and bool(result["turn_id"].strip())
-        and isinstance(result.get("commit_id"), str)
-        and bool(result["commit_id"].strip())
+        and _non_empty_identity(result.get("correlation_id")) is not None
+        and _non_empty_identity(result.get("interaction_id")) is not None
+        and _non_empty_identity(result.get("turn_id")) is not None
+        and _non_empty_identity(result.get("commit_id")) is not None
+        and isinstance(response, dict)
+        and response.get("interaction_id") == result.get("interaction_id")
+        and _non_empty_identity(response.get("response_id")) is not None
+        and type(response.get("response_generation")) is int
+        and response["response_generation"] >= 0
     )
+
+
+def product_result_voice_task_origin_binding(
+    params: object, payload: object
+) -> tuple[str, str, str, int, str, str] | None:
+    """Return the canonical CR Task-origin binding after exact claim matching.
+
+    Transport fields are checked only as claims.  Every returned identity,
+    including response generation, is projected from the closed product result.
+    """
+
+    if not isinstance(params, dict) or not product_result_voice_task_origin(payload):
+        return None
+    result = payload["result"]
+    response = result["response"]
+    claims = {
+        "correlation_id": result["correlation_id"],
+        "interaction_id": result["interaction_id"],
+        "response_id": response["response_id"],
+        "turn_id": result["turn_id"],
+        "commit_id": result["commit_id"],
+    }
+    if any(params.get(key) != value for key, value in claims.items()):
+        return None
+    return (
+        result["correlation_id"],
+        result["interaction_id"],
+        response["response_id"],
+        response["response_generation"],
+        result["turn_id"],
+        result["commit_id"],
+    )
+
+
+def product_result_progress_ack_binding(
+    params: object, payload: object
+) -> tuple[str, str, str] | None:
+    """Return authority-owned progress identity after exact request matching."""
+
+    if not isinstance(params, dict) or not isinstance(payload, dict):
+        return None
+    result = payload.get("result")
+    if (
+        not isinstance(result, dict)
+        or result.get("status") != "acknowledged"
+        or result.get("acknowledgement") != "web_ui_text_consumed"
+    ):
+        return None
+    task_id = _non_empty_identity(result.get("task_id"))
+    attempt_id = _non_empty_identity(result.get("attempt_id"))
+    correlation_id = _non_empty_identity(result.get("correlation_id"))
+    if (
+        task_id is None
+        or attempt_id is None
+        or correlation_id is None
+        or params.get("task_id") != task_id
+        or params.get("correlation_id") != correlation_id
+    ):
+        return None
+    return correlation_id, task_id, attempt_id
 
 
 def product_result_voice_task_bridge(params: object, payload: object) -> bool:
@@ -779,9 +847,15 @@ class ProductW2ObservabilityOwner:
         """Emit outcome-aware, content-free formal route facts."""
 
         async with self._lock:
+            if voice_task_origin:
+                # Task identity is joined only by the later authoritative P3
+                # create result.  Never inherit a prior Task into P2 origin.
+                task_id = None
+                attempt_id = None
             if (
                 task_id is None
                 and operation.startswith("live_voice.composition.p2.")
+                and not voice_task_origin
                 and self._active_task_id is not None
             ):
                 task_id = self._active_task_id
@@ -821,6 +895,23 @@ class ProductW2ObservabilityOwner:
                     ):
                         return False
             if result_ok:
+                if (
+                    voice_task_origin
+                    and operation == "live_voice.composition.p2.submit"
+                    and (
+                        not interaction_id
+                        or not response_id
+                        or type(response_generation) is not int
+                        or response_generation < 0
+                        or not turn_id
+                    )
+                ):
+                    return False
+                if (
+                    operation == "live_voice.composition.p3.progress.ack"
+                    and (not task_id or not attempt_id)
+                ):
+                    return False
                 if operation == "live_voice.composition.p2.submit":
                     fact_specs = (
                         (("runtime.turn", "product.voice_task_origin"),)
@@ -1443,11 +1534,13 @@ __all__ = [
     "product_result_task_event_facts",
     "product_result_has_terminal_d0_attempt",
     "product_result_observation_ok",
+    "product_result_progress_ack_binding",
     "product_result_response_binding",
     "product_result_query_binding",
     "product_result_task_id",
     "product_result_voice_task_bridge",
     "product_result_voice_task_origin",
+    "product_result_voice_task_origin_binding",
     "create_product_w2_observability_owner_from_environment",
     "create_gateway_w2_observability_owner_from_environment",
 ]
