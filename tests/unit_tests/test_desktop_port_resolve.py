@@ -13,6 +13,7 @@ import pytest
 from jiuwenswarm.dotenv_early import (
     CLI_PORTS_ENV_FLAG,
     DESKTOP_PRESERVED_ENV_KEYS,
+    W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG,
     load_dotenv_runtime,
 )
 from jiuwenswarm.instance_manager.config import BASE_PORTS, calculate_instance_ports
@@ -106,6 +107,57 @@ def test_load_dotenv_runtime_non_desktop_allows_override(tmp_path: Path, monkeyp
     load_dotenv_runtime(env_file, override=True)
 
     assert os.environ["WEB_PORT"] == "11111"
+
+
+def test_load_dotenv_runtime_preserves_w2_gateway_public_agent_identity_only(
+    tmp_path: Path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MODEL_PROVIDER=template-provider\n"
+        "API_BASE=https://template.invalid/v1\n"
+        "MODEL_NAME=your-model-name\n"
+        "API_KEY=template-key\n"
+        "OPENAI_API_KEY=foreign-key\n"
+        "OPENROUTER_API_KEY=foreign-router-key\n",
+        encoding="utf-8",
+    )
+    expected = {
+        "MODEL_PROVIDER": "OpenAI",
+        "API_BASE": "https://agent.example.invalid/v1",
+        "MODEL_NAME": "agent-model",
+    }
+    monkeypatch.setenv(W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG, "1")
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+
+    # Gateway and its stock-Web handlers both load the same dotenv during
+    # startup; the boundary must survive every load, not just the first one.
+    load_dotenv_runtime(env_file, override=True)
+    load_dotenv_runtime(env_file, override=True)
+
+    assert {name: os.environ[name] for name in expected} == expected
+    assert "API_KEY" not in os.environ
+    assert "OPENAI_API_KEY" not in os.environ
+    assert "OPENROUTER_API_KEY" not in os.environ
+
+
+def test_load_dotenv_runtime_without_w2_flag_keeps_normal_agent_dotenv_behavior(
+    tmp_path: Path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MODEL_NAME=dotenv-model\nAPI_KEY=normal-runtime-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv(W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG, raising=False)
+    monkeypatch.setenv("MODEL_NAME", "parent-model")
+    monkeypatch.delenv("API_KEY", raising=False)
+
+    load_dotenv_runtime(env_file, override=True)
+
+    assert os.environ["MODEL_NAME"] == "dotenv-model"
+    assert os.environ["API_KEY"] == "normal-runtime-key"
 
 
 def test_load_dotenv_runtime_preserves_cli_ports(tmp_path: Path, monkeypatch):

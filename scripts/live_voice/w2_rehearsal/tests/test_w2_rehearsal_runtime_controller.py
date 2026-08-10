@@ -301,7 +301,7 @@ def test_parent_secrets_are_scrubbed_and_reintroduced_only_to_the_right_child(
     )
 
 
-def test_private_config_is_strict_and_routes_values_only_to_the_owned_child(
+def test_private_config_routes_public_agent_identity_without_crossing_the_key(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -344,7 +344,12 @@ def test_private_config_is_strict_and_routes_values_only_to_the_owned_child(
     }
     assert private_values.isdisjoint(common.values())
     assert gateway["LIVE_VOICE_SPEECH_API_KEY"] == "private-speech-key"
-    assert all(name not in gateway for name in controller._AGENT_RUNTIME_ENV_NAMES)
+    assert gateway["MODEL_PROVIDER"] == "OpenAI"
+    assert gateway["API_BASE"] == "https://agent.example.invalid/v1"
+    assert gateway["MODEL_NAME"] == "agent-model"
+    assert gateway[controller.W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG] == "1"
+    assert "API_KEY" not in gateway
+    assert "OPENAI_API_KEY" not in gateway
     assert agentserver["MODEL_PROVIDER"] == "OpenAI"
     assert agentserver["API_BASE"] == "https://agent.example.invalid/v1"
     assert agentserver["API_KEY"] == "private-agent-key"

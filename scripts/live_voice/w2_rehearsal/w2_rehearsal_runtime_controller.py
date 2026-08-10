@@ -28,6 +28,7 @@ from jiuwenswarm.server.live_voice.w2_fault_plan import (
     W2FaultClass,
     W2FaultPlane,
 )
+from jiuwenswarm.dotenv_early import W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG
 from w2_product_fault_binding import (
     require_product_fault,
     validate_product_fault_plan_payload,
@@ -43,6 +44,9 @@ _PRIVATE_VALUE_MAX_UTF8_BYTES = 16_384
 _FAULT_RUNNER_TIMEOUT_SECONDS = 300
 _AGENT_RUNTIME_ENV_NAMES = frozenset(
     {"API_KEY", "API_BASE", "MODEL_NAME", "MODEL_PROVIDER"}
+)
+_AGENT_PUBLIC_RUNTIME_ENV_NAMES = frozenset(
+    {"API_BASE", "MODEL_NAME", "MODEL_PROVIDER"}
 )
 _AGENT_PROVIDER_SECRET_ENV_NAMES = frozenset(
     {
@@ -360,6 +364,17 @@ def _agent_provider_env(
     }
 
 
+def _agent_public_runtime_env(
+    agent_env: Mapping[str, str] | None,
+) -> dict[str, str]:
+    source = _agent_provider_env(None) if agent_env is None else agent_env
+    return {
+        name: value
+        for name in _AGENT_PUBLIC_RUNTIME_ENV_NAMES
+        if (value := source.get(name))
+    }
+
+
 def _assert_shared_dotenv_secret_boundary(data_dir: Path) -> None:
     path = data_dir / "config" / ".env"
     if not path.exists():
@@ -629,6 +644,15 @@ def _slot_env(
             env["JIUWENSWARM_LIVE_VOICE_W2_PREDECESSOR_ARTIFACT_ID"] = slot.predecessor
     else:
         speech = config["speech"]
+        # The Gateway owns Speech but not the Agent credential.  It still needs
+        # the public Agent identity so stock Web can render the session's real
+        # model instead of the package-template placeholder.  The scoped dotenv
+        # boundary preserves these three values across normal
+        # initialization while keeping API_KEY out of the Gateway process.
+        public_agent_env = _agent_public_runtime_env(agent_env)
+        env.update(public_agent_env)
+        if set(public_agent_env) == set(_AGENT_PUBLIC_RUNTIME_ENV_NAMES):
+            env[W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG] = "1"
         env.update(
             {
                 "LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED": "true",

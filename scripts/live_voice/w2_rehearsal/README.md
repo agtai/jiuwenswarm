@@ -80,9 +80,11 @@ policy, evidence, command lines, logs or chat:
 ```
 
 The controller accepts only these exact keys and requires the non-secret Speech
-metadata to match the signed runtime configuration. It routes Agent values only
-to AgentServer and the Speech key only to Gateway. The shared data-directory
-`.env` must not contain credentials.
+metadata to match the signed runtime configuration. It routes the Agent key only
+to AgentServer and the Speech key only to Gateway. The Gateway receives only the
+Agent provider, API base and model name needed for truthful stock-Web display;
+its normal dotenv initialization cannot replace those values or introduce an
+Agent key. The shared data-directory `.env` must not contain credentials.
 
 If the persisted Session does not yet exist, create it before preparing an
 attempt. The model remains an explicit machine choice rather than a value frozen

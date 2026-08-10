@@ -82,6 +82,25 @@ DESKTOP_PRESERVED_ENV_KEYS = (
 # child env. Mirrors JIUWENSWARM_DESKTOP=1 for the CLI launcher path (issue #2749).
 CLI_PORTS_ENV_FLAG = "JIUWENSWARM_CLI_PORTS"
 
+# The signed W2 runtime keeps the Agent credential in AgentServer while the
+# Gateway receives only enough public identity for truthful stock-Web display.
+# Gateway imports load dotenv more than once, so this flag preserves that public
+# identity across every load and removes model-provider keys introduced by the
+# package/data-dir dotenv.
+W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG = (
+    "JIUWENSWARM_LIVE_VOICE_W2_GATEWAY_PUBLIC_AGENT_ENV"
+)
+W2_GATEWAY_PUBLIC_AGENT_ENV_KEYS = (
+    "MODEL_PROVIDER",
+    "API_BASE",
+    "MODEL_NAME",
+)
+W2_GATEWAY_AGENT_SECRET_ENV_KEYS = (
+    "API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+)
+
 
 def _should_preserve_session_ports() -> bool:
     """True when this process was launched with an explicit session port remap."""
@@ -113,12 +132,28 @@ def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True
         if preserve
         else {}
     )
+    preserve_w2_gateway_agent = (
+        os.environ.get(W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG) == "1"
+    )
+    saved_w2_gateway_agent = (
+        {
+            key: os.environ[key]
+            for key in W2_GATEWAY_PUBLIC_AGENT_ENV_KEYS
+            if key in os.environ
+        }
+        if preserve_w2_gateway_agent
+        else {}
+    )
     loaded = load_dotenv(dotenv_path=dotenv_path, override=override)
     if saved:
         os.environ.update(saved)
     if preserve:
         # Prefer remapped AGENT_SERVER_PORT over any URL from .env/parent env.
         os.environ.pop("AGENT_SERVER_URL", None)
+    if preserve_w2_gateway_agent:
+        os.environ.update(saved_w2_gateway_agent)
+        for key in W2_GATEWAY_AGENT_SECRET_ENV_KEYS:
+            os.environ.pop(key, None)
     return loaded
 
 
@@ -307,6 +342,7 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
 __all__ = [
     "CLI_PORTS_ENV_FLAG",
     "DESKTOP_PRESERVED_ENV_KEYS",
+    "W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG",
     "parse_dotenv_early",
     "load_dotenv_runtime",
     "get_parsed_dotenv",
