@@ -68,10 +68,32 @@ export interface LiveVoiceIntegratedRoutePanelProps {
   taskCompatibilityAvailable: boolean;
   routeSelection?: Readonly<IntegratedWebRouteSelection>;
   request?: (method: string, params?: Record<string, unknown>, options?: WebRequestOptions) => Promise<unknown>;
+  p3RetryInspectionWait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
 }
 
 const defaultProductRequest = (method: string, params?: Record<string, unknown>, options?: WebRequestOptions): Promise<unknown> =>
   webClient.request(method, params, options);
+
+const PRODUCT_P3_RETRY_INSPECTION_DELAYS_MS = Object.freeze([250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
+
+function defaultP3RetryInspectionWait(delayMs: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(new Error('P3 retry inspection was cancelled'));
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+    const finish = (error: Error | null) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId !== null) globalThis.clearTimeout(timeoutId);
+      signal.removeEventListener('abort', abort);
+      if (error === null) resolve();
+      else reject(error);
+    };
+    const abort = () => finish(new Error('P3 retry inspection was cancelled'));
+    timeoutId = globalThis.setTimeout(() => finish(null), delayMs);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+}
 
 export type ProductPresentationAckInput = {
   response_id: string;
@@ -410,6 +432,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p3RetryInspectionStatus, setP3RetryInspectionStatus] = useState<'idle' | 'checking' | 'eligible' | 'ineligible' | 'failed'>('idle');
   const [p3RetryEligibility, setP3RetryEligibility] = useState<Readonly<FormalTaskControlRecord> | null>(null);
   const p3RetryInspectionGenerationRef = useRef(0);
+  const p3RetryInspectionAbortRef = useRef<AbortController | null>(null);
   const [createdProgressTaskId, setCreatedProgressTaskId] = useState<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
   const progressRef = useRef<Readonly<ProductTextProgressEvent> | null>(null);
@@ -459,6 +482,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const productTurnSequenceRef = useRef(0);
   const bargeInSequenceRef = useRef(0);
   const p3MutationSequenceRef = useRef(0);
+  const cancelP3RetryInspection = () => {
+    p3RetryInspectionGenerationRef.current += 1;
+    p3RetryInspectionAbortRef.current?.abort();
+    p3RetryInspectionAbortRef.current = null;
+  };
   activeSessionRef.current = props.activeSessionId;
   isConnectedRef.current = props.isConnected;
 
@@ -805,6 +833,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      cancelP3RetryInspection();
       const voiceOwner = p1VoiceOwnerRef.current;
       if (voiceOwner !== null) {
         // Local microphone/playout closes before remote authority revocation.
@@ -1347,6 +1376,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [pendingPresentationAck, productOutput, props.isConnected]);
 
   useEffect(() => {
+    cancelP3RetryInspection();
     pendingP3MutationRef.current = null;
     voiceTaskOriginRef.current = null;
     recognizedVoiceRef.current = null;
@@ -1354,7 +1384,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingFormalP3MutationRef.current = null;
     formalTaskControlLeafRef.current?.disconnect();
     formalTaskControlLeafRef.current = null;
-    p3RetryInspectionGenerationRef.current += 1;
+    setP3MutationOperation('task.create');
+    setP3TargetTaskId('');
     setP3MutationStatus('idle');
     setP3RetryInspectionStatus('idle');
     setP3RetryEligibility(null);
@@ -1369,13 +1400,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     });
     p3MutationOwnerRef.current = owner;
     return () => {
+      cancelP3RetryInspection();
       formalTaskControlLeafRef.current?.disconnect();
       if (p3MutationOwnerRef.current === owner) p3MutationOwnerRef.current = null;
     };
   }, [props.activeSessionId]);
 
   useEffect(() => {
-    if (!props.isConnected) formalTaskControlLeafRef.current?.disconnect();
+    if (!props.isConnected) {
+      cancelP3RetryInspection();
+      formalTaskControlLeafRef.current?.disconnect();
+    }
   }, [props.isConnected]);
 
   const submitProductText = async (overrideText?: string, source: 'structured' | 'voice' = 'structured'): Promise<ProductTurnInput | null> => {
@@ -1673,49 +1708,73 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   };
 
-  const inspectP3RetryEligibility = async (): Promise<Readonly<FormalTaskControlRecord> | null> => {
+  const inspectP3RetryEligibility = async (input: Readonly<{
+    task_id?: string;
+    follow_nonterminal?: boolean;
+  }> = {}): Promise<Readonly<FormalTaskControlRecord> | null> => {
     const sessionId = props.activeSessionId;
-    const taskId = p3TargetTaskId.trim();
+    const taskId = (input.task_id ?? p3TargetTaskId).trim();
     const leaf = formalTaskControlLeafRef.current;
     if (!sessionId || !taskId || !leaf || p3MutationOwnerRef.current?.hasPendingMutation()) {
+      cancelP3RetryInspection();
       setP3RetryEligibility(null);
       setP3RetryInspectionStatus('ineligible');
       return null;
     }
-    const inspectionGeneration = ++p3RetryInspectionGenerationRef.current;
+    cancelP3RetryInspection();
+    const inspectionGeneration = p3RetryInspectionGenerationRef.current;
+    const abortController = new AbortController();
+    p3RetryInspectionAbortRef.current = abortController;
+    const waitForRetry = props.p3RetryInspectionWait ?? defaultP3RetryInspectionWait;
+    const isCurrent = () => (
+      !abortController.signal.aborted
+      && mountedRef.current
+      && formalTaskControlLeafRef.current === leaf
+      && activeSessionRef.current === sessionId
+      && p3RetryInspectionGenerationRef.current === inspectionGeneration
+      && p3RetryInspectionAbortRef.current === abortController
+    );
     setP3RetryEligibility(null);
     setP3RetryInspectionStatus('checking');
     try {
-      const selected = await inspectProductP3RetryCandidate({
-        request: productRequest,
-        leaf,
-        session_id: sessionId,
-        task_id: taskId,
-        request_nonce: `${Date.now()}-${inspectionGeneration}`,
-        is_current: () => (
-          formalTaskControlLeafRef.current === leaf
-          && activeSessionRef.current === sessionId
-          && p3RetryInspectionGenerationRef.current === inspectionGeneration
-        ),
-      });
-      if (!isFormalTaskRetryEligible(selected)) {
-        setP3RetryEligibility(null);
-        setP3RetryInspectionStatus('ineligible');
-        return null;
+      for (let attempt = 0; ; attempt += 1) {
+        const selected = await inspectProductP3RetryCandidate({
+          request: productRequest,
+          leaf,
+          session_id: sessionId,
+          task_id: taskId,
+          request_nonce: `${Date.now()}-${inspectionGeneration}-${attempt}`,
+          is_current: isCurrent,
+        });
+        if (!isCurrent()) return null;
+        if (isFormalTaskRetryEligible(selected)) {
+          setP3RetryEligibility(selected);
+          setP3RetryInspectionStatus('eligible');
+          setP3MutationOperation('task.retry');
+          return selected;
+        }
+        if (
+          selected.state === 'terminal'
+          || input.follow_nonterminal !== true
+          || attempt >= PRODUCT_P3_RETRY_INSPECTION_DELAYS_MS.length
+        ) {
+          setP3RetryEligibility(null);
+          setP3RetryInspectionStatus('ineligible');
+          return null;
+        }
+        await waitForRetry(PRODUCT_P3_RETRY_INSPECTION_DELAYS_MS[attempt]!, abortController.signal);
+        if (!isCurrent()) return null;
       }
-      setP3RetryEligibility(selected);
-      setP3RetryInspectionStatus('eligible');
-      return selected;
     } catch {
-      if (
-        formalTaskControlLeafRef.current === leaf
-        && activeSessionRef.current === sessionId
-        && p3RetryInspectionGenerationRef.current === inspectionGeneration
-      ) {
+      if (isCurrent()) {
         setP3RetryEligibility(null);
         setP3RetryInspectionStatus('failed');
       }
       return null;
+    } finally {
+      if (p3RetryInspectionAbortRef.current === abortController) {
+        p3RetryInspectionAbortRef.current = null;
+      }
     }
   };
 
@@ -1837,12 +1896,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             throw new Error('formal task.create result did not return an exact task');
           }
           setCreatedProgressTaskId(createdTaskId);
-          p3RetryInspectionGenerationRef.current += 1;
+          cancelP3RetryInspection();
           setP3TargetTaskId(createdTaskId);
           setP3RetryEligibility(null);
           setP3RetryInspectionStatus('idle');
+          setP3MutationOperation('task.cancel');
         } else if (mutation.operation === 'task.retry') {
-          p3RetryInspectionGenerationRef.current += 1;
+          cancelP3RetryInspection();
           setP3RetryEligibility(null);
           setP3RetryInspectionStatus('ineligible');
           setP3MutationOperation('task.cancel');
@@ -1851,7 +1911,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingFormalP3MutationRef.current = null;
         setP3MutationStatus('accepted');
         if (mutation.operation === 'task.cancel') {
-          void inspectP3RetryEligibility();
+          void inspectP3RetryEligibility({ task_id: mutation.task_id, follow_nonterminal: true });
         }
       }
     } catch {
@@ -2035,6 +2095,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p3RetryAttemptNumber={p3RetryEligibility?.attempt_number ?? null}
       p3RetryInspectionStatus={p3RetryInspectionStatus}
       onP3MutationOperation={value => {
+        cancelP3RetryInspection();
         pendingP3MutationRef.current = null;
         voiceTaskOriginRef.current = null;
         setP3MutationStatus('idle');
@@ -2058,14 +2119,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }}
       onP3TargetTaskId={value => {
         pendingP3MutationRef.current = null;
-        p3RetryInspectionGenerationRef.current += 1;
+        cancelP3RetryInspection();
         setP3RetryEligibility(null);
         setP3RetryInspectionStatus('idle');
         if (p3MutationOperation === 'task.retry') setP3MutationOperation('task.cancel');
         setP3MutationStatus('idle');
         setP3TargetTaskId(value);
       }}
-      onP3InspectRetry={() => void inspectP3RetryEligibility()}
+      onP3InspectRetry={() => void inspectP3RetryEligibility({ follow_nonterminal: true })}
       onP3Issue={() => void issueP3MutationConfirmation()}
       onP3Execute={() => void executeP3Mutation()}
       onRefresh={() => void monitorRef.current?.refresh()}

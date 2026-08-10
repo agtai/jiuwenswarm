@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
-import test from 'node:test';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import test, { after } from 'node:test';
 
 import { build } from 'esbuild';
 import i18next from 'i18next';
@@ -11,7 +12,14 @@ import { act, create } from 'react-test-renderer';
 
 import { LiveVoiceIntegratedRoutePanel } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 
-const enabledBundleUrl = new URL('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanelEnabled.mjs', import.meta.url);
+const mountedBundleDirectory = await mkdtemp(
+  fileURLToPath(new URL('../node_modules/.cache/jiuwenswarm-live-voice-mounted-', import.meta.url))
+);
+after(async () => {
+  await rm(mountedBundleDirectory, { recursive: true, force: true });
+});
+
+const enabledBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelEnabled.mjs'));
 await build({
   entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
   bundle: true,
@@ -31,6 +39,27 @@ await build({
   },
 });
 const { LiveVoiceIntegratedRoutePanel: EnabledLiveVoiceIntegratedRoutePanel } = await import(`${enabledBundleUrl.href}?enabled=${Date.now()}`);
+
+const p3EnabledBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceIntegratedRoutePanelP3Enabled.mjs'));
+await build({
+  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url))],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  packages: 'external',
+  loader: { '.css': 'empty' },
+  outfile: fileURLToPath(p3EnabledBundleUrl),
+  define: {
+    'import.meta.env': JSON.stringify({
+      VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB: 'true',
+      VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1: 'false',
+      VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION: 'true',
+      VITE_FEATURE_LIVE_VOICE_TASK_DEMO: 'false',
+      VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH: 'false',
+    }),
+  },
+});
+const { LiveVoiceIntegratedRoutePanel: P3EnabledLiveVoiceIntegratedRoutePanel } = await import(`${p3EnabledBundleUrl.href}?enabled=${Date.now()}`);
 
 async function createI18n() {
   const translations = JSON.parse(await readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8'));
@@ -222,6 +251,190 @@ function mountedP1Element(i18n, sessionId, request) {
   );
 }
 
+function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait) {
+  return React.createElement(
+    I18nextProvider,
+    { i18n },
+    React.createElement(P3EnabledLiveVoiceIntegratedRoutePanel, {
+      activeSessionId: sessionId,
+      isConnected: true,
+      agentRouteAvailable: true,
+      taskCompatibilityAvailable: false,
+      request,
+      p3RetryInspectionWait,
+    })
+  );
+}
+
+function mountedP3Controls(renderer) {
+  const root = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-p3-mutation' });
+  const select = root.findByType('select');
+  const buttons = root.findAllByType('button');
+  const button = label => {
+    const selected = buttons.find(candidate => candidate.children.some(child => child === label));
+    assert.ok(selected, `mounted P3 button ${label} must exist`);
+    return selected;
+  };
+  const hasButton = label => buttons.some(candidate => candidate.children.some(child => child === label));
+  return { root, select, button, hasButton };
+}
+
+function mountedP3Status(binding, {
+  attemptId = 'attempt-a',
+  attemptNumber = 1,
+  state = 'running',
+  outcome = null,
+  eventHead = 1,
+} = {}) {
+  return {
+    ok: true,
+    result: {
+      task: {
+        task_id: 'task-a',
+        scope: {
+          subject_id: binding.subject_id,
+          session_id: binding.session_id,
+          project_id: binding.project_id,
+          assurance: 'authenticated',
+        },
+        correlation_id: binding.correlation_id,
+        attempt_id: attemptId,
+        state,
+        outcome,
+        event_head: eventHead,
+      },
+      attempt: { task_id: 'task-a', attempt_id: attemptId, attempt_number: attemptNumber },
+    },
+  };
+}
+
+function mountedP3Events(binding, { terminalA = false, terminalB = false } = {}) {
+  const scope = {
+    subject_id: binding.subject_id,
+    session_id: binding.session_id,
+    project_id: binding.project_id,
+    assurance: 'authenticated',
+  };
+  const events = [
+    {
+      event_id: 'task-a:event:0',
+      task_id: 'task-a',
+      attempt_id: 'attempt-a',
+      scope,
+      seq: 0,
+      event_type: 'task.accepted',
+      state: 'accepted',
+      outcome: null,
+      producer: 'task_core',
+      source_event_id: null,
+      causation_id: 'create-a',
+      correlation_id: binding.correlation_id,
+      occurred_at: '2026-08-10T10:00:00Z',
+      details: {},
+    },
+    {
+      event_id: 'task-a:event:1',
+      task_id: 'task-a',
+      attempt_id: 'attempt-a',
+      scope,
+      seq: 1,
+      event_type: 'task.running',
+      state: 'running',
+      outcome: null,
+      producer: 'task_core',
+      source_event_id: 'executor-a:1',
+      causation_id: 'executor-a:1',
+      correlation_id: binding.correlation_id,
+      occurred_at: '2026-08-10T10:00:01Z',
+      details: {},
+    },
+  ];
+  if (terminalA || terminalB) {
+    events.push({
+      event_id: 'task-a:event:2',
+      task_id: 'task-a',
+      attempt_id: 'attempt-a',
+      scope,
+      seq: 2,
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome: 'cancelled',
+      producer: 'task_core.delivery',
+      source_event_id: 'executor-a:2',
+      causation_id: 'executor-a:2',
+      correlation_id: binding.correlation_id,
+      occurred_at: '2026-08-10T10:00:02Z',
+      details: {},
+    });
+  }
+  if (terminalB) {
+    events.push(
+      {
+        event_id: 'task-a:event:3',
+        task_id: 'task-a',
+        attempt_id: 'attempt-b',
+        scope,
+        seq: 3,
+        event_type: 'task.retry_accepted',
+        state: 'accepted',
+        outcome: null,
+        producer: 'task_core',
+        source_event_id: null,
+        causation_id: 'retry-b',
+        correlation_id: binding.correlation_id,
+        occurred_at: '2026-08-10T10:00:03Z',
+        details: {
+          attempt_number: 2,
+          command_id: 'retry-b',
+          previous_outcome: 'cancelled',
+          retry_of_attempt_id: 'attempt-a',
+        },
+      },
+      {
+        event_id: 'task-a:event:4',
+        task_id: 'task-a',
+        attempt_id: 'attempt-b',
+        scope,
+        seq: 4,
+        event_type: 'task.running',
+        state: 'running',
+        outcome: null,
+        producer: 'task_core',
+        source_event_id: 'executor-b:1',
+        causation_id: 'executor-b:1',
+        correlation_id: binding.correlation_id,
+        occurred_at: '2026-08-10T10:00:04Z',
+        details: {},
+      },
+      {
+        event_id: 'task-a:event:5',
+        task_id: 'task-a',
+        attempt_id: 'attempt-b',
+        scope,
+        seq: 5,
+        event_type: 'task.terminal',
+        state: 'terminal',
+        outcome: 'completed',
+        producer: 'task_core.delivery',
+        source_event_id: 'executor-b:2',
+        causation_id: 'executor-b:2',
+        correlation_id: binding.correlation_id,
+        occurred_at: '2026-08-10T10:00:05Z',
+        details: {},
+      }
+    );
+  }
+  return {
+    ok: true,
+    result: {
+      task_id: 'task-a',
+      after_seq: -1,
+      head_seq: terminalB ? 5 : terminalA ? 2 : 1,
+      events,
+    },
+  };
+}
+
 function formalVoiceStartButton(renderer) {
   const button = renderer.root
     .findAllByType('button')
@@ -275,6 +488,297 @@ test('mounted route panel survives session replacement and closes every effect o
     renderer.unmount();
   });
   assert.equal(renderer.toJSON(), null);
+});
+
+test('mounted P3 reconciles create A through cancel and authoritative A/B terminals to retry B/C without stale effects', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const calls = [];
+  const retryWaiters = [];
+  let binding = null;
+  let authoritativeAttempt = 1;
+  let terminalA = false;
+  let terminalB = false;
+  let deferNextStatus = false;
+  let releaseDeferredStatus = null;
+  let renderer;
+
+  const p3RetryInspectionWait = (_delayMs, signal) => new Promise((resolve, reject) => {
+    const waiter = { resolve, reject };
+    const abort = () => {
+      const index = retryWaiters.indexOf(waiter);
+      if (index >= 0) retryWaiters.splice(index, 1);
+      reject(new Error('mounted P3 inspection wait aborted'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    waiter.resolve = () => {
+      signal.removeEventListener('abort', abort);
+      const index = retryWaiters.indexOf(waiter);
+      if (index >= 0) retryWaiters.splice(index, 1);
+      resolve();
+    };
+    retryWaiters.push(waiter);
+  });
+
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: { status: 'active', ...params } };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      binding ??= {
+        subject_id: 'mounted-p3-subject',
+        session_id: params.session_id,
+        project_id: 'mounted-p3-project',
+        correlation_id: params.correlation_id,
+        generation: 1,
+      };
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: params.operation,
+          command_id: params.command_id,
+          target_task_id: params.operation === 'task.create' ? null : params.task_id,
+          confirmation_id: `confirmation-${params.command_id}`,
+          expires_at: '2999-08-10T10:00:00Z',
+          task_control_binding: binding,
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.mutate') {
+      const common = {
+        status: 'mutation_processed',
+        operation: params.operation,
+        command_id: params.command_id,
+        target_task_id: params.operation === 'task.create' ? null : params.task_id,
+      };
+      if (params.operation === 'task.create') {
+        return {
+          ok: true,
+          result: {
+            ...common,
+            formal_task_result: {
+              task_id: 'task-a',
+              attempt_id: 'attempt-a',
+              attempt_number: 1,
+              state: 'accepted',
+              outbox_id: 'outbox-create-a',
+            },
+          },
+        };
+      }
+      if (params.operation === 'task.cancel') {
+        return {
+          ok: true,
+          result: {
+            ...common,
+            formal_task_result: {
+              task_id: 'task-a',
+              attempt_id: 'attempt-a',
+              cancel_acknowledged: true,
+              applied: true,
+              state: 'running',
+              outbox_id: 'outbox-cancel-a',
+            },
+          },
+        };
+      }
+      const previousAttempt = authoritativeAttempt === 1 ? 'attempt-a' : 'attempt-b';
+      const nextAttempt = authoritativeAttempt === 1 ? 'attempt-b' : 'attempt-c';
+      const nextAttemptNumber = authoritativeAttempt + 1;
+      authoritativeAttempt = nextAttemptNumber;
+      return {
+        ok: true,
+        result: {
+          ...common,
+          formal_task_result: {
+            task_id: 'task-a',
+            previous_attempt_id: previousAttempt,
+            attempt_id: nextAttempt,
+            attempt_number: nextAttemptNumber,
+            applied: true,
+            state: 'accepted',
+            outbox_id: `outbox-retry-${nextAttempt.at(-1)}`,
+          },
+        },
+      };
+    }
+    if (method === 'live_voice.task.status') {
+      if (deferNextStatus) {
+        deferNextStatus = false;
+        return new Promise(resolve => {
+          releaseDeferredStatus = () => resolve(mountedP3Status(binding, {
+            attemptId: 'attempt-c',
+            attemptNumber: 3,
+            state: 'accepted',
+            eventHead: 6,
+          }));
+        });
+      }
+      if (authoritativeAttempt === 2 && terminalB) {
+        return mountedP3Status(binding, {
+          attemptId: 'attempt-b',
+          attemptNumber: 2,
+          state: 'terminal',
+          outcome: 'completed',
+          eventHead: 5,
+        });
+      }
+      return mountedP3Status(binding, terminalA
+        ? { state: 'terminal', outcome: 'cancelled', eventHead: 2 }
+        : { state: 'running', outcome: null, eventHead: 1 });
+    }
+    if (method === 'live_voice.task.events') return mountedP3Events(binding, { terminalA, terminalB });
+    throw new Error(`unexpected mounted P3 request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, 'mounted-p3-session', request, p3RetryInspectionWait));
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'),
+        'formal P3 controls did not mount'
+      );
+    });
+
+    await act(async () => {
+      const controls = mountedP3Controls(renderer);
+      const inputs = controls.root.findAllByType('input');
+      controls.root.findByType('textarea').props.onChange({ target: { value: 'Edit only the disposable fixture.' } });
+      inputs[0].props.onChange({ target: { value: 'Mounted P3 task' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
+        'task.create confirmation did not settle'
+      );
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.cancel',
+        'accepted task.create did not transition the mounted controller to task.cancel'
+      );
+    });
+    assert.equal(mountedP3Controls(renderer).root.findByType('input').props.value, 'task-a');
+
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
+        'task.cancel confirmation did not settle'
+      );
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () => retryWaiters.length === 1 && JSON.stringify(renderer.toJSON()).includes('checking'),
+        'nonterminal task.cancel did not retain an authoritative retry inspection'
+      );
+    });
+    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+
+    terminalA = true;
+    await act(async () => {
+      retryWaiters[0].resolve();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry',
+        'terminal cancelled attempt did not automatically expose task.retry'
+      );
+    });
+    assert.equal(retryWaiters.length, 0, 'terminal reconciliation must release its deterministic waiter');
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
+        'task.retry confirmation did not settle'
+      );
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.cancel',
+        'accepted retry B did not return the mounted controller to task.cancel'
+      );
+    });
+    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+
+    terminalB = true;
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry',
+        'authoritative terminal completed attempt B did not expose task.retry'
+      );
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
+        'task.retry C confirmation did not settle'
+      );
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.cancel',
+        'accepted retry C did not return the mounted controller to task.cancel'
+      );
+    });
+    assert.equal(authoritativeAttempt, 3);
+    assert.equal(mountedP3Controls(renderer).root.findByType('input').props.value, 'task-a');
+    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+    assert.deepEqual(
+      calls
+        .filter(call => call.method === 'live_voice.composition.p3.confirmation.issue')
+        .map(call => [call.params.operation, call.params.task_id ?? null]),
+      [['task.create', null], ['task.cancel', 'task-a'], ['task.retry', 'task-a'], ['task.retry', 'task-a']]
+    );
+    assert.deepEqual(
+      calls
+        .filter(call => call.method === 'live_voice.composition.p3.mutate')
+        .map(call => [call.params.operation, call.params.task_id ?? null]),
+      [['task.create', null], ['task.cancel', 'task-a'], ['task.retry', 'task-a'], ['task.retry', 'task-a']]
+    );
+
+    const eventsBeforeFence = calls.filter(call => call.method === 'live_voice.task.events').length;
+    deferNextStatus = true;
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(() => typeof releaseDeferredStatus === 'function', 'old retry inspection did not reach status');
+    });
+    await act(async () => {
+      renderer.update(mountedP3Element(i18n, 'mounted-p3-successor-session', request, p3RetryInspectionWait));
+      releaseDeferredStatus();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, eventsBeforeFence);
+    assert.equal(mountedP3Controls(renderer).select.props.value, 'task.create');
+    assert.equal(mountedP3Controls(renderer).select.findAllByType('option').some(option => option.props.value === 'task.retry'), false);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 4);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    browser.restore();
+  }
 });
 
 test('mounted P1 cleanup singleflight fences two retained Start attempts until exact close, then allocates one successor', async () => {
