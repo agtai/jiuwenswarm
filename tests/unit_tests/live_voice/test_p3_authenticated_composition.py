@@ -672,7 +672,7 @@ async def test_invalid_voice_origin_is_rejected_before_durable_confirmation(
 @pytest.mark.parametrize(
     "outcome", (TerminalOutcome.COMPLETED, TerminalOutcome.FAILED)
 )
-async def test_product_registry_replays_terminal_p3_authority_before_subscription_activation(
+async def test_product_registry_replays_terminal_p3_authority_after_clean_checkpoint(
     tmp_path: Path,
     outcome: TerminalOutcome,
 ) -> None:
@@ -719,6 +719,10 @@ async def test_product_registry_replays_terminal_p3_authority_before_subscriptio
                 harness.composition._core.store.get_task(task_id, _scope()).state.value
                 == "terminal"
             )
+        )
+        harness.authority.contexts["session-1"] = replace(
+            authorized_context,
+            revision_value="clean-checkpoint-revision",
         )
         counts_before_progress = harness.composition._core.store.counts()
 
@@ -946,20 +950,8 @@ async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("change", "reason"),
-    [
-        (
-            {"revision_value": "different-revision"},
-            "EXECUTION_CONTEXT_REVISION_MISMATCH",
-        ),
-        ({"redacted": True, "redacted_fields": ("secret",)}, "TASK_CONTEXT_REDACTED"),
-    ],
-)
-async def test_dirty_read_and_cancel_still_fail_closed_on_context_drift(
+async def test_read_queries_survive_clean_checkpoint_revision_but_cancel_fails_closed(
     tmp_path: Path,
-    change: dict[str, object],
-    reason: str,
 ) -> None:
     harness = _harness(tmp_path)
     await harness.composition.start()
@@ -972,24 +964,27 @@ async def test_dirty_read_and_cancel_still_fail_closed_on_context_drift(
         )
         task_id = str(created.payload["result"]["task_id"])
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
-        harness.authority.dirty = True
         harness.authority.contexts["session-1"] = replace(
-            harness.authority.contexts["session-1"], **change
+            harness.authority.contexts["session-1"],
+            revision_value="clean-checkpoint-revision",
         )
         before = _store_counts(harness.database)
 
-        read = await harness.composition.handle(
-            operation="task.get",
-            params={**_base(), "task_id": task_id},
-            request_id="request-drift-read",
-            session_id="session-1",
-        )
-        listed = await harness.composition.handle(
-            operation="task.list",
-            params=_base(),
-            request_id="request-drift-list",
-            session_id="session-1",
-        )
+        operations = {
+            "task.get": {**_base(), "task_id": task_id},
+            "task.list": _base(),
+            "task.status": {**_base(), "task_id": task_id},
+            "task.events": {**_base(), "task_id": task_id, "after_seq": -1},
+        }
+        for operation, params in operations.items():
+            result = await harness.composition.handle(
+                operation=operation,
+                params=params,
+                request_id=f"request-checkpoint-{operation}",
+                session_id="session-1",
+            )
+            assert result.ok is True, operation
+
         cancel = await harness.composition.handle(
             operation="task.cancel",
             params=_issued_cancel_params(harness, task_id),
@@ -997,9 +992,54 @@ async def test_dirty_read_and_cancel_still_fail_closed_on_context_drift(
             session_id="session-1",
         )
 
-        assert read.payload["error"]["reason"] == reason
-        assert listed.payload["error"]["reason"] == reason
-        assert cancel.payload["error"]["reason"] == reason
+        assert (
+            cancel.payload["error"]["reason"]
+            == "EXECUTION_CONTEXT_REVISION_MISMATCH"
+        )
+        assert _store_counts(harness.database) == before
+        assert harness.executor.cancels == []
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_read_and_cancel_still_fail_closed_on_redacted_context(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness),
+            request_id="request-create-redacted-context",
+            session_id="session-1",
+        )
+        task_id = str(created.payload["result"]["task_id"])
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        harness.authority.contexts["session-1"] = replace(
+            harness.authority.contexts["session-1"],
+            redacted=True,
+            redacted_fields=("secret",),
+        )
+        before = _store_counts(harness.database)
+
+        operations = {
+            "task.get": {**_base(), "task_id": task_id},
+            "task.list": _base(),
+            "task.status": {**_base(), "task_id": task_id},
+            "task.events": {**_base(), "task_id": task_id, "after_seq": -1},
+            "task.cancel": _issued_cancel_params(harness, task_id),
+        }
+        for operation, params in operations.items():
+            result = await harness.composition.handle(
+                operation=operation,
+                params=params,
+                request_id=f"request-redacted-{operation}",
+                session_id="session-1",
+            )
+            assert result.payload["error"]["reason"] == "TASK_CONTEXT_REDACTED"
+
         assert _store_counts(harness.database) == before
         assert harness.executor.cancels == []
     finally:

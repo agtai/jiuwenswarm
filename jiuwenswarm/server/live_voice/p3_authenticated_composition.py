@@ -83,6 +83,7 @@ P3_ROUTE_METHODS: Mapping[str, str] = {
 }
 P3_MUTATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
 P3_TARGETED_MUTATIONS = frozenset({"task.cancel", "task.retry"})
+P3_QUERY_OPERATIONS = frozenset({"task.get", "task.list", "task.status", "task.events"})
 # ``task.retry`` deliberately has no direct transport method: the only W2
 # carrier is the product composition mutate route.  It must still be a first
 # class P3 operation, because dropping it here would silently disable the
@@ -1299,6 +1300,15 @@ class P3AuthenticatedComposition:
                 "formal task context no longer matches the authenticated project",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if operation in P3_QUERY_OPERATIONS:
+            # These are historical, read-only Task Core queries.  D-069 permits
+            # a clean checkpoint to advance the same project's revision between
+            # attempts; status/events must remain readable so the product can
+            # inspect and confirm the bounded retry that follows.  Scope,
+            # stable project identity, path, expiry and redaction were all
+            # revalidated above.  Mutations still require either exact revision
+            # equality (cancel) or the dedicated clean retry admission.
+            return
         if (
             persisted.revision_kind != current.revision_kind
             or persisted.revision_value != current.revision_value
