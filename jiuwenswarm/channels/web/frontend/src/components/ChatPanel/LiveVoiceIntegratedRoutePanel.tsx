@@ -50,6 +50,10 @@ import {
   reconcileProductP2Predecessor,
 } from '../../features/live-voice/formal/productP2ActivationJournal';
 import {
+  persistProductP3TaskTarget,
+  readProductP3TaskTarget,
+} from '../../features/live-voice/formal/productP3TaskTargetJournal';
+import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,
   prepareFormalTaskMutation,
@@ -725,6 +729,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const p3RetryInspectionAbortRef = useRef<AbortController | null>(null);
   const [createdProgressTaskId, setCreatedProgressTaskId] = useState<string | null>(null);
   const progressTaskTargetRef = useRef<string | null>(null);
+  const recoveredP3TaskTargetRef = useRef<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
   const progressRef = useRef<Readonly<ProductTextProgressEvent> | null>(null);
   const pendingOwnedProgressRef = useRef(new Map<string, Readonly<ProductTextProgressEvent>>());
@@ -1807,6 +1812,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setP3RetryInspectionStatus('idle');
     setP3RetryEligibility(null);
     progressTaskTargetRef.current = null;
+    recoveredP3TaskTargetRef.current = null;
     setCreatedProgressTaskId(null);
     if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION || !props.activeSessionId) {
       p3MutationOwnerRef.current = null;
@@ -1823,6 +1829,76 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (p3MutationOwnerRef.current === owner) p3MutationOwnerRef.current = null;
     };
   }, [props.activeSessionId]);
+
+  useEffect(() => {
+    const sessionId = props.activeSessionId;
+    if (
+      !FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ||
+      !props.isConnected ||
+      sessionId === null ||
+      p2JournalState?.status !== 'ready' ||
+      p2JournalState.session_id !== sessionId
+    ) {
+      return;
+    }
+    const recovered = readProductP3TaskTarget({ session_id: sessionId, correlation_id: correlationId });
+    if (recovered === null) return;
+    const recoveryIdentity = `${sessionId}\u0000${correlationId}\u0000${recovered.task_id}`;
+    if (recoveredP3TaskTargetRef.current === recoveryIdentity) return;
+    recoveredP3TaskTargetRef.current = recoveryIdentity;
+    const leaf = new FormalTaskControlLeaf({ enabled: true, binding: recovered.task_control_binding });
+    const recoveryGeneration = p3ProgressReconciliationGenerationRef.current + 1;
+    p3ProgressReconciliationGenerationRef.current = recoveryGeneration;
+    let cancelled = false;
+    setP3RetryInspectionStatus('checking');
+    const isCurrent = () =>
+      !cancelled &&
+      mountedRef.current &&
+      props.isConnected &&
+      activeSessionRef.current === sessionId &&
+      recoveredP3TaskTargetRef.current === recoveryIdentity &&
+      p3ProgressReconciliationGenerationRef.current === recoveryGeneration;
+    void inspectProductP3RetryCandidate({
+      request: productRequest,
+      leaf,
+      session_id: sessionId,
+      task_id: recovered.task_id,
+      request_nonce: `web-task-refresh-${Date.now()}-${recoveryGeneration}`,
+      is_current: isCurrent,
+    })
+      .then(record => {
+        if (!isCurrent()) return;
+        formalTaskControlLeafRef.current?.disconnect();
+        formalTaskControlLeafRef.current = leaf;
+        progressTaskTargetRef.current = recovered.task_id;
+        setCreatedProgressTaskId(recovered.task_id);
+        setP3TargetTaskId(recovered.task_id);
+        const terminalStatus = productP3TerminalStatus(record);
+        setP3MutationStatus(terminalStatus ?? 'accepted');
+        if (isFormalTaskRetryEligible(record)) {
+          setP3RetryEligibility(record);
+          setP3RetryInspectionStatus('eligible');
+          setP3MutationOperation('task.retry');
+        } else {
+          setP3RetryEligibility(null);
+          setP3RetryInspectionStatus('ineligible');
+          setP3MutationOperation('task.cancel');
+        }
+      })
+      .catch(() => {
+        if (!isCurrent()) return;
+        leaf.disconnect();
+        recoveredP3TaskTargetRef.current = null;
+        setP3RetryEligibility(null);
+        setP3RetryInspectionStatus('failed');
+      });
+    return () => {
+      cancelled = true;
+      leaf.disconnect();
+      if (formalTaskControlLeafRef.current === leaf) formalTaskControlLeafRef.current = null;
+      if (recoveredP3TaskTargetRef.current === recoveryIdentity) recoveredP3TaskTargetRef.current = null;
+    };
+  }, [correlationId, p2JournalState, productRequest, props.activeSessionId, props.isConnected]);
 
   useEffect(() => {
     if (!props.isConnected) {
@@ -2386,6 +2462,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (typeof createdTaskId !== 'string' || !createdTaskId.trim()) {
             throw new Error('formal task.create result did not return an exact task');
           }
+          const taskControlBinding = leaf.snapshot().binding;
+          persistProductP3TaskTarget({
+            session_id: taskControlBinding.session_id,
+            correlation_id: taskControlBinding.correlation_id,
+            task_id: createdTaskId,
+            task_control_binding: taskControlBinding,
+          });
+          recoveredP3TaskTargetRef.current = `${taskControlBinding.session_id}\u0000${taskControlBinding.correlation_id}\u0000${createdTaskId}`;
           progressTaskTargetRef.current = createdTaskId;
           progressRef.current = null;
           pendingOwnedProgressRef.current.clear();

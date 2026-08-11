@@ -1696,6 +1696,32 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       );
     });
     assert.equal(retryWaiters.length, 0, 'terminal reconciliation must release its deterministic waiter');
+    const createsBeforeRefresh = calls.filter(
+      call => call.method === 'live_voice.composition.p3.mutate' && call.params.operation === 'task.create'
+    ).length;
+    await act(async () => {
+      renderer.unmount();
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    renderer = null;
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, 'mounted-p3-session', request, p3RetryInspectionWait));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(
+        () =>
+          mountedP3Controls(renderer).root.findByType('input').props.value === 'task-a' &&
+          mountedP3Controls(renderer).select.props.value === 'task.retry' &&
+          JSON.stringify(renderer.toJSON()).includes('cancelled'),
+        'full page remount did not validate and restore the exact cancelled task target'
+      );
+    });
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p3.mutate' && call.params.operation === 'task.create').length,
+      createsBeforeRefresh,
+      'refresh recovery must not duplicate task.create'
+    );
     await act(async () => {
       mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
       await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.retry confirmation did not settle');
