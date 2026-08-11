@@ -54,6 +54,7 @@ import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,
   prepareFormalTaskMutation,
+  type FormalTaskControlBinding,
   type FormalTaskControlRecord,
   type FormalTaskState,
   type PreparedFormalTaskMutation,
@@ -206,6 +207,52 @@ export type ProductVoiceTaskOrigin = Readonly<{
 }>;
 
 type ProductWebRequest = NonNullable<LiveVoiceIntegratedRoutePanelProps['request']>;
+
+function sameFormalTaskControlBinding(left: Readonly<FormalTaskControlBinding>, right: Readonly<FormalTaskControlBinding>): boolean {
+  return (
+    left.subject_id === right.subject_id &&
+    left.session_id === right.session_id &&
+    left.project_id === right.project_id &&
+    left.correlation_id === right.correlation_id &&
+    left.generation === right.generation
+  );
+}
+
+/**
+ * Recover only enough local authority to validate an authenticated historical
+ * task query.  The returned status is immediately adopted by the formal leaf,
+ * so a forged scope, Session, correlation, target, or attempt still fails
+ * closed before the caller can expose retry or mutation controls.
+ */
+export function bootstrapProductP3TaskInspectionLeaf(
+  response: unknown,
+  input: Readonly<{ session_id: string; task_id: string }>
+): FormalTaskControlLeaf {
+  const envelope = recordValue(response);
+  const result = recordValue(envelope?.result);
+  const task = recordValue(result?.task);
+  const scope = recordValue(task?.scope);
+  const required = (value: unknown, field: string): string => {
+    if (typeof value !== 'string' || !value.trim()) throw new Error(`formal task inspection ${field} is invalid`);
+    return value;
+  };
+  const binding = Object.freeze({
+    subject_id: required(scope?.subject_id, 'subject_id'),
+    session_id: required(scope?.session_id, 'session_id'),
+    project_id: required(scope?.project_id, 'project_id'),
+    correlation_id: required(task?.correlation_id, 'correlation_id'),
+    generation: 1,
+  });
+  if (binding.session_id !== input.session_id) throw new Error('formal task inspection Session binding mismatch');
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding });
+  leaf.adopt('task.status', response, {
+    connection_generation: leaf.snapshot().connection_generation,
+    command_id: null,
+    target_task_id: input.task_id,
+    events_query: null,
+  });
+  return leaf;
+}
 
 /**
  * Read and validate one exact retry candidate before publishing it to the live
@@ -2337,8 +2384,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   ): Promise<Readonly<FormalTaskControlRecord> | null> => {
     const sessionId = props.activeSessionId;
     const taskId = (input.task_id ?? p3TargetTaskId).trim();
-    const leaf = formalTaskControlLeafRef.current;
-    if (!sessionId || !taskId || !leaf || p3MutationOwnerRef.current?.hasPendingMutation()) {
+    if (!sessionId || !taskId || p3MutationOwnerRef.current?.hasPendingMutation()) {
       cancelP3RetryInspection();
       setP3RetryEligibility(null);
       setP3RetryInspectionStatus('ineligible');
@@ -2350,17 +2396,28 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const abortController = new AbortController();
     p3RetryInspectionAbortRef.current = abortController;
     const waitForRetry = props.p3RetryInspectionWait ?? defaultP3RetryInspectionWait;
-    const isCurrent = () =>
+    let leaf = formalTaskControlLeafRef.current;
+    const requestIsCurrent = () =>
       !abortController.signal.aborted &&
       mountedRef.current &&
-      formalTaskControlLeafRef.current === leaf &&
       activeSessionRef.current === sessionId &&
       p3RetryInspectionGenerationRef.current === inspectionGeneration &&
       p3RetryInspectionAbortRef.current === abortController;
+    const isCurrent = () => requestIsCurrent() && formalTaskControlLeafRef.current === leaf;
     setP3RetryEligibility(null);
     setP3RetryInspectionStatus('checking');
     setP3RetryInspectionReason(null);
     try {
+      if (leaf === null) {
+        const bootstrapResponse = await productRequest(
+          PRODUCT_P3_TASK_STATUS_METHOD,
+          { session_id: sessionId, task_id: taskId },
+          { requestId: `web-task-status-bootstrap-${Date.now()}-${inspectionGeneration}` }
+        );
+        if (!requestIsCurrent()) return null;
+        leaf = bootstrapProductP3TaskInspectionLeaf(bootstrapResponse, { session_id: sessionId, task_id: taskId });
+        formalTaskControlLeafRef.current = leaf;
+      }
       for (let attempt = 0; ; attempt += 1) {
         const selected = await inspectProductP3RetryCandidate({
           request: productRequest,
@@ -2406,11 +2463,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (!sessionId) return null;
     p3MutationSequenceRef.current += 1;
     const identity = `${Date.now()}-${p3MutationSequenceRef.current}`;
+    const taskControlSnapshot = formalTaskControlLeafRef.current?.snapshot() ?? null;
+    const observedTarget = taskControlSnapshot?.tasks.find(task => task.task_id === p3TargetTaskId.trim());
+    const mutationCorrelationId =
+      p3MutationOperation !== 'task.create' && taskControlSnapshot !== null && observedTarget !== undefined
+        ? taskControlSnapshot.binding.correlation_id
+        : correlationId;
     const common = {
       session_id: sessionId,
       command_id: `web-task-command-${identity}`,
       issued_at: new Date().toISOString(),
-      correlation_id: correlationId,
+      correlation_id: mutationCorrelationId,
     };
     if (p3MutationOperation === 'task.cancel' || p3MutationOperation === 'task.retry') {
       if (!p3TargetTaskId.trim()) return null;
@@ -2526,14 +2589,40 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     try {
       const receipt = await owner.issue(mutation);
       let leaf = formalTaskControlLeafRef.current;
-      if (leaf === null) {
-        leaf = new FormalTaskControlLeaf({
+      const currentBinding = leaf?.snapshot().binding ?? null;
+      let receiptLeaf = leaf;
+      if (currentBinding === null || !sameFormalTaskControlBinding(currentBinding, receipt.task_control_binding)) {
+        receiptLeaf = new FormalTaskControlLeaf({
           enabled: true,
           binding: receipt.task_control_binding,
         });
-        formalTaskControlLeafRef.current = leaf;
       } else {
+        if (leaf === null) throw new Error('formal task control leaf missing for matching binding');
         leaf.reconnect(receipt.task_control_binding);
+      }
+      if (mutation.operation !== 'task.create') {
+        if (receiptLeaf === null) throw new Error('formal task control receipt leaf is missing');
+        const refreshed = await inspectProductP3RetryCandidate({
+          request: productRequest,
+          leaf: receiptLeaf,
+          session_id: mutation.session_id,
+          task_id: mutation.task_id,
+          request_nonce: `confirmed-${mutation.command_id}`,
+          is_current: () =>
+            mountedRef.current &&
+            p3MutationOwnerRef.current === owner &&
+            pendingP3MutationRef.current === mutation &&
+            activeSessionRef.current === mutation.session_id,
+        });
+        if (mutation.operation === 'task.retry' && !isFormalTaskRetryEligible(refreshed)) {
+          throw new Error('formal task.retry became ineligible after confirmation');
+        }
+        if (mutation.operation === 'task.retry') setP3RetryEligibility(refreshed);
+      }
+      if (receiptLeaf !== leaf) {
+        leaf?.disconnect();
+        leaf = receiptLeaf;
+        formalTaskControlLeafRef.current = receiptLeaf;
       }
       pendingFormalP3MutationRef.current = prepareFormalTaskMutation(
         receipt.task_control_binding,

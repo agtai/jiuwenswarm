@@ -11,6 +11,7 @@ import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
   bindProductVoiceTaskOrigin,
+  bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
   extractWebErrorReason,
   inspectProductP3RetryCandidate,
@@ -647,6 +648,20 @@ test('route panel exposes only a stable retry inspection failure reason', async 
   assert.equal(html.includes('<code>failed</code>'), true);
   assert.equal(html.includes('Retry check reason'), true);
   assert.equal(html.includes('<code>EXECUTION_CONTEXT_REVISION_MISMATCH</code>'), true);
+});
+
+test('an authenticated historical status bootstraps a query-only P3 leaf and still rejects foreign scope', () => {
+  const response = retryStatus();
+  const leaf = bootstrapProductP3TaskInspectionLeaf(response, { session_id: 'session-1', task_id: 'task-1' });
+  assert.deepEqual(leaf.snapshot().binding, { ...retryBinding, generation: 1 });
+  assert.deepEqual(
+    leaf.snapshot().tasks.map(task => [task.task_id, task.attempt_id, task.attempt_number, task.state, task.outcome]),
+    [['task-1', 'attempt-b', 2, 'terminal', 'completed']]
+  );
+  assert.throws(
+    () => bootstrapProductP3TaskInspectionLeaf(response, { session_id: 'session-foreign', task_id: 'task-1' }),
+    /Session binding mismatch/
+  );
 });
 
 test('retry candidate inspection binds exact status and full A/B history before exposing eligibility', async () => {

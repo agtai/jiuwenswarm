@@ -1884,6 +1884,125 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
   }
 });
 
+test('mounted P3 recovers an eligible historical task without a browser task-target journal', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const historicalBinding = {
+    subject_id: 'mounted-historical-subject',
+    session_id: 'mounted-historical-session',
+    project_id: 'mounted-historical-project',
+    correlation_id: 'mounted-historical-correlation',
+    generation: 1,
+  };
+  const calls = [];
+  let renderer;
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.task.status') {
+      return mountedP3Status(historicalBinding, {
+        attemptId: 'attempt-b',
+        attemptNumber: 2,
+        state: 'terminal',
+        outcome: 'completed',
+        eventHead: 5,
+      });
+    }
+    if (method === 'live_voice.task.events') {
+      return mountedP3Events(historicalBinding, { terminalA: true, terminalB: true });
+    }
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      assert.equal(params.operation, 'task.retry');
+      assert.equal(params.task_id, 'task-a');
+      assert.equal(params.correlation_id, historicalBinding.correlation_id);
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: params.operation,
+          command_id: params.command_id,
+          target_task_id: params.task_id,
+          confirmation_id: `confirmation-${params.command_id}`,
+          expires_at: '2999-08-10T10:00:00Z',
+          task_control_binding: { ...historicalBinding },
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.mutate') {
+      return {
+        ok: true,
+        result: {
+          status: 'mutation_processed',
+          operation: 'task.retry',
+          command_id: params.command_id,
+          target_task_id: 'task-a',
+          formal_task_result: {
+            task_id: 'task-a',
+            previous_attempt_id: 'attempt-b',
+            attempt_id: 'attempt-c',
+            attempt_number: 3,
+            applied: true,
+            state: 'accepted',
+            outbox_id: 'outbox-retry-c',
+          },
+        },
+      };
+    }
+    throw new Error(`unexpected historical P3 request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, historicalBinding.session_id, request));
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'historical P3 controls did not mount');
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.cancel' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).root.findByType('input').props.onChange({ target: { value: 'task-a' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry',
+        'historical task inspection did not expose task.retry'
+      );
+    });
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('eligible:2/3'), true);
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 2);
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 1);
+
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'historical retry confirmation did not settle');
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 3);
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 2);
+
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'historical retry C did not settle');
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 1);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    browser.restore();
+  }
+});
+
 test('mounted P1 cleanup singleflight fences two retained Start attempts until exact close, then allocates one successor', async () => {
   const i18n = await createI18n();
   const browser = installP1BrowserEnvironment();
