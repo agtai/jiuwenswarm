@@ -1,0 +1,13 @@
+{
+  "schema": "live-voice.w2-rehearsal-audio-asset.v1",
+  "file": "voice-command-48k-mono-pcm16.wav",
+  "sha256": "4df35a6ceb9ca44dc033e74f7700fe476af3705a74580b2fb66156bcf4a58557",
+  "bytes": 434258,
+  "channels": 1,
+  "sample_rate_hz": 48000,
+  "sample_width_bytes": 2,
+  "frame_count": 217088,
+  "duration_ms": 4523,
+  "spoken_command": "请回复：语音联调成功。",
+  "gate_credit": false
+}
