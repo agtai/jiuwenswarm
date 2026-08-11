@@ -68,3 +68,56 @@ async def deliver(channel, content, session_id: str,
                 "card degraded to numbered-reply text for session %s", session_id
             )
     return resolved
+
+_default_registry = PendingCardRegistry()
+
+
+def get_default_registry() -> PendingCardRegistry:
+    """Shared registry used by the dispatch loop and the inbound path."""
+    return _default_registry
+
+
+def degrade_card_if_unsupported(msg, channel, registry):
+    """Rewrite an interactive-card message for channels without buttons.
+
+    No-op when the message carries no card or the channel declares button
+    support. Otherwise the card is remembered for the session and the
+    message content becomes its numbered-reply text - never dropped.
+    """
+    import dataclasses
+
+    from jiuwenswarm.gateway.channel_manager.sdk.capabilities import ChannelCapabilities
+    from jiuwenswarm.gateway.channel_manager.sdk.cards import Button
+
+    payload = getattr(msg, "payload", None) or {}
+    card_spec = payload.get("interactive_card")
+    if not card_spec:
+        return msg
+    capabilities = getattr(channel, "capabilities", None) or ChannelCapabilities()
+    if capabilities.buttons:
+        return msg
+    card = InteractiveCard(
+        text=card_spec.get("text", ""),
+        buttons=tuple(
+            Button(label=b["label"], action=b["action"])
+            for b in card_spec.get("buttons", ())
+        ),
+    )
+    registry.remember(msg.session_id or "", card)
+    new_payload = {k: v for k, v in payload.items() if k != "interactive_card"}
+    new_params = dict(getattr(msg, "params", None) or {})
+    new_params["content"] = card.degrade_to_text()
+    return dataclasses.replace(msg, payload=new_payload, params=new_params)
+
+
+def map_incoming_reply(msg, registry):
+    """Rewrite a numbered reply back into its card action on the way in."""
+    import dataclasses
+
+    params = dict(getattr(msg, "params", None) or {})
+    content = str(params.get("content", ""))
+    kind, value = registry.resolve_incoming_reply(msg.session_id or "", content)
+    if kind == "action":
+        params["content"] = value
+        return dataclasses.replace(msg, params=params)
+    return msg
