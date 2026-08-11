@@ -25,6 +25,7 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.sys_operation.cwd import init_cwd
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
@@ -78,6 +79,7 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
+    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
 from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -333,6 +335,7 @@ def _set_workspace_coding_memory_directory(
     project_dir: str | None,
     agent_workspace_dir: str,
     description: str = "Coding Agent memory",
+    application_owned: bool = False,
 ) -> None:
     set_directory = getattr(workspace, "set_directory", None)
     if not callable(set_directory):
@@ -343,9 +346,13 @@ def _set_workspace_coding_memory_directory(
     # node, so the node must point at the absolute storage directory as well;
     # a project-relative node would split memory files and their index across
     # two locations.
-    coding_memory_path = resolve_project_coding_memory_dir(
-        agent_workspace_dir=agent_workspace_dir,
-        project_dir=project_dir,
+    coding_memory_path = (
+        resolve_project_coding_memory_dir(
+            agent_workspace_dir=agent_workspace_dir,
+            project_dir=project_dir,
+        )
+        if application_owned
+        else resolve_project_coding_memory_workspace_path(project_dir=project_dir)
     )
     set_directory(
         _build_coding_memory_directory_node(
@@ -413,6 +420,22 @@ _CODE_PLAN_ALLOWED_TOOLS: list[str] = [
     "write_file",
     "edit_file",
 ]
+_BACKGROUND_PROJECT_FILE_TOOLS = frozenset(
+    {"read_file", "grep", "list_files", "ls", "glob", "write_file", "edit_file"}
+)
+
+
+def _restrict_background_project_abilities(
+    instance: Any,
+) -> None:
+    """Leave only project file tools on one dedicated task adapter."""
+    manager = getattr(instance, "ability_manager", None)
+    if manager is None:
+        return
+    for existing in list(manager.list() or []):
+        name = str(getattr(existing, "name", "") or "")
+        if name not in _BACKGROUND_PROJECT_FILE_TOOLS:
+            manager.remove(name)
 
 
 class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
@@ -557,6 +580,7 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             project_dir=self._project_dir or self._workspace_dir,
             agent_workspace_dir=self._agent_workspace_dir,
             description="Coding Agent 记忆模块",
+            application_owned=self._uses_application_runtime_support(),
         )
 
         self._instance = create_deep_agent(
@@ -613,7 +637,17 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
         initial_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        self._seed_runtime_cwd(initial_workspace, workspace=initial_workspace)
+        if not self._uses_application_runtime_support():
+            self._ensure_project_gitignore_agent_history(initial_workspace)
+        self._seed_code_runtime_cwd(
+            self._RuntimeConfig(
+                project_dir=initial_workspace,
+                cwd=initial_workspace,
+                workspace=initial_workspace,
+            ),
+            project_workspace=initial_workspace,
+            task_cwd=initial_workspace,
+        )
 
         setattr(self._instance, "_jiuwenswarm_adapter_mode", "code")
         setattr(
@@ -1205,6 +1239,19 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
 
     # ─── Runtime config ──────────────────────────
 
+    async def prepare_background_project_session(self, session_id: str) -> None:
+        """Create one fresh child adapter reserved for a bounded project task."""
+        if self._is_session_scoped_adapter:
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background tasks require a root Code Agent adapter"
+            )
+        if self._get_cached_session_adapter(session_id) is not None:
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background task session was already used"
+            )
+        child = await self._get_or_create_session_adapter(session_id)
+        child._is_dedicated_background_project_adapter = True
+
     async def _update_runtime_config(self, runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig") -> None:
         """Code 模式 runtime config: ProjectMemoryRail 语言同步 + rail 模式切换."""
         if self._instance is None:
@@ -1217,7 +1264,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             or str(get_default_project_session_workspace_dir(runtime_config.session_id))
         )
         task_cwd = runtime_config.cwd or project_workspace
-        self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
+        self._seed_code_runtime_cwd(
+            runtime_config,
+            project_workspace=project_workspace,
+            task_cwd=task_cwd,
+        )
         resolved_language = self._resolve_runtime_language()
         resolved_channel = str(runtime_config.channel_id or
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
@@ -1300,6 +1351,30 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
                 self._instance.ability_manager.add(tool.card)
         except ImportError:
             pass
+
+        if getattr(self, "_is_dedicated_background_project_adapter", False):
+            _restrict_background_project_abilities(self._instance)
+
+    def _seed_code_runtime_cwd(
+        self,
+        runtime_config: "JiuWenSwarmDeepAdapter._RuntimeConfig",
+        *,
+        project_workspace: str,
+        task_cwd: str,
+    ) -> None:
+        """Separate clean formal support files from the project cwd."""
+
+        if not self._uses_application_runtime_support():
+            self._seed_runtime_cwd(task_cwd, workspace=project_workspace)
+            return
+        project_root = str(
+            runtime_config.project_dir or self._project_dir or task_cwd
+        )
+        init_cwd(
+            task_cwd,
+            project_root=project_root,
+            workspace=self._agent_workspace_dir,
+        )
 
     # ─── Tools 构建 ──────────────────────────
 

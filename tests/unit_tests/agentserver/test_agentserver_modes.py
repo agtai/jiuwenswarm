@@ -666,6 +666,280 @@ def test_chat_answer_routes_team_plan_confirm_interrupt_to_adapter(monkeypatch):
     assert fake_adapter.requests == [request]
 
 
+def test_background_code_task_is_root_bound_and_bypasses_chat_history(
+    tmp_path,
+    monkeypatch,
+):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeCodeAdapter:
+        _is_code_agent = True
+        _is_session_scoped_adapter = False
+        _project_dir = str(tmp_path)
+        seen_request = None
+        cleaned_sessions = []
+        prepared_sessions = []
+
+        @classmethod
+        async def prepare_background_project_session(cls, session_id):
+            cls.prepared_sessions.append(session_id)
+
+        @classmethod
+        async def cleanup_session_adapter(cls, session_id):
+            cls.cleaned_sessions.append(session_id)
+            return True
+
+        @classmethod
+        async def process_message_stream_impl(cls, request, _inputs):
+            cls.seen_request = request
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"event_type": "chat.final", "content": "done"},
+                is_complete=True,
+            )
+
+    facade = interface_module.JiuWenSwarm.__new__(interface_module.JiuWenSwarm)
+    facade._adapter = FakeCodeAdapter()
+    facade._build_inputs = lambda request: (
+        {"query": request.params["query"]},
+        "disabled",
+        request.params["query"],
+    )
+    monkeypatch.setattr(
+        interface_module,
+        "append_history_record",
+        lambda *_args, **_kwargs: pytest.fail("background task wrote Chat history"),
+    )
+    request = AgentRequest(
+        request_id="background-project",
+        channel_id="web",
+        session_id="sched-task",
+        params={"query": "make a project change", "project_dir": str(tmp_path)},
+        metadata={"enable_memory": True},
+        is_stream=True,
+    )
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in facade.process_background_code_task_stream(request)
+        ]
+
+    chunks = asyncio.run(collect())
+
+    assert chunks[-1].is_complete is True
+    assert facade.get_project_execution_root() == str(tmp_path.resolve())
+    assert FakeCodeAdapter.seen_request.params["mode"] == "code"
+    assert FakeCodeAdapter.seen_request.params["cwd"] == str(tmp_path.resolve())
+    assert FakeCodeAdapter.seen_request.params["trusted_dirs"] == [
+        str(tmp_path.resolve())
+    ]
+    assert FakeCodeAdapter.seen_request.metadata["enable_memory"] is False
+    assert FakeCodeAdapter.seen_request.metadata["skip_a2ui"] is True
+    assert (
+        FakeCodeAdapter.seen_request.metadata["project_task_file_tools_only"]
+        is True
+    )
+    assert FakeCodeAdapter.prepared_sessions == ["sched-task"]
+    assert FakeCodeAdapter.cleaned_sessions == ["sched-task"]
+
+
+def test_background_project_tool_filter_keeps_only_project_file_abilities():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        _restrict_background_project_abilities,
+    )
+
+    class Card:
+        def __init__(self, name):
+            self.name = name
+
+    class Manager:
+        def __init__(self):
+            self.cards = [
+                Card(name)
+                for name in (
+                    "read_file",
+                    "write_file",
+                    "edit_file",
+                    "grep",
+                    "glob",
+                    "bash",
+                    "task_tool",
+                    "create_terminal",
+                    "user_todos",
+                )
+            ]
+
+        def list(self):
+            return list(self.cards)
+
+        def remove(self, name):
+            self.cards = [card for card in self.cards if card.name != name]
+
+    class Instance:
+        ability_manager = Manager()
+
+    instance = Instance()
+    _restrict_background_project_abilities(
+        instance,
+    )
+
+    assert {card.name for card in instance.ability_manager.list()} == {
+        "read_file",
+        "write_file",
+        "edit_file",
+        "grep",
+        "glob",
+    }
+
+
+def test_code_adapter_prepares_only_a_fresh_dedicated_background_child():
+    from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+        JiuwenSwarmCodeAdapter,
+    )
+
+    class Child:
+        pass
+
+    child = Child()
+    adapter = JiuwenSwarmCodeAdapter.__new__(JiuwenSwarmCodeAdapter)
+    adapter._is_session_scoped_adapter = False
+    adapter._get_cached_session_adapter = lambda _session_id: None
+
+    async def get_child(_session_id):
+        return child
+
+    adapter._get_or_create_session_adapter = get_child
+
+    asyncio.run(adapter.prepare_background_project_session("sched-fresh"))
+
+    assert child._is_dedicated_background_project_adapter is True
+
+
+def test_background_code_task_rejects_reused_session_before_adapter_call(tmp_path):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeCodeAdapter:
+        _is_code_agent = True
+        _is_session_scoped_adapter = False
+        _project_dir = str(tmp_path)
+
+        @staticmethod
+        async def prepare_background_project_session(_session_id):
+            raise RuntimeError(
+                "EXECUTION_TARGET_NOT_BOUND: background task session was already used"
+            )
+
+        @staticmethod
+        async def process_message_stream_impl(*_args, **_kwargs):
+            pytest.fail("reused background session reached the adapter")
+            if False:
+                yield None
+
+    facade = interface_module.JiuWenSwarm.__new__(interface_module.JiuWenSwarm)
+    facade._adapter = FakeCodeAdapter()
+    request = AgentRequest(
+        request_id="reused-project-session",
+        channel_id="web",
+        session_id="sched-reused",
+        params={"query": "change project", "project_dir": str(tmp_path)},
+        is_stream=True,
+    )
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in facade.process_background_code_task_stream(request)
+        ]
+
+    with pytest.raises(RuntimeError, match="session was already used"):
+        asyncio.run(collect())
+
+
+def test_background_code_task_cleans_dedicated_session_after_stream_error(tmp_path):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeCodeAdapter:
+        _is_code_agent = True
+        _is_session_scoped_adapter = False
+        _project_dir = str(tmp_path)
+        cleaned_sessions = []
+
+        @staticmethod
+        async def prepare_background_project_session(_session_id):
+            return None
+
+        @staticmethod
+        async def process_message_stream_impl(*_args, **_kwargs):
+            raise RuntimeError("agent stream failed")
+            if False:
+                yield None
+
+        @classmethod
+        async def cleanup_session_adapter(cls, session_id):
+            cls.cleaned_sessions.append(session_id)
+            return True
+
+    facade = interface_module.JiuWenSwarm.__new__(interface_module.JiuWenSwarm)
+    facade._adapter = FakeCodeAdapter()
+    facade._build_inputs = lambda request: (
+        {"query": request.params["query"]},
+        "disabled",
+        request.params["query"],
+    )
+    request = AgentRequest(
+        request_id="failed-project-stream",
+        channel_id="web",
+        session_id="sched-failed",
+        params={"query": "change project", "project_dir": str(tmp_path)},
+        is_stream=True,
+    )
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in facade.process_background_code_task_stream(request)
+        ]
+
+    with pytest.raises(RuntimeError, match="agent stream failed"):
+        asyncio.run(collect())
+    assert FakeCodeAdapter.cleaned_sessions == ["sched-failed"]
+
+
+def test_background_code_task_rejects_foreign_root_before_adapter_call(tmp_path):
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeCodeAdapter:
+        _is_code_agent = True
+        _project_dir = str(tmp_path)
+
+        @staticmethod
+        async def process_message_stream_impl(*_args, **_kwargs):
+            pytest.fail("foreign-root task reached the adapter")
+            if False:
+                yield None
+
+    facade = interface_module.JiuWenSwarm.__new__(interface_module.JiuWenSwarm)
+    facade._adapter = FakeCodeAdapter()
+    request = AgentRequest(
+        request_id="foreign-project",
+        channel_id="web",
+        session_id="sched-task",
+        params={"query": "change project", "project_dir": str(tmp_path / "other")},
+        is_stream=True,
+    )
+
+    async def collect():
+        return [
+            chunk
+            async for chunk in facade.process_background_code_task_stream(request)
+        ]
+
+    with pytest.raises(RuntimeError, match="EXECUTION_TARGET_NOT_BOUND"):
+        asyncio.run(collect())
+
+
 def test_process_message_stream_routes_team_plan_confirm_interrupt_as_team_follow_up(monkeypatch):
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
@@ -1309,7 +1583,7 @@ def test_deep_adapter_build_agent_rails_adds_ask_user_for_agent_modes(monkeypatc
     monkeypatch.setattr(adapter, "_build_task_planning_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_security_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_heartbeat_rail", lambda: None)
-    monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda: None)
+    monkeypatch.setattr(adapter, "_build_circuit_breaker_rail", lambda **_kwargs: None)
     monkeypatch.setattr(adapter, "_build_avatar_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_subagent_rail", lambda: None)
     monkeypatch.setattr(adapter, "_build_skill_rail", lambda **_kwargs: None)
@@ -1694,7 +1968,7 @@ def test_deep_adapter_rebuilds_plan_evolution_rails_when_language_changes(monkey
     assert adapter._evolution_interrupt_rail is interrupt_rails[0]
 
 
-def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):
+async def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     monkeypatch.setattr(
@@ -1715,12 +1989,15 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
         },
     )
 
-    response = asyncio.run(adapter.handle_user_answer(request))
+    try:
+        response = await adapter.handle_user_answer(request)
+    finally:
+        await adapter.cleanup()
 
     assert response.payload["resolved"] is False
 
 
-def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch):
+async def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch):
     from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 
     calls: list[tuple[str, str]] = []
@@ -1764,7 +2041,10 @@ def test_deep_adapter_routes_team_simplify_answer_by_evolution_meta(monkeypatch)
         },
     )
 
-    response = asyncio.run(adapter.handle_user_answer(request))
+    try:
+        response = await adapter.handle_user_answer(request)
+    finally:
+        await adapter.cleanup()
 
     assert response.payload["resolved"] is True
     assert calls == [("approve_simplify", "evolve_simplify_team123")]

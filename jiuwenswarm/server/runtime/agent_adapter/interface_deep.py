@@ -207,12 +207,18 @@ from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_b
 from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
 from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
-from jiuwenswarm.server.runtime.session.session_history import append_history_record, load_history_records
+from jiuwenswarm.server.runtime.session.session_history import (
+    append_history_record,
+    load_history_records,
+    register_formal_no_history_session,
+    unregister_formal_no_history_session,
+)
 
 # Goal 用户历史：忙碌插队时先挂起，等上一轮→goal 边界（或流结束）再落盘，
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
 _pending_goal_objective_history: dict[str, dict[str, Any]] = {}
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.prompt_attachment_loader import PromptAttachmentLoader
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -336,6 +342,7 @@ from jiuwenswarm.common.utils import (
     get_checkpoint_dir,
     get_default_project_session_workspace_dir,
     get_env_file,
+    get_prompt_attachment_dir,
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
@@ -391,6 +398,40 @@ def get_runtime_tool_session_id() -> str | None:
     return _CRON_TOOL_SESSION_ID.get()
 
 logger = logging.getLogger(__name__)
+_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS = 5.0
+_FORMAL_ACTIVE_RAW_EVENT_TYPES = frozenset(
+    {
+        "answer",
+        "content_chunk",
+        "controller_output",
+        "delta",
+        "error",
+        "llm_output",
+        "llm_reasoning",
+        "tool_call",
+        "tool_result",
+        "tool_update",
+    }
+)
+_FORMAL_PASSIVE_RAW_EVENT_TYPES = frozenset(
+    {
+        "context.compression_state",
+        "context.usage",
+        "llm_usage",
+        "thinking",
+        "todo.updated",
+        "tracer_agent",
+    }
+)
+_FORMAL_PASSIVE_EVENT_TYPES = frozenset(
+    {
+        "chat.processing_status",
+        "chat.usage_metadata",
+        "context.compression_state",
+        "context.usage",
+        "todo.updated",
+    }
+)
 
 _PERSISTENT_CHECKPOINTER_LOCK: asyncio.Lock | None = None
 _PERSISTENT_CHECKPOINTER_LOCK_LOOP: asyncio.AbstractEventLoop | None = None
@@ -1153,6 +1194,7 @@ class JiuWenSwarmDeepAdapter:
         self._context_processor_rail: ContextProcessorRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
+        self._prompt_attachment_loader: PromptAttachmentLoader | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -1198,6 +1240,10 @@ class JiuWenSwarmDeepAdapter:
         self._root_instance_requested: bool = False
         self._root_instance_lock: asyncio.Lock | None = None
         self._session_adapters: dict[str, JiuWenSwarmDeepAdapter] = {}
+        # A child is published before its first initialization await.  This
+        # set prevents a concurrent lookup from treating that retained owner
+        # as ready after partial initialization failed or was cancelled.
+        self._session_adapter_initializing: set[str] = set()
         self._session_adapter_locks: dict[str, asyncio.Lock] = {}
         self._session_adapter_last_used: dict[str, float] = {}
         self._session_adapter_config_version: int = 0
@@ -1222,6 +1268,9 @@ class JiuWenSwarmDeepAdapter:
         self._a2x_config: dict[str, Any] = {}
         self._a2x_blank_service_id: str = ""
         self._a2x_blank_dataset: str = ""
+        self._formal_cleanup_lock = asyncio.Lock()
+        self._formal_cleanup_task: asyncio.Task[None] | None = None
+        self._formal_cleanup_complete = False
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -1355,6 +1404,7 @@ class JiuWenSwarmDeepAdapter:
         remove_runtime_state: bool = True,
     ) -> None:
         self._session_adapters.pop(session_id, None)
+        getattr(self, "_session_adapter_initializing", set()).discard(session_id)
         if remove_lock:
             self._session_adapter_locks.pop(session_id, None)
         self._session_adapter_last_used.pop(session_id, None)
@@ -1545,35 +1595,54 @@ class JiuWenSwarmDeepAdapter:
         async with lock:
             existing = self._session_adapters.get(sid)
             if existing is not None:
+                if sid in self._session_adapter_initializing:
+                    raise RuntimeError("SESSION_ADAPTER_INITIALIZATION_PENDING")
                 await self._reload_session_adapter_if_stale(sid, existing)
                 self._touch_session_adapter(sid)
                 return existing
 
             adapter = self._new_session_scoped_adapter(sid)
+            # Publish the exact child before create_instance can produce any
+            # runtime.  RuntimeError and CancelledError both retain this owner
+            # for formal strict cleanup; neither makes it usable.
+            self._session_adapters[sid] = adapter
+            self._session_adapter_initializing.add(sid)
             config = (
                 dict(self._session_instance_config)
                 if isinstance(self._session_instance_config, dict)
                 else None
             )
-            create_started_at = time.monotonic()
-            await adapter.create_instance(
-                config,
-                mode=self._session_instance_mode,
-                sub_mode=self._session_instance_sub_mode,
+            formal_profile = bool(
+                config and config.get("project_clean_runtime_support", False)
             )
-            instance_ready_at = time.monotonic()
+            try:
+                create_started_at = time.monotonic()
+                await adapter.create_instance(
+                    config,
+                    mode=self._session_instance_mode,
+                    sub_mode=self._session_instance_sub_mode,
+                )
+                instance_ready_at = time.monotonic()
 
-            await adapter.start_interaction(session_id=sid)
-            interaction_ready_at = time.monotonic()
+                if formal_profile:
+                    strict_start = getattr(adapter, "_start_interaction", None)
+                    if not callable(strict_start):
+                        raise RuntimeError("SESSION_ADAPTER_INITIALIZATION_PENDING")
+                    await strict_start(session_id=sid, strict=True)
+                else:
+                    await adapter.start_interaction(session_id=sid)
+                interaction_ready_at = time.monotonic()
 
-            self._session_adapters[sid] = adapter
-            # A brand-new session adapter is created from ``_session_instance_config``
-            # (which may predate the latest global reload). If a global reload left a
-            # pending ``config_base``, apply it now so the new session reflects the
-            # same configuration as already-existing sessions that reload lazily.
-            # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
-            # (including the no-pending case, where it silently catches up).
-            await self._reload_session_adapter_if_stale(sid, adapter)
+                # A brand-new session adapter is created from ``_session_instance_config``
+                # (which may predate the latest global reload). If a global reload left a
+                # pending ``config_base``, apply it now so the new session reflects the
+                # same configuration as already-existing sessions that reload lazily.
+                # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
+                # (including the no-pending case, where it silently catches up).
+                await self._reload_session_adapter_if_stale(sid, adapter)
+            except BaseException:  # noqa: BLE001 -- retain partial owner
+                raise
+            self._session_adapter_initializing.discard(sid)
             self._touch_session_adapter(sid)
             # Cold-start cost of a session's first turn, split so a slow one can
             # be attributed to agent assembly vs. interaction startup.
@@ -1653,12 +1722,41 @@ class JiuWenSwarmDeepAdapter:
     def is_session_active(self, session_id: str) -> bool:
         return self._is_session_active(session_id)
 
+    def _owns_local_runtime(self) -> bool:
+        return bool(
+            self._instance is not None
+            or self._a2x_client is not None
+            or (
+                self._memory_reindex_task is not None
+                and not self._memory_reindex_task.done()
+            )
+            or any(
+                not task.done()
+                for tasks in self._session_agent_tasks.values()
+                for task in tasks
+            )
+            or any(not task.done() for task in self._evolution_watcher_tasks)
+        )
+
+    def _owns_formal_runtime(self) -> bool:
+        return bool(
+            self._owns_local_runtime()
+            or self._session_adapters
+            or self._session_adapter_locks
+            or self._active_session_ids
+            or self._session_agent_tasks
+        )
+
     def has_session_runtime(self, session_id: str | None = None) -> bool:
-        """Return whether this adapter still owns session runtime."""
+        """Return whether this adapter still owns product session runtime."""
+        owns_local_runtime = self._owns_local_runtime()
         if session_id is not None:
             sid = self._session_adapter_key(session_id)
             if self._is_session_scoped_adapter:
-                return self._session_adapter_key(self._parent_session_id) == sid
+                return (
+                    self._session_adapter_key(self._parent_session_id) == sid
+                    and owns_local_runtime
+                )
             return bool(
                 sid in self._session_adapters
                 or sid in self._session_adapter_locks
@@ -1666,7 +1764,10 @@ class JiuWenSwarmDeepAdapter:
                 or sid in self._session_agent_tasks
             )
         if self._is_session_scoped_adapter:
-            return True
+            return owns_local_runtime
+        # A root DeepAdapter instance is a reusable cache, not product Session
+        # runtime.  The formal strict seam separately includes that local owner
+        # in its stronger quiescence proof before disposing the facade.
         return bool(
             self._session_adapters
             or self._session_adapter_locks
@@ -4577,12 +4678,20 @@ class JiuWenSwarmDeepAdapter:
             logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
             return None
 
-    def _build_circuit_breaker_rail(self) -> CircuitBreakerRail | None:
+    def _build_circuit_breaker_rail(
+        self,
+        config_base: dict[str, Any] | None = None,
+    ) -> CircuitBreakerRail | None:
         try:
-            guard_cfg = (get_config() or {}).get("execution_guard") or {}
+            effective_config = get_config() if config_base is None else config_base
+            guard_cfg = (effective_config or {}).get("execution_guard") or {}
             cb_cfg = guard_cfg.get("circuit_breaker") or {}
-            if cb_cfg.get("enabled", False) is not True:
-                logger.info("[JiuWenSwarmDeepAdapter] CircuitBreakerRail disabled by config")
+            legacy_enabled = cb_cfg.get("enabled", False) is True
+            repeated_failure_enabled = cb_cfg.get("repeated_failure_enabled", True) is True
+            if not legacy_enabled and not repeated_failure_enabled:
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] CircuitBreakerRail guards disabled by config"
+                )
                 return None
             defaults = CircuitBreakerConfig()
             config = CircuitBreakerConfig(
@@ -4593,6 +4702,11 @@ class JiuWenSwarmDeepAdapter:
                 ),
                 unknown_tool_threshold=cb_cfg.get(
                     "unknown_tool_threshold", defaults.unknown_tool_threshold
+                ),
+                legacy_detectors_enabled=legacy_enabled,
+                repeated_failure_enabled=repeated_failure_enabled,
+                repeated_failure_threshold=cb_cfg.get(
+                    "repeated_failure_threshold", defaults.repeated_failure_threshold
                 ),
             )
             rail = CircuitBreakerRail(config, language=self._resolve_runtime_language())
@@ -4801,7 +4915,11 @@ class JiuWenSwarmDeepAdapter:
                 self._build_llm_retry_rail,
                 {"config_base": config_base},
             ),
-            _RailBuildInfo("_circuit_breaker_rail", self._build_circuit_breaker_rail),
+            _RailBuildInfo(
+                "_circuit_breaker_rail",
+                self._build_circuit_breaker_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_memory_forbidden_rail", self._build_memory_forbidden_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
@@ -5412,6 +5530,8 @@ class JiuWenSwarmDeepAdapter:
             "project_dir", config.get("project_dir")
         )
         self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
+        self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
+        self._prompt_attachment_loader.ensure_layout()
         if self._skip_own_instance_build():
             return
 
@@ -5478,6 +5598,7 @@ class JiuWenSwarmDeepAdapter:
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
+        self._ensure_project_gitignore_agent_history(initial_runtime_workspace)
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -5498,6 +5619,120 @@ class JiuWenSwarmDeepAdapter:
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
+
+    @staticmethod
+    def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
+        """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
+        if not project_dir:
+            return
+        try:
+            repo_probe = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return
+        if repo_probe.returncode != 0:
+            return
+
+        repo_root_text = repo_probe.stdout.strip()
+        if not repo_root_text:
+            return
+        gitignore_path = Path(repo_root_text) / ".gitignore"
+        try:
+            existing_bytes = gitignore_path.read_bytes() if gitignore_path.exists() else b""
+        except OSError as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] read .gitignore for agent history rule failed: %s",
+                exc,
+            )
+            return
+
+        if JiuWenSwarmDeepAdapter._gitignore_covers_agent_history(existing_bytes):
+            return
+
+        existing = existing_bytes.decode("utf-8", errors="replace")
+        prefix = "" if not existing else ("\n" if existing.endswith(("\n", "\r")) else "\n\n")
+        addition = (
+            f"{prefix}# JiuwenSwarm runtime file operation logs\n.agent_history/\n"
+        ).encode("utf-8")
+        try:
+            gitignore_path.write_bytes(existing_bytes + addition)
+        except OSError as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ensure .agent_history gitignore failed: %s",
+                exc,
+            )
+
+    @staticmethod
+    def _gitignore_covers_agent_history(content: bytes) -> bool:
+        """Return True if .gitignore content already ignores .agent_history/.
+
+        Recognizes equivalent forms such as ``.agent_history``,
+        ``.agent_history/``, ``.agent_history/*``, ``.agent_history/**``,
+        ``.agent_history/**/*``, ``**/.agent_history`` and combinations
+        thereof, so that the rule is idempotent across pre-existing project
+        configurations.
+        """
+        text = content.decode("utf-8", errors="replace")
+        for raw_line in text.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Skip negation rules; they re-include paths rather than ignore
+            # the directory.
+            if line.startswith("!"):
+                continue
+            # Strip leading glob prefix like `**/`.
+            if line.startswith("**/"):
+                line = line[3:]
+            # Split into segments. The rule covers `.agent_history` if the
+            # first segment matches and any following segments are wildcards
+            # that target the directory contents.
+            segments = [seg for seg in line.split("/") if seg]
+            if not segments or segments[0] != ".agent_history":
+                continue
+            if all(seg in ("*", "**") for seg in segments[1:]):
+                return True
+        return False
+
+    async def _sync_prompt_attachments_for_request(self, session_id: str) -> None:
+        """Hot-load prompt attachment files for the current request.
+
+        Prompt attachment loading must not block the user request path. Failures are
+        logged and the original Runner flow continues without attachment injection.
+        """
+
+        if self._instance is None:
+            return
+        if self._prompt_attachment_loader is None:
+            self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
+            self._prompt_attachment_loader.ensure_layout()
+        try:
+            await self._prompt_attachment_loader.sync_to_agent(
+                self._instance,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment sync skipped: %s", exc)
+
+    def _uses_application_runtime_support(self) -> bool:
+        """Whether runtime support must remain outside the target project."""
+
+        return bool(
+            self._instance_overrides.get("project_clean_runtime_support", False)
+        )
+
+    def _prompt_attachment_root(self) -> Path:
+        if self._uses_application_runtime_support():
+            return get_prompt_attachment_dir()
+        if self._workspace_dir == str(get_agent_workspace_dir()):
+            return get_prompt_attachment_dir()
+        return Path(self._workspace_dir) / "prompt_attachment"
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -6448,21 +6683,35 @@ class JiuWenSwarmDeepAdapter:
         failed readiness check propagates so the warm pool cannot publish a
         partially initialized slot.
         """
+        await self._start_interaction(session_id=session_id, strict=False)
+
+    async def _start_interaction(self, session_id: str, *, strict: bool) -> None:
+        """Start an interaction, optionally propagating formal init failure."""
+
         if self._instance is None:
             raise RuntimeError("DeepAgent instance is not initialized")
 
-        session = create_agent_session(
-            session_id=session_id,
-            card=getattr(self._instance, "card", None),
-        )
-        await session.pre_run(inputs={})
-        await self._instance.start(session=session)
-        if getattr(self._instance, "_interaction_started", True) is not True:
-            raise RuntimeError(f"DeepAgent interaction did not become ready: {session_id}")
-        logger.info(
-            "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
-            session_id,
-        )
+        try:
+            session = create_agent_session(
+                session_id=session_id,
+                card=getattr(self._instance, "card", None),
+            )
+            await session.pre_run(inputs={})
+            await self._instance.start(session=session)
+            if getattr(self._instance, "_interaction_started", True) is not True:
+                raise RuntimeError(f"DeepAgent interaction did not become ready: {session_id}")
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] start completed: session_id=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] start failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            if strict:
+                raise
 
     async def prepare_session(
         self,
@@ -6500,6 +6749,7 @@ class JiuWenSwarmDeepAdapter:
                         exc,
                     )
             self._session_adapters.clear()
+            self._session_adapter_initializing.clear()
             self._session_adapter_locks.clear()
             self._session_adapter_last_used.clear()
             self._session_adapter_versions.clear()
@@ -6553,6 +6803,166 @@ class JiuWenSwarmDeepAdapter:
             logger.warning(
                 "[JiuWenSwarmDeepAdapter] agent tool teardown failed: %s", exc
             )
+
+    @staticmethod
+    def _consume_formal_cleanup_result(task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except BaseException:  # noqa: BLE001 -- retained owner is retried
+            pass
+
+    async def cleanup_formal_project_task_agent(self) -> None:
+        """Strictly release every owner of a disposable formal Agent runtime.
+
+        The coordinator is retained and shielded so caller cancellation cannot
+        consume cleanup ownership.  A failed coordinator is replaced only by a
+        later explicit retry; the exact children and local owners remain
+        observable until that retry proves quiescence.
+        """
+
+        if self._formal_cleanup_complete:
+            return
+        async with self._formal_cleanup_lock:
+            if self._formal_cleanup_complete:
+                return
+            coordinator = self._formal_cleanup_task
+            if coordinator is None or coordinator.done():
+                if coordinator is not None and not coordinator.cancelled():
+                    try:
+                        if coordinator.exception() is None:
+                            self._formal_cleanup_complete = True
+                            return
+                    except BaseException:  # noqa: BLE001 -- retry failed cleanup
+                        pass
+                coordinator = asyncio.create_task(
+                    self._cleanup_formal_project_task_agent_coordinator(),
+                    name=(
+                        "jiuwenswarm-deep-formal-cleanup-"
+                        f"{self._parent_session_id or 'root'}"
+                    ),
+                )
+                coordinator.add_done_callback(
+                    self._consume_formal_cleanup_result
+                )
+                self._formal_cleanup_task = coordinator
+        try:
+            await asyncio.shield(coordinator)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 -- stable strict seam
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING") from exc
+        if not self._formal_cleanup_complete or self._owns_formal_runtime():
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+
+    async def _cleanup_formal_project_task_agent_coordinator(self) -> None:
+        failures: list[BaseException] = []
+        if not self._is_session_scoped_adapter:
+            for sid, child in tuple(self._session_adapters.items()):
+                lock = self._session_adapter_locks.setdefault(sid, asyncio.Lock())
+                try:
+                    async with lock:
+                        if self._session_adapters.get(sid) is not child:
+                            continue
+                        await child.cleanup_formal_project_task_agent()
+                        if child.has_session_runtime():
+                            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+                        self._drop_session_adapter_cache_entry(
+                            sid,
+                            remove_lock=False,
+                        )
+                except BaseException as exc:  # noqa: BLE001 -- retain exact child
+                    failures.append(exc)
+                    continue
+                if self._is_session_lock_idle(sid, lock):
+                    self._session_adapter_locks.pop(sid, None)
+            for sid, lock in tuple(self._session_adapter_locks.items()):
+                if sid in self._session_adapters:
+                    continue
+                if self._is_session_lock_idle(sid, lock):
+                    self._session_adapter_locks.pop(sid, None)
+                else:
+                    failures.append(
+                        RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+                    )
+        try:
+            await self._cleanup_formal_local_runtime()
+        except BaseException as exc:  # noqa: BLE001 -- aggregate after children
+            failures.append(exc)
+        if failures or self._owns_formal_runtime():
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING") from (
+                failures[0] if failures else None
+            )
+        self._formal_cleanup_complete = True
+
+    async def _cleanup_formal_local_runtime(self) -> None:
+        current = asyncio.current_task()
+        tasks = {
+            task
+            for registered in self._session_agent_tasks.values()
+            for task in registered
+            if task is not current and not task.done()
+        }
+        tasks.update(
+            task
+            for task in self._evolution_watcher_tasks
+            if task is not current and not task.done()
+        )
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        if any(not task.done() for task in tasks):
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        self._session_agent_tasks = {
+            sid: {task for task in registered if not task.done()}
+            for sid, registered in self._session_agent_tasks.items()
+            if any(not task.done() for task in registered)
+        }
+        self._evolution_watcher_tasks = {
+            task for task in self._evolution_watcher_tasks if not task.done()
+        }
+
+        memory_task = self._memory_reindex_task
+        if memory_task is not None:
+            if not memory_task.done():
+                memory_task.cancel()
+            await asyncio.gather(memory_task, return_exceptions=True)
+            if not memory_task.done():
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+            if self._memory_reindex_task is memory_task:
+                self._memory_reindex_task = None
+
+        instance = self._instance
+        if instance is not None:
+            await self.stop_interaction()
+            if self._instance is not instance:
+                raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+            self._instance = None
+        self._active_session_ids.clear()
+        await self._close_a2x_client_strict()
+
+    async def _close_a2x_client_strict(self) -> None:
+        client = self._a2x_client
+        if client is None:
+            self._a2x_config = {}
+            self._a2x_blank_service_id = ""
+            self._a2x_blank_dataset = ""
+            self._clear_a2x_runtime_state()
+            return
+        config = self._a2x_config
+        close_timeout_raw = config.get("close_timeout", 5.0)
+        try:
+            close_timeout = max(float(close_timeout_raw), 0.1)
+        except (TypeError, ValueError):
+            close_timeout = 5.0
+        await asyncio.wait_for(client.aclose(), timeout=close_timeout)
+        if self._a2x_client is not client:
+            raise RuntimeError("PROJECT_AGENT_CLEANUP_PENDING")
+        self._a2x_client = None
+        self._a2x_config = {}
+        self._a2x_blank_service_id = ""
+        self._a2x_blank_dataset = ""
+        self._clear_a2x_runtime_state()
 
     def _collect_registered_ability_names(self) -> set[str]:
         ability_names: set[str] = set()
@@ -8764,6 +9174,7 @@ class JiuWenSwarmDeepAdapter:
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
+            await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
             )
@@ -8906,6 +9317,297 @@ class JiuWenSwarmDeepAdapter:
             payload={"content": content},
             metadata=request.metadata,
         )
+
+    async def process_formal_live_voice_stream_impl(
+        self, request: AgentRequest, inputs: dict[str, Any]
+    ) -> AsyncIterator[AgentResponseChunk]:
+        """Run the isolated ordinary-Agent path used by formal Live Voice.
+
+        This deliberately excludes the legacy Chat orchestration: no slash or
+        Goal dispatch, Team/AutoHarness, A2UI repair, debug/cron/evolution
+        hooks, implicit history, or session-current interrupt API participates.
+        """
+
+        if not self._is_session_scoped_adapter:
+            session_adapter = await self._get_or_create_session_adapter(
+                request.session_id
+            )
+            try:
+                async for chunk in session_adapter.process_formal_live_voice_stream_impl(
+                    request, inputs
+                ):
+                    yield chunk
+                return
+            finally:
+                cleanup = asyncio.create_task(
+                    self.cleanup_session_adapter(request.session_id),
+                    name=f"formal-live-voice-session-cleanup:{request.request_id}",
+                )
+                while not cleanup.done():
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(cleanup),
+                            timeout=_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS,
+                        )
+                    except TimeoutError:
+                        logger.warning(
+                            "formal Live Voice session cleanup is still pending"
+                        )
+                if not await asyncio.shield(cleanup):
+                    raise RuntimeError(
+                        "FORMAL_EXECUTION_SESSION_CLEANUP_INCOMPLETE"
+                    )
+
+        if self._instance is None:
+            raise RuntimeError("formal Live Voice Agent is not initialized")
+        params = request.params if isinstance(request.params, dict) else {}
+        metadata = request.metadata if isinstance(request.metadata, dict) else {}
+        allowed_params = {
+            "query",
+            "mode",
+            "source",
+            "supports_user_interaction",
+        }
+        if (
+            set(params) - allowed_params
+            or params.get("mode") != "agent"
+            or params.get("source") != "live_voice.formal"
+            or params.get("supports_user_interaction") is not False
+            or metadata
+            != {
+                "enable_memory": False,
+                "skip_a2ui": True,
+                "formal_live_voice": True,
+            }
+            or inputs.get("enable_memory") is not False
+            or inputs.get("skip_a2ui") is not True
+            or inputs.get("conversation_id") != request.session_id
+            or not isinstance(request.session_id, str)
+            or not request.session_id.startswith("lv-formal-")
+        ):
+            raise RuntimeError("FORMAL_EXECUTION_INPUT_REJECTED")
+
+        session_id = request.session_id
+        rid = request.request_id
+        cid = request.channel_id
+        stream_event_rail: JiuSwarmStreamEventRail | None = None
+        tool_capture = None
+        tool_capture_released = False
+        register_formal_no_history_session(session_id)
+        history_release_safe = True
+        try:
+            await self._update_runtime_config(
+                self._RuntimeConfig(
+                    session_id=session_id,
+                    mode="agent",
+                    request_id=rid,
+                    channel_id=cid,
+                    request_metadata=metadata,
+                    supports_user_interaction=False,
+                )
+            )
+            token_cid = TOOL_PERMISSION_CHANNEL_ID.set((cid or "").strip())
+            token_perm = setup_permission_context(request)
+            interaction_stream = None
+            cancelled = False
+            stream_exhausted = False
+            has_streamed_content = False
+            allowed_events = {
+                "chat.delta",
+                "chat.reasoning",
+                "chat.final",
+                "chat.tool_call",
+                "chat.tool_update",
+                "chat.tool_result",
+                "chat.error",
+            }
+
+            def captured_response(raw_event: Any) -> AgentResponseChunk:
+                parsed_capture = self._parse_stream_chunk(raw_event)
+                event_type = (
+                    parsed_capture.get("event_type")
+                    if isinstance(parsed_capture, dict)
+                    else None
+                )
+                if event_type not in {
+                    "chat.tool_call",
+                    "chat.tool_update",
+                    "chat.tool_result",
+                }:
+                    raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INVALID")
+                return AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=parsed_capture,
+                    is_complete=False,
+                )
+
+            try:
+                stream_event_rail = self._stream_event_rail
+                if not isinstance(stream_event_rail, JiuSwarmStreamEventRail):
+                    raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                is_registered_rail = getattr(
+                    self._instance,
+                    "is_registered_rail",
+                    None,
+                )
+                if not callable(is_registered_rail) or not is_registered_rail(
+                    stream_event_rail
+                ):
+                    raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                tool_capture = stream_event_rail.open_formal_tool_event_capture(
+                    session_id
+                )
+                interaction_stream = await self._instance.attach_output()
+                if interaction_stream is None:
+                    raise RuntimeError("FORMAL_EXECUTION_OUTPUT_LEASE_UNAVAILABLE")
+                history_release_safe = False
+                await self._instance.send_input(
+                    SendInputRequest(request_id=rid, inputs=dict(inputs), mode=None)
+                )
+                async for raw_chunk in interaction_stream:
+                    if tool_capture is None:
+                        raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                    for captured_event in tool_capture.drain():
+                        yield captured_response(captured_event)
+                    raw_event_type = getattr(raw_chunk, "type", None)
+                    raw_event_type = getattr(raw_event_type, "value", raw_event_type)
+                    if (
+                        not isinstance(raw_event_type, str)
+                        or not hasattr(raw_chunk, "payload")
+                    ):
+                        raise RuntimeError(
+                            "FORMAL_EXECUTION_EVENT_UNSUPPORTED: '<untyped>'"
+                        )
+                    if raw_event_type in _FORMAL_PASSIVE_RAW_EVENT_TYPES:
+                        continue
+                    if raw_event_type not in _FORMAL_ACTIVE_RAW_EVENT_TYPES:
+                        raise RuntimeError(
+                            "FORMAL_EXECUTION_EVENT_UNSUPPORTED: "
+                            f"{raw_event_type!r}"
+                        )
+                    controller_event_type = None
+                    if raw_event_type == "controller_output":
+                        controller_event_type = getattr(
+                            getattr(raw_chunk, "payload", None), "type", None
+                        )
+                        controller_event_type = getattr(
+                            controller_event_type, "value", controller_event_type
+                        )
+                        if controller_event_type not in {
+                            "task_completion",
+                            "task_failed",
+                        }:
+                            raise RuntimeError(
+                                "FORMAL_EXECUTION_EVENT_UNSUPPORTED: "
+                                f"{raw_event_type!r}"
+                            )
+                    parsed = self._parse_stream_chunk(
+                        raw_chunk, _has_streamed_content=has_streamed_content
+                    )
+                    if parsed is None:
+                        if controller_event_type == "task_completion":
+                            continue
+                        raise RuntimeError(
+                            "FORMAL_EXECUTION_EVENT_UNSUPPORTED: "
+                            f"{raw_event_type!r}"
+                        )
+                    event_type = parsed.get("event_type")
+                    if event_type in _FORMAL_PASSIVE_EVENT_TYPES:
+                        continue
+                    if event_type not in allowed_events:
+                        raise RuntimeError(
+                            f"FORMAL_EXECUTION_EVENT_UNSUPPORTED: {event_type!r}"
+                        )
+                    if event_type == "chat.delta":
+                        content = parsed.get("content")
+                        has_streamed_content = has_streamed_content or (
+                            isinstance(content, str) and bool(content)
+                        )
+                    if event_type in {"chat.final", "chat.error"} and (
+                        tool_capture.has_pending_results
+                    ):
+                        raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_INCOMPLETE")
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=parsed,
+                        is_complete=event_type in {"chat.final", "chat.error"},
+                    )
+                try:
+                    if stream_event_rail is None or tool_capture is None:
+                        raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
+                    remaining_tool_events = (
+                        stream_event_rail.close_formal_tool_event_capture(
+                            session_id,
+                            tool_capture,
+                            abort=False,
+                        )
+                    )
+                finally:
+                    tool_capture_released = True
+                for captured_event in remaining_tool_events:
+                    yield captured_response(captured_event)
+                stream_exhausted = True
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                try:
+                    tool_capture_close_error: BaseException | None = None
+                    if tool_capture is not None and not tool_capture_released:
+                        if stream_event_rail is None:
+                            tool_capture_close_error = RuntimeError(
+                                "FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE"
+                            )
+                        else:
+                            try:
+                                stream_event_rail.close_formal_tool_event_capture(
+                                    session_id,
+                                    tool_capture,
+                                    abort=True,
+                                )
+                            except BaseException as exc:
+                                tool_capture_close_error = exc
+                            finally:
+                                tool_capture_released = True
+                    if interaction_stream is not None:
+                        cleanup = asyncio.create_task(
+                            interaction_stream.close(
+                                abort_active_round=cancelled or not stream_exhausted
+                            ),
+                            name=f"formal-live-voice-output-close:{rid}",
+                        )
+                        while not cleanup.done():
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.shield(cleanup),
+                                    timeout=_FORMAL_OUTPUT_CLOSE_TIMEOUT_SECONDS,
+                                )
+                            except TimeoutError:
+                                # The retained cleanup task still owns the stream.
+                                # Outer shutdown callers are bounded separately and
+                                # must report pending rather than false terminal.
+                                logger.warning(
+                                    "formal Live Voice output cleanup is still pending"
+                                )
+                        await asyncio.shield(cleanup)
+                        history_release_safe = True
+                    if tool_capture_close_error is not None:
+                        raise tool_capture_close_error
+                finally:
+                    TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
+                    cleanup_permission_context(token_perm)
+        finally:
+            if history_release_safe:
+                unregister_formal_no_history_session(session_id)
+            else:
+                logger.error(
+                    "formal Live Voice no-history guard retained after unsafe cleanup: "
+                    "session_id=%s request_id=%s",
+                    session_id,
+                    rid,
+                )
 
     async def process_message_stream_impl(
         self, request: AgentRequest, inputs: dict[str, Any]
@@ -9341,6 +10043,7 @@ class JiuWenSwarmDeepAdapter:
                     payload=image_tool_fallback_notice,
                     is_complete=False,
                 )
+            await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
             )
@@ -10213,7 +10916,7 @@ class JiuWenSwarmDeepAdapter:
                         )
                         return {"event_type": "chat.error", "error": error}
 
-                if chunk_type == "llm_output":
+                if chunk_type in {"delta", "llm_output"}:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )

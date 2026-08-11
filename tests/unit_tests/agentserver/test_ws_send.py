@@ -132,6 +132,44 @@ async def test_oversized_server_push_preserves_push_marker(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agentserver_send_push_returns_observable_delivery_fact(monkeypatch):
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._current_ws = FakeWebSocket()
+    server._current_send_lock = asyncio.Lock()
+    message = {
+        "request_id": "push-delivery",
+        "channel_id": "web",
+        "session_id": "session-1",
+        "payload": {"event_type": "live_voice.task.progress"},
+    }
+
+    assert await server.send_push(message) is True
+
+    async def replace_with_oversized_error(_ws, _wire):
+        return False
+
+    monkeypatch.setattr(
+        agent_ws_server,
+        "send_wire_payload",
+        replace_with_oversized_error,
+    )
+    assert await server.send_push(message) is False
+
+
+@pytest.mark.asyncio
+async def test_agentserver_send_push_reports_missing_gateway_as_not_delivered():
+    server = agent_ws_server.AgentWebSocketServer.__new__(
+        agent_ws_server.AgentWebSocketServer
+    )
+    server._current_ws = None
+    server._current_send_lock = None
+
+    assert await server.send_push({"payload": {}}) is False
+
+
+@pytest.mark.asyncio
 async def test_stream_stops_after_oversized_chunk_is_replaced(monkeypatch):
     class FakeAgent:
         async def process_message_stream(self, request):
