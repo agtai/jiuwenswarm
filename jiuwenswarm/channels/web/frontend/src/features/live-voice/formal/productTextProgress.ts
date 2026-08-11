@@ -41,9 +41,7 @@ export interface ProductTextProgressEvent {
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 function textValue(value: unknown): string | null {
@@ -51,22 +49,14 @@ function textValue(value: unknown): string | null {
 }
 
 function uintValue(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-    ? value
-    : null;
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 
 function parseScope(value: unknown): ProductTextProgressScope | null {
   const raw = objectValue(value);
   if (!raw) return null;
   const keys = Object.keys(raw).sort();
-  if (
-    keys.length !== 4 ||
-    keys[0] !== 'assurance' ||
-    keys[1] !== 'project_id' ||
-    keys[2] !== 'session_id' ||
-    keys[3] !== 'subject_id'
-  ) {
+  if (keys.length !== 4 || keys[0] !== 'assurance' || keys[1] !== 'project_id' || keys[2] !== 'session_id' || keys[3] !== 'subject_id') {
     return null;
   }
   const subjectId = textValue(raw.subject_id);
@@ -85,10 +75,7 @@ function parseScope(value: unknown): ProductTextProgressScope | null {
 
 function sameScope(left: ProductTextProgressScope, right: ProductTextProgressScope): boolean {
   return (
-    left.subject_id === right.subject_id &&
-    left.project_id === right.project_id &&
-    left.session_id === right.session_id &&
-    left.assurance === right.assurance
+    left.subject_id === right.subject_id && left.project_id === right.project_id && left.session_id === right.session_id && left.assurance === right.assurance
   );
 }
 
@@ -131,9 +118,7 @@ function parseEnvelope(value: unknown): ProductTextProgressEnvelope | null {
   });
 }
 
-export function parseProductTextProgressEvent(
-  value: unknown
-): ProductTextProgressEvent | null {
+export function parseProductTextProgressEvent(value: unknown): ProductTextProgressEvent | null {
   const raw = objectValue(value);
   if (!raw || raw.event_type !== PRODUCT_TEXT_PROGRESS_EVENT) return null;
   const sessionId = textValue(raw.session_id);
@@ -165,9 +150,7 @@ export function parseProductTextProgressEvent(
     !attemptId ||
     persistentEventSeq !== sourceEvent?.seq ||
     persistentEventType !== sourceEvent?.event_type ||
-    (persistentSourceEventId !== undefined &&
-      persistentSourceEventId !== null &&
-      !textValue(persistentSourceEventId)) ||
+    (persistentSourceEventId !== undefined && persistentSourceEventId !== null && !textValue(persistentSourceEventId)) ||
     !projectId ||
     !correlationId ||
     !originId ||
@@ -225,12 +208,19 @@ export function adoptProductTextProgressEvent(
   activeSessionId: string | null
 ): Readonly<ProductTextProgressEvent> | null {
   const incoming = parseProductTextProgressEvent(value);
+  if (!incoming) return current;
+  return adoptParsedProductTextProgressEvent(current, incoming, activeSessionId);
+}
+
+export function adoptParsedProductTextProgressEvent(
+  current: Readonly<ProductTextProgressEvent> | null,
+  incoming: Readonly<ProductTextProgressEvent>,
+  activeSessionId: string | null
+): Readonly<ProductTextProgressEvent> | null {
   if (!incoming || !activeSessionId || incoming.session_id !== activeSessionId) {
     return current;
   }
-  if (
-    current === null
-  ) {
+  if (current === null) {
     return incoming;
   }
   const sameLineage =
@@ -245,8 +235,7 @@ export function adoptProductTextProgressEvent(
   if (
     incoming.generation < current.generation ||
     (incoming.generation === current.generation &&
-      (incoming.correlation_id !== current.correlation_id ||
-        incoming.source_event.seq <= current.source_event.seq))
+      (incoming.correlation_id !== current.correlation_id || incoming.source_event.seq <= current.source_event.seq))
   ) {
     return current;
   }
@@ -267,9 +256,7 @@ export interface ProductTextProgressDeliveryAck {
   readonly evidence_id: string;
 }
 
-export function createProductTextProgressDeliveryAck(
-  event: Readonly<ProductTextProgressEvent>
-): ProductTextProgressDeliveryAck {
+export function createProductTextProgressDeliveryAck(event: Readonly<ProductTextProgressEvent>): ProductTextProgressDeliveryAck {
   return Object.freeze({
     session_id: event.session_id,
     task_id: event.task_id,
@@ -294,10 +281,7 @@ export interface ProductTextProgressAckSnapshot {
   readonly retained_deliveries: number;
 }
 
-export type ProductTextProgressAckRequest = (
-  method: typeof PRODUCT_PROGRESS_ACK_METHOD,
-  params: ProductTextProgressDeliveryAck
-) => Promise<unknown>;
+export type ProductTextProgressAckRequest = (method: typeof PRODUCT_PROGRESS_ACK_METHOD, params: ProductTextProgressDeliveryAck) => Promise<unknown>;
 
 interface RetainedDeliveryAck {
   readonly ack: ProductTextProgressDeliveryAck;
@@ -308,10 +292,7 @@ interface RetainedDeliveryAck {
   retry_timer: ReturnType<typeof setTimeout> | null;
 }
 
-function sameDeliveryAck(
-  left: Readonly<ProductTextProgressDeliveryAck>,
-  right: Readonly<ProductTextProgressDeliveryAck>
-): boolean {
+function sameDeliveryAck(left: Readonly<ProductTextProgressDeliveryAck>, right: Readonly<ProductTextProgressDeliveryAck>): boolean {
   return (
     left.session_id === right.session_id &&
     left.task_id === right.task_id &&
@@ -394,10 +375,7 @@ export class ProductTextProgressAckOwner {
     const ack = createProductTextProgressDeliveryAck(event);
     const prior = this.deliveries.get(ack.delivery_id);
     if (prior) {
-      if (
-        !sameDeliveryAck(prior.ack, ack) ||
-        prior.expected_attempt_id !== event.attempt_id
-      ) {
+      if (!sameDeliveryAck(prior.ack, ack) || prior.expected_attempt_id !== event.attempt_id) {
         throw new Error('delivery_id binding conflict');
       }
       if (prior.status !== 'acknowledged' && this.connected) this.send(prior);

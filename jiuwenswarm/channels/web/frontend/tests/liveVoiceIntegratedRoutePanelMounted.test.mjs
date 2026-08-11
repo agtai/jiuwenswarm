@@ -10,7 +10,8 @@ import React from 'react';
 import { I18nextProvider } from 'react-i18next';
 import { act, create } from 'react-test-renderer';
 
-import { LiveVoiceIntegratedRoutePanel } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+import { LiveVoiceIntegratedRoutePanel, progressMatchesOwnedBinding } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
 const mountedBundleDirectory = await mkdtemp(fileURLToPath(new URL('../node_modules/.cache/jiuwenswarm-live-voice-mounted-', import.meta.url)));
 after(async () => {
@@ -434,7 +435,7 @@ function mountedP1Element(i18n, sessionId, request) {
   );
 }
 
-function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait, isConnected = true) {
+function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait, isConnected = true, progressSubscribe = undefined) {
   return React.createElement(
     I18nextProvider,
     { i18n },
@@ -445,6 +446,7 @@ function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait, isCon
       taskCompatibilityAvailable: false,
       request,
       p3RetryInspectionWait,
+      progressSubscribe,
     })
   );
 }
@@ -622,6 +624,63 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false } = {})
       after_seq: -1,
       head_seq: terminalB ? 5 : terminalA ? 2 : 1,
       events,
+    },
+  };
+}
+
+function mountedTerminalProgress(binding, activation, outcome) {
+  const scope = {
+    subject_id: binding.subject_id,
+    session_id: binding.session_id,
+    project_id: binding.project_id,
+    assurance: 'authenticated',
+  };
+  const sourceEventId = 'task-a:event:1';
+  return {
+    event_type: 'live_voice.task.progress',
+    delivery_id: `mounted-terminal-${outcome}`,
+    session_id: binding.session_id,
+    project_id: binding.project_id,
+    task_id: 'task-a',
+    correlation_id: binding.correlation_id,
+    origin_id: activation.origin_id,
+    generation_kind: 'web_task_progress_generation',
+    generation_id: activation.generation_id,
+    generation: activation.generation,
+    evidence_id: `mounted-evidence-${outcome}`,
+    source_event: {
+      event_id: sourceEventId,
+      event_type: 'task.terminal',
+      seq: 1,
+      correlation_id: binding.correlation_id,
+      causation_id: 'executor-terminal-a',
+      stream_ref: { kind: 'task', id: 'task-a' },
+      scope,
+      payload: { state: 'terminal', outcome },
+      extensions: {
+        'jiuwenswarm.task_progress_return': {
+          persistent_event_seq: 1,
+          persistent_event_type: 'task.terminal',
+          persistent_event_producer: 'task_core.delivery',
+          persistent_attempt_id: 'attempt-a',
+          persistent_source_event_id: 'executor-terminal-a',
+        },
+      },
+    },
+    progress_event: {
+      event_id: `task-progress:${sourceEventId}`,
+      event_type: 'work.progress',
+      seq: 1,
+      correlation_id: binding.correlation_id,
+      causation_id: sourceEventId,
+      stream_ref: { kind: 'task', id: 'task-a' },
+      scope,
+      payload: {
+        work_ref: { kind: 'task', id: 'task-a' },
+        seq: 1,
+        state: 'terminal',
+        outcome,
+      },
     },
   };
 }
@@ -1179,6 +1238,204 @@ test('mounted route panel survives session replacement and closes every effect o
     renderer.unmount();
   });
   assert.equal(renderer.toJSON(), null);
+});
+
+test('mounted P3 origin panel reconciles and ACKs authoritative completed and failed progress', async () => {
+  for (const outcome of ['completed', 'failed']) {
+    const i18n = await createI18n();
+    const browser = installP1BrowserEnvironment();
+    const calls = [];
+    let binding = null;
+    let exactProgressActivation = null;
+    let progressListener = null;
+    let renderer;
+    const progressSubscribe = listener => {
+      progressListener = listener;
+      return () => {
+        if (progressListener === listener) progressListener = null;
+      };
+    };
+    const taskEvents = () => {
+      const scope = {
+        subject_id: binding.subject_id,
+        session_id: binding.session_id,
+        project_id: binding.project_id,
+        assurance: 'authenticated',
+      };
+      return {
+        ok: true,
+        result: {
+          task_id: 'task-a',
+          after_seq: -1,
+          head_seq: 1,
+          events: [
+            {
+              event_id: 'task-a:event:0',
+              task_id: 'task-a',
+              attempt_id: 'attempt-a',
+              scope,
+              seq: 0,
+              event_type: 'task.accepted',
+              state: 'accepted',
+              outcome: null,
+              producer: 'task_core',
+              source_event_id: null,
+              causation_id: 'create-a',
+              correlation_id: binding.correlation_id,
+              occurred_at: '2026-08-11T08:00:00Z',
+              details: {},
+            },
+            {
+              event_id: 'task-a:event:1',
+              task_id: 'task-a',
+              attempt_id: 'attempt-a',
+              scope,
+              seq: 1,
+              event_type: 'task.terminal',
+              state: 'terminal',
+              outcome,
+              producer: 'task_core.delivery',
+              source_event_id: 'executor-terminal-a',
+              causation_id: 'executor-terminal-a',
+              correlation_id: binding.correlation_id,
+              occurred_at: '2026-08-11T08:00:01Z',
+              details: {},
+            },
+          ],
+        },
+      };
+    };
+    const request = async (method, params, options) => {
+      calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+      if (method === 'live_voice.composition.p2.activate') {
+        return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      }
+      if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+      if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+      if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+      if (method === 'live_voice.composition.p3.progress.activate') {
+        if (params.task_id === 'task-a') exactProgressActivation = { ...params };
+        return { ok: true, result: { status: 'active', ...params } };
+      }
+      if (method === 'live_voice.composition.p3.progress.close') {
+        return { ok: true, result: { status: 'closed', ...params } };
+      }
+      if (method === 'live_voice.composition.p3.confirmation.issue') {
+        binding = {
+          subject_id: 'mounted-terminal-subject',
+          session_id: params.session_id,
+          project_id: 'mounted-terminal-project',
+          correlation_id: params.correlation_id,
+          generation: 1,
+        };
+        return {
+          ok: true,
+          result: {
+            status: 'confirmation_issued',
+            operation: 'task.create',
+            command_id: params.command_id,
+            target_task_id: null,
+            confirmation_id: `confirmation-${params.command_id}`,
+            expires_at: '2999-08-11T08:00:00Z',
+            task_control_binding: binding,
+          },
+        };
+      }
+      if (method === 'live_voice.composition.p3.mutate') {
+        return {
+          ok: true,
+          result: {
+            status: 'mutation_processed',
+            operation: 'task.create',
+            command_id: params.command_id,
+            target_task_id: null,
+            formal_task_result: {
+              task_id: 'task-a',
+              attempt_id: 'attempt-a',
+              attempt_number: 1,
+              state: 'accepted',
+              outbox_id: 'outbox-create-a',
+            },
+          },
+        };
+      }
+      if (method === 'live_voice.task.events') return taskEvents();
+      if (method === 'live_voice.composition.p3.progress.ack') {
+        return {
+          ok: true,
+          result: {
+            status: 'acknowledged',
+            replayed: false,
+            attempt_id: 'attempt-a',
+            ...params,
+            acknowledgement: 'web_ui_text_consumed',
+          },
+        };
+      }
+      throw new Error(`unexpected terminal-progress request: ${method}`);
+    };
+
+    try {
+      await act(async () => {
+        renderer = create(mountedP3Element(i18n, `mounted-terminal-${outcome}`, request, undefined, true, progressSubscribe));
+        await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'terminal-progress P3 controls did not mount');
+      });
+      await act(async () => {
+        const controls = mountedP3Controls(renderer);
+        controls.root.findByType('textarea').props.onChange({ target: { value: 'Read the disposable fixture.' } });
+        controls.root.findAllByType('input')[0].props.onChange({ target: { value: 'Mounted terminal task' } });
+      });
+      await act(async () => {
+        mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+        await waitForMounted(
+          () => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'),
+          'terminal-progress task.create confirmation did not settle'
+        );
+      });
+      await act(async () => {
+        mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+        await waitForMounted(
+          () => exactProgressActivation !== null && mountedP3Controls(renderer).select.props.value === 'task.cancel',
+          'terminal-progress task.create did not bind its exact progress route'
+        );
+        await waitForMounted(
+          () =>
+            renderer.root
+              .findByProps({ 'data-testid': 'live-voice-integrated-p3-activation' })
+              .findAllByType('code')
+              .some(node => node.children.some(child => child === 'p3:active')),
+          'terminal-progress exact route did not become active'
+        );
+      });
+      assert.equal(typeof progressListener, 'function');
+      const terminalProgress = mountedTerminalProgress(binding, exactProgressActivation, outcome);
+      const parsedTerminalProgress = parseProductTextProgressEvent(terminalProgress);
+      assert.notEqual(parsedTerminalProgress, null);
+      assert.equal(progressMatchesOwnedBinding(parsedTerminalProgress, exactProgressActivation, binding.session_id), true);
+      await act(async () => {
+        progressListener(terminalProgress);
+        await waitForMounted(
+          () => calls.some(call => call.method === 'live_voice.task.events'),
+          `mounted origin panel did not reconcile ${outcome}: ${calls.map(call => call.method).join(',')}`
+        );
+        await waitForMounted(
+          () => renderer.root.findAllByType('code').some(node => node.children.some(child => child === outcome)),
+          `mounted origin panel did not render ${outcome}`
+        );
+        await waitForMounted(() => calls.some(call => call.method === 'live_voice.composition.p3.progress.ack'), `mounted origin panel did not ACK ${outcome}`);
+      });
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 1);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
+    } finally {
+      if (renderer) {
+        await act(async () => {
+          renderer.unmount();
+          await Promise.resolve();
+        });
+      }
+      browser.restore();
+    }
+  }
 });
 
 test('mounted P3 reconciles create A through cancel and authoritative A/B terminals to retry B/C without stale effects', async () => {

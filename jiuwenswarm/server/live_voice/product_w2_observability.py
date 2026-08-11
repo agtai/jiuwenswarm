@@ -483,10 +483,7 @@ def _is_valid_task_event_fact(event: object) -> bool:
         or state not in _TASK_EVENT_STATES
         or (
             outcome is not None
-            and (
-                not isinstance(outcome, str)
-                or outcome not in _TASK_EVENT_OUTCOMES
-            )
+            and (not isinstance(outcome, str) or outcome not in _TASK_EVENT_OUTCOMES)
         )
         or (state == "terminal") != (outcome is not None)
     ):
@@ -761,8 +758,7 @@ def product_result_progress_ack_binding(
         or attempt_id is None
         or correlation_id is None
         or any(
-            _non_empty_identity(result.get(key)) is None
-            for key in required_text_claims
+            _non_empty_identity(result.get(key)) is None for key in required_text_claims
         )
         or type(result.get("replayed")) is not bool
         or type(result.get("generation")) is not int
@@ -995,9 +991,8 @@ class ProductW2ObservabilityOwner:
                     )
                 ):
                     return False
-                if (
-                    operation == "live_voice.composition.p3.progress.ack"
-                    and (not task_id or not attempt_id)
+                if operation == "live_voice.composition.p3.progress.ack" and (
+                    not task_id or not attempt_id
                 ):
                     return False
                 if operation == "live_voice.composition.p2.submit":
@@ -1444,6 +1439,10 @@ class ProductW2ObservabilityOwner:
             ):
                 return False
             token = hashlib.sha256(event.event_id.encode("utf-8")).hexdigest()[:32]
+            reason_code = {
+                "failed": "TASK_FAILURE",
+                "cancelled": "CANCEL_TERMINAL",
+            }.get(event.outcome)
             observation = create_observation(
                 {
                     "schema_version": OBSERVABILITY_SCHEMA_VERSION,
@@ -1470,6 +1469,7 @@ class ProductW2ObservabilityOwner:
                     "source_seq": event.seq,
                     "state": event.state,
                     "outcome": event.outcome,
+                    "reason_code": reason_code,
                 }
             )
             return activation.adapter.consume_observation(

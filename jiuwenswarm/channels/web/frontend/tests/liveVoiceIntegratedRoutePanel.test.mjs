@@ -15,6 +15,7 @@ import {
   extractWebErrorReason,
   inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
+  reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
   recognizedSpeechConfirmationMatches,
   productTextBlockedByP1Status,
@@ -51,14 +52,7 @@ const retryScope = Object.freeze({
   assurance: 'authenticated',
 });
 
-function retryStatus({
-  taskId = 'task-1',
-  attemptId = 'attempt-b',
-  attemptNumber = 2,
-  state = 'terminal',
-  outcome = 'completed',
-  eventHead = 3,
-} = {}) {
+function retryStatus({ taskId = 'task-1', attemptId = 'attempt-b', attemptNumber = 2, state = 'terminal', outcome = 'completed', eventHead = 3 } = {}) {
   return {
     ok: true,
     result: {
@@ -76,16 +70,7 @@ function retryStatus({
   };
 }
 
-function retryEvent(seq, {
-  attemptId,
-  eventType,
-  state,
-  outcome = null,
-  sourceEventId,
-  causationId,
-  details = {},
-  producer = 'task_core',
-} = {}) {
+function retryEvent(seq, { attemptId, eventType, state, outcome = null, sourceEventId, causationId, details = {}, producer = 'task_core' } = {}) {
   const source = sourceEventId === undefined ? (seq === 0 ? null : `source-${seq}`) : sourceEventId;
   return {
     event_id: `task-1:event:${seq}`,
@@ -98,7 +83,7 @@ function retryEvent(seq, {
     outcome,
     producer,
     source_event_id: source,
-    causation_id: causationId ?? (source ?? `cause-${seq}`),
+    causation_id: causationId ?? source ?? `cause-${seq}`,
     correlation_id: retryBinding.correlation_id,
     occurred_at: '2026-08-09T12:00:00Z',
     details,
@@ -137,6 +122,70 @@ function retryEvents(events = retryHistoryThroughB(), headSeq = 3) {
     ok: true,
     result: { events, head_seq: headSeq, task_id: 'task-1', after_seq: -1 },
   };
+}
+
+function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, progressOutcome = event.outcome } = {}) {
+  const sourcePayload = { state: event.state };
+  if (sourceOutcome !== null) sourcePayload.outcome = sourceOutcome;
+  const raw = {
+    event_type: 'live_voice.task.progress',
+    delivery_id: `delivery-${event.seq}`,
+    session_id: retryBinding.session_id,
+    project_id: retryBinding.project_id,
+    task_id: event.task_id,
+    correlation_id: retryBinding.correlation_id,
+    origin_id: 'origin-1',
+    generation_kind: 'web_task_progress_generation',
+    generation_id: 'generation-1',
+    generation: 1,
+    evidence_id: `evidence-${event.seq}`,
+    source_event: {
+      event_id: event.event_id,
+      event_type: event.event_type,
+      seq: event.seq,
+      correlation_id: event.correlation_id,
+      causation_id: event.causation_id,
+      stream_ref: { kind: 'task', id: event.task_id },
+      scope: { ...event.scope },
+      payload: sourcePayload,
+      extensions: {
+        'jiuwenswarm.task_progress_return': {
+          persistent_event_seq: event.seq,
+          persistent_event_type: event.event_type,
+          persistent_event_producer: event.producer,
+          persistent_attempt_id: event.attempt_id,
+          persistent_source_event_id: event.source_event_id,
+        },
+      },
+    },
+    progress_event: {
+      event_id: `task-progress:${event.event_id}`,
+      event_type: 'work.progress',
+      seq: event.seq,
+      correlation_id: event.correlation_id,
+      causation_id: event.event_id,
+      stream_ref: { kind: 'task', id: event.task_id },
+      scope: { ...event.scope },
+      payload: {
+        work_ref: { kind: 'task', id: event.task_id },
+        seq: event.seq,
+        state: event.state,
+        outcome: progressOutcome,
+      },
+    },
+  };
+  const parsed = parseProductTextProgressEvent(raw);
+  assert.notEqual(parsed, null);
+  return parsed;
+}
+
+function adoptTaskEvents(leaf, response) {
+  leaf.adopt('task.events', response, {
+    connection_generation: leaf.snapshot().connection_generation,
+    command_id: null,
+    target_task_id: null,
+    events_query: { task_id: 'task-1', after_seq: -1 },
+  });
 }
 
 async function renderPanel({ sessionId = 'persisted-session', platform = null, progress = null, viewProps = {} } = {}) {
@@ -483,6 +532,28 @@ test('route panel renders a distinct two-action formal P3 task control', async (
   assert.equal((html.match(/disabled=""/g) ?? []).length >= 3, true);
 });
 
+test('route panel renders authoritative completed and failed P3 terminal truth', async () => {
+  for (const status of ['completed', 'failed']) {
+    const html = await renderPanel({
+      viewProps: {
+        p3MutationEnabled: true,
+        p3MutationOperation: 'task.cancel',
+        p3TargetTaskId: 'task-1',
+        p3MutationStatus: status,
+        onP3MutationOperation: () => {},
+        onP3TaskName: () => {},
+        onP3TaskInstruction: () => {},
+        onP3TargetTaskId: () => {},
+        onP3InspectRetry: () => {},
+        onP3Issue: () => {},
+        onP3Execute: () => {},
+      },
+    });
+    assert.match(html, new RegExp(`<code>${status}</code>`));
+    assert.equal(html.includes('Acceptance is not task completion.'), true);
+  }
+});
+
 test('route panel exposes task.retry only for an inspected eligible terminal attempt', async () => {
   const base = {
     p3MutationEnabled: true,
@@ -569,7 +640,7 @@ test('retry candidate inspection binds exact status and full A/B history before 
       state: 'terminal',
       outcome: 'completed',
       event_head: 3,
-    },
+    }
   );
   assert.deepEqual(leaf.snapshot().tasks, [record]);
 });
@@ -590,7 +661,7 @@ test('retry candidate inspection rejects a foreign status before events with zer
         return retryStatus({ taskId: 'task-foreign', attemptId: 'attempt-foreign', attemptNumber: 1 });
       },
     }),
-    /binding mismatch/,
+    /binding mismatch/
   );
   assert.equal(calls, 1);
   assert.deepEqual(leaf.snapshot().tasks, []);
@@ -617,7 +688,7 @@ test('retry candidate inspection rejects a stale Session binding before any netw
           throw new Error('network must not be reached');
         },
       }),
-      /Session binding/,
+      /Session binding/
     );
     assert.equal(calls, 0);
     assert.deepEqual(leaf.snapshot().tasks, []);
@@ -652,13 +723,12 @@ test('retry candidate inspection rejects same-head status/events disagreement wi
       task_id: 'task-1',
       request_nonce: 'conflict',
       is_current: () => true,
-      request: async method => (
+      request: async method =>
         method === 'live_voice.task.status'
           ? retryStatus({ attemptId: 'attempt-c', attemptNumber: 3, state: 'accepted', outcome: null, eventHead: 4 })
-          : retryEvents(staleBAtHeadFour, 4)
-      ),
+          : retryEvents(staleBAtHeadFour, 4),
     }),
-    /replay conflicts/,
+    /replay conflicts/
   );
   assert.deepEqual(leaf.snapshot().tasks, []);
 });
@@ -691,9 +761,7 @@ test('overlapping retry inspections let only the current generation perform even
     task_id: 'task-1',
     request_nonce: 'current',
     is_current: () => currentGeneration === 2,
-    request: async method => (
-      method === 'live_voice.task.status' ? retryStatus() : retryEvents()
-    ),
+    request: async method => (method === 'live_voice.task.status' ? retryStatus() : retryEvents()),
   });
   releaseOldStatus(retryStatus());
 
@@ -703,6 +771,168 @@ test('overlapping retry inspections let only the current generation perform even
   assert.equal(isFormalTaskRetryEligible(currentRecord), true);
   assert.equal(leaf.snapshot().tasks[0].attempt_id, 'attempt-b');
   assert.equal(leaf.snapshot().tasks[0].attempt_number, 2);
+});
+
+test('P3 progress reconciliation advances accepted UI truth only from exact authoritative terminal events', async () => {
+  for (const outcome of ['completed', 'failed']) {
+    const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+    const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
+    const terminal = retryEvent(1, {
+      attemptId: 'attempt-a',
+      eventType: 'task.terminal',
+      state: 'terminal',
+      outcome,
+      producer: 'task_core.delivery',
+    });
+    adoptTaskEvents(leaf, retryEvents([accepted], 0));
+    const calls = [];
+    const record = await reconcileProductP3ProgressEvent({
+      request: async (method, params, options) => {
+        calls.push({ method, params, options });
+        return retryEvents([accepted, terminal], 1);
+      },
+      leaf,
+      event: productProgressForTaskEvent(terminal),
+      session_id: 'session-1',
+      request_nonce: `terminal-${outcome}`,
+      is_current: () => true,
+    });
+
+    assert.equal(record.state, 'terminal');
+    assert.equal(record.outcome, outcome);
+    assert.deepEqual(leaf.snapshot().progress_receipts, [`task-progress:${terminal.event_id}`]);
+    assert.deepEqual(calls, [
+      {
+        method: 'live_voice.task.events',
+        params: { session_id: 'session-1', task_id: 'task-1', after_seq: -1 },
+        options: { requestId: `web-task-progress-events-terminal-${outcome}` },
+      },
+    ]);
+  }
+});
+
+test('P3 progress reconciliation works after reconnect with the new connection generation', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
+  const completed = retryEvent(1, {
+    attemptId: 'attempt-a',
+    eventType: 'task.terminal',
+    state: 'terminal',
+    outcome: 'completed',
+    producer: 'task_core.delivery',
+  });
+  adoptTaskEvents(leaf, retryEvents([accepted], 0));
+  leaf.disconnect();
+  leaf.reconnect(retryBinding);
+
+  const record = await reconcileProductP3ProgressEvent({
+    request: async () => retryEvents([accepted, completed], 1),
+    leaf,
+    event: productProgressForTaskEvent(completed),
+    session_id: 'session-1',
+    request_nonce: 'reconnect',
+    is_current: () => true,
+  });
+
+  assert.equal(leaf.snapshot().connection_generation, 2);
+  assert.equal(record.outcome, 'completed');
+});
+
+test('P3 progress reconciliation fails closed on outcome disagreement without live adoption', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
+  const failed = retryEvent(1, {
+    attemptId: 'attempt-a',
+    eventType: 'task.terminal',
+    state: 'terminal',
+    outcome: 'failed',
+    producer: 'task_core.delivery',
+  });
+  adoptTaskEvents(leaf, retryEvents([accepted], 0));
+
+  await assert.rejects(
+    reconcileProductP3ProgressEvent({
+      request: async () => retryEvents([accepted, failed], 1),
+      leaf,
+      event: productProgressForTaskEvent(failed, { progressOutcome: 'completed' }),
+      session_id: 'session-1',
+      request_nonce: 'outcome-conflict',
+      is_current: () => true,
+    }),
+    /source, state, outcome, or producer mismatch/
+  );
+  assert.equal(leaf.snapshot().tasks[0].state, 'accepted');
+  assert.deepEqual(leaf.snapshot().progress_receipts, []);
+});
+
+test('late predecessor progress cannot overwrite a successor attempt', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const acceptedA = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
+  const cancelledA = retryEvent(1, {
+    attemptId: 'attempt-a',
+    eventType: 'task.terminal',
+    state: 'terminal',
+    outcome: 'cancelled',
+    producer: 'task_core.delivery',
+  });
+  const retryB = retryEvent(2, {
+    attemptId: 'attempt-b',
+    eventType: 'task.retry_accepted',
+    state: 'accepted',
+    sourceEventId: null,
+    causationId: 'retry-b',
+    details: {
+      command_id: 'retry-b',
+      retry_of_attempt_id: 'attempt-a',
+      previous_outcome: 'cancelled',
+      attempt_number: 2,
+    },
+  });
+  adoptTaskEvents(leaf, retryEvents([acceptedA], 0));
+  let releaseEvents;
+  const delayedEvents = new Promise(resolve => {
+    releaseEvents = resolve;
+  });
+  const predecessor = reconcileProductP3ProgressEvent({
+    request: async () => delayedEvents,
+    leaf,
+    event: productProgressForTaskEvent(cancelledA),
+    session_id: 'session-1',
+    request_nonce: 'late-a',
+    is_current: () => true,
+  });
+
+  adoptTaskEvents(leaf, retryEvents([acceptedA, cancelledA, retryB], 2));
+  releaseEvents(retryEvents([acceptedA, cancelledA], 1));
+
+  await assert.rejects(predecessor, /became stale/);
+  assert.equal(leaf.snapshot().tasks[0].attempt_id, 'attempt-b');
+  assert.equal(leaf.snapshot().tasks[0].state, 'accepted');
+  assert.deepEqual(leaf.snapshot().progress_receipts, []);
+});
+
+test('foreign-task progress is rejected before any reconciliation request', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
+  adoptTaskEvents(leaf, retryEvents([accepted], 0));
+  let calls = 0;
+  const foreign = productProgressForTaskEvent({ ...accepted, task_id: 'task-foreign' });
+
+  await assert.rejects(
+    reconcileProductP3ProgressEvent({
+      request: async () => {
+        calls += 1;
+        return retryEvents([accepted], 0);
+      },
+      leaf,
+      event: foreign,
+      session_id: 'session-1',
+      request_nonce: 'foreign-task',
+      is_current: () => true,
+    }),
+    /exact Session\/task\/attempt binding/
+  );
+  assert.equal(calls, 0);
 });
 
 test('browser progress consumption is fenced to the exact owned P3 binding', () => {

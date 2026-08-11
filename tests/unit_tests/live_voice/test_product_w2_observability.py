@@ -165,7 +165,7 @@ def test_query_evidence_prefers_server_owned_task_correlation() -> None:
                     seq=2,
                     correlation_id="correlation-task",
                 ),
-            ]
+            ],
         }
     }
     conflicting = {
@@ -182,40 +182,31 @@ def test_query_evidence_prefers_server_owned_task_correlation() -> None:
                     seq=2,
                     correlation_id="correlation-other",
                 ),
-            ]
+            ],
         }
     }
 
-    assert (
-        product_result_query_binding(
-            "task.status", task_payload, request_id="transport-status-1"
-        )
-        == ("correlation-task", "task-1", "attempt-1")
-    )
-    assert (
-        product_result_query_binding(
-            "task.events", events_payload, request_id="transport-events-1"
-        )
-        == ("correlation-task", "task-1", "attempt-1")
-    )
-    assert (
-        product_result_query_binding(
-            "task.list",
-            {
-                "result": {
-                    "tasks": [
-                        {
-                            "task_id": "task-list-1",
-                            "attempt_id": "attempt-list-1",
-                            "correlation_id": "correlation-task",
-                        }
-                    ]
-                }
-            },
-            request_id="transport-list-1",
-        )
-        == ("correlation-task", "task-list-1", "attempt-list-1")
-    )
+    assert product_result_query_binding(
+        "task.status", task_payload, request_id="transport-status-1"
+    ) == ("correlation-task", "task-1", "attempt-1")
+    assert product_result_query_binding(
+        "task.events", events_payload, request_id="transport-events-1"
+    ) == ("correlation-task", "task-1", "attempt-1")
+    assert product_result_query_binding(
+        "task.list",
+        {
+            "result": {
+                "tasks": [
+                    {
+                        "task_id": "task-list-1",
+                        "attempt_id": "attempt-list-1",
+                        "correlation_id": "correlation-task",
+                    }
+                ]
+            }
+        },
+        request_id="transport-list-1",
+    ) == ("correlation-task", "task-list-1", "attempt-list-1")
     assert (
         product_result_query_binding(
             "task.events",
@@ -285,7 +276,7 @@ def test_query_evidence_prefers_server_owned_task_correlation() -> None:
                             attempt_id="attempt-2",
                             correlation_id="correlation-task",
                         ),
-                    ]
+                    ],
                 }
             },
             request_id="transport-multiple-attempts",
@@ -311,6 +302,7 @@ def test_query_evidence_prefers_server_owned_task_correlation() -> None:
 
     with pytest.raises(ValueError, match="request_id"):
         product_result_query_binding("task.status", task_payload, request_id="")
+
 
 @pytest.mark.asyncio
 async def test_incremental_task_queries_keep_one_correlation_and_unique_sources(
@@ -873,9 +865,22 @@ async def test_terminal_direct_status_emits_exact_executor_route(
     assert records[-1]["record"]["binding"]["attempt_id"] == "attempt-1"
 
 
+@pytest.mark.parametrize(
+    ("outcome", "expected_reason_code"),
+    (
+        (TerminalOutcome.COMPLETED, None),
+        (TerminalOutcome.FAILED, "TASK_FAILURE"),
+        (TerminalOutcome.CANCELLED, "CANCEL_TERMINAL"),
+        (TerminalOutcome.INTERRUPTED, None),
+        (TerminalOutcome.UNKNOWN, None),
+    ),
+)
 @pytest.mark.asyncio
 async def test_reconciliation_observation_requires_typed_durable_direct_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: TerminalOutcome,
+    expected_reason_code: str | None,
 ) -> None:
     path = tmp_path / "w2-reconciliation.jsonl"
     _enable(monkeypatch, path)
@@ -887,7 +892,7 @@ async def test_reconciliation_observation_requires_typed_durable_direct_attempt(
         executor_id=FORMAL_PROJECT_EXECUTOR_ID,
         executor_ref=f"{DIRECT_PROJECT_EXECUTOR_REF_PREFIX}attempt-restart-1",
         state=FormalAttemptState.TERMINAL,
-        outcome=TerminalOutcome.INTERRUPTED,
+        outcome=outcome,
         source_seq=1,
     )
     event = PersistentTaskEvent(
@@ -898,7 +903,7 @@ async def test_reconciliation_observation_requires_typed_durable_direct_attempt(
         seq=4,
         event_type="task.terminal",
         state="terminal",
-        outcome="interrupted",
+        outcome=outcome.value,
         producer="task_core.reconciliation",
         source_event_id=None,
         causation_id="reconciliation:attempt-restart-1",
@@ -929,7 +934,8 @@ async def test_reconciliation_observation_requires_typed_durable_direct_attempt(
     assert record["binding"]["task_id"] == attempt.task_id
     assert record["binding"]["attempt_id"] == attempt.attempt_id
     assert record["source_seq"] == event.seq
-    assert record["outcome"] == "interrupted"
+    assert record["outcome"] == outcome.value
+    assert record["reason_code"] == expected_reason_code
 
 
 def test_d0_executor_proof_rejects_nonterminal_or_legacy_attempts() -> None:

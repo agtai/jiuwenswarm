@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   adoptProductTextProgressEvent,
+  adoptParsedProductTextProgressEvent,
   createProductTextProgressDeliveryAck,
   parseProductTextProgressEvent,
   ProductTextProgressAckOwner,
@@ -80,6 +81,15 @@ test('parses an exact session/task/correlation/causation progress binding', () =
   assert.equal(Object.isFrozen(parsed), true);
 });
 
+test('adopts an already parsed exact event without weakening raw-envelope parsing', () => {
+  const parsed = parseProductTextProgressEvent(progressEvent());
+  assert.notEqual(parsed, null);
+
+  assert.equal(adoptProductTextProgressEvent(null, parsed, 'session-1'), null);
+  assert.equal(adoptParsedProductTextProgressEvent(null, parsed, 'session-1'), parsed);
+  assert.equal(adoptParsedProductTextProgressEvent(null, parsed, 'session-foreign'), null);
+});
+
 test('creates an exact credential-free Web UI delivery acknowledgement', () => {
   const parsed = parseProductTextProgressEvent(progressEvent());
   assert.notEqual(parsed, null);
@@ -102,16 +112,36 @@ test('creates an exact credential-free Web UI delivery acknowledgement', () => {
 
 test('rejects correlation, task, canonical scope, and causation mismatches', () => {
   for (const mutate of [
-    event => { event.progress_event.correlation_id = 'wrong-correlation'; },
-    event => { event.progress_event.stream_ref.id = 'wrong-task'; },
-    event => { event.source_event.scope.session_id = 'wrong-session'; },
-    event => { event.progress_event.scope.subject_id = 'wrong-principal'; },
-    event => { event.source_event.scope.assurance = 'request_asserted'; },
-    event => { delete event.source_event.scope.subject_id; },
-    event => { event.source_event.scope.extra = 'unknown'; },
-    event => { event.progress_event.causation_id = 'wrong-source'; },
-    event => { event.source_event.extensions['jiuwenswarm.task_progress_return'].persistent_event_seq = 8; },
-    event => { delete event.source_event.extensions['jiuwenswarm.task_progress_return'].persistent_attempt_id; },
+    event => {
+      event.progress_event.correlation_id = 'wrong-correlation';
+    },
+    event => {
+      event.progress_event.stream_ref.id = 'wrong-task';
+    },
+    event => {
+      event.source_event.scope.session_id = 'wrong-session';
+    },
+    event => {
+      event.progress_event.scope.subject_id = 'wrong-principal';
+    },
+    event => {
+      event.source_event.scope.assurance = 'request_asserted';
+    },
+    event => {
+      delete event.source_event.scope.subject_id;
+    },
+    event => {
+      event.source_event.scope.extra = 'unknown';
+    },
+    event => {
+      event.progress_event.causation_id = 'wrong-source';
+    },
+    event => {
+      event.source_event.extensions['jiuwenswarm.task_progress_return'].persistent_event_seq = 8;
+    },
+    event => {
+      delete event.source_event.extensions['jiuwenswarm.task_progress_return'].persistent_attempt_id;
+    },
   ]) {
     const event = progressEvent();
     mutate(event);
@@ -122,36 +152,12 @@ test('rejects correlation, task, canonical scope, and causation mismatches', () 
 test('adoption retains exact scope and binding within one generation', () => {
   const initial = adoptProductTextProgressEvent(null, progressEvent(), 'session-1');
   const duplicate = adoptProductTextProgressEvent(initial, progressEvent(), 'session-1');
-  const newer = adoptProductTextProgressEvent(
-    initial,
-    progressEvent({ seq: 8, state: 'waiting' }),
-    'session-1'
-  );
-  const staleGeneration = adoptProductTextProgressEvent(
-    newer,
-    progressEvent({ seq: 9, generation: 0 }),
-    'session-1'
-  );
-  const wrongSession = adoptProductTextProgressEvent(
-    newer,
-    progressEvent({ session_id: 'session-2', seq: 10 }),
-    'session-1'
-  );
-  const changedCorrelation = adoptProductTextProgressEvent(
-    newer,
-    progressEvent({ correlation_id: 'correlation-2', seq: 10 }),
-    'session-1'
-  );
-  const changedProject = adoptProductTextProgressEvent(
-    newer,
-    progressEvent({ project_id: 'project-2', seq: 10 }),
-    'session-1'
-  );
-  const changedSubject = adoptProductTextProgressEvent(
-    newer,
-    progressEvent({ subject_id: 'principal-2', seq: 10 }),
-    'session-1'
-  );
+  const newer = adoptProductTextProgressEvent(initial, progressEvent({ seq: 8, state: 'waiting' }), 'session-1');
+  const staleGeneration = adoptProductTextProgressEvent(newer, progressEvent({ seq: 9, generation: 0 }), 'session-1');
+  const wrongSession = adoptProductTextProgressEvent(newer, progressEvent({ session_id: 'session-2', seq: 10 }), 'session-1');
+  const changedCorrelation = adoptProductTextProgressEvent(newer, progressEvent({ correlation_id: 'correlation-2', seq: 10 }), 'session-1');
+  const changedProject = adoptProductTextProgressEvent(newer, progressEvent({ project_id: 'project-2', seq: 10 }), 'session-1');
+  const changedSubject = adoptProductTextProgressEvent(newer, progressEvent({ subject_id: 'principal-2', seq: 10 }), 'session-1');
   const changedGenerationKind = progressEvent({ seq: 10 });
   changedGenerationKind.generation_kind = 'other-generation-kind';
 
@@ -163,19 +169,12 @@ test('adoption retains exact scope and binding within one generation', () => {
   assert.equal(changedCorrelation, newer);
   assert.equal(changedProject, newer);
   assert.equal(changedSubject, newer);
-  assert.equal(
-    adoptProductTextProgressEvent(newer, changedGenerationKind, 'session-1'),
-    newer
-  );
+  assert.equal(adoptProductTextProgressEvent(newer, changedGenerationKind, 'session-1'), newer);
 });
 
 test('a higher generation explicitly replaces correlation within one lineage', () => {
   const initial = adoptProductTextProgressEvent(null, progressEvent(), 'session-1');
-  const replacement = adoptProductTextProgressEvent(
-    initial,
-    progressEvent({ generation: 2, correlation_id: 'correlation-2', seq: 1 }),
-    'session-1'
-  );
+  const replacement = adoptProductTextProgressEvent(initial, progressEvent({ generation: 2, correlation_id: 'correlation-2', seq: 1 }), 'session-1');
 
   assert.notEqual(replacement, initial);
   assert.equal(replacement?.generation, 2);
@@ -215,7 +214,10 @@ test('retained ACK owner retries the identical delivery after response loss', as
   assert.equal(owner.status(parsed.delivery_id)?.status, 'acknowledged');
   assert.equal(owner.status(parsed.delivery_id)?.attempts, 2);
   assert.deepEqual(calls[0], calls[1]);
-  assert.equal(snapshots.some(item => item.status === 'failed'), true);
+  assert.equal(
+    snapshots.some(item => item.status === 'failed'),
+    true
+  );
   owner.close();
 });
 
@@ -323,7 +325,9 @@ test('ACK owner rejects a retained delivery whose source attempt changes', () =>
   assert.notEqual(foreign, null);
   const owner = new ProductTextProgressAckOwner({
     enabled: true,
-    request: async () => { throw new Error('offline'); },
+    request: async () => {
+      throw new Error('offline');
+    },
   });
 
   owner.retain(first);
@@ -340,7 +344,9 @@ test('ACK capacity never evicts an unacknowledged delivery', () => {
   const owner = new ProductTextProgressAckOwner({
     enabled: true,
     capacity: 1,
-    request: async () => { throw new Error('offline'); },
+    request: async () => {
+      throw new Error('offline');
+    },
   });
   owner.retain(first);
   assert.throws(() => owner.retain(second), /no safe eviction/);
