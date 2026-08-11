@@ -260,13 +260,20 @@ def _response_payload(value: Mapping[str, Any], request_id: str) -> Mapping[str,
     outer = _mapping(value, "Gateway response")
     if outer.get("type") != "res" or outer.get("id") != request_id:
         raise FaultRunnerError("Gateway response does not bind the exact request")
-    if outer.get("ok") is not True:
-        raise FaultRunnerError("Gateway transport rejected the product request")
+    if type(outer.get("ok")) is not bool:
+        raise FaultRunnerError("Gateway response has no closed transport outcome")
     payload = _mapping(outer.get("payload"), "product response payload")
     if payload.get("request_id") != request_id:
         raise FaultRunnerError("product response request_id mismatch")
     if type(payload.get("ok")) is not bool:
         raise FaultRunnerError("product response has no closed outcome")
+    # Gateway preserves AgentServer business failures as an exact product
+    # payload while also setting the outer Web response to ok=false.  That is a
+    # valid observed product error, not a transport rejection.  A failed outer
+    # response remains inadmissible unless it carries the exact closed product
+    # failure bound above.
+    if outer.get("ok") is False and payload.get("ok") is not False:
+        raise FaultRunnerError("Gateway transport rejected the product request")
     return payload
 
 

@@ -20,6 +20,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
 from scripts.live_voice.w2_rehearsal.w2_fault_runner import (
     ChromeNetworkObserver,
     ChromeP3Oracle,
+    FaultRunnerError,
     GatewayDedicatedSpeechFactory,
     GatewayWebSocketClient,
     ObservedWebMessage,
@@ -413,6 +414,9 @@ async def test_p2_retriable_exact_replay_recovers_after_one_shot_failure() -> No
     failed = _error(
         fault.request_id, "UNAVAILABLE", "PRODUCT_W2_RETRIABLE_FAULT_INJECTED"
     )
+    # AgentServer business errors keep the exact product payload while Gateway
+    # also marks the outer Web response unsuccessful.
+    failed["ok"] = False
     recovered = _success(
         fault.request_id,
         {"status": "presentation_acknowledged", "replayed": False},
@@ -428,6 +432,27 @@ async def test_p2_retriable_exact_replay_recovers_after_one_shot_failure() -> No
 
     assert [call[1] for call in rpc.calls] == [canonical, canonical]
     assert [call[2] for call in rpc.calls] == [fault.request_id, fault.request_id]
+
+
+@pytest.mark.asyncio
+async def test_p2_retriable_rejects_unbound_gateway_transport_failure() -> None:
+    fault = _fault(
+        1, "p2.conversation", "retriable", "live_voice.composition.p2.presentation.ack"
+    )
+    rpc = _ScriptedRpc(
+        [
+            {
+                "type": "res",
+                "id": fault.request_id,
+                "ok": False,
+                "payload": {},
+                "error": "transport failed",
+            }
+        ]
+    )
+
+    with pytest.raises(FaultRunnerError, match="product response request_id mismatch"):
+        await W2FaultRunner(rpc).probe_p2_retriable(fault, {"session_id": "session-1"})
 
 
 @pytest.mark.asyncio
