@@ -32,7 +32,7 @@ def test_action_ids_are_unique_and_prefixed():
 
 
 def test_card_without_buttons_renders_section_only():
-    assert len(render_card_blocks({"text": "hello"})) == 1S
+    assert len(render_card_blocks({"text": "hello"})) == 1
 
 
 def test_extract_action_value_from_block_actions_payload():
