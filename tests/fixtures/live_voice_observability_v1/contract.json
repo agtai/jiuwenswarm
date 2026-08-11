@@ -1,0 +1,1129 @@
+{
+  "observation": {
+    "schema_version": "live-voice.observability.v1",
+    "event_id": "obs-agent-complete-1",
+    "event_name": "segment.completed",
+    "segment_name": "agent.dispatch",
+    "observed_at": "2026-08-05T09:00:00.125Z",
+    "monotonic_ms": 4125.5,
+    "binding": {
+      "correlation_id": "corr-journey-1",
+      "interaction_id": "interaction-1",
+      "turn_id": "turn-1",
+      "response_id": "response-1",
+      "response_generation": 2,
+      "round_id": "round-1",
+      "task_id": "task-1",
+      "attempt_id": "attempt-1"
+    },
+    "route": {
+      "implementation_class": "formal",
+      "owner_module": "agent.bridge",
+      "capability_provider": "jiuwenswarm-agent",
+      "contract_version": "live-voice.contract.v2",
+      "reason_code": null
+    },
+    "source_component": "agent.bridge",
+    "source_event_id": "agent-event-3",
+    "source_record_id": null,
+    "source_occurred_at": "2026-08-05T09:00:00.100Z",
+    "source_seq": 3,
+    "state": "terminal",
+    "outcome": "completed",
+    "reason_code": null,
+    "error_code": null,
+    "duration_ms": 125.5,
+    "queue_depth": null,
+    "queue_capacity": null,
+    "cancel_scope": null
+  },
+  "metric": {
+    "schema_version": "live-voice.observability.v1",
+    "measurement_id": "metric-agent-latency-1",
+    "metric_name": "live_voice.segment_latency_ms",
+    "metric_kind": "histogram",
+    "unit": "milliseconds",
+    "value": 125.5,
+    "observed_at": "2026-08-05T09:00:00.125Z",
+    "binding": {
+      "correlation_id": "corr-journey-1",
+      "interaction_id": "interaction-1",
+      "turn_id": "turn-1",
+      "response_id": "response-1",
+      "response_generation": 2,
+      "round_id": "round-1",
+      "task_id": "task-1",
+      "attempt_id": "attempt-1"
+    },
+    "route": {
+      "implementation_class": "formal",
+      "owner_module": "agent.bridge",
+      "capability_provider": "jiuwenswarm-agent",
+      "contract_version": "live-voice.contract.v2",
+      "reason_code": null
+    },
+    "segment_name": "agent.dispatch",
+    "implementation_class": "formal",
+    "outcome": "completed",
+    "reason_code": null,
+    "error_code": null,
+    "cancel_scope": null
+  },
+  "vocabulary": {
+    "route_classes": [
+      "formal",
+      "fallback",
+      "demo_substitute",
+      "unsupported",
+      "unknown"
+    ],
+    "cancel_scopes": [
+      "playback.stop",
+      "response.cancel",
+      "round.cancel",
+      "task.cancel"
+    ],
+    "segments": [
+      "speech.capture",
+      "speech.recognition",
+      "speech.synthesis",
+      "speech.playout",
+      "runtime.turn",
+      "runtime.response",
+      "runtime.presentation",
+      "runtime.queue",
+      "agent.dispatch",
+      "agent.progress",
+      "agent.queue",
+      "task.command",
+      "task.attempt",
+      "task.progress",
+      "task.queue",
+      "route.fallback",
+      "system.degradation"
+    ],
+    "events": [
+      "route.selected",
+      "segment.started",
+      "segment.completed",
+      "segment.failed",
+      "speech.capture_state",
+      "speech.playout_state",
+      "speech.device_change",
+      "queue.pressure",
+      "cancel.requested",
+      "cancel.acknowledged",
+      "cancel.terminal",
+      "cancel.result_unknown",
+      "fence.stale_dropped",
+      "task.state_observed",
+      "task.dispatch_outbox_observed",
+      "task.cancel_outbox_observed",
+      "degradation.activated",
+      "degradation.recovered",
+      "failure.observed"
+    ],
+    "states": [
+      "idle",
+      "starting",
+      "active",
+      "stopping",
+      "stopped",
+      "locked",
+      "ready",
+      "playing",
+      "closed",
+      "pending",
+      "claimed",
+      "delivered",
+      "suppressed",
+      "accepted",
+      "running",
+      "blocked",
+      "decision_required",
+      "terminal",
+      "failed"
+    ],
+    "outcomes": ["completed", "failed", "cancelled", "interrupted", "unknown"],
+    "error_codes": [
+      "INVALID_ARGUMENT",
+      "UNSUPPORTED",
+      "UNAUTHENTICATED",
+      "PERMISSION_DENIED",
+      "NOT_FOUND",
+      "CONFLICT",
+      "STALE",
+      "CAPABILITY_UNAVAILABLE",
+      "UNAVAILABLE",
+      "TIMEOUT",
+      "CANCELLED",
+      "PROTOCOL_VIOLATION",
+      "RESULT_UNKNOWN",
+      "INTERNAL"
+    ],
+    "reason_codes": [
+      "ROUTE_FALLBACK",
+      "DEMO_SUBSTITUTE",
+      "UNSUPPORTED_CAPABILITY",
+      "UNKNOWN_PROVENANCE",
+      "QUEUE_CAPACITY",
+      "CANCEL_REQUESTED",
+      "CANCEL_ACKNOWLEDGED",
+      "CANCEL_TERMINAL",
+      "CANCEL_RESULT_UNKNOWN",
+      "STALE_GENERATION",
+      "PROVIDER_FAILURE",
+      "AGENT_FAILURE",
+      "TASK_FAILURE",
+      "TIMEOUT",
+      "UNAVAILABLE",
+      "PROTOCOL_REJECTED",
+      "DEGRADED",
+      "RECOVERED",
+      "DEVICE_CHANGED",
+      "DEVICE_ENUMERATION_FAILED"
+    ],
+    "metrics": {
+      "live_voice.segment_latency_ms": {
+        "metric_kind": "histogram",
+        "unit": "milliseconds"
+      },
+      "live_voice.queue_depth": {
+        "metric_kind": "gauge",
+        "unit": "items"
+      },
+      "live_voice.queue_wait_ms": {
+        "metric_kind": "histogram",
+        "unit": "milliseconds"
+      },
+      "live_voice.cancel_total": {
+        "metric_kind": "counter",
+        "unit": "count"
+      },
+      "live_voice.stale_fence_total": {
+        "metric_kind": "counter",
+        "unit": "count"
+      },
+      "live_voice.task_total": {
+        "metric_kind": "counter",
+        "unit": "count"
+      },
+      "live_voice.failure_total": {
+        "metric_kind": "counter",
+        "unit": "count"
+      },
+      "live_voice.degradation_total": {
+        "metric_kind": "counter",
+        "unit": "count"
+      }
+    },
+    "event_semantics": {
+      "route.selected": {
+        "segments": [
+          "speech.capture",
+          "speech.recognition",
+          "speech.synthesis",
+          "speech.playout",
+          "runtime.turn",
+          "runtime.response",
+          "runtime.presentation",
+          "runtime.queue",
+          "agent.dispatch",
+          "agent.progress",
+          "agent.queue",
+          "task.command",
+          "task.attempt",
+          "task.progress",
+          "task.queue",
+          "route.fallback",
+          "system.degradation"
+        ],
+        "required_facts": [],
+        "allowed_facts": ["source_record_id", "reason_code"],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": [
+          "ROUTE_FALLBACK",
+          "DEMO_SUBSTITUTE",
+          "UNSUPPORTED_CAPABILITY",
+          "UNKNOWN_PROVENANCE"
+        ],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "segment.started": {
+        "segments": [
+          "speech.capture",
+          "speech.recognition",
+          "speech.synthesis",
+          "speech.playout",
+          "runtime.turn",
+          "runtime.response",
+          "runtime.presentation",
+          "runtime.queue",
+          "agent.dispatch",
+          "agent.progress",
+          "agent.queue",
+          "task.command",
+          "task.attempt",
+          "task.progress",
+          "task.queue"
+        ],
+        "required_facts": [],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": [],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "segment.completed": {
+        "segments": [
+          "speech.capture",
+          "speech.recognition",
+          "speech.synthesis",
+          "speech.playout",
+          "runtime.turn",
+          "runtime.response",
+          "runtime.presentation",
+          "runtime.queue",
+          "agent.dispatch",
+          "agent.progress",
+          "agent.queue",
+          "task.command",
+          "task.attempt",
+          "task.progress",
+          "task.queue"
+        ],
+        "required_facts": ["outcome", "duration_ms"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "state",
+          "outcome",
+          "duration_ms"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": ["terminal"],
+        "outcomes": ["completed"],
+        "reasons": [],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "segment.failed": {
+        "segments": [
+          "speech.capture",
+          "speech.recognition",
+          "speech.synthesis",
+          "speech.playout",
+          "runtime.turn",
+          "runtime.response",
+          "runtime.presentation",
+          "runtime.queue",
+          "agent.dispatch",
+          "agent.progress",
+          "agent.queue",
+          "task.command",
+          "task.attempt",
+          "task.progress",
+          "task.queue"
+        ],
+        "required_facts": [
+          "outcome",
+          "reason_code",
+          "error_code",
+          "duration_ms"
+        ],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "state",
+          "outcome",
+          "reason_code",
+          "error_code",
+          "duration_ms"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": ["terminal", "failed"],
+        "outcomes": ["failed"],
+        "reasons": [
+          "AGENT_FAILURE",
+          "PROTOCOL_REJECTED",
+          "PROVIDER_FAILURE",
+          "TASK_FAILURE",
+          "TIMEOUT",
+          "UNAVAILABLE"
+        ],
+        "errors": [
+          "INVALID_ARGUMENT",
+          "UNSUPPORTED",
+          "UNAUTHENTICATED",
+          "PERMISSION_DENIED",
+          "NOT_FOUND",
+          "CONFLICT",
+          "STALE",
+          "CAPABILITY_UNAVAILABLE",
+          "UNAVAILABLE",
+          "TIMEOUT",
+          "CANCELLED",
+          "PROTOCOL_VIOLATION",
+          "RESULT_UNKNOWN",
+          "INTERNAL"
+        ],
+        "cancel_scopes": []
+      },
+      "speech.capture_state": {
+        "segments": ["speech.capture"],
+        "required_facts": ["state"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "state",
+          "reason_code",
+          "error_code"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [
+          "idle",
+          "starting",
+          "active",
+          "stopping",
+          "stopped",
+          "failed"
+        ],
+        "outcomes": [],
+        "reasons": ["UNAVAILABLE"],
+        "errors": ["UNAVAILABLE"],
+        "cancel_scopes": []
+      },
+      "speech.playout_state": {
+        "segments": ["speech.playout"],
+        "required_facts": ["state"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "state",
+          "reason_code",
+          "error_code"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": ["locked", "ready", "playing", "stopped", "failed", "closed"],
+        "outcomes": [],
+        "reasons": ["UNAVAILABLE"],
+        "errors": ["UNAVAILABLE"],
+        "cancel_scopes": []
+      },
+      "speech.device_change": {
+        "segments": ["speech.capture"],
+        "required_facts": ["reason_code"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code",
+          "error_code"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": ["DEVICE_CHANGED", "DEVICE_ENUMERATION_FAILED"],
+        "errors": ["UNAVAILABLE"],
+        "cancel_scopes": []
+      },
+      "queue.pressure": {
+        "segments": ["runtime.queue", "agent.queue", "task.queue"],
+        "required_facts": ["reason_code", "queue_depth", "queue_capacity"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code",
+          "queue_depth",
+          "queue_capacity"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": ["QUEUE_CAPACITY"],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "cancel.requested": {
+        "segments": [
+          "speech.playout",
+          "runtime.response",
+          "agent.progress",
+          "task.command"
+        ],
+        "required_facts": ["reason_code", "cancel_scope"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code",
+          "cancel_scope"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": ["CANCEL_REQUESTED"],
+        "errors": [],
+        "cancel_scopes": [
+          "playback.stop",
+          "response.cancel",
+          "round.cancel",
+          "task.cancel"
+        ]
+      },
+      "cancel.acknowledged": {
+        "segments": [
+          "speech.playout",
+          "runtime.response",
+          "agent.progress",
+          "task.command"
+        ],
+        "required_facts": ["reason_code", "cancel_scope"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code",
+          "cancel_scope"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": ["CANCEL_ACKNOWLEDGED"],
+        "errors": [],
+        "cancel_scopes": [
+          "playback.stop",
+          "response.cancel",
+          "round.cancel",
+          "task.cancel"
+        ]
+      },
+      "cancel.terminal": {
+        "segments": [
+          "speech.playout",
+          "runtime.response",
+          "agent.progress",
+          "task.command"
+        ],
+        "required_facts": ["outcome", "reason_code", "cancel_scope"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "outcome",
+          "reason_code",
+          "cancel_scope"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": ["cancelled"],
+        "reasons": ["CANCEL_TERMINAL"],
+        "errors": [],
+        "cancel_scopes": [
+          "playback.stop",
+          "response.cancel",
+          "round.cancel",
+          "task.cancel"
+        ]
+      },
+      "cancel.result_unknown": {
+        "segments": [
+          "speech.playout",
+          "runtime.response",
+          "agent.progress",
+          "task.command"
+        ],
+        "required_facts": [
+          "outcome",
+          "reason_code",
+          "error_code",
+          "cancel_scope"
+        ],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "outcome",
+          "reason_code",
+          "error_code",
+          "cancel_scope"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": ["unknown"],
+        "reasons": ["CANCEL_RESULT_UNKNOWN"],
+        "errors": ["RESULT_UNKNOWN"],
+        "cancel_scopes": [
+          "playback.stop",
+          "response.cancel",
+          "round.cancel",
+          "task.cancel"
+        ]
+      },
+      "fence.stale_dropped": {
+        "segments": ["runtime.presentation"],
+        "required_facts": ["reason_code", "error_code"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code",
+          "error_code"
+        ],
+        "required_bindings": ["response_id"],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": ["STALE_GENERATION"],
+        "errors": ["STALE"],
+        "cancel_scopes": []
+      },
+      "task.state_observed": {
+        "segments": ["task.progress"],
+        "required_facts": [
+          "source_event_id",
+          "source_occurred_at",
+          "source_seq",
+          "state"
+        ],
+        "allowed_facts": [
+          "source_event_id",
+          "source_occurred_at",
+          "source_seq",
+          "state",
+          "outcome",
+          "reason_code"
+        ],
+        "required_bindings": ["task_id", "attempt_id"],
+        "source_kind": "event",
+        "states": [
+          "accepted",
+          "running",
+          "blocked",
+          "decision_required",
+          "terminal"
+        ],
+        "outcomes": [
+          "completed",
+          "failed",
+          "cancelled",
+          "interrupted",
+          "unknown"
+        ],
+        "reasons": ["TASK_FAILURE", "CANCEL_TERMINAL"],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "task.dispatch_outbox_observed": {
+        "segments": ["task.queue"],
+        "required_facts": ["source_record_id", "source_seq", "state"],
+        "allowed_facts": ["source_record_id", "source_seq", "state"],
+        "required_bindings": ["task_id", "attempt_id"],
+        "source_kind": "record",
+        "states": ["pending", "claimed", "delivered", "suppressed"],
+        "outcomes": [],
+        "reasons": [],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "task.cancel_outbox_observed": {
+        "segments": ["task.queue"],
+        "required_facts": ["source_record_id", "source_seq", "state"],
+        "allowed_facts": ["source_record_id", "source_seq", "state"],
+        "required_bindings": ["task_id", "attempt_id"],
+        "source_kind": "record",
+        "states": ["pending", "claimed", "delivered", "suppressed"],
+        "outcomes": [],
+        "reasons": [],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "degradation.activated": {
+        "segments": ["system.degradation"],
+        "required_facts": ["reason_code"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": ["DEGRADED"],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "degradation.recovered": {
+        "segments": ["system.degradation"],
+        "required_facts": ["reason_code"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": ["RECOVERED"],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "failure.observed": {
+        "segments": [
+          "speech.capture",
+          "speech.recognition",
+          "speech.synthesis",
+          "speech.playout",
+          "runtime.turn",
+          "runtime.response",
+          "runtime.presentation",
+          "agent.dispatch",
+          "agent.progress",
+          "task.command",
+          "task.attempt",
+          "task.progress",
+          "task.queue"
+        ],
+        "required_facts": ["reason_code", "error_code"],
+        "allowed_facts": [
+          "source_event_id",
+          "source_record_id",
+          "source_occurred_at",
+          "source_seq",
+          "reason_code",
+          "error_code"
+        ],
+        "required_bindings": [],
+        "source_kind": "optional",
+        "states": [],
+        "outcomes": [],
+        "reasons": [
+          "AGENT_FAILURE",
+          "PROTOCOL_REJECTED",
+          "PROVIDER_FAILURE",
+          "TASK_FAILURE",
+          "TIMEOUT",
+          "UNAVAILABLE"
+        ],
+        "errors": [
+          "INVALID_ARGUMENT",
+          "UNSUPPORTED",
+          "UNAUTHENTICATED",
+          "PERMISSION_DENIED",
+          "NOT_FOUND",
+          "CONFLICT",
+          "STALE",
+          "CAPABILITY_UNAVAILABLE",
+          "UNAVAILABLE",
+          "TIMEOUT",
+          "CANCELLED",
+          "PROTOCOL_VIOLATION",
+          "RESULT_UNKNOWN",
+          "INTERNAL"
+        ],
+        "cancel_scopes": []
+      }
+    },
+    "metric_semantics": {
+      "live_voice.segment_latency_ms": {
+        "segments": [
+          "speech.capture",
+          "speech.recognition",
+          "speech.synthesis",
+          "speech.playout",
+          "runtime.turn",
+          "runtime.response",
+          "runtime.presentation",
+          "agent.dispatch",
+          "agent.progress",
+          "task.command",
+          "task.attempt",
+          "task.progress"
+        ],
+        "required_dimensions": ["outcome"],
+        "allowed_dimensions": ["outcome"],
+        "required_bindings": [],
+        "outcomes": ["completed"],
+        "reasons": [],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "live_voice.queue_depth": {
+        "segments": ["runtime.queue", "agent.queue", "task.queue"],
+        "required_dimensions": [],
+        "allowed_dimensions": [],
+        "required_bindings": [],
+        "outcomes": [],
+        "reasons": [],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "live_voice.queue_wait_ms": {
+        "segments": ["runtime.queue", "agent.queue", "task.queue"],
+        "required_dimensions": [],
+        "allowed_dimensions": [],
+        "required_bindings": [],
+        "outcomes": [],
+        "reasons": [],
+        "errors": [],
+        "cancel_scopes": []
+      },
+      "live_voice.cancel_total": {
+        "segments": [
+          "speech.playout",
+          "runtime.response",
+          "agent.progress",
+          "task.command"
+        ],
+        "required_dimensions": ["reason_code", "cancel_scope"],
+        "allowed_dimensions": [
+          "outcome",
+          "reason_code",
+          "error_code",
+          "cancel_scope"
+        ],
+        "required_bindings": [],
+        "outcomes": ["cancelled", "unknown"],
+        "reasons": [
+          "CANCEL_REQUESTED",
+          "CANCEL_ACKNOWLEDGED",
+          "CANCEL_TERMINAL",
+          "CANCEL_RESULT_UNKNOWN"
+        ],
+        "errors": ["RESULT_UNKNOWN"],
+        "cancel_scopes": [
+          "playback.stop",
+          "response.cancel",
+          "round.cancel",
+          "task.cancel"
+        ]
+      },
+      "live_voice.stale_fence_total": {
+        "segments": ["runtime.presentation"],
+        "required_dimensions": ["reason_code", "error_code"],
+        "allowed_dimensions": ["reason_code", "error_code"],
+        "required_bindings": ["response_id"],
+        "outcomes": [],
+        "reasons": ["STALE_GENERATION"],
+        "errors": ["STALE"],
+        "cancel_scopes": []
+      },
+      "live_voice.task_total": {
+        "segments": ["task.progress"],
+        "required_dimensions": ["outcome"],
+        "allowed_dimensions": ["outcome", "reason_code", "error_code"],
+        "required_bindings": ["task_id"],
+        "outcomes": ["completed", "failed", "cancelled"],
+        "reasons": ["TASK_FAILURE", "CANCEL_TERMINAL"],
+        "errors": [
+          "INVALID_ARGUMENT",
+          "UNSUPPORTED",
+          "UNAUTHENTICATED",
+          "PERMISSION_DENIED",
+          "NOT_FOUND",
+          "CONFLICT",
+          "STALE",
+          "CAPABILITY_UNAVAILABLE",
+          "UNAVAILABLE",
+          "TIMEOUT",
+          "CANCELLED",
+          "PROTOCOL_VIOLATION",
+          "RESULT_UNKNOWN",
+          "INTERNAL"
+        ],
+        "cancel_scopes": []
+      },
+      "live_voice.failure_total": {
+        "segments": [
+          "speech.capture",
+          "speech.recognition",
+          "speech.synthesis",
+          "speech.playout",
+          "runtime.turn",
+          "runtime.response",
+          "runtime.presentation",
+          "agent.dispatch",
+          "agent.progress",
+          "task.command",
+          "task.attempt",
+          "task.progress",
+          "task.queue"
+        ],
+        "required_dimensions": ["reason_code", "error_code"],
+        "allowed_dimensions": ["reason_code", "error_code"],
+        "required_bindings": [],
+        "outcomes": [],
+        "reasons": [
+          "AGENT_FAILURE",
+          "PROTOCOL_REJECTED",
+          "PROVIDER_FAILURE",
+          "TASK_FAILURE",
+          "TIMEOUT",
+          "UNAVAILABLE"
+        ],
+        "errors": [
+          "INVALID_ARGUMENT",
+          "UNSUPPORTED",
+          "UNAUTHENTICATED",
+          "PERMISSION_DENIED",
+          "NOT_FOUND",
+          "CONFLICT",
+          "STALE",
+          "CAPABILITY_UNAVAILABLE",
+          "UNAVAILABLE",
+          "TIMEOUT",
+          "CANCELLED",
+          "PROTOCOL_VIOLATION",
+          "RESULT_UNKNOWN",
+          "INTERNAL"
+        ],
+        "cancel_scopes": []
+      },
+      "live_voice.degradation_total": {
+        "segments": ["system.degradation"],
+        "required_dimensions": ["reason_code"],
+        "allowed_dimensions": ["reason_code"],
+        "required_bindings": [],
+        "outcomes": [],
+        "reasons": ["DEGRADED", "RECOVERED"],
+        "errors": [],
+        "cancel_scopes": []
+      }
+    },
+    "failure_error_matrix": {
+      "PROVIDER_FAILURE": [
+        "INVALID_ARGUMENT",
+        "UNSUPPORTED",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+        "NOT_FOUND",
+        "CONFLICT",
+        "CAPABILITY_UNAVAILABLE",
+        "UNAVAILABLE",
+        "TIMEOUT",
+        "PROTOCOL_VIOLATION",
+        "INTERNAL"
+      ],
+      "AGENT_FAILURE": [
+        "INVALID_ARGUMENT",
+        "UNSUPPORTED",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+        "NOT_FOUND",
+        "CONFLICT",
+        "CAPABILITY_UNAVAILABLE",
+        "UNAVAILABLE",
+        "TIMEOUT",
+        "PROTOCOL_VIOLATION",
+        "INTERNAL"
+      ],
+      "TASK_FAILURE": [
+        "INVALID_ARGUMENT",
+        "UNSUPPORTED",
+        "UNAUTHENTICATED",
+        "PERMISSION_DENIED",
+        "NOT_FOUND",
+        "CONFLICT",
+        "CAPABILITY_UNAVAILABLE",
+        "UNAVAILABLE",
+        "TIMEOUT",
+        "PROTOCOL_VIOLATION",
+        "INTERNAL"
+      ],
+      "TIMEOUT": ["TIMEOUT"],
+      "UNAVAILABLE": ["CAPABILITY_UNAVAILABLE", "UNAVAILABLE"],
+      "PROTOCOL_REJECTED": [
+        "INVALID_ARGUMENT",
+        "UNSUPPORTED",
+        "CONFLICT",
+        "STALE",
+        "PROTOCOL_VIOLATION"
+      ]
+    },
+    "failure_segment_matrix": {
+      "PROVIDER_FAILURE": [
+        "speech.capture",
+        "speech.recognition",
+        "speech.synthesis",
+        "speech.playout"
+      ],
+      "AGENT_FAILURE": ["agent.dispatch", "agent.progress"],
+      "TASK_FAILURE": [
+        "task.command",
+        "task.attempt",
+        "task.progress",
+        "task.queue"
+      ],
+      "TIMEOUT": [
+        "speech.capture",
+        "speech.recognition",
+        "speech.synthesis",
+        "speech.playout",
+        "runtime.turn",
+        "runtime.response",
+        "runtime.presentation",
+        "agent.dispatch",
+        "agent.progress",
+        "task.command",
+        "task.attempt",
+        "task.progress",
+        "task.queue"
+      ],
+      "UNAVAILABLE": [
+        "speech.capture",
+        "speech.recognition",
+        "speech.synthesis",
+        "speech.playout",
+        "runtime.turn",
+        "runtime.response",
+        "runtime.presentation",
+        "agent.dispatch",
+        "agent.progress",
+        "task.command",
+        "task.attempt",
+        "task.progress",
+        "task.queue"
+      ],
+      "PROTOCOL_REJECTED": [
+        "speech.capture",
+        "speech.recognition",
+        "speech.synthesis",
+        "speech.playout",
+        "runtime.turn",
+        "runtime.response",
+        "runtime.presentation",
+        "agent.dispatch",
+        "agent.progress",
+        "task.command",
+        "task.attempt",
+        "task.progress",
+        "task.queue"
+      ]
+    },
+    "segment_binding_matrix": {
+      "speech.capture": ["interaction_id"],
+      "speech.recognition": ["interaction_id"],
+      "speech.synthesis": ["response_id"],
+      "speech.playout": ["response_id"],
+      "runtime.turn": ["turn_id"],
+      "runtime.response": ["response_id"],
+      "runtime.presentation": ["response_id"],
+      "runtime.queue": [],
+      "agent.dispatch": ["round_id"],
+      "agent.progress": ["round_id"],
+      "agent.queue": ["round_id"],
+      "task.command": ["task_id"],
+      "task.attempt": ["task_id", "attempt_id"],
+      "task.progress": ["task_id"],
+      "task.queue": ["task_id"]
+    },
+    "cancel_target_segment_matrix": {
+      "playback.stop": "speech.playout",
+      "response.cancel": "runtime.response",
+      "round.cancel": "agent.progress",
+      "task.cancel": "task.command"
+    },
+    "identity_policy": {
+      "max_length": 128,
+      "allowed_pattern": "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$",
+      "blocked_markers": [
+        "api_key",
+        "authorization",
+        "bearer",
+        "credential",
+        "password",
+        "passwd",
+        "secret",
+        "token",
+        "transcript"
+      ],
+      "trusted_source_boundary": "authoritative_public_identity_fields_only"
+    },
+    "adversarial_cases": [
+      {
+        "name": "capture_state_missing_state",
+        "kind": "observation",
+        "reason": "EVENT_FACT_REQUIRED"
+      },
+      {
+        "name": "completed_with_failure_truth",
+        "kind": "observation",
+        "reason": "EVENT_FACT_FORBIDDEN"
+      },
+      {
+        "name": "outbox_wrong_segment_missing_binding_source",
+        "kind": "observation",
+        "reason": "EVENT_SEGMENT_MISMATCH"
+      },
+      {
+        "name": "segment_latency_with_failure_truth",
+        "kind": "metric",
+        "reason": "METRIC_DIMENSION_FORBIDDEN"
+      },
+      {
+        "name": "identity_url",
+        "kind": "observation",
+        "reason": "INVALID_OPAQUE_IDENTITY"
+      },
+      {
+        "name": "identity_api_key",
+        "kind": "observation",
+        "reason": "INVALID_OPAQUE_IDENTITY"
+      },
+      {
+        "name": "identity_secret",
+        "kind": "observation",
+        "reason": "INVALID_OPAQUE_IDENTITY"
+      },
+      {
+        "name": "identity_transcript",
+        "kind": "observation",
+        "reason": "INVALID_OPAQUE_IDENTITY"
+      }
+    ]
+  }
+}

@@ -211,6 +211,40 @@ class ReqMethod(Enum):
     SCHEDULE_LOGS = "schedule.logs"
     SCHEDULE_CANCEL = "schedule.cancel"
     SCHEDULE_DELETE = "schedule.delete"
+
+    # Authenticated formal Live Voice P3-alpha task composition
+    LIVE_VOICE_TASK_CREATE = "live_voice.task.create"
+    LIVE_VOICE_TASK_GET = "live_voice.task.get"
+    LIVE_VOICE_TASK_LIST = "live_voice.task.list"
+    LIVE_VOICE_TASK_STATUS = "live_voice.task.status"
+    LIVE_VOICE_TASK_CANCEL = "live_voice.task.cancel"
+    LIVE_VOICE_TASK_EVENTS = "live_voice.task.events"
+    LIVE_VOICE_COMPOSITION_P2_ACTIVATE = "live_voice.composition.p2.activate"
+    LIVE_VOICE_COMPOSITION_P2_CLOSE = "live_voice.composition.p2.close"
+    LIVE_VOICE_COMPOSITION_P2_SUBMIT = "live_voice.composition.p2.submit"
+    LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT = (
+        "live_voice.composition.p2.notification.next"
+    )
+    LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK = (
+        "live_voice.composition.p2.presentation.ack"
+    )
+    LIVE_VOICE_COMPOSITION_P2_BARGE_IN = (
+        "live_voice.composition.p2.barge_in"
+    )
+    LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE = (
+        "live_voice.composition.p3.confirmation.issue"
+    )
+    LIVE_VOICE_COMPOSITION_P3_MUTATE = "live_voice.composition.p3.mutate"
+    LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE = (
+        "live_voice.composition.p3.progress.activate"
+    )
+    LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE = (
+        "live_voice.composition.p3.progress.close"
+    )
+    LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK = (
+        "live_voice.composition.p3.progress.ack"
+    )
+
     ISSUE_WATCH_ONCE = "issue.watch_once"
     ISSUE_STATE_LIST = "issue.state.list"
     ISSUE_DELETE = "issue.delete"
@@ -238,6 +272,7 @@ class EventType(Enum):
     CHAT_ERROR = "chat.error"
     CHAT_INTERRUPT_RESULT = "chat.interrupt_result"
     CHAT_EVOLUTION_STATUS = "chat.evolution_status"
+    LIVE_VOICE_TASK_PROGRESS = "live_voice.task.progress"
     CHAT_SUBTASK_UPDATE = "chat.subtask_update"
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
     PLAN_APPROVAL_REQUIRED = "plan.approval_required"

@@ -1,0 +1,25 @@
+{
+  "scope": {
+    "subject_id": "subject-1",
+    "project_id": "project-1",
+    "session_id": "session-1",
+    "assurance": "authenticated"
+  },
+  "events": [
+    {"seq": 1, "event_type": "interaction.opened", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": null, "response_id": null, "response_generation": null, "state": "open", "cancel_state": null, "outcome": null},
+    {"seq": 2, "event_type": "turn.started", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": "turn-1", "response_id": null, "response_generation": null, "state": "capturing", "cancel_state": null, "outcome": null},
+    {"seq": 3, "event_type": "turn.committed", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": "turn-1", "response_id": null, "response_generation": null, "state": "committed", "cancel_state": null, "outcome": null},
+    {"seq": 4, "event_type": "response.accepted", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": "turn-1", "response_id": "response-1", "response_generation": 0, "state": "accepted", "cancel_state": "none", "outcome": null},
+    {"seq": 5, "event_type": "response.generating", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": "turn-1", "response_id": "response-1", "response_generation": 0, "state": "generating", "cancel_state": "none", "outcome": null},
+    {"seq": 6, "event_type": "response.speaking", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": "turn-1", "response_id": "response-1", "response_generation": 0, "state": "speaking", "cancel_state": "none", "outcome": null},
+    {"seq": 7, "event_type": "response.terminal", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": "turn-1", "response_id": "response-1", "response_generation": 0, "state": "terminal", "cancel_state": "none", "outcome": "completed"},
+    {"seq": 8, "event_type": "interaction.closed", "scope": {"subject_id": "subject-1", "project_id": "project-1", "session_id": "session-1", "assurance": "authenticated"}, "interaction_id": "interaction-1", "turn_id": null, "response_id": null, "response_generation": null, "state": "closed", "cancel_state": null, "outcome": null}
+  ],
+  "expected": {
+    "interaction_state": "closed",
+    "turn_state": "committed",
+    "response_state": "terminal",
+    "response_outcome": "completed",
+    "last_seq": 8
+  }
+}

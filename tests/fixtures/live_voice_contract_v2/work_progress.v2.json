@@ -1,0 +1,230 @@
+{
+  "scope": {
+    "subject_id": "subject-1",
+    "project_id": "project-1",
+    "session_id": "session-1",
+    "assurance": "authenticated"
+  },
+  "context_refs": [
+    {
+      "source": "repo.file",
+      "stable_id": "readme",
+      "uri": "file:///workspace/README.md",
+      "revision": {"kind": "version", "value": "sha256:abc"},
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "permissions": ["context.read"],
+      "expires_at": "2026-08-05T12:00:00Z",
+      "redaction": {"policy_id": "safe-text-v1", "redacted": true, "fields": ["secret"]},
+      "extensions": {"example.media_type": "text/markdown"}
+    },
+    {
+      "source": "repo.file",
+      "stable_id": "readme",
+      "uri": "file:///workspace/README.md",
+      "revision": {"kind": "snapshot", "value": "snapshot-2"},
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "permissions": ["context.read"],
+      "expires_at": null,
+      "redaction": {"policy_id": "safe-text-v1", "redacted": false, "fields": []},
+      "extensions": {}
+    },
+    {
+      "source": "runtime.note",
+      "stable_id": "note-1",
+      "uri": "urn:live-voice:note-1",
+      "revision": {"kind": "unversioned"},
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "permissions": [],
+      "expires_at": null,
+      "redaction": {"policy_id": "safe-text-v1", "redacted": true, "fields": ["body"]},
+      "extensions": {}
+    }
+  ],
+  "source_events": [
+    {
+      "contract_version": "live-voice.contract.v2",
+      "event_id": "round-source-0",
+      "event_type": "round.accepted",
+      "producer": {"component": "agent.runtime", "instance_id": "harness-1", "authority": "harness"},
+      "stream_ref": {"kind": "round", "id": "round-1"},
+      "seq": 0,
+      "occurred_at": "2026-08-05T08:00:00Z",
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "correlation_id": "correlation-1",
+      "causation_id": null,
+      "required_capabilities": [],
+      "payload": {"state": "accepted"},
+      "extensions": {}
+    },
+    {
+      "contract_version": "live-voice.contract.v2",
+      "event_id": "round-source-1",
+      "event_type": "round.running",
+      "producer": {"component": "agent.runtime", "instance_id": "harness-1", "authority": "harness"},
+      "stream_ref": {"kind": "round", "id": "round-1"},
+      "seq": 1,
+      "occurred_at": "2026-08-05T08:00:01Z",
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "correlation_id": "correlation-1",
+      "causation_id": "round-source-0",
+      "required_capabilities": [],
+      "payload": {"state": "running"},
+      "extensions": {}
+    },
+    {
+      "contract_version": "live-voice.contract.v2",
+      "event_id": "round-source-2",
+      "event_type": "round.terminal",
+      "producer": {"component": "agent.runtime", "instance_id": "harness-1", "authority": "harness"},
+      "stream_ref": {"kind": "round", "id": "round-1"},
+      "seq": 2,
+      "occurred_at": "2026-08-05T08:00:02Z",
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "correlation_id": "correlation-1",
+      "causation_id": "round-source-1",
+      "required_capabilities": [],
+      "payload": {"state": "terminal", "outcome": "completed"},
+      "extensions": {}
+    }
+  ],
+  "progress_events": [
+    {
+      "contract_version": "live-voice.contract.v2",
+      "event_id": "progress-0",
+      "event_type": "work.progress",
+      "producer": {"component": "agent.bridge", "instance_id": "bridge-1", "authority": "adapter"},
+      "stream_ref": {"kind": "round", "id": "round-1"},
+      "seq": 0,
+      "occurred_at": "2026-08-05T08:00:00Z",
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "correlation_id": "correlation-1",
+      "causation_id": "round-source-0",
+      "required_capabilities": [],
+      "payload": {
+        "work_ref": {"kind": "round", "id": "round-1"},
+        "source": {
+          "authority": "harness",
+          "event_id": "round-source-0",
+          "source_work_ref": {"kind": "round", "id": "round-1"},
+          "adapter": "jiuwenswarm.harness"
+        },
+        "seq": 0,
+        "state": "accepted",
+        "outcome": null,
+        "summary": {"knowledge": "unknown"},
+        "blocking_question": {"knowledge": "unknown"},
+        "artifact_refs": {"knowledge": "unknown"},
+        "urgency": "unknown",
+        "speakability": "not_speakable"
+      },
+      "extensions": {}
+    },
+    {
+      "contract_version": "live-voice.contract.v2",
+      "event_id": "progress-1",
+      "event_type": "work.progress",
+      "producer": {"component": "agent.bridge", "instance_id": "bridge-2", "authority": "adapter"},
+      "stream_ref": {"kind": "round", "id": "round-1"},
+      "seq": 0,
+      "occurred_at": "2026-08-05T08:00:01Z",
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "correlation_id": "correlation-1",
+      "causation_id": "round-source-1",
+      "required_capabilities": [],
+      "payload": {
+        "work_ref": {"kind": "round", "id": "round-1"},
+        "source": {
+          "authority": "harness",
+          "event_id": "round-source-1",
+          "source_work_ref": {"kind": "round", "id": "round-1"},
+          "adapter": "jiuwenswarm.harness"
+        },
+        "seq": 1,
+        "state": "running",
+        "outcome": null,
+        "summary": {"knowledge": "unknown"},
+        "blocking_question": {"knowledge": "unknown"},
+        "artifact_refs": {"knowledge": "unknown"},
+        "urgency": "unknown",
+        "speakability": "not_speakable"
+      },
+      "extensions": {}
+    },
+    {
+      "contract_version": "live-voice.contract.v2",
+      "event_id": "progress-2",
+      "event_type": "work.progress",
+      "producer": {"component": "agent.bridge", "instance_id": "bridge-2", "authority": "adapter"},
+      "stream_ref": {"kind": "round", "id": "round-1"},
+      "seq": 1,
+      "occurred_at": "2026-08-05T08:00:02Z",
+      "scope": {
+        "subject_id": "subject-1",
+        "project_id": "project-1",
+        "session_id": "session-1",
+        "assurance": "authenticated"
+      },
+      "correlation_id": "correlation-1",
+      "causation_id": "round-source-2",
+      "required_capabilities": [],
+      "payload": {
+        "work_ref": {"kind": "round", "id": "round-1"},
+        "source": {
+          "authority": "harness",
+          "event_id": "round-source-2",
+          "source_work_ref": {"kind": "round", "id": "round-1"},
+          "adapter": "jiuwenswarm.harness"
+        },
+        "seq": 2,
+        "state": "terminal",
+        "outcome": "completed",
+        "summary": {"knowledge": "unknown"},
+        "blocking_question": {"knowledge": "unknown"},
+        "artifact_refs": {"knowledge": "unknown"},
+        "urgency": "unknown",
+        "speakability": "not_speakable"
+      },
+      "extensions": {}
+    }
+  ]
+}

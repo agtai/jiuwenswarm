@@ -1,0 +1,6 @@
+{
+  "contract_version": "live-voice.contract.v1",
+  "message_id": "legacy-message-1",
+  "type": "task_status",
+  "payload": {"task_id": "task-1", "status": "running"}
+}
