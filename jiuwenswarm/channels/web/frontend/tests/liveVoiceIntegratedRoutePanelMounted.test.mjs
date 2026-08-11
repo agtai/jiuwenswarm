@@ -2065,6 +2065,31 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 1);
     assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 4);
     assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 3);
+
+    const mutationsBeforeRefresh = calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length;
+    await act(async () => {
+      renderer.unmount();
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    renderer = null;
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, historicalBinding.session_id, request));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(
+        () =>
+          mountedP3Controls(renderer).root.findByType('input').props.value === 'task-a' &&
+          JSON.stringify(renderer.toJSON()).includes('interrupted') &&
+          JSON.stringify(renderer.toJSON()).includes('ineligible'),
+        'validated historical task target did not persist and recover after refresh'
+      );
+    });
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length,
+      mutationsBeforeRefresh,
+      'historical task-target recovery must perform zero mutation effects'
+    );
   } finally {
     if (renderer) {
       await act(async () => {

@@ -2028,9 +2028,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     ) {
       return;
     }
-    const recovered = readProductP3TaskTarget({ session_id: sessionId, correlation_id: correlationId });
+    const recovered = readProductP3TaskTarget({ session_id: sessionId });
     if (recovered === null) return;
-    const recoveryIdentity = `${sessionId}\u0000${correlationId}\u0000${recovered.task_id}`;
+    const recoveryIdentity = `${sessionId}\u0000${recovered.task_control_binding.correlation_id}\u0000${recovered.task_id}`;
     if (recoveredP3TaskTargetRef.current === recoveryIdentity) return;
     recoveredP3TaskTargetRef.current = recoveryIdentity;
     const leaf = new FormalTaskControlLeaf({ enabled: true, binding: recovered.task_control_binding });
@@ -2471,6 +2471,23 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           throw error;
         }
         if (!isCurrent()) return null;
+        const taskControlBinding = leaf.snapshot().binding;
+        persistProductP3TaskTarget({
+          session_id: taskControlBinding.session_id,
+          correlation_id: taskControlBinding.correlation_id,
+          task_id: taskId,
+          task_control_binding: taskControlBinding,
+        });
+        recoveredP3TaskTargetRef.current = `${taskControlBinding.session_id}\u0000${taskControlBinding.correlation_id}\u0000${taskId}`;
+        if (progressTaskTargetRef.current !== taskId) {
+          progressRef.current = null;
+          pendingOwnedProgressRef.current.clear();
+          setProgress(null);
+          setProgressAck('idle');
+        }
+        progressTaskTargetRef.current = taskId;
+        setCreatedProgressTaskId(taskId);
+        setP3TargetTaskId(taskId);
         const terminalStatus = productP3TerminalStatus(selected);
         if (terminalStatus !== null) {
           const followTarget = p3AcceptedFollowTargetRef.current;

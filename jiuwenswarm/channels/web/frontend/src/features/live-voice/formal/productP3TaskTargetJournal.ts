@@ -93,14 +93,19 @@ export function persistProductP3TaskTarget(
   }
 }
 
-/** Read only the exact Session/correlation target; stale or malformed hints fail closed. */
+/**
+ * Read only the exact Session target. The stored task-control correlation is
+ * validated against its closed binding rather than the current P2 route: a
+ * historical task keeps its own server-issued correlation after a browser
+ * successor allocates a new P2 correlation. The caller must still revalidate
+ * status and complete history before publishing this hint.
+ */
 export function readProductP3TaskTarget(
-  input: Readonly<{ session_id: string; correlation_id: string }>,
+  input: Readonly<{ session_id: string }>,
   storage?: ProductP3TaskTargetJournalStore
 ): ProductP3TaskTargetJournalRecord | null {
   try {
     const sessionId = requiredText(input.session_id);
-    const correlationId = requiredText(input.correlation_id);
     const serialized = (storage ?? browserStorage()).getItem(storageKey(sessionId));
     if (serialized === null) return null;
     if (serialized.length > PRODUCT_P3_TASK_TARGET_MAX_SERIALIZED_CHARS) return null;
@@ -122,7 +127,7 @@ export function readProductP3TaskTarget(
       task_id: record.task_id,
       task_control_binding: record.task_control_binding,
     });
-    if (frozen.session_id !== sessionId || frozen.correlation_id !== correlationId) return null;
+    if (frozen.session_id !== sessionId) return null;
     return frozen;
   } catch {
     return null;
