@@ -10,6 +10,8 @@ from jiuwenswarm.gateway.app_gateway import (
     GatewayServer,
     GatewayServerConfig,
     RouteConfig,
+    _inject_live_voice_gateway_voice_claim,
+    _inject_live_voice_web_alpha_credential,
     _normalize_gateway_message,
 )
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
@@ -81,16 +83,24 @@ class GatewayServerProbe(GatewayServer):
         self._probe_on_message = callback
         super().on_message(callback)
 
-    def bind_request_client(self, request_id: str, ws, *, channel_id: str = "acp") -> None:
+    def bind_request_client(
+        self, request_id: str, ws, *, channel_id: str = "acp"
+    ) -> None:
         self._request_to_client[(channel_id, request_id)] = ws
 
-    def bind_session_client(self, session_id: str, ws, *, channel_id: str = "acp") -> None:
+    def bind_session_client(
+        self, session_id: str, ws, *, channel_id: str = "acp"
+    ) -> None:
         self._session_to_client[(channel_id, session_id)] = ws
 
-    def bind_request_client_ws(self, request_id: str, ws, *, channel_id: str = "acp") -> None:
+    def bind_request_client_ws(
+        self, request_id: str, ws, *, channel_id: str = "acp"
+    ) -> None:
         self._request_to_client[(channel_id, request_id)] = ws
 
-    async def handle_raw_message_public(self, ws, raw: str, *, path: str = "/acp") -> None:
+    async def handle_raw_message_public(
+        self, ws, raw: str, *, path: str = "/acp"
+    ) -> None:
         await self._handle_raw_message(ws, raw, path, self.config.routes[path])
 
     async def dispatch_public_message(self, msg: Any) -> bool:
@@ -119,12 +129,16 @@ def build_server() -> GatewayServerProbe:
             "/acp": RouteConfig(
                 path="/acp",
                 channel_id="acp",
-                forward_methods=frozenset({ReqMethod.CHAT_SEND.value, ReqMethod.HISTORY_GET.value}),
+                forward_methods=frozenset(
+                    {ReqMethod.CHAT_SEND.value, ReqMethod.HISTORY_GET.value}
+                ),
             ),
             "/tui": RouteConfig(
                 path="/tui",
                 channel_id="tui",
-                forward_methods=frozenset({ReqMethod.CHAT_SEND.value, ReqMethod.HISTORY_GET.value}),
+                forward_methods=frozenset(
+                    {ReqMethod.CHAT_SEND.value, ReqMethod.HISTORY_GET.value}
+                ),
             ),
         },
     )
@@ -170,6 +184,195 @@ def test_normalize_gateway_message_preserves_user_id():
     assert normalized.is_stream is True
 
 
+def test_live_voice_web_alpha_credential_owner_is_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(
+        "JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", raising=False
+    )
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "server-secret")
+    msg = Message(
+        id="req-product-off",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert "auth_token" not in msg.params
+    assert msg.params["session_id"] == "session-1"
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE,
+        ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACK,
+    ],
+)
+def test_live_voice_web_alpha_credential_owner_replaces_client_claim(
+    monkeypatch: pytest.MonkeyPatch,
+    method: ReqMethod,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", "true")
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "server-secret")
+    msg = Message(
+        id="req-product-on",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=method,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert msg.params["auth_token"] == "server-secret"
+
+
+@pytest.mark.asyncio
+async def test_gateway_redeems_voice_receipt_and_strips_client_claim() -> None:
+    calls: list[dict[str, object]] = []
+
+    class SpeechOwner:
+        async def claim_voice_commit_receipt(self, **kwargs: object):
+            calls.append(dict(kwargs))
+            return {
+                "kind": "formal_speech_recognition",
+                "speech_operation_id": "speech-operation-1",
+                "capture_id": "capture-1",
+                "capture_generation": 1,
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "interaction_id": "interaction-1",
+                "turn_id": "turn-1",
+                "commit_id": "commit-1",
+                "text_sha256": "a" * 64,
+                "critical_policy": "eligible",
+            }
+
+    msg = Message(
+        id="req-voice-claim",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "turn_id": "turn-1",
+            "commit_id": "commit-1",
+            "text": "recognized text",
+            "voice_commit_receipt": "r" * 32,
+            "critical_confirmation": True,
+            "gateway_voice_claim": {"kind": "client-forged"},
+        },
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+    )
+
+    await _inject_live_voice_gateway_voice_claim(msg, SpeechOwner())
+
+    assert calls == [
+        {
+            "receipt": "r" * 32,
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "turn_id": "turn-1",
+            "commit_id": "commit-1",
+            "text": "recognized text",
+            "critical_confirmation": True,
+        }
+    ]
+    assert msg.params["gateway_voice_claim"]["kind"] == (
+        "formal_speech_recognition"
+    )
+    assert "voice_commit_receipt" not in msg.params
+    assert "critical_confirmation" not in msg.params
+
+
+@pytest.mark.asyncio
+async def test_gateway_strips_forged_voice_claim_without_receipt() -> None:
+    msg = Message(
+        id="req-forged-voice-claim",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={
+            "session_id": "session-1",
+            "gateway_voice_claim": {"kind": "formal_speech_recognition"},
+        },
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+    )
+
+    await _inject_live_voice_gateway_voice_claim(msg, None)
+
+    assert "gateway_voice_claim" not in msg.params
+
+
+def test_live_voice_web_alpha_credential_owner_fails_closed_without_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", "1")
+    monkeypatch.delenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", raising=False)
+    msg = Message(
+        id="req-product-missing",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.LIVE_VOICE_TASK_LIST,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert "auth_token" not in msg.params
+
+
+@pytest.mark.parametrize(
+    "method",
+    [ReqMethod.LIVE_VOICE_TASK_CREATE, ReqMethod.LIVE_VOICE_TASK_CANCEL],
+)
+def test_live_voice_web_alpha_credential_owner_never_enables_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+    method: ReqMethod,
+) -> None:
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED", "true")
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "server-secret")
+    msg = Message(
+        id="req-product-mutation",
+        type="req",
+        channel_id="web",
+        session_id="session-1",
+        params={"session_id": "session-1", "auth_token": "client-value"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=method,
+    )
+
+    _inject_live_voice_web_alpha_credential(msg)
+
+    assert "auth_token" not in msg.params
+
+
 @pytest.mark.asyncio
 async def test_schedule_gateway_restart_sets_event_without_execv(monkeypatch):
     import jiuwenswarm.gateway.app_gateway as gateway_module
@@ -197,7 +400,9 @@ async def test_wait_for_gateway_tasks_returns_false_when_services_finish():
     restart_request = gateway_module.GatewayRestartRequest()
 
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
+        gateway_module._wait_for_gateway_tasks_or_restart(
+            [service_task], restart_request
+        ),
         timeout=1.0,
     )
 
@@ -213,7 +418,9 @@ async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_services_finish
 
     gateway_module._schedule_gateway_restart(restart_request, delay=1.0)
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
+        gateway_module._wait_for_gateway_tasks_or_restart(
+            [service_task], restart_request
+        ),
         timeout=1.0,
     )
 
@@ -232,7 +439,9 @@ async def test_wait_for_gateway_tasks_keeps_delayed_restart_when_service_fails()
 
     gateway_module._schedule_gateway_restart(restart_request, delay=1.0)
     result = await asyncio.wait_for(
-        gateway_module._wait_for_gateway_tasks_or_restart([service_task], restart_request),
+        gateway_module._wait_for_gateway_tasks_or_restart(
+            [service_task], restart_request
+        ),
         timeout=1.0,
     )
 
@@ -381,6 +590,42 @@ async def test_gateway_server_send_response_targets_request_client():
 
 
 @pytest.mark.asyncio
+async def test_gateway_promotes_nested_product_error_without_dropping_reason():
+    server = build_server()
+    ws = FakeWebSocket()
+    server.bind_request_client("req-product-error", ws)
+    detail = {
+        "code": "PERMISSION_DENIED",
+        "reason": "TASK_CONTEXT_PERMISSION_MISSING",
+        "message": "current product authority was revoked",
+    }
+
+    await server.send(
+        Message(
+            id="req-product-error",
+            type="res",
+            channel_id="acp",
+            session_id="sess-1",
+            params={},
+            timestamp=time.time(),
+            ok=False,
+            payload={"ok": False, "result": None, "error": detail},
+        )
+    )
+
+    assert ws.sent_frames == [
+        {
+            "type": "res",
+            "id": "req-product-error",
+            "ok": False,
+            "payload": {"ok": False, "result": None, "error": detail},
+            "error": "current product authority was revoked",
+            "code": "PERMISSION_DENIED",
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_gateway_server_send_event_targets_session_client():
     server = build_server()
     ws = FakeWebSocket()
@@ -451,7 +696,9 @@ async def test_gateway_server_binds_session_for_local_request_and_calls_hook():
     bound_sessions = []
 
     async def local_handler(ws, req_id, params, session_id):
-        await server.send_response(ws, req_id, ok=True, payload={"session_id": session_id})
+        await server.send_response(
+            ws, req_id, ok=True, payload={"session_id": session_id}
+        )
 
     async def session_bind_handler(channel_id, session_id):
         bound_sessions.append((channel_id, session_id))
@@ -715,7 +962,9 @@ async def test_gateway_server_defers_end_turn_until_pending_client_rpc_resolves(
         "fs/write_text_file",
         "session/update",
     ]
-    assert ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    assert (
+        ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    )
     assert ws.sent_frames[1] == {
         "jsonrpc": "2.0",
         "id": "tool-pending-2",
@@ -730,7 +979,9 @@ async def test_gateway_server_defers_end_turn_until_pending_client_rpc_resolves(
         "sessionUpdate": "session_info_update",
         "status": "idle",
     }
-    assert not any(frame.get("id") == 211 and "result" in frame for frame in ws.sent_frames)
+    assert not any(
+        frame.get("id") == 211 and "result" in frame for frame in ws.sent_frames
+    )
 
     await server.handle_raw_message_public(
         ws,
@@ -759,8 +1010,10 @@ async def test_gateway_server_defers_end_turn_until_pending_client_rpc_resolves(
 async def test_gateway_server_expired_pending_rpc_does_not_block_end_turn(monkeypatch):
     server = build_server()
     ws = FakeWebSocket()
-    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_PENDING_RPC_TIMEOUT_SECONDS",
-                        -1.0)
+    monkeypatch.setattr(
+        "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_PENDING_RPC_TIMEOUT_SECONDS",
+        -1.0,
+    )
 
     async def on_message(msg):
         if msg.req_method != ReqMethod.CHAT_SEND:
@@ -1093,7 +1346,9 @@ async def test_gateway_server_emits_agent_message_chunk_from_chat_final_when_no_
 
     assert ws.sent_frames[0]["method"] == "session/update"
     assert ws.sent_frames[0]["params"]["sessionId"] == "sess-gateway-final"
-    assert ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    assert (
+        ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    )
     assert ws.sent_frames[0]["params"]["update"]["content"] == {
         "type": "text",
         "text": "gateway final only",
@@ -1192,9 +1447,13 @@ async def test_gateway_server_defers_end_turn_until_processing_idle_after_final_
     )
 
     assert ws.sent_frames[0]["method"] == "session/update"
-    assert ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    assert (
+        ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    )
     assert ws.sent_frames[1]["method"] == "session/update"
-    assert ws.sent_frames[1]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    assert (
+        ws.sent_frames[1]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    )
     assert ws.sent_frames[1]["params"]["update"]["content"] == {
         "type": "text",
         "text": "final",
@@ -1208,7 +1467,9 @@ async def test_gateway_server_defers_end_turn_until_processing_idle_after_final_
         "kind": "read",
         "status": "completed",
         "result": "still running",
-        "content": [{"type": "content", "content": {"type": "text", "text": "still running"}}],
+        "content": [
+            {"type": "content", "content": {"type": "text", "text": "still running"}}
+        ],
     }
     assert ws.sent_frames[3]["method"] == "session/update"
     assert ws.sent_frames[3]["params"]["update"] == {
@@ -1393,7 +1654,9 @@ async def test_gateway_server_prompt_result_echoes_user_message_id():
 
 
 @pytest.mark.asyncio
-async def test_gateway_server_does_not_end_turn_from_chat_final_before_late_tool_result(monkeypatch):
+async def test_gateway_server_does_not_end_turn_from_chat_final_before_late_tool_result(
+    monkeypatch,
+):
     import jiuwenswarm.gateway.app_gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "_PROMPT_IDLE_FINALIZE_SECONDS", 0.01)
@@ -1463,7 +1726,9 @@ async def test_gateway_server_does_not_end_turn_from_chat_final_before_late_tool
         ),
     )
     assert ws.sent_frames[0]["method"] == "session/update"
-    assert ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    assert (
+        ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_message_chunk"
+    )
     assert ws.sent_frames[1]["method"] == "session/update"
     assert ws.sent_frames[1]["params"]["update"] == {
         "sessionUpdate": "tool_call_update",
@@ -1473,7 +1738,12 @@ async def test_gateway_server_does_not_end_turn_from_chat_final_before_late_tool
         "kind": "edit",
         "status": "completed",
         "result": "index.html written",
-        "content": [{"type": "content", "content": {"type": "text", "text": "index.html written"}}],
+        "content": [
+            {
+                "type": "content",
+                "content": {"type": "text", "text": "index.html written"},
+            }
+        ],
     }
     assert ws.sent_frames[2]["method"] == "session/update"
     assert ws.sent_frames[2]["params"]["update"] == {
@@ -1539,7 +1809,9 @@ async def test_gateway_server_emits_direct_reasoning_update_then_waits_for_idle(
     )
 
     assert ws.sent_frames[0]["method"] == "session/update"
-    assert ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_thought_chunk"
+    assert (
+        ws.sent_frames[0]["params"]["update"]["sessionUpdate"] == "agent_thought_chunk"
+    )
     assert ws.sent_frames[0]["params"]["update"]["content"] == {
         "type": "text",
         "text": "reasoning step",
@@ -1742,7 +2014,9 @@ async def test_gateway_server_handle_raw_message_forwards_request():
 @pytest.mark.asyncio
 async def test_gateway_server_forwards_tui_client_timeout_as_metadata_only():
     server = build_server()
-    server.config.routes["/tui"].forward_no_local_handler_methods = frozenset({"chat.send"})
+    server.config.routes["/tui"].forward_no_local_handler_methods = frozenset(
+        {"chat.send"}
+    )
     ws = FakeWebSocket()
     seen = []
 
@@ -1985,7 +2259,13 @@ def test_gateway_server_extract_ws_user_id_case_insensitive():
     ws_upper = type(
         "Ws",
         (),
-        {"request": type("Request", (), {"headers": _FakeRequestHeaders({"X-User-Id": "  carol  "})})()},
+        {
+            "request": type(
+                "Request",
+                (),
+                {"headers": _FakeRequestHeaders({"X-User-Id": "  carol  "})},
+            )()
+        },
     )()
     ws_empty = type("Ws", (), {"request_headers": _FakeRequestHeaders({})})()
 
@@ -2194,7 +2474,9 @@ async def test_gateway_agent_switch_local_handler_updates_connection(
             del user_id, current_agent_type
             return {"ok": True, "payload": {"agents": []}}
 
-        async def thirdagent_switch(self, *, user_id, agent_type, session_id="", params=None):
+        async def thirdagent_switch(
+            self, *, user_id, agent_type, session_id="", params=None
+        ):
             del user_id, session_id, params
             normalized = self.normalize_agent_type(agent_type)
             if normalized == "unknown":
@@ -2310,7 +2592,9 @@ async def test_gateway_agent_switch_rejects_unsupported_type(_third_agent_regist
             del user_id, current_agent_type
             return {"ok": True, "payload": {"agents": []}}
 
-        async def thirdagent_switch(self, *, user_id, agent_type, session_id="", params=None):
+        async def thirdagent_switch(
+            self, *, user_id, agent_type, session_id="", params=None
+        ):
             del user_id, session_id, params
             return {
                 "ok": False,

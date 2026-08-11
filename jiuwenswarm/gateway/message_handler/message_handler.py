@@ -3714,8 +3714,18 @@ class MessageHandler(ABC):
                             await self._send_cancelled_tool_results(
                                 msg.channel_id, msg.session_id, payload, msg.metadata
                             )
-                        except Exception:
-                            pass  # 即使失败也继续启动新任务
+                        except Exception as exc:
+                            # The replacement task intentionally continues, but
+                            # a silent cancel failure makes real supplement E2E
+                            # impossible to diagnose and is unsafe to mistake for
+                            # a confirmed Agent/tool cancellation.
+                            logger.warning(
+                                "Agent cancel failed before supplement replacement; "
+                                "continuing replacement task: session_id=%s error_type=%s",
+                                msg.session_id,
+                                type(exc).__name__,
+                                exc_info=True,
+                            )
 
                         # 4. 入队新任务（单一任务，不并发）
                         from jiuwenswarm.common.schema.message import Message

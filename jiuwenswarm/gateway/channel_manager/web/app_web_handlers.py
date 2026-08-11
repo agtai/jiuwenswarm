@@ -654,6 +654,27 @@ _FORWARD_REQ_METHODS = frozenset({
     "schedule.logs",
     "schedule.cancel",
     "schedule.delete",
+    # Formal P3-alpha task route. Authentication and every authority fact are
+    # resolved by AgentServer; Gateway only forwards the opaque request.
+    "live_voice.task.create",
+    "live_voice.task.get",
+    "live_voice.task.list",
+    "live_voice.task.status",
+    "live_voice.task.cancel",
+    "live_voice.task.events",
+    # Default-off AgentServer product-composition lifecycle routes. Gateway
+    # forwards opaque credentials and comparison claims; it owns no authority.
+    "live_voice.composition.p2.activate",
+    "live_voice.composition.p2.close",
+    "live_voice.composition.p2.submit",
+    "live_voice.composition.p2.notification.next",
+    "live_voice.composition.p2.presentation.ack",
+    "live_voice.composition.p2.barge_in",
+    "live_voice.composition.p3.confirmation.issue",
+    "live_voice.composition.p3.mutate",
+    "live_voice.composition.p3.progress.activate",
+    "live_voice.composition.p3.progress.close",
+    "live_voice.composition.p3.progress.ack",
     "issue.watch_once",
     "issue.state.list",
     "issue.matrix",
@@ -734,6 +755,39 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "agents.enable",
     "agents.disable",
     "agents.tools_list",
+    # Schedule and issue task management are handled exclusively by AgentServer.
+    # Keep them out of the local-handler fallback so the forwarded Agent response
+    # remains the single response for the request id.
+    "schedule.check_config",
+    "schedule.update_config",
+    "schedule.create",
+    "schedule.run",
+    "schedule.list",
+    "schedule.status",
+    "schedule.logs",
+    "schedule.cancel",
+    "schedule.delete",
+    "live_voice.task.create",
+    "live_voice.task.get",
+    "live_voice.task.list",
+    "live_voice.task.status",
+    "live_voice.task.cancel",
+    "live_voice.task.events",
+    "live_voice.composition.p2.activate",
+    "live_voice.composition.p2.close",
+    "live_voice.composition.p2.submit",
+    "live_voice.composition.p2.notification.next",
+    "live_voice.composition.p2.presentation.ack",
+    "live_voice.composition.p2.barge_in",
+    "live_voice.composition.p3.confirmation.issue",
+    "live_voice.composition.p3.mutate",
+    "live_voice.composition.p3.progress.activate",
+    "live_voice.composition.p3.progress.close",
+    "live_voice.composition.p3.progress.ack",
+    "issue.watch_once",
+    "issue.state.list",
+    "issue.matrix",
+    "issue.delete",
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）
@@ -1362,6 +1416,7 @@ class WebHandlersBindParams:
     heartbeat_service: Any = None
     cron_controller: Any = None
     updater_service: UpdaterService | None = None
+    speech_service: Any = None
 
 
 def _attribute_session_project(
@@ -1530,6 +1585,46 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
     updater_service = bind.updater_service
+
+    from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
+        DedicatedMediaProductRegistry,
+        register_dedicated_media_rpc_handlers,
+    )
+    from jiuwenswarm.gateway.live_voice.speech_rpc import register_speech_rpc_handlers
+    from jiuwenswarm.server.live_voice.batch_speech import (
+        FormalBatchSpeechService,
+        create_environment_batch_speech_provider,
+    )
+    media_registry = DedicatedMediaProductRegistry.from_environment()
+    speech_service = bind.speech_service
+    media_registry_owns_speech_authority = speech_service is None
+    if speech_service is None:
+        speech_service = FormalBatchSpeechService(
+            create_environment_batch_speech_provider(),
+            authorization_resolver=(media_registry if media_registry.enabled else None),
+        )
+    capability = speech_service.capability_payload()
+    provider = capability.get("provider") if isinstance(capability, dict) else None
+    media_registry.set_provider_available(
+        media_registry_owns_speech_authority
+        and isinstance(provider, dict)
+        and provider.get("available") is True
+    )
+    channel.live_voice_media_registry = media_registry
+    channel.live_voice_speech_service = speech_service
+    register_speech_rpc_handlers(
+        channel,
+        service=speech_service,
+        context_factory=(
+            media_registry.context_for if media_registry_owns_speech_authority else None
+        ),
+        result_transform=(
+            media_registry.prepare_synthesis_downlink
+            if media_registry_owns_speech_authority
+            else None
+        ),
+    )
+    register_dedicated_media_rpc_handlers(channel, registry=media_registry)
 
     from jiuwenswarm.common.schema.message import Message, EventType
 
