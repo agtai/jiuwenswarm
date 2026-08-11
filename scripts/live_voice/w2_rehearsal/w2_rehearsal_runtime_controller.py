@@ -28,7 +28,10 @@ from jiuwenswarm.server.live_voice.w2_fault_plan import (
     W2FaultClass,
     W2FaultPlane,
 )
-from jiuwenswarm.dotenv_early import W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG
+from jiuwenswarm.dotenv_early import (
+    W2_AGENT_PRIVATE_ENV_FLAG,
+    W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG,
+)
 from w2_product_fault_binding import (
     require_product_fault,
     validate_product_fault_plan_payload,
@@ -578,9 +581,12 @@ def _slot_env(
     if slot.producer == "agentserver":
         pair = 3 if slot.showcase_run is None else slot.showcase_run
         fault_plan = config["product_fault_plan"]
-        env.update(
+        private_agent_env = (
             _agent_provider_env(None) if agent_env is None else dict(agent_env)
         )
+        env.update(private_agent_env)
+        if set(private_agent_env) == set(_AGENT_RUNTIME_ENV_NAMES):
+            env[W2_AGENT_PRIVATE_ENV_FLAG] = "1"
         env.update(
             {
                 "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED": "true",

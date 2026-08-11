@@ -13,6 +13,7 @@ import pytest
 from jiuwenswarm.dotenv_early import (
     CLI_PORTS_ENV_FLAG,
     DESKTOP_PRESERVED_ENV_KEYS,
+    W2_AGENT_PRIVATE_ENV_FLAG,
     W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG,
     load_dotenv_runtime,
 )
@@ -142,6 +143,34 @@ def test_load_dotenv_runtime_preserves_w2_gateway_public_agent_identity_only(
     assert "OPENROUTER_API_KEY" not in os.environ
 
 
+def test_load_dotenv_runtime_preserves_w2_agent_private_provider_binding(
+    tmp_path: Path, monkeypatch
+):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "MODEL_PROVIDER=template-provider\n"
+        "API_BASE=https://example.com/compatible-mode/v1\n"
+        "API_KEY=template-key\n"
+        "MODEL_NAME=your-model-name\n",
+        encoding="utf-8",
+    )
+    expected = {
+        "MODEL_PROVIDER": "OpenAI",
+        "API_BASE": "https://agent.example.invalid/v1",
+        "API_KEY": "private-agent-key",
+        "MODEL_NAME": "agent-model",
+    }
+    monkeypatch.setenv(W2_AGENT_PRIVATE_ENV_FLAG, "1")
+    monkeypatch.delenv(W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG, raising=False)
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+
+    load_dotenv_runtime(env_file, override=True)
+    load_dotenv_runtime(env_file, override=True)
+
+    assert {name: os.environ[name] for name in expected} == expected
+
+
 def test_load_dotenv_runtime_without_w2_flag_keeps_normal_agent_dotenv_behavior(
     tmp_path: Path, monkeypatch
 ):
@@ -150,6 +179,7 @@ def test_load_dotenv_runtime_without_w2_flag_keeps_normal_agent_dotenv_behavior(
         "MODEL_NAME=dotenv-model\nAPI_KEY=normal-runtime-key\n",
         encoding="utf-8",
     )
+    monkeypatch.delenv(W2_AGENT_PRIVATE_ENV_FLAG, raising=False)
     monkeypatch.delenv(W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG, raising=False)
     monkeypatch.setenv("MODEL_NAME", "parent-model")
     monkeypatch.delenv("API_KEY", raising=False)

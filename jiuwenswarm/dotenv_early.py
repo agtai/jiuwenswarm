@@ -101,6 +101,18 @@ W2_GATEWAY_AGENT_SECRET_ENV_KEYS = (
     "OPENROUTER_API_KEY",
 )
 
+# AgentServer receives the complete provider binding from the signed W2
+# controller.  The first process may materialize the package-template .env;
+# subsequent process epochs must not let that file replace the injected binding
+# with placeholder values.
+W2_AGENT_PRIVATE_ENV_FLAG = "JIUWENSWARM_LIVE_VOICE_W2_AGENT_PRIVATE_ENV"
+W2_AGENT_PRIVATE_ENV_KEYS = (
+    "MODEL_PROVIDER",
+    "API_BASE",
+    "API_KEY",
+    "MODEL_NAME",
+)
+
 
 def _should_preserve_session_ports() -> bool:
     """True when this process was launched with an explicit session port remap."""
@@ -144,12 +156,24 @@ def load_dotenv_runtime(dotenv_path: str | Path | None, *, override: bool = True
         if preserve_w2_gateway_agent
         else {}
     )
+    preserve_w2_agent_private = os.environ.get(W2_AGENT_PRIVATE_ENV_FLAG) == "1"
+    saved_w2_agent_private = (
+        {
+            key: os.environ[key]
+            for key in W2_AGENT_PRIVATE_ENV_KEYS
+            if key in os.environ
+        }
+        if preserve_w2_agent_private
+        else {}
+    )
     loaded = load_dotenv(dotenv_path=dotenv_path, override=override)
     if saved:
         os.environ.update(saved)
     if preserve:
         # Prefer remapped AGENT_SERVER_PORT over any URL from .env/parent env.
         os.environ.pop("AGENT_SERVER_URL", None)
+    if preserve_w2_agent_private:
+        os.environ.update(saved_w2_agent_private)
     if preserve_w2_gateway_agent:
         os.environ.update(saved_w2_gateway_agent)
         for key in W2_GATEWAY_AGENT_SECRET_ENV_KEYS:
@@ -342,6 +366,7 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
 __all__ = [
     "CLI_PORTS_ENV_FLAG",
     "DESKTOP_PRESERVED_ENV_KEYS",
+    "W2_AGENT_PRIVATE_ENV_FLAG",
     "W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG",
     "parse_dotenv_early",
     "load_dotenv_runtime",

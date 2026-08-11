@@ -354,6 +354,8 @@ def test_private_config_routes_public_agent_identity_without_crossing_the_key(
     assert agentserver["API_BASE"] == "https://agent.example.invalid/v1"
     assert agentserver["API_KEY"] == "private-agent-key"
     assert agentserver["MODEL_NAME"] == "agent-model"
+    assert agentserver[controller.W2_AGENT_PRIVATE_ENV_FLAG] == "1"
+    assert controller.W2_GATEWAY_PUBLIC_AGENT_ENV_FLAG not in agentserver
     assert "LIVE_VOICE_SPEECH_API_KEY" not in agentserver
     assert private_values.isdisjoint(
         value
