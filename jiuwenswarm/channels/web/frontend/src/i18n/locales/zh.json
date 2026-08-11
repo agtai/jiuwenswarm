@@ -2150,6 +2150,7 @@
         "retry": "重试符合条件的任务",
         "inspectRetry": "检查重试资格",
         "retryStatus": "重试资格",
+        "retryReason": "重试检查原因",
         "name": "任务名称",
         "instruction": "任务指令",
         "taskId": "精确任务 ID",

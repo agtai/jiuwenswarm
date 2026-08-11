@@ -1513,6 +1513,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
   let authoritativeAttempt = 1;
   let terminalA = false;
   let terminalB = false;
+  let failNextStatusReason = null;
   let deferNextStatus = false;
   let releaseDeferredStatus = null;
   let renderer;
@@ -1631,6 +1632,13 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       };
     }
     if (method === 'live_voice.task.status') {
+      if (failNextStatusReason !== null) {
+        const reason = failNextStatusReason;
+        failNextStatusReason = null;
+        const error = new Error('private fixture path and credentials must not reach the UI');
+        error.reason = reason;
+        throw error;
+      }
       if (deferNextStatus) {
         deferNextStatus = false;
         return new Promise(resolve => {
@@ -1786,6 +1794,17 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       );
     });
 
+    failNextStatusReason = 'EXECUTION_CONTEXT_REVISION_MISMATCH';
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('EXECUTION_CONTEXT_REVISION_MISMATCH'),
+        'retry inspection did not expose its stable failure reason'
+      );
+    });
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('private fixture path'), false);
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('failed'), true);
+
     terminalB = true;
     await act(async () => {
       mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
@@ -1794,6 +1813,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
         'authoritative terminal completed attempt B did not expose task.retry'
       );
     });
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('EXECUTION_CONTEXT_REVISION_MISMATCH'), false);
     await act(async () => {
       mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
       await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.retry C confirmation did not settle');

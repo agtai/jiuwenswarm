@@ -2152,6 +2152,7 @@
         "retry": "Retry eligible task",
         "inspectRetry": "Check retry eligibility",
         "retryStatus": "Retry eligibility",
+        "retryReason": "Retry check reason",
         "name": "Task name",
         "instruction": "Task instruction",
         "taskId": "Exact task ID",

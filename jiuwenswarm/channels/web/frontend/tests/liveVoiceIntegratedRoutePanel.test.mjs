@@ -17,6 +17,7 @@ import {
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
+  productP3RetryInspectionFailureReason,
   productVoiceDraftMatchesBinding,
   recognizedSpeechConfirmationMatches,
   productTextBlockedByP1Status,
@@ -613,6 +614,39 @@ test('route panel exposes task.retry only for an inspected eligible terminal att
   assert.equal(visible.includes('eligible:2/3'), true);
   assert.equal(visible.includes('Issue confirmation'), true);
   assert.equal(visible.includes('Execute confirmed mutation'), false);
+});
+
+test('route panel exposes only a stable retry inspection failure reason', async () => {
+  assert.equal(
+    productP3RetryInspectionFailureReason({ reason: 'EXECUTION_CONTEXT_REVISION_MISMATCH' }),
+    'EXECUTION_CONTEXT_REVISION_MISMATCH'
+  );
+  assert.equal(
+    productP3RetryInspectionFailureReason({ reason: 'private path: C:\\fixture\\secret', message: 'credential=value' }),
+    'PRODUCT_P3_RETRY_INSPECTION_FAILED'
+  );
+
+  const html = await renderPanel({
+    viewProps: {
+      p3MutationEnabled: true,
+      p3MutationOperation: 'task.cancel',
+      p3TargetTaskId: 'task-1',
+      p3MutationStatus: 'idle',
+      p3RetryInspectionStatus: 'failed',
+      p3RetryInspectionReason: 'EXECUTION_CONTEXT_REVISION_MISMATCH',
+      onP3MutationOperation: () => {},
+      onP3TaskName: () => {},
+      onP3TaskInstruction: () => {},
+      onP3TargetTaskId: () => {},
+      onP3InspectRetry: () => {},
+      onP3Issue: () => {},
+      onP3Execute: () => {},
+    },
+  });
+  assert.equal(html.includes('Retry eligibility'), true);
+  assert.equal(html.includes('<code>failed</code>'), true);
+  assert.equal(html.includes('Retry check reason'), true);
+  assert.equal(html.includes('<code>EXECUTION_CONTEXT_REVISION_MISMATCH</code>'), true);
 });
 
 test('retry candidate inspection binds exact status and full A/B history before exposing eligibility', async () => {
