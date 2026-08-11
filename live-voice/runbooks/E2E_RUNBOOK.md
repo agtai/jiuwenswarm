@@ -231,6 +231,24 @@ Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2
 - [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 只能作为 Gate 脚本，运行状态和 Week 2 分数只从 STATUS 读取；
 - 必须用下述 CLI 导入签名原件并输出机器 Gate 结果；手填分数、通用 lifecycle 事件、截图和人工 receipt 都不能创建 runtime credit。
 
+<a id="validation-ready-before-signing"></a>
+#### 7.1.a 正式签名前的 validation-ready 门
+
+W2 采用两条严格分离的执行轨道。第一条是**无 evidence 的验证准备轨道**：用于发现和修复启动、配置、浏览器、界面、重启与路由问题，不创建 policy、key、signature、runtime evidence 或 Gate credit。第二条才是**冻结 SHA 后的一次性签名取证轨道**。已知缺陷或未通过的机器/UI 条件不得带入第二条轨道；不得再用正式签名循环调试环境。
+
+无 evidence 轨道必须在签名前完成下列检查：
+
+1. 确认 candidate/source checkout 干净，所需测试与独立 review 已完成；所有旧 owner、服务、端口和 Chrome 进程已正常关闭。
+2. 验证 machine-private 文件的 schema 与引用路径、持久 Session、注册 project、实际 Agent 模型、Speech Provider 以及可丢弃 fixture；同一 AgentServer 连续启动两个 epoch 后模型配置仍不被模板 `.env` 覆盖。
+3. 启动且只启动一个隔离 Chrome 页面，精确地址为 `/chat/<session_id>`，不得使用 `/` 或 `session_id=new`。在 fault runner 开始观察后只刷新这个页面；CDP page target 必须始终为 1。
+4. 页面必须显示并选中预期模型、项目和设备。物理取证时显式选择 `Jabra EVOLVE 30 II`，不得使用 `Steam Streaming Microphone`。确认 **Live Voice 控制条**与**Integrated Web 路由事实面板**是两个不同表面；路由事实面板中的 P3 控件不能被误当成 Live Voice 控制条。
+5. 使用仓库的确定性 WAV 完成可重复 P1/STT/TTS、短 P2 普通回复、强制只读 Terminal Tool、P3 成功终态、P3 失败终态、刷新/reconnect/late-response fencing、pair restart 和 graceful `p2.close` 检查。P3 后端 completed/failed 但页面仍停在 `accepted` 时 readiness 必须判定失败。
+6. Browser/Computer Use 自动化可以负责打开精确页面、点击、输入、计时、状态轮询和截图。若使用 Codex Chrome 插件，必须在这一个隔离 profile 中预先安装/授权，并限制为操作现有单页；插件、侧栏或自动化不得打开第二个 page target，也不得充当 evidence owner、fault oracle 或人工 receipt。Windows GUI 自动化占用当前可见桌面，不能假定在同一用户会话中后台运行。
+
+准备 WAV、Chrome 插件和 Computer Use 只能减少重复操作，不能替代正式物理证据。最终取证仍需新的 physical-audio profile、真实 Jabra 采集、完整可听播放和用户对精确 runtime subject 的见证。自动化结果必须继续由 Gateway/AgentServer、fault runner、task/outbox 与 Gate CLI 的权威事实核对。
+
+正式四组 rehearsal 开始后，按 Pair 1、Pair 2、Pair 3、A4 顺序连续收集。长回复导致的 TTS response limit、完成后自动 successor capture 超时、可恢复的操作失误或其他不影响身份/权威/安全的单步失败，应记录并继续完成本轮其余可观察步骤，避免立刻重新创建 candidate；这些失败仍不产生该项 Gate credit。只有 candidate/Session/project/model 错误、credential 暴露、policy/signature/evidence-owner 不匹配、dirty worktree、多个页面、required route 丢失、无法形成规定 terminal truth 或存在未清理 mutation/lease/task 时才立即中止。四组结束后统一分析并批量修复；任何必需项失败都禁止派生 formal policy，但不应在发现第一个非致命问题时反复重做签名和环境准备。
+
 <a id="w2-portable-toolkit"></a>
 #### 7.1.0 可迁移 W2 rehearsal 工具包
 

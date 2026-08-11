@@ -111,6 +111,42 @@ From the repository root:
   scripts/live_voice/w2_rehearsal/*.py
 ```
 
+<a id="validation-ready-before-signing"></a>
+## Validation-ready before signing
+
+Do not use a root-signed rehearsal as the first integration or environment test.
+Consult `live-voice/STATUS.md`, close its source/review blockers, and then complete
+the unsigned validation-ready lane in
+[`E2E_RUNBOOK.md` section 7.1.a](../../../live-voice/runbooks/E2E_RUNBOOK.md#validation-ready-before-signing).
+At minimum, prove all of the following before `new_w2_rehearsal_attempt.ps1`:
+
+- the private-config reference, persistent Session, registered project, selected
+  Agent model, real Speech provider and disposable fixture are complete;
+- a second AgentServer epoch retains the same complete Agent configuration;
+- isolated Chrome opens the exact `/chat/<session_id>` URL with exactly one page,
+  the expected model/project, and the correct device for the selected lane;
+- the operator distinguishes the Live Voice control from the separate Integrated
+  Web route-facts panel;
+- deterministic-WAV P1, short P2, a forced read-only Terminal Tool turn, P3
+  completed and failed terminal UI, reconnect/late-response handling, restart
+  reconciliation and graceful `p2.close` all pass; and
+- every owner, task, lease, port and disposable project is clean afterward.
+
+Codex Chrome control and Computer Use may automate the repeatable operator work
+when available: existing-tab navigation, clicks, text entry, bounded timing,
+screenshots and status polling. Install/authorize the Chrome extension in the
+exact isolated profile before the run and constrain it to the existing page;
+the fault runner's one-page/CDP oracle remains authoritative. These tools do not
+replace backend/task/outbox oracles, fault probes, physical Jabra capture,
+complete audible playout or the user's assisted receipt. The prepared WAV is a
+diagnostic input, not physical-microphone Gate evidence.
+
+Use short, deterministic utterances and P2 prompts. A Tool-forcing prompt must
+explicitly require a terminal lookup and a short answer; do not infer a Tool call
+from a plausible model response. Keep the exact P3 mutation instruction and
+expected clean baseline from the current candidate scaffold rather than inventing
+a read-only task that cannot produce the required Git-visible effect.
+
 ## Prepare a fresh attempt
 
 Use a reviewed exact SHA that already contains this toolkit. Do not use a dirty
@@ -143,6 +179,16 @@ The command prints `W2_FRESH_ATTEMPT_READY_FOR_ROOT_SIGNING` and the paths to th
 candidate, staging root, generated signing script and static plan. Preserve that
 JSON. A partial failure is never resumed under the same label; inspect it, then
 start again with a fresh label/root.
+
+During an already started four-experiment rehearsal, a nonfatal observation does
+not require an immediate rebuild. Record it, continue collecting the remaining
+safe observations, close every owner gracefully, and batch the findings at the
+end. The failed evidence set remains invalid and cannot derive formal policy; a
+new candidate is created only after the batched repair/review is complete. Stop
+immediately for identity/authority/credential/policy mismatch, wrong or dirty
+candidate, wrong Session/project/model, multiple Chrome pages, required-route
+loss, unsafe residual side effects, or inability to establish required terminal
+truth.
 
 Run the generated `sign-rehearsal-policy.ps1` in a visible PowerShell window.
 Independently compare and type the complete expected-root fingerprint. Send only
