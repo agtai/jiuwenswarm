@@ -311,7 +311,8 @@ def has_terminal_session_event(log_path: Path) -> bool:
 # 终态任务状态集合 - 终态任务不需要读取日志
 TERMINAL_STATUSES = {
     "success", "failed", "cancelled", "pr_created",
-    "completed", "completed_without_pr", "skipped", "needs_human"
+    "completed", "completed_without_pr", "skipped", "needs_human",
+    "interrupted",
 }
 
 # 关键事件类型 - 只读取这些事件获取进度
@@ -326,12 +327,12 @@ def read_key_events_reverse(log_path: Path, max_events: int = 20) -> list[dict[s
     events: list[dict[str, Any]] = []
 
     try:
-        with log_path.open("r", encoding="utf-8") as f:
+        with log_path.open("rb") as f:
             f.seek(0, 2)  # 文件末尾
             file_size = f.tell()
 
             chunk_size = 4096
-            buffer = ""
+            buffer = b""
             pos = file_size
 
             while pos > 0 and len(events) < max_events:
@@ -341,7 +342,7 @@ def read_key_events_reverse(log_path: Path, max_events: int = 20) -> list[dict[s
                 chunk = f.read(read_size)
                 buffer = chunk + buffer
 
-                lines = buffer.split("\n")
+                lines = buffer.split(b"\n")
                 buffer = lines[0]
 
                 for line in reversed(lines[1:]):
@@ -351,8 +352,16 @@ def read_key_events_reverse(log_path: Path, max_events: int = 20) -> list[dict[s
                         entry = json.loads(line)
                         if entry.get("event_type") in KEY_EVENT_TYPES:
                             events.append(entry)
-                    except json.JSONDecodeError:
+                    except (json.JSONDecodeError, UnicodeDecodeError):
                         continue
+
+            if pos == 0 and buffer.strip() and len(events) < max_events:
+                try:
+                    entry = json.loads(buffer)
+                    if entry.get("event_type") in KEY_EVENT_TYPES:
+                        events.append(entry)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
 
     except Exception as exc:
         logger.warning("[AutoHarnessRunLogStatus] Failed to reverse read %s: %s", log_path, exc)
@@ -366,7 +375,6 @@ def summarize_progress_from_key_events(key_events: list[dict[str, Any]]) -> dict
     stage_messages: dict[str, list[str]] = {}
     last_error = ""
     failed_stage = ""
-    pipeline = ""
 
     # 反向读取的事件是倒序的，需要反转
     for entry in reversed(key_events):

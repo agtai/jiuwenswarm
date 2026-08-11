@@ -19,15 +19,18 @@ from __future__ import annotations
 
 import asyncio
 from copy import copy
+import hashlib
 import json
 import logging
+import math
 import os
 import shutil
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
+import unicodedata
 import uuid
 import zipfile
 import yaml
@@ -48,7 +51,7 @@ from openjiuwen.rsi.auto_harness.schema import (
     load_auto_harness_config,
 )
 from openjiuwen.rsi.auto_harness.contexts import TaskContext, TaskRuntime
-from openjiuwen.rsi.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE
+from openjiuwen.rsi.auto_harness.pipelines import EXTENDED_EVOLVE_PIPELINE, META_EVOLVE_PIPELINE
 from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline import (
     ExtensionTaskPipeline,
 )
@@ -61,7 +64,13 @@ from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.utils import get_user_workspace_dir
 
 from .capabilities import AutoHarnessCapabilityRegistry, create_default_capability_registry
+from .run_log_status import TERMINAL_STATUSES
 from .scheduler import Scheduler
+from .project_execution import (
+    PROJECT_CODE_PIPELINE,
+    PROJECT_CODE_RESULT_CONTRACT,
+    resolve_project_execution_contract,
+)
 from .task_store import TaskStore
 from .config_validator import ConfigValidator
 from .repo_auth import configure_gitcode_auth
@@ -79,6 +88,368 @@ _DEFAULT_LOCAL_REPO = _AUTO_HARNESS_DATA_DIR / "repo" / "openJiuwen--agent-core"
 # Default values for ci_gate config
 _DEFAULT_CI_GATE_PYTHON_EXECUTABLE = sys.executable
 _DEFAULT_CI_GATE_INSTALL_COMMAND = "uv sync --active --group dev --extra cli"
+_AUTO_HARNESS_SCHEDULE_PIPELINES = frozenset(
+    {EXTENDED_EVOLVE_PIPELINE, META_EVOLVE_PIPELINE}
+)
+_ONE_TIME_PIPELINES = frozenset(
+    {*_AUTO_HARNESS_SCHEDULE_PIPELINES, PROJECT_CODE_PIPELINE}
+)
+_UNKNOWN_EXECUTION_TARGET_VALUE = "unknown"
+_EXECUTION_TARGET_FIELDS = (
+    "project_dir",
+    "project_id",
+    "origin_session_id",
+    "origin_channel_id",
+)
+_SCHEDULE_OWNER_SCOPE_FIELDS = ("channel_id", "session_id", "app_id")
+_UNKNOWN_OWNER_SCOPE = {field: "unknown" for field in _SCHEDULE_OWNER_SCOPE_FIELDS}
+_OWNER_SCOPE_UNSET = object()
+_INTERNAL_OWNER_SCOPE = {
+    "channel_id": "internal",
+    "session_id": "auto_harness",
+    "app_id": "jiuwenswarm",
+}
+_DEFAULT_ORIGIN_NAMESPACE = "default"
+_MAX_ORIGIN_NAMESPACE_LENGTH = 128
+_MAX_IDEMPOTENCY_KEY_LENGTH = 256
+
+
+def _validate_schedule_task_input(
+    query: Any,
+    pipeline: Any,
+    *,
+    allowed_pipelines: frozenset[str] = _AUTO_HARNESS_SCHEDULE_PIPELINES,
+) -> tuple[str, Optional[str], Optional[dict[str, str]]]:
+    """Validate and normalize inputs shared by one-time and recurring tasks."""
+    if not isinstance(query, str) or not query.strip():
+        return "", None, {"error": "任务内容不能为空"}
+
+    normalized_pipeline: Optional[str]
+    if pipeline is None:
+        normalized_pipeline = None
+    elif isinstance(pipeline, str):
+        normalized_pipeline = pipeline.strip() or None
+    else:
+        return "", None, {"error": "任务流水线无效"}
+
+    if normalized_pipeline is not None and normalized_pipeline not in allowed_pipelines:
+        return "", None, {"error": "任务流水线无效"}
+
+    return query.strip(), normalized_pipeline, None
+
+
+def _normalize_schedule_execution_target(target: Any) -> dict[str, str]:
+    """Return a stable, JSON-safe target provenance view.
+
+    Missing legacy fields remain explicitly unknown. Do not infer them from a
+    later request or the mutable service-level Agent.
+    """
+    source = target if isinstance(target, dict) else {}
+    normalized: dict[str, str] = {}
+    for field in _EXECUTION_TARGET_FIELDS:
+        value = source.get(field)
+        normalized[field] = (
+            value.strip()
+            if isinstance(value, str) and value.strip()
+            else _UNKNOWN_EXECUTION_TARGET_VALUE
+        )
+    return normalized
+
+
+def _normalize_schedule_execution_contract(value: Any) -> dict[str, Any]:
+    """Return stable backend execution provenance without client inference."""
+    source = value if isinstance(value, dict) else {}
+    normalized: dict[str, Any] = {}
+    for field in (
+        "effective_execution_root",
+        "artifact_kind",
+        "executor",
+        "pipeline",
+    ):
+        item = source.get(field)
+        normalized[field] = (
+            item.strip()
+            if isinstance(item, str) and item.strip()
+            else _UNKNOWN_EXECUTION_TARGET_VALUE
+        )
+    effect_policy = source.get("effect_policy")
+    normalized["effect_policy"] = (
+        dict(effect_policy) if isinstance(effect_policy, dict) else {}
+    )
+    return normalized
+
+
+def _normalize_schedule_owner_scope(scope: Any) -> Optional[dict[str, str]]:
+    """Normalize the server-derived owner scope used for task isolation."""
+    if not isinstance(scope, dict):
+        return None
+    normalized: dict[str, str] = {}
+    for field in _SCHEDULE_OWNER_SCOPE_FIELDS:
+        value = scope.get(field)
+        normalized[field] = value.strip() if isinstance(value, str) else ""
+    if not normalized["channel_id"] or not normalized["session_id"]:
+        return None
+    return normalized
+
+
+def _normalize_origin_namespace(value: Any) -> Optional[str]:
+    if value is None:
+        return _DEFAULT_ORIGIN_NAMESPACE
+    if not isinstance(value, str):
+        return None
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized or len(normalized) > _MAX_ORIGIN_NAMESPACE_LENGTH:
+        return None
+    return normalized
+
+
+def _normalize_idempotency_key(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if not normalized or len(normalized) > _MAX_IDEMPOTENCY_KEY_LENGTH:
+        return None
+    return normalized
+
+
+def _normalize_schedule_fingerprint_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    normalized = unicodedata.normalize("NFKC", value)
+    return normalized.replace("\r\n", "\n").replace("\r", "\n").strip() or None
+
+
+def _build_schedule_run_fingerprint(
+    query: str,
+    pipeline: Optional[str],
+    model_intent: Any,
+    execution_target: Any = None,
+    optimization_task: Any = None,
+    repo_url: Any = "",
+    execution_contract: Any = None,
+) -> str:
+    """Fingerprint normalized intent, not mutable resolved execution objects."""
+    normalized_target = _normalize_schedule_execution_target(execution_target)
+    if normalized_target["project_dir"] != _UNKNOWN_EXECUTION_TARGET_VALUE:
+        normalized_target["project_dir"] = os.path.normcase(
+            os.path.normpath(normalized_target["project_dir"])
+        )
+    intent = {
+        "query": _normalize_schedule_fingerprint_text(query),
+        "pipeline": _normalize_schedule_fingerprint_text(pipeline),
+        "model": _normalize_schedule_fingerprint_text(model_intent),
+        "execution_target": normalized_target,
+        "optimization_task": optimization_task,
+        "repo_url": _normalize_schedule_fingerprint_text(repo_url),
+    }
+    if isinstance(execution_contract, dict):
+        intent["execution_contract"] = _normalize_schedule_execution_contract(
+            execution_contract
+        )
+    canonical = json.dumps(
+        intent,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _build_schedule_run_replay_payload(
+    store_result: dict[str, Any],
+    origin_namespace: str,
+) -> dict[str, Any]:
+    task = store_result.get("task")
+    task_data = task if isinstance(task, dict) else None
+    metadata_source = task_data
+    if metadata_source is None:
+        # A deleted task body is represented by a command-ledger tombstone.
+        # Project the frozen command provenance instead of guessing from the
+        # replay request or degrading known values to unknown.
+        metadata_source = {
+            "owner_scope": store_result.get("owner_scope"),
+            "origin_namespace": store_result.get("origin_namespace"),
+            "idempotency_key": store_result.get("idempotency_key"),
+            "execution_target": store_result.get("execution_target"),
+            "execution_contract": store_result.get("execution_contract"),
+        }
+    payload: dict[str, Any] = {
+        "task_id": str(store_result.get("task_id") or ""),
+        "status": str(task_data.get("status") or "unknown") if task_data else "deleted",
+        "message": "幂等任务创建命令已重放",
+        "idempotent_replay": True,
+        "origin_namespace": origin_namespace,
+        **_build_schedule_task_response_metadata(metadata_source),
+    }
+    if task_data and task_data.get("last_error"):
+        payload["last_error"] = str(task_data["last_error"])
+    if store_result.get("deleted_at"):
+        payload["deleted_at"] = store_result["deleted_at"]
+    return payload
+
+
+def _build_schedule_task_response_metadata(
+    task: Optional[dict[str, Any]],
+    *,
+    redact_owner: bool = False,
+    access: str = "authorized",
+) -> dict[str, Any]:
+    """Project stable provenance without inventing absent legacy fields."""
+    stored_scope = _normalize_schedule_owner_scope(
+        task.get("owner_scope") if task else None
+    )
+    legacy_unscoped = task is not None and stored_scope is None
+    owner_scope = (
+        dict(_UNKNOWN_OWNER_SCOPE)
+        if redact_owner or stored_scope is None
+        else dict(stored_scope)
+    )
+    origin_namespace = task.get("origin_namespace") if task else None
+    idempotency_key = task.get("idempotency_key") if task else None
+    metadata = {
+        "execution_target": (
+            dict(_normalize_schedule_execution_target(None))
+            if redact_owner
+            else _normalize_schedule_execution_target(
+                task.get("execution_target") if task else None
+            )
+        ),
+        "provenance": {
+            "owner_scope": owner_scope,
+            "origin_namespace": (
+                origin_namespace.strip()
+                if isinstance(origin_namespace, str) and origin_namespace.strip()
+                else _UNKNOWN_EXECUTION_TARGET_VALUE
+            ),
+            "idempotency_key": (
+                idempotency_key.strip()
+                if isinstance(idempotency_key, str) and idempotency_key.strip()
+                else _UNKNOWN_EXECUTION_TARGET_VALUE
+            ),
+            "legacy_unscoped": legacy_unscoped,
+            "access": access,
+        },
+    }
+    if task is not None and isinstance(task.get("execution_contract"), dict):
+        metadata["execution_contract"] = (
+            _normalize_schedule_execution_contract(None)
+            if redact_owner
+            else _normalize_schedule_execution_contract(task["execution_contract"])
+        )
+    return metadata
+
+
+def _build_schedule_run_execution_metadata(task: dict[str, Any]) -> dict[str, Any]:
+    """Preserve the run response shape while adding trusted project provenance."""
+    metadata = {
+        "execution_target": _normalize_schedule_execution_target(
+            task.get("execution_target")
+        )
+    }
+    if isinstance(task.get("execution_contract"), dict):
+        metadata["execution_contract"] = _normalize_schedule_execution_contract(
+            task["execution_contract"]
+        )
+    return metadata
+
+
+def _schedule_task_access_label(task: dict[str, Any]) -> str:
+    return (
+        "legacy_unscoped"
+        if _normalize_schedule_owner_scope(task.get("owner_scope")) is None
+        else "authorized"
+    )
+
+
+def _schedule_project_target_mismatch(
+    stored_target: dict[str, str],
+    requester_target: Any,
+) -> bool:
+    known_fields = [
+        field
+        for field in ("project_dir", "project_id")
+        if stored_target[field] != _UNKNOWN_EXECUTION_TARGET_VALUE
+    ]
+    if not known_fields:
+        return False
+    if not isinstance(requester_target, dict):
+        return True
+    normalized_requester = _normalize_schedule_execution_target(requester_target)
+    for field in known_fields:
+        stored_value = stored_target[field]
+        requester_value = normalized_requester[field]
+        if field == "project_dir":
+            stored_value = os.path.normcase(os.path.normpath(stored_value))
+            requester_value = os.path.normcase(os.path.normpath(requester_value))
+        if requester_value != stored_value:
+            return True
+    return False
+
+
+def _validate_schedule_task_access(
+    task: dict[str, Any],
+    *,
+    requester_owner_scope: Any,
+    requester_execution_target: Any,
+) -> Optional[dict[str, Any]]:
+    """Reject a wrong owner/project before reads or state-changing effects.
+
+    Omitting both requester values is the only trusted internal compatibility
+    path. Explicit ``None`` or malformed external values fail closed, and
+    legacy unscoped records are never adopted by an external requester.
+    """
+    stored_scope = _normalize_schedule_owner_scope(task.get("owner_scope"))
+    trusted_internal = (
+        requester_owner_scope is _OWNER_SCOPE_UNSET
+        and requester_execution_target is _OWNER_SCOPE_UNSET
+    )
+    if trusted_internal:
+        if stored_scope in (None, _INTERNAL_OWNER_SCOPE):
+            return None
+        return {
+            "error": "任务所有者范围不匹配",
+            "code": "TASK_SCOPE_MISMATCH",
+            **_build_schedule_task_response_metadata(
+                task,
+                redact_owner=True,
+                access="denied",
+            ),
+        }
+
+    requester_scope = _normalize_schedule_owner_scope(requester_owner_scope)
+    if requester_scope is None or stored_scope is None or requester_scope != stored_scope:
+        return {
+            "error": "任务所有者范围不匹配",
+            "code": "TASK_SCOPE_MISMATCH",
+            **_build_schedule_task_response_metadata(
+                task,
+                redact_owner=True,
+                access="denied",
+            ),
+        }
+    stored_target = _normalize_schedule_execution_target(task.get("execution_target"))
+    has_known_project = any(
+        stored_target[field] != _UNKNOWN_EXECUTION_TARGET_VALUE
+        for field in ("project_dir", "project_id")
+    )
+    if (
+        has_known_project
+        and _schedule_project_target_mismatch(
+            stored_target,
+            requester_execution_target,
+        )
+    ):
+        return {
+            "error": "任务项目目标不匹配",
+            "code": "TASK_PROJECT_MISMATCH",
+            **_build_schedule_task_response_metadata(
+                task,
+                access="denied",
+            ),
+        }
+    return None
 
 
 def _serialize_optimization_task(task: OptimizationTask | dict[str, Any]) -> dict[str, Any]:
@@ -210,6 +581,22 @@ class ActiveAutoHarnessRun:
     pipeline_preference: str = ""
 
 
+@dataclass(frozen=True)
+class ScheduledTaskExecutionContext:
+    """Process-local immutable execution binding for one scheduled task.
+
+    Agent objects and release callbacks must never be persisted in TaskStore.
+    A process restart therefore intentionally loses this binding; the
+    Scheduler reports that condition instead of borrowing another request's
+    mutable service-level agent.
+    """
+
+    agent: Any
+    stream_event_rail: Any
+    release: Optional[Callable[[], None]] = None
+    project_executor: Any | None = None
+
+
 class AutoHarnessService:
     """Service for auto_harness mode integration with JiuwenSwarm Web.
 
@@ -241,6 +628,9 @@ class AutoHarnessService:
         self._stream_event_rail = rail
         self._agent = agent
         self._agent_manager = agent_manager
+        self._scheduled_task_execution_contexts: dict[
+            str, ScheduledTaskExecutionContext
+        ] = {}
 
         # Active runs tracked by session_id (per §5.2)
         self._active_runs: dict[str, ActiveAutoHarnessRun] = {}
@@ -279,6 +669,97 @@ class AutoHarnessService:
             logger.warning("[AutoHarnessService] JiuSwarmStreamEventRail create failed: %s", exc)
             stream_event_rail = None
         self._stream_event_rail = stream_event_rail
+
+    def _capture_scheduled_task_execution_context(
+        self,
+        execution_agent: Any | None = None,
+        project_executor: Any | None = None,
+        release: Optional[Callable[[], None]] = None,
+    ) -> Optional[ScheduledTaskExecutionContext]:
+        """Capture one task's non-serializable execution dependencies now."""
+        agent = execution_agent if execution_agent is not None else getattr(self, "_agent", None)
+        if agent is None:
+            if release is not None:
+                release()
+            return None
+        try:
+            stream_event_rail = JiuSwarmStreamEventRail()
+            logger.info("[AutoHarnessService] Scheduled task stream rail created")
+        except Exception as exc:
+            logger.warning(
+                "[AutoHarnessService] Scheduled task stream rail creation failed: %s",
+                exc,
+            )
+            stream_event_rail = getattr(self, "_stream_event_rail", None)
+        return ScheduledTaskExecutionContext(
+            agent=agent,
+            stream_event_rail=stream_event_rail,
+            project_executor=project_executor,
+            release=release,
+        )
+
+    def _bind_scheduled_task_execution_context(
+        self,
+        task_id: str,
+        context: Optional[ScheduledTaskExecutionContext],
+    ) -> None:
+        """Bind a context once; a later request cannot replace it."""
+        if context is None:
+            return
+        contexts = getattr(self, "_scheduled_task_execution_contexts", None)
+        if contexts is None:
+            contexts = {}
+            self._scheduled_task_execution_contexts = contexts
+        existing = contexts.setdefault(task_id, context)
+        if existing is not context:
+            raise RuntimeError(f"Task execution context already bound: {task_id}")
+
+    def _adopt_scheduled_task_execution_context(
+        self,
+        candidate_task_id: str,
+        persisted_task_id: str,
+    ) -> bool:
+        """Move a replay candidate binding to one persisted pending task."""
+
+        contexts = getattr(self, "_scheduled_task_execution_contexts", {})
+        context = contexts.pop(candidate_task_id, None)
+        if context is None:
+            return False
+        if persisted_task_id in contexts:
+            if context.release is not None:
+                context.release()
+            return False
+        contexts[persisted_task_id] = context
+        return True
+
+    def get_scheduled_task_execution_context(
+        self,
+        task_id: str,
+    ) -> Optional[ScheduledTaskExecutionContext]:
+        """Return the process-local immutable context for ``task_id``."""
+        contexts = getattr(self, "_scheduled_task_execution_contexts", {})
+        return contexts.get(task_id)
+
+    def release_scheduled_task_execution_context(self, task_id: str) -> None:
+        """Release one task binding and its AgentManager pin exactly once."""
+        contexts = getattr(self, "_scheduled_task_execution_contexts", {})
+        context = contexts.pop(task_id, None)
+        if context is None or context.release is None:
+            return
+        try:
+            context.release()
+        except Exception as exc:
+            logger.warning(
+                "[AutoHarnessService] Failed to release task context %s: %s",
+                task_id,
+                exc,
+            )
+
+    def clear_scheduled_task_execution_contexts(self) -> None:
+        """Release all process-local task bindings during service shutdown."""
+        contexts = getattr(self, "_scheduled_task_execution_contexts", {})
+        for task_id in list(contexts):
+            self.release_scheduled_task_execution_context(task_id)
 
     def _ensure_data_dirs(self) -> None:
         """Ensure required data directories exist (per §5.6.1 layout)."""
@@ -432,11 +913,28 @@ class AutoHarnessService:
             await self._scheduler.start()
             logger.info("[AutoHarnessService] Scheduler started")
 
-    async def stop_scheduler(self) -> None:
+    async def reconcile_task_statuses(self) -> int:
+        """Recover persisted carrier facts without starting its polling loop."""
+
+        if self._task_store is None:
+            self._init_scheduler()
+        if self._task_store is None:
+            raise RuntimeError("carrier task store is unavailable")
+        return int(
+            await self._task_store.reconcile_task_statuses(
+                origin_namespace="live_voice"
+            )
+        )
+
+    async def stop_scheduler(self, *, interrupt_running: bool = False) -> None:
         """Stop the scheduler (called on server shutdown)."""
         if self._scheduler is not None:
-            await self._scheduler.stop()
+            if interrupt_running:
+                await self._scheduler.stop(interrupt_running=True)
+            else:
+                await self._scheduler.stop()
             logger.info("[AutoHarnessService] Scheduler stopped")
+        self.clear_scheduled_task_execution_contexts()
 
     def check_schedule_config(self) -> dict[str, Any]:
         """Check if required git/gitcode config is present.
@@ -1373,6 +1871,8 @@ class AutoHarnessService:
         query: str = "",
         model: Optional[Model] = None,
         auto_accept: bool = False,
+        execution_agent: Any | None = None,
+        stream_event_rail: Any | None = None,
     ) -> AsyncIterator[AgentResponseChunk]:
         """Run auto_harness session and stream chunks as WebSocket events.
 
@@ -1382,6 +1882,8 @@ class AutoHarnessService:
             request_id: Request identifier
             query: User's optimization goal input
             model: JiuwenSwarm's current model config
+            execution_agent: Optional task-scoped Agent override
+            stream_event_rail: Optional task-scoped stream rail override
 
         Yields:
             AgentResponseChunk instances mapped from orchestrator chunks
@@ -1469,10 +1971,16 @@ class AutoHarnessService:
             tasks = [_build_auto_harness_task(query, optimization_task_payload)]
 
             # Create orchestrator
+            bound_agent = execution_agent if execution_agent is not None else self._agent
+            bound_stream_event_rail = (
+                stream_event_rail
+                if stream_event_rail is not None
+                else self._stream_event_rail
+            )
             orchestrator = create_auto_harness_orchestrator(
                 config,
-                agent=self._agent,
-                stream_rails=[self._stream_event_rail],
+                agent=bound_agent,
+                stream_rails=[bound_stream_event_rail],
             )
             logger.info(
                 "[AutoHarnessService] Orchestrator agent attached=%s",
@@ -2770,10 +3278,15 @@ class AutoHarnessService:
     async def create_scheduled_task(
         self,
         query: str,
-        interval_hours: int,
+        interval_hours: int | float,
         run_immediately: bool = False,
         model: Optional[Model] = None,
-        pipeline: Optional[str] = None
+        pipeline: Optional[str] = None,
+        *,
+        execution_agent: Any | None = None,
+        context_release: Optional[Callable[[], None]] = None,
+        execution_target: Optional[dict[str, Any]] = None,
+        owner_scope: Any = _OWNER_SCOPE_UNSET,
     ) -> dict[str, Any]:
         """Create a new scheduled task.
 
@@ -2787,16 +3300,41 @@ class AutoHarnessService:
         Returns:
             {"task_id": str, "next_run_time": str, "message": str}
         """
+        query, pipeline, validation_error = _validate_schedule_task_input(query, pipeline)
+        if validation_error is not None:
+            return validation_error
+        owner_scope_was_provided = owner_scope is not _OWNER_SCOPE_UNSET
+        normalized_owner_scope = (
+            _normalize_schedule_owner_scope(owner_scope)
+            if owner_scope_was_provided
+            else dict(_INTERNAL_OWNER_SCOPE)
+        )
+        if owner_scope_was_provided and normalized_owner_scope is None:
+            return {
+                "error": "璋冨害浠诲姟缂哄皯鏈嶅姟绔墍鏈夎€呰寖鍥?",
+                "code": "TASK_SCOPE_REQUIRED",
+            }
+        if isinstance(interval_hours, bool) or not isinstance(interval_hours, (int, float)):
+            return {"error": "执行间隔必须是有限正数"}
+        try:
+            interval_value = float(interval_hours)
+        except OverflowError:
+            return {"error": "执行间隔必须是有限正数"}
+        if not math.isfinite(interval_value) or interval_value <= 0:
+            return {"error": "执行间隔必须是有限正数"}
+
+        now = datetime.now(timezone.utc)
+        try:
+            next_run = now + timedelta(hours=interval_value)
+        except OverflowError:
+            return {"error": "执行间隔必须是有限正数"}
+
         if self._task_store is None:
             self._init_scheduler()
         if self._task_store is None:
             return {"error": "任务存储未初始化"}
 
         task_id = f"sch_{uuid.uuid4().hex[:8]}"
-        now = datetime.now(timezone.utc)
-        # Set next_run based on run_immediately flag
-        next_run = now + timedelta(hours=interval_hours)
-
         # Store just the model_name (model will be resolved from jiuwenswarm config at execution)
         model_name = None
         if model is not None:
@@ -2813,9 +3351,27 @@ class AutoHarnessService:
             "execution_history": [],
             "model_name": model_name,
             "pipeline": pipeline,  # Pipeline preference
+            "execution_target": _normalize_schedule_execution_target(execution_target),
+            "owner_scope": normalized_owner_scope,
+            "origin_namespace": None,
+            "idempotency_key": None,
         }
 
-        await self._task_store.add_task(task_data)
+        execution_context = self._capture_scheduled_task_execution_context(
+            execution_agent,
+            release=context_release,
+        )
+        try:
+            self._bind_scheduled_task_execution_context(task_id, execution_context)
+        except Exception:
+            if execution_context is not None and execution_context.release is not None:
+                execution_context.release()
+            raise
+        try:
+            await self._task_store.add_task(task_data)
+        except Exception:
+            self.release_scheduled_task_execution_context(task_id)
+            raise
 
         logger.info(
             "[AutoHarnessService] Created scheduled task: %s, interval=%sh, next_run=%s, run_immediately=%s",
@@ -2823,19 +3379,62 @@ class AutoHarnessService:
         )
 
         # Trigger immediate execution if requested
+        immediate_trigger_details: Optional[dict[str, Any]] = None
         if run_immediately:
             logger.info("[AutoHarnessService] run_immediately=True, scheduler=%s", self._scheduler)
             if self._scheduler is not None:
-                triggered = await self._scheduler.trigger_immediate(task_id)
-                logger.info("[AutoHarnessService] trigger_immediate result: %s", triggered)
+                try:
+                    triggered = await self._scheduler.trigger_immediate(task_id)
+                    logger.info(
+                        "[AutoHarnessService] trigger_immediate result: %s",
+                        triggered,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "[AutoHarnessService] Immediate recurring-task trigger failed: %s",
+                        task_id,
+                    )
+                    latest_task = self._task_store.get_task(task_id) or task_data
+                    latest_status = str(latest_task.get("status") or "pending")
+                    is_execution_active = getattr(
+                        self._scheduler,
+                        "is_execution_active",
+                        None,
+                    )
+                    scheduler_claimed = bool(
+                        callable(is_execution_active)
+                        and is_execution_active(task_id)
+                    )
+                    if latest_status in TERMINAL_STATUSES:
+                        self.release_scheduled_task_execution_context(task_id)
+                        immediate_trigger_details = {
+                            "error": f"定时任务立即启动失败: {exc}",
+                            "status": latest_status,
+                        }
+                    elif scheduler_claimed or latest_status == "running":
+                        immediate_trigger_details = {
+                            "status": latest_status,
+                            "warning": f"定时任务已被调度器接管，但启动调用返回异常: {exc}",
+                        }
+                    else:
+                        # Creation is durable and remains eligible for its next
+                        # scheduled run; the service keeps ownership of context.
+                        immediate_trigger_details = {
+                            "status": "pending",
+                            "warning": f"定时任务已创建，但立即启动失败: {exc}",
+                        }
             else:
                 logger.warning("[AutoHarnessService] scheduler not initialized, cannot trigger immediate execution")
 
-        return {
+        result = {
             "task_id": task_id,
             "next_run_time": next_run.isoformat(),
             "message": "定时任务已创建",
+            "execution_target": dict(task_data["execution_target"]),
         }
+        if immediate_trigger_details is not None:
+            result.update(immediate_trigger_details)
+        return result
 
     async def run_task(
         self,
@@ -2844,6 +3443,16 @@ class AutoHarnessService:
         pipeline: Optional[str] = None,
         optimization_task: Optional[OptimizationTask | dict[str, Any]] = None,
         repo_url: str = "",
+        *,
+        execution_agent: Any | None = None,
+        project_executor: Any | None = None,
+        effective_execution_root: Any = None,
+        context_release: Optional[Callable[[], None]] = None,
+        execution_target: Optional[dict[str, Any]] = None,
+        owner_scope: Any = _OWNER_SCOPE_UNSET,
+        origin_namespace: Any = None,
+        idempotency_key: Any = None,
+        model_intent: Any = None,
     ) -> dict[str, Any]:
         """Create and immediately execute a one-time task.
 
@@ -2854,13 +3463,61 @@ class AutoHarnessService:
         Args:
             query: The optimization goal/task description
             model: Model configuration from JiuwenSwarm
-            pipeline: Pipeline preference (extended_evolve_pipeline or meta_evolve_pipeline)
+            pipeline: AutoHarness preference or the Live Voice project_code_pipeline
             optimization_task: Optional explicit task metadata for specialized callers
             repo_url: Target repository URL for the task (stored at task_data level)
 
         Returns:
             {"task_id": str, "status": "running", "message": str}
         """
+        query, pipeline, validation_error = _validate_schedule_task_input(
+            query,
+            pipeline,
+            allowed_pipelines=_ONE_TIME_PIPELINES,
+        )
+        if validation_error is not None:
+            return validation_error
+
+        idempotency_requested = (
+            idempotency_key is not None or origin_namespace is not None
+        )
+        owner_scope_was_provided = owner_scope is not _OWNER_SCOPE_UNSET
+        normalized_owner_scope = (
+            _normalize_schedule_owner_scope(owner_scope)
+            if owner_scope_was_provided
+            else dict(_INTERNAL_OWNER_SCOPE)
+        )
+        if owner_scope_was_provided and normalized_owner_scope is None:
+            return {
+                "error": "璋冨害浠诲姟缂哄皯鏈嶅姟绔墍鏈夎€呰寖鍥?",
+                "code": "TASK_SCOPE_REQUIRED",
+            }
+        normalized_origin_namespace: Optional[str] = None
+        normalized_idempotency_key: Optional[str] = None
+        if idempotency_requested:
+            if idempotency_key is None:
+                return {
+                    "error": "origin_namespace 需要同时提供 idempotency_key",
+                    "code": "IDEMPOTENCY_KEY_REQUIRED",
+                }
+            normalized_idempotency_key = _normalize_idempotency_key(idempotency_key)
+            if normalized_idempotency_key is None:
+                return {
+                    "error": "idempotency_key 无效",
+                    "code": "INVALID_IDEMPOTENCY_KEY",
+                }
+            normalized_origin_namespace = _normalize_origin_namespace(origin_namespace)
+            if normalized_origin_namespace is None:
+                return {
+                    "error": "origin_namespace 无效",
+                    "code": "INVALID_ORIGIN_NAMESPACE",
+                }
+            if normalized_owner_scope is None:
+                return {
+                    "error": "幂等任务缺少服务端所有者范围",
+                    "code": "IDEMPOTENCY_SCOPE_REQUIRED",
+                }
+
         if self._task_store is None:
             self._init_scheduler()
         if self._task_store is None:
@@ -2872,6 +3529,51 @@ class AutoHarnessService:
         model_name = None
         if model is not None:
             model_name = model.model_config.model_name
+
+        normalized_execution_target = _normalize_schedule_execution_target(
+            execution_target
+        )
+        serialized_optimization_task = (
+            _serialize_optimization_task(optimization_task)
+            if optimization_task is not None
+            else None
+        )
+        normalized_repo_url = _normalize_schedule_fingerprint_text(repo_url) or ""
+        execution_contract: dict[str, Any] | None = None
+        if normalized_origin_namespace == "live_voice":
+            if pipeline != PROJECT_CODE_PIPELINE:
+                return {
+                    "error": (
+                        "Live Voice project tasks require the project-bound "
+                        f"{PROJECT_CODE_PIPELINE} pipeline"
+                    ),
+                    "code": "EXECUTION_TARGET_NOT_BOUND",
+                }
+            execution_contract, contract_error = resolve_project_execution_contract(
+                query=query,
+                execution_target=normalized_execution_target,
+                bound_execution_root=effective_execution_root,
+                project_executor=project_executor,
+            )
+            if contract_error is not None:
+                return contract_error
+        elif pipeline == PROJECT_CODE_PIPELINE:
+            return {
+                "error": "project_code_pipeline is restricted to live_voice commands",
+                "code": "PROJECT_EXECUTION_SCOPE_REQUIRED",
+            }
+
+        fingerprint = None
+        if idempotency_requested:
+            fingerprint = _build_schedule_run_fingerprint(
+                query,
+                pipeline,
+                model_intent if model_intent is not None else model_name,
+                normalized_execution_target,
+                serialized_optimization_task,
+                normalized_repo_url,
+                execution_contract,
+            )
 
         task_data = {
             "task_id": task_id,
@@ -2885,13 +3587,124 @@ class AutoHarnessService:
             "execution_history": [],
             "model_name": model_name,
             "pipeline": pipeline,  # Pipeline preference
+            "execution_target": normalized_execution_target,
+            "owner_scope": (
+                dict(normalized_owner_scope)
+                if normalized_owner_scope is not None
+                else None
+            ),
+            "origin_namespace": (
+                normalized_origin_namespace if idempotency_requested else None
+            ),
+            "idempotency_key": (
+                normalized_idempotency_key if idempotency_requested else None
+            ),
         }
-        if optimization_task is not None:
-            task_data["optimization_task"] = _serialize_optimization_task(optimization_task)
-        if repo_url:
-            task_data["repo_url"] = repo_url
+        if execution_contract is not None:
+            task_data["execution_contract"] = dict(execution_contract)
+        if serialized_optimization_task is not None:
+            task_data["optimization_task"] = serialized_optimization_task
+        if normalized_repo_url:
+            task_data["repo_url"] = normalized_repo_url
+        if normalized_origin_namespace == "live_voice":
+            task_data["result_contract"] = PROJECT_CODE_RESULT_CONTRACT
 
-        await self._task_store.add_task(task_data)
+        execution_context = self._capture_scheduled_task_execution_context(
+            execution_agent,
+            project_executor,
+            context_release,
+        )
+        try:
+            self._bind_scheduled_task_execution_context(task_id, execution_context)
+        except Exception:
+            if execution_context is not None and execution_context.release is not None:
+                execution_context.release()
+            raise
+        try:
+            if idempotency_requested:
+                assert normalized_owner_scope is not None
+                assert normalized_origin_namespace is not None
+                assert normalized_idempotency_key is not None
+                assert fingerprint is not None
+                store_result = await self._task_store.get_or_create_task_for_command(
+                    task_data,
+                    owner_scope=normalized_owner_scope,
+                    origin_namespace=normalized_origin_namespace,
+                    idempotency_key=normalized_idempotency_key,
+                    fingerprint=fingerprint,
+                )
+                if store_result.get("result") != "created":
+                    if store_result.get("result") == "conflict":
+                        self.release_scheduled_task_execution_context(task_id)
+                        return {
+                            "error": "idempotency_key 已用于不同的任务意图",
+                            "code": "IDEMPOTENCY_CONFLICT",
+                            "existing_task_id": store_result.get("existing_task_id"),
+                            "origin_namespace": normalized_origin_namespace,
+                        }
+                    replay_task = store_result.get("task")
+                    replay_status = (
+                        str(replay_task.get("status") or "")
+                        if isinstance(replay_task, dict)
+                        else ""
+                    )
+                    persisted_task_id = str(store_result.get("task_id") or "")
+                    if (
+                        normalized_origin_namespace == "live_voice"
+                        and persisted_task_id
+                        and replay_status == "pending"
+                    ):
+                        adopted = self._adopt_scheduled_task_execution_context(
+                            task_id,
+                            persisted_task_id,
+                        )
+                        try:
+                            triggered = bool(
+                                adopted
+                                and self._scheduler is not None
+                                and await self._scheduler.trigger_immediate(
+                                    persisted_task_id
+                                )
+                            )
+                        except Exception as exc:
+                            self.release_scheduled_task_execution_context(
+                                persisted_task_id
+                            )
+                            return {
+                                "error": f"formal task replay trigger failed: {exc}",
+                                "code": "EXECUTOR_DELIVERY_UNAVAILABLE",
+                                "task_id": persisted_task_id,
+                            }
+                        latest = self._task_store.get_task(persisted_task_id) or {}
+                        is_execution_active = getattr(
+                            self._scheduler, "is_execution_active", None
+                        )
+                        active = bool(
+                            callable(is_execution_active)
+                            and is_execution_active(persisted_task_id)
+                        )
+                        if not triggered and not active:
+                            self.release_scheduled_task_execution_context(
+                                persisted_task_id
+                            )
+                            if latest.get("status") not in TERMINAL_STATUSES:
+                                return {
+                                    "error": "formal task replay could not resume execution",
+                                    "code": "EXECUTOR_DELIVERY_UNAVAILABLE",
+                                    "task_id": persisted_task_id,
+                                }
+                        store_result = {**store_result, "task": latest}
+                    else:
+                        self.release_scheduled_task_execution_context(task_id)
+                    return _build_schedule_run_replay_payload(
+                        store_result,
+                        normalized_origin_namespace,
+                    )
+            else:
+                await self._task_store.add_task(task_data)
+        except Exception:
+            self.release_scheduled_task_execution_context(task_id)
+            raise
 
         logger.info(
             "[AutoHarnessService] Created one-time task: %s, will execute immediately",
@@ -2899,20 +3712,138 @@ class AutoHarnessService:
         )
 
         # Trigger immediate execution
+        triggered = False
+        trigger_error: Optional[str] = None
         if self._scheduler is not None:
-            triggered = await self._scheduler.trigger_immediate(task_id)
-            logger.info("[AutoHarnessService] run_task trigger_immediate result: %s", triggered)
+            try:
+                triggered = await self._scheduler.trigger_immediate(task_id)
+                logger.info(
+                    "[AutoHarnessService] run_task trigger_immediate result: %s",
+                    triggered,
+                )
+            except Exception as exc:
+                trigger_error = f"一次性任务启动异常: {exc}"
+                logger.exception(
+                    "[AutoHarnessService] One-time task trigger raised: %s",
+                    task_id,
+                )
         else:
             logger.warning(
                 "[AutoHarnessService] scheduler not initialized, cannot execute one-time task")
 
-        return {
+        if not triggered:
+            latest_task = self._task_store.get_task(task_id) or {}
+            latest_status = str(latest_task.get("status") or "pending")
+            is_execution_active = getattr(self._scheduler, "is_execution_active", None)
+            scheduler_claimed = bool(
+                callable(is_execution_active) and is_execution_active(task_id)
+            )
+            if latest_status == "failed":
+                self.release_scheduled_task_execution_context(task_id)
+                failure_message = str(latest_task.get("last_error") or "")
+                if not failure_message:
+                    for record in reversed(latest_task.get("execution_history", [])):
+                        failure_message = str(record.get("error") or "")
+                        if failure_message:
+                            break
+                return {
+                    "error": failure_message or "一次性任务执行失败",
+                    "task_id": task_id,
+                    "status": latest_status,
+                    **_build_schedule_run_execution_metadata(task_data),
+                }
+            if latest_status == "cancelled":
+                self.release_scheduled_task_execution_context(task_id)
+                return {
+                    "error": "一次性任务已取消",
+                    "task_id": task_id,
+                    "status": latest_status,
+                    **_build_schedule_run_execution_metadata(task_data),
+                }
+            if latest_status in TERMINAL_STATUSES:
+                self.release_scheduled_task_execution_context(task_id)
+                return {
+                    "task_id": task_id,
+                    "status": latest_status,
+                    "message": "一次性任务已结束",
+                    **_build_schedule_run_execution_metadata(task_data),
+                }
+            if scheduler_claimed or latest_status == "running":
+                logger.info(
+                    "[AutoHarnessService] One-time task already claimed: %s, status=%s",
+                    task_id,
+                    latest_status,
+                )
+                return {
+                    "task_id": task_id,
+                    "status": latest_status,
+                    "message": "一次性任务已由调度器接管",
+                    **_build_schedule_run_execution_metadata(task_data),
+                }
+            if trigger_error is not None:
+                completed_at = datetime.now(timezone.utc).isoformat()
+                await self._task_store.update_task(
+                    task_id,
+                    {
+                        "status": "failed",
+                        "last_error": trigger_error,
+                        "completed_at": completed_at,
+                        "current_execution_id": None,
+                    },
+                )
+                self.release_scheduled_task_execution_context(task_id)
+                return {
+                    "error": trigger_error,
+                    "task_id": task_id,
+                    "status": "failed",
+                    **_build_schedule_run_execution_metadata(task_data),
+                }
+            if latest_status != "pending":
+                self.release_scheduled_task_execution_context(task_id)
+                return {
+                    "error": "一次性任务启动状态异常",
+                    "task_id": task_id,
+                    "status": latest_status or "unknown",
+                    **_build_schedule_run_execution_metadata(task_data),
+                }
+
+            completed_at = datetime.now(timezone.utc).isoformat()
+            await self._task_store.update_task(task_id, {
+                "status": "failed",
+                "last_error": "一次性任务启动失败",
+                "completed_at": completed_at,
+            })
+            self.release_scheduled_task_execution_context(task_id)
+            logger.error("[AutoHarnessService] Failed to start one-time task: %s", task_id)
+            return {
+                "error": "一次性任务启动失败",
+                "task_id": task_id,
+                "status": "failed",
+                **_build_schedule_run_execution_metadata(task_data),
+            }
+
+        result = {
             "task_id": task_id,
             "status": "running",
             "message": "一次性任务已创建并开始执行",
+            **_build_schedule_run_execution_metadata(task_data),
         }
+        if idempotency_requested:
+            result.update(
+                {
+                    "idempotent_replay": False,
+                    "origin_namespace": normalized_origin_namespace,
+                }
+            )
+        return result
 
-    async def cancel_scheduled_task(self, task_id: str) -> dict[str, Any]:
+    async def cancel_scheduled_task(
+        self,
+        task_id: str,
+        *,
+        requester_owner_scope: Any = _OWNER_SCOPE_UNSET,
+        requester_execution_target: Any = _OWNER_SCOPE_UNSET,
+    ) -> dict[str, Any]:
         """Cancel a scheduled task.
 
         Args:
@@ -2921,20 +3852,119 @@ class AutoHarnessService:
         Returns:
             {"task_id": str, "status": str}
         """
-        if self._task_store is None or self._scheduler is None:
-            return {"error": "调度器未初始化"}
+        if self._task_store is None:
+            return {
+                "error": "调度器未初始化",
+                "task_id": task_id,
+                **_build_schedule_task_response_metadata(None, access="unknown"),
+            }
 
-        # Cancel running execution if exists (async - must await)
-        await self._scheduler.cancel_execution(task_id)
+        task = self._task_store.get_task(task_id)
+        if task is None:
+            return {
+                "error": "任务不存在",
+                "task_id": task_id,
+                **_build_schedule_task_response_metadata(None, access="unknown"),
+            }
+
+        access_error = _validate_schedule_task_access(
+            task,
+            requester_owner_scope=requester_owner_scope,
+            requester_execution_target=requester_execution_target,
+        )
+        if access_error is not None:
+            return {"task_id": task_id, **access_error}
+
+        response_metadata = _build_schedule_task_response_metadata(
+            task,
+            access=_schedule_task_access_label(task),
+        )
+        if self._scheduler is None:
+            return {
+                "error": "调度器未初始化",
+                "task_id": task_id,
+                **response_metadata,
+            }
+
+        status = str(task.get("status") or "")
+        if status in TERMINAL_STATUSES:
+            self.release_scheduled_task_execution_context(task_id)
+            if status == "cancelled":
+                return {
+                    "task_id": task_id,
+                    "status": status,
+                    **response_metadata,
+                }
+            return {
+                "error": "任务已结束，无法取消",
+                "task_id": task_id,
+                "status": status,
+                **response_metadata,
+            }
+
+        # Cancel running execution if it still exists, then re-read the source of truth.
+        cancelled = await self._scheduler.cancel_execution(task_id)
+        latest_task = self._task_store.get_task(task_id)
+        if latest_task is None:
+            self.release_scheduled_task_execution_context(task_id)
+            return {
+                "error": "任务不存在",
+                "task_id": task_id,
+                **_build_schedule_task_response_metadata(None, access="unknown"),
+            }
+
+        latest_status = str(latest_task.get("status") or "")
+        response_metadata = _build_schedule_task_response_metadata(
+            latest_task,
+            access=_schedule_task_access_label(latest_task),
+        )
+        if latest_status in TERMINAL_STATUSES:
+            self.release_scheduled_task_execution_context(task_id)
+            if latest_status == "cancelled":
+                return {
+                    "task_id": task_id,
+                    "status": latest_status,
+                    **response_metadata,
+                }
+            return {
+                "error": "任务已结束，无法取消",
+                "task_id": task_id,
+                "status": latest_status,
+                **response_metadata,
+            }
+
+        if not cancelled and latest_status != "pending":
+            return {
+                "error": "任务仍在运行，取消未生效",
+                "task_id": task_id,
+                "status": latest_status,
+                **response_metadata,
+            }
 
         # Update status
         await self._task_store.update_task(task_id, {"status": "cancelled"})
+        self.release_scheduled_task_execution_context(task_id)
 
         logger.info("[AutoHarnessService] Cancelled scheduled task: %s", task_id)
 
-        return {"task_id": task_id, "status": "cancelled"}
+        return {
+            "task_id": task_id,
+            "status": "cancelled",
+            **_build_schedule_task_response_metadata(
+                self._task_store.get_task(task_id) or task,
+                access=_schedule_task_access_label(
+                    self._task_store.get_task(task_id) or task
+                ),
+            ),
+        }
 
-    async def delete_scheduled_task(self, task_id: str) -> dict[str, Any]:
+    async def delete_scheduled_task(
+        self,
+        task_id: str,
+        *,
+        requester_owner_scope: Any = _OWNER_SCOPE_UNSET,
+        requester_execution_target: Any = _OWNER_SCOPE_UNSET,
+    ) -> dict[str, Any]:
         """Delete a scheduled task completely.
 
         Cancels running execution if exists, then removes task and all logs.
@@ -2952,44 +3982,188 @@ class AutoHarnessService:
         task = self._task_store.get_task(task_id)
         if task is None:
             return {"error": "任务不存在", "task_id": task_id}
+        access_error = _validate_schedule_task_access(
+            task,
+            requester_owner_scope=requester_owner_scope,
+            requester_execution_target=requester_execution_target,
+        )
+        if access_error is not None:
+            return {"task_id": task_id, **access_error}
 
-        # Cancel running execution if exists
-        if self._scheduler is not None and task.get("status") == "running":
+        # Always fence a scheduler claim before deleting. A task may already be
+        # claimed while its persisted status is still pending.
+        if self._scheduler is not None:
             await self._scheduler.cancel_execution(task_id)
+
+        latest_task = self._task_store.get_task(task_id)
+        if latest_task is None:
+            self.release_scheduled_task_execution_context(task_id)
+            return {"task_id": task_id}
+        latest_status = str(latest_task.get("status") or "")
+        if latest_status not in TERMINAL_STATUSES and latest_status != "pending":
+            return {
+                "error": "任务仍在运行，无法安全删除",
+                "task_id": task_id,
+                "status": latest_status,
+            }
 
         # Delete task from store (includes removing log files)
         deleted = await self._task_store.delete_task(task_id)
         if not deleted:
             return {"error": "删除失败", "task_id": task_id}
 
+        self.release_scheduled_task_execution_context(task_id)
+
         logger.info("[AutoHarnessService] Deleted scheduled task: %s", task_id)
 
         return {"task_id": task_id}
 
-    async def get_scheduled_task_status(self, task_id: str) -> Optional[dict[str, Any]]:
+    async def get_scheduled_task_status(
+        self,
+        task_id: str,
+        *,
+        requester_owner_scope: Any = _OWNER_SCOPE_UNSET,
+        requester_execution_target: Any = _OWNER_SCOPE_UNSET,
+    ) -> dict[str, Any]:
         """Get task status and details.
 
         Returns:
             Task dict or None if not found
         """
         if self._task_store is None:
-            return None
+            return {
+                "error": "任务存储未初始化",
+                "code": "TASK_STORE_UNAVAILABLE",
+                "task_id": task_id,
+                **_build_schedule_task_response_metadata(None, access="unknown"),
+            }
         task = self._task_store.get_task(task_id)
         if task is None:
-            return None
-        return await self._task_store.enrich_task_with_progress(task)
+            return {
+                "error": "任务不存在",
+                "code": "TASK_NOT_FOUND",
+                "task_id": task_id,
+                **_build_schedule_task_response_metadata(None, access="unknown"),
+            }
+        access_error = _validate_schedule_task_access(
+            task,
+            requester_owner_scope=requester_owner_scope,
+            requester_execution_target=requester_execution_target,
+        )
+        if access_error is not None:
+            return {"task_id": task_id, **access_error}
+        enriched = await self._task_store.enrich_task_with_progress(task)
+        enriched.update(
+            _build_schedule_task_response_metadata(
+                enriched,
+                access=(
+                    "legacy_unscoped"
+                    if _normalize_schedule_owner_scope(enriched.get("owner_scope"))
+                    is None
+                    else "authorized"
+                ),
+            )
+        )
+        return enriched
 
-    async def list_scheduled_tasks(self) -> list[dict[str, Any]]:
+    async def list_scheduled_tasks(
+        self,
+        *,
+        owner_scope: Any = _OWNER_SCOPE_UNSET,
+        requester_execution_target: Any = _OWNER_SCOPE_UNSET,
+        origin_namespace: Any = None,
+        idempotency_key: Any = None,
+    ) -> list[dict[str, Any]] | dict[str, Any]:
         """List all scheduled tasks.
 
         Returns:
-            List of task dicts
+            List of task dicts or a stable availability error
         """
         if self._task_store is None:
-            return []
-        return await self._task_store.enrich_tasks_with_progress(
-            self._task_store.list_tasks()
+            return {
+                "error": "任务存储未初始化",
+                "code": "TASK_STORE_UNAVAILABLE",
+            }
+        scoped = origin_namespace is not None or idempotency_key is not None
+        trusted_internal = (
+            owner_scope is _OWNER_SCOPE_UNSET
+            and requester_execution_target is _OWNER_SCOPE_UNSET
         )
+        normalized_requester_scope = (
+            dict(_INTERNAL_OWNER_SCOPE)
+            if trusted_internal
+            else _normalize_schedule_owner_scope(owner_scope)
+        )
+        if normalized_requester_scope is None:
+            raise ValueError("TASK_SCOPE_REQUIRED")
+        if scoped:
+            normalized_origin_namespace = _normalize_origin_namespace(origin_namespace)
+            if normalized_origin_namespace is None:
+                raise ValueError("INVALID_ORIGIN_NAMESPACE")
+            normalized_idempotency_key = None
+            if idempotency_key is not None:
+                normalized_idempotency_key = _normalize_idempotency_key(idempotency_key)
+                if normalized_idempotency_key is None:
+                    raise ValueError("INVALID_IDEMPOTENCY_KEY")
+            source_tasks = self._task_store.list_tasks_for_create_command(
+                owner_scope=normalized_requester_scope,
+                origin_namespace=normalized_origin_namespace,
+                idempotency_key=normalized_idempotency_key,
+            )
+        else:
+            source_tasks = self._task_store.list_tasks()
+            if trusted_internal:
+                source_tasks = [
+                    task
+                    for task in source_tasks
+                    if (
+                        _normalize_schedule_owner_scope(task.get("owner_scope"))
+                        in (None, _INTERNAL_OWNER_SCOPE)
+                    )
+                ]
+            else:
+                source_tasks = [
+                    task
+                    for task in source_tasks
+                    if _normalize_schedule_owner_scope(task.get("owner_scope"))
+                    == normalized_requester_scope
+                ]
+        access_owner_scope = (
+            _OWNER_SCOPE_UNSET
+            if trusted_internal
+            else normalized_requester_scope
+        )
+        access_execution_target = (
+            _OWNER_SCOPE_UNSET
+            if trusted_internal
+            else requester_execution_target
+        )
+        source_tasks = [
+            task
+            for task in source_tasks
+            if _validate_schedule_task_access(
+                task,
+                requester_owner_scope=access_owner_scope,
+                requester_execution_target=access_execution_target,
+            )
+            is None
+        ]
+        tasks = await self._task_store.enrich_tasks_with_progress(
+            source_tasks
+        )
+        for task in tasks:
+            task.update(
+                _build_schedule_task_response_metadata(
+                    task,
+                    access=(
+                        "legacy_unscoped"
+                        if _normalize_schedule_owner_scope(task.get("owner_scope"))
+                        is None
+                        else "authorized"
+                    ),
+                )
+            )
+        return tasks
 
     async def get_scheduled_task_logs(
         self,
@@ -2997,7 +4171,10 @@ class AutoHarnessService:
         log_type: str = "current",
         history_index: int = -1,
         offset: int = 0,
-        limit: int = 500
+        limit: int = 500,
+        *,
+        requester_owner_scope: Any = _OWNER_SCOPE_UNSET,
+        requester_execution_target: Any = _OWNER_SCOPE_UNSET,
     ) -> dict[str, Any]:
         """Get logs for a task.
 
@@ -3013,4 +4190,20 @@ class AutoHarnessService:
         """
         if self._task_store is None:
             return {"error": "任务存储未初始化"}
-        return await self._task_store.get_logs(task_id, log_type, history_index, offset, limit)
+        task = self._task_store.get_task(task_id)
+        if task is None:
+            return {"error": "任务不存在", "task_id": task_id}
+        access_error = _validate_schedule_task_access(
+            task,
+            requester_owner_scope=requester_owner_scope,
+            requester_execution_target=requester_execution_target,
+        )
+        if access_error is not None:
+            return {"task_id": task_id, **access_error}
+        return await self._task_store.get_logs(
+            task_id,
+            log_type,
+            history_index,
+            offset,
+            limit,
+        )

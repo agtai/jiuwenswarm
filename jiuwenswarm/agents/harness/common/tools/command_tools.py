@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import locale
 import os
@@ -31,6 +32,33 @@ from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 class CommandCancelled(Exception):
     """Raised when a blocking command is terminated by user interrupt."""
+
+
+_BACKGROUND_PROJECT_SHELL_FORBIDDEN: contextvars.ContextVar[bool] = (
+    contextvars.ContextVar(
+        "jiuwenswarm_background_project_shell_forbidden",
+        default=False,
+    )
+)
+
+
+@contextlib.contextmanager
+def forbid_background_project_shell_commands():
+    """Disable every shell entry point for one project background task."""
+    token = _BACKGROUND_PROJECT_SHELL_FORBIDDEN.set(True)
+    try:
+        yield
+    finally:
+        _BACKGROUND_PROJECT_SHELL_FORBIDDEN.reset(token)
+
+
+def _check_background_project_shell_safety(command: str) -> str | None:
+    if not _BACKGROUND_PROJECT_SHELL_FORBIDDEN.get():
+        return None
+    return (
+        "background project tasks cannot execute shell commands; "
+        "tests, scripts, Git commands, and remote writes are forbidden"
+    )
 
 
 # ── jiuwenswarm-tui 反复 spawn 护栏 ────────────────────────────────
@@ -275,6 +303,9 @@ def _clip_text(value: str, max_chars: int) -> str:
 
 
 def _check_command_safety(command: str) -> str | None:
+    background_block = _check_background_project_shell_safety(command)
+    if background_block:
+        return background_block
     for pattern, message in _DANGEROUS_COMMAND_PATTERNS:
         if pattern.search(command):
             return message
