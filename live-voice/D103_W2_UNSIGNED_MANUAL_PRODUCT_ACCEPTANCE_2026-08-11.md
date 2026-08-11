@@ -4,6 +4,7 @@
 > Status: P1/P2 product-level manual acceptance passed; formal Gate and Replacement Ledger credit remain open
 > Tested source: `d26aa17797331f053bb584ec017f3ffa6ce90156`
 > Boundary: this was an evidence-disabled manual product check. It is not a signed rehearsal/formal artifact and grants no Gate credit.
+> Supersession: D-071 later retired the signed Gate/credit requirement. This record now counts as the completed W2 P1/P2 human product-acceptance portion; its original no-credit statement remains only as historical context.
 
 ## Result
 
@@ -32,4 +33,4 @@ After refreshing and starting again:
 - The physical input device was not the frozen Jabra baseline.
 - This run did not repeat the P3, fault-class, restart or 38-slot formal matrix. Those remain governed by current [STATUS](STATUS.md), [D102](D102_W2_SIGNED_REHEARSAL_FAULT_PROBE_REPAIR_2026-08-11.md) and the W2 acceptance/runbook.
 
-The correct product statement is therefore **W2 P1/P2 manual product acceptance passed on this environment**. The correct release-governance statement remains **Integrated Demo `SOURCE-INTEGRATED / GATE-PARTIAL`, Replacement Ledger `0/100`** until `w2_gate_cli evaluate` passes a complete signed formal set.
+The product statement is **W2 P1/P2 manual product acceptance passed on this environment**. Under D-071, the remaining W2 decision depends only on the applicable automated checks and the unfinished human product steps listed in current [STATUS](STATUS.md); no signed Gate evaluation is required.

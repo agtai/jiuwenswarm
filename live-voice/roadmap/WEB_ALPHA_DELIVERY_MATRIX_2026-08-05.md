@@ -11,6 +11,8 @@
 > Week 2 pass/fail: [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
 >
 > Week 3–4 pass/fail: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
+>
+> D-071 supersedes Gate-era scoring and signed-evidence completion rules for W2 and later Live Voice milestones. Package identities, dependencies and product requirements remain; acceptance is automated verification plus one complete human product run.
 
 ## 1. Purpose and reading contract
 
@@ -135,15 +137,15 @@ Source examples at the matrix freeze date are [useLiveVoiceDemo.ts](../../jiuwen
 | D-031 | Timeboxed single-task polling and fail-closed Demo Adapter | Replace by TC-C/VB-C event projection; do not expand into a second Task Core | Current→W3 | see STATUS |
 | Historical `X-WIN` | Windows Desktop/WebView2 productization plan | Superseded by D-055 and `X-WEB`; retain only in dated history | Superseded | see STATUS |
 
-## 10. Milestones and release Gates
+## 10. Milestones and product acceptance
 
 | Window | Human-readable outcome | Required package relationship | Pass/fail authority | Current status |
 |---|---|---|---|---|
 | V0 | Real voice can drive real Agent/Tool and speak the truthful answer in one fixed environment | Frozen predecessor only | [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md) | see STATUS |
 | W1 | Shared kernel, formal A-package foundations, deterministic fake verticals and Browser fallback exist | ACG kernel + A packages + W1-X1/X2/P1B | D-046/D-053 and package reviews | see STATUS |
-| W2 | One cumulative route reaches at least 90/100 with mandatory invariants | First real B routes + X-OBS/X-E2E; D-031 can only receive capped substitute credit | [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) | see STATUS |
-| W3 | Major B/C packages form real Speech/Media/Agent/Executor verticals | Real SR/SS/RM/CR/II/AB/TC/ED/VB paths plus Web integration | Module and real-path Gates | see STATUS |
-| W4 | One immutable candidate passes P1/P2/P3alpha, Web platform and joint Gates | Required B/C packages + X-OBS/X-E2E/X-WEB | [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md) | see STATUS |
+| W2 | One cumulative route passes applicable automated verification plus one complete human product journey | First real B routes + X-OBS/X-E2E; D-031 remains a declared substitute | [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) | see STATUS |
+| W3 | Major B/C packages form real Speech/Media/Agent/Executor verticals | Real SR/SS/RM/CR/II/AB/TC/ED/VB paths plus Web integration | Module verification and real-path acceptance | see STATUS |
+| W4 | One identified tested source passes P1/P2/P3alpha, Web platform and joint automated-plus-human acceptance | Required B/C packages + X-OBS/X-E2E/X-WEB | [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md) | see STATUS |
 | Later | Full P3, D1/D2, production auth, broader browsers/devices, SLO/privacy/release hardening | Explicit later decisions and packages | Future acceptance contracts | see STATUS |
 
 ## 11. Dependency map
@@ -162,8 +164,8 @@ ACG critical kernel / W1-K1
    ├─ X-E2E consumes each fake and real vertical incrementally
    └─ X-WEB consumes browser AIO/Speech, RM/CR and TC structured controls
 
-Week 2 Gate: cumulative route + route evidence + >=90/100 + mandatory invariants
-Week 4 Gate: real P1/P2/P3alpha verticals + Web platform Gate + joint Gate
+Week 2 acceptance: applicable automated verification + one complete human cumulative journey
+Week 4 acceptance: real P1/P2/P3alpha verticals + Web platform and joint automated-plus-human acceptance
 ```
 
 ## 12. Agent execution contract

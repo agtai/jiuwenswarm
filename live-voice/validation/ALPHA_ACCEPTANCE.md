@@ -2,19 +2,21 @@
 
 > Run state: see [STATUS.md](../STATUS.md)
 > Accepted scope: P1 + P2 + P3alpha; complete P3 is stretch
-> Architecture: historical [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), normative [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), and all applicable current decisions, especially D-046, D-047, D-050, D-052, D-053, D-055 and D-058–D-061
+> Architecture: historical [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), normative [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), and all applicable current decisions, especially D-046, D-047, D-050, D-052, D-053, D-055, D-058–D-061 and D-071
 > Stable package/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
-This contract decides whether the Integrated Web Alpha scope is complete; `W3/W4` is a delivery-order window, not a calendar promise under either the default or bounded-parallel execution model. The accepted carrier is the JiuwenSwarm desktop Web frontend. Chrome/Chromium 107 remains the implementation compatibility floor for modified frontend code, while the candidate must separately name the exact accepted single-desktop-Google-Chrome evidence baseline. D-058 does not turn that evidence into a Chrome+Edge or wider compatibility promise. This is not a mobile/PWA, Firefox/Safari, public compatibility-matrix, RC, or Production approval.
+This contract decides whether the Integrated Web Alpha scope is complete; `W3/W4` is a delivery-order window, not a calendar promise under either the default or bounded-parallel execution model. The accepted carrier is the JiuwenSwarm desktop Web frontend. Chrome/Chromium 107 remains the implementation compatibility floor for modified frontend code, while the acceptance record must name the actual single-desktop-Google-Chrome baseline. D-058 does not turn that run into a Chrome+Edge or wider compatibility promise. This is not a mobile/PWA, Firefox/Safari, public compatibility-matrix, RC, or Production approval.
 
-## 1. Candidate boundary
+Under D-071, Alpha closes with applicable automated verification plus one complete human product acceptance. No signed evidence bundle, fixed manifest, repeated full run or Replacement Ledger score is required.
 
-- One immutable candidate contains every runtime, schema, Adapter, flag, fixture, benchmark and documentation input.
-- The candidate has a clean worktree and an explicit relation to its development branch/upstream.
+## 1. Tested-source boundary
+
+- Identify the tested source containing every runtime, schema, Adapter, flag, fixture, benchmark and documentation input used by the run.
+- The tested source has a clean worktree and an explicit relation to its development branch/upstream.
 - Private Provider/Executor/project/browser/device/network/deployment conditions are recorded without secrets and restored independently of Git.
-- All required Tier 3 automated suites and real-path evidence run against this candidate; historical counts or Week 2 evidence are context, not automatic PASS.
+- All required automated suites and the complete human product journey run against this source; historical counts or Week 2 observations are context, not automatic Alpha PASS.
 
-## 2. Shared contract Gate
+## 2. Shared contract requirements
 
 The complete Alpha-consumed ACG boundary must be implemented and conformant:
 
@@ -28,7 +30,7 @@ The complete Alpha-consumed ACG boundary must be implemented and conformant:
 
 Unknown or unsupported facts remain explicit. A legacy v1 Adapter cannot be relabeled as complete v2.
 
-## 3. P1 Gate
+## 3. P1 requirements
 
 Pass the real `browser microphone → browser Audio I/O → STT → existing Chat/E2A → TTS → browser playout` path:
 
@@ -40,7 +42,7 @@ Pass the real `browser microphone → browser Audio I/O → STT → existing Cha
 - fixed corpus and real-device measurements with p50/p95, failures and sample count;
 - partial Agent/Tool/Task side effects, stale playback and wrong-response stop equal 0.
 
-## 4. P2 Gate
+## 4. P2 requirements
 
 Pass the real `browser microphone → Browser↔Gateway Realtime Media → Conversation Runtime/Interaction Engine → Agent Bridge/Harness → streaming TTS/browser playout` path:
 
@@ -52,7 +54,7 @@ Pass the real `browser microphone → Browser↔Gateway Realtime Media → Conve
 - background work does not freeze microphone, new Turn or progress notification;
 - cross-response/round/task/playback cancellation errors equal 0.
 
-## 5. P3alpha Gate
+## 5. P3alpha requirements
 
 Pass both structured and committed natural-language routes:
 
@@ -68,7 +70,7 @@ Pass both structured and committed natural-language routes:
 
 Full-P3-only operations must return explicit `unsupported` unless a separately reviewed stretch implementation and acceptance extension exists.
 
-## 6. Joint P2/P3alpha Gate
+## 6. Joint P2/P3alpha requirements
 
 Run one slow conversational Harness round and one detached task concurrently while the user continues multiple voice Turns, interrupts/revises the current response, queries or cancels the exact task, and receives blocked/decision/terminal progress.
 
@@ -81,7 +83,7 @@ Pass requires:
 - slow Harness synchronous wait on the realtime hot path is 0;
 - partial speech mutations and stale post-fence effects are 0.
 
-## 7. Web platform and degradation Gate
+## 7. Web platform and degradation requirements
 
 - freeze the desktop-browser scope before candidate testing and run the complete candidate on every browser/version in that declared baseline; an absent or changing baseline is `BLOCKED`, and exact browser, OS, origin, device and network labels are evidence rather than a public compatibility promise;
 - non-localhost deployment uses HTTPS/WSS or an equivalent secure context; localhost remains a development/controlled-test exception only;
@@ -95,10 +97,12 @@ Pass requires:
 
 ## 8. Final decision
 
-Sol reviews the actual diff, grouped Tier 2/3 evidence, exact candidate, unresolved gaps and every accepted deviation. Result is one of:
+First run the applicable automated positive, negative, flag-off, regression, build and static checks. Then the user completes one end-to-end human journey covering every applicable section above, including physical audio, interruption/correction, concurrent P2/P3alpha behavior, Task UI, refresh/reconnect and visible degradation. Reuse of an already passed human step is allowed only when later changes do not affect it.
+
+Review the actual diff, automated results, tested source, human observations, unresolved gaps and every accepted deviation. Result is one of:
 
 - `PASS — INTEGRATED WEB ALPHA`;
-- `PARTIAL — candidate runs but one or more committed Gate requirements remain`;
+- `PARTIAL — the source runs but one or more automated or human product requirements remain`;
 - `BLOCKED — required external condition or authority decision is unavailable`;
 - `FAIL — candidate violates a committed invariant or cannot run the required real paths`.
 

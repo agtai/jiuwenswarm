@@ -1,20 +1,20 @@
 # Live Voice：W2 90% Demo 与 Integrated Web Alpha 交付路线
 
-> 更新日期：2026-08-07
-> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061、D-062](../decisions/DECISIONS.md)
-> 当前实现事实、track 状态和 Demo Replacement Ledger：[STATUS.md](../STATUS.md)
+> 更新日期：2026-08-11
+> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061、D-062、D-071](../decisions/DECISIONS.md)
+> 当前实现事实、track 状态和产品验收清单：[STATUS.md](../STATUS.md)
 > 已完成 Week 1 的历史 priority/dependency/boundary 与 package contracts：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
 > Web Alpha 稳定工作包、Demo 替换关系、依赖和目标窗口：[WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 > 当前执行方式：[D-060、D-061、D-062](../decisions/DECISIONS.md) 在有界 W2→Alpha 窗口内以按批次自适应的非重叠 worker 图、一个 Main Integration Owner 和一次完整 reviewed 批次 smoke 取代 D-052 的默认单线；worker 可由独立 Session/worktree、bounded subagent 或 Main 承担，不设固定数量，远端更新继续单独批准。
-> 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前范围、顺序窗口和 Gate，不把 Alpha 写成 Production，也不把原并行估算继续写成单线日历承诺。
+> 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前范围、顺序窗口和验收，不把 Alpha 写成 Production，也不把原并行估算继续写成单线日历承诺。
 
 ## 1. 交付目标
 
 项目只维护一条累计工程路线：
 
 1. **V0 — 已完成且冻结**：第一时间证明真实麦克风输入、committed transcript、真实 JiuwenSwarm Agent/Tool、真实结果和语音输出能端到端运行。
-2. **Week 2 — Integrated Demo 90%**：P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability 在同一 Demo 中累计运行；正式模块按 Port/Adapter/flag 逐段替换 V0 shortcut，Replacement Ledger 至少 90/100 且 mandatory invariants 全部通过。
-3. **Week 3–4 — Integrated Web Alpha**：P1 + P2 + P3alpha 三个真实纵向切片、桌面 Web 产品路径以及 P2/P3alpha 联合 Gate 通过。完整 P3 是 stretch goal。
+2. **Week 2 — Integrated Demo**：P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability 在同一 Demo 中累计运行；正式模块按 Port/Adapter/flag 逐段替换 V0 shortcut，适用自动验证通过，并完成一次完整人工产品验收。
+3. **Week 3–4 — Integrated Web Alpha**：P1 + P2 + P3alpha 三个真实纵向切片、桌面 Web 产品路径以及 P2/P3alpha 联合自动与人工验收通过。完整 P3 是 stretch goal。
 4. **Later — Beta/RC/Production**：完整 P3、D1/D2、生产鉴权、跨平台、运营 SLO、隐私/retention、兼容矩阵和发布加固继续累计，不倒灌为当前 Web Alpha 的隐含阻塞项。
 
 V0、Week 2 和 Week 4 使用不同的验收合同。一次 V0 PASS 不能证明 Alpha，一次模块 conformance 也不能证明累计 Demo 或真实设备路径。
@@ -51,9 +51,9 @@ Integrated Web Alpha 至少包括：
 - 一个共享契约/集成 owner，避免各轨创造第二套 authority；
 - 从 Day 1 开始持续接回同一个 Demo；
 - 所有实现和审查 worker 使用当前 GPT/Sol，不再提醒、委派或切换到 DeepSeek/其他外部执行模型；
-- Provider、桌面 Chromium 浏览器、音频设备、Web 部署/代理、Executor 和私有配置在相应真实 Gate 前可用。
+- Provider、桌面 Chromium 浏览器、音频设备、Web 部署/代理、Executor 和私有配置在相应真实产品验收前可用。
 
-D-060/D-062 只在接受的 W2→Alpha 范围内提供按实际依赖和容量生成的非重叠 worker 图和一个单写集成 owner；它们不改变外部 Provider、浏览器/设备、部署、Executor 或真实 Gate 的依赖，也不把原并行 timebox 恢复为日历承诺。该范围外仍按 D-052 的默认分配执行。
+D-060/D-062 只在接受的 W2→Alpha 范围内提供按实际依赖和容量生成的非重叠 worker 图和一个单写集成 owner；它们不改变外部 Provider、浏览器/设备、部署、Executor 或真实产品验收的依赖，也不把原并行 timebox 恢复为日历承诺。该范围外仍按 D-052 的默认分配执行。
 
 ## 4. Architecture Contract Gate 的渐进实现
 
@@ -79,9 +79,9 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 - P1 Provider/Audio 接线前：hypothesis/audio chunk、provider provenance、session cancel、隐私/retention；
 - P2 播放/history 接线前：surface ACK/cursor、presented ledger、Context/WorkProgress 仲裁；
 - P3alpha Store/Executor 接线前：AuthorizationContext、atomic command/event/snapshot/outbox、attempt dedup、restart reconciliation；
-- Web/Release Gate 前：route telemetry、benchmark schema、安全上下文、权限/设备/页面生命周期、部署/代理以及真实 Provider/Executor evidence。
+- Web/Release acceptance 前：route telemetry、benchmark schema、安全上下文、权限/设备/页面生命周期、部署/代理以及真实 Provider/Executor verification。
 
-无关模块不等待未消费的扩展 contract。完整 ACG conformance 仍在 Week 4 Alpha Gate 前闭环。
+无关模块不等待未消费的扩展 contract。完整 ACG conformance 仍在 Week 4 Alpha acceptance 前闭环。
 
 ## 5. 并行 delivery tracks
 
@@ -96,7 +96,7 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 
 ## 6. W2 顺序窗口（原并行资源下的十日模型）
 
-本节保留原并行资源假设下的依赖顺序和 Gate 间距，不表示 D-060 执行窗口或任何当前日历日期。已完成 Week 1 的精确历史 owner、依赖 Gate、目标文件、scenario oracle 和验证命令可查 dated [Week 1 execution plan](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)；当前状态和下一动作只写入 STATUS。
+本节保留原并行资源假设下的依赖顺序和里程碑间距，不表示 D-060 执行窗口或任何当前日历日期。已完成 Week 1 的精确历史 owner、依赖条件、目标文件、scenario oracle 和验证命令可查 dated [Week 1 execution plan](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)；当前状态和下一动作只写入 STATUS。
 
 | 原并行时间模型 | 顺序目标 | 退出判据 |
 |---|---|---|
@@ -104,8 +104,8 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 | Day 3–5 | P1/P2/P3alpha A 包并行；首批 Browser/Agent/AutoHarness compatibility Adapter 接入 | 三轨各有 fake vertical；至少一个真实累计路径开始替换 V0 shortcut |
 | Day 5 | D-031 go/no-go | TC-B/Event projection 可在 Day 7 入 Demo则跳过/缩减；否则批准 1–2 天最小 poll Adapter |
 | Day 6–8 | 真实 B 包、Continuous Integration、Web/Provider/Executor 后验启动 | formal route 有 trace；fallback/substitute 可切换；错误不污染文字路径 |
-| Day 9 | Week 2 candidate freeze | Replacement Ledger 有证据、mandatory invariants 全绿、未达项明确 |
-| Day 10 | Integrated Demo Gate | [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 至少 90/100，并按 [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 连续运行 |
+| Day 9 | Week 2 automated closure | 适用自动正向/负向/flag-off/回归/build/static 检查通过，未达项明确 |
+| Day 10 | Integrated Demo product acceptance | 用户按 [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 和 [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 完成一次完整人工旅程 |
 
 遇到风险时，优先保住共享 authority、committed-only、真实状态、fence、文字降级和累计可运行 Demo；降低非关键 UI 精度、扩展 Context adapter 或完整 P3 stretch，而不是用 hardcode 伪造结果。
 
@@ -123,32 +123,20 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 
 - 关闭所有 Tier 2/3 必需 gap；
 - 对共享 ACG 和各真实 Adapter 执行 grouped Sol post-review；
-- 在同一 immutable candidate 运行受影响 unit/contract/integration/build、真实 Web/Provider/Executor、纵向和联合 Gates；
-- 形成 sanitized Alpha evidence；
-- 只有在 P1 + P2 + P3alpha 和 Web 平台必需 Gate 全部通过时标记 Integrated Web Alpha。
+- 在同一被识别的测试源码上运行受影响 unit/contract/integration/build 与真实 Web/Provider/Executor 自动检查；
+- 完成一次覆盖纵向与联合场景的人工产品验收，并形成简短的 sanitized acceptance record；
+- 只有在 P1 + P2 + P3alpha 和 Web 平台的适用自动与人工要求全部通过时标记 Integrated Web Alpha。
 
 完整 P3 stretch 不得阻塞 P3alpha Alpha。如果 stretch 改变 canonical operation/state/durability，必须单独设计和验收。
 
-## 8. Week 2 Demo Replacement Ledger
+## 8. Week 2 产品验收闭环
 
-权威当前分数保存在 STATUS；验收算法和 mandatory invariants 保存在 Week 2 acceptance。固定权重为：
+D-071 退役 Demo Replacement Ledger、签名证据 Gate、固定 artifact 槽位和重复三次完整展示。W2 只有两个完成条件：
 
-| Journey | Weight | Full credit requires |
-|---|---:|---|
-| P1 Speech I/O | 20 | formal AIO/SR/SS Port 路由、真实 Adapter/fallback、提交与权限/设备降级证据 |
-| P2 Realtime Conversation | 40 | CR/RM/II/AB 实际拥有 lifecycle、媒体/交互、Agent mapping、fence 和 presentation facts |
-| P3alpha Task Control | 25 | TC/ED/VB 实际拥有真实 command/event/task/attempt、D0、progress/result；legacy poll 只可获部分分 |
-| Cross-cutting | 15 | Context facts、Failure/Degradation、route telemetry、Observability、fault injection 和 flag-off/text regression |
-| **Total** | **100** | **至少 90，且 mandatory invariant 全部通过** |
+1. 最终测试源码上的适用自动正向、负向、flag-off、回归、构建和静态检查通过；
+2. 用户在一个完整产品会话中人工通过 P1、P2、P3alpha、非阻塞/打断、恢复与可见降级旅程。
 
-评分规则：
-
-- `formal`：目标模块及真实 Adapter 通过本 Journey 所需证据，可获得该子项全分；
-- `formal + fallback`：正常路径正式、fallback 诚实且可验证，可获得全分；
-- `demo_substitute`：telemetry/数据中的稳定枚举值；面向人的显示文本可以写作 “Demo substitute”。它只能按 acceptance 中预先分配的部分分计入，不能因为“可展示”就当作正式完成；
-- `unsupported/unknown`：可以保持诚实，但对应目标能力不得计满；
-- 没有 route telemetry 或证据无法确定实际实现时记 0；
-- 任一 mandatory invariant 失败时，Demo Gate FAIL，即使算术达到 90。
+`formal`、`fallback`、`demo_substitute`、`unsupported` 和 `unknown` 继续用于如实描述实际 route，不再换算分数。任何必需产品行为或安全不变量失败时保持 `PARTIAL` 或 `FAIL`；缺少旧签名、manifest 或 Ledger 分数不影响产品状态。
 
 ## 9. D-031 最小边界
 
@@ -171,7 +159,7 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 | 0 | docs、机械修改、纯重构 | affected checks、链接/格式/characterization | 按需；不建立完整矩阵 |
 | 1 | 普通功能、Port/Adapter/UI | positive journey、关键 negative/flag-off、affected integration/regression | grouped contract/diff review 按需 |
 | 2 | 状态、并发、mutation、cancel/fence | scoped pre/post review；所有适用 P/N/B/S/T/C/R/I/F/K/X 风险；零禁止副作用 | Sol 必须签署边界和实际 diff |
-| 3 | shared protocol/authority/security/durability、Week 2/4 Gate | 完整 D-032、fault/recovery、immutable candidate、真实 E2E/manual evidence | Sol 最终判断和 Gate 签字 |
+| 3 | shared protocol/authority/security/durability、production release | 完整适用 D-032、fault/recovery、真实 E2E；里程碑另按 D-071 完成人工产品验收 | Sol 最终判断高风险语义和实际 diff |
 
 ### D-053 三轮 review
 
@@ -195,7 +183,7 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 - coherent package group 可以共享 pre-review、implementation batch、post-review 和 commit；
 - Tier 0/1 不制造完整 11 维 N/A 表；
 - 不要求每个小包独立 checkpoint commit/push；
-- Week 2/Week 4 使用 immutable candidate 统一证明累计结果；
+- Week 2/Week 4 在被识别且干净的测试源码上运行自动验证与一次完整人工产品验收；
 - 默认 Git commit 和 push 仍分别遵守根 `AGENTS.md` 的精确批准门；active D-060/D-062 packet 内的本地操作按其有界例外执行，所有远端 ref 更新仍须单独精确批准。
 
 ## 11. 集成与兼容规则
@@ -205,15 +193,15 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 3. Provider、Bridge、UI、Executor 不得成为第二生命周期 authority；Compatibility Adapter 保留 provenance，不能把 legacy v1 重新标为完整 v2。
 4. 模块 fake 用于自动化和 fault injection，不作为现场真实成功证据。
 5. 每个 landed module 立即进入 Integrated route 的可选组合，先通过 fake upstream/downstream，再连接真实 Adapter。
-6. V0 candidate 保持冻结；累计 Demo 和 Alpha 使用新的 candidate/evidence，不修改 V0 事实。
+6. V0 candidate 保持冻结；累计 Demo 和 Alpha 使用新的被识别测试源码与验收记录，不修改 V0 事实。
 7. 按 D-047，`useLiveVoiceDemo`、稳定句 preview、前端 TaskBridge 和旧 `schedule.*`/JSON foundation 只作为冻结 Compatibility/fallback/substitute；除有界回归修复、timeboxed D-031 或正式 route 薄接线外不得继续扩建，CR/TC/ED 等正式 owner 随实际替换接管，避免先做独立大重构或形成第二 authority。
 
-## 12. Gate 状态语义
+## 12. 交付状态语义
 
 - `NOT STARTED`：没有实现和测试事实；设计接受不改变该状态。
-- `IN PROGRESS`：有未完成实现或 evidence，不能计满 Replacement Ledger。
-- `PARTIAL`：存在可运行 foundation/substitute 或部分证据，但目标 route/Gate 未完成。
-- `CLOSED`：相应 Tier 的必需行为、风险、真实接线和证据全部满足。
+- `IN PROGRESS`：实现或自动验证尚未完成。
+- `PARTIAL`：存在可运行 foundation/substitute，或自动/人工验收尚有未完成项。
+- `CLOSED`：相应 Tier 的必需行为、风险、真实接线、自动验证和适用人工验收全部满足。
 - `BLOCKED`：缺少外部条件或必要决策，当前无法诚实完成。
 
-设计文档的 accepted/sign-off 不等于实现 `CLOSED`。Week 2 90% 也不自动关闭 Week 4 Alpha 模块。
+设计文档的 accepted/sign-off 不等于实现 `CLOSED`。Week 2 产品验收也不自动关闭 Week 4 Alpha 模块。

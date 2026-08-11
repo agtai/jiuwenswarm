@@ -221,18 +221,24 @@ $env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 
 Vite 也会读取 `JIUWENSWARM_DATA_DIR`，所以前端终端必须使用与本次后端相同的隔离路径。下述默认 V0、稳定句预读和 Task Demo 三种兼容/Demo 模式一次只能选一种；切换模式时先按 `Ctrl+C` 停止现有 Vite，确认 `5173` 已释放，再在新终端完成变量设置后启动。不得先运行 `npm run dev` 再修改变量，也不得仅打开产品组合 flag 就把这些模式算作累计验收路径。
 
-### 7.1 Cumulative Integrated / Web Alpha 激活门槛
+### 7.1 Cumulative Integrated / Web Alpha 产品验收
 
-Week 2 Gate 要求在同一 Session 和同一累计产品路径中组合 P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability，并由 route telemetry 标记每段 `formal/fallback/demo_substitute/unsupported/unknown`。当前源码已提供默认关闭的累计产品路由、独立 Gateway/AgentServer JSONL 证据出口和严格 Gate CLI；这表示可以进入受控 candidate 激活，不表示已经有真实 Provider、设备、Executor、人工听感或 Gate PASS。
+D-071 将当前及后续 Live Voice 里程碑统一为**适用自动验证通过 + 一次完整人工产品验收**。不再创建或修复 trust policy、root/leaf key、artifact signature、38-slot manifest、Replacement Ledger 或 `w2_gate_cli evaluate` 结果，也不要求连续重复三次完整 showcase。
 
-- 不得同时打开现有两个 Post-V0 flag 并把偶然共存称为 Integrated Demo；
-- 不得拼接多个独立运行的截图或结果计算 Replacement Ledger；
-- 不得使用 fake Provider/Executor 作为真实 showcase 成功；
-- [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md) 只能作为 Gate 脚本，运行状态和 Week 2 分数只从 STATUS 读取；
-- 必须用下述 CLI 导入签名原件并输出机器 Gate 结果；手填分数、通用 lifecycle 事件、截图和人工 receipt 都不能创建 runtime credit。
+验收按以下顺序进行：
+
+1. 记录测试源码 SHA，确认 source worktree 无无法解释的改动；恢复隔离数据目录、持久 Session、注册 project、真实 Agent/Speech 配置、浏览器权限和实际输入/输出设备。
+2. 按 [W2 acceptance](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 运行适用的自动正向、负向、flag-off、回归、构建和静态检查。自动化必须继续验证 committed-only、身份/范围、stale/cancel、wrong-target 和零禁止副作用。
+3. 使用正式 Integrated Web flags 启动单一产品页面：`VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB=true`、`VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1=true`、`VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION=true`；保持兼容 Demo flags 关闭。
+4. 用户按 [Integrated showcase](../demo/INTEGRATED_SHOWCASE.md) 完成一次完整旅程：物理 P1、真实 Agent/只读 Tool、完整 TTS、打断/纠正、P2/P3 非阻塞、P3 create/cancel/retry A→B→C、刷新/重连/重启与一个安全可见降级。
+5. 正常停止服务并核对 worktree、fixture、端口、task/attempt/outbox/owner/lease。将每项记录为 `PASS`、`FAIL`、`BLOCKED` 或 `NOT APPLICABLE`，更新 STATUS；无需签名或计分。
+
+同一源码和相关环境中已经人工通过、且未被后续语义修改影响的步骤可以复用。不得为了旧 Gate 仪式要求用户重复，也不得用自动化替代麦克风、完整朗读、交互手感或 UI 状态的人工观察。
+
+下述 7.1.a–7.1.4 是 D-071 前的历史签名取证流程，仅用于解释旧 artifacts 或在用户明确重新启用审计级认证时参考；当前 W2/Alpha 验收**不得执行**这些步骤。
 
 <a id="validation-ready-before-signing"></a>
-#### 7.1.a 正式签名前的 validation-ready 门
+#### 7.1.a 历史：已退役的正式签名前 validation-ready 门
 
 W2 采用两条严格分离的执行轨道。第一条是**无 evidence 的验证准备轨道**：用于发现和修复启动、配置、浏览器、界面、重启与路由问题，不创建 policy、key、signature、runtime evidence 或 Gate credit。第二条才是**冻结 SHA 后的一次性签名取证轨道**。已知缺陷或未通过的机器/UI 条件不得带入第二条轨道；不得再用正式签名循环调试环境。
 
@@ -250,7 +256,7 @@ W2 采用两条严格分离的执行轨道。第一条是**无 evidence 的验�
 正式四组 rehearsal 开始后，按 Pair 1、Pair 2、Pair 3、A4 顺序连续收集。长回复导致的 TTS response limit、完成后自动 successor capture 超时、可恢复的操作失误或其他不影响身份/权威/安全的单步失败，应记录并继续完成本轮其余可观察步骤，避免立刻重新创建 candidate；这些失败仍不产生该项 Gate credit。只有 candidate/Session/project/model 错误、credential 暴露、policy/signature/evidence-owner 不匹配、dirty worktree、多个页面、required route 丢失、无法形成规定 terminal truth 或存在未清理 mutation/lease/task 时才立即中止。四组结束后统一分析并批量修复；任何必需项失败都禁止派生 formal policy，但不应在发现第一个非致命问题时反复重做签名和环境准备。
 
 <a id="w2-portable-toolkit"></a>
-#### 7.1.0 可迁移 W2 rehearsal 工具包
+#### 7.1.0 历史：已退役的可迁移 W2 rehearsal 工具包
 
 仓库内的 [W2 rehearsal portable toolkit](../../scripts/live_voice/w2_rehearsal/README.md)
 是新机器、新 Session 或 fresh candidate 的唯一脚本入口。它保存 candidate-independent
@@ -315,7 +321,7 @@ Pair2 non-retriable full journey、Pair3 STALE/full A→B→C、A4 exact restart
 rehearsal/formal runtime evidence experiments。当前能否开始这些运行只由
 [STATUS.md](../STATUS.md) 决定；工具可迁移不等于 source/runtime blockers 已关闭。
 
-#### 7.1.1 冻结 candidate、Session 和证据边界
+#### 7.1.1 历史：冻结 candidate、Session 和证据边界
 
 先在同一隔离数据目录完成机器私有的模型、code project 和一次持久 Session 注册，记录真实 `session_id`，然后停止全部服务。正式取证不能使用 `session_id=new`。在干净 candidate worktree 的新 PowerShell 中执行：
 
@@ -341,7 +347,7 @@ if (-not $sessionId -or $sessionId -eq 'new' -or $sessionId -like '<*') { throw 
 
 启动任何取证进程前，先由外部 root 身份签署 `live-voice.w2-trust-policy.v2`。policy 必须固定上述 candidate/environment/Session/mode、实际加载源码的 `repository_path`、`evidence_set_id`、两个互相独立的 Gateway/AgentServer runtime signer，以及本 attempt 允许出现的每个 runtime slot：`artifact_id`、全局 `artifact_sequence`、`producer_id`、`process_epoch`、同 producer 的可选 `predecessor_artifact_id` 和可选 `showcase_run`。所有 runtime、automated、assisted/review 原件还必须进入完整 `artifact_slots` 计划。三个 showcase 各自必须预留 Gateway 与 AgentServer slot；fault、restart 和其他取证 slot 也必须在启动前列全。使用独立可信渠道预先保存 root 公钥 SHA-256，并按 7.1.4 的 `validate-policy` 命令完成预检后才能启动服务。运行后不得补签 policy、删除失败 slot 或用 manifest 选择性省略原件；需要改变 slot 时废弃整个 attempt，使用新 evidence set 和新 root-signed policy 重来。
 
-#### 7.1.2 启动累计后端
+#### 7.1.2 历史：启动签名取证后端
 
 AgentServer 终端先设置第 4.1 节数据目录以及上节六个公共值，再设置：
 
@@ -420,7 +426,7 @@ Gateway 必须启用 bounded Web Alpha credential owner，并使用与 AgentServ
 
 每个 root-authorized slot 使用一组新进程和一个新 JSONL 文件；正常关闭 owner 后必须出现 `closed:true` footer，且 `rejected_invalid`、`rejected_capacity`、`failed_writes` 全为零。三个 showcase 不得写入同一 runtime artifact。任一进程若报告 candidate mismatch、dirty worktree、证据注册失败、Provider 配置错误或 P3 authority/project 错误，立即停止本次 attempt；不能关闭证据再继续算分。需要修代码或配置时关闭全部进程，产生新 commit/SHA、新证据目录、新 policy 和新 attempt。
 
-#### 7.1.3 启动累计前端并执行 journey
+#### 7.1.3 历史：启动签名取证前端并执行 journey
 
 Vite 终端绑定同一数据目录，启用且仅启用正式 Integrated Web 入口：
 
@@ -439,7 +445,7 @@ npm run dev
 
 P2 Realtime Media 取证时，产品会在 Agent 下行播放前自动打开下一轮麦克风上行。保持该上行处于采集状态直至物理播放完成，再使用产品内的停止/识别控制完成这轮上行；不得提前关闭麦克风、手工伪造 overlap，或把网络收包 ACK 当作播放 ACK。有效 runtime 顺序必须是同一 interaction/response 下的 Gateway downlink 完成、浏览器 render receipt、Gateway 派生 duplex receipt、后续 capture 完成。
 
-#### 7.1.4 冻结、签名、导入和评分
+#### 7.1.4 历史：冻结、签名、导入和评分
 
 完成后依次停止 Vite、Gateway、AgentServer，确认每个 JSONL v2 footer 已关闭、计数精确且没有 reject/write failure，并确认 candidate 仍干净。runtime 的 Gateway 与 AgentServer 必须使用 policy 中各自绑定的独立 signer/principal；自动化、人工观察、fault injection 和独立 review 也各用 policy 中的独立身份，独立 review 不得使用实现者身份。下面 `sign` policy 命令必须已在 7.1.2 启动前执行，此处只完整列出操作接口，禁止运行后补签或替换 policy。CLI 只创建新 key/signature 文件，拒绝覆盖：
 
@@ -656,7 +662,7 @@ project.create（首次注册时）
 - 同一 request 记录 11 次 tool call、10 次相同失败 result、0 个 Turn 3 final；第 11 次在途时由 `chat.interrupt(intent=cancel)` 终止。候选 dirty=`0`，资源恢复，Agent 服务以同一隔离数据目录重启。
 - CircuitBreaker 默认关闭且默认错误阈值过晚。本 attempt 记 **FAIL**；先建立带低阈值确定性失败熔断的新 Candidate，再从新 Session Turn 1 重跑。日期口令改成 `YYYY-MM-DD` 只隔离平台缺陷，不证明生产工具资源保护完成。
 
-## 11. 证据记录模板
+## 11. 产品验收记录模板
 
 只记录非敏感信息：
 
@@ -666,7 +672,7 @@ Git commit：
 工作区是否干净：
 OS 版本/build：
 Chrome 版本：
-非 Chrome 探索浏览器/版本（可选，不计 Alpha credit）：
+非 Chrome 探索浏览器/版本（可选，不属于当前 Alpha 基线）：
 Web origin 与 secure-context 状态：
 HTTPS/WSS 终止点与反向代理标签：
 CSP/CORS/实时连接路由：通过 / 失败
@@ -689,20 +695,20 @@ tool_call/tool_result/final：通过 / 失败
 实际 TTS：通过 / 失败
 技术标识符完整听到：通过 / 失败
 8 秒初始静默阈值：通过 / 失败
-10 Turn 通过数 / 重复提交：
-thinking supplement：__ / 3
-tool supplement：__ / 4
-speaking playback stop + chat.send：__ / 3
-10 次打断旧声音恢复次数：
-实际路由证据缺失次数：
+P2 correction/barge-in：通过 / 失败
+P2/P3alpha 同时运行且互不阻塞：通过 / 失败
+P3 create/cancel/retry A→B→C：通过 / 失败
+刷新/reconnect/restart：通过 / 失败
+可见降级与文字 fallback：通过 / 失败
+实际路由事实缺失次数：
 迟到 tool_result / cancel warning / 可观察副作用：
 20 分钟或 20 Turn：
-完整脚本连续成功次数：
+一次完整人工产品旅程：PASS / PARTIAL / BLOCKED / FAIL
 ASR 误识别样本：
 已知问题与复现步骤：
 ```
 
-截图和脱敏日志可以作为本机验收证据，但提交前必须确认不包含密钥、用户目录、私人对话或其他敏感信息。
+截图和脱敏日志可以作为本机验收记录，但提交前必须确认不包含密钥、用户目录、私人对话或其他敏感信息。D-071 不要求签名、固定 manifest 或重复完整旅程。
 
 ## 12. 结束与恢复
 

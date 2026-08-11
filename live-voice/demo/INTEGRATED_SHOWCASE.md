@@ -1,12 +1,12 @@
 # Live Voice cumulative P1/P2/P3alpha showcase
 
-> Runtime/Gate state: see [STATUS.md](../STATUS.md)
+> Runtime/acceptance state: see [STATUS.md](../STATUS.md)
 > Week 2 pass/fail authority: [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
 > Week 3–4 Web Alpha pass/fail authority: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
 > Environment procedure: [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md)
 > Stable delivery/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
-This script defines the cumulative engineering route after formal modules begin replacing V0 shortcuts. It never replaces acceptance evidence. Unless STATUS says the complete route is runnable and the runbook provides an exact activation procedure with route telemetry for every segment, this script remains a Gate procedure and must not be presented as a working capability.
+This script defines the single complete human product journey used by D-071 after automated verification. It is not a second implementation status source: only actually observed behavior may pass, and unavailable or unsupported behavior must remain explicit.
 
 ## 1. Showcase claim
 
@@ -30,13 +30,13 @@ The UI/trace must identify every segment as `formal`, `fallback`, `demo_substitu
 
 ## 2. Preflight
 
-1. Verify immutable candidate SHA, clean worktree, isolated runtime data and exact registered project.
+1. Record the tested source, confirm a clean worktree, and use isolated runtime data plus the exact registered project.
 2. Verify selected Speech/Media/Agent/Executor routes and capability flags before opening the microphone.
 3. Run a text-only Agent/Tool smoke and a structured task create/status/cancel smoke against the same project and data boundary.
 4. Confirm the Demo target is safe for one real side-effecting task or select an isolated/disposable project.
-5. Confirm route telemetry, correlated events and sanitized evidence capture are active.
+5. Confirm route telemetry, correlated events and sanitized diagnostic logging are active.
 6. Confirm text fallback remains usable.
-7. For Web Alpha evidence, verify the declared Google Chrome version, secure origin, permission/device/autoplay/page-lifecycle checks and Browser↔Gateway deployment route before opening the microphone. Non-Chrome evidence is exploratory and earns no Alpha credit.
+7. For Web Alpha acceptance, verify the declared Google Chrome version, secure origin, permission/device/autoplay/page-lifecycle checks and Browser↔Gateway deployment route before opening the microphone. Non-Chrome results remain exploratory unless the accepted browser scope changes.
 
 ## 3. Integrated script
 
@@ -56,7 +56,7 @@ Start a deliberately slow read-only Agent request. While it is working or speaki
 
 ### Turn 3 — create a real detached task
 
-> Gate rule: closing the bounded D-031 project-bound carrier does not make this cumulative script runnable. Consult STATUS for the formal Integrated-mode dependencies, and do not substitute the shell-disabled Compatibility Adapter for Task Core/Event/Executor authority.
+> Acceptance rule: closing the bounded D-031 project-bound carrier does not make this cumulative script runnable. Consult STATUS for the formal Integrated-mode dependencies, and do not substitute the shell-disabled Compatibility Adapter for Task Core/Event/Executor authority.
 
 Issue a task intent without confirmation and show zero task mutation plus a clarification/confirmation request. Then give the exact confirmation in the isolated target. Show the real task ID, command ID, target, Executor and accepted/running facts.
 
@@ -76,9 +76,9 @@ Exercise one controlled Provider/media/permission or Executor failure. Show a bo
 
 1. Exit Live Voice and confirm microphone/audio/timers stop.
 2. Confirm the task is in its real final or explicitly nonterminal/reconciliation state; do not assume cancellation rolled back side effects.
-3. Display the final Replacement Ledger score and actual route map.
-4. Confirm the worktree and isolated data/evidence boundary.
+3. Display the actual route map and record which user-visible steps passed, failed or were unavailable.
+4. Confirm the worktree and isolated data boundary.
 
 Recommended closing statement:
 
-> This run used one cumulative product path. The route trace shows which P1, P2 and P3alpha segments are formal, which use declared fallback, and which remain substitutes. The Agent, Tool, task identity, status and result were real; the score and limitations come from the Week 2 acceptance contract, not from the presentation alone.
+> This run used one cumulative product path. The route trace shows which P1, P2 and P3alpha segments are formal, which use declared fallback, and which remain substitutes. The Agent, Tool, task identity, status and result were real; automated verification and the human observations recorded here determine the Week 2 product result.

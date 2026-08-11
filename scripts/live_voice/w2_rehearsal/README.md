@@ -1,5 +1,7 @@
 # W2 rehearsal portable toolkit
 
+> **Retired acceptance path (D-071):** this toolkit is optional diagnostic and historical-forensics support only. Do not create or repair policies, keys, signatures, 38-slot manifests or Gate artifacts for W2/Alpha acceptance. Current milestone closure uses automated verification plus one complete human product acceptance. The commands below are retained only to explain existing artifacts and to support an explicitly reinstated audit-grade certification request.
+
 This directory carries the candidate-independent tooling and deterministic audio
 needed to resume the W2 discarded rehearsal on another Windows machine or in a
 new Session. The authoritative procedure and safety boundary remain

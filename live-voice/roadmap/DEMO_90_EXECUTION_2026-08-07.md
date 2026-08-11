@@ -3,10 +3,12 @@
 > Accepted 2026-08-07 under D-046 and D-062.
 >
 > This is the stable W2 task, dependency, ownership and exit contract. Current branch, progress, blockers, score and next active lane live only in [STATUS](../STATUS.md). Pass/fail remains exclusively owned by [Integrated Demo acceptance](../validation/INTEGRATED_DEMO_ACCEPTANCE.md).
+>
+> **Superseded acceptance procedure:** D-071 retires this packet's score, signature, immutable-evidence and repeated-showcase Gate. Keep its package boundaries and historical estimates only; current W2 closure is automated verification plus one complete human product acceptance under the acceptance contract and STATUS.
 
 ## 1. Outcome and anti-drift rule
 
-The current milestone is one cumulative Integrated Demo on one immutable candidate with a score of at least `90/100`, every mandatory invariant passing, and the required repeatability/recovery evidence. W2 is followed by Integrated Web Alpha; complete P3 and production hardening follow Alpha.
+This packet originally targeted one immutable, scored W2 evidence set. D-071 supersedes that exit: the current milestone is one cumulative Integrated Demo whose applicable automated checks pass and whose complete human product journey passes once. W2 is followed by Integrated Web Alpha; complete P3 and production hardening follow Alpha.
 
 A task belongs on the W2 critical path only when it does at least one of the following:
 
@@ -32,7 +34,7 @@ Effort bands are engineering activity estimates assuming current foundations rem
 | `D90-X` | Minimum evidence and degradation plane | Correlated route ownership, Context facts, active-plane retriable/non-retriable faults, feature-off/text regression and sanitized evidence capture | instrumentation, fault injection, tests | `1.5–3d` | event vocabulary; final correlation consumes integrated routes |
 | `D90-COMP` | Cumulative product composition | One mode and one Session register eligible P1/P2/P3alpha/X routes through trusted Authority, exact cleanup and visible formal/fallback/substitute truth | Main-owned shared integration and UI | `2–4d` | reviewed usable P1/P2/P3 leaves and X instrumentation hooks |
 | `D90-VERIFY` | Cumulative verification and review | Risk-proportional affected suites, build, negative/fault/flag-off regressions, coherent-batch cold review and required independent review | tests, review, fixes | `2–3d` | integrated candidate |
-| `D90-GATE` | Immutable W2 Gate | Freeze a clean candidate; run the cumulative real journey, required faults/recovery, three consecutive showcases, itemized scoring and mandatory-invariant decision | browser/service E2E, evidence, acceptance | `1–3d` | all prior exits |
+| `D90-ACCEPT` | W2 product acceptance | Identify the tested clean source; run applicable automated verification and one complete human cumulative journey; record actual limitations | browser/service E2E, human acceptance | `0.5–1d` | all prior exits |
 
 ## 3. Adaptive worker graph
 
@@ -70,7 +72,7 @@ D-061 applies: focused checks and review close inside each coherent lane; Main r
 2. **Independent vertical work:** derive concurrent `D90-P1`, `D90-P2`, `D90-P3` and `D90-X` leaves whose dependencies exist; X may prepare instrumentation before the cumulative route exists.
 3. **Single-writer composition:** Main completes `D90-COMP` in real dependency order and keeps unavailable routes fail-closed; X then closes correlation against the actual composed lifecycle.
 4. **Verification closure:** run `D90-VERIFY`, fix findings in the owning lane and rerun affected checks.
-5. **Immutable evidence:** freeze and run `D90-GATE`; only its accepted record may change Replacement Ledger credit.
+5. **Product acceptance:** run `D90-ACCEPT` once under D-071; no signature, fixed artifact set, numeric score or repeated full showcase is required.
 
 ## 6. W2 exclusions and later handoff
 

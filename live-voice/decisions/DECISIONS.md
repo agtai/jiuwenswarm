@@ -771,3 +771,15 @@
 - Review 和 finding：两个实现批都保留实现者 self-review、实现者 cold complete-diff review和跨模型第三轮。预读不属于第三轮且不产生 PASS/NOT PASS。第三轮 findings 必须绑定 exact SHA，给出稳定 symbol/path、违反的不变量、确定性复现和影响；影响当前请求、兼容性或适用 D-032/D-069 维度的 actionable finding 必须修复。只有明确 scope-out 且不影响本批验收的事项可以记录后续 owner，而不能用 P2 标签自动延后。
 - Git/环境边界：D-063 的本地自主 Git 例外继续适用，任何 remote ref 更新仍需用户对精确 remote/ref/commit/方式单独批准，Task worker 永不 push。本决定不要求 MCP；Codex PATH、`CODEX_HOME`、ripgrep、Claude 本机配置和 review scratchpad 是机器私有条件，不进入 Live Voice Git 状态或证据。scratchpad 只能作为恢复素材，确认后的 finding 才可按文档规则规范化进入 D95。
 - 重新评估条件：跨模型第三轮不可用；Core seam 在产品实现期间持续变化；两个 lane 出现文件/语义重叠；Opus 无法在不改变 `7be485e8c` 安全边界的情况下实现 retry readiness；协调或 rebase 成本持续高于并行收益；用户改变模型、集成、Git 或远端授权；或当前两个 D-069 批次关闭。
+
+## D-071 Live Voice 里程碑以自动验证加一次完整人工产品验收闭环
+
+- 日期：2026-08-11
+- 状态：Accepted product-acceptance policy（用户明确撤销 W2 及后续 Live Voice 里程碑的签名证据 Gate/Replacement Ledger 完成门槛）
+- 范围：本决定适用于当前 W2 Integrated Demo、后续 Integrated Web Alpha 及之后的 Live Voice 产品里程碑，直到用户为明确的审计、合规或正式发布场景重新要求更高等级认证。它只取代 D-046、D-060、D-062 和相关执行包中的签名取证、固定槽位、重复展示、计分与 Gate 阻塞规则；产品范围、真实 Agent/Tool/Task 要求、架构权威、安全边界、D-046 风险分级、D-053 高风险 review 和负向零副作用要求继续有效。
+- 完成标准：先在被识别的测试源码上完成适用的自动化验证，包括正向旅程、关键负向、flag-off、受影响回归、构建和静态检查；再由用户在一个完整产品会话中人工验收所有适用的用户可见能力。人工步骤可以复用同一源码和环境中已经通过且未被后续语义修改影响的结果，不得仅为仪式重复。修复若影响某个可见步骤，只重跑受影响自动检查和人工步骤。
+- 退役内容：W2/Alpha 完成不再要求 root/leaf key、trust policy、artifact signature、evidence owner、七个 runtime artifact、31 个 non-runtime artifact、38-slot manifest、三次连续 showcase、`w2_gate_cli evaluate` 或 Replacement Ledger 分数。相关代码、脚本、旧 candidate 和历史文档保留为诊断/取证历史，不再进入关键路径，不得因其失败、缺失或 `0/100` 阻止产品验收或后续里程碑。
+- 记录：STATUS 记录自动验证、人工验收的通过/未通过项目、测试源码和真实限制；必要时新增简短的脱敏验收记录。不得把自动测试称为人工体验，也不得把未实际观察的麦克风、完整朗读、打断、非阻塞、Task UI、刷新/重连或降级行为写成通过。
+- W2 当前影响：P1/P2、真实 Terminal Tool、完整 TTS 和后继 capture 的人工结果继续有效；剩余人工范围是打断/纠正、P2/P3 非阻塞、P3 create/cancel/retry A→B→C，以及刷新/重连/重启和可见降级。完成这些适用步骤并确认无关键产品缺陷后，W2 可标记 `PRODUCT-ACCEPTED`，无需恢复签名 Gate。
+- 原因：签名取证框架曾发现若干真实身份、重放、P3 UI、配置和音频问题，但后期成本主要消耗在证据编排、签名、页面计数、等待窗口和 artifact 完整性，已明显偏离 90% Demo 的产品价值。自动化验证与一次完整人工产品验收足以满足当前交付目标，同时保留真实功能、安全和回归保证。
+- 重新评估条件：外部发布、审计、监管、客户合同或跨组织交付明确要求不可抵赖且可复现的签名证据；自动与人工结果发生无法解释的冲突；或用户明确重新启用某个有界认证 Gate。

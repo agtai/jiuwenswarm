@@ -20,11 +20,11 @@ They can be combined. `README.md` and `STATUS.md` are short and mandatory for ev
 | Current branch/milestone/progress/gaps/next slice | `STATUS.md` |
 | Accepted choice, rationale, impact, re-evaluation | `decisions/DECISIONS.md` |
 | Original complete design | `architecture/FULL_SOLUTION_2026-07-30.md` |
-| Delivery ordering, milestone definitions, replacement scoring, risk-tier closure | `roadmap/POST_V0_DELIVERY_ROADMAP.md` |
+| Delivery ordering, milestone definitions, acceptance closure and risk-tier closure | `roadmap/POST_V0_DELIVERY_ROADMAP.md` |
 | Completed Week 1 priority/dependency/boundary and historical package contracts | `roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md` |
 | Stable Web Alpha work-package, Demo-predecessor, formal-replacement, dependency, target-window and acceptance mapping | `roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md` |
 | V0 pass/fail contract | `validation/V0_ACCEPTANCE.md` |
-| Week 2 Integrated Demo pass/fail and 90% scoring | `validation/INTEGRATED_DEMO_ACCEPTANCE.md` |
+| Week 2 Integrated Demo automated-plus-human pass/fail | `validation/INTEGRATED_DEMO_ACCEPTANCE.md` |
 | Week 3–4 Integrated Web Alpha pass/fail | `validation/ALPHA_ACCEPTANCE.md` |
 | Environment and E2E operating procedure | `runbooks/E2E_RUNBOOK.md` |
 | V0 presentation flow | `demo/DEMO_SHOWCASE.md` |
@@ -57,12 +57,12 @@ They can be combined. `README.md` and `STATUS.md` are short and mandatory for ev
 
 ## Synchronization protocol
 
-- Code/module progress changes: update the concise dashboard and replacement ledger in `STATUS.md`; update roadmap only if milestone scope, order, scoring, or contract changed; update a review record only for the review it owns.
+- Code/module progress changes: update the concise dashboard and acceptance checklist in `STATUS.md`; update roadmap only if milestone scope, order or acceptance contract changed; update a review record only for the review it owns.
 - Rolling execution planning: record a stable dated package contract under `roadmap/`, route it from README/STATUS, and keep progress out of it. Replace the route when Sol freezes a new window; do not silently mutate an old plan into a new week's history.
 - Schedule wording: `W1/W2/W3/W4` may name dependency/order windows. A document may call them calendar weeks or commitments only when the current resource assumption and dated estimate are explicitly accepted; otherwise STATUS must say that calendar timing is not frozen.
 - New technical or product choice: append a decision, then update only the concise consequence in STATUS/roadmap.
 - Product-carrier change: preserve dated historical snapshots, update current decision/status/roadmap/acceptance/runbook routes, and reconcile the stable delivery matrix without rewriting historical evidence.
-- Acceptance run: keep raw/private logs outside Git as required, add a sanitized immutable evidence record, then update STATUS once.
+- Acceptance run: keep raw/private logs outside Git as required, add a concise sanitized acceptance record when useful, then update STATUS once. D-071 does not require signatures, a fixed evidence manifest or repeated full-showcase runs.
 - New shortcut: update the applicable demo/archive ledger and record only its current consequence in STATUS.
 - Document move/rename: update `README.md`, root `AGENTS.md`, all relative links, and run the link checker.
 - Do not claim a state in advance. Record verification commands and exact tested SHA only after they actually ran.
@@ -74,7 +74,7 @@ Use the roadmap risk tier before creating review artifacts:
 - Tier 0 documentation/mechanical/refactor work records scope and affected checks in the normal diff summary.
 - Tier 1 ordinary feature/Adapter/UI work records its contract, positive journey, key negative/flag-off paths, affected integration, and regressions in the implementation plan or grouped review.
 - Tier 2 state/concurrency/mutation work maintains a scoped Sol pre/post review and every applicable scenario dimension, including explicit forbidden effects.
-- Tier 3 shared protocol, authority, security, durability, and release work maintains the complete D-032 matrix plus immutable candidate and required real-path evidence.
+- Tier 3 shared protocol, authority, security, durability, and production-release work maintains the complete applicable D-032 matrix plus required real-path verification. Milestone acceptance itself follows D-071: automated verification plus one complete human product acceptance.
 
 Detailed inventories and matrices live in dated or module review records, not in STATUS. Related packages may share a review when they change one coherent boundary. STATUS links the review and carries only current state. Positive scenarios must succeed; negative scenarios must reject/fail closed, and mutation/security boundaries assert forbidden side effects as zero. Missing required evidence prevents closure of the affected scope; irrelevant dimensions are omitted or briefly scoped out rather than expanded into ceremonial rows.
 
