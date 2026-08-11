@@ -20,6 +20,14 @@ export interface LiveVoiceDemoBarProps {
   /** Always-visible warning shown before any task command can dispatch. */
   taskSafetyDisclosure?: string;
   taskActivity?: LiveVoiceTaskActivity | null;
+  statusLabel?: string;
+  primaryActionLabel?: string;
+  primaryActionDisabled?: boolean;
+  editableTranscript?: string;
+  onTranscriptChange?: (value: string) => void;
+  recognizedConfirmation?: boolean;
+  onRecognizedConfirm?: () => void;
+  onRecognizedCancel?: () => void;
   onEnable: () => void;
   onExit: () => void;
   onPrimaryAction: () => void;
@@ -45,13 +53,7 @@ function PrimaryActionIcon({ status }: { status: LiveVoiceVisualState }) {
   return <Mic size={17} strokeWidth={2} />;
 }
 
-function TaskActivityPanel({
-  taskSafetyDisclosure,
-  taskActivity,
-}: {
-  taskSafetyDisclosure?: string;
-  taskActivity: LiveVoiceTaskActivity | null;
-}) {
+function TaskActivityPanel({ taskSafetyDisclosure, taskActivity }: { taskSafetyDisclosure?: string; taskActivity: LiveVoiceTaskActivity | null }) {
   const { t } = useTranslation();
   if (!taskSafetyDisclosure && !taskActivity) return null;
   return (
@@ -156,6 +158,14 @@ export function LiveVoiceDemoBar({
   routeLabel,
   taskSafetyDisclosure,
   taskActivity = null,
+  statusLabel: statusLabelOverride,
+  primaryActionLabel: primaryActionLabelOverride,
+  primaryActionDisabled = false,
+  editableTranscript,
+  onTranscriptChange,
+  recognizedConfirmation = false,
+  onRecognizedConfirm,
+  onRecognizedCancel,
   onEnable,
   onExit,
   onPrimaryAction,
@@ -199,13 +209,15 @@ export function LiveVoiceDemoBar({
   const visibleError = errorMessage.trim() || (!available ? resolvedUnavailableMessage : '');
   const transcript = interim || committed || visibleError || t('liveVoice.transcriptPlaceholder');
   const transcriptKind = visibleError ? 'error' : interim ? 'interim' : committed ? 'committed' : 'placeholder';
-  const statusLabel = t(`liveVoice.status.${status}`);
-  const primaryActionLabel = t(`liveVoice.actions.${status}`);
+  const statusLabel = statusLabelOverride || t(`liveVoice.status.${status}`);
+  const primaryActionLabel = primaryActionLabelOverride || t(`liveVoice.actions.${status}`);
   const hasTaskPanel = Boolean(taskSafetyDisclosure || taskActivity);
+  const hasEditableTranscript = editableTranscript !== undefined && onTranscriptChange !== undefined;
+  const hasRecognizedConfirmation = recognizedConfirmation && onRecognizedConfirm !== undefined && onRecognizedCancel !== undefined;
 
   return (
     <section
-      className={`live-voice-demo live-voice-demo--active live-voice-demo--${status}${hasTaskPanel ? ' live-voice-demo--with-task' : ''}`}
+      className={`live-voice-demo live-voice-demo--active live-voice-demo--${status}${hasTaskPanel ? ' live-voice-demo--with-task' : ''}${hasRecognizedConfirmation ? ' live-voice-demo--with-confirmation' : ''}`}
       aria-label={t('liveVoice.label')}
       data-state={status}
       data-testid="live-voice-demo"
@@ -227,22 +239,47 @@ export function LiveVoiceDemoBar({
           )}
         </div>
 
-        <div
-          className={`live-voice-demo__transcript live-voice-demo__transcript--${transcriptKind}`}
-          aria-live={visibleError ? undefined : 'off'}
-          role={visibleError ? 'alert' : undefined}
-          title={transcript}
-        >
-          {transcript}
-        </div>
+        {hasEditableTranscript ? (
+          <textarea
+            className="live-voice-demo__transcript live-voice-demo__transcript--editor"
+            aria-label={t('liveVoice.formal.editorLabel')}
+            value={editableTranscript}
+            disabled={hasRecognizedConfirmation || primaryActionDisabled}
+            maxLength={100000}
+            onChange={event => onTranscriptChange(event.target.value)}
+          />
+        ) : (
+          <div
+            className={`live-voice-demo__transcript live-voice-demo__transcript--${transcriptKind}`}
+            aria-live={visibleError ? undefined : 'off'}
+            role={visibleError ? 'alert' : undefined}
+            title={transcript}
+          >
+            {transcript}
+          </div>
+        )}
 
         <TaskActivityPanel taskSafetyDisclosure={taskSafetyDisclosure} taskActivity={taskActivity} />
+
+        {hasRecognizedConfirmation && (
+          <div className="live-voice-demo__confirmation" data-testid="live-voice-product-confirmation" role="note">
+            <span>{t('liveVoice.integrated.recognizedConfirmation.agent')}</span>
+            <span className="live-voice-demo__confirmation-actions">
+              <button type="button" onClick={onRecognizedConfirm}>
+                {t('liveVoice.integrated.recognizedConfirmation.confirm')}
+              </button>
+              <button type="button" onClick={onRecognizedCancel}>
+                {t('liveVoice.integrated.recognizedConfirmation.cancel')}
+              </button>
+            </span>
+          </div>
+        )}
 
         <div className="live-voice-demo__actions">
           <button
             type="button"
             className="live-voice-demo__primary"
-            disabled={!available}
+            disabled={!available || primaryActionDisabled}
             aria-label={primaryActionLabel}
             aria-pressed={status === 'listening'}
             title={!available ? resolvedUnavailableMessage : primaryActionLabel}

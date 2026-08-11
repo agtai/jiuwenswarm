@@ -107,6 +107,21 @@
     'task actions';
 }
 
+.live-voice-demo--with-confirmation .live-voice-demo__panel {
+  grid-template-areas:
+    'meta actions'
+    'transcript actions'
+    'confirmation actions';
+}
+
+.live-voice-demo--with-task.live-voice-demo--with-confirmation .live-voice-demo__panel {
+  grid-template-areas:
+    'meta actions'
+    'transcript actions'
+    'task actions'
+    'confirmation actions';
+}
+
 .live-voice-demo--listening .live-voice-demo__panel,
 .live-voice-demo--error .live-voice-demo__panel {
   --live-voice-state-color: var(--color-feedback-danger);
@@ -188,6 +203,72 @@
 
 .live-voice-demo__transcript--error {
   color: var(--color-feedback-danger);
+}
+
+.live-voice-demo__transcript--editor {
+  width: 100%;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 10px;
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  font: inherit;
+  line-height: 1.4;
+  resize: vertical;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.live-voice-demo__transcript--editor:focus-visible {
+  outline: none;
+  box-shadow: var(--effect-focus-ring);
+}
+
+.live-voice-demo__confirmation {
+  grid-area: confirmation;
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border-default);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-2xs);
+  line-height: 1.4;
+}
+
+.live-voice-demo__confirmation > span:first-child {
+  min-width: min(100%, 260px);
+  flex: 1 1 260px;
+}
+
+.live-voice-demo__confirmation-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.live-voice-demo__confirmation button {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  cursor: pointer;
+  font: inherit;
+}
+
+.live-voice-demo__confirmation button:first-child {
+  border-color: var(--color-action-primary);
+  background: var(--color-action-primary);
+  color: var(--color-text-inverse);
+}
+
+.live-voice-demo__confirmation button:focus-visible {
+  outline: none;
+  box-shadow: var(--effect-focus-ring);
 }
 
 .live-voice-demo__task {

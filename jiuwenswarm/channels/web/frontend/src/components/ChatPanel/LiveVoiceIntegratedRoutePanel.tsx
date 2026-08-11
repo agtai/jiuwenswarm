@@ -49,10 +49,7 @@ import {
   ProductP2ActivationJournal,
   reconcileProductP2Predecessor,
 } from '../../features/live-voice/formal/productP2ActivationJournal';
-import {
-  persistProductP3TaskTarget,
-  readProductP3TaskTarget,
-} from '../../features/live-voice/formal/productP3TaskTargetJournal';
+import { persistProductP3TaskTarget, readProductP3TaskTarget } from '../../features/live-voice/formal/productP3TaskTargetJournal';
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,
@@ -77,6 +74,29 @@ export interface LiveVoiceIntegratedRoutePanelProps {
   request?: (method: string, params?: Record<string, unknown>, options?: WebRequestOptions) => Promise<unknown>;
   progressSubscribe?: (listener: (payload: unknown) => void) => () => void;
   p3RetryInspectionWait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
+  productVoiceControlRef?: { current: ProductLiveVoiceSurfaceControl | null };
+  onProductVoiceStateChange?: (state: Readonly<ProductLiveVoiceSurfaceState>) => void;
+}
+
+export type ProductLiveVoiceSurfaceState = Readonly<{
+  available: boolean;
+  p1_status: ProductP1VoiceStatus;
+  p1_reason: string | null;
+  input: string;
+  output: string | null;
+  text_status: 'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed';
+  confirmation_phase: 'confirming' | 'dispatching' | null;
+  operation_retained: boolean;
+}>;
+
+export interface ProductLiveVoiceSurfaceControl {
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  updateInput(value: string): void;
+  submit(): void;
+  confirm(): Promise<void>;
+  cancelConfirmation(): void;
+  close(): Promise<void>;
 }
 
 const defaultProductRequest = (method: string, params?: Record<string, unknown>, options?: WebRequestOptions): Promise<unknown> =>
@@ -142,6 +162,38 @@ export type RecognizedSpeechConfirmation = Readonly<{
   activation_id: string;
   activation_generation: number;
 }>;
+
+type ProductVoiceDraftBinding = Readonly<{
+  session_id: string;
+  correlation_id: string;
+  interaction_id: string;
+  activation_id: string;
+  activation_generation: number;
+}>;
+
+type EditedVoiceDraftConfirmation = ProductVoiceDraftBinding &
+  Readonly<{
+    phase: 'confirming' | 'dispatching';
+    text: string;
+  }>;
+
+export function productVoiceDraftMatchesBinding(
+  draft: ProductVoiceDraftBinding | null,
+  activeSessionId: string | null,
+  binding: ProductWebP2ActivationSnapshot['binding']
+): draft is ProductVoiceDraftBinding {
+  return Boolean(
+    draft !== null &&
+    binding !== null &&
+    activeSessionId !== null &&
+    draft.session_id === activeSessionId &&
+    binding.session_id === activeSessionId &&
+    draft.correlation_id === binding.correlation_id &&
+    draft.interaction_id === binding.interaction_id &&
+    draft.activation_id === binding.activation_id &&
+    draft.activation_generation === binding.activation_generation
+  );
+}
 
 export type ProductVoiceTaskOrigin = Readonly<{
   session_id: string;
@@ -717,6 +769,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
   const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
   const [recognizedSpeechConfirmation, setRecognizedSpeechConfirmation] = useState<RecognizedSpeechConfirmation | null>(null);
+  const [editedVoiceDraftConfirmation, setEditedVoiceDraftConfirmation] = useState<EditedVoiceDraftConfirmation | null>(null);
   const [pendingPresentationAck, setPendingPresentationAck] = useState<ProductPresentationAckInput | null>(null);
   const [p3MutationOperation, setP3MutationOperation] = useState<'task.create' | 'task.cancel' | 'task.retry'>('task.create');
   const [p3TaskName, setP3TaskName] = useState('');
@@ -767,8 +820,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const pendingP3MutationRef = useRef<ProductWebP3MutationInput | null>(null);
   const voiceTaskOriginRef = useRef<ProductVoiceTaskOrigin | null>(null);
   const recognizedVoiceRef = useRef<ProductRecognizedVoice | null>(null);
+  const voiceDraftBindingRef = useRef<ProductVoiceDraftBinding | null>(null);
   const p1VoiceCaptureBindingRef = useRef<Readonly<NonNullable<ProductWebP2ActivationSnapshot['binding']>> | null>(null);
   const recognizedSpeechConfirmationRef = useRef<RecognizedSpeechConfirmation | null>(null);
+  const editedVoiceDraftConfirmationRef = useRef<EditedVoiceDraftConfirmation | null>(null);
   const formalTaskControlLeafRef = useRef<FormalTaskControlLeaf | null>(null);
   const pendingFormalP3MutationRef = useRef<PreparedFormalTaskMutation | null>(null);
   const activeSessionRef = useRef<string | null>(props.activeSessionId);
@@ -787,8 +842,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     p3RetryInspectionAbortRef.current = null;
   };
   const updateRecognizedSpeechConfirmation = (confirmation: RecognizedSpeechConfirmation | null) => {
+    if (confirmation !== null || editedVoiceDraftConfirmationRef.current !== null) {
+      editedVoiceDraftConfirmationRef.current = null;
+      setEditedVoiceDraftConfirmation(null);
+    }
     recognizedSpeechConfirmationRef.current = confirmation;
     setRecognizedSpeechConfirmation(confirmation);
+  };
+  const updateEditedVoiceDraftConfirmation = (confirmation: EditedVoiceDraftConfirmation | null) => {
+    if (confirmation !== null || recognizedSpeechConfirmationRef.current !== null) {
+      recognizedSpeechConfirmationRef.current = null;
+      setRecognizedSpeechConfirmation(null);
+    }
+    editedVoiceDraftConfirmationRef.current = confirmation;
+    setEditedVoiceDraftConfirmation(confirmation);
   };
   const currentVoiceTaskOrigin = (): ProductVoiceTaskOrigin | null => voiceTaskOriginRef.current;
   const currentProductP2Binding = (): ProductWebP2ActivationSnapshot['binding'] => {
@@ -1112,7 +1179,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   useEffect(() => {
     if (props.isConnected) return;
+    const hadVoiceDraft = recognizedVoiceRef.current !== null || voiceDraftBindingRef.current !== null;
     updateRecognizedSpeechConfirmation(null);
+    recognizedVoiceRef.current = null;
+    voiceDraftBindingRef.current = null;
+    if (hadVoiceDraft) {
+      setProductInput('');
+      setProductTextStatus('idle');
+    }
     p1VoiceCaptureBindingRef.current = null;
     const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner === null) return;
@@ -1152,6 +1226,28 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   ]);
 
   useEffect(() => {
+    const pending = editedVoiceDraftConfirmationRef.current;
+    if (pending === null) return;
+    if (
+      p2Activation.status !== 'active' ||
+      pending.session_id !== props.activeSessionId ||
+      pending.text !== productInput ||
+      !productVoiceDraftMatchesBinding(pending, props.activeSessionId, p2Activation.binding)
+    ) {
+      updateEditedVoiceDraftConfirmation(null);
+    }
+  }, [
+    p2Activation.binding?.activation_generation,
+    p2Activation.binding?.activation_id,
+    p2Activation.binding?.correlation_id,
+    p2Activation.binding?.interaction_id,
+    p2Activation.binding?.session_id,
+    p2Activation.status,
+    productInput,
+    props.activeSessionId,
+  ]);
+
+  useEffect(() => {
     const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null) {
       void voiceOwner
@@ -1172,9 +1268,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     pendingPresentationAttemptRef.current = null;
     pendingBargeInRef.current = null;
     updateRecognizedSpeechConfirmation(null);
+    recognizedVoiceRef.current = null;
+    voiceDraftBindingRef.current = null;
     p1VoiceCaptureBindingRef.current = null;
     presentedProductResponsesRef.current.clear();
     setPendingPresentationAck(null);
+    setProductInput('');
     setProductOutput(null);
     setProductTextStatus('idle');
   }, [props.activeSessionId]);
@@ -1184,6 +1283,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return () => {
       mountedRef.current = false;
       recognizedSpeechConfirmationRef.current = null;
+      editedVoiceDraftConfirmationRef.current = null;
+      voiceDraftBindingRef.current = null;
       cancelP3RetryInspection();
       const voiceOwner = p1VoiceOwnerRef.current;
       if (voiceOwner !== null) {
@@ -1983,6 +2084,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setProductTextStatus('waiting');
         if (source === 'voice' && recognizedVoiceRef.current === recognized) {
           recognizedVoiceRef.current = null;
+          voiceDraftBindingRef.current = null;
         }
         return retained.input;
       }
@@ -2093,6 +2195,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           session_id: props.activeSessionId,
           text: recognition.text,
           voice_commit_receipt: recognition.voice_commit_receipt,
+          correlation_id: captureBinding.correlation_id,
+          interaction_id: captureBinding.interaction_id,
+          activation_id: captureBinding.activation_id,
+          activation_generation: captureBinding.activation_generation,
+        });
+        voiceDraftBindingRef.current = Object.freeze({
+          session_id: props.activeSessionId,
           correlation_id: captureBinding.correlation_id,
           interaction_id: captureBinding.interaction_id,
           activation_id: captureBinding.activation_id,
@@ -2418,7 +2527,35 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   const acceptRecognizedSpeechConfirmation = async () => {
     const pending = recognizedSpeechConfirmationRef.current;
-    if (pending === null || pending.phase !== 'confirming') return;
+    if (pending === null) {
+      const editedPending = editedVoiceDraftConfirmationRef.current;
+      const binding = currentProductP2Binding();
+      if (
+        editedPending === null ||
+        editedPending.phase !== 'confirming' ||
+        editedPending.text !== productInput ||
+        !productVoiceDraftMatchesBinding(editedPending, props.activeSessionId, binding) ||
+        !productVoiceDraftMatchesBinding(voiceDraftBindingRef.current, props.activeSessionId, binding) ||
+        p2Activation.status !== 'active'
+      ) {
+        updateEditedVoiceDraftConfirmation(null);
+        return;
+      }
+      const dispatching = Object.freeze({ ...editedPending, phase: 'dispatching' as const });
+      updateEditedVoiceDraftConfirmation(dispatching);
+      try {
+        const submitted = await submitProductText(undefined, 'structured');
+        if (submitted !== null && productVoiceDraftMatchesBinding(voiceDraftBindingRef.current, editedPending.session_id, binding)) {
+          voiceDraftBindingRef.current = null;
+        }
+      } finally {
+        if (editedVoiceDraftConfirmationRef.current === dispatching) {
+          updateEditedVoiceDraftConfirmation(null);
+        }
+      }
+      return;
+    }
+    if (pending.phase !== 'confirming') return;
     const displayedText = pending.intent === 'agent' ? productInput : p3TaskInstruction;
     if (!recognizedSpeechConfirmationMatches(pending, recognizedVoiceRef.current, props.activeSessionId, displayedText, currentProductP2Binding())) {
       updateRecognizedSpeechConfirmation(null);
@@ -2616,6 +2753,167 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     };
   }, [correlationId, createdProgressTaskId, props.activeSessionId, props.isConnected]);
 
+  const productOperationRetained = Boolean(
+    recognizedSpeechConfirmation ||
+    editedVoiceDraftConfirmation ||
+    pendingProductTurnRef.current ||
+    pendingPresentationAttemptRef.current ||
+    pendingBargeInRef.current ||
+    activationOwnerRef.current?.hasPendingSubmission() ||
+    activationOwnerRef.current?.hasPendingPresentationAck() ||
+    activationOwnerRef.current?.hasPendingBargeIn()
+  );
+  const productVoiceAvailable = FEATURE_LIVE_VOICE_INTEGRATED_P1 && props.isConnected && p2Activation.status === 'active';
+
+  const handleProductInput = (value: string) => {
+    const owner = activationOwnerRef.current;
+    if (
+      pendingProductTurnRef.current ||
+      pendingPresentationAttemptRef.current ||
+      pendingBargeInRef.current ||
+      owner?.hasPendingSubmission() ||
+      owner?.hasPendingPresentationAck() ||
+      owner?.hasPendingBargeIn()
+    )
+      return;
+    updateRecognizedSpeechConfirmation(null);
+    setProductTextStatus('idle');
+    if (value !== recognizedVoiceRef.current?.text) {
+      recognizedVoiceRef.current = null;
+    }
+    setProductInput(value);
+  };
+
+  const handleProductSubmit = () => {
+    const recognized = recognizedVoiceRef.current;
+    if (recognized !== null && recognized.session_id === props.activeSessionId && recognized.text === productInput) {
+      const binding = currentProductP2Binding();
+      if (
+        recognizedSpeechConfirmationRef.current === null &&
+        p2Activation.status === 'active' &&
+        binding !== null &&
+        recognizedVoiceMatchesProductBinding(recognized, binding)
+      ) {
+        updateRecognizedSpeechConfirmation(
+          Object.freeze({
+            intent: 'agent',
+            phase: 'confirming',
+            session_id: recognized.session_id,
+            text: recognized.text,
+            correlation_id: binding.correlation_id,
+            interaction_id: binding.interaction_id,
+            activation_id: binding.activation_id,
+            activation_generation: binding.activation_generation,
+          })
+        );
+      } else if (binding === null || !recognizedVoiceMatchesProductBinding(recognized, binding)) {
+        recognizedVoiceRef.current = null;
+        voiceDraftBindingRef.current = null;
+        setProductInput('');
+        setProductTextStatus('idle');
+      }
+      return;
+    }
+    const voiceDraftBinding = voiceDraftBindingRef.current;
+    const binding = currentProductP2Binding();
+    if (voiceDraftBinding !== null) {
+      if (!productVoiceDraftMatchesBinding(voiceDraftBinding, props.activeSessionId, binding) || !productInput.trim()) {
+        voiceDraftBindingRef.current = null;
+        setProductInput('');
+        setProductTextStatus('idle');
+        return;
+      }
+      if (editedVoiceDraftConfirmationRef.current === null && p2Activation.status === 'active' && binding !== null) {
+        updateEditedVoiceDraftConfirmation(
+          Object.freeze({
+            phase: 'confirming',
+            session_id: voiceDraftBinding.session_id,
+            text: productInput,
+            correlation_id: voiceDraftBinding.correlation_id,
+            interaction_id: voiceDraftBinding.interaction_id,
+            activation_id: voiceDraftBinding.activation_id,
+            activation_generation: voiceDraftBinding.activation_generation,
+          })
+        );
+      }
+      return;
+    }
+    void submitProductText(undefined, 'structured');
+  };
+
+  const closeProductVoice = async () => {
+    const hadVoiceDraft = recognizedVoiceRef.current !== null || voiceDraftBindingRef.current !== null;
+    updateRecognizedSpeechConfirmation(null);
+    recognizedVoiceRef.current = null;
+    voiceDraftBindingRef.current = null;
+    if (hadVoiceDraft) {
+      setProductInput('');
+      setProductTextStatus('idle');
+    }
+    p1VoiceCaptureBindingRef.current = null;
+    activeVoiceResponseRef.current = null;
+    const owner = p1VoiceOwnerRef.current;
+    if (owner === null) {
+      setP1VoiceStatus('closed');
+      setP1VoiceReason(null);
+      return;
+    }
+    try {
+      await owner.close();
+      if (p1VoiceOwnerRef.current === owner) {
+        p1VoiceOwnerRef.current = null;
+      }
+    } catch {
+      // Retain the exact cleanup_pending owner. A later explicit start retries
+      // cleanup before it can construct a successor route.
+    }
+  };
+
+  useEffect(() => {
+    props.onProductVoiceStateChange?.(
+      Object.freeze({
+        available: productVoiceAvailable,
+        p1_status: p1VoiceStatus,
+        p1_reason: p1VoiceReason,
+        input: productInput,
+        output: productOutput,
+        text_status: productTextStatus,
+        confirmation_phase: recognizedSpeechConfirmation?.phase ?? editedVoiceDraftConfirmation?.phase ?? null,
+        operation_retained: productOperationRetained,
+      })
+    );
+  }, [
+    p1VoiceReason,
+    p1VoiceStatus,
+    productInput,
+    productOperationRetained,
+    productOutput,
+    productTextStatus,
+    productVoiceAvailable,
+    props.onProductVoiceStateChange,
+    editedVoiceDraftConfirmation?.phase,
+    recognizedSpeechConfirmation?.phase,
+  ]);
+
+  useEffect(() => {
+    const control = Object.freeze<ProductLiveVoiceSurfaceControl>({
+      start: startProductVoiceCapture,
+      stop: () => (p1VoiceOwnerRef.current?.status().status === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture()),
+      updateInput: handleProductInput,
+      submit: handleProductSubmit,
+      confirm: acceptRecognizedSpeechConfirmation,
+      cancelConfirmation: () => {
+        updateRecognizedSpeechConfirmation(null);
+        updateEditedVoiceDraftConfirmation(null);
+      },
+      close: closeProductVoice,
+    });
+    if (props.productVoiceControlRef) props.productVoiceControlRef.current = control;
+    return () => {
+      if (props.productVoiceControlRef?.current === control) props.productVoiceControlRef.current = null;
+    };
+  });
+
   return (
     <LiveVoiceIntegratedRoutePanelView
       manifest={manifest}
@@ -2627,68 +2925,26 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       productInput={productInput}
       productOutput={productOutput}
       productTextStatus={productTextStatus}
-      p1VoiceEnabled={FEATURE_LIVE_VOICE_INTEGRATED_P1 && props.isConnected && p2Activation.status === 'active'}
+      p1VoiceEnabled={productVoiceAvailable}
       p1VoiceStatus={p1VoiceStatus}
       p1VoiceReason={p1VoiceReason}
       onP1VoiceStart={() => void startProductVoiceCapture()}
       onP1VoiceStop={() => void (p1VoiceStatus === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture())}
-      productOperationRetained={Boolean(
-        recognizedSpeechConfirmation ||
-        pendingProductTurnRef.current ||
-        pendingPresentationAttemptRef.current ||
-        pendingBargeInRef.current ||
-        activationOwnerRef.current?.hasPendingSubmission() ||
-        activationOwnerRef.current?.hasPendingPresentationAck() ||
-        activationOwnerRef.current?.hasPendingBargeIn()
-      )}
-      onProductInput={value => {
-        const owner = activationOwnerRef.current;
-        if (
-          pendingProductTurnRef.current ||
-          pendingPresentationAttemptRef.current ||
-          pendingBargeInRef.current ||
-          owner?.hasPendingSubmission() ||
-          owner?.hasPendingPresentationAck() ||
-          owner?.hasPendingBargeIn()
-        )
-          return;
-        updateRecognizedSpeechConfirmation(null);
-        setProductTextStatus('idle');
-        if (value !== recognizedVoiceRef.current?.text) {
-          recognizedVoiceRef.current = null;
-        }
-        setProductInput(value);
-      }}
-      onProductSubmit={() => {
-        const recognized = recognizedVoiceRef.current;
-        if (recognized !== null && recognized.session_id === props.activeSessionId && recognized.text === productInput) {
-          const binding = currentProductP2Binding();
-          if (
-            recognizedSpeechConfirmationRef.current === null &&
-            p2Activation.status === 'active' &&
-            binding !== null &&
-            recognizedVoiceMatchesProductBinding(recognized, binding)
-          ) {
-            updateRecognizedSpeechConfirmation(
-              Object.freeze({
-                intent: 'agent',
-                phase: 'confirming',
-                session_id: recognized.session_id,
-                text: recognized.text,
-                correlation_id: binding.correlation_id,
-                interaction_id: binding.interaction_id,
-                activation_id: binding.activation_id,
-                activation_generation: binding.activation_generation,
-              })
-            );
-          }
-          return;
-        }
-        void submitProductText(undefined, 'structured');
-      }}
-      recognizedSpeechConfirmation={recognizedSpeechConfirmation?.phase === 'confirming' ? recognizedSpeechConfirmation.intent : null}
+      productOperationRetained={productOperationRetained}
+      onProductInput={handleProductInput}
+      onProductSubmit={handleProductSubmit}
+      recognizedSpeechConfirmation={
+        recognizedSpeechConfirmation?.phase === 'confirming'
+          ? recognizedSpeechConfirmation.intent
+          : editedVoiceDraftConfirmation?.phase === 'confirming'
+            ? 'agent'
+            : null
+      }
       onRecognizedSpeechConfirm={() => void acceptRecognizedSpeechConfirmation()}
-      onRecognizedSpeechCancel={() => updateRecognizedSpeechConfirmation(null)}
+      onRecognizedSpeechCancel={() => {
+        updateRecognizedSpeechConfirmation(null);
+        updateEditedVoiceDraftConfirmation(null);
+      }}
       p3MutationEnabled={FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && props.isConnected}
       p3MutationOperation={p3MutationOperation}
       p3TaskName={p3TaskName}

@@ -451,7 +451,7 @@ function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait, isCon
   );
 }
 
-function mountedFullyEnabledElement(i18n, sessionId, request, isConnected = true) {
+function mountedFullyEnabledElement(i18n, sessionId, request, isConnected = true, extraProps = {}) {
   return React.createElement(
     I18nextProvider,
     { i18n },
@@ -461,6 +461,7 @@ function mountedFullyEnabledElement(i18n, sessionId, request, isConnected = true
       agentRouteAvailable: true,
       taskCompatibilityAvailable: false,
       request,
+      ...extraProps,
     })
   );
 }
@@ -805,6 +806,8 @@ async function waitForMounted(predicate, message, timeoutMs = 1_000) {
 test('mounted recognized speech requires an exact in-page second action and fences Agent and task dispatch', async () => {
   const i18n = await createI18n();
   const calls = [];
+  const productVoiceControlRef = { current: null };
+  const productVoiceStates = [];
   let activeMediaBinding = null;
   let recognitionIndex = 0;
   let resolveAgentSubmit = null;
@@ -897,13 +900,13 @@ test('mounted recognized speech requires an exact in-page second action and fenc
 
   const capture = async text => {
     await act(async () => {
-      formalVoiceStartButton(renderer).props.onClick();
+      void productVoiceControlRef.current.start();
       await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('starting'), 'formal voice capture did not enter readiness');
       await browser.emitFirstFrame();
       await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('capturing'), 'formal voice capture did not start');
     });
     await act(async () => {
-      formalVoiceStopButton(renderer).props.onClick();
+      await productVoiceControlRef.current.stop();
       await waitForMounted(
         () => renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-text' }).findByType('textarea').props.value === text,
         'recognized speech did not populate the mounted product form'
@@ -913,28 +916,36 @@ test('mounted recognized speech requires an exact in-page second action and fenc
 
   try {
     await act(async () => {
-      renderer = create(mountedFullyEnabledElement(i18n, 'mounted-confirm-session', request));
+      renderer = create(
+        mountedFullyEnabledElement(i18n, 'mounted-confirm-session', request, true, {
+          productVoiceControlRef,
+          onProductVoiceStateChange: state => productVoiceStates.push(state),
+        })
+      );
       await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Start formal voice turn'), 'both-on panel did not mount');
     });
     await act(async () => {
       await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'both-on panel did not activate P2');
+      await waitForMounted(() => productVoiceControlRef.current !== null, 'formal product Live Voice control was not published');
+      await waitForMounted(() => productVoiceStates.at(-1)?.available === true, 'formal product Live Voice state did not become available');
     });
 
     await capture('Mounted Agent speech');
     const productForm = () => renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-text' });
     await act(async () => {
-      productForm().props.onSubmit({ preventDefault() {} });
+      productVoiceControlRef.current.submit();
       await waitForMounted(
         () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length === 1,
         'Agent speech did not open the in-page confirmation'
       );
+      await waitForMounted(() => productVoiceStates.at(-1)?.confirmation_phase === 'confirming', 'formal product Live Voice did not publish confirmation');
     });
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0);
     assert.equal(productForm().findByType('textarea').props.disabled, true);
     assert.equal(mountedP3Controls(renderer).button('Issue confirmation').props.disabled, true);
 
     await act(async () => {
-      mountedRecognizedConfirmation(renderer).button('Cancel').props.onClick();
+      productVoiceControlRef.current.cancelConfirmation();
       await waitForMounted(
         () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length === 0,
         'cancel did not close the in-page confirmation'
@@ -943,16 +954,38 @@ test('mounted recognized speech requires an exact in-page second action and fenc
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0, 'cancel must have zero Agent transport effect');
 
     await act(async () => {
-      productForm().props.onSubmit({ preventDefault() {} });
+      productForm()
+        .findByType('textarea')
+        .props.onChange({ target: { value: 'Edited Agent speech' } });
+      await waitForMounted(() => productForm().findByType('textarea').props.value === 'Edited Agent speech', 'speech edit did not settle');
+    });
+    await act(async () => {
+      productVoiceControlRef.current.submit();
+      await waitForMounted(
+        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length === 1,
+        'edited speech did not retain the explicit confirmation boundary'
+      );
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0, 'editing speech must not dispatch before confirmation');
+    await act(async () => {
+      productVoiceControlRef.current.cancelConfirmation();
+      await waitForMounted(
+        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length === 0,
+        'edited speech confirmation did not cancel'
+      );
+    });
+
+    await capture('Mounted task speech');
+    await act(async () => {
+      productVoiceControlRef.current.submit();
       await waitForMounted(
         () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length === 1,
         'Agent speech did not reopen confirmation after cancel'
       );
     });
-    const agentConfirm = mountedRecognizedConfirmation(renderer).button('Confirm and dispatch').props.onClick;
     await act(async () => {
-      agentConfirm();
-      agentConfirm();
+      void productVoiceControlRef.current.confirm();
+      void productVoiceControlRef.current.confirm();
       await waitForMounted(
         () => calls.filter(call => call.method === 'live_voice.composition.p2.submit').length === 1,
         'confirmed Agent speech did not issue one exact P2 submit'
@@ -1696,9 +1729,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       );
     });
     assert.equal(retryWaiters.length, 0, 'terminal reconciliation must release its deterministic waiter');
-    const createsBeforeRefresh = calls.filter(
-      call => call.method === 'live_voice.composition.p3.mutate' && call.params.operation === 'task.create'
-    ).length;
+    const createsBeforeRefresh = calls.filter(call => call.method === 'live_voice.composition.p3.mutate' && call.params.operation === 'task.create').length;
     await act(async () => {
       renderer.unmount();
       await new Promise(resolve => setTimeout(resolve, 20));

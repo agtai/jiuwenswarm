@@ -15,8 +15,8 @@ import type { HumanShareCommand } from '../../stores/sessionStore';
 import { MessageList } from './MessageList';
 import { ContextCompressionLines } from './MessageItem';
 import { InputArea } from './InputArea';
-import { LiveVoiceDemoBar } from './LiveVoiceDemoBar';
-import { LiveVoiceIntegratedRoutePanel } from './LiveVoiceIntegratedRoutePanel';
+import { LiveVoiceDemoBar, type LiveVoiceDemoBarProps, type LiveVoiceVisualState } from './LiveVoiceDemoBar';
+import { LiveVoiceIntegratedRoutePanel, type ProductLiveVoiceSurfaceControl, type ProductLiveVoiceSurfaceState } from './LiveVoiceIntegratedRoutePanel';
 import chatIcon from '../../assets/chat.svg';
 import expandIcon from '../../assets/expand.svg';
 import lineUpIcon from '../../assets/lineUp.svg';
@@ -40,7 +40,7 @@ import './ChatPanel.css';
 import { CodeChangesCard } from '../../features/code-mode/CodeChangesCard';
 import { useCodeTurnDiffHistory } from '../../features/code-mode/useCodeTurnDiffHistory';
 import type { CodeReviewTarget } from '../../features/code-mode/types';
-import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
+import { FEATURE_LIVE_VOICE_DEMO, FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_INTEGRATED_WEB } from '../../featureFlags';
 import { useLiveVoiceDemo } from '../../features/live-voice/useLiveVoiceDemo';
 import type { LiveVoiceTaskExecutionContext, LiveVoiceTaskRequest } from '../../features/live-voice/liveVoiceTaskClient';
 
@@ -917,7 +917,7 @@ export function ChatPanel({
   }, [activeSessionId, isSending, updateHistoryLayoutSnapshot]);
 
   const handleSuggestion = useCallback((text: string) => handleSendMessage(text), [handleSendMessage]);
-  const liveVoiceDemoProps = useLiveVoiceDemo({
+  const legacyLiveVoiceDemoProps = useLiveVoiceDemo({
     activeSessionId,
     messages,
     isProcessing,
@@ -931,6 +931,119 @@ export function ChatPanel({
     taskRequest: liveVoiceTaskRequest,
     taskExecutionContext: liveVoiceTaskExecutionContext,
   });
+  const formalProductVoiceEnabled = FEATURE_LIVE_VOICE_INTEGRATED_WEB && FEATURE_LIVE_VOICE_INTEGRATED_P1;
+  const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
+  const [productVoiceState, setProductVoiceState] = useState<Readonly<ProductLiveVoiceSurfaceState> | null>(null);
+  const [productVoiceActive, setProductVoiceActive] = useState(false);
+  const adoptProductVoiceState = useCallback((next: Readonly<ProductLiveVoiceSurfaceState>) => {
+    setProductVoiceState(previous => {
+      if (
+        previous !== null &&
+        previous.available === next.available &&
+        previous.p1_status === next.p1_status &&
+        previous.p1_reason === next.p1_reason &&
+        previous.input === next.input &&
+        previous.output === next.output &&
+        previous.text_status === next.text_status &&
+        previous.confirmation_phase === next.confirmation_phase &&
+        previous.operation_retained === next.operation_retained
+      ) {
+        return previous;
+      }
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    setProductVoiceActive(false);
+    setProductVoiceState(null);
+  }, [activeSessionId]);
+
+  let formalVoiceVisualState: LiveVoiceVisualState = 'idle';
+  if (productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting') {
+    formalVoiceVisualState = 'thinking';
+  } else {
+    switch (productVoiceState?.p1_status) {
+      case 'starting':
+      case 'recognizing':
+        formalVoiceVisualState = 'thinking';
+        break;
+      case 'capturing':
+        formalVoiceVisualState = 'listening';
+        break;
+      case 'playing':
+        formalVoiceVisualState = 'speaking';
+        break;
+      case 'failed':
+      case 'cleanup_pending':
+        formalVoiceVisualState = 'error';
+        break;
+      default:
+        formalVoiceVisualState = 'idle';
+    }
+  }
+  const formalP1Status = productVoiceState?.p1_status ?? 'idle';
+  const formalVoiceCanStop = formalP1Status === 'capturing' || formalP1Status === 'playing';
+  const formalVoiceBusy =
+    formalP1Status === 'starting' ||
+    formalP1Status === 'recognizing' ||
+    productVoiceState?.confirmation_phase != null ||
+    ['submitting', 'waiting', 'presented'].includes(productVoiceState?.text_status ?? 'idle') ||
+    Boolean(productVoiceState?.operation_retained);
+  const formalStatusLabel =
+    productVoiceState?.confirmation_phase === 'confirming'
+      ? t('liveVoice.formal.status.confirming')
+      : productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting'
+        ? t('liveVoice.formal.status.waiting')
+        : t(`liveVoice.formal.status.${formalP1Status}`);
+  const formalPrimaryActionLabel =
+    formalP1Status === 'capturing'
+      ? t('liveVoice.formal.actions.stopRecognize')
+      : formalP1Status === 'playing'
+        ? t('liveVoice.formal.actions.stopPlayback')
+        : formalP1Status === 'recognized' && Boolean(productVoiceState?.input.trim())
+          ? t('liveVoice.formal.actions.reviewSend')
+          : formalVoiceBusy
+            ? t('liveVoice.formal.actions.working')
+            : t('liveVoice.formal.actions.start');
+  const formalLiveVoiceDemoProps: LiveVoiceDemoBarProps = {
+    active: productVoiceActive,
+    available: Boolean(productVoiceState?.available),
+    status: formalVoiceVisualState,
+    interimTranscript: '',
+    committedTranscript: productVoiceState?.input || productVoiceState?.output || '',
+    errorMessage: formalVoiceVisualState === 'error' ? (productVoiceState?.p1_reason ?? '') : '',
+    routeLabel: t('liveVoice.formal.routeLabel'),
+    statusLabel: formalStatusLabel,
+    primaryActionLabel: formalPrimaryActionLabel,
+    primaryActionDisabled: !formalVoiceCanStop && formalVoiceBusy,
+    ...(formalP1Status === 'recognized' && productVoiceState?.text_status === 'idle' && Boolean(productVoiceState.input.trim())
+      ? {
+          editableTranscript: productVoiceState?.input ?? '',
+          onTranscriptChange: (value: string) => productVoiceControlRef.current?.updateInput(value),
+        }
+      : {}),
+    recognizedConfirmation: productVoiceState?.confirmation_phase === 'confirming',
+    onRecognizedConfirm: () => void productVoiceControlRef.current?.confirm(),
+    onRecognizedCancel: () => productVoiceControlRef.current?.cancelConfirmation(),
+    onEnable: () => {
+      setProductVoiceActive(true);
+      void productVoiceControlRef.current?.start();
+    },
+    onExit: () => {
+      setProductVoiceActive(false);
+      void productVoiceControlRef.current?.close();
+    },
+    onPrimaryAction: () => {
+      if (formalVoiceCanStop) {
+        void productVoiceControlRef.current?.stop();
+      } else if (formalP1Status === 'recognized' && productVoiceState?.input.trim()) {
+        productVoiceControlRef.current?.submit();
+      } else {
+        void productVoiceControlRef.current?.start();
+      }
+    },
+  };
+  const liveVoiceDemoProps = formalProductVoiceEnabled ? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps;
   return (
     <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
       {shouldShowChatHeader && (
@@ -1070,6 +1183,8 @@ export function ChatPanel({
           isConnected={isConnected}
           agentRouteAvailable={mode === 'agent' && !liveVoiceInteractionBlocked}
           taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
+          productVoiceControlRef={formalProductVoiceEnabled ? productVoiceControlRef : undefined}
+          onProductVoiceStateChange={formalProductVoiceEnabled ? adoptProductVoiceState : undefined}
         />
       )}
 

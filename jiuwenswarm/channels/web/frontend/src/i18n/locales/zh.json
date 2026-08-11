@@ -2085,6 +2085,30 @@
     "streamingRevisionFallback": "最终回答发生修订，已停止预读，请以页面文字为准",
     "streamingFinalTimeout": "未收到最终回答确认，已停止本轮预读；请重试或以页面文字为准",
     "transcriptPlaceholder": "说话内容会显示在这里",
+    "formal": {
+      "routeLabel": "P1 · Gateway Speech · 正式路线",
+      "editorLabel": "语音识别文本",
+      "status": {
+        "idle": "正式语音已就绪",
+        "starting": "正在启动麦克风",
+        "capturing": "正在通过正式 P1 聆听",
+        "recognizing": "正在识别语音",
+        "recognized": "请检查识别文本",
+        "playing": "正在播放 Agent 回答",
+        "cleanup_pending": "语音清理仍在进行",
+        "failed": "正式语音当前不可用",
+        "closed": "正式语音已关闭",
+        "confirming": "请确认识别文本",
+        "waiting": "Agent 正在工作"
+      },
+      "actions": {
+        "start": "开始说话",
+        "stopRecognize": "结束并识别",
+        "reviewSend": "检查并发送",
+        "stopPlayback": "停止播放",
+        "working": "处理中"
+      }
+    },
     "integrated": {
       "title": "Integrated Web 路由事实",
       "shellOnly": "下方 P2 文本路线仅在 activation 生效时属于正式路径。语音、物理音频、任务完成和 Integrated Demo/Web Alpha Gate 验收仍未证明。",

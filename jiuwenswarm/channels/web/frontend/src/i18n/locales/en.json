@@ -2087,6 +2087,30 @@
     "streamingRevisionFallback": "The final response was revised. Preview speech stopped; use the text on screen.",
     "streamingFinalTimeout": "No final response confirmation arrived. Preview stopped; retry or use the text on screen.",
     "transcriptPlaceholder": "Your speech will appear here",
+    "formal": {
+      "routeLabel": "P1 · Gateway Speech · formal",
+      "editorLabel": "Recognized speech",
+      "status": {
+        "idle": "Ready for formal speech",
+        "starting": "Starting microphone",
+        "capturing": "Listening through formal P1",
+        "recognizing": "Recognizing speech",
+        "recognized": "Review recognized speech",
+        "playing": "Playing the Agent response",
+        "cleanup_pending": "Voice cleanup is pending",
+        "failed": "Formal voice is unavailable",
+        "closed": "Formal voice is closed",
+        "confirming": "Confirm the recognized text",
+        "waiting": "The Agent is working"
+      },
+      "actions": {
+        "start": "Start speaking",
+        "stopRecognize": "Stop and recognize",
+        "reviewSend": "Review and send",
+        "stopPlayback": "Stop playback",
+        "working": "Working"
+      }
+    },
     "integrated": {
       "title": "Integrated Web route facts",
       "shellOnly": "The P2 text route below is formal only while its activation is active. Speech, physical audio, task completion, and Integrated Demo/Web Alpha Gate acceptance remain unproven.",

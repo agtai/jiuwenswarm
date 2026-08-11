@@ -17,6 +17,7 @@ import {
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
+  productVoiceDraftMatchesBinding,
   recognizedSpeechConfirmationMatches,
   productTextBlockedByP1Status,
   progressMatchesOwnedBinding,
@@ -398,6 +399,26 @@ test('recognized Speech confirmation is fenced to its exact Session and displaye
   assert.equal(recognizedSpeechConfirmationMatches(pending, null, 'session-1', 'exact text', binding), false);
   assert.equal(recognizedSpeechConfirmationMatches(pending, recognized, 'session-1', 'exact text', { ...binding, activation_generation: 3 }), false);
   assert.equal(recognizedSpeechConfirmationMatches(pending, { ...recognized, activation_generation: 1 }, 'session-1', 'exact text', binding), false);
+});
+
+test('edited voice draft confirmation remains fenced to the exact P2 activation', () => {
+  const draft = Object.freeze({
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-1',
+    activation_id: 'activation-1',
+    activation_generation: 2,
+  });
+  const binding = Object.freeze({ ...draft });
+
+  assert.equal(productVoiceDraftMatchesBinding(draft, 'session-1', binding), true);
+  assert.equal(productVoiceDraftMatchesBinding(draft, 'session-2', binding), false);
+  assert.equal(productVoiceDraftMatchesBinding(draft, 'session-1', { ...binding, correlation_id: 'correlation-2' }), false);
+  assert.equal(productVoiceDraftMatchesBinding(draft, 'session-1', { ...binding, interaction_id: 'interaction-2' }), false);
+  assert.equal(productVoiceDraftMatchesBinding(draft, 'session-1', { ...binding, activation_id: 'activation-2' }), false);
+  assert.equal(productVoiceDraftMatchesBinding(draft, 'session-1', { ...binding, activation_generation: 3 }), false);
+  assert.equal(productVoiceDraftMatchesBinding(null, 'session-1', binding), false);
+  assert.equal(productVoiceDraftMatchesBinding(draft, 'session-1', null), false);
 });
 
 test('P2 notification classification surfaces errors and terminal-without-final', () => {
@@ -997,6 +1018,21 @@ test('ChatPanel retains one integrated route owner across the first-message layo
   assert.equal(mounts.length, 1);
   assert.notEqual(mountIndex, -1);
   assert.equal(conversationComposerIndex > mountIndex, true);
+});
+
+test('actual Live Voice product entry selects the formal P1 owner while compatibility fallback remains flag-off only', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/index.tsx', import.meta.url), 'utf8');
+  const barSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceDemoBar.tsx', import.meta.url), 'utf8');
+
+  assert.match(source, /FEATURE_LIVE_VOICE_INTEGRATED_WEB\s*&&\s*FEATURE_LIVE_VOICE_INTEGRATED_P1/);
+  assert.match(source, /const liveVoiceDemoProps = formalProductVoiceEnabled \? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps/);
+  assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
+  assert.match(source, /productVoiceControlRef\.current\?\.stop\(\)/);
+  assert.match(source, /productVoiceControlRef\.current\?\.confirm\(\)/);
+  assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
+  assert.match(source, /liveVoice\.formal\.routeLabel/);
+  assert.match(barSource, /data-testid="live-voice-product-confirmation"/);
+  assert.match(barSource, /editableTranscript/);
 });
 
 test('integrated route diagnostics remain vertically reachable in a bounded panel', async () => {
