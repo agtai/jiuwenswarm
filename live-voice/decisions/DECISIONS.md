@@ -783,3 +783,13 @@
 - W2 当前影响：P1/P2、真实 Terminal Tool、完整 TTS 和后继 capture 的人工结果继续有效；剩余人工范围是打断/纠正、P2/P3 非阻塞、P3 create/cancel/retry A→B→C，以及刷新/重连/重启和可见降级。完成这些适用步骤并确认无关键产品缺陷后，W2 可标记 `PRODUCT-ACCEPTED`，无需恢复签名 Gate。
 - 原因：签名取证框架曾发现若干真实身份、重放、P3 UI、配置和音频问题，但后期成本主要消耗在证据编排、签名、页面计数、等待窗口和 artifact 完整性，已明显偏离 90% Demo 的产品价值。自动化验证与一次完整人工产品验收足以满足当前交付目标，同时保留真实功能、安全和回归保证。
 - 重新评估条件：外部发布、审计、监管、客户合同或跨组织交付明确要求不可抵赖且可复现的签名证据；自动与人工结果发生无法解释的冲突；或用户明确重新启用某个有界认证 Gate。
+
+## D-072 删除已退役的 W2 签名证据 Gate 实现
+
+- 日期：2026-08-11
+- 状态：Accepted implementation-removal decision（用户要求在 W2 人工验收继续按 D-071 推进的同时，深度分析并至少分三轮删除 Gate 代码；最终只保留一个提交）
+- 删除范围：删除 W2 Gate evaluator/scoring/CLI、root/leaf key 与 trust-policy/signature/manifest/Replacement Ledger 处理、自动报告与 runtime evidence exporter/owner、38-slot rehearsal/choreography/controller/fault runner，以及只为该 Gate 服务的 P1/P2/P3 request-id 故障注入和专属测试。
+- 保留范围：保留真实 P1/P2/P3 产品路由、Agent/Tool/Task 权威、P3 confirmation、replay/idempotency、fail-closed/零副作用、Task Core/Store/Executor/outbox/lease、普通产品观测、D-046/D-053 风险与 review、Architecture Contract Gate、Product Composition Gate 0 和历史冻结记录。确定性 WAV Speech preflight 与真实 D-069 A→B→C/restart 诊断不签名、不计分，作为产品验证工具保留。
+- 执行约束：删除分为纯 evaluator/编排、runtime evidence/故障 seam、残余入口/配置/文档三轮；每轮都必须完成依赖分析、实际删除和针对保留产品路径的无副作用确认。中间允许本地临时 commit，但最终历史只允许一个本任务 commit；任何 remote ref 更新仍需单独精确授权。
+- 完成影响：当前 checkout 不再提供或接受旧签名 Gate 命令和环境变量，历史 D90–D102 只解释过去事实。W2 状态、人工验收范围和后续 Alpha 顺序不因删除而自动改变，仍由 D-071、验收合同与 STATUS 决定。
+- 重新评估条件：用户为新的审计/合规/客户交付明确批准一个重新设计且有界的认证需求。不得直接复活被删除的 W2 实现；新认证必须重新定义威胁模型、所有者、成本和产品交付关系。

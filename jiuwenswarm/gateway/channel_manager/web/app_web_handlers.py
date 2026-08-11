@@ -1587,17 +1587,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         FormalBatchSpeechService,
         create_environment_batch_speech_provider,
     )
-    from jiuwenswarm.server.live_voice.product_w2_observability import (
-        create_gateway_w2_observability_owner_from_environment,
-    )
-
     media_registry = DedicatedMediaProductRegistry.from_environment()
-    try:
-        w2_evidence_observer = create_gateway_w2_observability_owner_from_environment()
-    except Exception as exc:  # noqa: BLE001 -- diagnostic plane is non-authoritative
-        logger.warning("[LiveVoiceW2] Gateway evidence plane unavailable: %s", exc)
-        w2_evidence_observer = None
-    media_registry.set_evidence_observer(w2_evidence_observer)
     speech_service = bind.speech_service
     media_registry_owns_speech_authority = speech_service is None
     if speech_service is None:
@@ -1614,18 +1604,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     )
     channel.live_voice_media_registry = media_registry
     channel.live_voice_speech_service = speech_service
-    channel.live_voice_w2_observability = w2_evidence_observer
     register_speech_rpc_handlers(
         channel,
         service=speech_service,
         context_factory=(
             media_registry.context_for if media_registry_owns_speech_authority else None
-        ),
-        evidence_observer=w2_evidence_observer,
-        evidence_binding_factory=(
-            media_registry.evidence_binding_for
-            if media_registry_owns_speech_authority
-            else None
         ),
         result_transform=(
             media_registry.prepare_synthesis_downlink

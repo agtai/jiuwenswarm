@@ -19,7 +19,6 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
 from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice import p3_authenticated_composition as p3_module
 from jiuwenswarm.server.live_voice import product_composition_registry as product_module
-from jiuwenswarm.server.live_voice import product_w2_observability as w2_module
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import P3RouteResult
 
 
@@ -57,24 +56,6 @@ class _Composition:
         return P3RouteResult(True, {"ok": True, "result": {"task_id": "task-1"}})
 
 
-class _Observer:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.reconciliation_calls: list[tuple[object, object]] = []
-        self.close_calls = 0
-
-    async def observe_route(self, **kwargs: object) -> bool:
-        self.calls.append(kwargs)
-        return True
-
-    async def observe_reconciliation_event(
-        self, event: object, attempt: object
-    ) -> bool:
-        self.reconciliation_calls.append((event, attempt))
-        return True
-
-    async def close(self) -> None:
-        self.close_calls += 1
 
 
 class _LifecycleComposition:
@@ -313,22 +294,6 @@ class _RoundAcceptedRegistry(_ProductRegistry):
         )
 
 
-class _StaleMutationRegistry(_ProductRegistry):
-    async def handle_p3_mutation(self, **kwargs):
-        self.calls.append(("p3.mutate", kwargs))
-        return P3RouteResult(
-            False,
-            {
-                "request_id": kwargs["request_id"],
-                "ok": False,
-                "result": None,
-                "error": {
-                    "code": "STALE",
-                    "reason": "PRODUCT_W2_STALE_FAULT_INJECTED",
-                    "message": "the externally frozen W2 plan injected a stale retry fault",
-                },
-            },
-        )
 
 
 class _ConnectionCleanupRegistry:
@@ -457,146 +422,6 @@ async def test_formal_route_passes_only_rpc_context_to_composition() -> None:
     assert wire["body"]["result"]["result"]["task_id"] == "task-1"
 
 
-@pytest.mark.asyncio
-async def test_formal_query_observation_uses_authoritative_task_correlation() -> None:
-    def event(
-        *,
-        event_id: str,
-        seq: int,
-        state: str,
-        correlation_id: str,
-        task_id: str = "task-1",
-    ) -> dict[str, object]:
-        return {
-            "event_id": event_id,
-            "task_id": task_id,
-            "attempt_id": "attempt-1",
-            "seq": seq,
-            "state": state,
-            "outcome": "completed" if state == "terminal" else None,
-            "correlation_id": correlation_id,
-            "occurred_at": f"2026-08-09T16:0{seq}:00Z",
-        }
-
-    registry = _QueuedQueryRegistry(
-        [
-            {
-                "ok": True,
-                "result": {
-                    "task_id": "task-1",
-                    "events": [
-                        {
-                            "task_id": "task-1",
-                            "attempt_id": "attempt-1",
-                            "correlation_id": "correlation-malformed",
-                        }
-                    ],
-                },
-            },
-            {
-                "ok": True,
-                "result": {
-                    "task_id": "task-1",
-                    "events": [
-                        event(
-                            event_id="event-conflict-1",
-                            seq=1,
-                            state="running",
-                            correlation_id="correlation-foreign",
-                        ),
-                        event(
-                            event_id="event-conflict-2",
-                            seq=2,
-                            state="running",
-                            correlation_id="correlation-other",
-                        ),
-                    ],
-                },
-            },
-            {
-                "ok": True,
-                "result": {
-                    "task_id": "task-foreign",
-                    "events": [
-                        event(
-                            event_id="event-foreign-target",
-                            seq=2,
-                            state="running",
-                            correlation_id="correlation-foreign-target",
-                            task_id="task-foreign",
-                        )
-                    ],
-                },
-            },
-            {
-                "ok": True,
-                "result": {
-                    "task_id": "task-1",
-                    "events": [
-                        event(
-                            event_id="event-running",
-                            seq=3,
-                            state="running",
-                            correlation_id="correlation-task",
-                        )
-                    ],
-                },
-            },
-            {
-                "ok": True,
-                "result": {
-                    "task_id": "task-1",
-                    "events": [
-                        event(
-                            event_id="event-terminal",
-                            seq=4,
-                            state="terminal",
-                            correlation_id="correlation-task",
-                        )
-                    ],
-                },
-            },
-        ]
-    )
-    observer = _Observer()
-    server = _server(object())
-    server._live_voice_product_composition = registry
-    server._live_voice_w2_observability = observer
-    ws = _WebSocket()
-
-    for request_id in (
-        "transport-events-malformed",
-        "transport-events-conflict",
-        "transport-events-foreign-target",
-        "transport-events-running",
-        "transport-events-terminal",
-    ):
-        await server._handle_live_voice_p3_request(
-            ws,
-            AgentRequest(
-                request_id=request_id,
-                channel_id="web",
-                session_id="session-1",
-                req_method=ReqMethod.LIVE_VOICE_TASK_EVENTS,
-                params={"task_id": "task-1", "after_seq": -1},
-            ),
-            asyncio.Lock(),
-        )
-
-    assert [call["request_id"] for call in observer.calls] == [
-        "transport-events-running",
-        "transport-events-terminal",
-    ]
-    assert [call["correlation_id"] for call in observer.calls] == [
-        "correlation-task",
-        "correlation-task",
-    ]
-    assert all(call["task_id"] == "task-1" for call in observer.calls)
-    assert all(call["attempt_id"] == "attempt-1" for call in observer.calls)
-    assert [call["task_event_facts"][0]["state"] for call in observer.calls] == [
-        "running",
-        "terminal",
-    ]
 
 
 @pytest.mark.asyncio
@@ -740,17 +565,10 @@ async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds()
             order.append("p3")
             await super().stop()
 
-    class OrderedObserver(_Observer):
-        async def close(self) -> None:
-            order.append("evidence")
-            await super().close()
-
     registry = OrderedRegistry(stop_failures=1)
     composition = OrderedComposition()
-    observer = OrderedObserver()
     server = _server(composition)
     server._live_voice_product_composition = registry
-    server._live_voice_w2_observability = observer
     server._server = None
     server._checkpointer_warmup_task = None
 
@@ -758,20 +576,16 @@ async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds()
 
     assert registry.stop_calls == 1
     assert composition.stop_calls == 0
-    assert observer.close_calls == 0
     assert server._live_voice_p3_composition is composition
-    assert server._live_voice_w2_observability is observer
     assert order == []
 
     await server.stop()
 
     assert registry.stop_calls == 2
     assert composition.stop_calls == 1
-    assert observer.close_calls == 1
     assert server._live_voice_product_composition is None
     assert server._live_voice_p3_composition is None
-    assert server._live_voice_w2_observability is None
-    assert order == ["product", "p3", "evidence"]
+    assert order == ["product", "p3"]
 
 
 @pytest.mark.asyncio
@@ -780,8 +594,6 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
     registry = _ProductRegistry()
     server = _server(composition)
     server._live_voice_product_composition = registry
-    observer = _Observer()
-    server._live_voice_w2_observability = observer
     ws = _WebSocket()
 
     query = AgentRequest(
@@ -825,10 +637,6 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
             "session_id": "session-1",
         }
     ]
-    # The central registry owns the business query, but this synthetic result
-    # does not carry an authority-owned Task correlation.  Transport identity
-    # must not be promoted into cumulative W2 evidence.
-    assert observer.calls == []
 
 
 @pytest.mark.asyncio
@@ -968,15 +776,14 @@ def _progress_delivery_id(attempt_id: str) -> str:
         "result_overrides",
         "minimal_result",
         "payload_request_id",
-        "expected_result_ok",
     ),
     [
-        ("attempt-1", {}, False, None, True),
-        (None, {}, False, None, False),
-        ("attempt-foreign", {}, False, None, False),
-        ("attempt-1", {"delivery_id": "delivery-old"}, False, None, False),
-        ("attempt-1", {}, True, None, False),
-        ("attempt-1", {}, False, "request-progress-ack-old", False),
+        ("attempt-1", {}, False, None),
+        (None, {}, False, None),
+        ("attempt-foreign", {}, False, None),
+        ("attempt-1", {"delivery_id": "delivery-old"}, False, None),
+        ("attempt-1", {}, True, None),
+        ("attempt-1", {}, False, "request-progress-ack-old"),
     ],
 )
 async def test_product_progress_ack_preserves_exact_rpc_context(
@@ -984,7 +791,6 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
     result_overrides: dict[str, object],
     minimal_result: bool,
     payload_request_id: str | None,
-    expected_result_ok: bool,
 ) -> None:
     registry = _ProductRegistry(
         progress_attempt_id=server_attempt_id,
@@ -994,8 +800,6 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
     )
     server = _server(object())
     server._live_voice_product_composition = registry
-    observer = _Observer()
-    server._live_voice_w2_observability = observer
     ws = _WebSocket()
     request = AgentRequest(
         request_id="request-progress-ack",
@@ -1046,229 +850,12 @@ async def test_product_progress_ack_preserves_exact_rpc_context(
         )
     ]
     assert json.loads(ws.sent[0])["status"] == "succeeded"
-    assert len(observer.calls) == 1
-    assert observer.calls[0]["operation"] == (
-        "live_voice.composition.p3.progress.ack"
-    )
-    assert observer.calls[0]["task_id"] == (
-        "task-1" if expected_result_ok else None
-    )
-    assert observer.calls[0]["attempt_id"] == (
-        "attempt-1" if expected_result_ok else None
-    )
-    assert observer.calls[0]["correlation_id"] == "correlation-task"
-    assert observer.calls[0]["result_ok"] is expected_result_ok
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    (
-        "canonical_response_id",
-        "response_interaction_id",
-        "registry_overrides",
-        "expected_result_ok",
-        "expected_response_id",
-    ),
-    [
-        ("response-origin", "interaction-origin", {}, True, "response-origin"),
-        (
-            "response-server-other",
-            "interaction-origin",
-            {},
-            True,
-            "response-server-other",
-        ),
-        ("response-origin", "interaction-foreign", {}, False, None),
-        (
-            "response-origin",
-            "interaction-origin",
-            {"payload_request_id": "request-origin-old"},
-            False,
-            None,
-        ),
-        (
-            "response-origin",
-            "interaction-origin",
-            {"result_session_id": "session-old"},
-            False,
-            None,
-        ),
-        (
-            "response-origin",
-            "interaction-origin",
-            {"result_activation_id": "activation-old"},
-            False,
-            None,
-        ),
-        (
-            "response-origin",
-            "interaction-origin",
-            {"result_activation_generation": 98},
-            False,
-            None,
-        ),
-        (
-            "response-origin",
-            "interaction-origin",
-            {"payload_ok": False},
-            False,
-            None,
-        ),
-        (
-            "response-origin",
-            "interaction-origin",
-            {"payload_error": {"code": "STALE"}},
-            False,
-            None,
-        ),
-    ],
-)
-async def test_product_voice_origin_projects_only_exact_canonical_response_binding(
-    canonical_response_id: str,
-    response_interaction_id: str,
-    registry_overrides: dict[str, object],
-    expected_result_ok: bool,
-    expected_response_id: str | None,
-) -> None:
-    registry = _TaskOriginRegistry(
-        response_id=canonical_response_id,
-        response_interaction_id=response_interaction_id,
-        **registry_overrides,
-    )
-    server = _server(object())
-    server._live_voice_product_composition = registry
-    observer = _Observer()
-    server._live_voice_w2_observability = observer
-    ws = _WebSocket()
-    request = AgentRequest(
-        request_id="request-origin",
-        channel_id="web",
-        session_id="session-1",
-        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
-        params={
-            "auth_token": "opaque",
-            "session_id": "session-1",
-            "correlation_id": "correlation-origin",
-            "interaction_id": "interaction-origin",
-            "activation_id": "activation-origin",
-            "activation_generation": 99,
-            "turn_id": "turn-origin",
-            "commit_id": "commit-origin",
-            "dispatch_target": "task",
-        },
-    )
-
-    await server._handle_live_voice_product_request(ws, request, asyncio.Lock())
-
-    assert json.loads(ws.sent[0])["status"] == "succeeded"
-    assert len(observer.calls) == 1
-    projected = observer.calls[0]
-    assert projected["result_ok"] is expected_result_ok
-    assert projected["voice_task_origin"] is expected_result_ok
-    assert projected["correlation_id"] == "correlation-origin"
-    assert projected["interaction_id"] == (
-        "interaction-origin" if expected_result_ok else None
-    )
-    assert projected["response_id"] == expected_response_id
-    assert projected["response_generation"] == (3 if expected_result_ok else None)
-    assert projected["turn_id"] == ("turn-origin" if expected_result_ok else None)
-    assert projected["task_id"] is None
-    assert projected["attempt_id"] is None
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("server_turn_id", "server_commit_id", "expected_ok"),
-    [
-        ("turn-round", "commit-round", True),
-        (None, "commit-round", False),
-        ("turn-round", None, False),
-        ("turn-foreign", "commit-round", False),
-        ("turn-round", "commit-foreign", False),
-    ],
-)
-async def test_product_round_observation_requires_exact_server_execution_binding(
-    server_turn_id: str | None,
-    server_commit_id: str | None,
-    expected_ok: bool,
-) -> None:
-    registry = _RoundAcceptedRegistry(
-        turn_id=server_turn_id,
-        commit_id=server_commit_id,
-    )
-    server = _server(object())
-    server._live_voice_product_composition = registry
-    observer = _Observer()
-    server._live_voice_w2_observability = observer
-    request = AgentRequest(
-        request_id="request-round",
-        channel_id="web",
-        session_id="session-1",
-        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
-        params={
-            "auth_token": "opaque",
-            "session_id": "session-1",
-            "correlation_id": "correlation-round",
-            "interaction_id": "interaction-round",
-            "activation_id": "activation-round",
-            "activation_generation": 1,
-            "turn_id": "turn-round",
-            "commit_id": "commit-round",
-            "response_id": "response-round",
-            "dispatch_target": "agent",
-        },
-    )
-
-    for _ in range(2):
-        await server._handle_live_voice_product_request(
-            _WebSocket(), request, asyncio.Lock()
-        )
-
-    assert len(observer.calls) == 2
-    for projected in observer.calls:
-        assert projected["result_ok"] is expected_ok
-        assert projected["turn_id"] == ("turn-round" if expected_ok else None)
-        assert projected["round_id"] == ("round-round" if expected_ok else None)
-        assert projected["voice_task_origin"] is False
-    assert len(registry.calls) == 2
 
 
-@pytest.mark.asyncio
-async def test_product_retry_stale_fault_projects_one_failed_task_observation() -> None:
-    registry = _StaleMutationRegistry()
-    server = _server(object())
-    server._live_voice_product_composition = registry
-    observer = _Observer()
-    server._live_voice_w2_observability = observer
-    ws = _WebSocket()
-    request = AgentRequest(
-        request_id="request-retry-stale-fault",
-        channel_id="web",
-        session_id="session-1",
-        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE,
-        params={
-            "auth_token": "opaque",
-            "session_id": "session-1",
-            "operation": "task.retry",
-            "command_id": "command-retry-stale-fault",
-            "confirmation_id": "confirmation-retry-stale-fault",
-            "issued_at": "2030-01-01T00:00:00Z",
-            "correlation_id": "correlation-retry-stale-fault",
-            "task_id": "task-1",
-        },
-    )
-
-    await server._handle_live_voice_product_request(ws, request, asyncio.Lock())
-
-    assert len(observer.calls) == 1
-    projected = observer.calls[0]
-    assert projected["operation"] == "live_voice.composition.p3.mutate"
-    assert projected["task_operation"] == "task.retry"
-    assert projected["task_id"] == "task-1"
-    assert projected["correlation_id"] == "correlation-retry-stale-fault"
-    assert projected["result_ok"] is False
-    assert projected["error_code"] == "STALE"
-    assert json.loads(ws.sent[0])["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -1318,51 +905,12 @@ async def test_agentserver_owns_formal_composition_start_and_stop(
     assert server._live_voice_p3_composition is None
     assert captured[0]["confirmation_verifier"] is None
     assert captured[0]["commit_ledger"] is not None
-    assert callable(captured[0]["reconciliation_event_sink"])
+    assert "reconciliation_event_sink" not in captured[0]
     assert server._live_voice_p3_confirmation_owner is None
     assert server._live_voice_p3_confirmation_forwarder is None
     assert server._live_voice_turn_commit_ledger is None
 
 
-@pytest.mark.asyncio
-async def test_w2_owner_is_ready_before_p3_startup_reconciliation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    order: list[str] = []
-    captured: list[dict[str, object]] = []
-    observer = _Observer()
-
-    class Composition(_LifecycleComposition):
-        async def start(self) -> None:
-            assert server._live_voice_w2_observability is observer
-            order.append("p3")
-            await super().start()
-
-    composition = Composition()
-    server = _server(None)
-    server._agent_manager = object()
-    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED", "1")
-    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED", "1")
-    monkeypatch.setattr(
-        w2_module,
-        "create_product_w2_observability_owner_from_environment",
-        lambda: order.append("w2") or observer,
-    )
-    monkeypatch.setattr(
-        p3_module,
-        "create_p3_composition_from_environment",
-        lambda **kwargs: captured.append(kwargs) or composition,
-    )
-
-    await server._start_live_voice_w2_observability()
-    await server._start_live_voice_p3_composition()
-    sink = captured[0]["reconciliation_event_sink"]
-    assert callable(sink)
-    await sink("event", "attempt")
-
-    assert order == ["w2", "p3"]
-    assert observer.reconciliation_calls == [("event", "attempt")]
-    await server._stop_live_voice_p3_composition()
 
 
 @pytest.mark.asyncio

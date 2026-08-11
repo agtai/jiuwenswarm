@@ -136,6 +136,8 @@ D-071 退役 Demo Replacement Ledger、签名证据 Gate、固定 artifact 槽�
 1. 最终测试源码上的适用自动正向、负向、flag-off、回归、构建和静态检查通过；
 2. 用户在一个完整产品会话中人工通过 P1、P2、P3alpha、非阻塞/打断、恢复与可见降级旅程。
 
+D-072 进一步从当前源码删除已退役 Gate 的 evaluator/CLI、签名与 manifest 编排、runtime evidence owner、rehearsal/fault runner 和产品内 Gate 专属故障注入。保留的 P1/P2/P3、Task/Tool/Agent、安全确认、架构合同 Gate、风险分级与产品观测不属于该删除范围。
+
 `formal`、`fallback`、`demo_substitute`、`unsupported` 和 `unknown` 继续用于如实描述实际 route，不再换算分数。任何必需产品行为或安全不变量失败时保持 `PARTIAL` 或 `FAIL`；缺少旧签名、manifest 或 Ledger 分数不影响产品状态。
 
 ## 9. D-031 最小边界

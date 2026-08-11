@@ -125,13 +125,6 @@ class SpyService:
         return {"ok": True, "result": {"route": "cancel"}}
 
 
-class SpyEvidenceObserver:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, object]] = []
-
-    async def observe_route(self, **kwargs: object) -> bool:
-        self.calls.append(kwargs)
-        return True
 
 
 @pytest.mark.asyncio
@@ -166,47 +159,12 @@ async def test_rpc_registration_injects_exact_connection_identity_and_session() 
     ]
 
 
-@pytest.mark.asyncio
-async def test_successful_speech_rpc_emits_only_exact_sanitized_p1_binding() -> None:
-    channel = FakeChannel()
-    service = SpyService()
-    observer = SpyEvidenceObserver()
-    register_speech_rpc_handlers(
-        channel,
-        service=service,  # type: ignore[arg-type]
-        evidence_observer=observer,
-        evidence_binding_factory=lambda _params, _session: {
-            "correlation_id": "correlation-1",
-            "interaction_id": "interaction-1",
-        },
-    )
-
-    private_payload = {"audio": {"data_base64": "must-not-enter-evidence"}}
-    await channel.handlers[RECOGNIZE_BATCH_METHOD](
-        "ws", "rpc-evidence", private_payload, "session-1", user_id="alice"
-    )
-
-    assert observer.calls == [
-        {
-            "session_id": "session-1",
-            "correlation_id": "correlation-1",
-            "request_id": "rpc-evidence",
-            "operation": "speech.recognize.batch",
-            "result_ok": True,
-            "interaction_id": "interaction-1",
-            "response_id": None,
-            "response_generation": None,
-            "error_code": None,
-        }
-    ]
-    assert "data_base64" not in json.dumps(observer.calls)
 
 
 @pytest.mark.asyncio
-async def test_result_transform_runs_before_evidence_and_response() -> None:
+async def test_result_transform_runs_before_response() -> None:
     channel = FakeChannel()
     service = SpyService()
-    observer = SpyEvidenceObserver()
     transform_calls: list[tuple[object, ...]] = []
 
     def transform(
@@ -223,11 +181,6 @@ async def test_result_transform_runs_before_evidence_and_response() -> None:
         channel,
         service=service,  # type: ignore[arg-type]
         result_transform=transform,
-        evidence_observer=observer,
-        evidence_binding_factory=lambda _params, _session: {
-            "correlation_id": "correlation-transform",
-            "interaction_id": "interaction-transform",
-        },
     )
     params = {"correlation_id": "correlation-transform"}
 
@@ -244,7 +197,6 @@ async def test_result_transform_runs_before_evidence_and_response() -> None:
             "session-transform",
         )
     ]
-    assert observer.calls[0]["result_ok"] is True
     assert channel.responses[0]["payload"] == {
         "ok": True,
         "result": {"route": "dedicated-downlink"},
@@ -253,20 +205,15 @@ async def test_result_transform_runs_before_evidence_and_response() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_result", [None, []])
-async def test_result_transform_failure_is_closed_and_observed(
+async def test_result_transform_failure_is_closed(
     invalid_result: object,
 ) -> None:
     channel = FakeChannel()
     service = SpyService()
-    observer = SpyEvidenceObserver()
     register_speech_rpc_handlers(
         channel,
         service=service,  # type: ignore[arg-type]
         result_transform=lambda *_args: invalid_result,  # type: ignore[arg-type,return-value]
-        evidence_observer=observer,
-        evidence_binding_factory=lambda _params, _session: {
-            "correlation_id": "correlation-transform-failure",
-        },
     )
 
     await channel.handlers[SYNTHESIZE_BATCH_METHOD](
@@ -288,8 +235,6 @@ async def test_result_transform_failure_is_closed_and_observed(
         "correlation_id": "correlation-transform-failure",
         "details": {},
     }
-    assert observer.calls[0]["result_ok"] is False
-    assert observer.calls[0]["error_code"] == "CAPABILITY_UNAVAILABLE"
 
 
 @pytest.mark.asyncio

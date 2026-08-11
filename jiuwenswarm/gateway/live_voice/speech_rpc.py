@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Awaitable, Callable
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import Assurance
@@ -21,7 +20,6 @@ CAPABILITIES_METHOD = "live_voice.speech.capabilities"
 RECOGNIZE_BATCH_METHOD = "live_voice.speech.recognize_batch"
 SYNTHESIZE_BATCH_METHOD = "live_voice.speech.synthesize_batch"
 CANCEL_METHOD = "live_voice.speech.cancel"
-logger = logging.getLogger(__name__)
 
 
 def register_speech_rpc_handlers(
@@ -29,9 +27,6 @@ def register_speech_rpc_handlers(
     *,
     service: FormalBatchSpeechService | None = None,
     context_factory: Callable[[Any, object, str, str | None], SpeechRpcContext]
-    | None = None,
-    evidence_observer: Any | None = None,
-    evidence_binding_factory: Callable[[object, str], dict[str, object] | None]
     | None = None,
     result_transform: Callable[
         [str, object, SpeechRpcContext, dict[str, object], str], dict[str, object]
@@ -112,37 +107,6 @@ def register_speech_rpc_handlers(
                             "details": {},
                         },
                     }
-            if evidence_observer is not None and evidence_binding_factory is not None:
-                evidence_binding = evidence_binding_factory(params, str(session_id))
-                if evidence_binding is not None:
-                    error = result.get("error")
-                    error_code = (
-                        error.get("code")
-                        if isinstance(error, dict)
-                        and isinstance(error.get("code"), str)
-                        else None
-                    )
-                    try:
-                        await evidence_observer.observe_route(
-                            session_id=str(session_id),
-                            correlation_id=str(evidence_binding["correlation_id"]),
-                            request_id=req_id,
-                            operation=operation_name,
-                            result_ok=result.get("ok") is True,
-                            interaction_id=evidence_binding.get("interaction_id"),
-                            response_id=evidence_binding.get("response_id"),
-                            response_generation=(
-                                evidence_binding["response_generation"]
-                                if type(evidence_binding.get("response_generation"))
-                                is int
-                                else None
-                            ),
-                            error_code=error_code,
-                        )
-                    except Exception as exc:  # noqa: BLE001 -- diagnostic only
-                        logger.warning(
-                            "W2 Speech evidence observation rejected: %s", exc
-                        )
             # Contract failures stay in the v2 result envelope. Transport success
             # only means the Gateway processed this package-local request.
             await channel.send_response(ws, req_id, ok=True, payload=result)

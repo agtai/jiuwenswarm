@@ -173,7 +173,6 @@ class WebChannel(BaseWsChannel):
         # Integration-Owner registration for the dedicated Live Voice route.
         # The package media leaf never mutates this attribute itself.
         self.live_voice_media_registry: Any = None
-        self.live_voice_w2_observability: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -628,14 +627,6 @@ class WebChannel(BaseWsChannel):
             self._server = None
         # 兜底清理未走正常断连路径的 writer 协程（正常断连已由 unregister_ws 清理）
         await self._shutdown_all_writers()
-        evidence_observer = self.live_voice_w2_observability
-        if evidence_observer is not None:
-            try:
-                await evidence_observer.close()
-            except Exception:
-                logger.exception("Live Voice W2 evidence shutdown remains incomplete")
-            else:
-                self.live_voice_w2_observability = None
         logger.info("WebChannel 已停止")
 
     async def connect(self) -> None:

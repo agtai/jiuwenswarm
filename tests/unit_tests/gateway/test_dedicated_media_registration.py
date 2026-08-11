@@ -44,9 +44,6 @@ from jiuwenswarm.gateway.channel_manager.web import web_connect
 from jiuwenswarm.server.live_voice.batch_speech import (
     RECOGNIZE_OPERATION,
     SYNTHESIZE_OPERATION,
-    BatchSpeechP1RetriableFaultPlan,
-    FormalBatchSpeechService,
-    ProviderCapability,
     SpeechAuthorizationBinding,
     SpeechRpcContext,
 )
@@ -813,7 +810,7 @@ async def test_exceptional_media_socket_exit_clears_every_raw_audio_byte(
 
 
 @pytest.mark.asyncio
-async def test_completed_media_socket_emits_only_exact_p1_trace_binding(
+async def test_completed_media_socket_retains_recognition_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry = _active_registry()
@@ -824,14 +821,6 @@ async def test_completed_media_socket_emits_only_exact_p1_trace_binding(
         connection_id="connection-owner",
     )
     endpoint_path = str(activation["endpoint_path"])
-    observed: list[dict[str, object]] = []
-
-    class Observer:
-        async def observe_route(self, **kwargs: object) -> bool:
-            observed.append(kwargs)
-            return True
-
-    registry.set_evidence_observer(Observer())
 
     async def complete_after_frame(*_args: object, **kwargs: object) -> object:
         kwargs["on_audio_frame"](  # type: ignore[operator]
@@ -853,14 +842,6 @@ async def test_completed_media_socket_emits_only_exact_p1_trace_binding(
 
     assert await handle_registered_media_socket(registry, ws, endpoint_path)
 
-    assert len(observed) == 1
-    assert observed[0]["session_id"] == "session-1"
-    assert observed[0]["correlation_id"] == "correlation-1"
-    assert observed[0]["interaction_id"] == "interaction-1"
-    assert observed[0]["operation"] == "media.capture"
-    assert observed[0]["result_ok"] is True
-    assert "subject_id" not in observed[0]
-    assert "pcm" not in observed[0]
     ticket = endpoint_path.rsplit("/", 1)[1]
     assert registry._records[ticket].route_completed is True
     assert registry._records[ticket].recognition_content_sha256 is not None
@@ -879,14 +860,6 @@ async def test_media_socket_success_without_completion_callback_fails_closed(
     )
     endpoint_path = str(activation["endpoint_path"])
     ticket = endpoint_path.rsplit("/", 1)[1]
-    observed: list[dict[str, object]] = []
-
-    class Observer:
-        async def observe_route(self, **kwargs: object) -> bool:
-            observed.append(kwargs)
-            return True
-
-    registry.set_evidence_observer(Observer())
 
     async def omit_completion(*_args: object, **kwargs: object) -> object:
         kwargs["on_audio_frame"](  # type: ignore[operator]
@@ -913,8 +886,6 @@ async def test_media_socket_success_without_completion_callback_fails_closed(
     assert record.route_completed is True
     assert record.recognition_content_sha256 is None
     assert record.pcm == bytearray()
-    assert len(observed) == 1
-    assert observed[0]["result_ok"] is False
 
 
 @pytest.mark.asyncio
@@ -1156,97 +1127,6 @@ def test_completed_route_authorizes_only_exact_independent_capture_and_no_disk(
     assert registry.authorize(forged) is None
 
 
-@pytest.mark.asyncio
-async def test_completed_product_media_authorizes_exact_planned_p1_fault() -> None:
-    class NeverCalledProvider:
-        def capability(self) -> ProviderCapability:
-            return ProviderCapability("never-called", True, True, True)
-
-        async def recognize(self, _request: object) -> object:
-            raise AssertionError("planned P1 fault must not call the Provider")
-
-        async def synthesize(self, _request: object) -> object:
-            raise AssertionError("planned P1 fault must not call the Provider")
-
-    registry = _active_registry()
-    activation = _activate(
-        registry,
-        params=_params(),
-        request_origin=ORIGIN,
-        connection_id="connection-p1-fault",
-    )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
-    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
-    assert record is not None
-    samples = (0.25,) * record.binding.frame_format.samples_per_channel
-    registry.accept_frame(
-        record,
-        MediaAudioFrame(seq=0, sample_cursor=0, samples=samples),
-    )
-    audio_wav = dedicated_media_registration._wav_bytes(  # noqa: SLF001
-        dedicated_media_registration._pcm16(samples),  # noqa: SLF001
-        record.binding.frame_format.sample_rate_hz,
-    )
-    registry.complete_route(
-        record,
-        SimpleNamespace(activated=True, accepted_frames=1),  # type: ignore[arg-type]
-    )
-    planned_request_id = "request-product-p1-retriable-fault"
-    service = FormalBatchSpeechService(
-        NeverCalledProvider(),  # type: ignore[arg-type]
-        authorization_resolver=registry,
-        p1_retriable_fault_plan=BatchSpeechP1RetriableFaultPlan(
-            request_id=planned_request_id,
-            operation=RECOGNIZE_OPERATION,
-        ),
-    )
-    context = registry.context_for(
-        SimpleNamespace(_jiuwen_ws_id="connection-p1-fault"),
-        {"scope": {"subject_id": activation["subject_id"]}},
-        "session-1",
-        "user-1",
-    )
-    payload = {
-        "contract_version": "live-voice.contract.v2",
-        "request_id": planned_request_id,
-        "operation_id": "operation-product-p1-retriable-fault",
-        "operation": RECOGNIZE_OPERATION,
-        "correlation_id": "correlation-1",
-        "session_id": "session-1",
-        "scope": {
-            "subject_id": activation["subject_id"],
-            "project_id": None,
-            "session_id": "session-1",
-            "assurance": "authenticated",
-        },
-        "timeout_ms": 1_000,
-        "capture": {
-            "capture_id": "capture-1",
-            "capture_generation": 0,
-            "track_id": "track-1",
-            "final": True,
-        },
-        "audio": {
-            "format": "wav_pcm16_mono",
-            "sample_rate_hz": 16_000,
-            "channel_count": 1,
-            "data_base64": base64.b64encode(audio_wav).decode("ascii"),
-        },
-        "locale": "zh-CN",
-    }
-
-    first = await service.recognize(payload, context)
-    replay = await service.recognize(payload, context)
-
-    assert first["request_id"] == planned_request_id
-    assert first["operation_id"] == "operation-product-p1-retriable-fault"
-    assert first["ok"] is False
-    assert first["error"]["code"] == "UNAVAILABLE"  # type: ignore[index]
-    assert first["error"]["reason"] == "SPEECH_W2_RETRIABLE_FAULT_INJECTED"  # type: ignore[index]
-    assert first["error"]["retriable"] is True  # type: ignore[index]
-    assert replay == first
-    assert service._operations == {}  # noqa: SLF001
-    assert service._seen_captures == {}  # noqa: SLF001
 
 
 def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> None:

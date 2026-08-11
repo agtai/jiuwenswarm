@@ -876,7 +876,6 @@ class AgentWebSocketServer:
         # master flag is off no registry, Adapter, registration, or worker is
         # constructed or called.
         self._live_voice_product_composition: Any = None
-        self._live_voice_w2_observability: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
@@ -995,7 +994,6 @@ class AgentWebSocketServer:
 
         # 端口已 listen, 后台预热 checkpointer, 不阻塞启动与握手.
         # _checkpointer_warmup_task 供 shutdown 时 cancel, 避免任务悬挂.
-        await self._start_live_voice_w2_observability()
         await self._start_live_voice_p3_composition()
         await self._start_live_voice_product_composition()
 
@@ -1190,50 +1188,6 @@ class AgentWebSocketServer:
                     unpin(scheduler_agent)
             self._scheduler_agent = None
 
-    async def _start_live_voice_w2_observability(self) -> None:
-        """Start evidence before P3 startup reconciliation can append facts."""
-
-        if getattr(self, "_live_voice_w2_observability", None) is not None:
-            return
-        enabled = all(
-            str(os.getenv(name) or "").strip().lower()
-            in {"1", "true", "yes", "on"}
-            for name in (
-                "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
-                "JIUWENSWARM_LIVE_VOICE_W2_EVIDENCE_ENABLED",
-            )
-        )
-        if not enabled:
-            return
-        try:
-            from jiuwenswarm.server.live_voice.product_w2_observability import (
-                create_product_w2_observability_owner_from_environment,
-            )
-
-            self._live_voice_w2_observability = (
-                create_product_w2_observability_owner_from_environment()
-            )
-        except Exception as exc:  # noqa: BLE001 -- evidence cannot break product
-            self._live_voice_w2_observability = None
-            logger.exception(
-                "[LiveVoiceW2] evidence registration failed closed: %s", exc
-            )
-
-    async def _observe_live_voice_p3_reconciliation(
-        self,
-        event: object,
-        attempt: object,
-    ) -> None:
-        observer = self._live_voice_w2_observability
-        if observer is None:
-            return
-        try:
-            await observer.observe_reconciliation_event(event, attempt)
-        except Exception as exc:  # noqa: BLE001 -- evidence cannot change Task truth
-            logger.warning(
-                "[LiveVoiceW2] reconciliation evidence rejected: %s", exc
-            )
-
     async def _start_live_voice_p3_composition(self) -> None:
         """Start P3 only when its feature and complete authority gate validate."""
 
@@ -1290,9 +1244,6 @@ class AgentWebSocketServer:
                 ),
                 confirmation_verifier=confirmation_forwarder,
                 commit_ledger=commit_ledger,
-                reconciliation_event_sink=(
-                    self._observe_live_voice_p3_reconciliation
-                ),
             )
             if composition is None:
                 logger.info("[LiveVoiceP3] formal route disabled")
@@ -1415,19 +1366,6 @@ class AgentWebSocketServer:
             self._live_voice_product_composition = None
         return True
 
-    async def _stop_live_voice_w2_observability(self) -> bool:
-        observer = getattr(self, "_live_voice_w2_observability", None)
-        if observer is None:
-            return True
-        try:
-            await observer.close()
-        except Exception as exc:  # noqa: BLE001 -- retain honest cleanup result
-            logger.warning("[LiveVoiceW2] evidence cleanup pending: %s", exc)
-            return False
-        if self._live_voice_w2_observability is observer:
-            self._live_voice_w2_observability = None
-        return True
-
     def _set_scheduler_agent(self, agent: Any) -> None:
         """Pin the facade whose DeepAgent is retained by the scheduler."""
         previous = getattr(self, "_scheduler_agent", None)
@@ -1513,20 +1451,13 @@ class AgentWebSocketServer:
             self._server = None
 
         # Product leases consume the authenticated P3 Core/Store and must
-        # detach before that lower owner closes. Evidence remains active until
-        # P3's final reconciliation has published every durable fact.
+        # detach before that lower owner closes.
         product_stopped = await self._stop_live_voice_product_composition()
         if product_stopped:
-            p3_stopped = await self._stop_live_voice_p3_composition()
-            if p3_stopped:
-                await self._stop_live_voice_w2_observability()
-            else:
-                logger.warning(
-                    "[LiveVoiceW2] retaining evidence owner until P3 cleanup retries"
-                )
+            await self._stop_live_voice_p3_composition()
         else:
             logger.warning(
-                "[LiveVoiceProduct] retaining P3 and evidence owners until product cleanup retries"
+                "[LiveVoiceProduct] retaining P3 owner until product cleanup retries"
             )
 
         from jiuwenswarm.server.runtime.session.kv_cache_product_hooks import (
@@ -8576,95 +8507,6 @@ class AgentWebSocketServer:
                 )
             result_ok = result.ok
             payload = result.payload
-            observer = getattr(self, "_live_voice_w2_observability", None)
-            query_binding = None
-            if operation in {"task.get", "task.list", "task.status", "task.events"}:
-                from jiuwenswarm.server.live_voice.product_w2_observability import (
-                    product_result_query_binding,
-                )
-
-                query_binding = product_result_query_binding(
-                    operation,
-                    payload,
-                    request_id=request.request_id,
-                )
-                if (
-                    query_binding is not None
-                    and operation != "task.list"
-                    and formal_params.get("task_id") != query_binding[1]
-                ):
-                    query_binding = None
-                correlation_id = None if query_binding is None else query_binding[0]
-            else:
-                correlation_id = formal_params.get("correlation_id")
-            if (
-                observer is not None
-                and isinstance(request.session_id, str)
-                and isinstance(correlation_id, str)
-            ):
-                from jiuwenswarm.server.live_voice.product_w2_observability import (
-                    product_result_error_code,
-                    product_result_agent_output_kind,
-                    product_result_execution_binding,
-                    product_result_has_terminal_d0_attempt,
-                    product_result_observation_ok,
-                    product_result_response_binding,
-                    product_result_task_id,
-                    product_result_task_event_facts,
-                    product_result_voice_task_bridge,
-                )
-
-                if query_binding is None:
-                    task_id, attempt_id = product_result_task_id(formal_params, payload)
-                else:
-                    _, task_id, attempt_id = query_binding
-                interaction_id, response_id, response_generation = (
-                    product_result_response_binding(formal_params, payload)
-                )
-                turn_id, round_id = product_result_execution_binding(
-                    formal_params, payload
-                )
-                try:
-                    await observer.observe_route(
-                        session_id=request.session_id,
-                        correlation_id=correlation_id,
-                        request_id=request.request_id,
-                        operation=operation,
-                        result_ok=product_result_observation_ok(
-                            operation,
-                            result_ok=result_ok,
-                            payload=payload,
-                            params=formal_params,
-                        ),
-                        task_id=task_id,
-                        attempt_id=attempt_id,
-                        interaction_id=interaction_id,
-                        response_id=response_id,
-                        response_generation=response_generation,
-                        turn_id=turn_id,
-                        round_id=round_id,
-                        error_code=product_result_error_code(payload),
-                        terminal_d0_attempt=(
-                            product_result_has_terminal_d0_attempt(payload)
-                        ),
-                        voice_task_bridge=product_result_voice_task_bridge(
-                            formal_params, payload
-                        ),
-                        # Voice Task-origin authority exists only on the exact
-                        # product P2 submit path, where request/session/
-                        # activation claims are bound below. A P3 route result
-                        # can never mint that observation from payload shape.
-                        voice_task_origin=False,
-                        task_operation=(
-                            formal_params.get("operation")
-                            if isinstance(formal_params.get("operation"), str)
-                            else None
-                        ),
-                        agent_output_kind=product_result_agent_output_kind(payload),
-                        task_event_facts=product_result_task_event_facts(payload),
-                    )
-                except Exception as exc:  # noqa: BLE001 -- diagnostic only
-                    logger.warning("[LiveVoiceW2] route observation rejected: %s", exc)
         response = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -8779,140 +8621,6 @@ class AgentWebSocketServer:
                 )
             result_ok = result.ok
             payload = result.payload
-            observer = getattr(self, "_live_voice_w2_observability", None)
-            correlation_id = params.get("correlation_id")
-            if (
-                observer is not None
-                and isinstance(request.session_id, str)
-                and isinstance(correlation_id, str)
-            ):
-                from jiuwenswarm.server.live_voice.product_w2_observability import (
-                    product_result_error_code,
-                    product_result_execution_binding,
-                    product_result_has_terminal_d0_attempt,
-                    product_result_observation_ok,
-                    product_result_progress_ack_binding,
-                    product_result_response_binding,
-                    product_result_agent_output_kind,
-                    product_result_task_id,
-                    product_result_task_event_facts,
-                    product_result_voice_task_bridge,
-                    product_result_voice_task_origin_binding,
-                )
-
-                task_id, attempt_id = product_result_task_id(params, payload)
-                interaction_id, response_id, response_generation = (
-                    product_result_response_binding(params, payload)
-                )
-                turn_id, round_id = product_result_execution_binding(params, payload)
-                observed_operation = (
-                    request.req_method.value if request.req_method is not None else ""
-                )
-                result_payload = (
-                    payload.get("result") if isinstance(payload, dict) else None
-                )
-                is_voice_task_origin = bool(
-                    observed_operation == "live_voice.composition.p2.submit"
-                    and isinstance(result_payload, dict)
-                    and result_payload.get("status") == "task_origin_accepted"
-                )
-                is_agent_round = bool(
-                    observed_operation == "live_voice.composition.p2.submit"
-                    and isinstance(result_payload, dict)
-                    and result_payload.get("status") == "round_accepted"
-                )
-                voice_task_origin_binding = (
-                    product_result_voice_task_origin_binding(
-                        params,
-                        payload,
-                        request_id=request.request_id,
-                        session_id=request.session_id,
-                    )
-                    if is_voice_task_origin
-                    else None
-                )
-                progress_ack_binding = (
-                    product_result_progress_ack_binding(
-                        params,
-                        payload,
-                        request_id=request.request_id,
-                        session_id=request.session_id,
-                    )
-                    if observed_operation
-                    == "live_voice.composition.p3.progress.ack"
-                    else None
-                )
-                observation_ok = product_result_observation_ok(
-                    observed_operation,
-                    result_ok=result_ok,
-                    payload=payload,
-                    params=params,
-                )
-                if is_voice_task_origin:
-                    task_id = None
-                    attempt_id = None
-                    interaction_id = None
-                    response_id = None
-                    response_generation = None
-                    turn_id = None
-                    if voice_task_origin_binding is None:
-                        observation_ok = False
-                    else:
-                        (
-                            correlation_id,
-                            interaction_id,
-                            response_id,
-                            response_generation,
-                            turn_id,
-                            _commit_id,
-                        ) = voice_task_origin_binding
-                elif observed_operation == "live_voice.composition.p3.progress.ack":
-                    task_id = None
-                    attempt_id = None
-                    if progress_ack_binding is None:
-                        observation_ok = False
-                    else:
-                        correlation_id, task_id, attempt_id = progress_ack_binding
-                elif is_agent_round and not observation_ok:
-                    interaction_id = None
-                    response_id = None
-                    response_generation = None
-                    turn_id = None
-                    round_id = None
-                try:
-                    await observer.observe_route(
-                        session_id=request.session_id,
-                        correlation_id=correlation_id,
-                        request_id=request.request_id,
-                        operation=observed_operation,
-                        result_ok=observation_ok,
-                        task_id=task_id,
-                        attempt_id=attempt_id,
-                        interaction_id=interaction_id,
-                        response_id=response_id,
-                        response_generation=response_generation,
-                        turn_id=turn_id,
-                        round_id=round_id,
-                        error_code=product_result_error_code(payload),
-                        terminal_d0_attempt=(
-                            product_result_has_terminal_d0_attempt(payload)
-                        ),
-                        voice_task_bridge=product_result_voice_task_bridge(
-                            params, payload
-                        ),
-                        voice_task_origin=(
-                            voice_task_origin_binding is not None
-                        ),
-                        task_operation=(
-                            params.get("operation")
-                            if isinstance(params.get("operation"), str)
-                            else None
-                        ),
-                        agent_output_kind=product_result_agent_output_kind(payload),
-                        task_event_facts=product_result_task_event_facts(payload),
-                    )
-                except Exception as exc:  # noqa: BLE001 -- diagnostic only
-                    logger.warning("[LiveVoiceW2] route observation rejected: %s", exc)
         response = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,

@@ -24,8 +24,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
 )
 from jiuwenswarm.server.live_voice.batch_speech import (
-    P1_RETRIABLE_FAULT_OPERATION_ENV,
-    P1_RETRIABLE_FAULT_REQUEST_ID_ENV,
     CANCEL_OPERATION,
     FORMAL_BATCH_SPEECH_FLAG,
     MAX_SYNTHESIS_AUDIO_BYTES,
@@ -39,7 +37,6 @@ from jiuwenswarm.server.live_voice.batch_speech import (
     SYNTHESIZE_OPERATION,
     BatchSpeechError,
     BatchSpeechProvider,
-    BatchSpeechP1RetriableFaultPlan,
     FormalBatchSpeechService,
     OpenAICompatibleBatchSpeechProvider,
     OpenAICompatibleSpeechConfig,
@@ -316,14 +313,12 @@ def _service(
     resolver: SpeechAuthorizationResolver | None = None,
     max_completed_operations: int = 128,
     max_identity_tombstones: int = 512,
-    p1_retriable_fault_plan: BatchSpeechP1RetriableFaultPlan | None = None,
 ) -> FormalBatchSpeechService:
     return FormalBatchSpeechService(
         provider,
         authorization_resolver=resolver or ExactAuthorizationResolver(),
         max_completed_operations=max_completed_operations,
         max_identity_tombstones=max_identity_tombstones,
-        p1_retriable_fault_plan=p1_retriable_fault_plan,
     )
 
 
@@ -402,143 +397,6 @@ def _synthesize_request(
         "voice": None,
         "required_sample_rate_hz": 16_000,
     }
-
-
-def test_p1_retriable_fault_plan_is_default_off_and_requires_exact_pair(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv(P1_RETRIABLE_FAULT_REQUEST_ID_ENV, raising=False)
-    monkeypatch.delenv(P1_RETRIABLE_FAULT_OPERATION_ENV, raising=False)
-    provider = ControlledProvider()
-
-    service = FormalBatchSpeechService(
-        provider, authorization_resolver=ExactAuthorizationResolver()
-    )
-    assert service._p1_retriable_fault_plan is None
-
-    monkeypatch.setenv(P1_RETRIABLE_FAULT_REQUEST_ID_ENV, "request-p1-fault")
-    with pytest.raises(ValueError, match="requires exact request_id and operation"):
-        FormalBatchSpeechService(
-            provider, authorization_resolver=ExactAuthorizationResolver()
-        )
-    monkeypatch.setenv(P1_RETRIABLE_FAULT_OPERATION_ENV, SYNTHESIZE_OPERATION)
-    with pytest.raises(ValueError, match="exact recognition operation"):
-        FormalBatchSpeechService(
-            provider, authorization_resolver=ExactAuthorizationResolver()
-        )
-    monkeypatch.setenv(P1_RETRIABLE_FAULT_OPERATION_ENV, RECOGNIZE_OPERATION)
-    configured = FormalBatchSpeechService(
-        provider, authorization_resolver=ExactAuthorizationResolver()
-    )
-    assert configured._p1_retriable_fault_plan == BatchSpeechP1RetriableFaultPlan(
-        request_id="request-p1-fault",
-        operation=RECOGNIZE_OPERATION,
-    )
-
-
-@pytest.mark.asyncio
-async def test_p1_retriable_fault_is_authorized_exact_replayed_and_effect_free() -> None:
-    planned_request_id = "request-p1-retriable-fault"
-    provider = ControlledProvider()
-    allow = False
-
-    def authorize(
-        binding: SpeechAuthorizationBinding,
-    ) -> SpeechAuthorizationBinding | None:
-        return binding if allow else None
-
-    resolver = ExactAuthorizationResolver(authorize)
-    service = _service(
-        provider,
-        resolver=resolver,
-        p1_retriable_fault_plan=BatchSpeechP1RetriableFaultPlan(
-            request_id=planned_request_id,
-            operation=RECOGNIZE_OPERATION,
-        ),
-    )
-    request = _recognize_request(
-        request_id=planned_request_id,
-        operation_id="operation-p1-fault",
-        capture_id="capture-p1-fault",
-    )
-
-    malformed = await service.recognize({**request, "fault": "client-claim"}, CONTEXT)
-    denied = await service.recognize(request, CONTEXT)
-    assert malformed["error"]["code"] == "INVALID_ARGUMENT"  # type: ignore[index]
-    assert denied["error"]["code"] == "PERMISSION_DENIED"  # type: ignore[index]
-    assert len(resolver.calls) == 1
-    assert provider.recognize_calls == 0
-    assert service._operations == {}
-    assert service._seen_captures == {}
-    assert service._current_capture == {}
-
-    allow = True
-    authority_calls_before = len(resolver.calls)
-    injected = await service.recognize(request, CONTEXT)
-    replayed = await service.recognize(request, CONTEXT)
-    conflicted = await service.recognize(
-        {**request, "operation_id": "operation-p1-fault-conflict"}, CONTEXT
-    )
-
-    expected_error = {
-        "code": "UNAVAILABLE",
-        "reason": "SPEECH_W2_RETRIABLE_FAULT_INJECTED",
-        "message": "the signed W2 plan injected a retriable recognition fault",
-        "retriable": True,
-        "correlation_id": "correlation-1",
-        "details": {},
-    }
-    assert injected["ok"] is False
-    assert injected["error"] == expected_error
-    assert replayed == injected
-    assert conflicted["error"]["code"] == "CONFLICT"  # type: ignore[index]
-    assert conflicted["error"]["reason"] == "SPEECH_REQUEST_ID_CONFLICT"  # type: ignore[index]
-    assert len(resolver.calls) == authority_calls_before + 3
-    assert provider.recognize_calls == 0
-    assert service._operations == {}
-    assert service._seen_captures == {}
-    assert service._current_capture == {}
-    assert service._voice_commit_receipts == {}
-
-    recovered = await service.recognize(
-        _recognize_request(
-            request_id="request-p1-after-fault",
-            operation_id="operation-p1-after-fault",
-            capture_id="capture-p1-after-fault",
-        ),
-        CONTEXT,
-    )
-    assert recovered["ok"] is True
-    assert provider.recognize_calls == 1
-
-
-@pytest.mark.asyncio
-async def test_p1_retriable_fault_concurrency_retains_one_exact_outcome() -> None:
-    planned_request_id = "request-p1-concurrent-fault"
-    provider = ControlledProvider()
-    service = _service(
-        provider,
-        p1_retriable_fault_plan=BatchSpeechP1RetriableFaultPlan(
-            request_id=planned_request_id,
-            operation=RECOGNIZE_OPERATION,
-        ),
-    )
-    request = _recognize_request(
-        request_id=planned_request_id,
-        operation_id="operation-p1-concurrent-fault",
-        capture_id="capture-p1-concurrent-fault",
-    )
-
-    results = await asyncio.gather(
-        service.recognize(request, CONTEXT),
-        service.recognize(request, CONTEXT),
-    )
-
-    assert results[0] == results[1]
-    assert results[0]["error"]["code"] == "UNAVAILABLE"  # type: ignore[index]
-    assert provider.recognize_calls == 0
-    assert service._operations == {}
-    assert service._seen_captures == {}
 
 
 def _cancel_request(target: str) -> dict[str, object]:

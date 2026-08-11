@@ -331,7 +331,6 @@ class DedicatedMediaProductRegistry:
         )
         self._lock = threading.RLock()
         self._provider_available = False
-        self._evidence_observer: Any | None = None
 
     @classmethod
     def from_environment(cls) -> "DedicatedMediaProductRegistry":
@@ -339,51 +338,6 @@ class DedicatedMediaProductRegistry:
 
     def set_provider_available(self, value: bool) -> None:
         self._provider_available = value is True
-
-    def set_evidence_observer(self, observer: Any | None) -> None:
-        self._evidence_observer = observer
-
-    @property
-    def evidence_observer(self) -> Any | None:
-        return self._evidence_observer
-
-    def evidence_binding_for(
-        self, params: object, session_id: str
-    ) -> dict[str, object] | None:
-        """Project only exact, retained P1 trace identity; never content."""
-
-        if not isinstance(params, Mapping):
-            return None
-        scope = params.get("scope")
-        if not isinstance(scope, Mapping):
-            return None
-        subject_id = scope.get("subject_id")
-        correlation_id = params.get("correlation_id")
-        if not isinstance(subject_id, str) or not isinstance(correlation_id, str):
-            return None
-        with self._lock:
-            self._prune(self._monotonic())
-            ticket = self._subjects.get((session_id, subject_id))
-            record = self._records.get(ticket or "")
-            if (
-                record is None
-                or record.binding.correlation_id != correlation_id
-                or not record.ticket_consumed
-            ):
-                return None
-            projected = {
-                "correlation_id": correlation_id,
-                "interaction_id": record.binding.interaction_id,
-            }
-            response = params.get("response")
-            if isinstance(response, Mapping) and isinstance(
-                response.get("response_id"), str
-            ):
-                projected["response_id"] = response["response_id"]
-                generation = response.get("response_generation")
-                if type(generation) is int:
-                    projected["response_generation"] = generation
-            return projected
 
     def activate(
         self,
@@ -1546,32 +1500,6 @@ def register_dedicated_media_rpc_handlers(
                 user_id=user_id,
                 request_origin=_request_origin(ws),
             )
-            observer = registry.evidence_observer
-            if observer is not None:
-                try:
-                    await observer.observe_route(
-                        session_id=session_id,
-                        correlation_id=str(payload["correlation_id"]),
-                        request_id=str(payload["receipt_id"]),
-                        operation="media.playout.receipt",
-                        result_ok=True,
-                        interaction_id=str(payload["interaction_id"]),
-                        response_id=str(payload["response_id"]),
-                        response_generation=int(payload["response_generation"]),
-                    )
-                    if payload.get("duplex_media_observed") is True:
-                        await observer.observe_route(
-                            session_id=session_id,
-                            correlation_id=str(payload["correlation_id"]),
-                            request_id=f"{payload['receipt_id']}:duplex",
-                            operation="media.duplex.receipt",
-                            result_ok=True,
-                            interaction_id=str(payload["interaction_id"]),
-                            response_id=str(payload["response_id"]),
-                            response_generation=int(payload["response_generation"]),
-                        )
-                except Exception:
-                    pass
             await channel.send_response(ws, req_id, ok=True, payload=payload)
         except MediaTransportViolation as exc:
             await channel.send_response(
@@ -1630,7 +1558,7 @@ async def handle_registered_media_socket(
                 downlink_complete = registry.complete_downlink(record, leaf_result)
                 route_completion_retained = True
 
-            result = await run_dedicated_media_downlink_socket_leaf(
+            await run_dedicated_media_downlink_socket_leaf(
                 request,
                 socket=ws,
                 frames=record.downlink_frames,
@@ -1652,7 +1580,7 @@ async def handle_registered_media_socket(
                 registry.complete_route(record, leaf_result)
                 route_completion_retained = True
 
-            result = await run_dedicated_media_socket_leaf(
+            await run_dedicated_media_socket_leaf(
                 request,
                 socket=ws,
                 on_audio_frame=lambda frame: registry.accept_frame(record, frame),
@@ -1666,65 +1594,7 @@ async def handle_registered_media_socket(
     except BaseException:
         if not route_completion_retained:
             registry.abort_route(record)
-            observer = registry.evidence_observer
-            if observer is not None:
-                try:
-                    await observer.observe_route(
-                        session_id=record.binding.session_id,
-                        correlation_id=record.binding.correlation_id,
-                        request_id=record.binding.lease_id,
-                        operation=(
-                            "media.downlink"
-                            if record.binding.direction is MediaDirection.DOWNLINK
-                            else "media.capture"
-                        ),
-                        result_ok=False,
-                        interaction_id=record.binding.interaction_id,
-                        error_code="UNAVAILABLE",
-                    )
-                except Exception:
-                    pass
         raise
-    observer = registry.evidence_observer
-    if observer is not None:
-        try:
-            await observer.observe_route(
-                session_id=record.binding.session_id,
-                correlation_id=record.binding.correlation_id,
-                request_id=record.binding.lease_id,
-                operation=(
-                    "media.downlink"
-                    if record.binding.direction is MediaDirection.DOWNLINK
-                    else "media.capture"
-                ),
-                result_ok=(
-                    downlink_complete
-                    if record.binding.direction is MediaDirection.DOWNLINK
-                    else result.activated and result.accepted_frames > 0
-                ),
-                interaction_id=record.binding.interaction_id,
-                response_id=(
-                    record.downlink_response.response_id
-                    if record.downlink_response is not None
-                    else None
-                ),
-                response_generation=(
-                    record.downlink_response.response_generation
-                    if record.downlink_response is not None
-                    else None
-                ),
-                error_code=(
-                    None
-                    if (
-                        downlink_complete
-                        if record.binding.direction is MediaDirection.DOWNLINK
-                        else result.activated and result.accepted_frames > 0
-                    )
-                    else "UNAVAILABLE"
-                ),
-            )
-        except Exception:
-            pass
     return True
 
 
