@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import io
 import json
+import struct
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -14,6 +16,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAttach,
     MediaDetach,
     MediaDetachReason,
+    decode_audio_frame,
     deserialize_media_control,
     serialize_media_control,
 )
@@ -29,6 +32,7 @@ from scripts.live_voice.w2_rehearsal.w2_fault_runner import (
     StockSpeechTemplate,
     W2FaultRunner,
     _typed_media_binding,
+    _wav_frames,
     derive_public_fault_plan,
 )
 
@@ -815,6 +819,27 @@ async def test_media_transfer_rejects_tampered_attach_and_ack() -> None:
     with pytest.raises(Exception, match="ACK is malformed"):
         await factory._transfer(socket, binding, [b"frame"])
     assert socket.sent == [b"frame"]
+
+
+def test_wav_frames_preserve_exact_gateway_pcm16_authority_content() -> None:
+    from jiuwenswarm.gateway.live_voice import dedicated_media_registration
+
+    binding = _media_binding()
+    seed = (0, 1, 2, 12_345, 32_767, -1, -2, -12_345, -32_768)
+    values = tuple(seed[index % len(seed)] for index in range(160))
+    pcm = b"".join(struct.pack("<h", value) for value in values)
+    wav = dedicated_media_registration._wav_bytes(  # noqa: SLF001
+        pcm, binding.frame_format.sample_rate_hz
+    )
+
+    frames = _wav_frames(base64.b64encode(wav).decode("ascii"), binding)
+    decoded = tuple(
+        sample
+        for frame in frames
+        for sample in decode_audio_frame(binding, frame).samples
+    )
+
+    assert dedicated_media_registration._pcm16(decoded) == pcm  # noqa: SLF001
 
 
 @pytest.mark.asyncio

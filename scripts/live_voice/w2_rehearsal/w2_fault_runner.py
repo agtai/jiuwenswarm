@@ -1675,7 +1675,13 @@ def _wav_frames(data_base64: str, binding: MediaAuthorityBinding) -> tuple[bytes
     frames: list[bytes] = []
     for seq, offset in enumerate(range(0, len(samples), samples_per_frame)):
         block = samples[offset : offset + samples_per_frame]
-        floats = tuple(sample / 32768.0 for sample in block)
+        # Match stock Web's PCM16 WAV decoder exactly.  Positive samples use
+        # 32767 while negative samples use 32768; using 32768 for both sides
+        # changes positive PCM values when Gateway canonicalizes the uploaded
+        # float32 frames and invalidates the completed-media content grant.
+        floats = tuple(
+            sample / (32768.0 if sample < 0 else 32767.0) for sample in block
+        )
         frames.append(
             encode_audio_frame(
                 binding,
