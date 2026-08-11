@@ -821,6 +821,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const voiceTaskOriginRef = useRef<ProductVoiceTaskOrigin | null>(null);
   const recognizedVoiceRef = useRef<ProductRecognizedVoice | null>(null);
   const voiceDraftBindingRef = useRef<ProductVoiceDraftBinding | null>(null);
+  const p3VoiceDraftBindingRef = useRef<ProductVoiceDraftBinding | null>(null);
   const p1VoiceCaptureBindingRef = useRef<Readonly<NonNullable<ProductWebP2ActivationSnapshot['binding']>> | null>(null);
   const recognizedSpeechConfirmationRef = useRef<RecognizedSpeechConfirmation | null>(null);
   const editedVoiceDraftConfirmationRef = useRef<EditedVoiceDraftConfirmation | null>(null);
@@ -2207,6 +2208,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           activation_id: captureBinding.activation_id,
           activation_generation: captureBinding.activation_generation,
         });
+        p3VoiceDraftBindingRef.current = voiceDraftBindingRef.current;
         voiceTaskOriginRef.current = null;
         setProductInput(recognition.text);
         pendingP3MutationRef.current = null;
@@ -2407,6 +2409,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             task_id: p3TargetTaskId,
           };
     }
+    const p3VoiceDraftBinding = p3VoiceDraftBindingRef.current;
+    if (
+      p3VoiceDraftBinding !== null &&
+      (voiceTaskOriginRef.current === null ||
+        !productVoiceDraftMatchesBinding(p3VoiceDraftBinding, props.activeSessionId, currentProductP2Binding()))
+    )
+      return null;
     if (!p3TaskName.trim() || !p3TaskInstruction.trim()) return null;
     return {
       operation: 'task.create',
@@ -2807,10 +2816,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           })
         );
       } else if (binding === null || !recognizedVoiceMatchesProductBinding(recognized, binding)) {
+        const staleVoiceTaskDraft =
+          p3MutationOperation === 'task.create' &&
+          voiceTaskOriginRef.current === null &&
+          p3TaskInstruction === recognized.text;
         recognizedVoiceRef.current = null;
         voiceDraftBindingRef.current = null;
         setProductInput('');
         setProductTextStatus('idle');
+        if (staleVoiceTaskDraft) {
+          pendingP3MutationRef.current = null;
+          setP3TaskName('');
+          setP3TaskInstruction('');
+          setP3MutationStatus('idle');
+        }
       }
       return;
     }
@@ -2960,6 +2979,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         cancelP3RetryInspection();
         pendingP3MutationRef.current = null;
         voiceTaskOriginRef.current = null;
+        p3VoiceDraftBindingRef.current = null;
         setP3MutationStatus('idle');
         setP3MutationOperation(value);
       }}
@@ -2977,6 +2997,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         if (value !== recognizedVoiceRef.current?.text) {
           recognizedVoiceRef.current = null;
+          p3VoiceDraftBindingRef.current = null;
         }
         setP3MutationStatus('idle');
         setP3TaskInstruction(value);
