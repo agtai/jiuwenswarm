@@ -1248,6 +1248,7 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
     let binding = null;
     let exactProgressActivation = null;
     let progressListener = null;
+    let mutationCount = 0;
     let renderer;
     const progressSubscribe = listener => {
       progressListener = listener;
@@ -1314,7 +1315,7 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
       if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
       if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
       if (method === 'live_voice.composition.p3.progress.activate') {
-        if (params.task_id === 'task-a') exactProgressActivation = { ...params };
+        exactProgressActivation = { ...params };
         return { ok: true, result: { status: 'active', ...params } };
       }
       if (method === 'live_voice.composition.p3.progress.close') {
@@ -1342,6 +1343,8 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
         };
       }
       if (method === 'live_voice.composition.p3.mutate') {
+        mutationCount += 1;
+        const taskId = mutationCount === 1 ? 'task-a' : 'task-b';
         return {
           ok: true,
           result: {
@@ -1350,8 +1353,8 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
             command_id: params.command_id,
             target_task_id: null,
             formal_task_result: {
-              task_id: 'task-a',
-              attempt_id: 'attempt-a',
+              task_id: taskId,
+              attempt_id: mutationCount === 1 ? 'attempt-a' : 'attempt-b',
               attempt_number: 1,
               state: 'accepted',
               outbox_id: 'outbox-create-a',
@@ -1424,6 +1427,36 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
         );
         await waitForMounted(() => calls.some(call => call.method === 'live_voice.composition.p3.progress.ack'), `mounted origin panel did not ACK ${outcome}`);
       });
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 1);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
+
+      await act(async () => {
+        mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.create' } });
+        await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.create', 'second create did not become selectable');
+        mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+        await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'second task.create confirmation did not settle');
+      });
+      await act(async () => {
+        mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+        await waitForMounted(
+          () => exactProgressActivation?.task_id === 'task-b' && mountedP3Controls(renderer).select.props.value === 'task.cancel',
+          'second task.create did not bind its exact progress route'
+        );
+      });
+      assert.equal(
+        renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length,
+        0,
+        'a successor task must clear the predecessor progress projection before replay arrives'
+      );
+      await act(async () => {
+        progressListener(terminalProgress);
+        await Promise.resolve();
+      });
+      assert.equal(
+        renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length,
+        0,
+        'a late predecessor event must not repopulate the successor task projection'
+      );
       assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 1);
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
     } finally {

@@ -669,8 +669,12 @@ async def test_invalid_voice_origin_is_rejected_before_durable_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_product_registry_uses_real_p3_authority_query_and_subscription_owner(
+@pytest.mark.parametrize(
+    "outcome", (TerminalOutcome.COMPLETED, TerminalOutcome.FAILED)
+)
+async def test_product_registry_replays_terminal_p3_authority_before_subscription_activation(
     tmp_path: Path,
+    outcome: TerminalOutcome,
 ) -> None:
     from jiuwenswarm.server.live_voice.product_composition_registry import (
         AgentServerProductCompositionRegistry,
@@ -698,6 +702,7 @@ async def test_product_registry_uses_real_p3_authority_query_and_subscription_ow
         agent_manager=object(),
         push_text_event=push,
     )
+    harness.executor.dispatch_outcome = outcome
     await harness.composition.start()
     try:
         create_params = _issued_create_params(harness, "command-product-owner")
@@ -709,6 +714,13 @@ async def test_product_registry_uses_real_p3_authority_query_and_subscription_ow
         )
         assert created.ok is True
         task_id = str(created.payload["result"]["task_id"])
+        await _wait_until(
+            lambda: (
+                harness.composition._core.store.get_task(task_id, _scope()).state.value
+                == "terminal"
+            )
+        )
+        counts_before_progress = harness.composition._core.store.counts()
 
         queried = await registry.handle_p3_query(
             operation="task.list",
@@ -729,6 +741,14 @@ async def test_product_registry_uses_real_p3_authority_query_and_subscription_ow
             session_id="session-1",
             channel_id="web",
         )
+        assert queried.ok is True
+        assert activated.ok is True
+        await _wait_until(
+            lambda: any(
+                message["payload"]["source_event"]["event_type"] == "task.terminal"
+                for message in pushed
+            )
+        )
         closed = await registry.handle_p3_progress_close(
             params={
                 **_base(),
@@ -741,12 +761,16 @@ async def test_product_registry_uses_real_p3_authority_query_and_subscription_ow
             request_id="request-product-progress-close",
             session_id="session-1",
         )
-
-        assert queried.ok is True
-        assert activated.ok is True
         assert closed.ok is True
         assert activated.payload["result"]["voice_progress"] == "unavailable"
-        assert pushed == []
+        assert [
+            message["payload"]["source_event"]["event_type"] for message in pushed
+        ] == ["task.accepted", "task.running", "task.terminal"]
+        assert pushed[-1]["payload"]["source_event"]["payload"] == {
+            "state": "terminal",
+            "outcome": outcome.value,
+        }
+        assert harness.composition._core.store.counts() == counts_before_progress
     finally:
         await registry.stop()
         await harness.composition.stop()

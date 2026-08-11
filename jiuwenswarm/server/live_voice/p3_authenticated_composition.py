@@ -1104,7 +1104,7 @@ class P3AuthenticatedComposition:
         authorization: TaskAuthorizationGrant,
         binding: TaskProgressOriginBinding,
     ) -> TaskEventSubscription:
-        """Create one live-only exact-task reader for text/UI projection."""
+        """Create one authority-replaying exact-task reader for text/UI projection."""
 
         if not self._accepting:
             raise FormalTaskViolation(
@@ -1130,6 +1130,9 @@ class P3AuthenticatedComposition:
             scope=binding.scope,
             task_id=binding.task_id,
             enabled=True,
+            queue_capacity=256,
+            validation_capacity=4096,
+            authority_atomic_replay=True,
         )
 
     async def start(self) -> dict[str, int]:

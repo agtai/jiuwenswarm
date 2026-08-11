@@ -724,6 +724,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const p3RetryInspectionGenerationRef = useRef(0);
   const p3RetryInspectionAbortRef = useRef<AbortController | null>(null);
   const [createdProgressTaskId, setCreatedProgressTaskId] = useState<string | null>(null);
+  const progressTaskTargetRef = useRef<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
   const progressRef = useRef<Readonly<ProductTextProgressEvent> | null>(null);
   const pendingOwnedProgressRef = useRef(new Map<string, Readonly<ProductTextProgressEvent>>());
@@ -1004,7 +1005,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     owner.setConnected(props.isConnected);
     progressAckOwnerRef.current = owner;
     const consume = (parsed: Readonly<ProductTextProgressEvent>) => {
-      if (activeSessionRef.current !== ownedSessionId || parsed.session_id !== ownedSessionId || progressAckOwnerRef.current !== owner) {
+      if (
+        activeSessionRef.current !== ownedSessionId ||
+        parsed.session_id !== ownedSessionId ||
+        progressAckOwnerRef.current !== owner ||
+        (progressTaskTargetRef.current !== null && progressTaskTargetRef.current !== parsed.task_id)
+      ) {
         return;
       }
       const candidate = adoptParsedProductTextProgressEvent(progressRef.current, parsed, ownedSessionId);
@@ -1029,6 +1035,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           formalTaskControlLeafRef.current === leaf &&
           p3ProgressReconciliationGenerationRef.current === reconciliationGeneration &&
           progressOwnerEpochRef.current === ownerEpoch &&
+          (progressTaskTargetRef.current === null || progressTaskTargetRef.current === parsed.task_id) &&
           currentActivation?.status === 'active' &&
           currentActivation.binding !== null &&
           progressMatchesOwnedBinding(parsed, currentActivation.binding, ownedSessionId)
@@ -1061,7 +1068,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const acceptProgressPayload = (payload: unknown) => {
       const parsed = parseProductTextProgressEvent(payload);
       if (!parsed) return;
-      if (activeSessionRef.current !== ownedSessionId || parsed.session_id !== ownedSessionId || progressAckOwnerRef.current !== owner) {
+      if (
+        activeSessionRef.current !== ownedSessionId ||
+        parsed.session_id !== ownedSessionId ||
+        progressAckOwnerRef.current !== owner ||
+        (progressTaskTargetRef.current !== null && progressTaskTargetRef.current !== parsed.task_id)
+      ) {
         return;
       }
       const activation = progressActivationOwnerRef.current?.snapshot();
@@ -1794,6 +1806,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setP3MutationStatus('idle');
     setP3RetryInspectionStatus('idle');
     setP3RetryEligibility(null);
+    progressTaskTargetRef.current = null;
     setCreatedProgressTaskId(null);
     if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION || !props.activeSessionId) {
       p3MutationOwnerRef.current = null;
@@ -2373,6 +2386,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (typeof createdTaskId !== 'string' || !createdTaskId.trim()) {
             throw new Error('formal task.create result did not return an exact task');
           }
+          progressTaskTargetRef.current = createdTaskId;
+          progressRef.current = null;
+          pendingOwnedProgressRef.current.clear();
+          setProgress(null);
+          setProgressAck('idle');
           setCreatedProgressTaskId(createdTaskId);
           cancelP3RetryInspection();
           setP3TargetTaskId(createdTaskId);
