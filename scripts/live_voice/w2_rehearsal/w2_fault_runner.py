@@ -35,6 +35,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     encode_audio_frame,
     serialize_media_control,
 )
+from jiuwenswarm.server.live_voice.batch_speech import MIN_BATCH_TIMEOUT_MS
 
 P1_OPERATION = "speech.recognize.batch"
 P1_METHOD = "live_voice.speech.recognize_batch"
@@ -298,7 +299,10 @@ def _require_error(
         or code not in codes
         or reported_retriable is not retriable
     ):
-        raise FaultRunnerError("product fault returned the wrong nested business code")
+        raise FaultRunnerError(
+            "product fault returned the wrong nested business code "
+            f"(code={code!r}, reason={reason!r}, retriable={reported_retriable!r})"
+        )
     if reasons is not None and reason not in reasons:
         raise FaultRunnerError(
             "product fault returned the wrong nested business reason"
@@ -493,7 +497,7 @@ class W2FaultRunner:
             reserved = _copy_params(lease.params)
             reserved["request_id"] = reserve_id
             reserved["operation_id"] = _control_id(identity, "reserve-operation")
-            reserved["timeout_ms"] = 1
+            reserved["timeout_ms"] = MIN_BATCH_TIMEOUT_MS
             reserve_response = await self._request(
                 P1_METHOD,
                 reserved,

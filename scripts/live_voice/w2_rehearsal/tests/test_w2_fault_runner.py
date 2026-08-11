@@ -17,6 +17,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     deserialize_media_control,
     serialize_media_control,
 )
+from jiuwenswarm.server.live_voice.batch_speech import MIN_BATCH_TIMEOUT_MS
 from scripts.live_voice.w2_rehearsal.w2_fault_runner import (
     ChromeNetworkObserver,
     ChromeP3Oracle,
@@ -401,7 +402,7 @@ async def test_p1_zero_effect_never_allows_same_capture_success_after_stale() ->
         fault.request_id,
         fault.request_id,
     ]
-    assert rpc.calls[0][1]["timeout_ms"] == 1
+    assert rpc.calls[0][1]["timeout_ms"] == MIN_BATCH_TIMEOUT_MS
     assert rpc.calls[3][1]["capture"] != same_capture[0]
     assert len(media.leases) == 2 and all(lease.closed for lease in media.leases)
 

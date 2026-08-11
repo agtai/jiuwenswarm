@@ -688,6 +688,56 @@ async def test_scope_and_authority_fail_closed_without_provider_side_effects() -
 
 
 @pytest.mark.asyncio
+async def test_parse_failures_retain_exact_safe_response_identities() -> None:
+    provider = ControlledProvider()
+    service = _service(provider)
+    recognition = _recognize_request(
+        request_id="request-invalid-timeout",
+        operation_id="operation-invalid-timeout",
+        timeout_ms=0,
+    )
+    synthesis = _synthesize_request(
+        request_id="request-invalid-synthesis-timeout",
+        operation_id="operation-invalid-synthesis-timeout",
+        timeout_ms=0,
+    )
+    cancel = _cancel_request("operation-r0")
+    cancel["request_id"] = "request-invalid-cancel"
+    cancel["operation_id"] = "operation-invalid-cancel"
+    cancel["unknown"] = True
+
+    recognition_result = await service.recognize(recognition, CONTEXT)
+    synthesis_result = await service.synthesize(synthesis, CONTEXT)
+    cancel_result = await service.cancel(cancel, CONTEXT)
+
+    assert recognition_result["request_id"] == "request-invalid-timeout"
+    assert recognition_result["operation_id"] == "operation-invalid-timeout"
+    assert recognition_result["error"]["reason"] == "INVALID_SPEECH_TIMEOUT"
+    assert synthesis_result["request_id"] == "request-invalid-synthesis-timeout"
+    assert synthesis_result["operation_id"] == "operation-invalid-synthesis-timeout"
+    assert synthesis_result["error"]["reason"] == "INVALID_SPEECH_TIMEOUT"
+    assert cancel_result["request_id"] == "request-invalid-cancel"
+    assert cancel_result["operation_id"] == "operation-invalid-cancel"
+    assert cancel_result["error"]["reason"] == "UNKNOWN_FIELD"
+    assert provider.recognize_calls == 0
+    assert provider.synthesize_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_parse_failures_never_echo_unsafe_response_identities() -> None:
+    service = _service(ControlledProvider())
+    unsafe = _recognize_request(timeout_ms=0)
+    unsafe["request_id"] = "request with whitespace"
+    unsafe["operation_id"] = "o" * 257
+
+    result = await service.recognize(unsafe, CONTEXT)
+
+    assert result["request_id"] == "unknown"
+    assert result["operation_id"] == "unknown"
+    assert result["error"]["reason"] == "INVALID_SPEECH_TIMEOUT"
+
+
+@pytest.mark.asyncio
 async def test_request_asserted_identity_never_authorizes_provider_cost_or_audio() -> (
     None
 ):

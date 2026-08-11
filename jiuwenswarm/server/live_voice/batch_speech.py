@@ -87,6 +87,8 @@ MAX_CLOSE_TIMEOUT_MS = 5_000
 DEFAULT_CLOSE_TIMEOUT_MS = 1_000
 MAX_VOICE_COMMIT_RECEIPTS = 512
 VOICE_COMMIT_RECEIPT_TTL_SECONDS = 300.0
+MAX_RESPONSE_IDENTITY_CHARACTERS = 256
+MAX_RESPONSE_IDENTITY_UTF8_BYTES = 1_024
 
 _PCM16_SAMPLE_WIDTH_BYTES = 2
 _PCM_WAV_HEADER_BYTES = 44
@@ -226,6 +228,36 @@ def _required_text(value: object, field: str) -> str:
     return value
 
 
+def _safe_response_identity(payload: object, field: str) -> str:
+    """Retain only a bounded opaque identity for a failed result envelope.
+
+    Full request parsing can fail after the caller supplied valid request and
+    operation identities (for example, on an invalid timeout).  Preserve those
+    identities so the error remains bound to the exact request, but never echo
+    an unbounded, whitespace-bearing, malformed, or non-scalar value from an
+    otherwise invalid payload.
+    """
+
+    if type(payload) is not dict:
+        return "unknown"
+    value = payload.get(field)
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > MAX_RESPONSE_IDENTITY_CHARACTERS
+        or any(character.isspace() for character in value)
+    ):
+        return "unknown"
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return "unknown"
+    if len(encoded) > MAX_RESPONSE_IDENTITY_UTF8_BYTES:
+        return "unknown"
+    return value
+
+
 def _required_dict(value: object, field: str) -> dict[str, object]:
     if type(value) is not dict:
         raise _fail(
@@ -284,14 +316,16 @@ def _positive_int(value: object, field: str) -> int:
 
 
 def _timeout_ms(value: object) -> int:
-    timeout = _positive_int(value, "timeout_ms")
-    if not MIN_BATCH_TIMEOUT_MS <= timeout <= MAX_BATCH_TIMEOUT_MS:
+    if (
+        type(value) is not int
+        or not MIN_BATCH_TIMEOUT_MS <= value <= MAX_BATCH_TIMEOUT_MS
+    ):
         raise _fail(
             ErrorCode.INVALID_ARGUMENT,
             "INVALID_SPEECH_TIMEOUT",
             f"timeout_ms must be between {MIN_BATCH_TIMEOUT_MS} and {MAX_BATCH_TIMEOUT_MS}",
         )
-    return timeout
+    return value
 
 
 def _locale(value: object) -> str:
@@ -1595,8 +1629,8 @@ class FormalBatchSpeechService:
     async def recognize(
         self, payload: object, context: SpeechRpcContext
     ) -> dict[str, object]:
-        request_id = "unknown"
-        operation_id = "unknown"
+        request_id = _safe_response_identity(payload, "request_id")
+        operation_id = _safe_response_identity(payload, "operation_id")
         try:
             request = parse_recognition_batch_request(payload, context)
             request_id = request.request_id
@@ -1690,8 +1724,8 @@ class FormalBatchSpeechService:
     async def synthesize(
         self, payload: object, context: SpeechRpcContext
     ) -> dict[str, object]:
-        request_id = "unknown"
-        operation_id = "unknown"
+        request_id = _safe_response_identity(payload, "request_id")
+        operation_id = _safe_response_identity(payload, "operation_id")
         try:
             request = parse_synthesis_batch_request(payload, context)
             request_id = request.request_id
@@ -1757,8 +1791,8 @@ class FormalBatchSpeechService:
     async def cancel(
         self, payload: object, context: SpeechRpcContext
     ) -> dict[str, object]:
-        request_id = "unknown"
-        operation_id = "unknown"
+        request_id = _safe_response_identity(payload, "request_id")
+        operation_id = _safe_response_identity(payload, "operation_id")
         try:
             data = _required_dict(payload, "cancel_request")
             _exact_keys(
