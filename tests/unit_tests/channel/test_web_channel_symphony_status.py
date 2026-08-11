@@ -109,6 +109,64 @@ def test_web_channel_preserves_goal_structured_payloads():
 
 
 @pytest.mark.asyncio
+async def test_web_channel_preserves_live_voice_task_progress_delivery_binding():
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    client = _FakeClient()
+    routing_key = RoutingKey(
+        channel_id="web",
+        app_id="default",
+        user_id="test_user",
+        session_id="session-1",
+        agent_ref=None,
+    )
+    payload = {
+        "event_type": "live_voice.task.progress",
+        "channel_id": "web",
+        "scope": {"project_id": "project-1", "task_id": "task-1"},
+        "correlation_id": "correlation-1",
+        "generation": 3,
+        "delivery_id": "delivery-1",
+        "source_event": {"event_type": "work.progress", "seq": 7},
+        "progress_event": {"event_type": "work.progress", "payload": {"seq": 7}},
+        "evidence": {"kind": "text_progress"},
+    }
+    msg = Message(
+        id="progress-1",
+        type="event",
+        channel_id="web",
+        session_id="session-1",
+        params={},
+        timestamp=0.0,
+        ok=True,
+        payload=payload,
+        event_type=EventType.LIVE_VOICE_TASK_PROGRESS,
+    )
+
+    routing_target = RoutingTarget(
+        intent="live_voice_product_progress",
+        routing_keys=[routing_key],
+        member_names=(),
+    )
+
+    await channel.register_ws(client, routing_key)
+    try:
+        await channel.send(msg, routing_target=routing_target)
+        for _ in range(20):
+            if client.frames:
+                break
+            await asyncio.sleep(0.005)
+        assert client.frames == [
+            {
+                "type": "event",
+                "event": "live_voice.task.progress",
+                "payload": {**payload, "session_id": "session-1"},
+            }
+        ]
+    finally:
+        await channel.unregister_ws(client)
+
+
+@pytest.mark.asyncio
 async def test_web_channel_preserves_symphony_status_payload():
     channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
     client = _FakeClient()

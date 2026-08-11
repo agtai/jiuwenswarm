@@ -1030,6 +1030,32 @@ def test_web_exposes_graph_methods_and_rejects_legacy_symphony_methods():
     assert legacy_symphony_methods.isdisjoint(app_web_handlers._FORWARD_REQ_METHODS)
 
 
+def test_web_schedule_and_issue_rpc_methods_are_agent_only():
+    expected = {
+        "schedule.check_config",
+        "schedule.update_config",
+        "schedule.create",
+        "schedule.run",
+        "schedule.list",
+        "schedule.status",
+        "schedule.logs",
+        "schedule.cancel",
+        "schedule.delete",
+        "issue.watch_once",
+        "issue.state.list",
+        "issue.matrix",
+        "issue.delete",
+    }
+
+    exposed = {
+        method
+        for method in app_web_handlers._FORWARD_REQ_METHODS
+        if method.startswith(("schedule.", "issue."))
+    }
+    assert exposed == expected
+    assert expected <= app_web_handlers._FORWARD_NO_LOCAL_HANDLER_METHODS
+
+
 # =====================================================================
 # _normalize_feishu_conf 纯函数测试
 # =====================================================================

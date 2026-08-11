@@ -657,8 +657,12 @@ execution_guard:
 
   # 断路器：检测工具重复/交替/无进展循环，critical 级会强制结束当次回答
   circuit_breaker:
-    # 总开关。断路器会主动中断 agent（force-finish），默认关闭，需显式开启
+    # 旧版通用循环检测器开关；默认关闭，避免改变既有执行策略
     enabled: false
+    # 同工具名、同执行参数、同完整失败结果连续出现时，默认启用精确止损
+    repeated_failure_enabled: true
+    # 前两次失败放行；第 3 次完成后 force-finish，阻止顺序第 4 次执行
+    repeated_failure_threshold: 3
     # 相同工具+参数重复达到该次数时告警（仅日志，不中断）
     warning_threshold: 10
     # Ping-Pong 两工具交替且无进展达到该次数时中断

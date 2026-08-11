@@ -336,6 +336,50 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             text = str(value)
         return cls._truncate_for_ws_log(text)
 
+    @classmethod
+    def _redact_ws_media_for_log(cls, value: Any) -> Any:
+        """Project websocket diagnostics without private Live Voice content."""
+
+        if isinstance(value, dict):
+            projected: dict[Any, Any] = {}
+            for key, item in value.items():
+                normalized = str(key).strip().lower().replace("-", "_")
+                if normalized in {
+                    "data_base64",
+                    "audio_base64",
+                    "audio_bytes",
+                    "raw_audio",
+                    "pcm",
+                    "samples",
+                    "raw_text",
+                    "display_text",
+                    "spoken_text",
+                    "transcript",
+                    "text",
+                    "instruction",
+                    "auth_token",
+                    "authorization",
+                    "api_key",
+                    "access_token",
+                    "refresh_token",
+                    "credential",
+                    "credentials",
+                    "secret",
+                    "ticket",
+                    "endpoint_path",
+                    "subject_id",
+                    "lease_id",
+                    "authority_evidence_id",
+                    "media_session_id",
+                }:
+                    projected[key] = "<redacted:live-voice-private>"
+                else:
+                    projected[key] = cls._redact_ws_media_for_log(item)
+            return projected
+        if isinstance(value, list):
+            return [cls._redact_ws_media_for_log(item) for item in value]
+        return value
+
     def _log_ws_business_message(self, direction: str, raw_message: str) -> None:
         try:
             payload = json.loads(raw_message)
@@ -351,7 +395,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 direction,
                 self._format_ws_part(payload.get("id")),
                 self._format_ws_part(payload.get("method")),
-                self._format_ws_part(payload.get("params")),
+                self._format_ws_part(
+                    self._redact_ws_media_for_log(payload.get("params"))
+                ),
             )
             return
         if msg_type == "res":
@@ -360,7 +406,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 direction,
                 self._format_ws_part(payload.get("id")),
                 self._format_ws_part(payload.get("ok")),
-                self._format_ws_part(payload.get("payload")),
+                self._format_ws_part(
+                    self._redact_ws_media_for_log(payload.get("payload"))
+                ),
                 self._format_ws_part(payload.get("error")),
                 self._format_ws_part(payload.get("code")),
             )
@@ -372,7 +420,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._format_ws_part(payload.get("event")),
                 self._format_ws_part(payload.get("seq")),
                 self._format_ws_part(payload.get("stream_id")),
-                self._format_ws_part(payload.get("payload")),
+                self._format_ws_part(
+                    self._redact_ws_media_for_log(payload.get("payload"))
+                ),
             )
 
     def _is_api_route(self) -> bool:
