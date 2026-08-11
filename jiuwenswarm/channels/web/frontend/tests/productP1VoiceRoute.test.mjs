@@ -6,6 +6,7 @@ import vm from 'node:vm';
 import {
   PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
   PRODUCT_P1_CAPTURE_MAX_DURATION_MS,
+  PRODUCT_P1_EMPTY_TRANSCRIPT_REASON,
   PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
   PRODUCT_P1_MEDIA_CLOSE_METHOD,
   PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
@@ -1407,6 +1408,129 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
   assert.deepEqual(
     calls.map(([method]) => method),
     [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, 'live_voice.speech.recognize_batch', 'live_voice.speech.synthesize_batch', PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD]
+  );
+  await owner.close();
+  assert.equal(calls.at(-1)[0], PRODUCT_P1_MEDIA_CLOSE_METHOD);
+});
+
+test('empty capture settles with zero commit while retaining authoritative P2 playout', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return {
+          status: 'active',
+          reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+          subject_id: 'media-subject-1',
+          endpoint_path: '/ws/live-voice/media/private-ticket',
+          subprotocol: 'live-voice.media.v1',
+          ticket_ttl_ms: 30_000,
+          binding,
+          privacy: {
+            raw_audio_persisted: false,
+            raw_audio_logged: false,
+            memory_only: true,
+          },
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        throw Object.assign(new Error('provider returned no transcript'), {
+          reason: PRODUCT_P1_EMPTY_TRANSCRIPT_REASON,
+        });
+      }
+      if (method === 'live_voice.speech.synthesize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.synthesize.batch',
+            response: params.response,
+            unit_id: params.unit_id,
+            audio: {
+              format: 'wav_pcm16_mono',
+              sample_rate_hz: 48_000,
+              channel_count: 1,
+              data_base64: wavBase64(48_000, 960),
+            },
+            provider: {
+              provider_id: 'provider-test',
+              implementation_class: 'formal',
+              fallback_from: null,
+              model: 'tts-test',
+              voice: 'voice-test',
+            },
+            presented: false,
+          },
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD) {
+        return {
+          status: 'media_playout_acknowledged',
+          reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+          receipt_id: 'media-playout-receipt-1',
+          duplex_media_observed: false,
+          ...params,
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+    locale: 'zh-CN',
+  });
+  await assert.rejects(
+    owner.stopAndRecognize(),
+    error => error?.reason === PRODUCT_P1_EMPTY_TRANSCRIPT_REASON
+  );
+
+  assert.deepEqual(owner.status(), {
+    status: 'idle',
+    reason: PRODUCT_P1_EMPTY_TRANSCRIPT_REASON,
+  });
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD).length, 0);
+
+  await owner.playAgentText({
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-p2-1',
+      response_generation: 0,
+    },
+    unit_id: 'unit-p2-1',
+    text: 'main',
+  });
+
+  assert.equal(owner.status().status, 'recognized');
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [
+      PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
+      'live_voice.speech.recognize_batch',
+      'live_voice.speech.synthesize_batch',
+      PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD,
+    ]
   );
   await owner.close();
   assert.equal(calls.at(-1)[0], PRODUCT_P1_MEDIA_CLOSE_METHOD);

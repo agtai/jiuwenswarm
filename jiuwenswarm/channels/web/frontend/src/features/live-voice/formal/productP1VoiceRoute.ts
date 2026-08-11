@@ -21,6 +21,7 @@ export const PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD = 'live_voice.media.playout
 
 export const PRODUCT_P1_CAPTURE_MAX_DURATION_MS = 30_000;
 export const PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON = 'AUDIO_CAPTURE_DURATION_EXCEEDED';
+export const PRODUCT_P1_EMPTY_TRANSCRIPT_REASON = 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT';
 const MAX_CAPTURE_FRAMES = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
 export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
 const ROUTE_READY_TIMEOUT_MS = 3_000;
@@ -471,6 +472,19 @@ export class ProductP1VoiceRouteOwner {
         voice_commit_receipt: result.voice_commit_receipt,
       });
     } catch (error) {
+      if (stableFailureReason(error) === PRODUCT_P1_EMPTY_TRANSCRIPT_REASON) {
+        // An empty successor capture is an expected zero-input outcome, not a
+        // broken Speech/media route. The exact capture has already been flushed
+        // and closed above, so release its browser samples while retaining the
+        // authenticated Speech/playout authority for the next P2 response.
+        // No recognition receipt is returned, so callers cannot commit an empty
+        // Agent/Tool turn.
+        this.#frames = [];
+        this.#mediaSentFrames = 0;
+        this.#route = null;
+        this.#setStatus('idle', PRODUCT_P1_EMPTY_TRANSCRIPT_REASON);
+        throw error;
+      }
       await this.#fail(error);
       throw error;
     }
