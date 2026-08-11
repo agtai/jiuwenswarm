@@ -679,10 +679,7 @@ class DedicatedMediaProductRegistry:
                     owned.downlink_results.clear()
                     owned.downlink_frames = ()
                     owned.pcm.clear()
-                self._revoked[subject_id] = binding
-                self._revoked.move_to_end(subject_id)
-                while len(self._revoked) > _MAX_RECORDS:
-                    self._revoked.popitem(last=False)
+                self._remember_revoked(subject_id, binding)
         return {
             "status": "closed",
             "reason_id": "MEDIA_ROUTE_REVOKED",
@@ -838,7 +835,36 @@ class DedicatedMediaProductRegistry:
             return
         text = str(event["text"])
         with self._lock:
-            self._prune(self._monotonic())
+            now = self._monotonic()
+            self._prune(now)
+            activation_key = (session_id, owner_connection_id, ref.interaction_id)
+            activation = self._product_activations.get(activation_key)
+            if (
+                session_id != routed_session
+                or activation is None
+                or activation.correlation_id != correlation_id
+                or activation.activation_id != result.get("activation_id")
+                or activation.activation_generation
+                != result.get("activation_generation")
+                or activation.connection_id != owner_connection_id
+            ):
+                return
+            # A final notification is exact, server-originated proof that the
+            # accepted P2 activation is still live on this connection. Renew
+            # its bounded media trust before authorizing the corresponding
+            # synthesis. Without this sliding renewal a turn begun just before
+            # the fixed activation deadline can lose cleanup authority while
+            # its downlink or successor capture is still completing.
+            self._product_activations[activation_key] = _ProductActivationAuthority(
+                session_id=activation.session_id,
+                connection_id=activation.connection_id,
+                correlation_id=activation.correlation_id,
+                interaction_id=activation.interaction_id,
+                activation_id=activation.activation_id,
+                activation_generation=activation.activation_generation,
+                expires_at=now + self._authority_ttl,
+            )
+            self._product_activations.move_to_end(activation_key)
             for record in self._records.values():
                 if (
                     record.binding.session_id != session_id
@@ -849,10 +875,8 @@ class DedicatedMediaProductRegistry:
                     or result.get("activation_id") != record.product_activation_id
                     or result.get("activation_generation")
                     != record.product_activation_generation
-                    or self._monotonic() > record.authority_expires_at
-                    or not self._has_retained_product_activation(
-                        record, self._monotonic()
-                    )
+                    or now > record.authority_expires_at
+                    or not self._has_retained_product_activation(record, now)
                 ):
                     continue
                 record.synthesis_content_sha256[(ref, unit_id)] = hashlib.sha256(
@@ -1345,6 +1369,17 @@ class DedicatedMediaProductRegistry:
             subject_key = (record.binding.session_id, record.subject_id)
             if self._subjects.get(subject_key) == ticket:
                 self._subjects.pop(subject_key, None)
+            self._remember_revoked(
+                record.subject_id,
+                (
+                    record.binding.session_id,
+                    record.binding.correlation_id,
+                    record.binding.interaction_id,
+                    record.product_activation_id,
+                    record.product_activation_generation,
+                    record.binding.connection_id,
+                ),
+            )
             record.pcm.clear()
             record.playout_receipts.clear()
             record.downlink_results.clear()
@@ -1398,6 +1433,17 @@ class DedicatedMediaProductRegistry:
         for ticket in tickets:
             record = self._records.pop(ticket)
             self._subjects.pop((record.binding.session_id, record.subject_id), None)
+            self._remember_revoked(
+                record.subject_id,
+                (
+                    record.binding.session_id,
+                    record.binding.correlation_id,
+                    record.binding.interaction_id,
+                    record.product_activation_id,
+                    record.product_activation_generation,
+                    record.binding.connection_id,
+                ),
+            )
             record.route_completed = True
             record.recognition_content_sha256 = None
             record.synthesis_content_sha256.clear()
@@ -1406,6 +1452,18 @@ class DedicatedMediaProductRegistry:
             record.downlink_frames = ()
             record.downlink_overlap_ticket = None
             record.pcm.clear()
+
+    def _remember_revoked(
+        self,
+        subject_id: str,
+        binding: tuple[str, str, str, str, int, str],
+    ) -> None:
+        """Retain only the exact bounded tombstone required for close replay."""
+
+        self._revoked[subject_id] = binding
+        self._revoked.move_to_end(subject_id)
+        while len(self._revoked) > _MAX_RECORDS:
+            self._revoked.popitem(last=False)
 
 
 def register_dedicated_media_rpc_handlers(

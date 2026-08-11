@@ -431,6 +431,267 @@ def test_exact_media_close_is_idempotent_and_revokes_all_speech_authority() -> N
     assert forged.value.reason_id == "MEDIA_CLOSE_BINDING_MISMATCH"
 
 
+def test_product_activation_expiry_retains_exact_media_close_tombstone() -> None:
+    now = 0.0
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now,
+        authority_ttl_seconds=10,
+    )
+    registry.set_provider_available(True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-owner")
+    now = 9.0
+    activation = registry.activate(
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+        user_id="user-1",
+    )
+    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    assert registry.consume_ticket(ticket, request_origin=ORIGIN) is not None
+    close = {
+        "session_id": "session-1",
+        "subject_id": activation["subject_id"],
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "activation_id": "activation-1",
+        "activation_generation": 1,
+    }
+
+    # The media authority itself is still live, but pruning the older P2
+    # activation revokes it first. The browser's later exact close must remain
+    # idempotent instead of becoming permanently cleanup_pending.
+    now = 11.0
+    first = registry.revoke(
+        params=close,
+        routed_session_id="session-1",
+        connection_id="connection-owner",
+        user_id="user-1",
+    )
+    replay = registry.revoke(
+        params=close,
+        routed_session_id="session-1",
+        connection_id="connection-owner",
+        user_id="user-1",
+    )
+
+    assert first == replay
+    assert first["reason_id"] == "MEDIA_ROUTE_REVOKED"
+    assert registry._records == {}
+    with pytest.raises(MediaTransportViolation) as forged:
+        registry.revoke(
+            params=close,
+            routed_session_id="session-1",
+            connection_id="connection-forged",
+            user_id="user-1",
+        )
+    assert forged.value.reason_id == "MEDIA_CLOSE_BINDING_MISMATCH"
+
+
+def test_media_authority_expiry_retains_exact_media_close_tombstone() -> None:
+    now = 0.0
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now,
+        authority_ttl_seconds=10,
+    )
+    registry.set_provider_available(True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-owner")
+    activation = registry.activate(
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-owner",
+        user_id="user-1",
+    )
+    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    assert registry.consume_ticket(ticket, request_origin=ORIGIN) is not None
+
+    now = 11.0
+    close = registry.revoke(
+        params={
+            "session_id": "session-1",
+            "subject_id": activation["subject_id"],
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "activation_id": "activation-1",
+            "activation_generation": 1,
+        },
+        routed_session_id="session-1",
+        connection_id="connection-owner",
+        user_id="user-1",
+    )
+
+    assert close["reason_id"] == "MEDIA_ROUTE_REVOKED"
+    assert registry._records == {}
+
+
+def test_exact_final_notification_renews_live_product_media_trust() -> None:
+    now = 0.0
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now,
+        authority_ttl_seconds=10,
+    )
+    registry.set_provider_available(True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    now = 9.0
+    activation = registry.activate(
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    record = registry.consume_ticket(ticket, request_origin=ORIGIN)
+    assert record is not None
+    record.route_completed = True
+
+    now = 9.5
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-1",
+                    "response_generation": 0,
+                },
+                "agent_event": {
+                    "event_type": "chat.final",
+                    "text": "authoritative response",
+                },
+                "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    now = 11.0
+    context = registry.context_for(
+        SimpleNamespace(_jiuwen_ws_id="connection-1"),
+        {"scope": {"subject_id": activation["subject_id"]}},
+        "session-1",
+        "user-1",
+    )
+    assert context.assurance is Assurance.AUTHENTICATED
+    assert registry._records
+
+
+def test_expired_product_activation_cannot_be_revived_by_late_notification() -> None:
+    now = 0.0
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now,
+        authority_ttl_seconds=10,
+    )
+    registry.set_provider_available(True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+
+    now = 11.0
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-late",
+                    "response_generation": 0,
+                },
+                "agent_event": {
+                    "event_type": "chat.final",
+                    "text": "late response",
+                },
+                "presentation_unit": {"surface": "text", "unit_id": "unit-late"},
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    assert registry._product_activations == {}
+    with pytest.raises(MediaTransportViolation) as rejected:
+        registry.activate(
+            params=params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+            user_id="user-1",
+        )
+    assert rejected.value.reason_id == "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED"
+
+
+def test_cross_session_route_notification_cannot_renew_product_activation() -> None:
+    now = 0.0
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now,
+        authority_ttl_seconds=10,
+    )
+    registry.set_provider_available(True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+
+    now = 9.0
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-cross-session",
+                    "response_generation": 0,
+                },
+                "agent_event": {
+                    "event_type": "chat.final",
+                    "text": "cross-session response",
+                },
+                "presentation_unit": {
+                    "surface": "text",
+                    "unit_id": "unit-cross-session",
+                },
+            },
+        },
+        routed_session_id="session-foreign",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+
+    now = 11.0
+    with pytest.raises(MediaTransportViolation) as rejected:
+        registry.activate(
+            params=params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+            user_id="user-1",
+        )
+    assert rejected.value.reason_id == "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED"
+    assert registry._product_activations == {}
+
+
 def test_speech_context_requires_the_exact_activation_connection() -> None:
     registry = _active_registry()
     activation = _activate(
