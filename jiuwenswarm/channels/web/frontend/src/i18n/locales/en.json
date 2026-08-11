@@ -2130,6 +2130,191 @@
     "unknownError": "Unknown error",
     "errorPrefix": "Error: {{message}}"
   },
+  "liveVoice": {
+    "label": "Live Voice",
+    "experimental": "Experimental",
+    "enable": "Enable Live Voice",
+    "exit": "Exit Live Voice",
+    "unavailable": "The Live Voice demo currently requires Agent mode and a compatible browser",
+    "interactionBlocked": "Finish the pending question or evolution flow before enabling Live Voice",
+    "streamingRevisionFallback": "The final response was revised. Preview speech stopped; use the text on screen.",
+    "streamingFinalTimeout": "No final response confirmation arrived. Preview stopped; retry or use the text on screen.",
+    "transcriptPlaceholder": "Your speech will appear here",
+    "formal": {
+      "routeLabel": "P1 · Gateway Speech · formal",
+      "editorLabel": "Recognized speech",
+      "status": {
+        "idle": "Ready for formal speech",
+        "starting": "Starting microphone",
+        "capturing": "Listening through formal P1",
+        "recognizing": "Recognizing speech",
+        "recognized": "Review recognized speech",
+        "playing": "Playing the Agent response",
+        "cleanup_pending": "Voice cleanup is pending",
+        "failed": "Formal voice is unavailable",
+        "closed": "Formal voice is closed",
+        "confirming": "Confirm the recognized text",
+        "waiting": "The Agent is working"
+      },
+      "actions": {
+        "start": "Start speaking",
+        "stopRecognize": "Stop and recognize",
+        "reviewSend": "Review and send",
+        "stopPlayback": "Stop playback",
+        "working": "Working"
+      }
+    },
+    "integrated": {
+      "title": "Integrated Web route facts",
+      "shellOnly": "The P2 text route below is formal only while its activation is active. Speech, physical audio, task completion, and Integrated Demo/Web Alpha Gate acceptance remain unproven.",
+      "routes": "P1 / P2 / P3alpha route selection",
+      "platform": "Chrome and Web diagnostics",
+      "refresh": "Refresh Web diagnostics",
+      "session": "Persisted Session",
+      "correlation": "Correlation",
+      "observedAt": "Route facts observed at",
+      "requested": "Requested class",
+      "owner": "Observed owner",
+      "adapter": "Adapter",
+      "provider": "Capability provider",
+      "contract": "Contract version",
+      "wiring": "Adapter state",
+      "reason": "Safe reason",
+      "activation": {
+        "status": "Product activation lease",
+        "scope": "Route / generation"
+      },
+      "textRoute": {
+        "label": "Formal P2 text input",
+        "placeholder": "Send committed text through CR and the JiuwenSwarm Agent",
+        "submit": "Submit committed turn",
+        "status": "P2 text / presentation ACK"
+      },
+      "recognizedConfirmation": {
+        "title": "Review recognized speech",
+        "agent": "Confirm the recognized speech shown on screen is exact before dispatching it to the Agent.",
+        "task": "Confirm the recognized speech shown on screen is exact before using it as the task instruction.",
+        "confirm": "Confirm and dispatch",
+        "cancel": "Cancel"
+      },
+      "taskControl": {
+        "title": "Formal P3 task control",
+        "disclosure": "Two distinct user actions are required: issue an exact short-lived confirmation, then execute it. Acceptance is not task completion.",
+        "create": "Create task",
+        "cancel": "Cancel task",
+        "retry": "Retry eligible task",
+        "inspectRetry": "Check retry eligibility",
+        "retryStatus": "Retry eligibility",
+        "retryReason": "Retry check reason",
+        "name": "Task name",
+        "instruction": "Task instruction",
+        "taskId": "Exact task ID",
+        "confirm": "Issue confirmation",
+        "execute": "Execute confirmed mutation",
+        "status": "P3 confirmation / mutation"
+      },
+      "composition": {
+        "flag_off": "flag off",
+        "shell_only": "shell only",
+        "formal_seams": "formal adapter seams present (not Gate evidence)",
+        "degraded": "declared degraded route",
+        "unsupported": "unsupported"
+      },
+      "diagnostics": {
+        "pending": "checking",
+        "browser": "Browser evidence",
+        "browserScope": "Declared Alpha browser scope",
+        "platform": "Reported OS platform",
+        "origin": "Origin / secure context",
+        "permission": "Microphone permission",
+        "devices": "Audio devices",
+        "activation": "Autoplay user activation",
+        "page": "Page lifecycle",
+        "network": "Network",
+        "aio": "AIO foundation (not route-wired)",
+        "errors": "Diagnostic limitations"
+      },
+      "progress": {
+        "title": "Authenticated task text progress",
+        "disclosure": "This is a session-bound text/UI projection from Task Core. It is not voice progress or Integrated Gate evidence.",
+        "task": "Task ID",
+        "state": "Observed state",
+        "correlation": "Authority correlation",
+        "generation": "Origin generation",
+        "sequence": "Persistent event sequence",
+        "evidence": "Binding evidence",
+        "delivery": "Web delivery ID",
+        "ack": "UI consumption acknowledgement"
+      }
+    },
+    "task": {
+      "commandId": "Command ID",
+      "taskCommandId": "Record command ID",
+      "predecessorTaskId": "Predecessor task ID",
+      "successorTaskId": "Successor task ID",
+      "conflictingTaskId": "Conflicting task ID (not successor)",
+      "recordRole": "Record role",
+      "roles": {
+        "current": "Current task",
+        "predecessor": "Predecessor",
+        "successor": "Successor",
+        "conflict": "Conflicting record"
+      },
+      "taskId": "Task ID",
+      "status": "Observed status",
+      "monitorState": "Monitor state",
+      "progress": "Progress summary",
+      "lastError": "Last error",
+      "source": "Status source",
+      "resultSource": "Result source",
+      "recoveryStatus": "Recovery status",
+      "projectDir": "Target project path",
+      "projectId": "Target project ID",
+      "originSessionId": "Origin session ID",
+      "originChannelId": "Origin channel ID",
+      "unknown": "unknown",
+      "monitor": {
+        "title": "Background task monitor",
+        "phases": {
+          "idle": "Task {{taskId}} is waiting for monitoring to start.",
+          "polling": "Reading the real state of task {{taskId}}; current status is {{status}}.",
+          "paused-disconnected": "The connection is down, so monitoring for task {{taskId}} is paused. Reconnection will reconcile only the original command.",
+          "reconciling": "Reconciling task {{taskId}} using its original command.",
+          "backoff": "Task {{taskId}} is temporarily unreadable; read-only retry {{retryCount}} is pending.",
+          "terminal": "Task {{taskId}} ended with the real status {{status}}.",
+          "missing": "Task {{taskId}} can no longer be found for the original command. The last trusted facts remain visible and monitoring stopped.",
+          "adapter-error": "Task {{taskId}} returned a response that cannot be adopted safely ({{error}}). The last trusted facts remain visible and monitoring stopped.",
+          "stopped": "Monitoring for task {{taskId}} stopped."
+        }
+      },
+      "safetyTitle": "Real side effects:",
+      "safetyDisclosure": "Executor JiuwenSwarm Code Agent; fixed project-bound project_code_pipeline; the saved project is the only execution root, and all shell, test, Git, and remote commands are blocked. Live Voice interrupt/exit only stops voice feedback and does not abort schedule.run or an existing task. Cancellation requires the explicit confirmed command and an observed real task ID, and cannot undo changes that already happened. Switching session or project isolates an unresolved command; only returning to its original context can resume reconciliation. Refreshing still loses voice-side task memory, so use the background task list afterward.",
+      "contextIsolatedTitle": "Task command isolated",
+      "contextIsolated": "Command {{commandId}} still has an unverified request or result, but the session or project context changed. To prevent duplicate side effects, other contexts will not retry it. Return to the original session and project to continue reconciliation.",
+      "isolatedResult": "This result belongs to the isolated original context and was not merged into the current context: {{detail}}",
+      "sessionChanged": "The session changed during this voice capture. No task was dispatched, preventing side effects in the wrong session.",
+      "executionTargetChanged": "The persisted session's project target changed during this voice capture. No task was dispatched, preventing side effects in the wrong project.",
+      "requiresSession": "Task commands require an existing saved session. No task was dispatched.",
+      "requiresExecutionTarget": "The saved session has no verifiable absolute project path. The task gateway was not called, preventing execution in an unknown directory.",
+      "unavailable": "The task gateway is unavailable. No task was dispatched."
+    },
+    "actions": {
+      "idle": "Start speaking",
+      "listening": "Stop and send",
+      "thinking": "Interrupt and speak",
+      "speaking": "Interrupt and speak",
+      "interrupted": "Continue speaking",
+      "error": "Retry"
+    },
+    "status": {
+      "idle": "Ready",
+      "listening": "Listening",
+      "thinking": "Agent is working",
+      "speaking": "Reading the response",
+      "interrupted": "Interrupted, waiting for your update",
+      "error": "Voice is unavailable"
+    }
+  },
   "speech": {
     "recognitionUnsupported": "Speech recognition is not supported by this browser",
     "synthesisUnsupported": "Speech synthesis is not supported by this browser",

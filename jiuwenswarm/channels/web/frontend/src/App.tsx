@@ -40,6 +40,7 @@ import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
 } from './features/tool-events/toolEventNormalizer';
+import { resolveLiveVoiceTaskExecutionContext } from './features/live-voice/liveVoiceTaskClient';
 import { useWebSocket, mergePersistedGoalCompletionMessages, stampGoalObjectiveMessages } from './hooks';
 import { webRequest } from './services/webClient';
 import { useTeamPanelState } from './features/teamPanelState';
@@ -374,6 +375,11 @@ function AppContent() {
   const historyBackgroundPrefetchTokensRef = useRef(new Map<string, number>());
   const creatingSessionRef = useRef(false);
   const sessionIdsCreatedInThisPageRef = useRef(new Set<string>());
+  const newSessionPromotionSequenceRef = useRef(0);
+  const [newSessionPromotion, setNewSessionPromotion] = useState<{
+    targetSessionId: string;
+    sequence: number;
+  } | null>(null);
   const shareExportRef = useRef<HTMLDivElement>(null);
   const shareExportFilenameRef = useRef('jiuwenswarm-share.png');
   const shareExportTokenRef = useRef(0);
@@ -482,6 +488,35 @@ function AppContent() {
       || Boolean(project.project_dir && project.project_dir === session.project_dir)
     )) ?? null;
   }, [currentSession, projects, sessions, sessionId]);
+  const liveVoiceTaskExecutionContext = useMemo(() => {
+    const session = currentSession?.session_id === sessionId
+      ? currentSession
+      : sessions.find((item) => item.session_id === sessionId);
+    if (!session || sessionId === NEW_CONVERSATION_ID) return null;
+
+    // Only trust the persisted session itself or the exact project registry
+    // entry referenced by that session. Never fall back to cwd/selectedProject.
+    const exactRegisteredProject =
+      sessionProject
+      ?? projects.find((project) => (
+        project.project_id === session.project_id && Boolean(project.project_dir?.trim())
+      ))
+      ?? null;
+    return resolveLiveVoiceTaskExecutionContext(
+      sessionId,
+      {
+        sessionId: session.session_id,
+        projectDir: session.project_dir,
+        projectId: session.project_id,
+      },
+      exactRegisteredProject
+        ? {
+            projectDir: exactRegisteredProject.project_dir,
+            projectId: exactRegisteredProject.project_id,
+          }
+        : null,
+    );
+  }, [currentSession, projects, sessionId, sessionProject, sessions]);
   const mode = useSessionStore((s) => s.runtimes[sessionId]?.mode ?? 'agent');
   const teamTaskEvents = useSessionStore((s) => s.runtimes[sessionId]?.teamTaskEvents ?? []);
   const teamTasks = useSessionStore((s) => s.runtimes[sessionId]?.teamTasks ?? []);
@@ -1755,6 +1790,11 @@ function AppContent() {
         usePlanStore.getState().removeRuntime(NEW_CONVERSATION_ID);
         useWorkspaceStore.getState().upsertSession(createdSession, { isNew: true });
         sessionIdsCreatedInThisPageRef.current.add(newSid);
+        newSessionPromotionSequenceRef.current += 1;
+        setNewSessionPromotion({
+          targetSessionId: newSid,
+          sequence: newSessionPromotionSequenceRef.current,
+        });
         useChatStore.getState().setProcessing(NEW_CONVERSATION_ID, false);
         sessionIdRef.current = newSid;
         setSessionId(newSid);
@@ -2342,9 +2382,13 @@ function AppContent() {
                       onPersistMedia={handlePersistMedia}
                       onPersistDocuments={handlePersistDocuments}
                       onInterrupt={handleInterrupt}
+                      liveVoiceTaskRequest={request}
+                      liveVoiceTaskExecutionContext={liveVoiceTaskExecutionContext}
+                      isConnected={isConnected}
                       onCancel={handleCancel}
                       onSwitchMode={handleSwitchMode}
                       isProcessing={isProcessing}
+                      newSessionPromotion={newSessionPromotion}
                       onUserAnswer={handleUserAnswer}
                       onExportShare={handleExportShare}
                       isExportingShare={isExportingShare}

@@ -232,6 +232,7 @@ interface ChatState {
   finalizeStreamSegment: (sessionId: string, streamKey?: string) => void;
   finalizeTeamLeaderSegment: (sessionId: string) => void;
   clearStreamSplit: (sessionId: string) => void;
+  markAssistantTurnFinal: (sessionId: string) => void;
   collapseTurnFinal: (
     sessionId: string,
     opts: { kind: 'agent' | 'team'; content: string; finalId: string; timestampIso: string }
@@ -638,6 +639,35 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
         runtimes: {
           ...state.runtimes,
           [sessionId]: { ...runtime, assistantStreamSplit: false },
+        },
+      };
+    });
+  },
+
+  markAssistantTurnFinal: (sessionId) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime) return state;
+      let turnStart = 0;
+      for (let index = runtime.messages.length - 1; index >= 0; index -= 1) {
+        if (runtime.messages[index].role === 'user') {
+          turnStart = index + 1;
+          break;
+        }
+      }
+      let changed = false;
+      const messages = runtime.messages.map((message, index) => {
+        if (index < turnStart || message.role !== 'assistant' || message.isResponseFinal === true) {
+          return message;
+        }
+        changed = true;
+        return { ...message, isResponseFinal: true };
+      });
+      if (!changed) return state;
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: { ...runtime, messages },
         },
       };
     });

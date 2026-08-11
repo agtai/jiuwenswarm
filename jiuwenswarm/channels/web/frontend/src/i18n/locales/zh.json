@@ -2128,6 +2128,191 @@
     "unknownError": "未知错误",
     "errorPrefix": "错误: {{message}}"
   },
+  "liveVoice": {
+    "label": "Live Voice",
+    "experimental": "实验功能",
+    "enable": "开启 Live Voice",
+    "exit": "退出 Live Voice",
+    "unavailable": "Live Voice Demo 目前仅支持 Agent 模式和兼容的浏览器",
+    "interactionBlocked": "请先完成当前待确认问题或演进流程，再开启 Live Voice",
+    "streamingRevisionFallback": "最终回答发生修订，已停止预读，请以页面文字为准",
+    "streamingFinalTimeout": "未收到最终回答确认，已停止本轮预读；请重试或以页面文字为准",
+    "transcriptPlaceholder": "说话内容会显示在这里",
+    "formal": {
+      "routeLabel": "P1 · Gateway Speech · 正式路线",
+      "editorLabel": "语音识别文本",
+      "status": {
+        "idle": "正式语音已就绪",
+        "starting": "正在启动麦克风",
+        "capturing": "正在通过正式 P1 聆听",
+        "recognizing": "正在识别语音",
+        "recognized": "请检查识别文本",
+        "playing": "正在播放 Agent 回答",
+        "cleanup_pending": "语音清理仍在进行",
+        "failed": "正式语音当前不可用",
+        "closed": "正式语音已关闭",
+        "confirming": "请确认识别文本",
+        "waiting": "Agent 正在工作"
+      },
+      "actions": {
+        "start": "开始说话",
+        "stopRecognize": "结束并识别",
+        "reviewSend": "检查并发送",
+        "stopPlayback": "停止播放",
+        "working": "处理中"
+      }
+    },
+    "integrated": {
+      "title": "Integrated Web 路由事实",
+      "shellOnly": "下方 P2 文本路线仅在 activation 生效时属于正式路径。语音、物理音频、任务完成和 Integrated Demo/Web Alpha Gate 验收仍未证明。",
+      "routes": "P1 / P2 / P3alpha 路由选择",
+      "platform": "Chrome 与 Web 诊断",
+      "refresh": "刷新 Web 诊断",
+      "session": "持久化 Session",
+      "correlation": "关联 ID",
+      "observedAt": "路由事实观察时间",
+      "requested": "请求的实现类别",
+      "owner": "观察到的 owner",
+      "adapter": "适配器",
+      "provider": "能力提供方",
+      "contract": "契约版本",
+      "wiring": "适配器状态",
+      "reason": "安全原因",
+      "activation": {
+        "status": "产品激活 lease",
+        "scope": "路由 / generation"
+      },
+      "textRoute": {
+        "label": "正式 P2 文本输入",
+        "placeholder": "通过 CR 和 JiuwenSwarm Agent 提交已确认文本",
+        "submit": "提交已确认轮次",
+        "status": "P2 文本 / 展示确认"
+      },
+      "recognizedConfirmation": {
+        "title": "检查识别文本",
+        "agent": "确认屏幕上的语音识别文本完全正确，然后发送给 Agent。",
+        "task": "确认屏幕上的语音识别文本完全正确，然后用作任务指令。",
+        "confirm": "确认并发送",
+        "cancel": "取消"
+      },
+      "taskControl": {
+        "title": "正式 P3 任务控制",
+        "disclosure": "必须执行两个独立的用户动作：签发精确且短时有效的确认，然后再执行。接受不代表任务完成。",
+        "create": "创建任务",
+        "cancel": "取消任务",
+        "retry": "重试符合条件的任务",
+        "inspectRetry": "检查重试资格",
+        "retryStatus": "重试资格",
+        "retryReason": "重试检查原因",
+        "name": "任务名称",
+        "instruction": "任务指令",
+        "taskId": "精确任务 ID",
+        "confirm": "签发确认",
+        "execute": "执行已确认变更",
+        "status": "P3 确认 / 变更"
+      },
+      "composition": {
+        "flag_off": "flag 已关闭",
+        "shell_only": "仅组合 shell",
+        "formal_seams": "正式适配器接缝已具备（非 Gate 证据）",
+        "degraded": "已声明降级路线",
+        "unsupported": "不支持"
+      },
+      "diagnostics": {
+        "pending": "检查中",
+        "browser": "浏览器证据",
+        "browserScope": "声明的 Alpha 浏览器范围",
+        "platform": "浏览器报告的 OS 平台",
+        "origin": "Origin / 安全上下文",
+        "permission": "麦克风权限",
+        "devices": "音频设备",
+        "activation": "自动播放用户激活",
+        "page": "页面生命周期",
+        "network": "网络",
+        "aio": "AIO foundation（尚未接入路线）",
+        "errors": "诊断限制"
+      },
+      "progress": {
+        "title": "已认证的任务文本进度",
+        "disclosure": "这是绑定到当前 Session 的 Task Core 文本/UI 投影；它不是语音进度，也不是 Integrated Gate 证据。",
+        "task": "任务 ID",
+        "state": "观测状态",
+        "correlation": "Authority 关联 ID",
+        "generation": "来源 generation",
+        "sequence": "持久事件序号",
+        "evidence": "绑定证据",
+        "delivery": "Web 投递 ID",
+        "ack": "UI 消费确认"
+      }
+    },
+    "task": {
+      "commandId": "命令 ID",
+      "taskCommandId": "该记录的命令 ID",
+      "predecessorTaskId": "前任务 ID",
+      "successorTaskId": "successor 任务 ID",
+      "conflictingTaskId": "冲突任务 ID（非 successor）",
+      "recordRole": "记录角色",
+      "roles": {
+        "current": "当前任务",
+        "predecessor": "前任务",
+        "successor": "successor",
+        "conflict": "冲突记录"
+      },
+      "taskId": "任务 ID",
+      "status": "真实状态",
+      "monitorState": "监控状态",
+      "progress": "进度摘要",
+      "lastError": "最近错误",
+      "source": "状态来源",
+      "resultSource": "结果来源",
+      "recoveryStatus": "恢复状态",
+      "projectDir": "目标项目路径",
+      "projectId": "目标项目 ID",
+      "originSessionId": "来源会话 ID",
+      "originChannelId": "来源渠道 ID",
+      "unknown": "unknown",
+      "monitor": {
+        "title": "后台任务监控",
+        "phases": {
+          "idle": "任务 {{taskId}} 等待开始监控。",
+          "polling": "正在读取任务 {{taskId}} 的真实状态；当前为 {{status}}。",
+          "paused-disconnected": "连接已断开，任务 {{taskId}} 的监控已暂停；重连后只按原命令核对。",
+          "reconciling": "正在按原命令核对任务 {{taskId}}。",
+          "backoff": "任务 {{taskId}} 暂时无法读取，正在进行第 {{retryCount}} 次只读重试。",
+          "terminal": "任务 {{taskId}} 已结束，真实状态为 {{status}}。",
+          "missing": "原命令对应的任务 {{taskId}} 已找不到；保留最后已知事实并停止监控。",
+          "adapter-error": "任务 {{taskId}} 的响应无法安全采用（{{error}}）；保留最后已知事实并停止监控。",
+          "stopped": "任务 {{taskId}} 的监控已停止。"
+        }
+      },
+      "safetyTitle": "真实副作用：",
+      "safetyDisclosure": "执行器 JiuwenSwarm Code Agent；固定项目绑定流水线 project_code_pipeline；只允许以当前已保存项目为执行根，所有 shell、测试、Git 和远端命令均被硬阻止。Live Voice 的打断或退出只停止语音反馈，不会中止 schedule.run 或已创建任务；取消必须使用“确认取消后台代码优化任务”和已观察到的真实任务 ID，且不能撤销已经产生的修改。切换会话或项目会隔离未决命令，只有返回原上下文才能继续核对；刷新仍会丢失语音侧任务记忆，之后应到后台任务列表处理。",
+      "contextIsolatedTitle": "任务命令已隔离",
+      "contextIsolated": "任务命令 {{commandId}} 的请求或结果仍未核对，但会话或项目上下文已经改变。为防止重复副作用，其他上下文不会重试；请返回原会话和项目继续核对。",
+      "isolatedResult": "该结果属于已隔离的原上下文，不会合入当前上下文：{{detail}}",
+      "sessionChanged": "语音 capture 期间会话已经切换。为防止在错误会话创建真实任务，本次口令未执行。",
+      "executionTargetChanged": "语音 capture 期间当前会话的项目目标已经改变。为防止任务作用于错误项目，本次口令未执行。",
+      "requiresSession": "后台任务口令需要先进入一个已经保存的会话，本次没有执行任务",
+      "requiresExecutionTarget": "当前已保存会话没有可核对的绝对项目路径。为防止任务作用于错误目录，本次没有调用后台任务网关。",
+      "unavailable": "后台任务网关当前不可用，本次没有执行任务"
+    },
+    "actions": {
+      "idle": "开始说话",
+      "listening": "结束并发送",
+      "thinking": "打断并说话",
+      "speaking": "打断并说话",
+      "interrupted": "继续说话",
+      "error": "重试"
+    },
+    "status": {
+      "idle": "已就绪",
+      "listening": "正在听你说话",
+      "thinking": "Agent 正在工作",
+      "speaking": "正在朗读回答",
+      "interrupted": "已打断，等待新要求",
+      "error": "语音功能出现问题"
+    }
+  },
   "speech": {
     "recognitionUnsupported": "浏览器不支持语音识别",
     "synthesisUnsupported": "浏览器不支持语音合成",

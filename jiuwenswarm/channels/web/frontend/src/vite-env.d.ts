@@ -4,6 +4,11 @@
 interface ImportMetaEnv {
   readonly VITE_API_BASE?: string;
   readonly VITE_WS_BASE?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_TASK_DEMO?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB?: string;
+  readonly VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION?: string;
 }
 
 interface ImportMeta {

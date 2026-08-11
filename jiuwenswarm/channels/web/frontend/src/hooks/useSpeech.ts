@@ -6,6 +6,11 @@
 
 import { useState, useCallback, useRef, useEffect } from 'react';
 import i18n from '../i18n';
+import {
+  isSuccessfulSpeechTailNoSpeech,
+  shouldContinueSpeechCaptureAfterNaturalEnd,
+  shouldRetrySpeechCaptureDuringInitialSilence,
+} from './speechRecognitionLifecycle';
 
 // ============================================================================
 // 语音识别 (STT)
@@ -17,6 +22,8 @@ interface UseSpeechRecognitionOptions {
   interimResults?: boolean;
   /** 无声音后多少毫秒结束识别，默认 5000。需配合 continuous: true 使用。 */
   silenceTimeoutMs?: number;
+  /** 首次识别结果到达前允许等待的毫秒数；默认与 silenceTimeoutMs 相同。 */
+  initialSilenceTimeoutMs?: number;
   /** 返回 true 时，onend 后会自动重启识别。 */
   restartWhen?: () => boolean;
   onResult?: (transcript: string, isFinal: boolean) => void;
@@ -71,6 +78,7 @@ export function useSpeechRecognition(
     continuous = false, // 默认检测到停止说话后自动结束
     interimResults = true,
     silenceTimeoutMs = 5000, // 无声音后 5s 结束（需配合 continuous: true）
+    initialSilenceTimeoutMs = silenceTimeoutMs,
     restartWhen,
     onResult,
     onError,
@@ -81,6 +89,7 @@ export function useSpeechRecognition(
   const [transcript, setTranscript] = useState('');
   const [interimTranscript, setInterimTranscript] = useState('');
   const recognitionRef = useRef<SpeechRecognition | null>(null);
+  const recognitionGenerationRef = useRef(0);
   const silenceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const manualStopRef = useRef(false);
   const autoStopRef = useRef(false);
@@ -89,7 +98,7 @@ export function useSpeechRecognition(
   // 检查浏览器支持
   const isSupported =
     typeof window !== 'undefined' &&
-    ('SpeechRecognition' in window || 'webkitSpeechRecognition' in window);
+    (typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function');
 
   const clearSilenceTimer = useCallback(() => {
     if (silenceTimerRef.current) {
@@ -98,17 +107,27 @@ export function useSpeechRecognition(
     }
   }, []);
 
-  const scheduleSilenceStop = useCallback(() => {
-    if (silenceTimeoutMs <= 0) {
+  const scheduleSilenceStop = useCallback((recognition: SpeechRecognition, generation: number, timeoutMs: number) => {
+    if (timeoutMs <= 0) {
       return;
     }
     clearSilenceTimer();
     silenceTimerRef.current = setTimeout(() => {
       silenceTimerRef.current = null;
+      if (recognitionGenerationRef.current !== generation || recognitionRef.current !== recognition) {
+        return;
+      }
       autoStopRef.current = true;
-      recognitionRef.current?.stop();
-    }, silenceTimeoutMs);
-  }, [clearSilenceTimer, silenceTimeoutMs]);
+      try {
+        recognition.stop();
+      } catch (error) {
+        console.warn('Speech recognition auto-stop failed:', error);
+        recognitionRef.current = null;
+        setIsListening(false);
+        onEnd?.();
+      }
+    }, timeoutMs);
+  }, [clearSilenceTimer, onEnd]);
 
   const startListening = useCallback(() => {
     if (!isSupported) {
@@ -117,6 +136,17 @@ export function useSpeechRecognition(
     }
 
     clearSilenceTimer();
+    const previousRecognition = recognitionRef.current;
+    recognitionGenerationRef.current += 1;
+    recognitionRef.current = null;
+    if (previousRecognition) {
+      try {
+        previousRecognition.stop();
+      } catch {
+        // The previous instance may already be ending. Its callbacks are
+        // fenced by generation and cannot mutate the replacement capture.
+      }
+    }
     manualStopRef.current = false;
     autoStopRef.current = false;
 
@@ -125,9 +155,40 @@ export function useSpeechRecognition(
       window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionCtor) {
       onError?.(i18n.t('speech.recognitionUnsupported'));
+      onEnd?.();
       return;
     }
-    const recognition = new SpeechRecognitionCtor();
+    let recognition: SpeechRecognition;
+    try {
+      recognition = new SpeechRecognitionCtor();
+    } catch (error) {
+      console.error('Speech recognition initialization failed:', error);
+      setIsListening(false);
+      onError?.(i18n.t('speech.errors.recognitionGeneric', { error: 'initialization' }));
+      onEnd?.();
+      return;
+    }
+    const generation = recognitionGenerationRef.current;
+    const isCurrentRecognition = () =>
+      recognitionGenerationRef.current === generation && recognitionRef.current === recognition;
+    const initialSilenceDeadline = Date.now() + initialSilenceTimeoutMs;
+    let currentSilenceDeadline = initialSilenceDeadline;
+    let receivedAnyResult = false;
+    let retryAfterInitialNoSpeech = false;
+    let successfulTailNoSpeech = false;
+    let terminalRecognitionError = false;
+
+    const scheduleCurrentSilenceDeadline = () => {
+      const configuredTimeoutMs = receivedAnyResult
+        ? silenceTimeoutMs
+        : initialSilenceTimeoutMs;
+      if (configuredTimeoutMs <= 0) return;
+      scheduleSilenceStop(
+        recognition,
+        generation,
+        Math.max(1, currentSilenceDeadline - Date.now()),
+      );
+    };
 
     // 使用自定义静默超时时，用 continuous=true 避免浏览器约 2s 就结束
     const useContinuous = continuous || silenceTimeoutMs > 0;
@@ -137,13 +198,20 @@ export function useSpeechRecognition(
     recognition.interimResults = interimResults;
 
     recognition.onstart = () => {
+      if (!isCurrentRecognition()) return;
       setIsListening(true);
       setTranscript('');
       setInterimTranscript('');
-      scheduleSilenceStop();
+      // Starting the short end-of-speech timer here can cut a real user off
+      // before Chrome emits its first interim result. Give device pickup and
+      // the user's first word a separate, longer window.
+      // A browser-level natural restart after a result keeps the existing
+      // trailing deadline instead of granting a new full initial-silence span.
+      scheduleCurrentSilenceDeadline();
     };
 
     recognition.onresult = (event) => {
+      if (!isCurrentRecognition()) return;
       let finalTranscript = '';
       let interim = '';
 
@@ -156,20 +224,48 @@ export function useSpeechRecognition(
         }
       }
 
+      if (finalTranscript || interim) {
+        receivedAnyResult = true;
+        currentSilenceDeadline = Date.now() + silenceTimeoutMs;
+      }
+
       if (finalTranscript) {
         setTranscript((prev) => prev + finalTranscript);
         onResult?.(finalTranscript, true);
-        scheduleSilenceStop();
+        scheduleCurrentSilenceDeadline();
       }
 
       setInterimTranscript(interim);
       if (interim) {
         onResult?.(interim, false);
-        scheduleSilenceStop();
+        scheduleCurrentSilenceDeadline();
       }
     };
 
     recognition.onerror = (event) => {
+      if (!isCurrentRecognition()) return;
+      if (isSuccessfulSpeechTailNoSpeech(event.error, receivedAnyResult)) {
+        // A restarted recognition instance often reports no-speech once the
+        // user has finished. Earlier final chunks remain valid and are
+        // committed by the following onend exactly once.
+        successfulTailNoSpeech = true;
+        clearSilenceTimer();
+        return;
+      }
+      if (
+        event.error === 'no-speech' &&
+        !receivedAnyResult &&
+        Date.now() < initialSilenceDeadline
+      ) {
+        // Chromium may end an otherwise healthy capture after only a few
+        // seconds of initial silence. Keep the same logical capture alive
+        // until the Demo's explicit initial-silence deadline instead of
+        // forcing the user to race a browser-specific timeout.
+        retryAfterInitialNoSpeech = true;
+        clearSilenceTimer();
+        return;
+      }
+      terminalRecognitionError = true;
       console.error('Speech recognition error:', event.error);
       clearSilenceTimer();
       setIsListening(false);
@@ -185,51 +281,120 @@ export function useSpeechRecognition(
     };
 
     recognition.onend = () => {
+      if (!isCurrentRecognition()) return;
       clearSilenceTimer();
+      if (shouldRetrySpeechCaptureDuringInitialSilence({
+        retryRequested: retryAfterInitialNoSpeech,
+        receivedAnyResult,
+        beforeInitialDeadline: Date.now() < initialSilenceDeadline,
+        terminalRecognitionError,
+        manualStop: manualStopRef.current,
+        autoStop: autoStopRef.current,
+      })) {
+        retryAfterInitialNoSpeech = false;
+        try {
+          recognition.start();
+          return;
+        } catch (error) {
+          console.warn('Speech recognition initial-silence retry failed:', error);
+        }
+      }
       if (manualStopRef.current) {
         manualStopRef.current = false;
+        recognitionRef.current = null;
         setIsListening(false);
         onEnd?.();
         return;
       }
       if (autoStopRef.current) {
         autoStopRef.current = false;
+        recognitionRef.current = null;
         setIsListening(false);
         onEnd?.();
         return;
       }
-      if (useContinuousRef.current && restartWhen?.()) {
+      if (successfulTailNoSpeech) {
+        successfulTailNoSpeech = false;
+        recognitionRef.current = null;
+        setIsListening(false);
+        onEnd?.();
+        return;
+      }
+      let restartRequested = false;
+      if (!terminalRecognitionError && receivedAnyResult) {
         try {
-          recognitionRef.current?.start();
+          restartRequested = restartWhen?.() ?? false;
+        } catch (error) {
+          console.warn('Speech recognition restart condition failed:', error);
+        }
+      }
+      if (shouldContinueSpeechCaptureAfterNaturalEnd({
+        useContinuous: useContinuousRef.current,
+        restartRequested,
+        receivedAnyResult,
+        terminalRecognitionError,
+        manualStop: manualStopRef.current,
+        autoStop: autoStopRef.current,
+      })) {
+        try {
+          recognition.start();
           return;
         } catch (error) {
           console.warn('Speech recognition restart failed:', error);
         }
       }
+      recognitionRef.current = null;
       setIsListening(false);
       onEnd?.();
     };
 
     recognitionRef.current = recognition;
-    recognition.start();
-  }, [isSupported, language, continuous, interimResults, silenceTimeoutMs, restartWhen, onResult, onError, onEnd, clearSilenceTimer]);
+    try {
+      recognition.start();
+    } catch (error) {
+      if (isCurrentRecognition()) {
+        recognitionRef.current = null;
+      }
+      console.error('Speech recognition start failed:', error);
+      setIsListening(false);
+      onError?.(i18n.t('speech.errors.recognitionGeneric', { error: 'start' }));
+      onEnd?.();
+    }
+  }, [isSupported, language, continuous, interimResults, silenceTimeoutMs, initialSilenceTimeoutMs, restartWhen, onResult, onError, onEnd, clearSilenceTimer]);
 
   const stopListening = useCallback(() => {
     clearSilenceTimer();
-    if (recognitionRef.current) {
+    const recognition = recognitionRef.current;
+    if (recognition) {
       manualStopRef.current = true;
-      recognitionRef.current.stop();
-      recognitionRef.current = null;
+      try {
+        recognition.stop();
+      } catch (error) {
+        console.warn('Speech recognition stop failed:', error);
+        if (recognitionRef.current === recognition) {
+          recognitionRef.current = null;
+          recognitionGenerationRef.current += 1;
+          manualStopRef.current = false;
+          onEnd?.();
+        }
+      }
     }
     setIsListening(false);
-  }, [clearSilenceTimer]);
+  }, [clearSilenceTimer, onEnd]);
 
   // 组件卸载时清理
   useEffect(() => {
     return () => {
       clearSilenceTimer();
-      if (recognitionRef.current) {
-        recognitionRef.current.stop();
+      recognitionGenerationRef.current += 1;
+      const recognition = recognitionRef.current;
+      recognitionRef.current = null;
+      if (recognition) {
+        try {
+          recognition.stop();
+        } catch {
+          // Unmount cleanup is best-effort and all callbacks are stale now.
+        }
       }
     };
   }, [clearSilenceTimer]);

@@ -26,6 +26,17 @@ interface PendingRequest {
 const MAX_RECONNECT_ATTEMPTS = 5;
 const DEFAULT_TIMEOUT_MS = 15000;
 
+export function extractWebErrorReason(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  const detail =
+    record.error && typeof record.error === 'object' && !Array.isArray(record.error)
+      ? (record.error as Record<string, unknown>)
+      : null;
+  const reason = detail?.reason ?? record.reason;
+  return typeof reason === 'string' && reason.trim() ? reason.trim() : undefined;
+}
+
 const LEGACY_EVENT_MAP: Record<string, string> = {
   connection_ack: 'connection.ack',
   content_chunk: 'chat.delta',
@@ -254,7 +265,14 @@ class WebClient {
       throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
     }
 
-    const id = this.generateRequestId();
+    const requestedId = options.requestId?.trim();
+    if (requestedId !== undefined && (!requestedId || requestedId.length > 256)) {
+      throw this.createWebError('request id is invalid', 'INVALID_REQUEST_ID', undefined, false);
+    }
+    const id = requestedId ?? this.generateRequestId();
+    if (this.pending.has(id)) {
+      throw this.createWebError('request id is already in flight', 'REQUEST_ID_IN_FLIGHT', id, false);
+    }
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const message: WsRequest = {
       type: 'req',
@@ -448,14 +466,15 @@ class WebClient {
       return;
     }
 
-    pending.reject(
-      this.createWebError(
-        message.error ?? i18n.t('network.requestFailed'),
-        message.code,
-        message.id,
-        this.isRetriableCode(message.code)
-      )
+    const error = this.createWebError(
+      message.error ?? i18n.t('network.requestFailed'),
+      message.code,
+      message.id,
+      this.isRetriableCode(message.code),
+      message.payload
     );
+    error.reason = extractWebErrorReason(message.payload);
+    pending.reject(error);
   }
 
   private dispatchEvent(event: WsEvent): void {
@@ -538,12 +557,14 @@ class WebClient {
     message: string,
     code?: string,
     requestId?: string,
-    retriable = false
+    retriable = false,
+    payload?: unknown
   ): WebError {
     const error = new Error(message) as WebError;
     error.code = code;
     error.requestId = requestId;
     error.retriable = retriable;
+    error.payload = payload;
     return error;
   }
 

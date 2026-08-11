@@ -1,0 +1,1337 @@
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useSpeechRecognition } from '../../hooks/useSpeech';
+import { combinedSpeechRecognitionTranscript, mergeSpeechRecognitionTranscript } from '../../hooks/speechRecognitionLifecycle';
+import type { AgentMode, Message } from '../../types';
+import { onTtsStop, sanitizeLiveVoiceTtsText, splitLiveVoiceTtsText, stopAllTts } from '../../utils/tts';
+import { acquireLiveVoiceTtsOutputOwnership } from '../../utils/ttsOutputOwnership';
+import type { LiveVoiceDemoBarProps } from '../../components/ChatPanel/LiveVoiceDemoBar';
+import { FEATURE_LIVE_VOICE_INTEGRATED_P1, FEATURE_LIVE_VOICE_STREAMING_SPEECH, FEATURE_LIVE_VOICE_TASK_DEMO } from '../../featureFlags';
+import { createLiveVoiceCore, type LiveVoiceCore, type LiveVoiceSnapshot, type LiveVoiceSpeechPlayer } from './liveVoiceCore';
+import { selectLiveVoiceResponseMessages } from './liveVoiceMessageGate';
+import { advanceLiveVoiceStreamingSpeech, createLiveVoiceStreamingSpeechState } from './liveVoiceStreamingSpeech';
+import {
+  LIVE_VOICE_STREAMING_FINAL_TIMEOUT_MS,
+  resolveLiveVoiceSessionTransition,
+  resolveLiveVoiceTurnOriginatingSessionId,
+  selectLiveVoicePostSpeechAction,
+  selectLiveVoiceStreamingFinalTimeoutAction,
+  shouldResumeAfterSilentResponse,
+} from './liveVoiceTurnLifecycle';
+import { LiveVoiceTaskBridge, shouldFenceLiveVoiceTaskMonitor, type LiveVoiceTaskGateway } from './liveVoiceTaskBridge';
+import {
+  canAnnounceLiveVoiceTaskTerminal,
+  isLiveVoiceTaskResultCurrentContext,
+  projectLiveVoiceTaskActivity,
+  projectLiveVoiceTaskMonitorActivity,
+  selectLiveVoiceTaskContextInvalidation,
+  selectLiveVoiceTaskFeedbackDrainAction,
+  selectLiveVoiceTaskMonitorPredecessor,
+  selectLiveVoiceTaskMonitorStart,
+  selectLiveVoiceTaskSafetyDisclosure,
+  shouldResumeAfterLiveVoiceTaskSpeech,
+  selectLiveVoiceTaskTranscriptRoute,
+  type LiveVoiceTaskActivity,
+} from './liveVoiceTaskAdapter';
+import {
+  createLiveVoiceTaskGateway,
+  liveVoiceTaskExecutionContextKey,
+  type LiveVoiceTaskExecutionContext,
+  type LiveVoiceTaskRequest,
+} from './liveVoiceTaskClient';
+import { LiveVoiceTaskMonitor, type LiveVoiceTaskMonitorSnapshot } from './liveVoiceTaskMonitor';
+import { createIntegratedP1Route, type IntegratedP1Route } from './formal/integratedP1Route';
+
+const DEMO_LANGUAGE = 'zh-CN';
+const DEMO_END_OF_SPEECH_TIMEOUT_MS = 2200;
+const DEMO_INITIAL_SILENCE_TIMEOUT_MS = 8000;
+
+interface VoiceTurn {
+  transcript: string;
+  responseEpoch: number;
+  originatingSessionId: string | null;
+  userBoundaryId: string | null;
+  responseObserved: boolean;
+}
+
+interface TaskBridgeHolder {
+  sessionId: string;
+  executionTargetKey: string;
+  request: LiveVoiceTaskRequest;
+  gateway: LiveVoiceTaskGateway;
+  bridge: LiveVoiceTaskBridge;
+}
+
+interface TaskMonitorHolder {
+  sessionId: string;
+  executionTargetKey: string;
+  bridge: LiveVoiceTaskBridge;
+  monitor: LiveVoiceTaskMonitor;
+  predecessorTaskId?: string;
+}
+
+interface IsolatedTaskBridge {
+  holder: TaskBridgeHolder;
+  commandId: string | null;
+}
+
+interface StreamingFinalTimeoutRegistration {
+  responseEpoch: number;
+  originatingSessionId: string;
+  timeoutId: ReturnType<typeof setTimeout>;
+}
+
+export interface UseLiveVoiceDemoOptions {
+  activeSessionId: string | null;
+  messages: readonly Message[];
+  isProcessing: boolean;
+  isThinking: boolean;
+  isConnected: boolean;
+  mode: AgentMode;
+  interactionBlocked: boolean;
+  newSessionPromotion: {
+    targetSessionId: string;
+    sequence: number;
+  } | null;
+  onSendMessage: (content: string) => void;
+  onInterrupt: (newInput?: string) => void;
+  taskRequest?: LiveVoiceTaskRequest;
+  taskExecutionContext?: LiveVoiceTaskExecutionContext | null;
+}
+
+function browserSpeechSynthesisAvailable(): boolean {
+  return typeof window !== 'undefined' && 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
+}
+
+function createBrowserSpeechPlayer(): LiveVoiceSpeechPlayer {
+  let activeUtterance: SpeechSynthesisUtterance | null = null;
+
+  return {
+    play(text, callbacks): void {
+      if (!browserSpeechSynthesisAvailable()) {
+        throw new Error('Speech synthesis is not supported by this browser');
+      }
+
+      const utterance = new SpeechSynthesisUtterance(text);
+      activeUtterance = utterance;
+      utterance.lang = DEMO_LANGUAGE;
+      utterance.rate = 1;
+      utterance.pitch = 1;
+      utterance.volume = 1;
+
+      const chineseVoice = window.speechSynthesis.getVoices().find(voice => /^zh(?:-|_)/i.test(voice.lang));
+      if (chineseVoice) {
+        utterance.voice = chineseVoice;
+      }
+
+      utterance.onstart = () => callbacks.onStart();
+      utterance.onend = () => {
+        if (activeUtterance === utterance) {
+          activeUtterance = null;
+        }
+        callbacks.onEnd();
+      };
+      utterance.onerror = event => {
+        if (activeUtterance === utterance) {
+          activeUtterance = null;
+        }
+        callbacks.onError(new Error(`Speech playback failed: ${event.error}`));
+      };
+
+      window.speechSynthesis.speak(utterance);
+    },
+
+    stop(): void {
+      if (activeUtterance) {
+        activeUtterance.onstart = null;
+        activeUtterance.onend = null;
+        activeUtterance.onerror = null;
+        activeUtterance = null;
+      }
+      if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+      }
+    },
+  };
+}
+
+function createCore(player: LiveVoiceSpeechPlayer = createBrowserSpeechPlayer()): LiveVoiceCore {
+  return createLiveVoiceCore({ player });
+}
+
+function findErrorMessageAfterBoundary(messages: readonly Message[], userBoundaryId: string): Message | null {
+  const boundaryIndex = messages.findIndex(message => message.id === userBoundaryId && message.role === 'user');
+  if (boundaryIndex < 0) return null;
+
+  let latestErrorMessage: Message | null = null;
+  for (let index = boundaryIndex + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message.role === 'user') break;
+    const isExplicitError =
+      message.role === 'system' && ((message as Message & { isError?: boolean }).isError === true || /(?:^|-)error(?:-|$)/i.test(message.id));
+    if (isExplicitError && message.content.trim()) {
+      latestErrorMessage = message;
+    }
+  }
+  return latestErrorMessage;
+}
+
+function hasUserMessageAfterBoundary(messages: readonly Message[], userBoundaryId: string): boolean {
+  const boundaryIndex = messages.findIndex(message => message.id === userBoundaryId && message.role === 'user');
+  if (boundaryIndex < 0) return false;
+  return messages.slice(boundaryIndex + 1).some(message => message.role === 'user');
+}
+
+/**
+ * Demo adapter from browser speech to the existing Chat/Agent path.
+ *
+ * Speech recognition only updates local subtitles until one complete capture
+ * cycle ends. The accepted final transcript is then sent through the existing
+ * chat.send/supplement callbacks. TTS consumes only message snapshots already
+ * accepted into chatStore, never raw WebSocket output. The optional Post-V0
+ * sentence preview remains behind a separate feature flag.
+ */
+export function useLiveVoiceDemo({
+  activeSessionId,
+  messages,
+  isProcessing,
+  isThinking,
+  isConnected,
+  mode,
+  interactionBlocked,
+  newSessionPromotion,
+  onSendMessage,
+  onInterrupt,
+  taskRequest,
+  taskExecutionContext = null,
+}: UseLiveVoiceDemoOptions): LiveVoiceDemoBarProps {
+  const { t } = useTranslation();
+  const integratedP1RouteRef = useRef<IntegratedP1Route | null>(null);
+  if (FEATURE_LIVE_VOICE_INTEGRATED_P1 && integratedP1RouteRef.current === null) {
+    integratedP1RouteRef.current = createIntegratedP1Route({ correlationId: 'live-voice-browser-p1' });
+  }
+  const integratedP1Route = integratedP1RouteRef.current;
+  const coreRef = useRef<LiveVoiceCore | null>(null);
+  if (coreRef.current === null) {
+    coreRef.current = createCore(integratedP1Route?.speechPlayer);
+  }
+  const core = coreRef.current;
+
+  const [active, setActive] = useState(false);
+  const [snapshot, setSnapshot] = useState<LiveVoiceSnapshot>(() => core.getSnapshot());
+  const [taskActivity, setTaskActivity] = useState<LiveVoiceTaskActivity | null>(null);
+  const activeRef = useRef(active);
+  const connectedRef = useRef(isConnected);
+  const processingRef = useRef(isProcessing);
+  const responseInProgressRef = useRef(isProcessing || isThinking);
+  const interactionBlockedRef = useRef(interactionBlocked);
+  const sessionIdRef = useRef(activeSessionId);
+  const previousSessionIdRef = useRef(activeSessionId);
+  const lastHandledPromotionSequenceRef = useRef(newSessionPromotion?.sequence ?? 0);
+  const finalChunksRef = useRef('');
+  const interimChunkRef = useRef('');
+  const recognitionFailedRef = useRef(false);
+  const recognitionCaptureOpenRef = useRef(false);
+  const recognitionCaptureSessionIdRef = useRef<string | null>(null);
+  const recognitionCaptureExecutionTargetKeyRef = useRef<string | null>(null);
+  const retryCaptureAfterRecognitionEndRef = useRef(false);
+  const beginCaptureRef = useRef<() => void>(() => {});
+  const safelyStopListeningRef = useRef<() => void>(() => {});
+  const pendingSupplementAfterPromotionRef = useRef<string | null>(null);
+  const voiceTurnRef = useRef<VoiceTurn | null>(null);
+  const spokenMessageIdsRef = useRef<Set<string>>(new Set());
+  const streamingSpeechStateRef = useRef(createLiveVoiceStreamingSpeechState());
+  const streamingFinalTimeoutRef = useRef<StreamingFinalTimeoutRegistration | null>(null);
+  const resumeListeningAfterSpeechRef = useRef(false);
+  const taskFeedbackOwnsResumeRef = useRef(false);
+  const ignoreNextGlobalTtsStopRef = useRef(false);
+  const coreSubscriptionRef = useRef<(() => void) | null>(null);
+  const releaseTtsOutputOwnershipRef = useRef<(() => void) | null>(null);
+  const taskBridgeRef = useRef<TaskBridgeHolder | null>(null);
+  const taskMonitorRef = useRef<TaskMonitorHolder | null>(null);
+  const pendingTaskTerminalRef = useRef<LiveVoiceTaskMonitor | null>(null);
+  const taskRequestRef = useRef(taskRequest);
+  const isolatedTaskBridgeRef = useRef<IsolatedTaskBridge | null>(null);
+  const taskExecutionContextRef = useRef(taskExecutionContext);
+  const taskExecutionTargetKey = liveVoiceTaskExecutionContextKey(taskExecutionContext);
+  const taskExecutionTargetKeyRef = useRef(taskExecutionTargetKey);
+
+  activeRef.current = active;
+  connectedRef.current = isConnected;
+  processingRef.current = isProcessing;
+  responseInProgressRef.current = isProcessing || isThinking;
+  interactionBlockedRef.current = interactionBlocked;
+  sessionIdRef.current = activeSessionId;
+  taskExecutionContextRef.current = taskExecutionContext;
+  taskExecutionTargetKeyRef.current = taskExecutionTargetKey;
+  taskRequestRef.current = taskRequest;
+
+  const clearStreamingFinalTimeout = useCallback(() => {
+    const registration = streamingFinalTimeoutRef.current;
+    streamingFinalTimeoutRef.current = null;
+    if (registration) {
+      clearTimeout(registration.timeoutId);
+    }
+  }, []);
+
+  const stopEveryVoiceOutput = useCallback(() => {
+    ignoreNextGlobalTtsStopRef.current = true;
+    stopAllTts();
+  }, []);
+
+  const acquireTtsOutputOwnership = useCallback(() => {
+    if (releaseTtsOutputOwnershipRef.current === null) {
+      releaseTtsOutputOwnershipRef.current = acquireLiveVoiceTtsOutputOwnership();
+    }
+  }, []);
+
+  const releaseTtsOutputOwnership = useCallback(() => {
+    releaseTtsOutputOwnershipRef.current?.();
+    releaseTtsOutputOwnershipRef.current = null;
+  }, []);
+
+  const enqueueTaskFeedback = useCallback(
+    (text: string, responseEpoch: number, captureKey: string, source: 'command-feedback' | 'terminal-notification' = 'command-feedback') => {
+      const resumeAfterSpeech = shouldResumeAfterLiveVoiceTaskSpeech(source);
+      if (!resumeAfterSpeech) {
+        resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+      }
+      const speakable = sanitizeLiveVoiceTtsText(text);
+      for (const [chunkIndex, chunk] of splitLiveVoiceTtsText(speakable).entries()) {
+        const queued = core.enqueueSpeech(chunk, responseEpoch, `task-feedback:${captureKey}:${chunkIndex}`);
+        if (queued.accepted && resumeAfterSpeech) {
+          resumeListeningAfterSpeechRef.current = true;
+          taskFeedbackOwnsResumeRef.current = true;
+        }
+      }
+    },
+    [core]
+  );
+
+  const tryAnnounceTaskTerminal = useCallback(() => {
+    const monitor = pendingTaskTerminalRef.current;
+    if (!monitor || taskMonitorRef.current?.monitor !== monitor) {
+      pendingTaskTerminalRef.current = null;
+      return;
+    }
+    if (!activeRef.current) {
+      monitor.takeTerminalNotification();
+      pendingTaskTerminalRef.current = null;
+      return;
+    }
+    const currentSnapshot = core.getSnapshot();
+    if (
+      !canAnnounceLiveVoiceTaskTerminal({
+        taskDemoEnabled: FEATURE_LIVE_VOICE_TASK_DEMO,
+        liveVoiceActive: activeRef.current,
+        interactionBlocked: interactionBlockedRef.current,
+        captureOpen: recognitionCaptureOpenRef.current,
+        isProcessing: processingRef.current,
+        isThinking: responseInProgressRef.current && !processingRef.current,
+        coreStatus: currentSnapshot.status,
+        pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+        activeSpeechKey: currentSnapshot.activeSpeechKey,
+        ownsTtsOutput: releaseTtsOutputOwnershipRef.current !== null,
+      })
+    ) {
+      return;
+    }
+    const notification = monitor.takeTerminalNotification();
+    pendingTaskTerminalRef.current = null;
+    if (notification) {
+      enqueueTaskFeedback(notification, currentSnapshot.responseEpoch, `monitor:${monitor.getSnapshot().task.taskId}`, 'terminal-notification');
+    }
+  }, [core, enqueueTaskFeedback]);
+
+  const getTaskBridge = useCallback(
+    (sessionId: string, executionContext: LiveVoiceTaskExecutionContext): LiveVoiceTaskBridge | null => {
+      if (!taskRequest) return null;
+      const executionTargetKey = liveVoiceTaskExecutionContextKey(executionContext);
+      if (!executionTargetKey) return null;
+      const current = taskBridgeRef.current;
+      if (current?.sessionId === sessionId && current.executionTargetKey === executionTargetKey && current.request === taskRequest) {
+        return current.bridge;
+      }
+      const gateway = createLiveVoiceTaskGateway({ request: taskRequest, sessionId, executionContext });
+      const bridge = new LiveVoiceTaskBridge(gateway);
+      taskBridgeRef.current = { sessionId, executionTargetKey, request: taskRequest, gateway, bridge };
+      return bridge;
+    },
+    [taskRequest]
+  );
+
+  const startTaskMonitor = useCallback(
+    (holder: TaskBridgeHolder, task: NonNullable<ReturnType<LiveVoiceTaskBridge['getSnapshot']>['lastVisibleTask']>, predecessorTaskId?: string) => {
+      taskMonitorRef.current?.monitor.stop();
+      pendingTaskTerminalRef.current = null;
+      let monitor: LiveVoiceTaskMonitor;
+      monitor = new LiveVoiceTaskMonitor({
+        task,
+        gateway: holder.gateway,
+        onObservation: observation => {
+          const current = taskMonitorRef.current;
+          if (
+            !current ||
+            current.monitor !== monitor ||
+            current.bridge !== holder.bridge ||
+            taskBridgeRef.current !== holder ||
+            sessionIdRef.current !== holder.sessionId ||
+            taskExecutionTargetKeyRef.current !== holder.executionTargetKey ||
+            taskRequestRef.current !== holder.request
+          ) {
+            return false;
+          }
+          return holder.bridge.applyMonitorObservation(observation);
+        },
+        onSnapshot: (monitorSnapshot: LiveVoiceTaskMonitorSnapshot) => {
+          const current = taskMonitorRef.current;
+          if (
+            !current ||
+            current.monitor !== monitor ||
+            current.bridge !== holder.bridge ||
+            taskBridgeRef.current !== holder ||
+            sessionIdRef.current !== holder.sessionId ||
+            taskExecutionTargetKeyRef.current !== holder.executionTargetKey ||
+            taskRequestRef.current !== holder.request
+          ) {
+            return;
+          }
+          const detail = t(`liveVoice.task.monitor.phases.${monitorSnapshot.phase}`, {
+            taskId: monitorSnapshot.task.taskId,
+            status: monitorSnapshot.task.status.raw ?? t('liveVoice.task.unknown'),
+            retryCount: monitorSnapshot.retryCount,
+            error: monitorSnapshot.errorCode ?? t('liveVoice.task.unknown'),
+          });
+          setTaskActivity(projectLiveVoiceTaskMonitorActivity(monitorSnapshot, t('liveVoice.task.monitor.title'), detail, current.predecessorTaskId));
+          if (monitorSnapshot.phase === 'terminal') {
+            if (activeRef.current) {
+              pendingTaskTerminalRef.current = monitor;
+              tryAnnounceTaskTerminal();
+            } else {
+              monitor.takeTerminalNotification();
+            }
+          }
+        },
+      });
+      taskMonitorRef.current = {
+        sessionId: holder.sessionId,
+        executionTargetKey: holder.executionTargetKey,
+        bridge: holder.bridge,
+        monitor,
+        predecessorTaskId,
+      };
+      monitor.start(connectedRef.current);
+    },
+    [t, tryAnnounceTaskTerminal]
+  );
+
+  const handleCommittedTaskCommand = useCallback(
+    async (transcript: string, captureId: number, responseEpoch: number) => {
+      const sessionId = sessionIdRef.current?.trim() ?? '';
+      const executionContext = taskExecutionContextRef.current;
+      const executionTargetKey = liveVoiceTaskExecutionContextKey(executionContext);
+      const captureKey = `${sessionId || 'no-session'}:${captureId}:${responseEpoch}`;
+      if (!sessionId || sessionId === 'new') {
+        const detail = t('liveVoice.task.requiresSession');
+        setTaskActivity({
+          level: 'warning',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        enqueueTaskFeedback(detail, responseEpoch, captureKey);
+        return;
+      }
+
+      if (!executionContext || !executionTargetKey) {
+        const detail = t('liveVoice.task.requiresExecutionTarget');
+        setTaskActivity({
+          level: 'error',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        enqueueTaskFeedback(detail, responseEpoch, captureKey);
+        return;
+      }
+
+      const isolated = isolatedTaskBridgeRef.current;
+      if (isolated) {
+        const canRestore =
+          isolated.holder.sessionId === sessionId && isolated.holder.executionTargetKey === executionTargetKey && isolated.holder.request === taskRequest;
+        if (canRestore) {
+          taskBridgeRef.current = isolated.holder;
+          isolatedTaskBridgeRef.current = null;
+        } else {
+          const detail = t('liveVoice.task.contextIsolated', {
+            commandId: isolated.commandId ?? t('liveVoice.task.unknown'),
+          });
+          setTaskActivity({
+            level: 'error',
+            title: t('liveVoice.task.contextIsolatedTitle'),
+            detail,
+            commandId: isolated.commandId ?? undefined,
+          });
+          enqueueTaskFeedback(detail, responseEpoch, captureKey);
+          return;
+        }
+      }
+
+      const bridge = getTaskBridge(sessionId, executionContext);
+      if (!bridge) {
+        const detail = t('liveVoice.task.unavailable');
+        setTaskActivity({
+          level: 'error',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        enqueueTaskFeedback(detail, responseEpoch, captureKey);
+        return;
+      }
+
+      const fencedMonitor = shouldFenceLiveVoiceTaskMonitor(transcript) ? taskMonitorRef.current : null;
+      if (fencedMonitor) {
+        fencedMonitor.monitor.stop();
+        taskMonitorRef.current = null;
+        pendingTaskTerminalRef.current = null;
+      }
+
+      const result = await bridge.handle({
+        captureKey,
+        text: transcript,
+        transcriptKind: 'final',
+        committed: true,
+      });
+      if (
+        !isLiveVoiceTaskResultCurrentContext(
+          sessionId,
+          sessionIdRef.current,
+          bridge,
+          taskBridgeRef.current?.bridge ?? null,
+          executionTargetKey,
+          taskExecutionTargetKeyRef.current
+        )
+      ) {
+        const isolatedResult = isolatedTaskBridgeRef.current;
+        if (isolatedResult?.holder.bridge === bridge) {
+          const activity = projectLiveVoiceTaskActivity(result);
+          if (activity) {
+            setTaskActivity({
+              ...activity,
+              level: activity.level === 'error' ? 'error' : 'warning',
+              title: t('liveVoice.task.contextIsolatedTitle'),
+              detail: t('liveVoice.task.isolatedResult', { detail: activity.detail }),
+            });
+          }
+        }
+        return;
+      }
+      const nextActivity = projectLiveVoiceTaskActivity(result);
+      if (nextActivity) {
+        setTaskActivity(nextActivity);
+      }
+      const holder = taskBridgeRef.current;
+      const monitorStart = selectLiveVoiceTaskMonitorStart(result);
+      if (holder?.bridge === bridge && monitorStart) {
+        const predecessorTaskId = selectLiveVoiceTaskMonitorPredecessor(
+          fencedMonitor?.monitor.getSnapshot().task.taskId,
+          fencedMonitor?.predecessorTaskId,
+          monitorStart
+        );
+        startTaskMonitor(holder, monitorStart.task, predecessorTaskId);
+      }
+      if (result.feedback?.speakableText) {
+        enqueueTaskFeedback(result.feedback.speakableText, responseEpoch, captureKey);
+      }
+    },
+    [enqueueTaskFeedback, getTaskBridge, startTaskMonitor, t]
+  );
+
+  const handleRecognitionResult = useCallback(
+    (transcript: string, isFinal: boolean) => {
+      if (!activeRef.current) return;
+      const observation = integratedP1Route?.observeRecognition(transcript, isFinal);
+      if (integratedP1Route && observation === null) return;
+      const nextTranscript = mergeSpeechRecognitionTranscript(
+        {
+          finalTranscript: finalChunksRef.current,
+          interimTranscript: interimChunkRef.current,
+        },
+        observation?.display_text ?? transcript,
+        observation?.kind === 'final' || (!observation && isFinal)
+      );
+      finalChunksRef.current = nextTranscript.finalTranscript;
+      interimChunkRef.current = nextTranscript.interimTranscript;
+      core.setInterimTranscript(combinedSpeechRecognitionTranscript(nextTranscript));
+    },
+    [core, integratedP1Route]
+  );
+
+  const handleRecognitionError = useCallback(
+    (message: string) => {
+      if (!activeRef.current || recognitionFailedRef.current) return;
+      integratedP1Route?.cancelRecognition();
+      recognitionFailedRef.current = true;
+      finalChunksRef.current = '';
+      interimChunkRef.current = '';
+      resumeListeningAfterSpeechRef.current = false;
+      core.fail('speech-recognition', message);
+    },
+    [core, integratedP1Route]
+  );
+
+  const handleRecognitionEnd = useCallback(() => {
+    const captureWasOpen = recognitionCaptureOpenRef.current;
+    const captureSessionId = recognitionCaptureSessionIdRef.current;
+    recognitionCaptureOpenRef.current = false;
+    recognitionCaptureSessionIdRef.current = null;
+    const captureExecutionTargetKey = recognitionCaptureExecutionTargetKeyRef.current;
+    recognitionCaptureExecutionTargetKeyRef.current = null;
+    if (!activeRef.current) {
+      recognitionFailedRef.current = false;
+      retryCaptureAfterRecognitionEndRef.current = false;
+      finalChunksRef.current = '';
+      interimChunkRef.current = '';
+      return;
+    }
+    if (!captureWasOpen) return;
+    if (recognitionFailedRef.current) {
+      recognitionFailedRef.current = false;
+      const shouldRetry = retryCaptureAfterRecognitionEndRef.current;
+      retryCaptureAfterRecognitionEndRef.current = false;
+      if (shouldRetry) {
+        queueMicrotask(() => {
+          if (activeRef.current) beginCaptureRef.current();
+        });
+      }
+      return;
+    }
+    integratedP1Route?.finishRecognition();
+    if (interactionBlockedRef.current) {
+      finalChunksRef.current = '';
+      interimChunkRef.current = '';
+      core.fail('interaction-blocked', t('liveVoice.interactionBlocked'));
+      return;
+    }
+
+    // `stop()` normally promotes the last interim segment to final, but some
+    // Chromium builds end without doing so. Preserve that last visible segment
+    // as a fallback while still committing this logical capture only once.
+    const finalTranscript = combinedSpeechRecognitionTranscript({
+      finalTranscript: finalChunksRef.current,
+      interimTranscript: interimChunkRef.current,
+    });
+    finalChunksRef.current = '';
+    interimChunkRef.current = '';
+    const committed = core.commitFinalTranscript(finalTranscript);
+    if (!committed.accepted) {
+      if (committed.reason === 'empty') {
+        core.fail('no-speech', t('speech.errors.noSpeech'));
+      }
+      return;
+    }
+
+    voiceTurnRef.current = {
+      transcript: committed.transcript,
+      responseEpoch: committed.responseEpoch,
+      originatingSessionId: sessionIdRef.current,
+      userBoundaryId: null,
+      responseObserved: false,
+    };
+    resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
+
+    const taskTranscriptRoute = selectLiveVoiceTaskTranscriptRoute({
+      taskDemoEnabled: FEATURE_LIVE_VOICE_TASK_DEMO,
+      transcript: committed.transcript,
+      captureSessionId,
+      currentSessionId: sessionIdRef.current,
+      captureExecutionTargetKey,
+      currentExecutionTargetKey: taskExecutionTargetKeyRef.current,
+    });
+    if (taskTranscriptRoute !== 'chat') {
+      if (taskTranscriptRoute === 'session-changed') {
+        const detail = t('liveVoice.task.sessionChanged');
+        setTaskActivity({
+          level: 'warning',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        voiceTurnRef.current = null;
+        core.fail('task-session-changed', detail);
+        return;
+      }
+      if (taskTranscriptRoute === 'execution-target-changed') {
+        const detail = t('liveVoice.task.executionTargetChanged');
+        setTaskActivity({
+          level: 'warning',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        voiceTurnRef.current = null;
+        core.fail('task-execution-target-changed', detail);
+        return;
+      }
+      if (taskTranscriptRoute === 'requires-execution-target') {
+        const detail = t('liveVoice.task.requiresExecutionTarget');
+        setTaskActivity({
+          level: 'error',
+          title: 'Live Voice Task Demo',
+          detail,
+        });
+        voiceTurnRef.current = null;
+        core.fail('task-execution-target-missing', detail);
+        return;
+      }
+      pendingSupplementAfterPromotionRef.current = null;
+      // Task commands do not create a chat user boundary. Keep the chatStore
+      // response selector out of this turn so an older identical transcript
+      // cannot be mistaken for the current command's response.
+      voiceTurnRef.current = null;
+      void handleCommittedTaskCommand(committed.transcript, committed.captureId, committed.responseEpoch);
+      return;
+    }
+
+    // Decide at commit time, not capture start: the Agent may start or finish
+    // while the user is still speaking.
+    if (processingRef.current && sessionIdRef.current === 'new') {
+      // The initial voice turn is already creating the real session. App drops
+      // another onSendMessage while that create is in flight, so retain only
+      // this second capture and supplement once `new` is promoted.
+      pendingSupplementAfterPromotionRef.current = committed.transcript;
+    } else if (processingRef.current) {
+      pendingSupplementAfterPromotionRef.current = null;
+      onInterrupt(committed.transcript);
+    } else {
+      pendingSupplementAfterPromotionRef.current = null;
+      onSendMessage(committed.transcript);
+    }
+  }, [core, handleCommittedTaskCommand, integratedP1Route, onInterrupt, onSendMessage, t]);
+
+  const shouldContinueRecognitionTail = useCallback(() => activeRef.current && recognitionCaptureOpenRef.current && !recognitionFailedRef.current, []);
+
+  const {
+    startListening,
+    stopListening,
+    isSupported: recognitionSupported,
+  } = useSpeechRecognition({
+    language: DEMO_LANGUAGE,
+    continuous: true,
+    interimResults: true,
+    silenceTimeoutMs: DEMO_END_OF_SPEECH_TIMEOUT_MS,
+    initialSilenceTimeoutMs: DEMO_INITIAL_SILENCE_TIMEOUT_MS,
+    restartWhen: shouldContinueRecognitionTail,
+    onResult: handleRecognitionResult,
+    onError: handleRecognitionError,
+    onEnd: handleRecognitionEnd,
+  });
+
+  const synthesisSupported = browserSpeechSynthesisAvailable();
+  const available = mode === 'agent' && !interactionBlocked && recognitionSupported && synthesisSupported;
+
+  const beginCapture = useCallback(() => {
+    if (!activeRef.current || !available) return;
+    if (recognitionFailedRef.current) {
+      retryCaptureAfterRecognitionEndRef.current = true;
+      return;
+    }
+    if (recognitionCaptureOpenRef.current) return;
+
+    // Once a new capture starts, no later message can still belong to the
+    // previous voice turn. This also prevents proactive/late assistant output
+    // from being spoken over the microphone while the user is talking.
+    clearStreamingFinalTimeout();
+    voiceTurnRef.current = null;
+    streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
+    finalChunksRef.current = '';
+    interimChunkRef.current = '';
+    resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
+    integratedP1Route?.beginRecognition();
+    core.beginListening();
+    recognitionCaptureOpenRef.current = true;
+    recognitionCaptureSessionIdRef.current = sessionIdRef.current;
+    recognitionCaptureExecutionTargetKeyRef.current = taskExecutionTargetKeyRef.current;
+    try {
+      startListening();
+    } catch (error) {
+      integratedP1Route?.cancelRecognition();
+      recognitionCaptureOpenRef.current = false;
+      recognitionCaptureSessionIdRef.current = null;
+      recognitionCaptureExecutionTargetKeyRef.current = null;
+      const message = error instanceof Error && error.message ? error.message : t('speech.errors.recognitionGeneric', { error: 'start-failed' });
+      core.fail('speech-recognition-start', message);
+    }
+  }, [available, clearStreamingFinalTimeout, core, integratedP1Route, startListening, t]);
+  beginCaptureRef.current = beginCapture;
+
+  const safelyStopListening = useCallback(() => {
+    try {
+      stopListening();
+    } catch {
+      // Some Chromium builds throw when stop() races an already-ended
+      // recognition instance. The local capture is invalidated regardless.
+      recognitionCaptureOpenRef.current = false;
+      recognitionCaptureSessionIdRef.current = null;
+      recognitionCaptureExecutionTargetKeyRef.current = null;
+    }
+  }, [stopListening]);
+  safelyStopListeningRef.current = safelyStopListening;
+
+  const exitLiveVoice = useCallback(() => {
+    activeRef.current = false;
+    setActive(false);
+    releaseTtsOutputOwnership();
+    finalChunksRef.current = '';
+    interimChunkRef.current = '';
+    recognitionCaptureOpenRef.current = false;
+    recognitionCaptureSessionIdRef.current = null;
+    recognitionCaptureExecutionTargetKeyRef.current = null;
+    recognitionFailedRef.current = false;
+    integratedP1Route?.cancelRecognition();
+    retryCaptureAfterRecognitionEndRef.current = false;
+    pendingSupplementAfterPromotionRef.current = null;
+    clearStreamingFinalTimeout();
+    voiceTurnRef.current = null;
+    streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
+    resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
+    spokenMessageIdsRef.current.clear();
+    safelyStopListening();
+    core.exit();
+    stopEveryVoiceOutput();
+  }, [clearStreamingFinalTimeout, core, integratedP1Route, releaseTtsOutputOwnership, safelyStopListening, stopEveryVoiceOutput]);
+
+  const enableLiveVoice = useCallback(() => {
+    if (!available || activeRef.current) return;
+    acquireTtsOutputOwnership();
+    activeRef.current = true;
+    setActive(true);
+    spokenMessageIdsRef.current = new Set(messages.filter(message => message.role === 'assistant').map(message => message.id));
+    clearStreamingFinalTimeout();
+    voiceTurnRef.current = null;
+    streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
+    pendingSupplementAfterPromotionRef.current = null;
+    core.exit();
+    stopEveryVoiceOutput();
+    finalChunksRef.current = '';
+    interimChunkRef.current = '';
+    recognitionFailedRef.current = false;
+    recognitionCaptureOpenRef.current = false;
+    recognitionCaptureSessionIdRef.current = null;
+    recognitionCaptureExecutionTargetKeyRef.current = null;
+    retryCaptureAfterRecognitionEndRef.current = false;
+    beginCaptureRef.current();
+  }, [acquireTtsOutputOwnership, available, clearStreamingFinalTimeout, core, messages, stopEveryVoiceOutput]);
+
+  const handlePrimaryAction = useCallback(() => {
+    switch (core.getSnapshot().status) {
+      case 'listening':
+        safelyStopListening();
+        return;
+      case 'thinking':
+      case 'speaking':
+        core.interrupt();
+        stopEveryVoiceOutput();
+        beginCapture();
+        return;
+      case 'error':
+        core.clearError();
+        beginCapture();
+        return;
+      case 'idle':
+      case 'interrupted':
+        beginCapture();
+        return;
+    }
+  }, [beginCapture, core, safelyStopListening, stopEveryVoiceOutput]);
+
+  useEffect(() => {
+    const unsubscribe = core.subscribe(nextSnapshot => setSnapshot(nextSnapshot));
+    coreSubscriptionRef.current = unsubscribe;
+    return () => {
+      if (coreSubscriptionRef.current === unsubscribe) {
+        coreSubscriptionRef.current = null;
+      }
+      unsubscribe();
+    };
+  }, [core]);
+
+  useEffect(() => {
+    taskMonitorRef.current?.monitor.setConnected(isConnected);
+  }, [isConnected]);
+
+  useEffect(() => {
+    tryAnnounceTaskTerminal();
+  }, [active, isProcessing, isThinking, snapshot.activeSpeechKey, snapshot.pendingSpeechCount, snapshot.status, tryAnnounceTaskTerminal]);
+
+  useEffect(() => {
+    const currentMonitor = taskMonitorRef.current;
+    const currentBridge = taskBridgeRef.current;
+    if (
+      currentMonitor &&
+      (currentMonitor.sessionId !== activeSessionId ||
+        currentMonitor.executionTargetKey !== taskExecutionTargetKey ||
+        currentBridge?.bridge !== currentMonitor.bridge ||
+        currentBridge?.request !== taskRequest)
+    ) {
+      currentMonitor.monitor.stop();
+      taskMonitorRef.current = null;
+      pendingTaskTerminalRef.current = null;
+    }
+    const current = taskBridgeRef.current;
+    if (current && (current.sessionId !== activeSessionId || current.executionTargetKey !== taskExecutionTargetKey || current.request !== taskRequest)) {
+      const invalidation = selectLiveVoiceTaskContextInvalidation(current.bridge.getSnapshot());
+      taskBridgeRef.current = null;
+      if (invalidation.action === 'isolate') {
+        isolatedTaskBridgeRef.current = {
+          holder: current,
+          commandId: invalidation.commandId,
+        };
+        const detail = t('liveVoice.task.contextIsolated', {
+          commandId: invalidation.commandId ?? t('liveVoice.task.unknown'),
+        });
+        setTaskActivity({
+          level: 'error',
+          title: t('liveVoice.task.contextIsolatedTitle'),
+          detail,
+          commandId: invalidation.commandId ?? undefined,
+        });
+        clearStreamingFinalTimeout();
+        voiceTurnRef.current = null;
+        resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+        if (activeRef.current) {
+          core.fail('task-context-isolated', detail);
+        }
+      } else {
+        setTaskActivity(null);
+      }
+    }
+  }, [activeSessionId, clearStreamingFinalTimeout, core, t, taskExecutionTargetKey, taskRequest]);
+
+  useLayoutEffect(() => {
+    return () => {
+      const shouldStopAllTts = activeRef.current;
+      taskMonitorRef.current?.monitor.stop();
+      taskMonitorRef.current = null;
+      pendingTaskTerminalRef.current = null;
+      activeRef.current = false;
+      releaseTtsOutputOwnershipRef.current?.();
+      releaseTtsOutputOwnershipRef.current = null;
+      finalChunksRef.current = '';
+      interimChunkRef.current = '';
+      recognitionCaptureOpenRef.current = false;
+      recognitionCaptureSessionIdRef.current = null;
+      recognitionCaptureExecutionTargetKeyRef.current = null;
+      recognitionFailedRef.current = false;
+      retryCaptureAfterRecognitionEndRef.current = false;
+      pendingSupplementAfterPromotionRef.current = null;
+      clearStreamingFinalTimeout();
+      voiceTurnRef.current = null;
+      streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
+      resumeListeningAfterSpeechRef.current = false;
+      taskFeedbackOwnsResumeRef.current = false;
+      coreSubscriptionRef.current?.();
+      coreSubscriptionRef.current = null;
+      safelyStopListeningRef.current();
+      core.exit();
+      // Do not set ignoreNextGlobalTtsStop during unmount: the event listener
+      // may already be gone. activeRef=false makes a still-mounted listener a
+      // no-op, while stopAllTts also clears generated HTMLAudio playback.
+      if (shouldStopAllTts) stopAllTts();
+    };
+  }, [clearStreamingFinalTimeout, core]);
+
+  useEffect(() => {
+    return onTtsStop(() => {
+      if (ignoreNextGlobalTtsStopRef.current) {
+        ignoreNextGlobalTtsStopRef.current = false;
+        return;
+      }
+      const currentSnapshot = core.getSnapshot();
+      if (activeRef.current && (currentSnapshot.status === 'speaking' || currentSnapshot.activeSpeechKey !== null || currentSnapshot.pendingSpeechCount > 0)) {
+        resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+        clearStreamingFinalTimeout();
+        streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
+        core.interrupt();
+      }
+    });
+  }, [clearStreamingFinalTimeout, core]);
+
+  useEffect(() => {
+    if (!active || available) return;
+    exitLiveVoice();
+  }, [active, available, exitLiveVoice]);
+
+  useEffect(() => {
+    const previousSessionId = previousSessionIdRef.current;
+    previousSessionIdRef.current = activeSessionId;
+    const promotionSequence = newSessionPromotion?.sequence ?? 0;
+    const transition = resolveLiveVoiceSessionTransition({
+      active: activeRef.current,
+      previousSessionId,
+      activeSessionId,
+      promotionSequence,
+      promotionTargetSessionId: newSessionPromotion?.targetSessionId ?? null,
+      lastHandledPromotionSequence: lastHandledPromotionSequenceRef.current,
+    });
+    lastHandledPromotionSequenceRef.current = transition.nextHandledPromotionSequence;
+
+    // Creating the first real session promotes the special `new` runtime. It
+    // is the same voice turn and must keep listening/thinking across the move.
+    if (transition.action === 'preserve') {
+      const currentTurn = voiceTurnRef.current;
+      if (currentTurn) {
+        currentTurn.originatingSessionId = resolveLiveVoiceTurnOriginatingSessionId({
+          originatingSessionId: currentTurn.originatingSessionId,
+          previousSessionId,
+          activeSessionId,
+          transitionAction: transition.action,
+        });
+      }
+      const pendingSupplement = pendingSupplementAfterPromotionRef.current;
+      pendingSupplementAfterPromotionRef.current = null;
+      if (pendingSupplement) onInterrupt(pendingSupplement);
+      return;
+    }
+    if (transition.action === 'exit') {
+      exitLiveVoice();
+    }
+  }, [activeSessionId, exitLiveVoice, newSessionPromotion, onInterrupt]);
+
+  useEffect(() => {
+    if (!active || !voiceTurnRef.current) return;
+    const turn = voiceTurnRef.current;
+    const responseInProgress = isProcessing || isThinking;
+    if (responseInProgress) {
+      turn.responseObserved = true;
+    }
+    const selection = selectLiveVoiceResponseMessages({
+      messages,
+      voiceTranscript: turn.transcript,
+      knownUserBoundaryId: turn.userBoundaryId,
+      isProcessing: responseInProgress,
+      spokenMessageIds: spokenMessageIdsRef.current,
+      plannerMessageId:
+        FEATURE_LIVE_VOICE_STREAMING_SPEECH && streamingSpeechStateRef.current.responseEpoch === turn.responseEpoch
+          ? streamingSpeechStateRef.current.messageId
+          : null,
+      requireAuthoritativeFinal: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+    });
+    turn.userBoundaryId = selection.userBoundaryId;
+    if (selection.speakableMessages.length > 0 || selection.streamingCandidate || selection.plannerFinalObservation) {
+      turn.responseObserved = true;
+    }
+
+    if (selection.userBoundaryId && hasUserMessageAfterBoundary(messages, selection.userBoundaryId)) {
+      // A later typed message owns the conversation from this point. Stop the
+      // voice loop so it cannot speak or supplement the superseded voice turn.
+      exitLiveVoice();
+      return;
+    }
+
+    if (!responseInProgress && selection.userBoundaryId) {
+      const errorMessage = findErrorMessageAfterBoundary(messages, selection.userBoundaryId);
+      if (errorMessage) {
+        core.fail('agent-response', errorMessage.content.trim());
+        return;
+      }
+    }
+
+    if (FEATURE_LIVE_VOICE_STREAMING_SPEECH && selection.plannerFinalObservation) {
+      const message = selection.plannerFinalObservation;
+      const previousStreamingState = streamingSpeechStateRef.current;
+      const planned = advanceLiveVoiceStreamingSpeech(previousStreamingState, {
+        responseEpoch: turn.responseEpoch,
+        messageId: message.id,
+        rawContent: message.content,
+        phase: 'final',
+      });
+      streamingSpeechStateRef.current = planned.state;
+      spokenMessageIdsRef.current.add(message.id);
+      if (planned.outcome === 'mismatch') {
+        if (previousStreamingState.mode !== 'mismatch') {
+          resumeListeningAfterSpeechRef.current = false;
+          core.fail('streaming-speech-revision', t('liveVoice.streamingRevisionFallback'));
+        }
+        return;
+      }
+      for (const emission of planned.emissions) {
+        const queued = core.enqueueSpeech(emission.text, emission.responseEpoch, emission.key);
+        if (queued.accepted) {
+          resumeListeningAfterSpeechRef.current = true;
+        }
+      }
+    }
+
+    if (FEATURE_LIVE_VOICE_STREAMING_SPEECH && selection.streamingCandidate) {
+      const previousStreamingState = streamingSpeechStateRef.current;
+      const planned = advanceLiveVoiceStreamingSpeech(previousStreamingState, {
+        responseEpoch: turn.responseEpoch,
+        messageId: selection.streamingCandidate.id,
+        rawContent: selection.streamingCandidate.content,
+        phase: 'streaming',
+      });
+      streamingSpeechStateRef.current = planned.state;
+      if (planned.outcome === 'mismatch') {
+        if (previousStreamingState.mode !== 'mismatch') {
+          resumeListeningAfterSpeechRef.current = false;
+          core.fail('streaming-speech-revision', t('liveVoice.streamingRevisionFallback'));
+        }
+        return;
+      }
+      for (const emission of planned.emissions) {
+        const queued = core.enqueueSpeech(emission.text, emission.responseEpoch, emission.key);
+        if (queued.accepted) {
+          resumeListeningAfterSpeechRef.current = true;
+        }
+      }
+    }
+
+    for (const message of selection.speakableMessages) {
+      // Mark before enqueue so a synchronous store/render update cannot queue
+      // the same final twice. Rejections are intentionally not retried unless
+      // they belong to a later, newly committed response epoch.
+      spokenMessageIdsRef.current.add(message.id);
+
+      if (FEATURE_LIVE_VOICE_STREAMING_SPEECH) {
+        const previousStreamingState = streamingSpeechStateRef.current;
+        // A chat.final collapse may replace the streaming message with a new
+        // ID inside the same response epoch. Always let the planner reconcile
+        // a single final message: before early speech it can safely fall back
+        // to final-only; after early speech it must stop on the ID mismatch
+        // instead of replaying the whole final through the legacy path.
+        if (selection.finalAssistantMessageCount === 1) {
+          const planned = advanceLiveVoiceStreamingSpeech(previousStreamingState, {
+            responseEpoch: turn.responseEpoch,
+            messageId: message.id,
+            rawContent: message.content,
+            phase: 'final',
+          });
+          streamingSpeechStateRef.current = planned.state;
+          if (planned.outcome === 'mismatch') {
+            spokenMessageIdsRef.current.delete(message.id);
+            if (previousStreamingState.mode !== 'mismatch') {
+              resumeListeningAfterSpeechRef.current = false;
+              core.fail('streaming-speech-revision', t('liveVoice.streamingRevisionFallback'));
+            }
+            return;
+          }
+          for (const emission of planned.emissions) {
+            const queued = core.enqueueSpeech(emission.text, emission.responseEpoch, emission.key);
+            if (queued.accepted) {
+              resumeListeningAfterSpeechRef.current = true;
+            }
+          }
+          continue;
+        }
+      }
+
+      const text = sanitizeLiveVoiceTtsText(message.content);
+      for (const [chunkIndex, chunk] of splitLiveVoiceTtsText(text).entries()) {
+        const queued = core.enqueueSpeech(chunk, turn.responseEpoch, `${message.id}:${chunkIndex}`);
+        if (queued.accepted) {
+          resumeListeningAfterSpeechRef.current = true;
+        }
+      }
+    }
+
+    const latestSnapshot = core.getSnapshot();
+    const latestStreamingPlan = streamingSpeechStateRef.current;
+    const currentSessionId = sessionIdRef.current;
+    const finalTimeoutAction = selectLiveVoiceStreamingFinalTimeoutAction({
+      streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+      liveVoiceActive: activeRef.current,
+      responseInProgress,
+      responseObserved: turn.responseObserved,
+      originatingSessionId: turn.originatingSessionId,
+      activeSessionId: currentSessionId,
+      currentTurnResponseEpoch: turn.responseEpoch,
+      plannerResponseEpoch: latestStreamingPlan.responseEpoch,
+      plannerMessageId: latestStreamingPlan.messageId,
+      plannerMode: latestStreamingPlan.mode,
+      status: latestSnapshot.status,
+      pendingSpeechCount: latestSnapshot.pendingSpeechCount,
+      activeSpeechKey: latestSnapshot.activeSpeechKey,
+      timeoutExpired: false,
+    });
+    if (
+      turn.originatingSessionId === currentSessionId &&
+      finalTimeoutAction !== 'wait' &&
+      shouldResumeAfterSilentResponse({
+        responseObserved: turn.responseObserved,
+        responseInProgress,
+        hasUserBoundary: Boolean(selection.userBoundaryId),
+        isThinking: latestSnapshot.status === 'thinking',
+        pendingSpeechCount: latestSnapshot.pendingSpeechCount,
+      })
+    ) {
+      // A real response may contain only tool/media content, or sanitization
+      // may intentionally remove everything. With no error and no playable
+      // text, continue the voice loop instead of remaining stuck in thinking.
+      beginCapture();
+    }
+  }, [active, beginCapture, core, exitLiveVoice, isProcessing, isThinking, messages, t]);
+
+  useEffect(() => {
+    const currentSnapshot = core.getSnapshot();
+    const currentTurn = voiceTurnRef.current;
+    const currentPlan = streamingSpeechStateRef.current;
+    const currentSessionId = activeSessionId;
+    const action = selectLiveVoiceStreamingFinalTimeoutAction({
+      streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+      liveVoiceActive: active,
+      responseInProgress: isProcessing || isThinking,
+      responseObserved: currentTurn?.responseObserved ?? false,
+      originatingSessionId: currentTurn?.originatingSessionId ?? null,
+      activeSessionId: currentSessionId,
+      currentTurnResponseEpoch: currentTurn?.responseEpoch ?? null,
+      plannerResponseEpoch: currentPlan.responseEpoch,
+      plannerMessageId: currentPlan.messageId,
+      plannerMode: currentPlan.mode,
+      status: currentSnapshot.status,
+      pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+      activeSpeechKey: currentSnapshot.activeSpeechKey,
+      timeoutExpired: false,
+    });
+
+    if (action !== 'wait' || currentTurn === null) {
+      clearStreamingFinalTimeout();
+      return;
+    }
+    if (
+      streamingFinalTimeoutRef.current?.responseEpoch === currentTurn.responseEpoch &&
+      streamingFinalTimeoutRef.current.originatingSessionId === currentTurn.originatingSessionId
+    ) {
+      return;
+    }
+    if (currentTurn.originatingSessionId === null) {
+      clearStreamingFinalTimeout();
+      return;
+    }
+
+    clearStreamingFinalTimeout();
+    let registration: StreamingFinalTimeoutRegistration;
+    registration = {
+      responseEpoch: currentTurn.responseEpoch,
+      originatingSessionId: currentTurn.originatingSessionId,
+      timeoutId: setTimeout(() => {
+        if (streamingFinalTimeoutRef.current !== registration) return;
+        streamingFinalTimeoutRef.current = null;
+
+        const latestSnapshot = core.getSnapshot();
+        const latestTurn = voiceTurnRef.current;
+        const latestPlan = streamingSpeechStateRef.current;
+        const expiredAction = selectLiveVoiceStreamingFinalTimeoutAction({
+          streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+          liveVoiceActive: activeRef.current,
+          responseInProgress: responseInProgressRef.current,
+          responseObserved: latestTurn?.responseObserved ?? false,
+          originatingSessionId: latestTurn?.originatingSessionId ?? null,
+          activeSessionId: sessionIdRef.current,
+          currentTurnResponseEpoch: latestTurn?.responseEpoch ?? null,
+          plannerResponseEpoch: latestPlan.responseEpoch,
+          plannerMessageId: latestPlan.messageId,
+          plannerMode: latestPlan.mode,
+          status: latestSnapshot.status,
+          pendingSpeechCount: latestSnapshot.pendingSpeechCount,
+          activeSpeechKey: latestSnapshot.activeSpeechKey,
+          timeoutExpired: true,
+        });
+        if (latestTurn?.originatingSessionId !== registration.originatingSessionId) return;
+        if (expiredAction !== 'recover') return;
+
+        // Missing chat.final is not permission to speak provisional content as
+        // final. Invalidate this epoch and expose a retryable error instead.
+        voiceTurnRef.current = null;
+        streamingSpeechStateRef.current = createLiveVoiceStreamingSpeechState();
+        resumeListeningAfterSpeechRef.current = false;
+        taskFeedbackOwnsResumeRef.current = false;
+        core.fail('streaming-final-timeout', t('liveVoice.streamingFinalTimeout'));
+      }, LIVE_VOICE_STREAMING_FINAL_TIMEOUT_MS),
+    };
+    streamingFinalTimeoutRef.current = registration;
+  }, [
+    active,
+    activeSessionId,
+    clearStreamingFinalTimeout,
+    core,
+    isProcessing,
+    isThinking,
+    messages,
+    snapshot.activeSpeechKey,
+    snapshot.pendingSpeechCount,
+    snapshot.status,
+    t,
+  ]);
+
+  useEffect(() => {
+    if (!active) return;
+    const currentSnapshot = core.getSnapshot();
+    const currentTurn = voiceTurnRef.current;
+    const currentStreamingPlan = streamingSpeechStateRef.current;
+    const taskFeedbackAction = selectLiveVoiceTaskFeedbackDrainAction({
+      taskFeedbackOwnsResume: taskFeedbackOwnsResumeRef.current,
+      resumeRequested: resumeListeningAfterSpeechRef.current,
+      responseInProgress: isProcessing || isThinking,
+      status: currentSnapshot.status,
+      pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+      activeSpeechKey: currentSnapshot.activeSpeechKey,
+    });
+    if (taskFeedbackAction === 'begin-capture') {
+      resumeListeningAfterSpeechRef.current = false;
+      taskFeedbackOwnsResumeRef.current = false;
+      beginCapture();
+      return;
+    }
+    const action = selectLiveVoicePostSpeechAction({
+      streamingEnabled: FEATURE_LIVE_VOICE_STREAMING_SPEECH,
+      responseInProgress: isProcessing || isThinking,
+      responseObserved: currentTurn?.responseObserved ?? false,
+      currentTurnResponseEpoch: currentTurn?.responseEpoch ?? null,
+      plannerResponseEpoch: currentStreamingPlan.responseEpoch,
+      plannerMessageId: currentStreamingPlan.messageId,
+      plannerMode: currentStreamingPlan.mode,
+      status: currentSnapshot.status,
+      pendingSpeechCount: currentSnapshot.pendingSpeechCount,
+      activeSpeechKey: currentSnapshot.activeSpeechKey,
+      resumeRequested: resumeListeningAfterSpeechRef.current,
+    });
+    if (action === 'mark-thinking' && currentTurn) {
+      core.markThinking(currentTurn.responseEpoch);
+      return;
+    }
+    if (action !== 'begin-capture') return;
+    resumeListeningAfterSpeechRef.current = false;
+    taskFeedbackOwnsResumeRef.current = false;
+    beginCapture();
+  }, [active, beginCapture, core, isProcessing, isThinking, snapshot.activeSpeechKey, snapshot.pendingSpeechCount, snapshot.status]);
+
+  let unavailableMessage = '';
+  if (mode !== 'agent') {
+    unavailableMessage = t('liveVoice.unavailable');
+  } else if (interactionBlocked) {
+    unavailableMessage = t('liveVoice.interactionBlocked');
+  } else if (!recognitionSupported) {
+    unavailableMessage = t('speech.recognitionUnsupported');
+  } else if (!synthesisSupported) {
+    unavailableMessage = t('speech.synthesisUnsupported');
+  }
+
+  return {
+    active,
+    available,
+    status: snapshot.status,
+    interimTranscript: snapshot.interimTranscript,
+    committedTranscript: snapshot.finalTranscript,
+    errorMessage: snapshot.error?.message ?? '',
+    unavailableMessage,
+    routeLabel: integratedP1Route?.routeLabel,
+    taskSafetyDisclosure: selectLiveVoiceTaskSafetyDisclosure(FEATURE_LIVE_VOICE_TASK_DEMO, t('liveVoice.task.safetyDisclosure')),
+    taskActivity,
+    onEnable: enableLiveVoice,
+    onExit: exitLiveVoice,
+    onPrimaryAction: handlePrimaryAction,
+  };
+}
