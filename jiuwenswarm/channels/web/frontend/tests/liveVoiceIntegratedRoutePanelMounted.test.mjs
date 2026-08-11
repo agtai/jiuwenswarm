@@ -502,7 +502,7 @@ function mountedP3Status(binding, { attemptId = 'attempt-a', attemptNumber = 1, 
   };
 }
 
-function mountedP3Events(binding, { terminalA = false, terminalB = false } = {}) {
+function mountedP3Events(binding, { terminalA = false, terminalB = false, terminalC = false } = {}) {
   const scope = {
     subject_id: binding.subject_id,
     session_id: binding.session_id,
@@ -543,7 +543,7 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false } = {})
       details: {},
     },
   ];
-  if (terminalA || terminalB) {
+  if (terminalA || terminalB || terminalC) {
     events.push({
       event_id: 'task-a:event:2',
       task_id: 'task-a',
@@ -561,7 +561,7 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false } = {})
       details: {},
     });
   }
-  if (terminalB) {
+  if (terminalB || terminalC) {
     events.push(
       {
         event_id: 'task-a:event:3',
@@ -618,12 +618,69 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false } = {})
       }
     );
   }
+  if (terminalC) {
+    events.push(
+      {
+        event_id: 'task-a:event:6',
+        task_id: 'task-a',
+        attempt_id: 'attempt-c',
+        scope,
+        seq: 6,
+        event_type: 'task.retry_accepted',
+        state: 'accepted',
+        outcome: null,
+        producer: 'task_core',
+        source_event_id: null,
+        causation_id: 'retry-c',
+        correlation_id: binding.correlation_id,
+        occurred_at: '2026-08-10T10:00:06Z',
+        details: {
+          attempt_number: 3,
+          command_id: 'retry-c',
+          previous_outcome: 'completed',
+          retry_of_attempt_id: 'attempt-b',
+        },
+      },
+      {
+        event_id: 'task-a:event:7',
+        task_id: 'task-a',
+        attempt_id: 'attempt-c',
+        scope,
+        seq: 7,
+        event_type: 'task.running',
+        state: 'running',
+        outcome: null,
+        producer: 'task_core',
+        source_event_id: 'executor-c:1',
+        causation_id: 'executor-c:1',
+        correlation_id: binding.correlation_id,
+        occurred_at: '2026-08-10T10:00:07Z',
+        details: {},
+      },
+      {
+        event_id: 'task-a:event:8',
+        task_id: 'task-a',
+        attempt_id: 'attempt-c',
+        scope,
+        seq: 8,
+        event_type: 'task.terminal',
+        state: 'terminal',
+        outcome: 'interrupted',
+        producer: 'task_core.reconciliation',
+        source_event_id: 'executor-c:2',
+        causation_id: 'executor-c:2',
+        correlation_id: binding.correlation_id,
+        occurred_at: '2026-08-10T10:00:08Z',
+        details: {},
+      }
+    );
+  }
   return {
     ok: true,
     result: {
       task_id: 'task-a',
       after_seq: -1,
-      head_seq: terminalB ? 5 : terminalA ? 2 : 1,
+      head_seq: terminalC ? 8 : terminalB ? 5 : terminalA ? 2 : 1,
       events,
     },
   };
@@ -1895,6 +1952,7 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
     generation: 1,
   };
   const calls = [];
+  let retryApplied = false;
   let renderer;
   const request = async (method, params, options) => {
     calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
@@ -1907,6 +1965,15 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
     if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.task.status') {
+      if (retryApplied) {
+        return mountedP3Status(historicalBinding, {
+          attemptId: 'attempt-c',
+          attemptNumber: 3,
+          state: 'terminal',
+          outcome: 'interrupted',
+          eventHead: 8,
+        });
+      }
       return mountedP3Status(historicalBinding, {
         attemptId: 'attempt-b',
         attemptNumber: 2,
@@ -1916,7 +1983,7 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
       });
     }
     if (method === 'live_voice.task.events') {
-      return mountedP3Events(historicalBinding, { terminalA: true, terminalB: true });
+      return mountedP3Events(historicalBinding, { terminalA: true, terminalB: true, terminalC: retryApplied });
     }
     if (method === 'live_voice.composition.p3.confirmation.issue') {
       assert.equal(params.operation, 'task.retry');
@@ -1936,6 +2003,7 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
       };
     }
     if (method === 'live_voice.composition.p3.mutate') {
+      retryApplied = true;
       return {
         ok: true,
         result: {
@@ -1989,9 +2057,14 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
 
     await act(async () => {
       mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
-      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'historical retry C did not settle');
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('interrupted'),
+        'historical retry C terminal truth did not replace accepted status'
+      );
     });
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.status').length, 4);
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 3);
   } finally {
     if (renderer) {
       await act(async () => {
