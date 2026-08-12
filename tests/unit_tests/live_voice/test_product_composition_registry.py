@@ -97,11 +97,12 @@ def _resource(task_id: str) -> AuthorityResourceBinding:
 
 
 class _Facade:
-    def __init__(self) -> None:
+    def __init__(self, *, formal_live_voice: bool = True) -> None:
         self.calls = 0
+        self._formal_live_voice = formal_live_voice
 
     def supports_formal_live_voice(self) -> bool:
-        return True
+        return self._formal_live_voice
 
     async def process_formal_live_voice_stream(self, execution):
         self.calls += 1
@@ -148,22 +149,32 @@ class _HistoryWriter:
 
 
 class _AgentManager:
+    """Honors the real profile contract instead of one always-capable facade.
+
+    ``JiuWenSwarm.supports_formal_live_voice`` refuses an already bound Code
+    adapter, so a Code-profile request can only return a facade without the
+    formal Live Voice seam. A fake that reports the capability for every
+    profile hides which profile the caller actually asked for.
+    """
+
     def __init__(self) -> None:
         self.agent = _Facade()
+        self.code_agent = _Facade(formal_live_voice=False)
         self.get_calls: list[tuple[object, ...]] = []
         self.pins = 0
         self.unpins = 0
 
     async def get_agent(self, *args):
         self.get_calls.append(args)
-        return self.agent
+        mode = str(args[1]) if len(args) > 1 else "agent"
+        return self.code_agent if mode == "code" else self.agent
 
     def pin_agent(self, agent) -> None:
-        assert agent is self.agent
+        assert agent in (self.agent, self.code_agent)
         self.pins += 1
 
     def unpin_agent(self, agent) -> None:
-        assert agent is self.agent
+        assert agent in (self.agent, self.code_agent)
         self.unpins += 1
 
 
@@ -702,15 +713,79 @@ def test_factory_requires_real_authenticated_authority_when_enabled(
 
 
 @pytest.mark.asyncio
+async def test_p2_activation_requests_the_formal_live_voice_agent_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Code-mode Session must still activate P2 on the formal Agent profile.
+
+    ``process_formal_live_voice_stream`` drives ``_ensure_adapter(mode="agent")``
+    and ``supports_formal_live_voice`` refuses an already bound Code adapter, so
+    asking for the Session's own work mode made every project-bound Code Session
+    fail closed with ``P2_RUNTIME_UNAVAILABLE``. The route owns no Chat history
+    and always runs an Agent-profile turn, so the work mode is not its input.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.session.session_metadata.get_session_metadata",
+        lambda *_args, **_kwargs: {"mode": "code", "work_mode": "code"},
+    )
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-profile",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert activated.ok is True, activated.payload
+    assert _route(activated.payload, "p2.agent_interaction")["truth"] == "formal"
+    assert len(manager.get_calls) == 1
+    channel_id, mode, project_dir, sub_mode = manager.get_calls[0]
+    assert (channel_id, mode, sub_mode) == ("web", "agent", None)
+    assert Path(str(project_dir)) == tmp_path
+    assert manager.pins == 1
+
+
+@pytest.mark.asyncio
+async def test_p2_activation_without_the_formal_seam_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A facade that does not own the formal seam allocates nothing."""
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    manager.agent = _Facade(formal_live_voice=False)
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-no-seam",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert activated.ok is False
+    assert _route(activated.payload, "p2.agent_interaction")["reason_id"] == (
+        "P2_RUNTIME_UNAVAILABLE"
+    )
+    assert len(manager.get_calls) == 1
+    assert manager.pins == 0
+    assert manager.unpins == 0
+
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-p2-no-seam-close",
+        session_id="session-product",
+    )
+    assert closed.ok is False
+
+
+@pytest.mark.asyncio
 async def test_p2_authority_first_activation_replay_and_exact_close(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, p3, manager, _pushed = _registry(tmp_path)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("code", "normal"),
-    )
 
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
@@ -802,10 +877,6 @@ async def test_p2_denied_or_unavailable_authority_has_zero_downstream_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, p3, manager, _pushed = _registry(tmp_path)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("agent", None),
-    )
 
     denied = await registry.handle_p2_activate(
         params=_p2_params(auth_token="wrong-token"),
@@ -838,10 +909,6 @@ async def test_p2_candidate_correlation_mismatch_allocates_nothing(
 ) -> None:
     registry, p3, manager, _pushed = _registry(tmp_path)
     p3.correlation_override = "other-correlation"
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("agent", None),
-    )
 
     result = await registry.handle_p2_activate(
         params=_p2_params(),
@@ -1860,10 +1927,6 @@ async def test_disconnect_cleanup_closes_p2_and_progress_without_stopping_regist
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, _p3, manager, _pushed = _registry(tmp_path)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("agent", None),
-    )
     await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2",
@@ -2118,10 +2181,6 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, _p3, manager, _pushed = _registry(tmp_path)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("code", "normal"),
-    )
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate",
@@ -3187,10 +3246,6 @@ async def test_p2_submit_caller_cancellation_retains_exact_disconnect_replay(
     registry, _p3, manager, _pushed = _registry(tmp_path)
     blocking = _BlockingFacade()
     manager.agent = blocking
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("code", "normal"),
-    )
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-p2-activate-cancel",
@@ -4692,10 +4747,6 @@ async def test_p2_oversized_notification_cursor_allocates_no_business_effect(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     registry, _p3, manager, _pushed = _registry(tmp_path)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("code", "normal"),
-    )
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-oversized-operation-activate",
@@ -4733,10 +4784,6 @@ async def test_p2_oversized_ack_cursor_allocates_no_business_effect(
     contiguous_cursor: int,
 ) -> None:
     registry, _p3, manager, _pushed = _registry(tmp_path)
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("code", "normal"),
-    )
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-oversized-ack-activate",

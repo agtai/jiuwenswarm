@@ -142,6 +142,8 @@ PRODUCT_P3_TEXT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED"
 PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED"
 PRODUCT_CRITICAL_INPUT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED"
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
+# The only Agent profile whose facade implements the formal Live Voice seam.
+_FORMAL_LIVE_VOICE_AGENT_MODE = "agent"
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -525,31 +527,25 @@ def _success_result(
     )
 
 
-def _server_agent_mode(session_id: str) -> tuple[str, str | None]:
-    from jiuwenswarm.server.runtime.session.session_metadata import (
-        get_session_metadata,
-    )
+def _formal_live_voice_capable(agent: object) -> bool:
+    """Report whether one Agent facade actually owns the formal Live Voice seam.
 
-    metadata = get_session_metadata(
-        session_id,
-        cache_bust=True,
-        enable_writeback=False,
+    ``AgentConversationRuntime.start`` performs the same check and merely
+    returns ``False``, which the P2 adapter can only surface as an opaque
+    runtime failure.  Observing it at the owner keeps the refusal attributable
+    to the facade instead of to the conversation runtime.
+    """
+
+    capability = getattr(agent, "supports_formal_live_voice", None)
+    if not callable(capability):
+        return False
+    try:
+        supported = bool(capability())
+    except Exception:  # a capability probe never presents provider text
+        return False
+    return supported and callable(
+        getattr(agent, "process_formal_live_voice_stream", None)
     )
-    if not isinstance(metadata, Mapping):
-        return "agent", None
-    raw = str(metadata.get("mode") or "").strip().lower()
-    if not raw:
-        raw = "code" if str(metadata.get("work_mode") or "") == "code" else "agent"
-    if raw in {"plan", "fast"} or raw.startswith("agent"):
-        return "agent", None
-    if raw == "team.plan":
-        return "code", "team"
-    if raw.startswith("team"):
-        return "team", None
-    if raw.startswith("code"):
-        suffix = raw.partition(".")[2]
-        return "code", suffix if suffix in {"plan", "normal", "team"} else "normal"
-    return "agent", None
 
 
 class AgentServerProductCompositionRegistry:
@@ -1560,16 +1556,22 @@ class AgentServerProductCompositionRegistry:
                         ),
                         None,
                     )
-                mode, sub_mode = await asyncio.to_thread(
-                    _server_agent_mode, routed_session
-                )
+                # The formal Live Voice seam exists only on the Agent-profile
+                # facade: ``process_formal_live_voice_stream`` drives
+                # ``_ensure_adapter(mode="agent")``, and an already bound Code
+                # adapter is refused by ``supports_formal_live_voice`` rather
+                # than re-described as an ordinary Agent.  Deriving the
+                # interactive session's own work mode asked for a Code facade on
+                # every project-bound Code session, so P2 could never start.
+                # This route owns no Chat history and always runs an
+                # Agent-profile turn, so the session work mode is not its input.
                 agent = await self._agent_manager.get_agent(
                     "web",
-                    mode,
+                    _FORMAL_LIVE_VOICE_AGENT_MODE,
                     project_dir,
-                    sub_mode,
+                    None,
                 )
-                if agent is None:
+                if agent is None or not _formal_live_voice_capable(agent):
                     return ProductSegmentActivation(
                         _unavailable_fact(
                             ProductSegment.P2_AGENT_INTERACTION,
@@ -1647,6 +1649,14 @@ class AgentServerProductCompositionRegistry:
                         P2ActivationReason.AUTHORITY_UNAVAILABLE,
                     }
                     else ProductRouteReason.P2_RUNTIME_UNAVAILABLE
+                )
+                # Eight distinct allocator reasons collapse into two route
+                # reasons, so the exact one is only recoverable from here. The
+                # value is a closed enum name and carries no request content.
+                logger.warning(
+                    "[LiveVoiceProduct] P2 activation inactive: status=%s reason=%s",
+                    result.status.value,
+                    result.reason.value,
                 )
                 return ProductSegmentActivation(
                     _unavailable_fact(ProductSegment.P2_AGENT_INTERACTION, reason),

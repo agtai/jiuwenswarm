@@ -800,6 +800,79 @@ async def test_effective_transcription_session_mismatch_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ga_server_vad_echo_without_response_fields_opens_the_stream() -> None:
+    """The real GA transcription session echoes only the fields it governs.
+
+    ``create_response``/``interrupt_response`` belong to the realtime response
+    API, so a transcription session drops them from ``session.updated``. Byte
+    equality with the request rejected every real ``server_vad`` open, which
+    silently degraded every dedicated-media capture to the text tier.
+    """
+
+    ga_echo = {
+        "type": "server_vad",
+        "threshold": 0.5,
+        "prefix_padding_ms": 300,
+        "silence_duration_ms": 500,
+    }
+    socket = FakeSocket((session_updated_event(ga_echo),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    ref = recognition_ref()
+    await provider.open_recognition(
+        RecognitionStreamRequest(ref, RecognitionTurnDetection.server_vad_default()),
+        timeout_seconds=2,
+    )
+
+    # The request still pins response generation off on every session shape.
+    assert (
+        socket.sent[0]["session"]["audio"]["input"]["turn_detection"]
+        == server_vad_wire()
+    )
+    assert provider.conformance.snapshot().active_recognition == 1
+    assert socket.closed is False
+    await provider.cancel_recognition(ref)
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_server_vad_echo_field_still_fails_closed() -> None:
+    facts: list[SpeechDegradationFact] = []
+    unknown_echo = {
+        "type": "server_vad",
+        "threshold": 0.5,
+        "prefix_padding_ms": 300,
+        "silence_duration_ms": 500,
+        "eagerness": "high",
+    }
+    socket = FakeSocket((session_updated_event(unknown_echo),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), socket_factory=socket_factory, degradation_sink=facts.append
+    )
+    with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
+        await provider.open_recognition(
+            RecognitionStreamRequest(
+                recognition_ref(), RecognitionTurnDetection.server_vad_default()
+            ),
+            timeout_seconds=1,
+        )
+    assert exc_info.value.reason == "SPEECH_PROVIDER_SESSION_MISMATCH"
+    assert socket.closed is True
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_PROTOCOL
+    assert provider.conformance.snapshot().active_recognition == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_effective_server_vad_response_creation_mismatch_fails_closed() -> None:
     facts: list[SpeechDegradationFact] = []
     mismatched_vad = server_vad_wire()

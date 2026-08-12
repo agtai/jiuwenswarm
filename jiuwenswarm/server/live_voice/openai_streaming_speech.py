@@ -2461,8 +2461,10 @@ def _validate_transcription_session(
             or audio_format.get("rate") != OPENAI_PCM_RATE_HZ
             or type(transcription) is not dict
             or transcription.get("model") != expected_model
-            or input_config.get("turn_detection", object())
-            != _turn_detection_value(expected_turn_detection)
+            or "turn_detection" not in input_config
+            or not _turn_detection_echo_accepted(
+                input_config.get("turn_detection"), expected_turn_detection
+            )
         ):
             raise OpenAIStreamingSpeechError(
                 "SPEECH_PROVIDER_SESSION_MISMATCH",
@@ -2475,8 +2477,10 @@ def _validate_transcription_session(
         session.get("input_audio_format") != "pcm16"
         or type(transcription) is not dict
         or transcription.get("model") != expected_model
-        or session.get("turn_detection", object())
-        != _turn_detection_value(expected_turn_detection)
+        or "turn_detection" not in session
+        or not _turn_detection_echo_accepted(
+            session.get("turn_detection"), expected_turn_detection
+        )
     ):
         raise OpenAIStreamingSpeechError(
             "SPEECH_PROVIDER_SESSION_MISMATCH",
@@ -2499,6 +2503,34 @@ def _turn_detection_value(
         "create_response": False,
         "interrupt_response": False,
     }
+
+
+def _turn_detection_echo_accepted(
+    echo: object,
+    detection: RecognitionTurnDetection,
+) -> bool:
+    """Compare the effective session echo against the negotiated detection.
+
+    The request keeps sending ``create_response``/``interrupt_response`` so no
+    session shape can auto-generate a response, but a GA transcription session
+    owns no response and echoes neither field.  Byte equality with the request
+    therefore rejects every real ``server_vad`` open, so compare the fields the
+    transcription session actually governs and still fail closed on any
+    unknown key or on response generation the Adapter never requested.
+    """
+
+    expected = _turn_detection_value(detection)
+    if expected is None:
+        return echo is None
+    if type(echo) is not dict:
+        return False
+    governed = ("type", "threshold", "prefix_padding_ms", "silence_duration_ms")
+    optional = ("create_response", "interrupt_response")
+    if set(echo) - set(governed) - set(optional):
+        return False
+    if any(echo.get(field) != expected[field] for field in governed):
+        return False
+    return not any(echo.get(field) for field in optional)
 
 
 def _json_object(value: str) -> dict[str, object]:

@@ -825,10 +825,6 @@ async def test_product_registry_uses_real_authority_and_agent_runtime_for_p2(
         allowed_operations=P3_OPERATIONS | frozenset({"agent.chat"}),
     )
     manager = Manager()
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("agent", None),
-    )
 
     async def push(_message: dict[str, object]) -> bool:
         raise AssertionError("P2 activation must not use the P3 progress sink")

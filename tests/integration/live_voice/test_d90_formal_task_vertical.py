@@ -712,10 +712,6 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         p3_confirmation_forwarder=confirmation_forwarder,
         commit_ledger=commit_ledger,
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
-        lambda _session_id: ("code", "normal"),
-    )
     await p3_composition.start()
     activated = await registry.handle_p2_activate(
         params=_joint_product_p2_params(),
@@ -820,6 +816,17 @@ async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains
         channel_id="web",
     )
     assert status_origin.ok is True, status_origin.payload
+    # ``accepted`` -> ``running`` is owned by the dispatch worker, so the query
+    # must wait for that transition instead of relying on an incidental
+    # scheduling gap somewhere else in the activation path.
+    def _task_is_running() -> bool:
+        probe = _structured("task.status", task_id=task_id)
+        observed = core.query(probe.envelope, probe.authorization, now=NOW)
+        return bool(
+            observed.ok and observed.result["task"]["state"] == "running"
+        )
+
+    await _wait(_task_is_running)
     status = await registry.handle_p3_intent(
         params=_joint_product_voice_intent(
             stem="joint-task-status",

@@ -1084,6 +1084,51 @@ async def test_media_handshake_rejects_missing_origin_even_when_general_check_is
     assert int(response[0]) == 403
 
 
+@pytest.mark.parametrize(
+    "request_path",
+    ["/ws/live-voice/media", "/ws/live-voice/media/private-ticket"],
+)
+@pytest.mark.asyncio
+async def test_dispatcher_routes_every_accepted_media_path_to_the_media_leaf(
+    monkeypatch: pytest.MonkeyPatch,
+    request_path: str,
+) -> None:
+    """The dispatcher must accept exactly what the handshake accepted.
+
+    ``activate`` returns the fixed ``/ws/live-voice/media`` path with a
+    first-frame ticket unless legacy path compatibility is on. A dispatcher
+    that matches only the legacy trailing-slash prefix passes the handshake and
+    then closes every real media socket with ``unsupported path``.
+    """
+
+    monkeypatch.setenv("JIUWENSWARM_ENABLE_ORIGIN_CHECK", "0")
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    channel.live_voice_media_registry = _active_registry()
+    routed: list[str] = []
+    closed: list[tuple[int, str]] = []
+
+    async def fake_leaf(_registry: object, _ws: object, path: str) -> bool:
+        routed.append(path)
+        return True
+
+    monkeypatch.setattr(
+        dedicated_media_registration, "handle_registered_media_socket", fake_leaf
+    )
+
+    async def record_close(code: int = 1000, reason: str = "") -> None:
+        closed.append((code, reason))
+
+    socket = SimpleNamespace(close=record_close, path=request_path)
+
+    assert (
+        await channel._process_request(request_path, {"Origin": ORIGIN})
+    ) is None
+    await channel._connection_handler(socket, request_path)
+
+    assert routed == [request_path]
+    assert closed == []
+
+
 @pytest.mark.asyncio
 async def test_media_handshake_never_logs_the_authority_ticket(
     monkeypatch: pytest.MonkeyPatch,

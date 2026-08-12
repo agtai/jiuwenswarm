@@ -129,6 +129,10 @@ _MEDIA_AUTH_FRAME_MAX_BYTES = 8 * 1024
 _MEDIA_AUTH_TIMEOUT_SECONDS = 2.0
 _MAX_ID_CHARS = 256
 _MAX_STREAMING_PREOPEN_FRAMES = 64
+# End-of-turn arbitration starts before the Provider open settles, so it waits
+# for that open instead of cancelling it. The route owner already hard-bounds
+# the open; this is the independent local bound.
+_STREAMING_BEGIN_WAIT_SECONDS = 20.0
 _STREAMING_RESULT_TIMEOUT_SECONDS = 36.0
 _STREAMING_OBSERVABILITY_QUEUE_CAPACITY = 64
 _STREAMING_OBSERVABILITY_CLOSE_BUDGET_SECONDS = 0.05
@@ -1484,7 +1488,7 @@ class DedicatedMediaProductRegistry:
         """Return one negotiated, content-free Provider-time EOT control."""
 
         try:
-            await self._settle_streaming_begin(record)
+            await self._await_streaming_begin(record)
             with self._lock:
                 owner = self._streaming_recognition_owner
                 handle = record.streaming_recognition_handle
@@ -1665,6 +1669,33 @@ class DedicatedMediaProductRegistry:
         if owner is not None and handle is not None:
             with suppress(Exception, asyncio.CancelledError):
                 await owner.abort(handle)
+
+    async def _await_streaming_begin(self, record: _MediaAuthority) -> None:
+        """Observe the retained Provider open without cancelling or draining it.
+
+        ``_settle_streaming_begin`` is teardown: it cancels an open nobody wants
+        any more and drops the pre-open frames. End-of-turn arbitration starts
+        one scheduling turn after ``start_streaming_recognition``, so calling
+        that teardown here cancelled the very open it was waiting for and
+        discarded the audio buffered before the Provider was ready, which
+        aborted every real streaming recognition on this route.
+        """
+
+        with self._lock:
+            task = record.streaming_recognition_begin_task
+        if task is None or task.done():
+            return
+        # asyncio.wait never cancels on timeout; a Provider that misses this
+        # bound stays owned by the finish/abort path.
+        done, _pending = await asyncio.wait(
+            {task}, timeout=_STREAMING_BEGIN_WAIT_SECONDS
+        )
+        if not done:
+            return
+        try:
+            task.result()
+        except (Exception, asyncio.CancelledError):
+            return
 
     async def _settle_streaming_begin(self, record: _MediaAuthority) -> None:
         with self._lock:

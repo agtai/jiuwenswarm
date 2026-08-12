@@ -59,6 +59,22 @@ _websocket_transport_logger.addFilter(_MediaSafeTransportLogFilter())
 
 _WEB_CONNECTION_USER_ID_ATTR = "_web_connection_user_id"
 
+# The fixed Alpha route carries its one-use ticket in the first frame; the
+# legacy prefix carries it in the path. Both the handshake gate and the path
+# dispatcher must accept exactly the same set as
+# ``handle_registered_media_socket``, so they share one predicate: an
+# accepted handshake whose path the dispatcher then rejects closes every real
+# media socket with "unsupported path".
+_DEDICATED_MEDIA_ROUTE_PATH = "/ws/live-voice/media"
+_DEDICATED_MEDIA_ROUTE_PREFIX = "/ws/live-voice/media/"
+
+
+def _is_dedicated_media_route(request_path: str) -> bool:
+    return request_path == _DEDICATED_MEDIA_ROUTE_PATH or request_path.startswith(
+        _DEDICATED_MEDIA_ROUTE_PREFIX
+    )
+
+
 _LOCAL_HANDLER_ONLY_METHODS = frozenset(
     {
         "live_voice.speech.capabilities",
@@ -781,13 +797,10 @@ class WebChannel(BaseWsChannel):
         origin = get_header_value(request_headers, "Origin")
         parsed_path = urlparse(path)
         handshake_path = parsed_path.path or path
-        is_dedicated_media_path = (
-            handshake_path == "/ws/live-voice/media"
-            or handshake_path.startswith("/ws/live-voice/media/")
-        )
+        is_dedicated_media_path = _is_dedicated_media_route(handshake_path)
         logged_path = (
             "/ws/live-voice/media/<redacted>"
-            if handshake_path.startswith("/ws/live-voice/media/")
+            if handshake_path.startswith(_DEDICATED_MEDIA_ROUTE_PREFIX)
             else handshake_path
         )
         if is_dedicated_media_path and (
@@ -1261,7 +1274,7 @@ class WebChannel(BaseWsChannel):
             await self._handle_git_ws_connection(ws, _flat_query, remote)
             return
 
-        if request_path.startswith("/ws/live-voice/media/"):
+        if _is_dedicated_media_route(request_path):
             registry = self.live_voice_media_registry
             if registry is None:
                 await ws.close(code=1008, reason="live-voice media route unavailable")
