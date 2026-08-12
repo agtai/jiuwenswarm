@@ -243,6 +243,57 @@ batch 层在本矩阵中只签发了替换授权、未执行替换识别（`has_
 W2 batch 的实际替换需要客户端另外调用 `live_voice.speech.recognize_batch`，
 不在本次矩阵范围内，记为观察项。
 
+## 8f. 真实联合路由与取消域（S6-06 + S6-03 剩余）
+
+一次真实运行内同时存在：一个分离的 P3alpha Task 在一次性 fixture 上执行、
+一个经真实媒体链路承诺的语音回合、两个慢的对话回合、一次 barge-in、
+一次运行中 Task 取消，以及两个必须被拒绝的取消目标。
+
+| 事实 | 结果 |
+|---|---|
+| 分离 Task 创建 | `mutation_processed`，`state=accepted`，真实 executor `jiuwenswarm_code_agent.project_code` |
+| 承诺语音回合 | 227 帧 / 227 ACK，端点检测已观察，识别 `completed`，`round_accepted` |
+| 慢回合非阻塞分发 | 提交返回 444.3 ms / 378.8 ms，Agent 仍在工作 |
+| 首个 delta | 4,133.0 ms |
+| **Task 取消发生在响应流式进行中** | 取消时 `state=running`，`mutation_processed`，取消时刻 4,554.4 ms |
+| **取消 Task 不停止响应/回合** | 取消**之后**仍收到 **184 个 delta**，回合 A 正常到达 `chat.final`（6,655 字符） |
+| Task 终态 | `terminal` / `outcome=cancelled` / `cancel_requested=true` |
+| 回合 B barge-in | `barge_in_applied`，`applied=true`、`replayed=false`，两个 effect id |
+| **响应打断不改变 Task** | barge-in 前后 `state`/`outcome` 完全一致（`unchanged=true`） |
+| 取消 fence：过期 generation | 被拒，`STALE` |
+| 取消 fence：不存在的 response 目标 | 被拒，`STALE` |
+| 两次拒绝后 Task 状态 | 未变（`task_state_unchanged=true`） |
+| 取消后路由仍可用 | 新承诺回合 `round_accepted` 且拿到 `chat.final` |
+| fixture 副作用 | HEAD 未变、remote 仍为 0、工作树 clean；被取消的 Task **零写入** |
+| 凭据泄漏 | 0（742 帧控制面） |
+
+同一脚本的前一轮（Task 未被取消而正常完成）里，真实 Code Agent 在 fixture 的
+`notes.txt` 上写入了**恰好一行**指令要求的 `alpha-s606-joint-marker`，
+HEAD 未变、remote 仍为 0。两轮合起来覆盖了「完成」与「取消」两个终态：
+完成时产生且仅产生指令要求的变更，取消时零变更。
+
+慢/失败 Harness 剖面即由这两个慢回合承担：单回合输出规模达 6,655–12,448 字符、
+数百个 delta，期间提交、查询、取消与打断全部并发进行且互不越界。
+
+## 8g. sanitized trace 复现（S6-05）
+
+**只使用去敏输出**（服务日志 + 权威 SQLite Store），不接触任何运行内存或凭据，
+重建上一次真实联合运行的路由 / 取消 / 队列 / Task 事实：
+
+| 复现项 | 结果 |
+|---|---|
+| 日志中的闭合事实族 | `live_voice_end_of_turn_observed`(13)、`live_voice_end_of_turn_degradation`(4)、`live_voice_streaming_recognition_degradation`(4)、`live_voice_streaming_recognition_fallback`(9)、`live_voice_speech_degradation`(10)、`live_voice_speech_transport_cleanup_incomplete`(29)、`live_voice_formal_task`(6) |
+| 路由事实 | 端点检测已观察、`timing_basis=provider_time`、`detector=server_vad`、媒体路径可达、降级可见 —— 全部可从日志复现 |
+| Store 中的 TaskEvent 序列 | `task.accepted:accepted(task_core)` → `attempt.accepted(...project_code)` → `attempt.running(...)` → `task.running(task_core)` → `task.cancel_requested:running(task_core.control)` → `attempt.terminal/cancelled(...)` → `task.terminal/cancelled(task_core)` |
+| 每个事件都有 causation | 是 |
+| outbox | `attempt.dispatch` delivered(1)、`attempt.cancel` delivered(1) |
+| 与实测交叉校验 | `state` / `outcome` / `cancel_requested` 三项与运行期观察**逐项一致**，取消在事件序列中可见 |
+| 去敏面隐私 | 扫描日志 21,192,551 字节：凭据 0、原始 PCM 0、语料 sha 0；Store 274,432 字节：凭据 0、无 `RIFF` |
+| 判定 | `all_reproduced = true` |
+
+即：Alpha 的路由、取消域与 Task 生命周期真值都可以在**不接触运行进程**的前提下，
+从去敏产物独立复核；且这些产物本身不含凭据与原始音频。
+
 ## 9. 自动化验证（本候选）
 
 | 检查 | 结果 |
@@ -271,18 +322,19 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 |---|---|---|
 | S6-01 | `SATISFIED` | 源码与确定性自动化通过，无 Alpha 归因失败 |
 | S6-02 | `ENVIRONMENT` | Provider 层已由 D111 §7 证实；本批次新增：真实 server_vad 开流与 provider-time 端点检测已跑通。物理麦克风、设备切换/丢失与听感确认仍需用户 |
-| S6-03 | `ENVIRONMENT` | 真实媒体链路已跑通；九个真实故障/负载剖面全部按预期 fail closed（§8b）；带 p50/p95/failure/sample 的完整路由延迟报告已产出，5/5 轮零失败（§8c）。**仅剩**慢/失败 Harness 剖面与取消 fence 的真实跨域断言 |
+| S6-03 | `SATISFIED` | 真实媒体链路全线跑通（§8）；九个真实故障/负载剖面按预期 fail closed（§8b）；p50/p95/failure/sample 完整路由延迟报告 5/5 轮零失败（§8c）；慢回合剖面与取消 fence 真实跨域断言完成，取消 Task 不停止响应、响应打断不改变 Task、过期 generation 与错误目标均被拒（§8f）。未使用任何 fake 结果冒充真实路径 |
 | S6-04 | `SATISFIED` | 见 D111 §6e |
-| S6-05 | `ENVIRONMENT` | whole-stack benchmark（§8c，5/5 轮零失败）、raw-audio 零持久化回归（§8d，66 个面 16.2 MB 零命中）与降级矩阵（§8e，三层显式标识、文字路径存活）均已执行。**仅剩** sanitized trace 复现 |
-| S6-06 | `ENVIRONMENT` | 自动化联合场景通过（含本批次的竞态修正）；真实联合场景未执行 |
+| S6-05 | `SATISFIED` | whole-stack benchmark 覆盖每个声明目标的 p50/p95/failure/sample（§8c）；raw-audio 零持久化回归 66 个面 16.2 MB 零命中（§8d）；降级矩阵三层显式标识、文字路径在 Speech 与媒体两种移除下均存活（§8e）；sanitized trace 复现 `all_reproduced=true`，去敏面凭据 0、原始音频 0（§8g）。私有 HTTPS/WSS 拓扑、CSP 与浏览器层零凭据此前已实测 |
+| S6-06 | `SATISFIED` | 自动化联合场景通过（含本批次的竞态修正）；真实联合场景已执行：分离 Task、承诺语音回合、两个慢回合、barge-in、运行中取消与两个被拒取消目标在同一次真实运行中并发且互不越界，跨域副作用为 0，fixture 零越权变更（§8f） |
 
-**S6 未满足退出条件**，故本批次不进入 S7-01，不冻结 A2 候选，不进行 S8。
+S6-01、S6-03、S6-04、S6-05、S6-06 五项均已 `SATISFIED`。**S6 仍未关闭**，唯一未满足的是 S6-02 的物理观察（麦克风授权/拒绝/撤销、设备切换/丢失、听感确认），它按定义只能由用户在真实 Chrome 与物理音频设备上完成，执行手册见 [S6-02 物理观察执行手册](S6_02_PHYSICAL_OBSERVATION_RUNBOOK_2026-08-13.md)。因此本批次仍不进入 S7-01，不冻结 A2 候选，不进行 S8。
 
 ## 11. 剩余阻塞
 
-1. 用户在真实 Chrome + 麦克风 + 输出设备上完成 S6-02/03/06 的物理与听感确认。
-2. S6-03 的慢/失败 Harness 剖面与取消 fence 真实跨域断言；S6-05 的 sanitized
-   trace 复现；S6-06 的真实联合慢回合 + 分离 Task 场景。
+1. **唯一剩余的真实证据**：用户在真实 Chrome + 物理麦克风 + 输出设备上完成
+   S6-02 的六项物理观察，按
+   [执行手册](S6_02_PHYSICAL_OBSERVATION_RUNBOOK_2026-08-13.md) 回填。
+   AI 不得声称听到了扬声器输出，也不得代替权限弹窗做选择。
 3. S7-03 的完整累计 cold review 与一次独立 review 仍未完成。
 
 ## 12. 方法学结论（对 D111 §12 的加强）
