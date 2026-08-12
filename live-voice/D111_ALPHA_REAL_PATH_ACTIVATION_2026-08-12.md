@@ -9,8 +9,13 @@
 
 [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md)
 记录的两个外部阻塞条件（Speech 凭据、私有 HTTPS/WSS）本批次已解除，真实路径首次
-执行。执行立刻暴露 **2 个 Alpha 源码缺陷**和 **1 个 develop 既有运行期阻塞缺陷**，
-全部为自动化测试无法发现的类型。两个 Alpha 缺陷已修复并由回归测试锁定。
+执行。执行立刻暴露 **4 个 Alpha 源码缺陷**和 **1 个 develop 既有运行期阻塞缺陷**，
+全部为自动化测试无法发现的类型。四个 Alpha 缺陷已全部修复并由回归测试锁定，
+每个都用「回退修复 → 测试失败 → 还原 → 测试通过」验证过测试确实有效。
+
+修复后，真实 Streaming STT/TTS 与真实 P3alpha Executor 垂直**均已跑通**：
+识别与合成各 5/5，形式化任务真实分发并 `terminal/completed`，真实 Code Agent 在
+一次性 fixture 上产生了指令要求的确切变更且跨项目副作用为 0。
 
 S6 仍**未关闭**：物理麦克风、设备切换与听感确认必须由用户在真实 Chrome 上完成，
 S6-03/S6-05/S6-06 的真实测量尚未执行。因此未进入 S7，未执行 S8。
@@ -19,11 +24,11 @@ S6-03/S6-05/S6-06 的真实测量尚未执行。因此未进入 S7，未执行 S
 
 | 项 | 值 |
 |---|---|
-| 验证候选 | `31ee31abbd356b58e0b663943e204b1123298c1e` |
+| 验证候选 | `3583c0fe2`（真实路径修复批次的最后一个提交） |
 | 上一候选 | `82b2cc5f629e518d8631975517b72330f9c4992f` |
 | 对比基线 | `2a69c2b87d0ee080a4a30421cbcbcdf93183f340` |
 | develop 基线 | `3f3cdbb7f45fdd29e7d03deafa5bca10e363434e` |
-| 分支 / upstream | `hx/0812_live_voice_w3` / `agtai/hx/0812_live_voice_w3`（ahead 4） |
+| 分支 / upstream | `hx/0812_live_voice_w3` / `agtai/hx/0812_live_voice_w3`（ahead 8） |
 | 累计 diff | 91 files, +45,044 / −1,159 |
 | Python / Node / Chrome | 3.12.11 / v24.18.1 / 151.0.7922.109 |
 | Vite | 5.4.21 |
@@ -139,6 +144,39 @@ Gateway flags：`LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED`、
   `EXECUTOR_CAPABILITY_UNAVAILABLE`（见 §11）。提交 `44b275d5d`，回归测试断言
   调用确实到达模块级函数且参数原样透传，回退修复即失败。
 
+## 6d. 缺陷 5（Alpha 引入，已修）：分发读取纯访问器而非构建 Agent 句柄
+
+- **现象**：越过缺陷 4 后，真实分发仍全部失败于
+  `EXECUTOR_CAPABILITY_UNAVAILABLE: project dispatch requires a task-scoped
+  execution Agent`（`project_code_executor.py:235` 的 `execution_agent is None`）。
+  日志显示 `live_voice_formal_task agent created`，即 Agent 本身创建成功。
+- **根因**：`AgentManagerProjectBindingResolver._resolve_transition` 用
+  `agent.get_instance()`。该方法在 `interface.py:3172` 是纯访问器，其 docstring 明确写着
+  「may return None before the root DeepAgent has been built; callers that need a live
+  handle outside the chat path should await `ensure_instance` instead」。
+  形式化任务正是这种调用方：它分发到一个刚创建、从未经历 chat turn 的项目 Agent 上。
+- **修复**：改为 `await agent.ensure_instance()`。
+- **为何自动化没发现**：覆盖该路径的全部 fake 只定义了 `get_instance`，不实现真实 facade
+  的 `ensure_instance`，因此任何套件都观察不到差异。本次已把这些 fake 补齐到真实契约，
+  回归测试才具备意义。提交 `3583c0fe2`。
+
+## 6e. 真实 Executor 执行结果（S6-04 关键证据）
+
+修复后同一真实分发**首次成功**：
+
+| 事实 | 值 |
+|---|---|
+| outbox | `state=delivered`，`last_error=None` |
+| task | `state=terminal`，`outcome=completed` |
+| 一次性 fixture 工作树 | 已变化 |
+| 实际写入 | `notes.txt` 新增恰好一行 `alpha-s6-executor-marker`（与指令一致） |
+| fixture HEAD | 未变（未产生意外提交） |
+| fixture remote | 仍为 0 个 |
+| 跨项目副作用 | 0 |
+
+同一 Store 中并存 3 个先前 `terminal/failed` 的任务，其 outbox 为 `suppressed`
+且项目零副作用——fail-closed 与成功路径在同一权威账本上可对照。
+
 ## 6c. P3alpha 真实垂直已证实的正向事实
 
 即使分发最终失败，下列产品权威事实由真实运行与权威 SQLite Store 共同证明：
@@ -225,7 +263,7 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 | S6-01 | `SATISFIED` | 源码与确定性自动化通过，无 Alpha 归因失败 |
 | S6-02 | `ENVIRONMENT` | 真实 Streaming STT/TTS 已首次跑通并给出 p50/p95/failure/sample；物理麦克风、设备切换与听感确认仍需用户 |
 | S6-03 | `ENVIRONMENT` | 真实 Agent/Tool 文字路径已验证；P2 真实媒体、故障/负载与延迟测量未执行 |
-| S6-04 | `ENVIRONMENT` | 由 `SATISFIED` 下调。授权、确认、命令幂等、TaskEvent 权威、outbox、scope 隔离、重放与终态保护均在真实运行中证实；但真实 attempt 分发尚未成功执行过一次，`EXECUTOR_CAPABILITY_UNAVAILABLE` 未闭合，因此不能声称真实 D0 Executor 的 capability/outcome 真值已验收 |
+| S6-04 | `SATISFIED` | 授权、确认、命令幂等、TaskEvent 权威、outbox、scope 隔离、重放与终态保护均在真实运行中证实；修掉缺陷 4、5 后真实 attempt 首次成功分发并 `completed`，真实 Code Agent 在一次性 fixture 上产生了指令要求的确切变更，跨项目副作用为 0（见 §6e） |
 | S6-05 | `ENVIRONMENT` | 私有 HTTPS/WSS 同源拓扑已建立并实测；whole-stack benchmark、raw-audio 零持久化回归与降级矩阵未执行 |
 | S6-06 | `ENVIRONMENT` | 依赖 S6-02/03/05 的剩余真实路径 |
 
@@ -233,21 +271,15 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 
 ## 11. 剩余阻塞
 
-1. **`EXECUTOR_CAPABILITY_UNAVAILABLE`（已精确定位，最高优先级）**：
-   `project_code_executor.py:235` 的 `for_dispatch and self.execution_agent is None`
-   成立。`execution_agent` 由 `AgentManagerProjectBindingResolver._resolve_transition`
-   在 `for_dispatch=True` 时经 `agent_manager.get_live_voice_formal_task_agent(project_dir)`
-   与 `agent.get_instance()` 取得，需查明二者哪一步返回 `None`。在此闭合前
-   S6-04 与 S6-06 都不能声称真实 Executor 已验收。
-2. 用户在真实 Chrome + 麦克风 + 输出设备上完成 S6-02/03/06 的物理与听感确认。
-3. S6-03 的真实 P2 媒体/故障/负载测量；S6-05 的 whole-stack 隐私与降级回归；
-   S6-06 的联合慢回合 + 分离 Task 场景。
-4. S7-03 的 45,044 行完整累计 cold review 与一次独立 review 仍未完成（D110 §10 已记，本批次未推进）。
+1. 用户在真实 Chrome + 麦克风 + 输出设备上完成 S6-02/03/06 的物理与听感确认。
+2. S6-03 的真实 P2 媒体/故障/负载测量；S6-05 的 whole-stack 隐私与降级回归；
+   S6-06 的联合慢回合 + 分离 Task 场景（其 P3 侧前提已由 §6e 打通）。
+3. S7-03 的 45,044 行完整累计 cold review 与一次独立 review 仍未完成（D110 §10 已记，本批次未推进）。
 
 ## 12. 本批次的方法学结论
 
-四个真实路径缺陷（GA 事件白名单、清理槽位泄漏、P3 模型构造，以及仍未闭合的
-Executor Agent 绑定）**没有一个**能被现有自动化发现，原因完全一致：streaming 的
+五个真实路径缺陷（GA 事件白名单、清理槽位泄漏、P3 模型构造、分发 Agent 句柄，
+以及 develop 既有的 processor 缺失）中，四个 Alpha 归因缺陷**没有一个**能被现有自动化发现，原因完全一致：streaming 的
 socket、P3 的 model resolver 与 executor 都是 fake，只回放实现已知的形状。
 `4731 passed` 与真实链路可用之间没有任何蕴含关系。
 
