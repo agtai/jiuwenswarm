@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -47,6 +48,8 @@ from .formal_task_models import (
 )
 
 _SCHEMA_VERSION = 2
+_JOURNAL_MODE_RETRY_SECONDS = 10.0
+_JOURNAL_MODE_RETRY_INTERVAL_SECONDS = 0.01
 _TASK_STORE_TABLES = frozenset(
     {
         "metadata",
@@ -561,7 +564,7 @@ class SqliteTaskStore:
 
         journal_connection = self._connect()
         try:
-            journal_connection.execute("PRAGMA journal_mode = WAL")
+            self._enable_wal_journal_mode(journal_connection)
         except sqlite3.Error as exc:
             raise FormalTaskViolation(
                 "TASK_STORE_UNAVAILABLE",
@@ -570,6 +573,23 @@ class SqliteTaskStore:
             ) from exc
         finally:
             journal_connection.close()
+
+    @staticmethod
+    def _enable_wal_journal_mode(connection: sqlite3.Connection) -> None:
+        """Converge concurrent initializers on WAL without accepting lock races."""
+        deadline = time.monotonic() + _JOURNAL_MODE_RETRY_SECONDS
+        while True:
+            try:
+                row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+                if row is None or str(row[0]).lower() != "wal":
+                    raise sqlite3.OperationalError(
+                        "formal Task Store journal mode did not converge on WAL"
+                    )
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(_JOURNAL_MODE_RETRY_INTERVAL_SECONDS)
 
     @staticmethod
     def _schema_unsupported(message: str) -> FormalTaskViolation:

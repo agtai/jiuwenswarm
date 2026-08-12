@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from openjiuwen.core.sys_operation.cwd import (
+    get_agent_history_root,
     get_cwd,
     get_project_root,
     get_workspace,
@@ -20,7 +21,6 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
-    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
     JiuwenSwarmCodeAdapter,
@@ -64,17 +64,19 @@ class _Session:
 @pytest.mark.asyncio
 async def test_clean_runtime_support_stays_external_while_project_write_remains_allowed(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     before_head = _project(project)
-    application_workspace = tmp_path / "application" / "agent" / "workspace"
+    application_root = tmp_path / "application"
+    application_workspace = application_root / "agent" / "workspace"
     application_workspace.mkdir(parents=True)
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(application_root))
     workspace = Workspace(root_path=project)
     _set_workspace_coding_memory_directory(
         workspace,
         project_dir=str(project),
         agent_workspace_dir=str(application_workspace),
-        application_owned=True,
     )
 
     coding_memory = workspace.get_node_path("coding_memory")
@@ -122,7 +124,9 @@ async def test_clean_runtime_support_stays_external_while_project_write_remains_
     )
 
     assert Path(history_path).is_file()
-    assert Path(history_path).is_relative_to(application_workspace)
+    assert Path(history_path).is_relative_to(
+        Path(get_agent_history_root()) / ".agent_history"
+    )
     assert not (project / ".agent_history").exists()
     assert not (project / "coding_memory").exists()
     assert not (project / "prompt_attachment").exists()
@@ -133,7 +137,7 @@ async def test_clean_runtime_support_stays_external_while_project_write_remains_
     )
 
 
-def test_ordinary_code_runtime_keeps_project_relative_support_behavior(
+def test_ordinary_code_runtime_keeps_develop_application_owned_memory_behavior(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -146,9 +150,12 @@ def test_ordinary_code_runtime_keeps_project_relative_support_behavior(
         agent_workspace_dir=str(application_workspace),
     )
 
-    assert workspace.get_directory("coding_memory") == (
-        resolve_project_coding_memory_workspace_path(project_dir=project)
-    )
+    assert Path(workspace.get_directory("coding_memory")).resolve() == Path(
+        resolve_project_coding_memory_dir(
+            agent_workspace_dir=application_workspace,
+            project_dir=project,
+        )
+    ).resolve()
     adapter = object.__new__(JiuwenSwarmCodeAdapter)
     adapter._instance_overrides = {}
     adapter._project_dir = str(project)

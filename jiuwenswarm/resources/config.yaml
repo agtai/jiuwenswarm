@@ -638,7 +638,7 @@ heartbeat:
 execution_guard:
   # LLM 重试护栏：处理模型重复输出和流式帧超时，命中后重新发起模型请求
   llm_retry_rail:
-    # 总开关。关闭后不注册 LLMRetryRail，也不会额外拦截重复输出/流式帧超时
+    # 总开关。关闭后不注册 ModelAnomalyDetectionRail，也不会额外拦截重复输出/流式帧超时
     enabled: true
     # 单次 invoke 内同一类异常最多重试次数；超过后把异常继续抛给上层
     max_retries: 2

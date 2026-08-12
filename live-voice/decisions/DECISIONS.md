@@ -793,3 +793,13 @@
 - 执行约束：删除分为纯 evaluator/编排、runtime evidence/故障 seam、残余入口/配置/文档三轮；每轮都必须完成依赖分析、实际删除和针对保留产品路径的无副作用确认。中间允许本地临时 commit，但最终历史只允许一个本任务 commit；任何 remote ref 更新仍需单独精确授权。
 - 完成影响：当前 checkout 不再提供或接受旧签名 Gate 命令和环境变量，历史 D90–D102 只解释过去事实。W2 状态、人工验收范围和后续 Alpha 顺序不因删除而自动改变，仍由 D-071、验收合同与 STATUS 决定。
 - 重新评估条件：用户为新的审计/合规/客户交付明确批准一个重新设计且有界的认证需求。不得直接复活被删除的 W2 实现；新认证必须重新定义威胁模型、所有者、成本和产品交付关系。
+
+## D-073 W3 换基线必须保留 develop 的删除与替代意图
+
+- 日期：2026-08-12
+- 状态：Accepted migration-integration decision（用户要求审核既有 W3 migration，判断 develop 删除对象是彻底删除还是迁移，并在不重做迁移的前提下完成必要调整）
+- 范围：`hx/0812_live_voice_w3` 的 develop 换基线收口；不改变 W2 产品验收，不自动扩大 Alpha 范围，也不统一现有 Task 子系统。
+- 规则：换基线不得仅因特性旧代码仍引用某个符号就将 develop 删除内容补回。先用删除提交、当前调用面和替代 API 判定意图：有替代 API 时迁移调用方；明确退役时删除特性依赖；纯改名时采用新名称。只有特性仍有独立且被测试的产品需求、并且当前树没有等价能力时，才可设计一个显式兼容 Adapter，而不是静默复活旧实现。
+- 本次适用：删除恢复的 `prompt_attachment_loader.py`、其测试和 `get_prompt_attachment_dir`；删除恢复的 `resolve_project_coding_memory_workspace_path` 并采用 `resolve_project_coding_memory_dir`；保持 `ReqMethod.SKILLS_GRAPH_*`；使用 agent-core 公共 `get_agent_history_root()`；继续服从 develop 已删除“自动改写项目 `.gitignore`”的决定；公共 Agent 启动继续遵守 develop 的失败传播契约。`ProjectCodeExecutorAdapter` 作为有测试覆盖的兼容 Adapter 暂时保留，但正式 P3 组合继续使用 `DirectProjectCodeExecutorAdapter`。
+- 依赖规则：浮动的 agent-core develop 依赖必须由 `uv.lock` 的解析 commit 固定迁移验证边界；源码需适配该 commit 的公共 rail/history API，不得依赖已移除的私有属性。
+- 重新评估条件：develop 重新引入官方文件热加载契约；Live Voice 出现经产品范围确认且当前 PromptAttachmentManager 无法满足的文件附件需求；agent-core 再次变更公共 API；或兼容 Adapter 的所有调用方和测试被一个独立移除批次明确关闭。

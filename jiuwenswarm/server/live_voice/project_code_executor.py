@@ -30,6 +30,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from openjiuwen.core.sys_operation.cwd import get_agent_history_root
+
 from jiuwenswarm.agents.harness.common.tools.command_tools import (
     forbid_background_project_shell_commands,
 )
@@ -38,7 +40,7 @@ from jiuwenswarm.common.coding_memory_paths import (
 )
 from jiuwenswarm.common.schema.agent import AgentRequest
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ErrorCode, TerminalOutcome
-from jiuwenswarm.common.utils import get_agent_workspace_dir, get_prompt_attachment_dir
+from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 from .formal_task_models import (
     ExecutorDeliveryResult,
@@ -876,8 +878,10 @@ def _runtime_support_governance(root: Path) -> dict[str, object]:
                 project_dir=root,
             )
         ).resolve(strict=False),
-        "prompt_attachment": get_prompt_attachment_dir().resolve(strict=False),
-        ".agent_history": (agent_workspace / ".agent_history").resolve(strict=False),
+        "prompt_attachment": (agent_workspace / "prompt_attachment").resolve(strict=False),
+        ".agent_history": (
+            Path(get_agent_history_root()) / ".agent_history"
+        ).resolve(strict=False),
     }
     if any(_is_within(path, root) for path in application_paths.values()):
         raise FormalTaskViolation(

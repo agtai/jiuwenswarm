@@ -10,6 +10,9 @@ import types
 import pytest
 
 from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+from jiuwenswarm.server.runtime.agent_adapter.interface_code import (
+    JiuwenSwarmCodeAdapter,
+)
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenSwarmDeepAdapter,
     _RailBuildInfo,
@@ -75,6 +78,32 @@ def _stub_observability_rail(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _make_adapter() -> JiuWenSwarmDeepAdapter:
     return object.__new__(JiuWenSwarmDeepAdapter)
+
+
+def test_code_adapter_queues_configured_model_anomaly_detection_rail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code mode must replace, rather than silently drop, agent-core's default rail."""
+    adapter = object.__new__(JiuwenSwarmCodeAdapter)
+    adapter._model = object()
+    captured: list[_RailBuildInfo] = []
+    config_base = {"models": {}}
+
+    def _capture(rail_infos, _config_base):
+        captured.extend(rail_infos)
+        return []
+
+    monkeypatch.setattr(adapter, "_instantiate_rails", _capture)
+
+    adapter._build_agent_rails({}, config_base)
+
+    anomaly_infos = [
+        info
+        for info in captured
+        if info.attr_name == "_model_anomaly_detection_rail"
+    ]
+    assert len(anomaly_infos) == 1
+    assert anomaly_infos[0].params == {"config_base": config_base}
 
 
 def _breakdown_of(records: list[tuple[str, tuple]]) -> str:

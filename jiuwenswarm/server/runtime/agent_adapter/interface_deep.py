@@ -63,7 +63,7 @@ from openjiuwen.harness import (
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.rails import (
-    LLMRetryRail,
+    ModelAnomalyDetectionRail,
     SkillUseRail,
     TaskPlanningRail,
     SecurityRail,
@@ -218,7 +218,6 @@ from jiuwenswarm.server.runtime.session.session_history import (
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
 _pending_goal_objective_history: dict[str, dict[str, Any]] = {}
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-from jiuwenswarm.server.runtime.prompt_attachment_loader import PromptAttachmentLoader
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
@@ -342,7 +341,6 @@ from jiuwenswarm.common.utils import (
     get_checkpoint_dir,
     get_default_project_session_workspace_dir,
     get_env_file,
-    get_prompt_attachment_dir,
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
@@ -1194,7 +1192,6 @@ class JiuWenSwarmDeepAdapter:
         self._context_processor_rail: ContextProcessorRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
-        self._prompt_attachment_loader: PromptAttachmentLoader | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
@@ -1206,7 +1203,7 @@ class JiuWenSwarmDeepAdapter:
         self._last_mode: str | None = None
         # 延时重索引任务（debounce）：连续改多次 embedding 只在最后一次后跑一次。
         self._memory_reindex_task: asyncio.Task | None = None
-        self._llm_retry_rail: LLMRetryRail | None = None
+        self._model_anomaly_detection_rail: ModelAnomalyDetectionRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._evolution_interrupt_rail: EvolutionInterruptRail | None = None
@@ -1640,7 +1637,30 @@ class JiuWenSwarmDeepAdapter:
                 # ``_reload_session_adapter_if_stale`` owns the version bookkeeping
                 # (including the no-pending case, where it silently catches up).
                 await self._reload_session_adapter_if_stale(sid, adapter)
-            except BaseException:  # noqa: BLE001 -- retain partial owner
+            except BaseException:  # noqa: BLE001 -- formal owns partial runtime
+                if not formal_profile:
+                    try:
+                        await adapter.cleanup()
+                    except BaseException as cleanup_error:  # noqa: BLE001
+                        # Keep the published owner when cleanup itself is not
+                        # proven complete. A disconnect/explicit cleanup can
+                        # then retry the exact child instead of orphaning it.
+                        logger.warning(
+                            "[JiuWenSwarmDeepAdapter] ordinary session startup cleanup "
+                            "remains pending: session_id=%s error=%s",
+                            sid,
+                            cleanup_error,
+                        )
+                    else:
+                        self._drop_session_adapter_cache_entry(
+                            sid,
+                            remove_lock=False,
+                        )
+                        # No await occurs between pruning this uncontended lock
+                        # and releasing it via the exception, so a later caller
+                        # cannot race onto a second lock for the same Session.
+                        if not self._session_adapter_lock_has_waiters(lock):
+                            self._session_adapter_locks.pop(sid, None)
                 raise
             self._session_adapter_initializing.discard(sid)
             self._touch_session_adapter(sid)
@@ -4655,15 +4675,19 @@ class JiuWenSwarmDeepAdapter:
             return None
 
     @staticmethod
-    def _build_llm_retry_rail(config_base: dict[str, Any] | None = None) -> LLMRetryRail | None:
+    def _build_model_anomaly_detection_rail(
+        config_base: dict[str, Any] | None = None,
+    ) -> ModelAnomalyDetectionRail | None:
         try:
             config_base = config_base or get_config()
             guard_cfg = config_base.get("execution_guard", {}) if isinstance(config_base, dict) else {}
             retry_cfg = guard_cfg.get("llm_retry_rail", {}) if isinstance(guard_cfg, dict) else {}
             if retry_cfg.get("enabled", False) is not True:
-                logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail disabled by config")
+                logger.info(
+                    "[JiuWenSwarmDeepAdapter] ModelAnomalyDetectionRail disabled by config"
+                )
                 return None
-            rail = LLMRetryRail(
+            rail = ModelAnomalyDetectionRail(
                 max_retries=retry_cfg.get("max_retries", 2),
                 repeat_min_pattern_chars=retry_cfg.get("repeat_min_pattern_chars", 2),
                 repeat_max_pattern_chars=retry_cfg.get("repeat_max_pattern_chars", 64),
@@ -4672,10 +4696,15 @@ class JiuWenSwarmDeepAdapter:
                 repeat_window_chars=retry_cfg.get("repeat_window_chars", 1024),
                 single_char_repeat_count=retry_cfg.get("single_char_repeat_count", 100),
             )
-            logger.info("[JiuWenSwarmDeepAdapter] LLMRetryRail create success")
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] ModelAnomalyDetectionRail create success"
+            )
             return rail
         except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] LLMRetryRail create failed: %s", exc)
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] ModelAnomalyDetectionRail create failed: %s",
+                exc,
+            )
             return None
 
     def _build_circuit_breaker_rail(
@@ -4911,8 +4940,8 @@ class JiuWenSwarmDeepAdapter:
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo(
-                "_llm_retry_rail",
-                self._build_llm_retry_rail,
+                "_model_anomaly_detection_rail",
+                self._build_model_anomaly_detection_rail,
                 {"config_base": config_base},
             ),
             _RailBuildInfo(
@@ -5530,8 +5559,6 @@ class JiuWenSwarmDeepAdapter:
             "project_dir", config.get("project_dir")
         )
         self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
-        self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
-        self._prompt_attachment_loader.ensure_layout()
         if self._skip_own_instance_build():
             return
 
@@ -5587,9 +5614,10 @@ class JiuWenSwarmDeepAdapter:
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
-            enable_llm_retry_rail=((config_base.get("execution_guard") or {}).get("llm_retry_rail") or {}).get(
-                "enabled", False
-            ),
+            # JiuwenSwarm registers the explicitly configured instance above.
+            # Disable agent-core's default instance to avoid duplicate rails and
+            # to preserve the repository's feature-off contract.
+            enable_model_anomaly_detection_rail=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
 
@@ -5598,7 +5626,6 @@ class JiuWenSwarmDeepAdapter:
         initial_runtime_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        self._ensure_project_gitignore_agent_history(initial_runtime_workspace)
         self._seed_runtime_cwd(initial_runtime_workspace, workspace=initial_runtime_workspace)
         setattr(self._instance, "_jiuwenswarm_project_dir", initial_runtime_workspace)
 
@@ -5620,119 +5647,12 @@ class JiuWenSwarmDeepAdapter:
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
-    @staticmethod
-    def _ensure_project_gitignore_agent_history(project_dir: str | None) -> None:
-        """Ensure JiuwenSwarm's file operation logs stay out of project git diffs."""
-        if not project_dir:
-            return
-        try:
-            repo_probe = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                cwd=project_dir,
-                capture_output=True,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-        except (OSError, subprocess.SubprocessError):
-            return
-        if repo_probe.returncode != 0:
-            return
-
-        repo_root_text = repo_probe.stdout.strip()
-        if not repo_root_text:
-            return
-        gitignore_path = Path(repo_root_text) / ".gitignore"
-        try:
-            existing_bytes = gitignore_path.read_bytes() if gitignore_path.exists() else b""
-        except OSError as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] read .gitignore for agent history rule failed: %s",
-                exc,
-            )
-            return
-
-        if JiuWenSwarmDeepAdapter._gitignore_covers_agent_history(existing_bytes):
-            return
-
-        existing = existing_bytes.decode("utf-8", errors="replace")
-        prefix = "" if not existing else ("\n" if existing.endswith(("\n", "\r")) else "\n\n")
-        addition = (
-            f"{prefix}# JiuwenSwarm runtime file operation logs\n.agent_history/\n"
-        ).encode("utf-8")
-        try:
-            gitignore_path.write_bytes(existing_bytes + addition)
-        except OSError as exc:
-            logger.warning(
-                "[JiuWenSwarmDeepAdapter] ensure .agent_history gitignore failed: %s",
-                exc,
-            )
-
-    @staticmethod
-    def _gitignore_covers_agent_history(content: bytes) -> bool:
-        """Return True if .gitignore content already ignores .agent_history/.
-
-        Recognizes equivalent forms such as ``.agent_history``,
-        ``.agent_history/``, ``.agent_history/*``, ``.agent_history/**``,
-        ``.agent_history/**/*``, ``**/.agent_history`` and combinations
-        thereof, so that the rule is idempotent across pre-existing project
-        configurations.
-        """
-        text = content.decode("utf-8", errors="replace")
-        for raw_line in text.splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#"):
-                continue
-            # Skip negation rules; they re-include paths rather than ignore
-            # the directory.
-            if line.startswith("!"):
-                continue
-            # Strip leading glob prefix like `**/`.
-            if line.startswith("**/"):
-                line = line[3:]
-            # Split into segments. The rule covers `.agent_history` if the
-            # first segment matches and any following segments are wildcards
-            # that target the directory contents.
-            segments = [seg for seg in line.split("/") if seg]
-            if not segments or segments[0] != ".agent_history":
-                continue
-            if all(seg in ("*", "**") for seg in segments[1:]):
-                return True
-        return False
-
-    async def _sync_prompt_attachments_for_request(self, session_id: str) -> None:
-        """Hot-load prompt attachment files for the current request.
-
-        Prompt attachment loading must not block the user request path. Failures are
-        logged and the original Runner flow continues without attachment injection.
-        """
-
-        if self._instance is None:
-            return
-        if self._prompt_attachment_loader is None:
-            self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
-            self._prompt_attachment_loader.ensure_layout()
-        try:
-            await self._prompt_attachment_loader.sync_to_agent(
-                self._instance,
-                session_id=session_id,
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] prompt attachment sync skipped: %s", exc)
-
     def _uses_application_runtime_support(self) -> bool:
         """Whether runtime support must remain outside the target project."""
 
         return bool(
             self._instance_overrides.get("project_clean_runtime_support", False)
         )
-
-    def _prompt_attachment_root(self) -> Path:
-        if self._uses_application_runtime_support():
-            return get_prompt_attachment_dir()
-        if self._workspace_dir == str(get_agent_workspace_dir()):
-            return get_prompt_attachment_dir()
-        return Path(self._workspace_dir) / "prompt_attachment"
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -6683,7 +6603,7 @@ class JiuWenSwarmDeepAdapter:
         failed readiness check propagates so the warm pool cannot publish a
         partially initialized slot.
         """
-        await self._start_interaction(session_id=session_id, strict=False)
+        await self._start_interaction(session_id=session_id, strict=True)
 
     async def _start_interaction(self, session_id: str, *, strict: bool) -> None:
         """Start an interaction, optionally propagating formal init failure."""
@@ -9174,7 +9094,6 @@ class JiuWenSwarmDeepAdapter:
                 inputs,
                 enable_read_image_multimodal=enable_read_image_multimodal,
             )
-            await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
             )
@@ -10043,7 +9962,6 @@ class JiuWenSwarmDeepAdapter:
                     payload=image_tool_fallback_notice,
                     is_complete=False,
                 )
-            await self._sync_prompt_attachments_for_request(session_id)
             from jiuwenswarm.agents.harness.common.prompt.user_prompt_builder import (
                 set_current_multimodal_image_files,
             )

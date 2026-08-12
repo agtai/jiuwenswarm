@@ -60,3 +60,4 @@ async def test_code_adapter_forwards_context_window_tokens(tmp_path, monkeypatch
 
     context_config = create_agent.call_args.kwargs["context_engine_config"]
     assert context_config.context_window_tokens == 123456
+    assert create_agent.call_args.kwargs["enable_model_anomaly_detection_rail"] is False

@@ -448,6 +448,7 @@ async def test_real_deep_adapter_retains_partial_child_until_strict_cleanup(
     parent = JiuWenSwarmDeepAdapter()
     child = JiuWenSwarmDeepAdapter()
     child.mark_as_session_scoped("formal-session")
+    parent._session_instance_config = {"project_clean_runtime_support": True}
 
     class Instance:
         async def stop(self) -> None:
@@ -476,6 +477,25 @@ async def test_real_deep_adapter_retains_partial_child_until_strict_cleanup(
     assert parent._session_adapters == {}
     assert parent._session_adapter_initializing == set()
     assert parent.has_session_runtime() is False
+
+
+@pytest.mark.asyncio
+async def test_real_deep_adapter_public_start_preserves_develop_failure_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = JiuWenSwarmDeepAdapter()
+    calls: list[tuple[str, bool]] = []
+
+    async def start(*, session_id: str, strict: bool) -> None:
+        calls.append((session_id, strict))
+        raise RuntimeError("injected interaction startup failure")
+
+    monkeypatch.setattr(adapter, "_start_interaction", start)
+
+    with pytest.raises(RuntimeError, match="injected interaction startup failure"):
+        await adapter.start_interaction("ordinary-session")
+
+    assert calls == [("ordinary-session", True)]
 
 
 @pytest.mark.asyncio
@@ -509,6 +529,87 @@ async def test_real_deep_adapter_preserves_public_start_for_nonformal_session(
     assert calls == ["create", "public"]
     assert parent._session_adapters == {"ordinary-session": child}
     assert parent._session_adapter_initializing == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_kind", ["runtime_error", "cancelled_error"])
+async def test_nonformal_start_failure_cleans_child_and_allows_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    parent = JiuWenSwarmDeepAdapter()
+    failed_child = JiuWenSwarmDeepAdapter()
+    failed_child.mark_as_session_scoped("ordinary-session")
+    replacement = JiuWenSwarmDeepAdapter()
+    replacement.mark_as_session_scoped("ordinary-session")
+    parent._session_instance_config = {"project_clean_runtime_support": False}
+    children = iter((failed_child, replacement))
+    cleanup_calls = 0
+
+    async def create_instance(*_args, **_kwargs) -> None:
+        return None
+
+    async def failed_start(*_args, **_kwargs) -> None:
+        if failure_kind == "runtime_error":
+            raise RuntimeError("injected ordinary start failure")
+        raise asyncio.CancelledError()
+
+    async def cleanup() -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    async def replacement_start(*_args, **_kwargs) -> None:
+        return None
+
+    monkeypatch.setattr(parent, "_new_session_scoped_adapter", lambda _sid: next(children))
+    monkeypatch.setattr(failed_child, "create_instance", create_instance)
+    monkeypatch.setattr(failed_child, "start_interaction", failed_start)
+    monkeypatch.setattr(failed_child, "cleanup", cleanup)
+    monkeypatch.setattr(replacement, "create_instance", create_instance)
+    monkeypatch.setattr(replacement, "start_interaction", replacement_start)
+
+    expected = RuntimeError if failure_kind == "runtime_error" else asyncio.CancelledError
+    with pytest.raises(expected):
+        await parent._get_or_create_session_adapter("ordinary-session")
+
+    assert cleanup_calls == 1
+    assert parent._session_adapters == {}
+    assert parent._session_adapter_initializing == set()
+    assert parent._session_adapter_locks == {}
+    assert parent.has_session_runtime() is False
+
+    assert await parent._get_or_create_session_adapter("ordinary-session") is replacement
+
+
+@pytest.mark.asyncio
+async def test_nonformal_start_cleanup_failure_retains_exact_owner(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = JiuWenSwarmDeepAdapter()
+    child = JiuWenSwarmDeepAdapter()
+    child.mark_as_session_scoped("ordinary-session")
+    parent._session_instance_config = {"project_clean_runtime_support": False}
+
+    async def create_instance(*_args, **_kwargs) -> None:
+        return None
+
+    async def failed_start(*_args, **_kwargs) -> None:
+        raise RuntimeError("injected ordinary start failure")
+
+    async def failed_cleanup() -> None:
+        raise RuntimeError("injected cleanup failure")
+
+    monkeypatch.setattr(parent, "_new_session_scoped_adapter", lambda _sid: child)
+    monkeypatch.setattr(child, "create_instance", create_instance)
+    monkeypatch.setattr(child, "start_interaction", failed_start)
+    monkeypatch.setattr(child, "cleanup", failed_cleanup)
+
+    with pytest.raises(RuntimeError, match="injected ordinary start failure"):
+        await parent._get_or_create_session_adapter("ordinary-session")
+
+    assert parent._session_adapters == {"ordinary-session": child}
+    assert parent._session_adapter_initializing == {"ordinary-session"}
+    assert parent.has_session_runtime("ordinary-session")
 
 
 @pytest.mark.asyncio

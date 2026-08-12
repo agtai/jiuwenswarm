@@ -146,6 +146,7 @@ def _voice_create(
             confirmed=confirmed,
         ),
         command_id=command_id,
+        interaction_id=f"interaction-{suffix}",
         turn_id=turn_id,
         commit_id=commit_id,
         name=f"Formal task {suffix}",

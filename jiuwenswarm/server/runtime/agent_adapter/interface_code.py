@@ -18,12 +18,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
-from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.sys_operation.cwd import init_cwd
 from openjiuwen.harness.factory import create_deep_agent
@@ -50,7 +48,6 @@ from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     _AGENT_CARD_ID,
     _CRON_TOOL_CHANNEL_ID,
     _RailBuildInfo,
-    _agent_def_to_subagent_config,
     _deep_agent_context_engine_config,
     _deep_agent_kv_cache_affinity_config,
     parse_int,
@@ -79,11 +76,8 @@ from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool
 from jiuwenswarm.common.coding_memory_paths import (
     resolve_project_coding_memory_dir,
-    resolve_project_coding_memory_workspace_path,
 )
 from jiuwenswarm.server.runtime.agent_adapter.code_agent_rail import CodeAgentRail
-from jiuwenswarm.common.hooks_config import load_hooks_config
-from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
 from jiuwenswarm.common.utils import (
     get_agent_workspace_dir,
     get_default_project_session_workspace_dir,
@@ -335,7 +329,6 @@ def _set_workspace_coding_memory_directory(
     project_dir: str | None,
     agent_workspace_dir: str,
     description: str = "Coding Agent memory",
-    application_owned: bool = False,
 ) -> None:
     set_directory = getattr(workspace, "set_directory", None)
     if not callable(set_directory):
@@ -346,13 +339,9 @@ def _set_workspace_coding_memory_directory(
     # node, so the node must point at the absolute storage directory as well;
     # a project-relative node would split memory files and their index across
     # two locations.
-    coding_memory_path = (
-        resolve_project_coding_memory_dir(
-            agent_workspace_dir=agent_workspace_dir,
-            project_dir=project_dir,
-        )
-        if application_owned
-        else resolve_project_coding_memory_workspace_path(project_dir=project_dir)
+    coding_memory_path = resolve_project_coding_memory_dir(
+        agent_workspace_dir=agent_workspace_dir,
+        project_dir=project_dir,
     )
     set_directory(
         _build_coding_memory_directory_node(
@@ -580,7 +569,6 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             project_dir=self._project_dir or self._workspace_dir,
             agent_workspace_dir=self._agent_workspace_dir,
             description="Coding Agent 记忆模块",
-            application_owned=self._uses_application_runtime_support(),
         )
 
         self._instance = create_deep_agent(
@@ -599,6 +587,9 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             enable_read_image_multimodal=self._resolve_enable_read_image_multimodal(config),
             context_engine_config=_deep_agent_context_engine_config(config),
             kv_cache_affinity_config=_deep_agent_kv_cache_affinity_config(config, model),
+            # The configured ModelAnomalyDetectionRail is already supplied by
+            # ``_build_agent_rails``; do not let agent-core add a default copy.
+            enable_model_anomaly_detection_rail=False,
             auto_create_workspace=False,
             completion_timeout=config.get("completion_timeout", 3600.0),
         )
@@ -627,18 +618,12 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             None,
             lambda: asyncio.run(self._instance.ensure_initialized()),
         )
-        # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
-        # .agent_history 写到 Workspace.root_path（即项目目录），
-        # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。
-        for rail in getattr(self._instance, '_registered_rails', []):
-            for tool in getattr(rail, 'tools', []) or []:
-                if hasattr(tool, '_workspace_path'):
-                    setattr(tool, '_workspace_path', self._agent_workspace_dir)
+        # Current agent-core owns file-operation history under its host-level
+        # ``get_agent_history_root()``. Do not patch private tool attributes;
+        # formal governance resolves the same public root independently.
         initial_workspace = self._project_dir or str(
             get_default_project_session_workspace_dir()
         )
-        if not self._uses_application_runtime_support():
-            self._ensure_project_gitignore_agent_history(initial_workspace)
         self._seed_code_runtime_cwd(
             self._RuntimeConfig(
                 project_dir=initial_workspace,
@@ -695,6 +680,11 @@ class JiuwenSwarmCodeAdapter(JiuWenSwarmDeepAdapter):
             _RailBuildInfo("_skill_retrieval_prompt_rail", self._build_skill_retrieval_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
+            _RailBuildInfo(
+                "_model_anomaly_detection_rail",
+                self._build_model_anomaly_detection_rail,
+                {"config_base": config_base},
+            ),
             _RailBuildInfo("_lsp_rail", self._build_lsp_rail_via_config),
             _RailBuildInfo("_project_memory_rail", self._build_project_memory_rail),
             _RailBuildInfo(

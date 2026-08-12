@@ -5,8 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.common.utils import get_prompt_attachment_dir
-from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
 from jiuwenswarm.server.utils.diff_service import DiffService
 
@@ -116,14 +114,3 @@ def test_git_diff_excludes_unignored_agent_history(tmp_path):
     assert diff is not None
     assert diff["stats"] == {"filesChanged": 1, "linesAdded": 1, "linesRemoved": 1}
     assert str(history_dir / "file_ops_jiuwenswarm_sess.json") not in diff["files"]
-
-
-def test_formal_project_profile_keeps_runtime_support_outside_target(tmp_path):
-    adapter = object.__new__(JiuwenSwarmCodeAdapter)
-    adapter._instance_overrides = {"project_clean_runtime_support": True}
-    adapter._workspace_dir = str(tmp_path)
-
-    assert adapter._uses_application_runtime_support() is True
-    assert adapter._prompt_attachment_root() == get_prompt_attachment_dir()
-    assert not (tmp_path / "prompt_attachment").exists()
-    assert not (tmp_path / ".gitignore").exists()

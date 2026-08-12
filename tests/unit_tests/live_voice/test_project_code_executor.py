@@ -414,7 +414,10 @@ def _direct_task_attempt(
 async def _wait_direct_settled(
     adapter: DirectProjectCodeExecutorAdapter,
 ) -> None:
-    for _ in range(200):
+    # Full Live Voice runs can briefly saturate Windows while many process and
+    # worktree tests overlap; keep the assertion bounded without treating a
+    # healthy worker that needs slightly over two seconds as a product failure.
+    for _ in range(500):
         if not adapter._running:
             return
         await asyncio.sleep(0.01)
@@ -1173,7 +1176,9 @@ async def test_cancelled_attempt_acquire_retains_lease_and_bounds_close(
         close_timeout=0.01,
     )
     dispatch = asyncio.create_task(adapter.dispatch(_item(project)))
-    await asyncio.wait_for(acquire_entered.wait(), timeout=2)
+    # Creating the disposable Git worktree can exceed two seconds on a busy
+    # Windows runner; the assertion is about ownership, not startup latency.
+    await asyncio.wait_for(acquire_entered.wait(), timeout=5)
     assert len(attempt_roots) == 1
     assert attempt_roots[0].exists()
 
@@ -2339,10 +2344,6 @@ async def test_direct_executor_rejects_runtime_support_inside_target_before_agen
     monkeypatch.setattr(
         "jiuwenswarm.server.live_voice.project_code_executor.get_agent_workspace_dir",
         lambda: project / "runtime",
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.server.live_voice.project_code_executor.get_prompt_attachment_dir",
-        lambda: project / "runtime" / "prompt_attachment",
     )
     adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
 

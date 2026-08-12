@@ -23,6 +23,7 @@ The short/full distinction and mandatory/conditional distinction are independent
 | Long-term architecture, P1/P2/P3 boundary, protocol, ownership, cancellation, durability, production acceptance | Complete [full solution snapshot](architecture/FULL_SOLUTION_2026-07-30.md), accepted [Architecture Contract Gate](architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), relevant decisions, and roadmap |
 | V0 reproduction or regression acceptance | [V0 acceptance](validation/V0_ACCEPTANCE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), [showcase](demo/DEMO_SHOWCASE.md), and immutable [V0 evidence](evidence/V0_20260802_ee2896a4.md) |
 | Week 2 cumulative Demo implementation or acceptance | D-071/D-072 in [decisions](decisions/DECISIONS.md), current [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md), final [W2 product acceptance](D105_W2_PRODUCT_ACCEPTANCE_2026-08-11.md), [Integrated showcase](demo/INTEGRATED_SHOWCASE.md), [E2E runbook](runbooks/E2E_RUNBOOK.md) section 7.1, [W2 source-candidate review](D90_W2_INTEGRATED_DEMO_REVIEW_2026-08-08.md), [P3 terminal replay and automated validation review](D100_P3_TERMINAL_REPLAY_VALIDATION_READY_2026-08-11.md), prior [P1/P2 manual product record](D103_W2_UNSIGNED_MANUAL_PRODUCT_ACCEPTANCE_2026-08-11.md), frozen [P3 refresh-recovery continuation](D104_P3_REFRESH_RECOVERY_AND_W2_ACCEPTANCE_CONTINUATION_2026-08-11.md), [Gate-code removal review](D106_W2_SIGNED_GATE_CODE_REMOVAL_REVIEW_2026-08-11.md), and STATUS. The [90% Demo packet](roadmap/DEMO_90_EXECUTION_2026-08-07.md), [D101 handoff](D101_W2_NEW_ENVIRONMENT_MANUAL_HANDOFF_2026-08-11.md) and [D102 repair](D102_W2_SIGNED_REHEARSAL_FAULT_PROBE_REPAIR_2026-08-11.md) are frozen history. The [remaining W2 product diagnostics](../scripts/live_voice/w2_rehearsal/README.md) contain no signed Gate path. |
+| W3 develop rebaseline, migration audit, or deleted-versus-migrated API decisions | [D107 W3 migration review](D107_W3_DEVELOP_REBASELINE_MIGRATION_2026-08-12.md), D-073 in [decisions](decisions/DECISIONS.md), actual source/tests, and current STATUS |
 | D-031 task Demo, monitor, project-bound execution or validation | [D-031 implementation review](D031_IMPLEMENTATION_REVIEW_2026-08-04.md), D-056/D-057, [project-bound evidence](evidence/D031_20260805_PROJECT_BOUND.md), [E2E runbook](runbooks/E2E_RUNBOOK.md), relevant task/scheduler/Code Agent source and tests, and current STATUS |
 | Integrated Web Alpha acceptance (`W3/W4` delivery windows, not current calendar promises) | [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), D-055, full solution, ACG, [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md), roadmap, runbook, and current STATUS |
 | AIO-B browser audio integration, regression, or Chrome evidence | [AIO-B/X-WEB implementation review](AIO_B_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md), D-058, ACG, [Web Alpha delivery matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md), relevant frontend source/tests, and current STATUS |
@@ -74,6 +75,7 @@ Start with the named sections above. Expand reading only when Git, STATUS, code 
 | `D104_P3_REFRESH_RECOVERY_AND_W2_ACCEPTANCE_CONTINUATION_2026-08-11.md` | Frozen P3 full-refresh task-target recovery review, verification boundary and copy/paste bootstrap for the final new-server W2 human journey; STATUS owns the live next action |
 | `D105_W2_PRODUCT_ACCEPTANCE_2026-08-11.md` | Final sanitized W2 human product journey, tested-source boundary, authoritative P3 A→B→C settlement, cleanup and PRODUCT-ACCEPTED decision |
 | `D106_W2_SIGNED_GATE_CODE_REMOVAL_REVIEW_2026-08-11.md` | Three-round removal record for the retired W2 signed-evidence Gate, including retained product boundaries, verification, single-commit invariant and the exact independent-review limitation |
+| `D107_W3_DEVELOP_REBASELINE_MIGRATION_2026-08-12.md` | Frozen audit and closure record for the W3 develop rebaseline, including corrected deleted/migrated-object handling, current agent-core adaptation, verification and limitations |
 | `LATEST_FOUNDATIONS_D053_REVIEW_2026-08-06.md` | Exact-SHA retained task-evidence index for the four landed AIO-C/CR-C/TC-C/X-OBS bounded foundations; aggregate integration commands remain an explicit limitation and no acceptance/Gate credit is claimed |
 | `DOCUMENTATION_RULES.md` | Authority, routing, anti-duplication, and synchronization rules |
 | `decisions/DECISIONS.md` | Accepted decisions and their rationale/history |
@@ -94,8 +96,8 @@ Start with the named sections above. Expand reading only when Git, STATUS, code 
 ## Fresh-clone continuation
 
 ```powershell
-git fetch origin hx/0803_live_voice
-git switch --track -c hx/0803_live_voice origin/hx/0803_live_voice
+git fetch origin hx/0812_live_voice_w3
+git switch --track -c hx/0812_live_voice_w3 origin/hx/0812_live_voice_w3
 git status --short --branch
 git rev-parse HEAD
 git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'

@@ -78,20 +78,3 @@ def resolve_project_coding_memory_dir(
         "coding_memory",
         resolve_coding_memory_project_name(project_dir),
     )
-
-
-def resolve_project_coding_memory_workspace_path(
-    *,
-    project_dir: str | PathLike[str] | None,
-) -> str:
-    """Resolve the workspace-relative ``coding_memory/<project_name>-<path_hash>`` path.
-
-    Callers that are not application-owned mount coding memory through the
-    workspace node rather than an absolute storage directory. This composes the
-    relative form from the same project-name resolution used by
-    :func:`resolve_project_coding_memory_dir`, so both stay in sync.
-    """
-    return os.path.join(
-        "coding_memory",
-        resolve_coding_memory_project_name(project_dir),
-    )
