@@ -175,6 +175,74 @@ raw-audio 零持久化回归与降级矩阵，以及 S6-06 的联合场景真实
 仍未执行：慢/失败 Harness 剖面、取消 fence 的真实跨域断言、以及带 p50/p95 的
 完整路由延迟报告（当前只有本文 §8 的单轮逐层时延）。
 
+## 8c. 真实路由延迟报告与 whole-stack benchmark（S6-03 / S6-05）
+
+同一条完整真实链路连续 5 轮，每轮独立的 P2 激活 / 媒体授权 / capture 身份，
+固定语料 227 帧、真实 20 ms 配速。**5/5 轮零失败，任何一层都没有失败计数。**
+
+| 目标 | sample | p50 | p95 | max |
+|---|---:|---:|---:|---:|
+| `p2.activate` | 5 | — | 48.3 ms | 48.3 ms |
+| `media.activate` | 5 | 2.5 ms | 2.6 ms | 2.6 ms |
+| 媒体 socket 连接 | 5 | 5.8 ms | 6.0 ms | 6.0 ms |
+| 首帧鉴权 → `media.attach` | 5 | 0.9 ms | 1.5 ms | 1.5 ms |
+| 首个 `media.ack` | 5 | 2.2 ms | 2.6 ms | 2.6 ms |
+| 端点检测（鉴权起算） | 5 | 6,308.3 ms | 6,699.5 ms | 6,699.5 ms |
+| 识别结果 | 5 | 416.9 ms | 600.7 ms | 600.7 ms |
+| 语音承诺回合提交 | 5 | 385.7 ms | 405.1 ms | 405.1 ms |
+| 真实 Agent 终态 | 5 | 6,043.5 ms | 7,695.4 ms | 7,695.4 ms |
+| 真实 streaming 合成 | 5 | 1,203.9 ms | 1,959.1 ms | 1,959.1 ms |
+| downlink 首帧 | 5 | 7.7 ms | 15.0 ms | 15.0 ms |
+| downlink 全程 | 5 | 1,552.1 ms | 2,402.4 ms | 2,402.4 ms |
+| 单轮全链路 | 5 | 17,158.2 ms | 17,707.5 ms | 17,707.5 ms |
+
+5 轮的降级观测全部为空：`streaming_degradation=None`、`recognition_degradation=None`、
+`synthesis_streaming=True`、`synthesis_degradation=None`。
+浏览器层凭据泄漏 **0**（552 帧控制面全量扫描）。
+
+## 8d. raw-audio 零持久化回归（S6-05）
+
+在整条真实链路跑完之后扫描全部**已配置的**存储与日志面（隔离数据目录与运行日志），
+以固定语料自身的 PCM 前 4 KiB、`RIFF/WAVE` 头、音频扩展名与语料 sha256 为探针：
+
+| 事实 | 值 |
+|---|---|
+| 扫描文件数 / 字节数 | 66 / 16,187,664 |
+| `RIFF`+`WAVE` 文件 | **0** |
+| 原始 PCM 子串命中 | **0** |
+| 音频扩展名文件（wav/pcm/mp3/ogg/opus/webm/m4a/flac） | **0** |
+| 语料 sha256 出现 | 0 |
+
+结论：`raw_audio_persisted=false` / `raw_audio_logged=false` / `memory_only=true`
+这三项声明在真实运行后可被独立复核。
+
+## 8e. 降级矩阵（S6-05）
+
+每个用例一次受控 flag 覆盖 + 完整重启，跑完后驱动脚本自动恢复基线。
+覆盖值写在 Git 之外的运行私有目录，源码与仓库配置未改。
+
+| 用例 | `media.activate` | 识别层 | 文字兜底 |
+|---|---|---|---|
+| 基线（streaming 开） | `active` / `MEDIA_ROUTE_TICKET_ISSUED`，`streaming_recognition=true`，EOT `active` | 见下方背压观察 | — |
+| 移除 streaming flag | `active`，`streaming_recognition=false`，`streaming_degradation.reason_id=STREAMING_SPEECH_FEATURE_OFF`、`fallback_tier=batch`、`visible=true`，EOT `fallback` | `status=fallback`、`fallback_tier=batch`、`reason_id=STREAMING_SPEECH_FEATURE_OFF`、`visible=true` | — |
+| 同时移除 streaming 与 batch | `unavailable` / `MEDIA_PROVIDER_UNAVAILABLE` | — | `p2.submit` **仍被接受**，`round_accepted` |
+| 移除专用媒体 flag | `disabled` / `MEDIA_FEATURE_DISABLED` | — | `p2.submit` **仍被接受**，`round_accepted` |
+
+三个层级（Streaming → W2 Batch → Browser/文字）都被**显式标识**，没有任何一层是静默降级；
+feature-off 与 provider-unavailable 是两个不同的、各自可辨认的 reason id；
+文字路径在移除 Speech provider 与移除媒体能力两种情况下都存活。
+
+**额外测得的真实背压边界（非缺陷）**：本矩阵的探针以 5 ms 间隔发帧，即约 4 倍实时速率。
+此时媒体传输层依然一帧一 ACK（227/227，见 §8b 的突发用例），但 Provider 侧
+streaming 事件队列会耗尽，识别以 `status=fallback`、`fallback_tier=batch`、
+`reason_id=STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED`、`visible=true` **显式**降级。
+§8 与 §8c 的真实 20 ms 配速下 5/5 轮均为 `completed` 且零降级。
+即：超出契约的发送速率会触发**显式**降级而不是静默丢帧或伪造结果。
+
+batch 层在本矩阵中只签发了替换授权、未执行替换识别（`has_final_text=false`）——
+W2 batch 的实际替换需要客户端另外调用 `live_voice.speech.recognize_batch`，
+不在本次矩阵范围内，记为观察项。
+
 ## 9. 自动化验证（本候选）
 
 | 检查 | 结果 |
@@ -203,9 +271,9 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 |---|---|---|
 | S6-01 | `SATISFIED` | 源码与确定性自动化通过，无 Alpha 归因失败 |
 | S6-02 | `ENVIRONMENT` | Provider 层已由 D111 §7 证实；本批次新增：真实 server_vad 开流与 provider-time 端点检测已跑通。物理麦克风、设备切换/丢失与听感确认仍需用户 |
-| S6-03 | `ENVIRONMENT` | 真实媒体链路（首帧鉴权 → LVM1 上行/ACK → 真实 STT → 真实 Agent → 真实 TTS downlink → playout ACK）已首次跑通并给出逐层时延；有界队列/ACK/背压/丢包/重排/过期 generation/票据重放/断连重连九个真实剖面全部按预期 fail closed（见 §8b）。慢 Harness、取消 fence 的真实跨域断言与带 p50/p95 的完整路由延迟报告尚未执行 |
+| S6-03 | `ENVIRONMENT` | 真实媒体链路已跑通；九个真实故障/负载剖面全部按预期 fail closed（§8b）；带 p50/p95/failure/sample 的完整路由延迟报告已产出，5/5 轮零失败（§8c）。**仅剩**慢/失败 Harness 剖面与取消 fence 的真实跨域断言 |
 | S6-04 | `SATISFIED` | 见 D111 §6e |
-| S6-05 | `ENVIRONMENT` | whole-stack benchmark、raw-audio 零持久化回归与降级矩阵未执行 |
+| S6-05 | `ENVIRONMENT` | whole-stack benchmark（§8c，5/5 轮零失败）、raw-audio 零持久化回归（§8d，66 个面 16.2 MB 零命中）与降级矩阵（§8e，三层显式标识、文字路径存活）均已执行。**仅剩** sanitized trace 复现 |
 | S6-06 | `ENVIRONMENT` | 自动化联合场景通过（含本批次的竞态修正）；真实联合场景未执行 |
 
 **S6 未满足退出条件**，故本批次不进入 S7-01，不冻结 A2 候选，不进行 S8。
@@ -213,9 +281,8 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 ## 11. 剩余阻塞
 
 1. 用户在真实 Chrome + 麦克风 + 输出设备上完成 S6-02/03/06 的物理与听感确认。
-2. S6-03 的慢/失败 Harness 剖面、取消 fence 真实跨域断言与带 p50/p95 的完整路由
-   延迟报告；S6-05 的 whole-stack benchmark、raw-audio 零持久化回归与降级矩阵；
-   S6-06 的真实联合慢回合 + 分离 Task 场景。
+2. S6-03 的慢/失败 Harness 剖面与取消 fence 真实跨域断言；S6-05 的 sanitized
+   trace 复现；S6-06 的真实联合慢回合 + 分离 Task 场景。
 3. S7-03 的完整累计 cold review 与一次独立 review 仍未完成。
 
 ## 12. 方法学结论（对 D111 §12 的加强）
