@@ -151,6 +151,30 @@ raw-audio 零持久化回归与降级矩阵，以及 S6-06 的联合场景真实
 
 「联调/连调」为同音 ASR 差异，记为精度观察，不是缺陷（与 D111 §7 一致）。
 
+## 8b. 真实媒体故障 / 负载剖面（S6-03）
+
+每个用例独占一个新签发的媒体授权，不复用他人 lease；全部经私有 origin 的真实
+专用 socket 执行。
+
+| 用例 | 结果 |
+|---|---|
+| 有序基线 | 10 帧 → **10 个 ACK**，无 detach |
+| 序号缺口（0,1,3） | 2 个 ACK 后 `media.detach` `MEDIA_SEQUENCE_GAP`，`through_seq=1`，1000 正常关闭 |
+| 重复/乱序（0,1,2,1） | 3 个 ACK 后 `MEDIA_DUPLICATE_OR_OUT_OF_ORDER`，`through_seq=2` |
+| 游标错配 | 1 个 ACK 后 `MEDIA_CURSOR_MISMATCH`，`through_seq=0` |
+| 过期 generation | **0 个 ACK**，`MEDIA_STALE_GENERATION`，`through_seq=null` |
+| 突发背压（227 帧零配速） | **227 个 ACK**，无丢帧、无 detach |
+| 鉴权前发音频 | 0 个 ACK，`1008 invalid live-voice media route` |
+| 一次性票据重放 | 重放 socket `1008` 拒绝，首个 socket 仍保持 attach |
+| 终态 detach 后重连 | 新授权正常 attach，10 帧 → 10 个 ACK |
+
+全部用例的浏览器层凭据泄漏为 **0**。
+
+有界队列在**丢帧/重排/游标/generation 四个维度上都以终态 detach fail closed**，
+并在 detach 中回报已确认到的 `through_seq`；正常路径与突发路径都是一帧一 ACK。
+仍未执行：慢/失败 Harness 剖面、取消 fence 的真实跨域断言、以及带 p50/p95 的
+完整路由延迟报告（当前只有本文 §8 的单轮逐层时延）。
+
 ## 9. 自动化验证（本候选）
 
 | 检查 | 结果 |
@@ -179,7 +203,7 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 |---|---|---|
 | S6-01 | `SATISFIED` | 源码与确定性自动化通过，无 Alpha 归因失败 |
 | S6-02 | `ENVIRONMENT` | Provider 层已由 D111 §7 证实；本批次新增：真实 server_vad 开流与 provider-time 端点检测已跑通。物理麦克风、设备切换/丢失与听感确认仍需用户 |
-| S6-03 | `ENVIRONMENT` | 真实媒体链路（首帧鉴权 → LVM1 上行/ACK → 真实 STT → 真实 Agent → 真实 TTS downlink → playout ACK）已首次跑通并给出逐层时延；有界队列/背压/丢包/重排/断连重连、慢 Harness、取消 fence 与完整路由延迟报告尚未执行 |
+| S6-03 | `ENVIRONMENT` | 真实媒体链路（首帧鉴权 → LVM1 上行/ACK → 真实 STT → 真实 Agent → 真实 TTS downlink → playout ACK）已首次跑通并给出逐层时延；有界队列/ACK/背压/丢包/重排/过期 generation/票据重放/断连重连九个真实剖面全部按预期 fail closed（见 §8b）。慢 Harness、取消 fence 的真实跨域断言与带 p50/p95 的完整路由延迟报告尚未执行 |
 | S6-04 | `SATISFIED` | 见 D111 §6e |
 | S6-05 | `ENVIRONMENT` | whole-stack benchmark、raw-audio 零持久化回归与降级矩阵未执行 |
 | S6-06 | `ENVIRONMENT` | 自动化联合场景通过（含本批次的竞态修正）；真实联合场景未执行 |
@@ -189,8 +213,9 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 ## 11. 剩余阻塞
 
 1. 用户在真实 Chrome + 麦克风 + 输出设备上完成 S6-02/03/06 的物理与听感确认。
-2. S6-03 剩余的故障/负载剖面与完整路由延迟报告；S6-05 的 whole-stack benchmark、
-   raw-audio 零持久化回归与降级矩阵；S6-06 的真实联合慢回合 + 分离 Task 场景。
+2. S6-03 的慢/失败 Harness 剖面、取消 fence 真实跨域断言与带 p50/p95 的完整路由
+   延迟报告；S6-05 的 whole-stack benchmark、raw-audio 零持久化回归与降级矩阵；
+   S6-06 的真实联合慢回合 + 分离 Task 场景。
 3. S7-03 的完整累计 cold review 与一次独立 review 仍未完成。
 
 ## 12. 方法学结论（对 D111 §12 的加强）
