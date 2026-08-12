@@ -8,7 +8,9 @@
 ## Resume capsule
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
-  `origin/hx/0812_live_voice_w3`. Verify live Git before trusting prose.
+  `agtai/hx/0812_live_voice_w3`. `origin` is the atomgit upstream and has no W3
+  ref; an earlier `origin/...` claim here was wrong. Verify live Git before
+  trusting prose.
 - Current stage/node: `S6 - Alpha Module Closure` / `A1`, `ENVIRONMENT`.
 - Current task: complete the declared real Provider/device/private-topology
   acceptance for `S6-02`, `S6-03`, `S6-05` and the real-path portion of
@@ -51,6 +53,23 @@ S6 implementation and review record is
 No known S6 source defect or deterministic-automation defect remains after the
 final independent review. The open rows are environment evidence, not hidden
 fallback success or accepted product deviations.
+
+Latest verification is bound to `07cd6df86` and recorded in
+[D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md):
+backend `4731 passed, 13 failed, 4 skipped`, frontend `16/16` scripts and
+`713 tests`, `tsc && vite build` PASS, `git diff --check` clean, 283 doc links
+with 0 broken. All 13 backend failures reproduce on the `3f3cdbb7f` develop
+baseline with no Live Voice code (14 there), so 0 are Alpha-attributable. One
+Alpha-introduced test defect was found and fixed in that commit: a traceback
+frame filter in the gateway synthesis privacy test matched the test file itself.
+That test lives under `tests/unit_tests/gateway`, outside the live_voice suite
+paths used for previous runs — future verification must include gateway
+live-voice tests.
+
+S6 remains open on environment evidence only. Under
+[ALPHA_ACCEPTANCE.md](validation/ALPHA_ACCEPTANCE.md) §8 the current result is
+`BLOCKED`: no Speech credential and no private HTTPS/WSS topology exist on the
+current machine, so S7 has not been entered and S8 has not run.
 
 ## Frozen product boundary
 

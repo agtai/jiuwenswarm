@@ -48,6 +48,7 @@ Read only the record that owns the regression or source boundary being examined.
 ## Planning and governance history
 
 - Stage/governance audits: [D108](D108_PROJECT_PROGRESS_AND_GOVERNANCE_REVIEW_2026-08-12.md), [D109](D109_STAGE_MODULE_DOCUMENTATION_SYNC_2026-08-12.md).
+- Alpha automated verification and the environment block that keeps S6 open: [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md). Its §6 records the gateway test path that earlier verification runs missed.
 - Stable package relationships: [Web Alpha matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md).
 - Completed Week 1: [execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md) and [Sol pre-reviews](SOL_MODULE_PRE_REVIEWS_2026-08-03.md).
 - Historical parallel packets: [Alpha parallel plan](roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md), [Wave A+B packet](roadmap/ALPHA_WAVE_AB_EXECUTION_2026-08-07.md), [Wave C packet](roadmap/ALPHA_WAVE_C_EXECUTION_2026-08-07.md), [W2 90% packet](roadmap/DEMO_90_EXECUTION_2026-08-07.md).
