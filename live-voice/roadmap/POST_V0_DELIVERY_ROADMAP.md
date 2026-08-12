@@ -1,12 +1,12 @@
 # Live Voice：W2 90% Demo 与 Integrated Web Alpha 交付路线
 
 > 更新日期：2026-08-12
-> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061、D-062、D-071、D-072、D-074–D-076](../decisions/DECISIONS.md)
+> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061、D-062、D-071、D-072、D-074–D-078](../decisions/DECISIONS.md)
 > 当前实现事实、track 状态和产品验收清单：[STATUS.md](../STATUS.md)
 > 当前 S5–S8 任务、依赖、风险、module-close oracle 和退出条件：[ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md)
 > 已完成 Week 1 的历史 priority/dependency/boundary 与 package contracts：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
 > Web Alpha 稳定工作包、Demo 替换关系、依赖和目标窗口：[WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
-> 当前执行方式：[D-074–D-076](../decisions/DECISIONS.md) 定义 coherent 本地提交、模块/阶段 review、S5→S8 关键节点和 verify-first 当前任务合同；D-060/D-062 的非重叠 worker 图只在当前 packet 明确启用并行时生效，D-061 保留完整 reviewed 集成批次后的一次累计 smoke，远端更新继续单独批准。
+> 当前执行方式：[D-074–D-078](../decisions/DECISIONS.md) 定义 coherent 本地提交、模块/阶段 review、S5→S8 关键节点、verify-first 当前任务合同、渐进读取和 Alpha 私有运行基线；D-060/D-062 的非重叠 worker 图只在当前 packet 明确启用并行时生效，D-061 保留完整 reviewed 集成批次后的一次累计 smoke，远端更新继续单独批准。
 > 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前范围、顺序窗口和验收，不把 Alpha 写成 Production，也不把原并行估算继续写成单线日历承诺。
 
 ## 1. 交付目标
@@ -56,7 +56,7 @@ S5/A0 是当前 Alpha 的唯一入口；A0 未关闭前可以做只读调查和�
 
 Integrated Web Alpha 至少包括：
 
-- **P1 Speech I/O**：浏览器 Audio I/O、Speech Recognition/Synthesis Port、一个真实可用 Adapter、Browser fallback、提交/编辑或安全澄清边界、文字降级；
+- **P1 Speech I/O**：浏览器 Audio I/O、Speech Recognition/Synthesis Port、D-078 选定的 Gateway-owned OpenAI Streaming STT/TTS 主路径、显式 Batch/Browser fallback、提交/编辑或安全澄清边界、文字降级；最终回答仍来自真实 JiuwenSwarm Agent/Tools；
 - **P2 Realtime Conversation**：Realtime Media、Conversation Runtime、Interaction Engine、Agent Bridge、response/generation fence、自然或受控 barge-in、真实 presentation facts、后台工作不冻结前台；
 - **P3alpha Task Control**：稳定 task/command/attempt identity、`create/get/list/status/cancel/events`、TaskEvent/Core reducer、一个 D0 Executor、committed Voice–Task Bridge、progress/result 回流、restart reconciliation 的诚实状态；
 - **横切能力**：Context、WorkProgress、Capability/Error、route telemetry、fault injection、feature-off/text regression、Web 集成、安全上下文、浏览器权限/设备/页面生命周期和受控真实设备证据。
@@ -80,7 +80,7 @@ Integrated Web Alpha 至少包括：
 - 一个共享契约/集成 owner，避免各轨创造第二套 authority；
 - 从 Day 1 开始持续接回同一个 Demo；
 - 当前没有固定 lane、worker 数量或跨模型分工；只有 active packet 才能按可用执行环境声明并行所有权和独立 review 入口；
-- Provider、桌面 Chromium 浏览器、音频设备、Web 部署/代理、Executor 和私有配置在相应真实产品验收前可用。
+- D-078 选定的 OpenAI Speech Provider 与初始 model/voice 默认值、当前 JiuwenSwarm Agent Provider、精确 desktop Chrome/Windows、实际耳机/输出设备和麦克风（不限制品牌/型号）、稳定/受控故障网络、私有 same-origin HTTPS/WSS、Direct Executor 和 disposable local Git fixture 在相应真实产品验收前可用；实际版本、设备标签、origin、凭据和目录只在候选环境记录。
 
 D-060/D-062 只在当前任务包明确启用时提供按实际依赖和容量生成的非重叠 worker 图和一个单写集成 owner；没有 active parallel packet 时不保留历史 lane、worker 或模型分工。它们不改变外部 Provider、浏览器/设备、部署、Executor 或真实产品验收的依赖，也不把原并行 timebox 恢复为日历承诺。
 

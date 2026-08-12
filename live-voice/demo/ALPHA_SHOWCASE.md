@@ -12,7 +12,8 @@ This is the D-075 `A3 Product Acceptance` script. The active S5–S8 task contra
 Record without secrets:
 
 - tested Git source, comparison base and clean worktree before the run;
-- exact Chrome, OS, origin/secure-context, input/output device and network labels;
+- exact Chrome, OS, origin/secure-context, actual input/output device and network
+  labels for reproducibility; hardware brand/model is not an acceptance allowlist;
 - selected real Speech/Media/Agent/Tool/Executor routes and declared fallbacks;
 - persistent Session, registered isolated project, runtime-data label and enabled Alpha flags;
 - automated A2 result, open accepted deviations and any human step explicitly approved for reuse.

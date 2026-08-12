@@ -98,7 +98,7 @@ Before creating a documentation commit:
 1. `git diff --check` passes.
 2. Every local Markdown link under `live-voice/` resolves.
 3. `docs/zh/live-voice/` contains no tracked duplicate.
-4. README remains a lightweight sectional router, STATUS remains the sole concise mutable state, REFERENCE_INDEX remains conditional, the Web Alpha matrix contains no live status, W2/Alpha acceptance each route to the correct showcase, and frozen review records cannot override STATUS or applicable current decisions, especially D-046/D-055/D-058/D-071–D-077.
+4. README remains a lightweight sectional router, STATUS remains the sole concise mutable state, REFERENCE_INDEX remains conditional, the Web Alpha matrix contains no live status, W2/Alpha acceptance each route to the correct showcase, and frozen review records cannot override STATUS or applicable current decisions, especially D-046/D-055/D-058/D-071–D-078.
 5. Archive warnings are present.
 6. Current code, tests, decisions, roadmap, and STATUS do not contradict one another.
 7. The local commit is one coherent documentation/governance scope under root `AGENTS.md`; any push remains separately approved for the exact remote/ref/commits/update mode.

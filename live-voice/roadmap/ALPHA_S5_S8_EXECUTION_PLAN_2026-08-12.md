@@ -126,17 +126,20 @@ The freeze-date inspection establishes these starting facts:
   1. selected Alpha streaming STT/TTS Provider/Adapter and fallback, or an
      explicitly accepted bounded non-streaming deviation;
   2. exact desktop Chrome version, Windows build, secure origin/topology,
-     microphone/output device labels and fixed network profile;
-  3. real Provider/model/voice and safe failure profiles, without credentials;
+     actual microphone/output labels without a hardware-model allowlist, and
+     fixed network profile;
+  3. real Provider probe of the accepted model/voice defaults and safe failure
+     profiles, without recording credentials;
   4. real D0 Executor/project target and recoverable isolation boundary; and
   5. any acceptance target that is intentionally a deviation rather than a bug.
 - **Exit:** accepted decisions are in DECISIONS, machine-private values are
   recorded in the candidate workspace/run record, and no task silently chooses
   billing, credentials, deployment, destructive target or product scope.
 
-This task can wait for user-controlled inputs while S5-01 read-only audit and
-noncontroversial verification preparation continue. S5/A0 cannot close without
-the inputs.
+This task can wait for usable OpenAI Speech API access and candidate-machine
+facts while S5-01 read-only audit and noncontroversial verification preparation
+continue. Hardware brand/model selection is not an input. S5/A0 cannot close
+without the runtime facts and real probes.
 
 ### S5-03 — A1 batch and ownership freeze
 

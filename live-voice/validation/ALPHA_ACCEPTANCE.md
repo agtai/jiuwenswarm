@@ -94,7 +94,7 @@ Pass requires:
 
 ## 7. Web platform and degradation requirements
 
-- freeze the desktop-browser scope before candidate testing and run the complete candidate on every browser/version in that declared baseline; an absent or changing baseline is `BLOCKED`, and exact browser, OS, origin, device and network labels are evidence rather than a public compatibility promise;
+- freeze the desktop-browser scope before candidate testing and run the complete candidate on every browser/version in that declared baseline; an absent or changing baseline is `BLOCKED`, and exact browser, OS, origin, actual headphone/output, microphone and network labels are reproducibility evidence rather than a hardware-model allowlist or public compatibility promise;
 - non-localhost deployment uses HTTPS/WSS or an equivalent secure context; localhost remains a development/controlled-test exception only;
 - microphone grant, denial and revocation; device selection and `devicechange`; input/output loss; autoplay/user-activation; page hidden/background/resume; refresh/reconnect and visible diagnostics have no silent failure or stale audio resurrection;
 - the selected browser capture/playout implementation, media encoding and Browser↔Gateway transport are documented with capability and fallback provenance; unsupported behavior remains explicit;
