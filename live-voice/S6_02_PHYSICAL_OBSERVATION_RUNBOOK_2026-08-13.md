@@ -41,9 +41,23 @@ hidden/background/resume 与听感确认。这些都发生在浏览器权限层�
 | 首页 | `HTTP/1.1 200 OK`，866 字节，`id="root"` 存在，3 个 module script |
 | CSP | `default-src 'self'; connect-src 'self' wss://live-voice.localhost; media-src 'self' blob:; worker-src 'self' blob:; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'` |
 | HTML 中的 Speech 凭据 | 0 |
+| 页面渲染 | 真实 UI 可读（第一次预检漏了这一项，见下） |
+| 页面内 `new WebSocket(.../ws)` | 312 ms 打开成功，`readyState=1` |
+| `/ws/live-voice/media` | 子协议 `live-voice.media.v1` 协商成功 |
 
 也就是说：证书、同源、CSP（含音频所需的 `media-src blob:` 与 `worker-src blob:`）
 都不会成为你的障碍。**Chrome 直接打开即可，不会有证书警告，不需要任何开关。**
+
+**修正记录**：这份预检最初只验了 HTTP 200 就交给了你，结果你打开是**整页空白**。
+根因是声明的 CSP 没有 `script-src`（回退到 `default-src 'self'`）而 Vite dev server
+注入了内联 refresh preamble，被拦后 React 没挂载。已改为由 Caddy 直接服务生产构建
+（内联脚本 0），CSP 未放宽，另修了两处：`try_files` 曾把 `/ws` 重写成 `/index.html`
+导致 WSS 升级全失败；CSP 缺 `font-src` 导致构建自带的 `data:` 字体被拦。
+完整取证见 [D112](D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md) §3b。
+
+**由此带来的一个操作差异**：前端 flags 现在是**构建期**烘焙的。如果之后改了前端源码，
+必须按 `D:\lvalpha\run-20260812\caddy\Caddyfile` 头部记录的命令带同一组 flags
+重新 `npm run build`，否则你看到的还是旧构建。
 
 ### 2b2. 用哪个浏览器：普通 Chrome 的**专用 profile**
 
@@ -82,10 +96,9 @@ profile 里开一个无痕窗口做，这样不会破坏主窗口已授予的状
 或任何关闭安全策略的开关。CA 已受信、origin 已是 https，这些都不需要，
 且超出本次授权边界。
 
-**顺手确认一下浏览器基线**：打开 `chrome://version`，把第一行版本号发我。
-本机安装了两个版本目录（`151.0.7922.109` 与 `151.0.7922.77`），而 D111 声明的
-基线是 `151.0.7922.109`；S6-02 要求「在声明的 Chrome 基线上」观察，所以实际跑的
-版本要以你看到的为准记录，不能照抄旧记录。
+**浏览器基线已确认**：实测运行 **`151.0.7922.77`（正式版本，64 位）**。
+本机同时装有 `151.0.7922.109` 目录，而 D111 声明的基线是 `.109`；既然实际跑的是
+`.77`，S6-02 的声明基线就更正为 `.77`（D112 §3b-5），不沿用旧记录的值。
 
 ### 2c. 在哪个页面、怎么让语音块出现
 
@@ -193,10 +206,6 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 ## 4. 回填格式
 
 把结果按下表回给我（一句话一项即可，写你看到/听到的事实）：
-
-| 项 | 值 |
-|---|---|
-| `chrome://version` 第一行 | |
 
 | 观察 | 结果 | 你看到 / 听到的 |
 |---|---|---|

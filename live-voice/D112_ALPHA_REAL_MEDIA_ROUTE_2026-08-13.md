@@ -40,6 +40,76 @@ raw-audio 零持久化回归与降级矩阵，以及 S6-06 的联合场景真实
 | playout 回执前置 | `acknowledge_playout` 要求所属 downlink 的 `overlap_observed` 为真，即 downlink 完成时必须存在另一路**仍在线且已收帧**的 uplink（"麦克风持续"语义）。探针因此在合成前再开一路 capture。 |
 | 合成超时上界 | `live_voice.speech.synthesize_batch` 的 `timeout_ms` 必须落在 100–30000。 |
 
+## 3b. 私有 Web 端的三个部署缺陷（环境，非 Alpha 源码）
+
+S6-02 交给用户执行前先做了一次页面预检，只验了 HTML 外壳返回 200，**没有验 JS 是否
+真的执行**。用户一打开就是**整页空白**。这三个问题都在浏览器层，源码未改。
+
+### 3b-1 声明的 CSP 与 Vite dev server 不相容 → 整页空白
+
+- **取证（浏览器 console 原文）**：
+  `Executing inline script violates the following Content Security Policy
+  directive 'default-src 'self''. ... Note also that 'script-src' was not
+  explicitly set, so 'default-src' is used as a fallback.`
+  紧接着 `Uncaught @vitejs/plugin-react can't detect preamble. Something is wrong.`
+- **根因**：Vite dev server 在 `<head>` 注入一段**内联** module script
+  （`@vitejs/plugin-react` 的 refresh preamble）。声明的 CSP 没有 `script-src`，
+  回退到 `default-src 'self'` → 内联脚本被 Chrome 拦掉 → React refresh 运行时抛错 →
+  根本没挂载 → 空白页。
+- **处置**：不加 `'unsafe-inline'`、不加 preamble 的 hash，而是**改用生产构建**。
+  理由：这份 CSP 正是 S6-05 隐私/部署证据所测量的那一份（§8e），为了让 dev server
+  能跑而放宽它，会让那条结论作废。生产构建的 `index.html` 内联脚本数为 **0**。
+- **拓扑变化（§3 的链路描述据此更新）**：
+  `Chrome → Caddy(HTTPS/WSS) → 静态 frontend/dist + /ws,/api 反代到 WebChannel 19000
+  → Gateway 19001 → AgentServer 18092`。Vite 已不在浏览器路径上。
+  代价：前端 flags 由**构建期**烘焙而不再是 dev server 的运行期环境变量，
+  改前端后必须按 Caddyfile 头部记录的命令带同一组 flags 重新构建；
+  Vite dev 独有的 `/file-api/*`、`/share-api/*`、`/__dev/ws-log` 不再存在，
+  它们与 Live Voice 路径无关。
+
+### 3b-2 共享的 `try_files` 把 `/ws` 重写掉 → 每次 WSS 升级失败
+
+- **现象**：页面渲染出来了，但 `wss://live-voice.localhost/ws` 反复失败。
+- **根因**：Caddy 的指令顺序把 `try_files` 排在 `reverse_proxy` **之前**。
+  `/ws` 不是磁盘上的文件，于是被 `try_files {path} /index.html` 重写成 `/index.html`，
+  socket 路由的 `path` 匹配器再也匹配不到，升级请求落到 file_server。
+- **处置**：改用互斥的 `handle /ws*` / `handle /api*` / `handle` 三段结构，
+  重写不可能再跨到 socket 段。
+
+### 3b-3 CSP 缺 `font-src` → 构建自带字体被拦
+
+- **现象**：`Loading the font 'data:font/woff2;base64,...' violates ...
+  "default-src 'self'". Note that 'font-src' was not explicitly set`。
+- **根因**：生产构建把自带 woff2 内联成 `data:` URI，而 CSP 未声明 `font-src`，
+  回退到 `default-src 'self'`。dev server 时期页面是空白的，字体根本没机会加载，
+  所以这个缺口一直没暴露。
+- **处置**：显式加 `font-src 'self' data:`。这是**只收窄字体**的补充，
+  `script-src` / `connect-src` 未受影响。
+
+### 3b-4 修复后的实测
+
+| 检查 | 实测 |
+|---|---|
+| `GET /` | 200，709 字节，内联脚本 0 |
+| `GET /assets/index-*.js` | 200，3,110,197 字节 |
+| CSP 响应头 | 含 `font-src 'self' data:`，其余与原声明逐字相同 |
+| 页面渲染 | 真实 UI 可读（工作/新建任务/项目/对话/Live Voice/Integrated Web 路由事实） |
+| 页面上下文内 `new WebSocket('wss://'+location.host+'/ws')` | **312 ms 打开成功**，`readyState=1` |
+| WebChannel 侧 | 收到 WS 注册，心跳期间连接稳定 |
+| 独立客户端控制面 | `connection.ack`，`session_id` 已下发 |
+| 专用媒体路径 `/ws/live-voice/media` | 子协议 `live-voice.media.v1` 协商成功 |
+
+**方法学补充**：本轮已经吃过一次"门禁后面还有门禁"的教训，却仍然只用 HTTP 状态码
+做了页面预检。**"服务返回 200" 不等于"应用能跑"**：浏览器侧的验证必须至少看一次
+真实 console 与一次真实 WebSocket 建立，否则等于把空白页交给用户。
+
+### 3b-5 Chrome 基线更正
+
+D111 §2 声明的 Chrome 基线是 `151.0.7922.109`，但本机安装目录同时存在
+`151.0.7922.109` 与 `151.0.7922.77`，而用户实测运行的是
+**`151.0.7922.77`（正式版本，64 位）**。S6-02 要求在**声明的** Chrome 基线上观察，
+因此本轮的声明基线更正为 `151.0.7922.77`，不沿用旧记录的值。
+
 ## 4. 缺陷 6（Alpha 引入，已修）：P2 向 AgentManager 请求了不拥有形式化接缝的 Agent 侧写
 
 - **现象**：真实 `live_voice.composition.p2.activate` 恒定失败，产品清单
