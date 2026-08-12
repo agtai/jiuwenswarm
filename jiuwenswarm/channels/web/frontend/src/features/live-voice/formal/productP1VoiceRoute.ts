@@ -10,10 +10,24 @@ import {
   createBrowserDedicatedMediaRoute,
   deserializeMediaControl,
   type ActiveBrowserDedicatedMediaRoute,
+  type BrowserDedicatedMediaRouteActivation,
+  type DedicatedMediaTerminalEvent,
   type DedicatedMediaSocketFactory,
 } from './adapters/browserDedicatedMediaRoute.js';
-import type { MediaAudioFrame } from './adapters/browserGatewayMediaTransport.js';
-import { GatewayBatchSpeechClient, type FormalSynthesisDownlink, type GatewaySpeechProvider } from './gatewayBatchSpeechClient.js';
+import {
+  MEDIA_END_OF_TURN_CAPABILITY,
+  type MediaAudioFrame,
+  type MediaEndOfTurn,
+} from './adapters/browserGatewayMediaTransport.js';
+import {
+  GatewayBatchSpeechClient,
+  isStreamingSpeechDegradationReason,
+  normalizeStreamingXObs,
+  type FormalBatchRecognitionResult,
+  type FormalStreamingRecognitionResult,
+  type FormalSynthesisDownlink,
+  type GatewaySpeechProvider,
+} from './gatewayBatchSpeechClient.js';
 
 export const PRODUCT_P1_MEDIA_ACTIVATE_METHOD = 'live_voice.media.activate';
 export const PRODUCT_P1_MEDIA_CLOSE_METHOD = 'live_voice.media.close';
@@ -31,6 +45,12 @@ const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
 
 export type ProductP1VoiceStatus = 'idle' | 'starting' | 'capturing' | 'recognizing' | 'recognized' | 'playing' | 'cleanup_pending' | 'failed' | 'closed';
 
+export interface ProductP1AudioDeviceSelection {
+  readonly selection_generation: number;
+  readonly input_device_id?: string;
+  readonly output_device_id?: string;
+}
+
 export interface ProductP1Recognition {
   readonly text: string;
   readonly voice_commit_receipt: string;
@@ -42,7 +62,8 @@ interface PendingProductPlayout {
   readonly response: Readonly<AudioResponseRef>;
   readonly unitId: string;
   readonly chunks: Readonly<BrowserAudioPcmChunk>[];
-  readonly frameCount: number;
+  readonly frameCount: number | null;
+  readonly degradationReason: string | null;
   readonly downlinkRoute: ActiveBrowserDedicatedMediaRoute | null;
   readonly receiptAuthority: Readonly<ProductP1MediaCloseBinding>;
   readonly captureFramesAcked: number;
@@ -50,7 +71,7 @@ interface PendingProductPlayout {
   renderedChunks: number;
   peakDepth: number;
   filling: boolean;
-  readonly expected: ReadonlyMap<string, number>;
+  readonly expected: Map<string, number>;
   readonly observed: Map<string, number>;
   readonly resolve: () => void;
   readonly reject: (error: Error) => void;
@@ -82,9 +103,44 @@ function exactObject(value: unknown, fields: readonly string[], field: string): 
   return result;
 }
 
+function exactMediaActivation(value: unknown): Record<string, unknown> {
+  const record = objectValue(value, 'media_activation');
+  const hasStreaming = Object.prototype.hasOwnProperty.call(record, 'streaming_recognition');
+  const hasDegradation = Object.prototype.hasOwnProperty.call(record, 'streaming_degradation');
+  const hasEndOfTurn = Object.prototype.hasOwnProperty.call(record, 'end_of_turn');
+  if (hasStreaming !== hasDegradation) {
+    throw new Error('media activation streaming fields are incomplete');
+  }
+  return exactObject(
+    record,
+    [
+      'status',
+      'reason_id',
+      'subject_id',
+      'endpoint_path',
+      'media_ticket',
+      'subprotocol',
+      'ticket_ttl_ms',
+      'binding',
+      'privacy',
+      ...(hasStreaming ? ['streaming_recognition', 'streaming_degradation'] : []),
+      ...(hasEndOfTurn ? ['end_of_turn'] : []),
+    ],
+    'media_activation'
+  );
+}
+
 function requiredText(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0 || value !== value.trim()) {
     throw new Error(`${field} is invalid`);
+  }
+  return value;
+}
+
+function consumePrivateText(record: Record<string, unknown>, key: string, field: string): string {
+  const value = requiredText(record[key], field);
+  if (!Reflect.deleteProperty(record, key) || Object.prototype.hasOwnProperty.call(record, key)) {
+    throw new Error(`${field} could not be released from memory`);
   }
   return value;
 }
@@ -107,6 +163,18 @@ function stableCaptureStopReason(reason: string): string {
     case 'track_ended':
     case 'track_ended_during_start':
       return 'AUDIO_TRACK_ENDED';
+    case 'audio_input_unavailable':
+      return 'AUDIO_INPUT_UNAVAILABLE';
+    case 'audio_input_selection_lost':
+      return 'AUDIO_INPUT_SELECTION_LOST';
+    case 'audio_input_selection_unverified':
+      return 'AUDIO_INPUT_SELECTION_UNVERIFIED';
+    case 'audio_output_selection_lost':
+      return 'AUDIO_OUTPUT_SELECTION_LOST';
+    case 'audio_output_selection_unverified':
+      return 'AUDIO_OUTPUT_SELECTION_UNVERIFIED';
+    case 'microphone_permission_revoked':
+      return 'MICROPHONE_PERMISSION_REVOKED';
     case 'page_hidden':
       return 'PAGE_HIDDEN';
     case 'audio_processor_error':
@@ -193,7 +261,7 @@ export class ProductP1VoiceRouteOwner {
   #locale = 'zh-CN';
   #activationId: string | null = null;
   #activationGeneration = 0;
-  #deviceId: string | undefined;
+  #deviceSelection: Readonly<ProductP1AudioDeviceSelection> = Object.freeze({ selection_generation: 1 });
   #playout: Readonly<BrowserAudioPlayoutMetadata> | null = null;
   #closed = false;
   #operationGeneration = 0;
@@ -206,8 +274,17 @@ export class ProductP1VoiceRouteOwner {
   #settlingPlayout: PendingProductPlayout | null = null;
   #captureStartupAudioReady = false;
   #captureStartupFailure: (Error & { readonly reason: string }) | null = null;
+  #mediaTerminalFailure: (Error & { readonly reason: string }) | null = null;
   #captureReadinessPending = false;
+  #streamingRecognitionAvailable = false;
+  #streamingFallbackReason: string | null = null;
+  #streamingFallbackTier: 'batch' | 'text' | null = null;
   #pendingMediaActivation: Promise<unknown> | null = null;
+  #endOfTurnNegotiated = false;
+  #pendingEndOfTurn: Readonly<MediaEndOfTurn> | null = null;
+  #endOfTurnHandler: (() => void) | null = null;
+  #endOfTurnDelivered = false;
+  #stopAndRecognizePromise: Promise<Readonly<ProductP1Recognition>> | null = null;
 
   constructor(
     input: Readonly<{
@@ -275,7 +352,7 @@ export class ProductP1VoiceRouteOwner {
       activation_id: string;
       activation_generation: number;
       locale?: 'zh-CN' | 'en-US';
-      device_id?: string;
+      device_selection?: Readonly<ProductP1AudioDeviceSelection>;
     }>
   ): Promise<void> {
     if (!this.#enabled || this.#closed) throw new Error('formal P1 voice route is disabled');
@@ -291,11 +368,31 @@ export class ProductP1VoiceRouteOwner {
     }
     const locale = input.locale ?? 'zh-CN';
     if (!['zh-CN', 'en-US'].includes(locale)) throw new Error('locale is invalid');
+    const selected: Readonly<ProductP1AudioDeviceSelection> = input.device_selection ?? Object.freeze({ selection_generation: 1 });
+    if (!Number.isSafeInteger(selected.selection_generation) || selected.selection_generation <= 0) {
+      throw new Error('device selection generation is invalid');
+    }
+    const inputDeviceId = selected.input_device_id === undefined ? undefined : requiredText(selected.input_device_id, 'input_device_id');
+    const outputDeviceId = selected.output_device_id === undefined ? undefined : requiredText(selected.output_device_id, 'output_device_id');
+    const deviceSelection = Object.freeze({
+      selection_generation: selected.selection_generation,
+      ...(inputDeviceId === undefined ? {} : { input_device_id: inputDeviceId }),
+      ...(outputDeviceId === undefined ? {} : { output_device_id: outputDeviceId }),
+    });
     const operationGeneration = ++this.#operationGeneration;
     this.#setStatus('starting', null);
     this.#captureStartupAudioReady = false;
     this.#captureStartupFailure = null;
+    this.#mediaTerminalFailure = null;
     this.#captureReadinessPending = true;
+    this.#streamingRecognitionAvailable = false;
+    this.#streamingFallbackReason = null;
+    this.#streamingFallbackTier = null;
+    this.#endOfTurnNegotiated = false;
+    this.#pendingEndOfTurn = null;
+    this.#endOfTurnHandler = null;
+    this.#endOfTurnDelivered = false;
+    this.#stopAndRecognizePromise = null;
     this.#failureCleanupReason = null;
     this.#frames = [];
     this.#mediaSentFrames = 0;
@@ -308,13 +405,15 @@ export class ProductP1VoiceRouteOwner {
     this.#locale = locale;
     this.#activationId = activationId;
     this.#activationGeneration = activationGeneration;
-    this.#deviceId = input.device_id;
+    this.#deviceSelection = deviceSelection;
     try {
       if (this.#mediaCloseBinding !== null) await this.#revokeMediaAuthority();
       this.#requireCurrent(operationGeneration);
-      this.#playout = await this.#audio.unlockPlayout();
+      this.#playout = await this.#audio.unlockPlayout(
+        deviceSelection.output_device_id ? { deviceId: deviceSelection.output_device_id } : {}
+      );
       this.#requireCurrent(operationGeneration);
-      const metadata = await this.#audio.startCapture(input.device_id ? { deviceId: input.device_id } : {});
+      const metadata = await this.#audio.startCapture(deviceSelection.input_device_id ? { deviceId: deviceSelection.input_device_id } : {});
       this.#captureStartupAudioReady = true;
       this.#requireHealthyCaptureReadiness(operationGeneration);
       if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
@@ -332,6 +431,7 @@ export class ProductP1VoiceRouteOwner {
           track_id: metadata.track_id,
           sample_rate_hz: metadata.frame_format.sample_rate_hz,
           locale: this.#locale,
+          end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
         });
         const activationEnvelope = objectValue(activationValue, 'media_activation');
         if (activationEnvelope.status !== 'active') {
@@ -341,11 +441,7 @@ export class ProductP1VoiceRouteOwner {
           }
           throw routeUnavailable(inactive.reason_id);
         }
-        const activation = exactObject(
-          activationEnvelope,
-          ['status', 'reason_id', 'subject_id', 'endpoint_path', 'subprotocol', 'ticket_ttl_ms', 'binding', 'privacy'],
-          'media_activation'
-        );
+        const activation = exactMediaActivation(activationEnvelope);
         if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
           throw routeUnavailable(activation.reason_id);
         }
@@ -360,6 +456,8 @@ export class ProductP1VoiceRouteOwner {
         const privacy = exactObject(activation.privacy, ['raw_audio_persisted', 'raw_audio_logged', 'memory_only'], 'media_activation.privacy');
         if (privacy.raw_audio_persisted !== false || privacy.raw_audio_logged !== false || privacy.memory_only !== true)
           throw new Error('media activation did not prove its privacy boundary');
+        this.#observeStreamingAvailability(activation);
+        this.#observeEndOfTurnAvailability(activation);
         return activation;
       });
       this.#pendingMediaActivation = activationOperation;
@@ -389,17 +487,37 @@ export class ProductP1VoiceRouteOwner {
         attach.binding.frame_format.sample_rate_hz !== metadata.frame_format.sample_rate_hz
       )
         throw new Error('server media binding does not match the active browser capture');
-      const route = createBrowserDedicatedMediaRoute({
-        enabled: true,
-        expected_origin: this.#origin,
-        endpoint_url: mediaEndpoint(this.#origin, requiredText(activation.endpoint_path, 'endpoint_path')),
-        binding: attach.binding,
-        provider_available: true,
-        transport_available: typeof WebSocket === 'function',
-        socket_factory: this.#socketFactory,
-        on_audio_frame: () => undefined,
-      });
+      let ownedRoute: ActiveBrowserDedicatedMediaRoute | null = null;
+      let mediaTicket = consumePrivateText(activation, 'media_ticket', 'media_ticket');
+      let route: BrowserDedicatedMediaRouteActivation;
+      try {
+        route = createBrowserDedicatedMediaRoute({
+          enabled: true,
+          expected_origin: this.#origin,
+          endpoint_url: mediaEndpoint(this.#origin, requiredText(activation.endpoint_path, 'endpoint_path')),
+          media_ticket: mediaTicket,
+          binding: attach.binding,
+          provider_available: true,
+          transport_available: typeof WebSocket === 'function',
+          socket_factory: this.#socketFactory,
+          on_audio_frame: () => undefined,
+          on_terminal: event => {
+            if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
+          },
+          ...(this.#endOfTurnNegotiated
+            ? {
+                end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+                on_end_of_turn: (event: Readonly<MediaEndOfTurn>) => {
+                  this.#observeEndOfTurnControl(operationGeneration, ownedRoute, event);
+                },
+              }
+            : {}),
+        });
+      } finally {
+        mediaTicket = '';
+      }
       if (!route.active) throw new Error(route.reason_id);
+      ownedRoute = route;
       this.#route = route;
       this.#speech = new GatewayBatchSpeechClient({
         enabled: true,
@@ -416,19 +534,40 @@ export class ProductP1VoiceRouteOwner {
       await this.#awaitCaptureReadiness(route, operationGeneration);
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
+      this.#mediaTerminalFailure = null;
       this.#captureReadinessPending = false;
-      this.#setStatus('capturing', null);
+      this.#setStatus('capturing', this.#streamingFallbackReason);
     } catch (error) {
-      const failure = this.#captureStartupFailure ?? error;
+      const failure = this.#captureStartupFailure ?? this.#mediaTerminalFailure ?? error;
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
+      this.#mediaTerminalFailure = null;
       this.#captureReadinessPending = false;
       await this.#fail(failure);
       throw failure;
     }
   }
 
-  async stopAndRecognize(): Promise<Readonly<ProductP1Recognition>> {
+  armEndOfTurn(handler: () => void): boolean {
+    if (typeof handler !== 'function') throw new TypeError('end-of-turn handler is invalid');
+    if (!this.#endOfTurnNegotiated) return false;
+    if (this.#status !== 'capturing' || this.#route === null) {
+      throw new Error('end-of-turn can only arm the current capture');
+    }
+    this.#endOfTurnHandler = handler;
+    this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
+    return true;
+  }
+
+  stopAndRecognize(): Promise<Readonly<ProductP1Recognition>> {
+    const retained = this.#stopAndRecognizePromise;
+    if (retained !== null) return retained;
+    const operation = this.#stopAndRecognizeOnce();
+    this.#stopAndRecognizePromise = operation;
+    return operation;
+  }
+
+  async #stopAndRecognizeOnce(): Promise<Readonly<ProductP1Recognition>> {
     if (this.#failureCleanupPromise !== null || this.#status !== 'capturing' || this.#route === null || this.#speech === null) {
       throw new Error('formal P1 capture is not active');
     }
@@ -454,11 +593,43 @@ export class ProductP1VoiceRouteOwner {
       this.#captureFramesAcked = this.#mediaSentFrames;
       await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
       this.#requireCurrent(operationGeneration);
-      const result = await speech.recognizeFinal({
+      const recognitionInput = Object.freeze({
         frames: this.#frames,
         locale: this.#locale,
         correlationId: requiredText(this.#correlationId, 'correlation_id'),
+        interactionId: requiredText(this.#interactionId, 'interaction_id'),
       });
+      let degradationReason: string | null = this.#streamingFallbackReason;
+      let result: Readonly<FormalBatchRecognitionResult | FormalStreamingRecognitionResult> | null;
+      if (this.#streamingRecognitionAvailable) {
+        const streaming = await speech.recognizeStreamingFinal(recognitionInput);
+        this.#requireCurrent(operationGeneration);
+        if (streaming.status === 'completed') {
+          result = streaming.result;
+        } else if (streaming.fallback.fallback_tier === 'batch') {
+          degradationReason = streaming.fallback.reason_id;
+          console.warn(`live_voice_speech_degradation reason=${degradationReason} target=batch visible=true`);
+          this.#setStatus('recognizing', degradationReason);
+          result = await speech.recognizeFinal(recognitionInput);
+        } else {
+          throw Object.assign(new Error('streaming recognition requires text fallback'), {
+            reason_id: streaming.fallback.reason_id,
+          });
+        }
+      } else {
+        if (degradationReason !== null) {
+          const fallbackTier = this.#streamingFallbackTier;
+          if (fallbackTier === null) throw new Error('streaming recognition fallback tier is absent');
+          console.warn(`live_voice_speech_degradation reason=${degradationReason} target=${fallbackTier} visible=true`);
+          this.#setStatus('recognizing', degradationReason);
+          if (fallbackTier === 'text') {
+            throw Object.assign(new Error('streaming recognition requires text fallback'), {
+              reason_id: degradationReason,
+            });
+          }
+        }
+        result = await speech.recognizeFinal(recognitionInput);
+      }
       // The formal STT result, not captured samples, is the retained product
       // fact. Release the browser copy as soon as the exact request settles.
       this.#frames = [];
@@ -466,7 +637,7 @@ export class ProductP1VoiceRouteOwner {
       this.#route = null;
       this.#requireCurrent(operationGeneration);
       if (result === null) throw new Error('formal recognition was fenced');
-      this.#setStatus('recognized', null);
+      this.#setStatus('recognized', degradationReason);
       return Object.freeze({
         text: result.final_text,
         voice_commit_receipt: result.voice_commit_receipt,
@@ -530,18 +701,34 @@ export class ProductP1VoiceRouteOwner {
         throw new Error('formal synthesis lost its capture authority');
       }
       let downlinkRoute: ActiveBrowserDedicatedMediaRoute | null = null;
+      let downlinkTerminal: Readonly<DedicatedMediaTerminalEvent> | null = null;
       let pendingRef: PendingProductPlayout | null = null;
       const chunks = [...result.chunks];
-      const frameCount = result.downlink?.frame_count ?? chunks.length;
+      // A streaming downlink deliberately declares no final frame count. Keep
+      // that `null` distinct from the batch path's in-envelope chunk count;
+      // nullish coalescing here would turn a valid stream into a zero-frame
+      // batch and reject its first media frame as stale.
+      const frameCount = result.downlink === null ? chunks.length : result.downlink.frame_count;
       if (result.downlink !== null) {
         await this.#startConcurrentCapture(operationGeneration);
         this.#requireCurrent(operationGeneration);
-        downlinkRoute = this.#openDownlinkRoute(result.downlink, result.provider, result.response, result.unit_id, frame => {
-          if (pendingRef === null) throw new Error('downlink arrived before playout ownership');
-          this.#acceptDownlinkFrame(pendingRef, frame, result.provider);
-        });
+        downlinkRoute = this.#openDownlinkRoute(
+          result.downlink,
+          result.provider,
+          result.response,
+          result.unit_id,
+          frame => {
+            if (pendingRef === null) throw new Error('downlink arrived before playout ownership');
+            this.#acceptDownlinkFrame(pendingRef, frame, result.provider);
+          },
+          event => {
+            downlinkTerminal = event;
+            if (pendingRef !== null && downlinkRoute !== null) this.#observeMediaTerminal(downlinkRoute, event);
+          }
+        );
       }
-      const expected = new Map<string, number>([[result.unit_id, frameCount - 1]]);
+      const expected = new Map<string, number>();
+      if (frameCount !== null) expected.set(result.unit_id, frameCount - 1);
       let resolvePlayout!: () => void;
       let rejectPlayout!: (error: Error) => void;
       const rendered = new Promise<void>((resolve, reject) => {
@@ -559,6 +746,7 @@ export class ProductP1VoiceRouteOwner {
         unitId: requiredText(input.unit_id, 'unit_id'),
         chunks,
         frameCount,
+        degradationReason: result.downlink?.degradation_reason ?? null,
         downlinkRoute,
         receiptAuthority,
         captureFramesAcked,
@@ -573,6 +761,10 @@ export class ProductP1VoiceRouteOwner {
       };
       pendingRef = pendingPlayout;
       this.#pendingPlayout = pendingPlayout;
+      if (downlinkTerminal !== null && downlinkRoute !== null) {
+        this.#observeMediaTerminal(downlinkRoute, downlinkTerminal);
+        this.#requireCurrent(operationGeneration);
+      }
       this.#audio.beginPlayout(result.response);
       this.#fillPlayoutQueue(pendingPlayout);
       await rendered;
@@ -595,7 +787,8 @@ export class ProductP1VoiceRouteOwner {
         await this.#revokeMediaAuthority(receiptAuthority);
         this.#requireCurrent(operationGeneration);
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
-        this.#setStatus('capturing', null);
+        this.#setStatus('capturing', pendingPlayout.degradationReason);
+        this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
       } else {
         if (this.#settlingPlayout === pendingPlayout) this.#settlingPlayout = null;
         this.#setStatus('recognized', null);
@@ -605,13 +798,19 @@ export class ProductP1VoiceRouteOwner {
         this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
         return;
       }
+      const failure =
+        playoutResponse !== null && stableFailureReason(error) === 'PAGE_HIDDEN'
+          ? Object.assign(new Error('formal browser playout was fenced because the page is hidden'), {
+              reason: 'PAGE_HIDDEN_PLAYOUT_FENCED',
+            })
+          : error;
       const pending = this.#pendingPlayout;
       if (pending !== null && playoutResponse !== null) {
         this.#pendingPlayout = null;
         this.#audio.stopPlayout(playoutResponse, 'formal_playout_failed');
       }
-      await this.#fail(error);
-      throw error;
+      await this.#fail(failure);
+      throw failure;
     }
   }
 
@@ -689,16 +888,19 @@ export class ProductP1VoiceRouteOwner {
   async #startConcurrentCapture(operationGeneration: number): Promise<void> {
     this.#captureStartupAudioReady = false;
     this.#captureStartupFailure = null;
+    this.#mediaTerminalFailure = null;
     this.#captureReadinessPending = true;
     try {
       await this.#startConcurrentCaptureOwned(operationGeneration);
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
+      this.#mediaTerminalFailure = null;
       this.#captureReadinessPending = false;
     } catch (error) {
-      const failure = this.#captureStartupFailure ?? error;
+      const failure = this.#captureStartupFailure ?? this.#mediaTerminalFailure ?? error;
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
+      this.#mediaTerminalFailure = null;
       this.#captureReadinessPending = false;
       throw failure;
     }
@@ -719,7 +921,13 @@ export class ProductP1VoiceRouteOwner {
     this.#captureFramesAcked = 0;
     this.#route = null;
     this.#speech = null;
-    const metadata = await this.#audio.startCapture(this.#deviceId ? { deviceId: this.#deviceId } : {});
+    this.#endOfTurnNegotiated = false;
+    this.#pendingEndOfTurn = null;
+    this.#endOfTurnDelivered = false;
+    this.#stopAndRecognizePromise = null;
+    const metadata = await this.#audio.startCapture(
+      this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
+    );
     this.#captureStartupAudioReady = true;
     this.#requireHealthyCaptureReadiness(operationGeneration);
     if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
@@ -737,12 +945,9 @@ export class ProductP1VoiceRouteOwner {
         track_id: metadata.track_id,
         sample_rate_hz: metadata.frame_format.sample_rate_hz,
         locale: this.#locale,
+        end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
       });
-      const activation = exactObject(
-        activationValue,
-        ['status', 'reason_id', 'subject_id', 'endpoint_path', 'subprotocol', 'ticket_ttl_ms', 'binding', 'privacy'],
-        'media_activation'
-      );
+      const activation = exactMediaActivation(activationValue);
       if (activation.status !== 'active' || activation.subprotocol !== 'live-voice.media.v1') {
         throw routeUnavailable(activation.reason_id);
       }
@@ -759,6 +964,8 @@ export class ProductP1VoiceRouteOwner {
       const privacy = exactObject(activation.privacy, ['raw_audio_persisted', 'raw_audio_logged', 'memory_only'], 'media_activation.privacy');
       if (privacy.raw_audio_persisted !== false || privacy.raw_audio_logged !== false || privacy.memory_only !== true)
         throw new Error('concurrent media activation did not prove its privacy boundary');
+      this.#observeStreamingAvailability(activation);
+      this.#observeEndOfTurnAvailability(activation);
       return Object.freeze({ activation, subjectId });
     });
     this.#pendingMediaActivation = activationOperation;
@@ -789,17 +996,37 @@ export class ProductP1VoiceRouteOwner {
       attach.binding.frame_format.sample_rate_hz !== metadata.frame_format.sample_rate_hz
     )
       throw new Error('concurrent server media binding does not match browser capture');
-    const route = createBrowserDedicatedMediaRoute({
-      enabled: true,
-      expected_origin: this.#origin,
-      endpoint_url: mediaEndpoint(this.#origin, requiredText(activation.endpoint_path, 'endpoint_path')),
-      binding: attach.binding,
-      provider_available: true,
-      transport_available: true,
-      socket_factory: this.#socketFactory,
-      on_audio_frame: () => undefined,
-    });
+    let ownedRoute: ActiveBrowserDedicatedMediaRoute | null = null;
+    let mediaTicket = consumePrivateText(activation, 'media_ticket', 'media_ticket');
+    let route: BrowserDedicatedMediaRouteActivation;
+    try {
+      route = createBrowserDedicatedMediaRoute({
+        enabled: true,
+        expected_origin: this.#origin,
+        endpoint_url: mediaEndpoint(this.#origin, requiredText(activation.endpoint_path, 'endpoint_path')),
+        media_ticket: mediaTicket,
+        binding: attach.binding,
+        provider_available: true,
+        transport_available: true,
+        socket_factory: this.#socketFactory,
+        on_audio_frame: () => undefined,
+        on_terminal: event => {
+          if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
+        },
+        ...(this.#endOfTurnNegotiated
+          ? {
+              end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+              on_end_of_turn: (event: Readonly<MediaEndOfTurn>) => {
+                this.#observeEndOfTurnControl(operationGeneration, ownedRoute, event);
+              },
+            }
+          : {}),
+      });
+    } finally {
+      mediaTicket = '';
+    }
     if (!route.active) throw new Error(route.reason_id);
+    ownedRoute = route;
     this.#route = route;
     this.#speech = new GatewayBatchSpeechClient({
       enabled: true,
@@ -821,8 +1048,10 @@ export class ProductP1VoiceRouteOwner {
     provider: Readonly<GatewaySpeechProvider>,
     response: Readonly<AudioResponseRef>,
     unitId: string,
-    onFrame: (frame: Readonly<MediaAudioFrame>) => void
+    onFrame: (frame: Readonly<MediaAudioFrame>) => void,
+    onTerminal: (event: Readonly<DedicatedMediaTerminalEvent>) => void
   ): ActiveBrowserDedicatedMediaRoute {
+    const mediaTicket = downlink.take_media_ticket();
     const attach = deserializeMediaControl(
       JSON.stringify({
         type: 'media.attach',
@@ -853,11 +1082,13 @@ export class ProductP1VoiceRouteOwner {
       enabled: true,
       expected_origin: this.#origin,
       endpoint_url: mediaEndpoint(this.#origin, downlink.endpoint_path),
+      media_ticket: mediaTicket,
       binding: attach.binding,
       provider_available: true,
       transport_available: true,
       socket_factory: this.#socketFactory,
       on_audio_frame: onFrame,
+      on_terminal: onTerminal,
       max_pending_frames: downlink.max_pending_frames,
       max_pending_bytes: downlink.max_pending_bytes,
       defer_downlink_ack: true,
@@ -872,7 +1103,7 @@ export class ProductP1VoiceRouteOwner {
       this.#failureCleanupPromise !== null ||
       this.#pendingPlayout !== pending ||
       frame.seq !== pending.chunks.length ||
-      frame.seq >= pending.frameCount
+      frame.seq >= (pending.frameCount ?? 1_500)
     )
       throw new Error('dedicated media downlink frame is stale or non-contiguous');
     pending.chunks.push(
@@ -985,6 +1216,27 @@ export class ProductP1VoiceRouteOwner {
 
   #observePlayout(event: Readonly<BrowserAudioPlayoutEvent>): void {
     const pending = this.#pendingPlayout;
+    const deviceFailure =
+      event.state === 'failed' && ['audio_output_selection_lost', 'audio_output_selection_unverified'].includes(event.reason)
+        ? stableCaptureStopReason(event.reason)
+        : null;
+    if (deviceFailure !== null && this.#failureCleanupPromise === null && !this.#closed) {
+      const failure = Object.assign(new Error('formal browser output selection failed'), { reason: deviceFailure });
+      if (pending !== null) {
+        this.#pendingPlayout = null;
+        pending.reject(failure);
+      }
+      if (this.#captureReadinessPending && ['starting', 'playing'].includes(this.#status)) {
+        this.#captureStartupFailure ??= failure;
+        this.#reason = this.#captureStartupFailure.reason;
+        this.#status = 'cleanup_pending';
+        void this.#audio.close().catch(() => undefined);
+        this.#publish();
+        return;
+      }
+      void this.#fail(failure);
+      return;
+    }
     if (pending === null) return;
     if (
       event.response !== null &&
@@ -997,7 +1249,12 @@ export class ProductP1VoiceRouteOwner {
       this.#pendingPlayout = null;
       pending.reject(
         Object.assign(new Error('formal browser playout failed'), {
-          reason: 'FORMAL_PLAYOUT_FAILED',
+          reason:
+            event.reason.startsWith('page_hidden')
+              ? 'PAGE_HIDDEN_PLAYOUT_FENCED'
+              : stableCaptureStopReason(event.reason) === 'AUDIO_CAPTURE_STOPPED'
+                ? 'FORMAL_PLAYOUT_FAILED'
+                : stableCaptureStopReason(event.reason),
         })
       );
       return;
@@ -1015,10 +1272,12 @@ export class ProductP1VoiceRouteOwner {
         return;
       }
     }
-    pending.renderedChunks = [...pending.expected].reduce(
-      (count, [unitId, finalSeq]) => count + Math.max(0, Math.min(finalSeq, pending.observed.get(unitId) ?? -1) + 1),
-      0
-    );
+    pending.renderedChunks = pending.frameCount === null
+      ? Math.max(0, (pending.observed.get(pending.unitId) ?? -1) + 1)
+      : [...pending.expected].reduce(
+          (count, [unitId, finalSeq]) => count + Math.max(0, Math.min(finalSeq, pending.observed.get(unitId) ?? -1) + 1),
+          0
+        );
     try {
       this.#fillPlayoutQueue(pending);
     } catch (error) {
@@ -1027,11 +1286,70 @@ export class ProductP1VoiceRouteOwner {
       pending.reject(error instanceof Error ? error : new Error('formal playout queue failed'));
       return;
     }
-    if ([...pending.expected].every(([unitId, seq]) => (pending.observed.get(unitId) ?? -1) >= seq) && pending.nextChunkIndex === pending.chunks.length) {
+    if (pending.expected.size === 1 && [...pending.expected].every(([unitId, seq]) => (pending.observed.get(unitId) ?? -1) >= seq) && pending.nextChunkIndex === pending.chunks.length) {
       this.#pendingPlayout = null;
       this.#settlingPlayout = pending;
       pending.resolve();
     }
+  }
+
+  #observeMediaTerminal(route: ActiveBrowserDedicatedMediaRoute, event: Readonly<DedicatedMediaTerminalEvent>): void {
+    if (event.source === 'local_close' || this.#closed || this.#failureCleanupPromise !== null) return;
+    const pending = this.#pendingPlayout ?? this.#settlingPlayout;
+    if (this.#route !== route && pending?.downlinkRoute !== route) return;
+    if (event.source === 'expected_completion') {
+      if (event.direction === 'uplink') return;
+      if (
+        pending?.downlinkRoute === route
+        && pending.frameCount === null
+        && pending.chunks.length > 0
+        && pending.chunks.length <= 1_500
+      ) {
+        const finalSeq = pending.chunks.length - 1;
+        pending.expected.set(pending.unitId, finalSeq);
+        if (
+          pending.nextChunkIndex === pending.chunks.length
+          && pending.renderedChunks === pending.chunks.length
+          && (pending.observed.get(pending.unitId) ?? -1) >= finalSeq
+        ) {
+          if (this.#pendingPlayout === pending) {
+            this.#pendingPlayout = null;
+            this.#settlingPlayout = pending;
+            pending.resolve();
+          }
+          return;
+        }
+      }
+      const finalSeq = pending?.expected.get(pending.unitId);
+      if (
+        pending?.downlinkRoute === route &&
+        pending.expected.size === 1 &&
+        pending.frameCount !== null &&
+        pending.frameCount > 0 &&
+        finalSeq === pending.frameCount - 1 &&
+        pending.chunks.length === pending.frameCount &&
+        pending.nextChunkIndex === pending.frameCount &&
+        (pending.observed.get(pending.unitId) ?? -1) >= finalSeq
+      )
+        return;
+      void this.#fail(
+        Object.assign(new Error('formal dedicated media downlink completed before every declared frame rendered'), {
+          reason: 'MEDIA_TRANSPORT_PROTOCOL_ERROR',
+        })
+      );
+      return;
+    }
+    if (this.#captureReadinessPending && this.#route === route) {
+      this.#mediaTerminalFailure ??= Object.assign(new Error('formal dedicated media route closed before capture readiness'), {
+        reason: 'AUDIO_CAPTURE_MEDIA_ROUTE_CLOSED',
+      });
+      return;
+    }
+    void this.#fail(
+      Object.assign(new Error('formal dedicated media route terminated unexpectedly'), {
+        reason: event.reason_id,
+      })
+    );
   }
 
   async #revokeMediaAuthority(binding: Readonly<ProductP1MediaCloseBinding> | null = this.#mediaCloseBinding): Promise<void> {
@@ -1079,6 +1397,7 @@ export class ProductP1VoiceRouteOwner {
   #requireHealthyCaptureReadiness(operationGeneration: number): void {
     this.#requireCurrent(operationGeneration);
     if (this.#captureStartupFailure !== null) throw this.#captureStartupFailure;
+    if (this.#mediaTerminalFailure !== null) throw this.#mediaTerminalFailure;
   }
 
   async #awaitCaptureReadiness(route: ActiveBrowserDedicatedMediaRoute, operationGeneration: number): Promise<void> {
@@ -1185,6 +1504,10 @@ export class ProductP1VoiceRouteOwner {
 
   async #releaseResources(reason: string, pendingFailureReason: string | null = null): Promise<void> {
     this.#operationGeneration += 1;
+    this.#pendingEndOfTurn = null;
+    this.#endOfTurnHandler = null;
+    this.#endOfTurnDelivered = false;
+    this.#stopAndRecognizePromise = null;
     this.#route?.leaf.close('MEDIA_LOCAL_CLOSE');
     this.#route = null;
     this.#speech = null;
@@ -1232,6 +1555,140 @@ export class ProductP1VoiceRouteOwner {
     this.#status = status;
     this.#reason = reason;
     this.#publish();
+  }
+
+  #observeStreamingAvailability(activation: Record<string, unknown>): void {
+    if (!Object.prototype.hasOwnProperty.call(activation, 'streaming_recognition')) {
+      this.#streamingRecognitionAvailable = false;
+      this.#streamingFallbackReason = null;
+      this.#streamingFallbackTier = null;
+      return;
+    }
+    if (typeof activation.streaming_recognition !== 'boolean') {
+      throw new Error('media activation streaming capability is invalid');
+    }
+    this.#streamingRecognitionAvailable = activation.streaming_recognition;
+    if (activation.streaming_degradation === null) {
+      if (!this.#streamingRecognitionAvailable) {
+        throw new Error('media activation omitted streaming degradation');
+      }
+      this.#streamingFallbackReason = null;
+      this.#streamingFallbackTier = null;
+      return;
+    }
+    if (this.#streamingRecognitionAvailable) {
+      throw new Error('active streaming recognition cannot declare degradation');
+    }
+    const degradation = exactObject(
+      activation.streaming_degradation,
+      ['reason_id', 'fallback_tier', 'visible', 'x_obs_event', 'x_obs_metric'],
+      'media_activation.streaming_degradation'
+    );
+    const reason = requiredText(degradation.reason_id, 'streaming_degradation.reason_id');
+    normalizeStreamingXObs(degradation.x_obs_event, degradation.x_obs_metric);
+    if (
+      !isStreamingSpeechDegradationReason(reason) ||
+      !['batch', 'text'].includes(String(degradation.fallback_tier)) ||
+      degradation.visible !== true
+    ) {
+      throw new Error('media activation streaming degradation is invalid');
+    }
+    this.#streamingFallbackReason = reason;
+    this.#streamingFallbackTier = degradation.fallback_tier as 'batch' | 'text';
+  }
+
+  #observeEndOfTurnAvailability(activation: Record<string, unknown>): void {
+    if (!Object.prototype.hasOwnProperty.call(activation, 'end_of_turn')) {
+      throw new Error('media activation omitted requested end-of-turn negotiation');
+    }
+    const value = objectValue(activation.end_of_turn, 'media_activation.end_of_turn');
+    if (value.status === 'active') {
+      const active = exactObject(
+        value,
+        ['status', 'capability_version', 'detector', 'create_response', 'interrupt_response'],
+        'media_activation.end_of_turn'
+      );
+      if (
+        active.capability_version !== MEDIA_END_OF_TURN_CAPABILITY ||
+        active.detector !== 'server_vad' ||
+        active.create_response !== false ||
+        active.interrupt_response !== false
+      ) {
+        throw new Error('media activation end-of-turn capability mismatched');
+      }
+      this.#endOfTurnNegotiated = true;
+      return;
+    }
+    const fallback = exactObject(
+      value,
+      ['status', 'requested_capability', 'reason_id', 'fallback', 'visible'],
+      'media_activation.end_of_turn'
+    );
+    if (
+      fallback.status !== 'fallback' ||
+      fallback.requested_capability !== MEDIA_END_OF_TURN_CAPABILITY ||
+      fallback.fallback !== 'manual' ||
+      fallback.visible !== true
+    ) {
+      throw new Error('media activation end-of-turn fallback is invalid');
+    }
+    const reason = requiredText(fallback.reason_id, 'end_of_turn.reason_id');
+    if (reason !== 'MEDIA_END_OF_TURN_FEATURE_OFF' && reason !== 'MEDIA_END_OF_TURN_PROVIDER_UNAVAILABLE') {
+      throw new Error('media activation end-of-turn fallback reason is unsupported');
+    }
+    console.warn(`live_voice_end_of_turn_degradation reason=${reason} target=manual visible=true`);
+    this.#endOfTurnNegotiated = false;
+  }
+
+  #deliverEndOfTurn(operationGeneration: number, route: ActiveBrowserDedicatedMediaRoute | null): void {
+    if (
+      this.#pendingEndOfTurn === null ||
+      this.#endOfTurnHandler === null ||
+      this.#endOfTurnDelivered ||
+      route === null ||
+      route !== this.#route ||
+      operationGeneration !== this.#operationGeneration
+    ) {
+      return;
+    }
+    if (this.#status !== 'capturing') {
+      if (this.#stopAndRecognizePromise !== null) this.#endOfTurnDelivered = true;
+      return;
+    }
+    this.#endOfTurnDelivered = true;
+    const handler = this.#endOfTurnHandler;
+    Promise.resolve().then(() => {
+      if (
+        !this.#closed &&
+        operationGeneration === this.#operationGeneration &&
+        route === this.#route &&
+        this.#status === 'capturing'
+      ) {
+        handler();
+      }
+    });
+  }
+
+  #observeEndOfTurnControl(
+    operationGeneration: number,
+    route: ActiveBrowserDedicatedMediaRoute | null,
+    event: Readonly<MediaEndOfTurn>
+  ): void {
+    if (
+      route === null ||
+      route !== this.#route ||
+      operationGeneration !== this.#operationGeneration
+    ) {
+      return;
+    }
+    if (
+      event.lease_id !== route.binding.lease_id ||
+      event.generation !== route.binding.generation.value
+    ) {
+      throw new Error('end-of-turn control escaped its media authority');
+    }
+    this.#pendingEndOfTurn = event;
+    this.#deliverEndOfTurn(operationGeneration, route);
   }
 
   #publish(): void {

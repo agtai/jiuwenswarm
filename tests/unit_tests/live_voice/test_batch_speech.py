@@ -484,6 +484,41 @@ async def test_voice_commit_receipt_is_exact_replayable_and_cannot_rebind() -> N
 
 
 @pytest.mark.asyncio
+async def test_streaming_voice_receipt_binds_exact_issuing_interaction() -> None:
+    service = _service(ControlledProvider())
+    receipt = await service.issue_streaming_voice_commit_receipt(
+        operation_id="operation-stream-1",
+        capture_id="capture-stream-1",
+        capture_generation=0,
+        session_id="session-1",
+        correlation_id="correlation-1",
+        interaction_id="interaction-1",
+        text="hello formal speech",
+    )
+    binding = {
+        "receipt": receipt,
+        "session_id": "session-1",
+        "correlation_id": "correlation-1",
+        "turn_id": "turn-1",
+        "commit_id": "commit-1",
+        "text": "hello formal speech",
+        "critical_confirmation": None,
+    }
+
+    with pytest.raises(ValueError, match="does not match recognition"):
+        await service.claim_voice_commit_receipt(
+            **binding,
+            interaction_id="interaction-foreign",
+        )
+    claim = await service.claim_voice_commit_receipt(
+        **binding,
+        interaction_id="interaction-1",
+    )
+
+    assert claim["interaction_id"] == "interaction-1"
+
+
+@pytest.mark.asyncio
 async def test_critical_voice_receipt_requires_confirmation_and_expires() -> None:
     now = [10.0]
     service = FormalBatchSpeechService(
@@ -1634,3 +1669,23 @@ def test_environment_configuration_requires_secure_complete_gateway_secret_bound
     capability_json = json.dumps(_service(secure).capability_payload())
     assert "server-secret" not in capability_json
     assert "speech.example.test" not in capability_json
+
+
+def test_official_openai_label_enables_only_the_official_w2_batch_fallback() -> None:
+    base = {
+        FORMAL_BATCH_SPEECH_FLAG: "true",
+        SPEECH_PROVIDER_ENV: "openai",
+        SPEECH_API_KEY_ENV: "server-only-key",
+        SPEECH_STT_MODEL_ENV: "gpt-4o-mini-transcribe-2025-12-15",
+        SPEECH_TTS_MODEL_ENV: "gpt-4o-mini-tts-2025-12-15",
+        SPEECH_TTS_VOICE_ENV: "marin",
+    }
+    official = create_environment_batch_speech_provider(
+        {**base, SPEECH_API_BASE_ENV: "https://api.openai.com/v1"}
+    )
+    arbitrary = create_environment_batch_speech_provider(
+        {**base, SPEECH_API_BASE_ENV: "https://provider.example/v1"}
+    )
+
+    assert isinstance(official, OpenAICompatibleBatchSpeechProvider)
+    assert isinstance(arbitrary, UnavailableBatchSpeechProvider)

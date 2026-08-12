@@ -8,6 +8,7 @@ resolve project context, execute a task, persist lifecycle state, or invoke TTS.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -51,6 +52,9 @@ class FormalTaskPolicyInput:
     interaction_id: str | None = None
     turn_id: str | None = None
     commit_id: str | None = None
+    origin_commit_sha256: str | None = None
+    source_start: int | None = None
+    source_end: int | None = None
     task_id: str | None = None
     name: str | None = None
     instruction: str | None = None
@@ -153,12 +157,12 @@ class FormalTaskPolicyAdapter:
         return FormalTaskInvocation(envelope, intent.authorization, intent.context)
 
     def _require_committed_origin(self, intent: FormalTaskPolicyInput) -> None:
-        if intent.source != "voice":
+        if intent.source not in {"voice", "text"}:
             return
         if self._commits is None:
             raise FormalTaskViolation(
                 "COMMIT_AUTHORITY_REQUIRED",
-                "voice task intent requires the authoritative turn commit ledger",
+                "natural-language task intent requires the authoritative turn commit ledger",
                 ErrorCode.UNAVAILABLE,
             )
         try:
@@ -170,16 +174,59 @@ class FormalTaskPolicyAdapter:
             raise FormalTaskViolation(error.reason, str(error), error.code) from error
         if intent.interaction_id != commit.interaction_id:
             raise FormalTaskViolation(
-                "VOICE_TASK_INTERACTION_MISMATCH",
-                "voice task intent must bind the exact committed interaction",
+                "TASK_INTENT_INTERACTION_MISMATCH",
+                "natural-language task intent must bind the exact committed interaction",
                 ErrorCode.PERMISSION_DENIED,
             )
-        if intent.operation == "task.create" and intent.instruction != commit.text:
+        commit_sha256 = hashlib.sha256(commit.canonical_bytes()).hexdigest()
+        if (
+            intent.origin_commit_sha256 is not None
+            and intent.origin_commit_sha256 != commit_sha256
+        ):
             raise FormalTaskViolation(
-                "VOICE_TASK_INSTRUCTION_MISMATCH",
-                "voice task instruction must equal its exact committed speech text",
+                "TASK_INTENT_COMMIT_MISMATCH",
+                "natural-language task intent must bind the exact committed content",
                 ErrorCode.PERMISSION_DENIED,
             )
+        if intent.operation == "task.create":
+            if intent.source_start is None and intent.source_end is None:
+                # Compatibility for the older exact-full-commit voice create
+                # path.  The formal Voice--Task Bridge always supplies a span.
+                matches = intent.instruction == commit.text
+            else:
+                matches = (
+                    type(intent.source_start) is int
+                    and type(intent.source_end) is int
+                    and 0 <= intent.source_start < intent.source_end <= len(commit.text)
+                    and commit.text[intent.source_start : intent.source_end]
+                    == intent.instruction
+                )
+            if not matches:
+                raise FormalTaskViolation(
+                    (
+                        "VOICE_TASK_INSTRUCTION_MISMATCH"
+                        if intent.source == "voice"
+                        and intent.source_start is None
+                        and intent.source_end is None
+                        else "TASK_INTENT_SOURCE_SPAN_MISMATCH"
+                    ),
+                    "task instruction must equal its exact committed source span",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+        elif intent.source_start is not None or intent.source_end is not None:
+            if (
+                type(intent.source_start) is not int
+                or type(intent.source_end) is not int
+                or not 0 <= intent.source_start < intent.source_end <= len(commit.text)
+                or intent.task_id is None
+                or commit.text[intent.source_start : intent.source_end]
+                != intent.task_id
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_SOURCE_SPAN_MISMATCH",
+                    "targeted task intent must equal its exact committed source span",
+                    ErrorCode.PERMISSION_DENIED,
+                )
 
     def require_voice_origin(
         self,
@@ -218,6 +265,49 @@ class FormalTaskPolicyAdapter:
             )
         return commit
 
+    def require_committed_origin(
+        self,
+        *,
+        scope: ScopeRef,
+        interaction_id: str,
+        turn_id: str,
+        commit_id: str,
+        commit_sha256: str,
+        operation: str,
+        instruction: str | None,
+        task_id: str | None,
+        source_start: int,
+        source_end: int,
+    ) -> TurnCommit:
+        """Preflight the content-bound natural-language resolver result."""
+
+        probe = FormalTaskPolicyInput(
+            state=InputCommitState.COMMITTED,
+            source="text",
+            operation=operation,
+            request_id="preflight",
+            issued_at="1970-01-01T00:00:00Z",
+            scope=scope,
+            correlation_id="preflight",
+            authorization=None,
+            interaction_id=interaction_id,
+            turn_id=turn_id,
+            commit_id=commit_id,
+            origin_commit_sha256=commit_sha256,
+            source_start=source_start,
+            source_end=source_end,
+            instruction=instruction,
+            task_id=task_id,
+        )
+        self._require_committed_origin(probe)
+        assert self._commits is not None
+        try:
+            return self._commits.require_origin(
+                OriginRef("committed_turn", turn_id, commit_id), scope
+            )
+        except ContractViolation as error:
+            raise FormalTaskViolation(error.reason, str(error), error.code) from error
+
     @staticmethod
     def _validate_common(intent: FormalTaskPolicyInput) -> None:
         if intent.state is not InputCommitState.COMMITTED:
@@ -226,10 +316,10 @@ class FormalTaskPolicyAdapter:
                 "partial or uncommitted input cannot reach formal Task Core",
                 ErrorCode.PERMISSION_DENIED,
             )
-        if intent.source not in {"voice", "structured"}:
+        if intent.source not in {"voice", "text", "structured"}:
             raise FormalTaskViolation(
                 "INVALID_TASK_INTENT_SOURCE",
-                "formal task intent source must be voice or structured",
+                "formal task intent source must be voice, text or structured",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if intent.ambiguous:
@@ -253,17 +343,30 @@ class FormalTaskPolicyAdapter:
                 "only task.retry may carry server-derived retry lineage",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if intent.source == "voice":
+        if intent.source in {"voice", "text"}:
             if not intent.interaction_id or not intent.turn_id or not intent.commit_id:
                 raise FormalTaskViolation(
                     "COMMITTED_ORIGIN_REQUIRED",
-                    "voice task intent requires the exact committed turn origin",
+                    "natural-language task intent requires the exact committed turn origin",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if (intent.source == "text" or intent.operation == "task.cancel") and (
+                not intent.origin_commit_sha256
+                or type(intent.source_start) is not int
+                or type(intent.source_end) is not int
+            ):
+                raise FormalTaskViolation(
+                    "TASK_INTENT_SOURCE_BINDING_REQUIRED",
+                    "text task intent requires its commit digest and exact source span",
                     ErrorCode.PERMISSION_DENIED,
                 )
         elif (
             intent.interaction_id is not None
             or intent.turn_id is not None
             or intent.commit_id is not None
+            or intent.origin_commit_sha256 is not None
+            or intent.source_start is not None
+            or intent.source_end is not None
         ):
             raise FormalTaskViolation(
                 "INVALID_STRUCTURED_ORIGIN",
@@ -398,7 +501,7 @@ class FormalTaskPolicyAdapter:
                 "turn_id": intent.turn_id,
                 "commit_id": intent.commit_id,
             }
-            if intent.source == "voice"
+            if intent.source in {"voice", "text"}
             else {"kind": "structured", "turn_id": None, "commit_id": None}
         )
         return CommandEnvelope.from_dict(

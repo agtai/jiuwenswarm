@@ -9,20 +9,26 @@ memory-only audit facts needed by the W2 Web composition.
 
 from __future__ import annotations
 
-import hashlib
+import asyncio
 import base64
+import hashlib
+import hmac
 import io
 import json
+import logging
 import math
 import os
+import queue
 import secrets
 import struct
 import threading
 import time
 import wave
 from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Callable, Mapping
+from datetime import UTC, datetime
+from typing import Any, Awaitable, Callable, Literal, Mapping
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
@@ -34,37 +40,83 @@ from jiuwenswarm.common.security.ws_origin import (
     is_allowed_browser_origin,
 )
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
+    MEDIA_END_OF_TURN_CAPABILITY,
     MediaAudioFrame,
     MediaAuthorityBinding,
     MediaDirection,
     MediaFrameFormat,
     MediaGenerationBinding,
     MediaGenerationKind,
+    MediaEndOfTurn,
     MediaPlayoutBinding,
     MediaTransportViolation,
     MediaAttach,
+    deserialize_media_control,
     serialize_media_control,
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
+    DedicatedMediaLeafCleanupOwner,
+    DedicatedMediaLeafCleanupSnapshot,
     DedicatedMediaRouteRequest,
     DedicatedMediaSocketLeafResult,
     run_dedicated_media_socket_leaf,
     run_dedicated_media_downlink_socket_leaf,
 )
+from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
+    StreamingRecognitionFallbackReason,
+    StreamingRecognitionEndOfTurn,
+    StreamingRecognitionHandle,
+    StreamingRecognitionOutcome,
+    StreamingRecognitionRouteOwner,
+)
+from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
+    ProductStreamingSynthesisSource,
+    start_product_streaming_synthesis,
+)
+from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
+    StreamingSynthesisOutcome,
+    StreamingSynthesisRouteOwner,
+)
 from jiuwenswarm.server.live_voice.batch_speech import (
+    CONTRACT_VERSION as SPEECH_CONTRACT_VERSION,
+    FormalBatchSpeechService,
     RECOGNIZE_OPERATION,
     SYNTHESIZE_OPERATION,
+    SynthesisBatchRequest,
     SpeechAuthorizationBinding,
     SpeechRpcContext,
+    parse_synthesis_batch_request,
+)
+from jiuwenswarm.server.live_voice.streaming_speech import (
+    RecognitionTurnDetection,
+    SynthesisStreamRef,
+    SynthesisStreamRequest,
+    TextSpan,
+)
+from jiuwenswarm.server.live_voice.openai_streaming_speech import SpeechRouteTier
+from jiuwenswarm.server.live_voice.observability import (
+    LIVE_VOICE_CONTRACT_VERSION,
+    OBSERVABILITY_SCHEMA_VERSION,
+    LiveVoiceObservabilityCollector,
+    LiveVoiceMetric,
+    LiveVoiceObservation,
+    create_metric,
+    create_observation,
 )
 
 
 MEDIA_ACTIVATE_METHOD = "live_voice.media.activate"
 MEDIA_CLOSE_METHOD = "live_voice.media.close"
 MEDIA_PLAYOUT_RECEIPT_METHOD = "live_voice.media.playout_receipt"
+STREAMING_RECOGNITION_RESULT_METHOD = "live_voice.speech.recognize_streaming_result"
+MEDIA_ROUTE_PATH = "/ws/live-voice/media"
+# Legacy W2 ticket-in-path routing is available only to explicitly constructed
+# compatibility registries. Alpha product construction never enables it.
 MEDIA_ROUTE_PREFIX = "/ws/live-voice/media/"
 MEDIA_SUBPROTOCOL = "live-voice.media.v1"
 MEDIA_FEATURE_ENV = "JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED"
+MEDIA_END_OF_TURN_FEATURE_ENV = "JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED"
+MEDIA_AUTH_CONTRACT_VERSION = "live-voice.media-auth.v1"
 
 _MAX_RECORDS = 128
 _MAX_CAPTURE_WAV_BYTES = 4 * 1024 * 1024
@@ -73,9 +125,17 @@ _MAX_DOWNLINK_FRAMES = 1_500
 _PRODUCT_PLAYOUT_QUEUE_CAPACITY = 256
 _DEFAULT_TICKET_TTL_SECONDS = 30.0
 _DEFAULT_AUTHORITY_TTL_SECONDS = 15 * 60.0
+_MEDIA_AUTH_FRAME_MAX_BYTES = 8 * 1024
+_MEDIA_AUTH_TIMEOUT_SECONDS = 2.0
 _MAX_ID_CHARS = 256
+_MAX_STREAMING_PREOPEN_FRAMES = 64
+_STREAMING_RESULT_TIMEOUT_SECONDS = 36.0
+_STREAMING_OBSERVABILITY_QUEUE_CAPACITY = 64
+_STREAMING_OBSERVABILITY_CLOSE_BUDGET_SECONDS = 0.05
 _LOCALES = frozenset({"en", "en-US", "zh", "zh-CN"})
 _PRODUCT_CONTRACT_VERSION = "live-voice.product-composition.gate0.v1"
+_STREAMING_DIAGNOSTIC_QUEUE_CAPACITY = 16
+_STREAMING_DIAGNOSTIC_CLOSE_BUDGET_SECONDS = 0.05
 _FORMAL_P2_EVIDENCE = frozenset(
     {
         "TRUSTED_AUTHORITY_RESOLVED",
@@ -84,6 +144,98 @@ _FORMAL_P2_EVIDENCE = frozenset(
         "P2_NOTIFICATION_BACKPRESSURE_CLOSED",
     }
 )
+_LOGGER = logging.getLogger(__name__)
+
+StreamingXObsEvent = Literal["failure.observed", "degradation.activated"]
+StreamingXObsMetric = Literal[
+    "live_voice.failure_total", "live_voice.degradation_total"
+]
+
+
+class _StreamingObservabilityOwner:
+    """Bounded non-authoritative handoff to possibly blocking X-OBS sinks."""
+
+    def __init__(
+        self,
+        collector: LiveVoiceObservabilityCollector,
+        *,
+        capacity: int = _STREAMING_OBSERVABILITY_QUEUE_CAPACITY,
+    ) -> None:
+        self._collector = collector
+        self._queue: queue.Queue[
+            tuple[LiveVoiceObservation, LiveVoiceMetric] | None
+        ] = queue.Queue(maxsize=max(1, capacity))
+        self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._closed = False
+
+    def submit(
+        self, observation: LiveVoiceObservation, metric: LiveVoiceMetric
+    ) -> bool:
+        with self._lock:
+            if self._closed:
+                return False
+            if self._worker is None:
+                self._worker = threading.Thread(
+                    target=self._run,
+                    name="live-voice-streaming-observability",
+                    daemon=True,
+                )
+                self._worker.start()
+            try:
+                self._queue.put_nowait((observation, metric))
+            except queue.Full:
+                _LOGGER.warning(
+                    "live_voice_streaming_observability_unavailable "
+                    "reason=QUEUE_SATURATED"
+                )
+                return False
+            return True
+
+    def close(self) -> None:
+        # Teardown is also diagnostic-only.  A sink that ignores its own
+        # budget must not hold the product shutdown path.
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            worker = self._worker
+            try:
+                self._queue.put_nowait(None)
+            except queue.Full:
+                pass
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=_STREAMING_OBSERVABILITY_CLOSE_BUDGET_SECONDS)
+
+    def _run(self) -> None:
+        while True:
+            try:
+                item = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                with self._lock:
+                    if self._closed:
+                        return
+                continue
+            try:
+                if item is None:
+                    return
+                observation, metric = item
+                try:
+                    self._collector.emit_observation(observation)
+                except Exception:
+                    _LOGGER.warning(
+                        "live_voice_streaming_observability_unavailable "
+                        "reason=OBSERVATION_SINK_FAILED"
+                    )
+                try:
+                    self._collector.emit_metric(metric)
+                except Exception:
+                    _LOGGER.warning(
+                        "live_voice_streaming_observability_unavailable "
+                        "reason=METRIC_SINK_FAILED"
+                    )
+            finally:
+                self._queue.task_done()
 
 
 def _enabled(value: object) -> bool:
@@ -164,6 +316,55 @@ def _binding_payload(binding: MediaAuthorityBinding) -> dict[str, object]:
     result = payload.get("binding")
     assert isinstance(result, dict)
     return result
+
+
+def _parse_media_auth_frame(value: object) -> tuple[str, MediaAuthorityBinding] | None:
+    """Parse the bounded, closed first-frame capability without echoing secrets."""
+
+    if not isinstance(value, str):
+        return None
+    try:
+        if len(value.encode("utf-8")) > _MEDIA_AUTH_FRAME_MAX_BYTES:
+            return None
+        raw = json.loads(value)
+    except (UnicodeEncodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, Mapping) or set(raw) != {
+        "type",
+        "contract_version",
+        "media_ticket",
+        "binding",
+    }:
+        return None
+    ticket = raw.get("media_ticket")
+    if (
+        raw.get("type") != "media.auth"
+        or raw.get("contract_version") != MEDIA_AUTH_CONTRACT_VERSION
+        or not isinstance(ticket, str)
+        or not 32 <= len(ticket) <= 128
+        or not all(
+            character.isascii() and (character.isalnum() or character in "_-")
+            for character in ticket
+        )
+    ):
+        return None
+    try:
+        attach = deserialize_media_control(
+            json.dumps(
+                {
+                    "type": "media.attach",
+                    "contract_version": "live-voice.media.v1",
+                    "binding": raw.get("binding"),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
+    except MediaTransportViolation:
+        return None
+    if not isinstance(attach, MediaAttach):
+        return None
+    return ticket, attach.binding
 
 
 def _request_origin(ws: Any) -> str | None:
@@ -260,15 +461,80 @@ def _downlink_frames(
     return tuple(frames)
 
 
+def _synthesis_authorization_binding(
+    request: SynthesisBatchRequest,
+) -> SpeechAuthorizationBinding:
+    content_sha256 = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "response": {
+                    "interaction_id": request.response.interaction_id,
+                    "response_id": request.response.response_id,
+                    "response_generation": request.response.response_generation,
+                },
+                "unit_id": request.unit_id,
+                "display_text": request.display_text,
+                "spoken_text": request.spoken_text,
+                "transforms": [
+                    {
+                        "transform": item.transform,
+                        "source_start": item.source_start,
+                        "source_end": item.source_end,
+                        "rendered_text": item.rendered_text,
+                    }
+                    for item in request.transforms
+                ],
+                "locale": request.locale,
+                "voice": request.voice,
+                "required_sample_rate_hz": request.required_sample_rate_hz,
+            }
+        )
+    ).hexdigest()
+    return SpeechAuthorizationBinding(
+        subject_id=request.scope.subject_id,
+        scope=request.scope,
+        operation=SYNTHESIZE_OPERATION,
+        operation_id=request.operation_id,
+        correlation_id=request.correlation_id,
+        capture_id=None,
+        capture_generation=None,
+        track_id=None,
+        response=request.response,
+        unit_id=request.unit_id,
+        content_sha256=content_sha256,
+    )
+
+
+def _streaming_error_envelope(
+    request: SynthesisBatchRequest, reason: str
+) -> dict[str, object]:
+    return {
+        "contract_version": SPEECH_CONTRACT_VERSION,
+        "request_id": request.request_id,
+        "operation_id": request.operation_id,
+        "ok": False,
+        "result": None,
+        "error": {
+            "code": "CAPABILITY_UNAVAILABLE",
+            "reason": reason,
+            "message": "streaming speech stopped; continue with text or retry",
+            "retriable": True,
+            "correlation_id": request.correlation_id,
+            "details": {},
+        },
+    }
+
+
 @dataclass(slots=True)
 class _MediaAuthority:
-    ticket: str
+    record_id: str
     subject_id: str
     expected_origin: str
     product_activation_id: str
     product_activation_generation: int
     binding: MediaAuthorityBinding
     locale: str
+    end_of_turn_capability: str | None
     issued_at: float
     ticket_expires_at: float
     authority_expires_at: float
@@ -277,16 +543,46 @@ class _MediaAuthority:
     accepted_frames: int = 0
     pcm: bytearray = field(default_factory=bytearray, repr=False)
     recognition_content_sha256: str | None = None
+    streaming_recognition_handle: StreamingRecognitionHandle | None = field(
+        default=None, repr=False
+    )
+    streaming_recognition_outcome: StreamingRecognitionOutcome | None = field(
+        default=None, repr=False
+    )
+    streaming_recognition_ready: asyncio.Future[StreamingRecognitionOutcome] | None = (
+        field(default=None, repr=False)
+    )
+    streaming_recognition_begin_task: asyncio.Task[None] | None = field(
+        default=None, repr=False
+    )
+    streaming_preopen_frames: list[MediaAudioFrame] = field(
+        default_factory=list, repr=False
+    )
+    streaming_voice_commit_receipt: str | None = field(default=None, repr=False)
+    streaming_started_at: float | None = None
+    streaming_observation_emitted: bool = False
+    streaming_x_obs_event: StreamingXObsEvent | None = None
+    streaming_x_obs_metric: StreamingXObsMetric | None = None
+    streaming_observation_lock: threading.Lock = field(
+        default_factory=threading.Lock, repr=False
+    )
     synthesis_content_sha256: dict[tuple[ResponseRef, str], str] = field(
         default_factory=dict, repr=False
     )
     playout_receipts: dict[tuple[ResponseRef, str], dict[str, object]] = field(
         default_factory=dict, repr=False
     )
+    playout_receipt_content_sha256: dict[tuple[ResponseRef, str], str] = field(
+        default_factory=dict, repr=False
+    )
     downlink_frames: tuple[MediaAudioFrame, ...] = field(default=(), repr=False)
+    downlink_stream_source: ProductStreamingSynthesisSource | None = field(
+        default=None, repr=False
+    )
     downlink_response: ResponseRef | None = None
     downlink_unit_id: str | None = None
-    downlink_overlap_ticket: str | None = None
+    downlink_content_sha256: str | None = field(default=None, repr=False)
+    downlink_overlap_record_id: str | None = None
     downlink_overlap_observed: bool = False
     downlink_results: dict[tuple[ResponseRef, str], dict[str, object]] = field(
         default_factory=dict, repr=False
@@ -304,6 +600,187 @@ class _ProductActivationAuthority:
     expires_at: float
 
 
+@dataclass(frozen=True, slots=True)
+class _StreamingObservationContext:
+    operation_id: str
+    correlation_id: str
+    response: ResponseRef
+    started_monotonic: float
+
+
+@dataclass(frozen=True, slots=True)
+class _StreamingDiagnosticItem:
+    owner: "_StreamingSynthesisDiagnosticOwner"
+    context: _StreamingObservationContext
+    outcome: StreamingSynthesisOutcome
+
+
+class _StreamingSynthesisDiagnosticWorker:
+    """One process-wide worker for all bounded product TTS diagnostics.
+
+    Python cannot stop a thread whose configured sink blocks forever. Keeping
+    one daemon worker process-wide prevents repeated WebChannel/registry
+    lifetimes from creating an unbounded pool of abandoned workers.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.Queue[_StreamingDiagnosticItem] = queue.Queue(
+            maxsize=_STREAMING_DIAGNOSTIC_QUEUE_CAPACITY
+        )
+        self._start_lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+
+    def submit(self, item: _StreamingDiagnosticItem) -> bool:
+        self._ensure_started()
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            _LOGGER.warning(
+                "live_voice_streaming_tts_diagnostic_dropped reason=QUEUE_SATURATED"
+            )
+            return False
+        return True
+
+    def _ensure_started(self) -> None:
+        with self._start_lock:
+            if self._worker is not None:
+                return
+            self._worker = threading.Thread(
+                target=self._run,
+                name="live-voice-streaming-tts-diagnostics",
+                daemon=True,
+            )
+            self._worker.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            delivered = False
+            drop_reason: str | None = None
+            try:
+                delivered = item.owner._deliver(item.context, item.outcome)
+                if not delivered:
+                    drop_reason = "OWNER_CLOSED_PENDING"
+            except BaseException:
+                drop_reason = "SINK_FAILED"
+            finally:
+                item.owner._complete_one(
+                    delivered=delivered,
+                    drop_reason=drop_reason,
+                )
+                self._queue.task_done()
+                del item
+
+
+_STREAMING_SYNTHESIS_DIAGNOSTIC_WORKER = _StreamingSynthesisDiagnosticWorker()
+
+
+class _StreamingSynthesisDiagnosticOwner:
+    """Closed lifecycle lease over the shared bounded diagnostic worker."""
+
+    def __init__(
+        self,
+        deliver: Callable[
+            [_StreamingObservationContext, StreamingSynthesisOutcome], None
+        ],
+    ) -> None:
+        self._deliver_callback = deliver
+        self._condition = threading.Condition()
+        self._closed = False
+        self._pending = 0
+        self._accepted = 0
+        self._delivered = 0
+        self._dropped = 0
+
+    def submit(
+        self,
+        context: _StreamingObservationContext,
+        outcome: StreamingSynthesisOutcome,
+    ) -> bool:
+        with self._condition:
+            if self._closed:
+                _LOGGER.warning(
+                    "live_voice_streaming_tts_diagnostic_dropped reason=OWNER_CLOSED"
+                )
+                return False
+            self._pending += 1
+            self._accepted += 1
+        item = _StreamingDiagnosticItem(self, context, outcome)
+        try:
+            queued = _STREAMING_SYNTHESIS_DIAGNOSTIC_WORKER.submit(item)
+        except BaseException:
+            self._complete_one(
+                delivered=False,
+                drop_reason="WORKER_UNAVAILABLE",
+            )
+            return False
+        if queued:
+            return True
+        # The process-wide worker already logged the bounded queue rejection.
+        self._complete_one(delivered=False, drop_reason=None)
+        return False
+
+    def close(self) -> bool:
+        deadline = time.monotonic() + _STREAMING_DIAGNOSTIC_CLOSE_BUDGET_SECONDS
+        with self._condition:
+            self._closed = True
+            while self._pending:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    _LOGGER.warning(
+                        "live_voice_streaming_tts_diagnostic_cleanup_incomplete "
+                        "reason=SINK_DID_NOT_STOP pending=%d",
+                        self._pending,
+                    )
+                    return False
+                self._condition.wait(timeout=remaining)
+            return True
+
+    @property
+    def accounting(self) -> tuple[int, int, int, int]:
+        """Return accepted, delivered, dropped, and still-pending counts."""
+
+        with self._condition:
+            return (
+                self._accepted,
+                self._delivered,
+                self._dropped,
+                self._pending,
+            )
+
+    def _deliver(
+        self,
+        context: _StreamingObservationContext,
+        outcome: StreamingSynthesisOutcome,
+    ) -> bool:
+        with self._condition:
+            if self._closed:
+                return False
+        self._deliver_callback(context, outcome)
+        return True
+
+    def _complete_one(
+        self,
+        *,
+        delivered: bool,
+        drop_reason: str | None,
+    ) -> None:
+        with self._condition:
+            if delivered:
+                self._delivered += 1
+            else:
+                self._dropped += 1
+            if self._pending > 0:
+                self._pending -= 1
+            if self._pending == 0:
+                self._condition.notify_all()
+        if drop_reason is not None:
+            _LOGGER.warning(
+                "live_voice_streaming_tts_diagnostic_dropped reason=%s",
+                drop_reason,
+            )
+
+
 class DedicatedMediaProductRegistry:
     """Bounded ticket registry and exact Speech authorization resolver."""
 
@@ -315,13 +792,21 @@ class DedicatedMediaProductRegistry:
         ticket_ttl_seconds: float = _DEFAULT_TICKET_TTL_SECONDS,
         authority_ttl_seconds: float = _DEFAULT_AUTHORITY_TTL_SECONDS,
         capacity: int = _MAX_RECORDS,
+        legacy_path_ticket_compat: bool = False,
+        end_of_turn_enabled: bool = False,
+        streaming_observability: LiveVoiceObservabilityCollector | None = None,
     ) -> None:
         self.enabled = enabled is True
         self._monotonic = monotonic
         self._ticket_ttl = ticket_ttl_seconds
         self._authority_ttl = authority_ttl_seconds
         self._capacity = max(1, min(capacity, _MAX_RECORDS))
+        self.legacy_path_ticket_compat = legacy_path_ticket_compat is True
+        self.end_of_turn_enabled = end_of_turn_enabled is True
         self._records: OrderedDict[str, _MediaAuthority] = OrderedDict()
+        # One-use credentials exist only in this pre-authentication index.  All
+        # durable authority references use an unrelated internal record id.
+        self._pending_tickets: OrderedDict[str, str] = OrderedDict()
         self._subjects: dict[tuple[str, str], str] = {}
         self._product_activations: OrderedDict[
             tuple[str, str, str], _ProductActivationAuthority
@@ -330,14 +815,313 @@ class DedicatedMediaProductRegistry:
             OrderedDict()
         )
         self._lock = threading.RLock()
-        self._provider_available = False
+        self._batch_provider_available = False
+        self._streaming_provider_available = False
+        self._streaming_selection_degradation: dict[str, object] | None = None
+        self._streaming_recognition_owner: StreamingRecognitionRouteOwner | None = None
+        self._streaming_receipt_issuer: Callable[..., Awaitable[str]] | None = None
+        self._streaming_cleanup_tasks: set[asyncio.Task[None]] = set()
+        if streaming_observability is not None and not isinstance(
+            streaming_observability, LiveVoiceObservabilityCollector
+        ):
+            raise TypeError("streaming observability collector is invalid")
+        self._streaming_observability = streaming_observability
+        self._streaming_observability_owner = (
+            _StreamingObservabilityOwner(
+                streaming_observability,
+                capacity=_STREAMING_OBSERVABILITY_QUEUE_CAPACITY,
+            )
+            if streaming_observability is not None
+            else None
+        )
+        self._streaming_synthesis_owner: StreamingSynthesisRouteOwner | None = None
+        self._streaming_synthesis_observability: (
+            LiveVoiceObservabilityCollector | None
+        ) = None
+        self._stream_cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._media_leaf_cleanup_owner = DedicatedMediaLeafCleanupOwner(
+            capacity=max(2, self._capacity * 2)
+        )
+        self._streaming_diagnostic_owner: _StreamingSynthesisDiagnosticOwner | None = (
+            None
+        )
+        self._streaming_diagnostics_cleanup_complete: bool | None = None
 
     @classmethod
     def from_environment(cls) -> "DedicatedMediaProductRegistry":
-        return cls(enabled=_enabled(os.getenv(MEDIA_FEATURE_ENV)))
+        enabled = _enabled(os.getenv(MEDIA_FEATURE_ENV))
+        return cls(
+            enabled=enabled,
+            end_of_turn_enabled=(
+                enabled and _enabled(os.getenv(MEDIA_END_OF_TURN_FEATURE_ENV))
+            ),
+            streaming_observability=(
+                LiveVoiceObservabilityCollector() if enabled else None
+            ),
+        )
+
+    @property
+    def streaming_observability(self) -> LiveVoiceObservabilityCollector | None:
+        return self._streaming_observability
+
+    def close_streaming_observability(self) -> None:
+        owner = self._streaming_observability_owner
+        if owner is not None:
+            owner.close()
+
+    @property
+    def media_leaf_cleanup_snapshot(self) -> DedicatedMediaLeafCleanupSnapshot:
+        return self._media_leaf_cleanup_owner.snapshot
+
+    async def retry_media_leaf_cleanup(self, *, timeout_seconds: float = 1.0) -> bool:
+        return await self._media_leaf_cleanup_owner.retry_cleanup(
+            timeout_seconds=timeout_seconds
+        )
+
+    async def close_media_leaf_cleanup(self, *, timeout_seconds: float = 1.0) -> bool:
+        return await self._media_leaf_cleanup_owner.close(
+            timeout_seconds=timeout_seconds
+        )
 
     def set_provider_available(self, value: bool) -> None:
-        self._provider_available = value is True
+        self._batch_provider_available = value is True
+
+    async def prepare_streaming_provider(self) -> None:
+        if not self.enabled:
+            return
+        owner = self._streaming_recognition_owner
+        if owner is None:
+            return
+        try:
+            available = await owner.available()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            available = False
+        with self._lock:
+            self._streaming_provider_available = available
+            fact = owner.selection_degradation
+            self._streaming_selection_degradation = (
+                {
+                    "reason_id": StreamingRecognitionFallbackReason.CONFIGURATION_UNAVAILABLE.value,
+                    "fallback_tier": (
+                        SpeechRouteTier.BATCH.value
+                        if self._batch_provider_available
+                        else SpeechRouteTier.TEXT.value
+                    ),
+                    "visible": True,
+                    "x_obs_event": None,
+                    "x_obs_metric": None,
+                }
+                if not available and fact is None
+                else (
+                    None
+                    if fact is None
+                    else {
+                        "reason_id": fact.get("reason"),
+                        "fallback_tier": fact.get("to_tier"),
+                        "visible": fact.get("visible"),
+                        # Startup has no capture/interaction record from which
+                        # an exact X-OBS binding can be emitted.
+                        "x_obs_event": None,
+                        "x_obs_metric": None,
+                    }
+                )
+            )
+
+    def configure_streaming_recognition(
+        self,
+        owner: StreamingRecognitionRouteOwner,
+        *,
+        receipt_issuer: Callable[..., Awaitable[str]],
+    ) -> None:
+        if not isinstance(owner, StreamingRecognitionRouteOwner):
+            raise TypeError("streaming recognition owner is invalid")
+        if not callable(receipt_issuer):
+            raise TypeError("streaming recognition receipt issuer is invalid")
+        with self._lock:
+            if self._records:
+                raise RuntimeError(
+                    "streaming recognition must be configured before use"
+                )
+            self._streaming_recognition_owner = owner
+            self._streaming_receipt_issuer = receipt_issuer
+
+    def configure_streaming_synthesis(
+        self,
+        owner: StreamingSynthesisRouteOwner,
+        *,
+        observability: LiveVoiceObservabilityCollector | None = None,
+    ) -> None:
+        if not self.enabled:
+            raise RuntimeError("streaming synthesis cannot attach to disabled media")
+        if not isinstance(owner, StreamingSynthesisRouteOwner):
+            raise TypeError("streaming synthesis requires its route owner")
+        if observability is not None and not isinstance(
+            observability, LiveVoiceObservabilityCollector
+        ):
+            raise TypeError("streaming synthesis observability must be typed")
+        if self._streaming_synthesis_owner is not None:
+            raise RuntimeError("streaming synthesis is already configured")
+        self._streaming_synthesis_owner = owner
+        self._streaming_synthesis_observability = observability
+        if observability is not None:
+            self._streaming_diagnostic_owner = _StreamingSynthesisDiagnosticOwner(
+                self._observe_streaming_outcome
+            )
+
+    @property
+    def streaming_diagnostics_cleanup_complete(self) -> bool | None:
+        return self._streaming_diagnostics_cleanup_complete
+
+    def close_streaming_diagnostics(self) -> bool:
+        owner = self._streaming_diagnostic_owner
+        if owner is None:
+            self._streaming_diagnostics_cleanup_complete = True
+            return True
+        complete = owner.close()
+        self._streaming_diagnostics_cleanup_complete = complete
+        return complete
+
+    def _observe_streaming_outcome(
+        self,
+        context: _StreamingObservationContext,
+        outcome: StreamingSynthesisOutcome,
+    ) -> None:
+        collector = self._streaming_synthesis_observability
+        if collector is None:
+            return
+        try:
+            identity = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        "operation_id": context.operation_id,
+                        "binding_ref": outcome.request_binding_ref,
+                        "reason": outcome.reason.value
+                        if outcome.reason
+                        else "completed",
+                    }
+                )
+            ).hexdigest()[:32]
+            observed_at = (
+                datetime.now(UTC)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z")
+            )
+            observed_monotonic = self._monotonic()
+            binding = {
+                "correlation_id": context.correlation_id,
+                "interaction_id": context.response.interaction_id,
+                "response_id": context.response.response_id,
+                "response_generation": context.response.response_generation,
+            }
+            provider_id = outcome.provider_id
+            if outcome.completed:
+                collector.emit_observation(
+                    {
+                        "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                        "event_id": f"tts-completed-{identity}",
+                        "event_name": "segment.completed",
+                        "segment_name": "speech.synthesis",
+                        "observed_at": observed_at,
+                        "monotonic_ms": observed_monotonic * 1000,
+                        "binding": binding,
+                        "route": {
+                            "implementation_class": "formal",
+                            "owner_module": "gateway.streaming_synthesis",
+                            "capability_provider": provider_id,
+                            "contract_version": LIVE_VOICE_CONTRACT_VERSION,
+                            "reason_code": None,
+                        },
+                        "source_component": "gateway.streaming_synthesis",
+                        "state": "terminal",
+                        "outcome": "completed",
+                        "duration_ms": max(
+                            0.0,
+                            (observed_monotonic - context.started_monotonic) * 1000,
+                        ),
+                    }
+                )
+                return
+            fact = outcome.fact
+            if fact is None or not fact.visible or fact.x_obs_metric is None:
+                # Route abort, successor fencing, and owner shutdown are normal
+                # controls, not Provider degradation. The route owner already
+                # classifies these as content-free control facts.
+                return
+            fallback_route = {
+                "implementation_class": "fallback",
+                "owner_module": "gateway.streaming_synthesis",
+                "capability_provider": provider_id,
+                "contract_version": None,
+                "reason_code": "ROUTE_FALLBACK",
+            }
+            collector.emit_observation(
+                {
+                    "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                    "event_id": f"tts-degraded-{identity}",
+                    "event_name": "degradation.activated",
+                    "segment_name": "system.degradation",
+                    "observed_at": observed_at,
+                    "monotonic_ms": self._monotonic() * 1000,
+                    "binding": binding,
+                    "route": fallback_route,
+                    "source_component": "gateway.streaming_synthesis",
+                    "reason_code": "DEGRADED",
+                }
+            )
+            collector.emit_metric(
+                {
+                    "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                    "measurement_id": f"tts-degraded-metric-{identity}",
+                    "metric_name": "live_voice.degradation_total",
+                    "metric_kind": "counter",
+                    "unit": "count",
+                    "value": 1,
+                    "observed_at": observed_at,
+                    "binding": binding,
+                    "route": fallback_route,
+                    "segment_name": "system.degradation",
+                    "implementation_class": "fallback",
+                    "reason_code": "DEGRADED",
+                }
+            )
+        except BaseException:
+            _LOGGER.warning(
+                "live_voice_streaming_tts_diagnostic_dropped reason=EMISSION_FAILED"
+            )
+            # X-OBS must never block or change Speech/media business behavior.
+            return
+
+    def _schedule_streaming_outcome(
+        self,
+        context: _StreamingObservationContext,
+        outcome: StreamingSynthesisOutcome,
+    ) -> None:
+        owner = self._streaming_diagnostic_owner
+        if owner is not None:
+            owner.submit(context, outcome)
+
+    def _release_stream_source(self, record: _MediaAuthority) -> None:
+        source = record.downlink_stream_source
+        record.downlink_stream_source = None
+        if source is None:
+            return
+        try:
+            task = asyncio.create_task(
+                source.aclose(), name="live-voice-product-tts-source-close"
+            )
+        except RuntimeError:
+            return
+        self._stream_cleanup_tasks.add(task)
+        task.add_done_callback(self._consume_stream_cleanup)
+
+    def _consume_stream_cleanup(self, task: asyncio.Task[None]) -> None:
+        self._stream_cleanup_tasks.discard(task)
+        try:
+            task.exception()
+        except BaseException:
+            return
 
     def activate(
         self,
@@ -349,7 +1133,7 @@ class DedicatedMediaProductRegistry:
     ) -> dict[str, object]:
         if not self.enabled:
             return {"status": "disabled", "reason_id": "MEDIA_FEATURE_DISABLED"}
-        if not self._provider_available:
+        if not (self._batch_provider_available or self._streaming_provider_available):
             return {
                 "status": "unavailable",
                 "reason_id": "MEDIA_PROVIDER_UNAVAILABLE",
@@ -366,10 +1150,31 @@ class DedicatedMediaProductRegistry:
             "sample_rate_hz",
             "locale",
         }
-        if set(params) != expected_keys:
+        requests_end_of_turn = "end_of_turn_capability" in params
+        if frozenset(params) not in {
+            frozenset(expected_keys),
+            frozenset(expected_keys | {"end_of_turn_capability"}),
+        }:
             raise MediaTransportViolation(
                 "MEDIA_INVALID_ACTIVATION", "media activation fields are not closed"
             )
+        requested_end_of_turn = params.get("end_of_turn_capability")
+        if (
+            requests_end_of_turn
+            and requested_end_of_turn != MEDIA_END_OF_TURN_CAPABILITY
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_END_OF_TURN_CAPABILITY_MISMATCH",
+                "requested end-of-turn capability is unsupported",
+            )
+        owner = self._streaming_recognition_owner
+        end_of_turn_available = bool(
+            requests_end_of_turn
+            and self.end_of_turn_enabled
+            and self._streaming_provider_available
+            and owner is not None
+            and owner.end_of_turn_available
+        )
         if request_origin is None or not is_allowed_browser_origin(request_origin):
             raise MediaTransportViolation(
                 "MEDIA_ORIGIN_REJECTED", "media activation requires an allowed Origin"
@@ -420,6 +1225,7 @@ class DedicatedMediaProductRegistry:
                     "media activation requires the exact accepted product P2 route",
                 )
         ticket = secrets.token_urlsafe(32)
+        record_id = f"media-record-{secrets.token_hex(16)}"
         subject_id = f"live-voice-media:{secrets.token_hex(16)}"
         binding = MediaAuthorityBinding(
             lease_id=f"media-lease-{secrets.token_hex(16)}",
@@ -441,13 +1247,16 @@ class DedicatedMediaProductRegistry:
             ),
         )
         record = _MediaAuthority(
-            ticket=ticket,
+            record_id=record_id,
             subject_id=subject_id,
             expected_origin=request_origin,
             product_activation_id=activation_id,
             product_activation_generation=activation_generation,
             binding=binding,
             locale=locale,
+            end_of_turn_capability=(
+                MEDIA_END_OF_TURN_CAPABILITY if end_of_turn_available else None
+            ),
             issued_at=now,
             ticket_expires_at=now + self._ticket_ttl,
             authority_expires_at=now + self._authority_ttl,
@@ -458,15 +1267,62 @@ class DedicatedMediaProductRegistry:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
-            self._records[ticket] = record
-            self._subjects[(session_id, subject_id)] = ticket
+            self._records[record_id] = record
+            self._pending_tickets[ticket] = record_id
+            self._subjects[(session_id, subject_id)] = record_id
+        route_descriptor = (
+            {"endpoint_path": f"{MEDIA_ROUTE_PREFIX}{ticket}"}
+            if self.legacy_path_ticket_compat
+            else {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
+        )
+        streaming_descriptor = (
+            {}
+            if self._streaming_recognition_owner is None
+            else {
+                "streaming_recognition": self._streaming_provider_available,
+                "streaming_degradation": self._streaming_selection_degradation,
+            }
+        )
+        end_of_turn_descriptor: dict[str, object] = {}
+        if requests_end_of_turn:
+            if end_of_turn_available:
+                end_of_turn_descriptor = {
+                    "end_of_turn": {
+                        "status": "active",
+                        "capability_version": MEDIA_END_OF_TURN_CAPABILITY,
+                        "detector": "server_vad",
+                        "create_response": False,
+                        "interrupt_response": False,
+                    }
+                }
+            else:
+                reason_id = (
+                    "MEDIA_END_OF_TURN_FEATURE_OFF"
+                    if not self.end_of_turn_enabled
+                    else "MEDIA_END_OF_TURN_PROVIDER_UNAVAILABLE"
+                )
+                _LOGGER.warning(
+                    "live_voice_end_of_turn_degradation reason=%s target=manual visible=true",
+                    reason_id,
+                )
+                end_of_turn_descriptor = {
+                    "end_of_turn": {
+                        "status": "fallback",
+                        "requested_capability": MEDIA_END_OF_TURN_CAPABILITY,
+                        "reason_id": reason_id,
+                        "fallback": "manual",
+                        "visible": True,
+                    }
+                }
         return {
             "status": "active",
             "reason_id": "MEDIA_ROUTE_TICKET_ISSUED",
             "subject_id": subject_id,
-            "endpoint_path": f"{MEDIA_ROUTE_PREFIX}{ticket}",
+            **route_descriptor,
             "subprotocol": MEDIA_SUBPROTOCOL,
             "ticket_ttl_ms": int(self._ticket_ttl * 1000),
+            **streaming_descriptor,
+            **end_of_turn_descriptor,
             "binding": _binding_payload(binding),
             "privacy": {
                 "raw_audio_persisted": False,
@@ -476,27 +1332,739 @@ class DedicatedMediaProductRegistry:
         }
 
     def consume_ticket(
-        self, ticket: str, *, request_origin: str | None
+        self,
+        ticket: str,
+        *,
+        request_origin: str | None,
+        claimed_binding: MediaAuthorityBinding | None = None,
     ) -> _MediaAuthority | None:
         now = self._monotonic()
         with self._lock:
             self._prune(now)
-            record = self._records.get(ticket)
+            # Ticket lookup scans the bounded pending index and uses a
+            # constant-time comparison. A successful capability is removed
+            # immediately; the authority record remains reachable by subject.
+            matched_ticket: str | None = None
+            try:
+                candidate = ticket.encode("utf-8") if isinstance(ticket, str) else b""
+            except UnicodeEncodeError:
+                candidate = b""
+            for pending_ticket in self._pending_tickets:
+                if hmac.compare_digest(pending_ticket.encode("utf-8"), candidate):
+                    matched_ticket = pending_ticket
+            if matched_ticket is None:
+                return None
+            record_id = self._pending_tickets.get(matched_ticket)
+            record = self._records.get(record_id or "")
             if (
                 record is None
                 or record.ticket_consumed
                 or now > record.ticket_expires_at
                 or request_origin != record.expected_origin
                 or not is_allowed_browser_origin(request_origin)
+                or (claimed_binding is not None and claimed_binding != record.binding)
             ):
                 return None
+            assert matched_ticket is not None
+            self._pending_tickets.pop(matched_ticket, None)
             record.ticket_consumed = True
             return record
+
+    def start_streaming_recognition(self, record: _MediaAuthority) -> None:
+        """Start Provider allocation without delaying browser media attach."""
+
+        if record.binding.direction is not MediaDirection.UPLINK:
+            return
+        loop = asyncio.get_running_loop()
+        with self._lock:
+            if (
+                self._records.get(record.record_id) is not record
+                or not record.ticket_consumed
+                or record.route_completed
+            ):
+                return
+            if record.streaming_recognition_ready is not None:
+                return
+            record.streaming_recognition_ready = loop.create_future()
+            record.streaming_started_at = self._monotonic()
+            owner = self._streaming_recognition_owner
+        if owner is None:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.CONFIGURATION_UNAVAILABLE
+                ),
+            )
+            return
+        task = loop.create_task(
+            self._open_streaming_recognition(record, owner),
+            name=f"live-voice-streaming-stt-open-{record.record_id}",
+        )
+        with self._lock:
+            if (
+                self._records.get(record.record_id) is record
+                and not record.route_completed
+                and record.streaming_recognition_begin_task is None
+            ):
+                record.streaming_recognition_begin_task = task
+                return
+        task.cancel()
+        self._streaming_cleanup_tasks.add(task)
+        task.add_done_callback(self._streaming_cleanup_tasks.discard)
+
+    async def begin_streaming_recognition(self, record: _MediaAuthority) -> None:
+        """Compatibility helper for callers that explicitly await Provider readiness."""
+
+        self.start_streaming_recognition(record)
+        with self._lock:
+            task = record.streaming_recognition_begin_task
+        if task is not None:
+            await asyncio.shield(task)
+
+    async def _open_streaming_recognition(
+        self,
+        record: _MediaAuthority,
+        owner: StreamingRecognitionRouteOwner,
+    ) -> None:
+        try:
+            handle, fallback = await owner.begin(
+                record.binding,
+                turn_detection=(
+                    RecognitionTurnDetection.server_vad_default()
+                    if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+                    else RecognitionTurnDetection.manual()
+                ),
+            )
+        except asyncio.CancelledError:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                ),
+            )
+            raise
+        except Exception:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE
+                ),
+            )
+            return
+        with self._lock:
+            current = (
+                self._records.get(record.record_id) is record
+                and record.streaming_recognition_outcome is None
+            )
+            if current:
+                record.streaming_recognition_handle = handle
+                preopen_frames = tuple(record.streaming_preopen_frames)
+                record.streaming_preopen_frames.clear()
+            else:
+                preopen_frames = ()
+        if not current:
+            if handle is not None:
+                await owner.abort(handle)
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                ),
+            )
+            return
+        if handle is not None:
+            for frame in preopen_frames:
+                owner.offer(handle, frame)
+        if fallback is not None:
+            self._retain_streaming_outcome(record, fallback)
+
+    async def wait_streaming_end_of_turn(
+        self, record: _MediaAuthority
+    ) -> MediaEndOfTurn:
+        """Return one negotiated, content-free Provider-time EOT control."""
+
+        try:
+            await self._settle_streaming_begin(record)
+            with self._lock:
+                owner = self._streaming_recognition_owner
+                handle = record.streaming_recognition_handle
+                current = (
+                    self._records.get(record.record_id) is record
+                    and not record.route_completed
+                    and record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+                )
+            if not current or owner is None or handle is None:
+                raise RuntimeError("end-of-turn route is unavailable")
+            observed: StreamingRecognitionEndOfTurn = await owner.wait_end_of_turn(
+                handle
+            )
+            with self._lock:
+                if (
+                    self._records.get(record.record_id) is not record
+                    or record.route_completed
+                    or record.streaming_recognition_handle is not handle
+                ):
+                    raise RuntimeError("end-of-turn authority became stale")
+            _LOGGER.info(
+                "live_voice_end_of_turn_observed detector=server_vad "
+                "timing_basis=provider_time provenance=adapter_derived"
+            )
+            return MediaEndOfTurn(
+                lease_id=record.binding.lease_id,
+                generation=record.binding.generation.value,
+                provider_start_ms=observed.provider_start_ms,
+                provider_end_ms=observed.provider_end_ms,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._emit_streaming_observability(
+                record,
+                outcome=self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
+                ),
+            )
+            _LOGGER.warning(
+                "live_voice_end_of_turn_degradation reason=EOT_PROVIDER_FAILED "
+                "target=manual visible=true"
+            )
+            raise RuntimeError("end-of-turn Provider path failed") from None
+
+    def accept_streaming_frame(
+        self, record: _MediaAuthority, frame: MediaAudioFrame
+    ) -> None:
+        cancel_begin = False
+        with self._lock:
+            if (
+                self._records.get(record.record_id) is not record
+                or record.route_completed
+            ):
+                return
+            owner = self._streaming_recognition_owner
+            handle = record.streaming_recognition_handle
+            begin_task = record.streaming_recognition_begin_task
+            if (
+                owner is not None
+                and handle is None
+                and begin_task is not None
+                and record.streaming_recognition_outcome is None
+            ):
+                if len(record.streaming_preopen_frames) < _MAX_STREAMING_PREOPEN_FRAMES:
+                    record.streaming_preopen_frames.append(frame)
+                else:
+                    record.streaming_preopen_frames.clear()
+                    cancel_begin = True
+        if owner is not None and handle is not None:
+            owner.offer(handle, frame)
+        elif cancel_begin:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
+                ),
+            )
+            assert begin_task is not None
+            begin_task.cancel()
+
+    async def finish_streaming_recognition(self, record: _MediaAuthority) -> None:
+        with self._lock:
+            begin_pending = (
+                record.streaming_recognition_begin_task is not None
+                and record.streaming_recognition_handle is None
+                and record.streaming_recognition_outcome is None
+            )
+        if begin_pending:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.PROVIDER_TIMEOUT
+                ),
+            )
+        await self._settle_streaming_begin(record)
+        owner = self._streaming_recognition_owner
+        handle = record.streaming_recognition_handle
+        if record.streaming_recognition_outcome is not None:
+            return
+        if owner is None or handle is None:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.CONFIGURATION_UNAVAILABLE
+                ),
+            )
+            return
+        try:
+            outcome = await owner.finish(handle)
+        except asyncio.CancelledError:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                ),
+            )
+            raise
+        except Exception:
+            outcome = self._streaming_fallback(
+                StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE
+            )
+        with self._lock:
+            current = (
+                self._records.get(record.record_id) is record
+                and record.route_completed
+                and record.recognition_content_sha256 is not None
+                and record.accepted_frames > 0
+            )
+            record.streaming_recognition_handle = None
+        if not current:
+            self._retain_streaming_outcome(
+                record,
+                self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                ),
+            )
+            return
+        if outcome.completed:
+            issuer = self._streaming_receipt_issuer
+            if issuer is None or outcome.final_text is None:
+                outcome = self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
+                )
+            else:
+                try:
+                    receipt = await issuer(
+                        operation_id=f"streaming-recognition-{record.binding.lease_id}",
+                        capture_id=record.binding.generation.id,
+                        capture_generation=record.binding.generation.value,
+                        session_id=record.binding.session_id,
+                        correlation_id=record.binding.correlation_id,
+                        interaction_id=record.binding.interaction_id,
+                        text=outcome.final_text,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    outcome = self._streaming_fallback(
+                        StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
+                    )
+                else:
+                    with self._lock:
+                        if self._records.get(record.record_id) is record:
+                            record.streaming_voice_commit_receipt = receipt
+        self._retain_streaming_outcome(record, outcome)
+
+    async def abort_streaming_recognition(self, record: _MediaAuthority) -> None:
+        self._retain_streaming_outcome(
+            record,
+            self._streaming_fallback(StreamingRecognitionFallbackReason.ROUTE_ABORTED),
+        )
+        await self._settle_streaming_begin(record)
+        with self._lock:
+            owner = self._streaming_recognition_owner
+            handle = record.streaming_recognition_handle
+            record.streaming_recognition_handle = None
+        if owner is not None and handle is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await owner.abort(handle)
+
+    async def _settle_streaming_begin(self, record: _MediaAuthority) -> None:
+        with self._lock:
+            task = record.streaming_recognition_begin_task
+            record.streaming_recognition_begin_task = None
+            record.streaming_preopen_frames.clear()
+        if task is None:
+            return
+        if not task.done():
+            task.cancel()
+        done, pending = await asyncio.wait({task}, timeout=1.0)
+        if pending:
+            self._streaming_cleanup_tasks.add(task)
+            task.add_done_callback(self._streaming_cleanup_tasks.discard)
+            return
+        try:
+            task.result()
+        except (Exception, asyncio.CancelledError):
+            return
+
+    async def streaming_recognition_result(
+        self,
+        *,
+        params: Mapping[str, object],
+        routed_session_id: str,
+        connection_id: str,
+        request_origin: str | None,
+    ) -> dict[str, object]:
+        expected_keys = {
+            "session_id",
+            "subject_id",
+            "correlation_id",
+            "interaction_id",
+            "capture_id",
+            "capture_generation",
+            "track_id",
+        }
+        if set(params) != expected_keys:
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_STREAMING_RESULT",
+                "streaming recognition result fields are not closed",
+            )
+        session_id = _required_id(params.get("session_id"), "session_id")
+        if session_id != routed_session_id:
+            raise MediaTransportViolation(
+                "MEDIA_SESSION_MISMATCH",
+                "streaming recognition result must target the routed session",
+            )
+        subject_id = _required_id(params.get("subject_id"), "subject_id")
+        correlation_id = _required_id(params.get("correlation_id"), "correlation_id")
+        interaction_id = _required_id(params.get("interaction_id"), "interaction_id")
+        capture_id = _required_id(params.get("capture_id"), "capture_id")
+        capture_generation = _safe_uint(
+            params.get("capture_generation"), "capture_generation"
+        )
+        track_id = _required_id(params.get("track_id"), "track_id")
+        now = self._monotonic()
+        with self._lock:
+            self._prune(now)
+            record_id = self._subjects.get((session_id, subject_id))
+            record = self._records.get(record_id or "")
+            if (
+                record is None
+                or record.binding.direction is not MediaDirection.UPLINK
+                or record.binding.connection_id != connection_id
+                or record.expected_origin != request_origin
+                or not is_allowed_browser_origin(request_origin)
+                or record.binding.correlation_id != correlation_id
+                or record.binding.interaction_id != interaction_id
+                or record.binding.generation.id != capture_id
+                or record.binding.generation.value != capture_generation
+                or record.binding.track_id != track_id
+                or not record.ticket_consumed
+                or not record.route_completed
+                or now > record.authority_expires_at
+                or not self._has_retained_product_activation(record, now)
+            ):
+                raise MediaTransportViolation(
+                    "MEDIA_STREAMING_RESULT_UNAUTHORIZED",
+                    "streaming recognition result authority is absent or stale",
+                )
+            ready = record.streaming_recognition_ready
+            immediate = record.streaming_recognition_outcome
+        if immediate is None and ready is not None:
+            try:
+                immediate = await asyncio.wait_for(
+                    asyncio.shield(ready),
+                    timeout=_STREAMING_RESULT_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                immediate = self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.PROVIDER_TIMEOUT
+                )
+                self._retain_streaming_outcome(record, immediate)
+                # The caller is about to authorize a product fallback.  Fence
+                # the exact streaming stream first so it cannot later mint an
+                # unreachable receipt or keep consuming Provider resources.
+                await self.abort_streaming_recognition(record)
+        if immediate is None:
+            immediate = self._streaming_fallback(
+                StreamingRecognitionFallbackReason.CONFIGURATION_UNAVAILABLE
+            )
+        with self._lock:
+            if self._records.get(record.record_id) is not record:
+                raise MediaTransportViolation(
+                    "MEDIA_STREAMING_RESULT_UNAUTHORIZED",
+                    "streaming recognition result authority is absent or stale",
+                )
+            receipt = record.streaming_voice_commit_receipt
+        capture = {
+            "capture_id": capture_id,
+            "capture_generation": capture_generation,
+            "track_id": track_id,
+            "final": True,
+        }
+        if immediate.completed:
+            if (
+                immediate.final_text is None
+                or immediate.provider is None
+                or receipt is None
+            ):
+                raise MediaTransportViolation(
+                    "MEDIA_STREAMING_RESULT_INCOMPLETE",
+                    "streaming recognition result is incomplete",
+                )
+            result = {
+                "status": "completed",
+                "operation": "speech.recognize.stream",
+                "capture": capture,
+                "final_text": immediate.final_text,
+                "raw_text": immediate.final_text,
+                "commits_turn": False,
+                "voice_commit_receipt": receipt,
+                "provider": {
+                    "provider_id": immediate.provider.provider_id,
+                    "implementation_class": immediate.provider.implementation_class,
+                    "fallback_from": immediate.provider.fallback_from,
+                },
+                "degradation": None,
+            }
+            self._emit_streaming_observability(
+                record,
+                outcome=immediate,
+            )
+            return result
+        # A Provider adapter cannot know whether the product retained one
+        # complete, bounded capture.  Batch replay is authorized here, and only
+        # here, after the canonical media route sealed its exact digest.
+        fallback_tier = (
+            SpeechRouteTier.BATCH
+            if (
+                self._batch_provider_available
+                and record.route_completed
+                and record.accepted_frames > 0
+                and record.recognition_content_sha256 is not None
+                and immediate.reason
+                is not StreamingRecognitionFallbackReason.ROUTE_ABORTED
+            )
+            else SpeechRouteTier.TEXT
+        )
+        reason_id = (
+            immediate.reason.value
+            if immediate.reason is not None
+            else StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE.value
+        )
+        _LOGGER.warning(
+            "live_voice_streaming_recognition_degradation reason=%s target=%s visible=true",
+            reason_id,
+            fallback_tier.value,
+        )
+        x_obs_event, x_obs_metric = self._emit_streaming_observability(
+            record,
+            outcome=immediate,
+        )
+        result = {
+            "status": "fallback",
+            "operation": "speech.recognize.stream",
+            "capture": capture,
+            "fallback_tier": fallback_tier.value,
+            "reason_id": reason_id,
+            "visible": True,
+            "x_obs_event": x_obs_event,
+            "x_obs_metric": x_obs_metric,
+        }
+        return result
+
+    def _emit_streaming_observability(
+        self,
+        record: _MediaAuthority,
+        *,
+        outcome: StreamingRecognitionOutcome,
+    ) -> tuple[StreamingXObsEvent | None, StreamingXObsMetric | None]:
+        owner = self._streaming_observability_owner
+        if owner is None:
+            return None, None
+        with record.streaming_observation_lock:
+            if record.streaming_observation_emitted:
+                return record.streaming_x_obs_event, record.streaming_x_obs_metric
+            built = self._build_streaming_observability(record, outcome=outcome)
+            if built is None:
+                emitted: tuple[
+                    StreamingXObsEvent | None, StreamingXObsMetric | None
+                ] = (None, None)
+            else:
+                observation, metric = built
+                emitted = (
+                    (observation.event_name, metric.metric_name)
+                    if owner.submit(observation, metric)
+                    else (None, None)
+                )
+            record.streaming_x_obs_event, record.streaming_x_obs_metric = emitted
+            record.streaming_observation_emitted = True
+            return emitted
+
+    def _build_streaming_observability(
+        self,
+        record: _MediaAuthority,
+        *,
+        outcome: StreamingRecognitionOutcome,
+    ) -> tuple[LiveVoiceObservation, LiveVoiceMetric] | None:
+        started_at = record.streaming_started_at
+        now = self._monotonic()
+        duration_ms = max(
+            0.0,
+            (now - (started_at if started_at is not None else now)) * 1000.0,
+        )
+        observed_at = (
+            datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        )
+        binding = {
+            "correlation_id": record.binding.correlation_id,
+            "interaction_id": record.binding.interaction_id,
+        }
+        source_record_id = record.record_id
+        try:
+            if outcome.completed and outcome.provider is not None:
+                route = {
+                    "implementation_class": "formal",
+                    "owner_module": "gateway.streaming_speech_route",
+                    "capability_provider": outcome.provider.provider_id,
+                    "contract_version": LIVE_VOICE_CONTRACT_VERSION,
+                    "reason_code": None,
+                }
+                observation = create_observation(
+                    {
+                        "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                        "event_id": f"{source_record_id}:stt-completed",
+                        "event_name": "segment.completed",
+                        "segment_name": "speech.recognition",
+                        "observed_at": observed_at,
+                        "monotonic_ms": now * 1000.0,
+                        "binding": binding,
+                        "route": route,
+                        "source_component": "gateway.streaming_speech",
+                        "source_record_id": source_record_id,
+                        "state": "terminal",
+                        "outcome": "completed",
+                        "duration_ms": duration_ms,
+                    }
+                )
+                metric = create_metric(
+                    {
+                        "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                        "measurement_id": f"{source_record_id}:stt-latency",
+                        "metric_name": "live_voice.segment_latency_ms",
+                        "metric_kind": "histogram",
+                        "unit": "milliseconds",
+                        "value": duration_ms,
+                        "observed_at": observed_at,
+                        "binding": binding,
+                        "route": route,
+                        "segment_name": "speech.recognition",
+                        "implementation_class": "formal",
+                        "outcome": "completed",
+                    }
+                )
+                return observation, metric
+            route = {
+                "implementation_class": "fallback",
+                "owner_module": "gateway.streaming_speech_route",
+                "capability_provider": (
+                    outcome.provider.provider_id
+                    if outcome.provider is not None
+                    else None
+                ),
+                "contract_version": None,
+                "reason_code": "ROUTE_FALLBACK",
+            }
+            if outcome.reason is StreamingRecognitionFallbackReason.ROUTE_ABORTED:
+                event_name: StreamingXObsEvent = "degradation.activated"
+                metric_name: StreamingXObsMetric = "live_voice.degradation_total"
+                segment_name = "system.degradation"
+                reason_code = "DEGRADED"
+                error_code = None
+            else:
+                event_name = "failure.observed"
+                metric_name = "live_voice.failure_total"
+                segment_name = "speech.recognition"
+                fallback_reason = outcome.reason or (
+                    StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE
+                )
+                reason_code, error_code = {
+                    StreamingRecognitionFallbackReason.PROVIDER_TIMEOUT: (
+                        "TIMEOUT",
+                        "TIMEOUT",
+                    ),
+                    StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL: (
+                        "PROTOCOL_REJECTED",
+                        "PROTOCOL_VIOLATION",
+                    ),
+                    StreamingRecognitionFallbackReason.CONFIGURATION_UNAVAILABLE: (
+                        "UNAVAILABLE",
+                        "CAPABILITY_UNAVAILABLE",
+                    ),
+                    StreamingRecognitionFallbackReason.FEATURE_OFF: (
+                        "UNAVAILABLE",
+                        "CAPABILITY_UNAVAILABLE",
+                    ),
+                }.get(
+                    fallback_reason,
+                    ("UNAVAILABLE", "UNAVAILABLE"),
+                )
+            observation_payload = {
+                "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                "event_id": f"{source_record_id}:stt-degraded",
+                "event_name": event_name,
+                "segment_name": segment_name,
+                "observed_at": observed_at,
+                "monotonic_ms": now * 1000.0,
+                "binding": binding,
+                "route": route,
+                "source_component": "gateway.streaming_speech",
+                "source_record_id": source_record_id,
+                "reason_code": reason_code,
+            }
+            metric_payload = {
+                "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                "measurement_id": f"{source_record_id}:stt-degraded",
+                "metric_name": metric_name,
+                "metric_kind": "counter",
+                "unit": "count",
+                "value": 1,
+                "observed_at": observed_at,
+                "binding": binding,
+                "route": route,
+                "segment_name": segment_name,
+                "implementation_class": "fallback",
+                "reason_code": reason_code,
+            }
+            if error_code is not None:
+                observation_payload["error_code"] = error_code
+                metric_payload["error_code"] = error_code
+            return (
+                create_observation(observation_payload),
+                create_metric(metric_payload),
+            )
+        except Exception:
+            _LOGGER.warning(
+                "live_voice_streaming_observability_unavailable reason=FACT_REJECTED"
+            )
+            return None
+
+    def _retain_streaming_outcome(
+        self, record: _MediaAuthority, outcome: StreamingRecognitionOutcome
+    ) -> None:
+        ready: asyncio.Future[StreamingRecognitionOutcome] | None
+        with self._lock:
+            if record.streaming_recognition_outcome is None:
+                record.streaming_recognition_outcome = outcome
+            retained = record.streaming_recognition_outcome
+            ready = record.streaming_recognition_ready
+        if ready is not None and not ready.done():
+            ready.set_result(retained)
+
+    def _streaming_fallback(
+        self, reason: StreamingRecognitionFallbackReason
+    ) -> StreamingRecognitionOutcome:
+        return StreamingRecognitionOutcome(
+            completed=False,
+            final_text=None,
+            provider=None,
+            fallback_tier=(
+                SpeechRouteTier.TEXT
+                if reason is StreamingRecognitionFallbackReason.ROUTE_ABORTED
+                else (
+                    SpeechRouteTier.BATCH
+                    if self._batch_provider_available
+                    else SpeechRouteTier.TEXT
+                )
+            ),
+            reason=reason,
+        )
 
     def accept_frame(self, record: _MediaAuthority, frame: MediaAudioFrame) -> None:
         encoded = _pcm16(frame.samples)
         with self._lock:
-            if record.route_completed:
+            if (
+                self._records.get(record.record_id) is not record
+                or record.route_completed
+            ):
                 raise MediaTransportViolation(
                     "MEDIA_LEASE_CLOSED", "media capture route is already complete"
                 )
@@ -541,6 +2109,7 @@ class DedicatedMediaProductRegistry:
             record.route_completed = True
             record.recognition_content_sha256 = None
             record.downlink_frames = ()
+            self._release_stream_source(record)
             record.pcm.clear()
 
     def revoke(
@@ -590,8 +2159,8 @@ class DedicatedMediaProductRegistry:
         now = self._monotonic()
         with self._lock:
             self._prune(now)
-            ticket = self._subjects.get((session_id, subject_id))
-            record = self._records.get(ticket or "")
+            record_id = self._subjects.get((session_id, subject_id))
+            record = self._records.get(record_id or "")
             if record is None:
                 if self._revoked.get(subject_id) != binding:
                     raise MediaTransportViolation(
@@ -612,9 +2181,9 @@ class DedicatedMediaProductRegistry:
                         "MEDIA_CLOSE_BINDING_MISMATCH",
                         "media close does not own the exact route",
                     )
-                owned_tickets = [
-                    ticket
-                    for ticket, candidate in self._records.items()
+                owned_record_ids = [
+                    candidate_record_id
+                    for candidate_record_id, candidate in self._records.items()
                     if candidate.subject_id == subject_id
                     and candidate.binding.session_id == session_id
                     and candidate.binding.correlation_id == correlation_id
@@ -623,16 +2192,25 @@ class DedicatedMediaProductRegistry:
                     and candidate.product_activation_generation == activation_generation
                     and candidate.binding.connection_id == owner_connection_id
                 ]
-                owned_records = [self._records.pop(ticket) for ticket in owned_tickets]
+                owned_records = [
+                    self._records.pop(owned_record_id)
+                    for owned_record_id in owned_record_ids
+                ]
                 self._subjects.pop((session_id, subject_id), None)
-                for owned in owned_records:
+                for owned_record_id, owned in zip(
+                    owned_record_ids, owned_records, strict=True
+                ):
+                    self._drop_pending_for_record_id(owned_record_id)
                     owned.route_completed = True
                     owned.recognition_content_sha256 = None
                     owned.synthesis_content_sha256.clear()
                     owned.playout_receipts.clear()
+                    owned.playout_receipt_content_sha256.clear()
                     owned.downlink_results.clear()
                     owned.downlink_frames = ()
+                    self._release_stream_source(owned)
                     owned.pcm.clear()
+                    self._schedule_streaming_abort(owned)
                 self._remember_revoked(subject_id, binding)
         return {
             "status": "closed",
@@ -870,8 +2448,8 @@ class DedicatedMediaProductRegistry:
         now = self._monotonic()
         with self._lock:
             self._prune(now)
-            ticket = self._subjects.get((session_id, subject or ""))
-            record = self._records.get(ticket or "")
+            record_id = self._subjects.get((session_id, subject or ""))
+            record = self._records.get(record_id or "")
             if (
                 record is not None
                 and record.ticket_consumed
@@ -891,8 +2469,10 @@ class DedicatedMediaProductRegistry:
         now = self._monotonic()
         with self._lock:
             self._prune(now)
-            ticket = self._subjects.get((binding.scope.session_id, binding.subject_id))
-            record = self._records.get(ticket or "")
+            record_id = self._subjects.get(
+                (binding.scope.session_id, binding.subject_id)
+            )
+            record = self._records.get(record_id or "")
             if (
                 record is None
                 or not record.ticket_consumed
@@ -937,6 +2517,217 @@ class DedicatedMediaProductRegistry:
                 return binding if expected == binding.content_sha256 else None
             return None
 
+    async def try_streaming_synthesis(
+        self,
+        operation_name: str,
+        params: object,
+        context: SpeechRpcContext,
+        session_id: str,
+        *,
+        batch_service: FormalBatchSpeechService,
+    ) -> dict[str, object] | None:
+        """Own the exact product streaming route or explicitly delegate batch."""
+
+        owner = self._streaming_synthesis_owner
+        if operation_name != SYNTHESIZE_OPERATION or owner is None:
+            return None
+        if (
+            not isinstance(context, SpeechRpcContext)
+            or context.assurance is not Assurance.AUTHENTICATED
+            or context.subject_id is None
+            or context.session_id != session_id
+        ):
+            return None
+        try:
+            request = parse_synthesis_batch_request(params, context)
+        except Exception:
+            return None
+        # The native route does not yet carry render-transform or per-request
+        # voice semantics.  Those exact requests stay on the existing batch
+        # contract instead of being silently approximated.
+        if request.transforms or request.voice is not None:
+            return None
+        binding = _synthesis_authorization_binding(request)
+        if self.authorize(binding) != binding:
+            return None
+        stream_identity = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "operation_id": request.operation_id,
+                    "response_id": request.response.response_id,
+                    "response_generation": request.response.response_generation,
+                    "unit_id": request.unit_id,
+                }
+            )
+        ).hexdigest()[:40]
+        observation_context = _StreamingObservationContext(
+            request.operation_id,
+            request.correlation_id,
+            request.response,
+            self._monotonic(),
+        )
+
+        def observe_outcome(outcome: StreamingSynthesisOutcome) -> None:
+            self._schedule_streaming_outcome(observation_context, outcome)
+
+        start = await start_product_streaming_synthesis(
+            owner,
+            SynthesisStreamRequest(
+                ref=SynthesisStreamRef(
+                    stream_id=f"product-tts-{stream_identity}",
+                    stream_generation=0,
+                    response=request.response,
+                    unit_id=request.unit_id,
+                    unit_seq=0,
+                ),
+                display_text=request.display_text,
+                spoken_text=request.spoken_text,
+                display_span=TextSpan(0, len(request.display_text)),
+                sample_rate_hz=request.required_sample_rate_hz,
+                timeout_seconds=request.timeout_ms / 1000,
+            ),
+            on_outcome=observe_outcome,
+        )
+        if start.source is None:
+            outcome = start.outcome
+            assert outcome is not None
+            if outcome.batch_eligible and not outcome.first_audio_emitted:
+                batch_result = await batch_service.synthesize(params, context)
+                return {
+                    **batch_result,
+                    "_streaming_degradation_reason": (
+                        outcome.reason.value if outcome.reason is not None else None
+                    ),
+                }
+            return _streaming_error_envelope(
+                request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
+            )
+
+        source = start.source
+        try:
+            model = source.model
+            voice = source.voice
+            implementation_class = source.provider_implementation_class
+            if implementation_class != "formal":
+                raise TypeError("streaming Provider is not a formal route")
+        except BaseException:
+            await source.aclose()
+            return _streaming_error_envelope(
+                request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
+            )
+        now = self._monotonic()
+        stored: tuple[str, MediaAuthorityBinding] | None = None
+        with self._lock:
+            self._prune(now)
+            parent_record_id = self._subjects.get((session_id, context.subject_id))
+            parent = self._records.get(parent_record_id or "")
+            key = (request.response, request.unit_id)
+            if (
+                parent is not None
+                and parent.binding.direction is MediaDirection.UPLINK
+                and parent.binding.correlation_id == request.correlation_id
+                and parent.binding.interaction_id == request.response.interaction_id
+                and parent.synthesis_content_sha256.get(key) == binding.content_sha256
+                and now <= parent.authority_expires_at
+                and self._has_retained_product_activation(parent, now)
+                and len(self._records) < self._capacity
+            ):
+                ticket = secrets.token_urlsafe(32)
+                record_id = f"media-record-{secrets.token_hex(16)}"
+                media_binding = MediaAuthorityBinding(
+                    lease_id=f"media-downlink-{secrets.token_hex(16)}",
+                    authority_evidence_id=f"media-authority-{secrets.token_hex(16)}",
+                    connection_id=parent.binding.connection_id,
+                    connection_epoch=parent.binding.connection_epoch,
+                    session_id=parent.binding.session_id,
+                    media_session_id=f"media-session-{secrets.token_hex(16)}",
+                    interaction_id=request.response.interaction_id,
+                    track_id=f"playout-{secrets.token_hex(12)}",
+                    correlation_id=parent.binding.correlation_id,
+                    direction=MediaDirection.DOWNLINK,
+                    generation=MediaGenerationBinding(
+                        MediaGenerationKind.RESPONSE,
+                        request.response.response_id,
+                        request.response.response_generation,
+                    ),
+                    frame_format=MediaFrameFormat(
+                        sample_rate_hz=request.required_sample_rate_hz,
+                        samples_per_channel=request.required_sample_rate_hz // 50,
+                    ),
+                    playout=MediaPlayoutBinding(
+                        request.response.response_id,
+                        request.response.response_generation,
+                        request.unit_id,
+                    ),
+                )
+                self._records[record_id] = _MediaAuthority(
+                    record_id=record_id,
+                    subject_id=parent.subject_id,
+                    expected_origin=parent.expected_origin,
+                    product_activation_id=parent.product_activation_id,
+                    product_activation_generation=parent.product_activation_generation,
+                    binding=media_binding,
+                    locale=parent.locale,
+                    end_of_turn_capability=None,
+                    issued_at=now,
+                    ticket_expires_at=now + self._ticket_ttl,
+                    authority_expires_at=parent.authority_expires_at,
+                    downlink_stream_source=source,
+                    downlink_response=request.response,
+                    downlink_unit_id=request.unit_id,
+                    downlink_content_sha256=binding.content_sha256,
+                )
+                self._pending_tickets[ticket] = record_id
+                stored = ticket, media_binding
+        if stored is None:
+            await source.aclose()
+            return _streaming_error_envelope(
+                request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
+            )
+        ticket, media_binding = stored
+        audio = {
+            "format": "pcm_f32_mono_20ms",
+            "sample_rate_hz": request.required_sample_rate_hz,
+            "channel_count": 1,
+            "frame_count": None,
+            "delivery": "dedicated_media_downlink",
+            "endpoint_path": MEDIA_ROUTE_PATH,
+            "media_ticket": ticket,
+            "subprotocol": MEDIA_SUBPROTOCOL,
+            "ticket_ttl_ms": int(self._ticket_ttl * 1000),
+            "binding": _binding_payload(media_binding),
+            "max_pending_frames": 8,
+            "max_pending_bytes": 131_072,
+            "streaming": True,
+            "degradation_reason": None,
+        }
+        provider = {
+            "provider_id": source.provider_id,
+            "implementation_class": implementation_class,
+            "model": model,
+            "fallback_from": source.provider_fallback_from,
+            **({"voice": voice} if voice is not None else {}),
+        }
+        return {
+            "contract_version": SPEECH_CONTRACT_VERSION,
+            "request_id": request.request_id,
+            "operation_id": request.operation_id,
+            "ok": True,
+            "result": {
+                "operation": SYNTHESIZE_OPERATION,
+                "response": {
+                    "interaction_id": request.response.interaction_id,
+                    "response_id": request.response.response_id,
+                    "response_generation": request.response.response_generation,
+                },
+                "unit_id": request.unit_id,
+                "audio": audio,
+                "provider": provider,
+                "presented": False,
+            },
+            "error": None,
+        }
+
     def prepare_synthesis_downlink(
         self,
         operation_name: str,
@@ -947,6 +2738,13 @@ class DedicatedMediaProductRegistry:
     ) -> dict[str, object]:
         """Replace exact product synthesis bytes with a one-use binary ticket."""
 
+        degradation_reason = result.get("_streaming_degradation_reason")
+        if "_streaming_degradation_reason" in result:
+            result = {
+                key: value
+                for key, value in result.items()
+                if key != "_streaming_degradation_reason"
+            }
         if (
             operation_name != SYNTHESIZE_OPERATION
             or not isinstance(params, Mapping)
@@ -965,6 +2763,13 @@ class DedicatedMediaProductRegistry:
             return result
         audio = payload.get("audio")
         if not isinstance(audio, Mapping):
+            return result
+        if audio.get("delivery") == "dedicated_media_downlink":
+            return result
+        try:
+            request = parse_synthesis_batch_request(params, context)
+            authorization_binding = _synthesis_authorization_binding(request)
+        except Exception:
             return result
         try:
             response = ResponseRef(
@@ -1001,24 +2806,33 @@ class DedicatedMediaProductRegistry:
         now = self._monotonic()
         with self._lock:
             self._prune(now)
-            parent_ticket = self._subjects.get((session_id, context.subject_id))
-            parent = self._records.get(parent_ticket or "")
+            parent_record_id = self._subjects.get((session_id, context.subject_id))
+            parent = self._records.get(parent_record_id or "")
             key = (response, unit_id)
             if (
                 parent is None
                 or parent.binding.direction is not MediaDirection.UPLINK
                 or parent.binding.correlation_id != params.get("correlation_id")
                 or parent.binding.interaction_id != response.interaction_id
-                or key not in parent.synthesis_content_sha256
+                or response != request.response
+                or unit_id != request.unit_id
                 or now > parent.authority_expires_at
                 or not self._has_retained_product_activation(parent, now)
             ):
                 return result
+            if (
+                parent.synthesis_content_sha256.get(key)
+                != authorization_binding.content_sha256
+            ):
+                return _streaming_error_envelope(
+                    request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
+                )
             if len(self._records) >= self._capacity:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
             ticket = secrets.token_urlsafe(32)
+            record_id = f"media-record-{secrets.token_hex(16)}"
             binding = MediaAuthorityBinding(
                 lease_id=f"media-downlink-{secrets.token_hex(16)}",
                 authority_evidence_id=f"media-authority-{secrets.token_hex(16)}",
@@ -1046,33 +2860,43 @@ class DedicatedMediaProductRegistry:
                 ),
             )
             record = _MediaAuthority(
-                ticket=ticket,
+                record_id=record_id,
                 subject_id=parent.subject_id,
                 expected_origin=parent.expected_origin,
                 product_activation_id=parent.product_activation_id,
                 product_activation_generation=parent.product_activation_generation,
                 binding=binding,
                 locale=parent.locale,
+                end_of_turn_capability=None,
                 issued_at=now,
                 ticket_expires_at=now + self._ticket_ttl,
                 authority_expires_at=parent.authority_expires_at,
                 downlink_frames=frames,
                 downlink_response=response,
                 downlink_unit_id=unit_id,
+                downlink_content_sha256=authorization_binding.content_sha256,
             )
-            self._records[ticket] = record
+            self._records[record_id] = record
+            self._pending_tickets[ticket] = record_id
+        route_descriptor = (
+            {"endpoint_path": f"{MEDIA_ROUTE_PREFIX}{ticket}"}
+            if self.legacy_path_ticket_compat
+            else {"endpoint_path": MEDIA_ROUTE_PATH, "media_ticket": ticket}
+        )
         transformed_audio = {
             "format": "pcm_f32_mono_20ms",
             "sample_rate_hz": sample_rate_hz,
             "channel_count": 1,
             "frame_count": len(frames),
             "delivery": "dedicated_media_downlink",
-            "endpoint_path": f"{MEDIA_ROUTE_PREFIX}{ticket}",
+            **route_descriptor,
             "subprotocol": MEDIA_SUBPROTOCOL,
             "ticket_ttl_ms": int(self._ticket_ttl * 1000),
             "binding": _binding_payload(binding),
             "max_pending_frames": 8,
             "max_pending_bytes": 131_072,
+            "streaming": False,
+            "degradation_reason": degradation_reason,
         }
         return {
             **result,
@@ -1083,10 +2907,10 @@ class DedicatedMediaProductRegistry:
         """Bind the downlink start to one exact consumed live uplink."""
 
         with self._lock:
-            record.downlink_overlap_ticket = next(
+            record.downlink_overlap_record_id = next(
                 (
-                    ticket
-                    for ticket, other in self._records.items()
+                    record_id
+                    for record_id, other in self._records.items()
                     if other is not record
                     and other.binding.direction is MediaDirection.UPLINK
                     and other.binding.session_id == record.binding.session_id
@@ -1106,12 +2930,22 @@ class DedicatedMediaProductRegistry:
         self, record: _MediaAuthority, result: DedicatedMediaSocketLeafResult
     ) -> bool:
         with self._lock:
-            frame_count = len(record.downlink_frames)
+            source = record.downlink_stream_source
+            frame_count = (
+                source.emitted_frames
+                if source is not None
+                else len(record.downlink_frames)
+            )
+            source_completed = source.completed if source is not None else True
             record.route_completed = True
             record.downlink_frames = ()
+            record.downlink_stream_source = None
             response = record.downlink_response
             unit_id = record.downlink_unit_id
-            overlapping_uplink = self._records.get(record.downlink_overlap_ticket or "")
+            content_sha256 = record.downlink_content_sha256
+            overlapping_uplink = self._records.get(
+                record.downlink_overlap_record_id or ""
+            )
             record.downlink_overlap_observed = bool(
                 overlapping_uplink is not None
                 and overlapping_uplink.binding.direction is MediaDirection.UPLINK
@@ -1123,7 +2957,9 @@ class DedicatedMediaProductRegistry:
                 result.activated
                 and response is not None
                 and unit_id is not None
+                and content_sha256 is not None
                 and frame_count > 0
+                and source_completed
                 and result.sent_frames == frame_count
                 and result.acknowledged_through_seq == frame_count - 1
                 and result.playback_stop_receipts == 0
@@ -1135,10 +2971,10 @@ class DedicatedMediaProductRegistry:
             )
             if response is None or unit_id is None:
                 return False
-            parent_ticket = self._subjects.get(
+            parent_record_id = self._subjects.get(
                 (record.binding.session_id, record.subject_id)
             )
-            parent = self._records.get(parent_ticket or "")
+            parent = self._records.get(parent_record_id or "")
             if parent is None:
                 return False
             parent.downlink_results[(response, unit_id)] = {
@@ -1150,6 +2986,7 @@ class DedicatedMediaProductRegistry:
                 "peak_pending_frames": result.peak_pending_frames,
                 "peak_pending_bytes": result.peak_pending_bytes,
                 "overlap_observed": record.downlink_overlap_observed,
+                "content_sha256": content_sha256,
             }
             return complete
 
@@ -1232,8 +3069,8 @@ class DedicatedMediaProductRegistry:
         now = self._monotonic()
         with self._lock:
             self._prune(now)
-            ticket = self._subjects.get((session_id, subject_id))
-            record = self._records.get(ticket or "")
+            record_id = self._subjects.get((session_id, subject_id))
+            record = self._records.get(record_id or "")
             if (
                 record is None
                 or record.binding.connection_id != owner_connection_id
@@ -1254,11 +3091,19 @@ class DedicatedMediaProductRegistry:
                 )
             key = (response, unit_id)
             downlink = record.downlink_results.get(key)
-            duplex_media_observed = bool(
-                downlink is not None
-                and downlink.get("complete") is True
-                and downlink.get("overlap_observed") is True
-            )
+            if (
+                downlink is None
+                or downlink.get("complete") is not True
+                or downlink.get("overlap_observed") is not True
+                or downlink.get("content_sha256")
+                != record.synthesis_content_sha256.get(key)
+                or downlink.get("sent_frames") != rendered_chunks
+                or downlink.get("acknowledged_through_seq") != rendered_through_seq
+            ):
+                raise MediaTransportViolation(
+                    "MEDIA_PLAYOUT_RECEIPT_UNTRUSTED",
+                    "media playout receipt does not match the completed downlink",
+                )
             receipt_id = (
                 "media-playout-"
                 + hashlib.sha256(
@@ -1300,28 +3145,43 @@ class DedicatedMediaProductRegistry:
                 "playout_peak_depth": queue_peak_depth,
                 "capture_control_ack": "capture_flush_acked",
                 "playout_state": "render_completed",
-                "duplex_media_observed": duplex_media_observed,
+                "duplex_media_observed": True,
             }
             previous = record.playout_receipts.get(key)
+            previous_content_sha256 = record.playout_receipt_content_sha256.get(key)
+            content_sha256 = downlink.get("content_sha256")
+            if previous is not None and previous_content_sha256 != content_sha256:
+                raise MediaTransportViolation(
+                    "MEDIA_PLAYOUT_RECEIPT_CONFLICT",
+                    "media playout receipt content binding cannot change",
+                )
             if previous is not None and previous != payload:
                 raise MediaTransportViolation(
                     "MEDIA_PLAYOUT_RECEIPT_CONFLICT",
                     "media playout receipt cannot change after acceptance",
                 )
             record.playout_receipts[key] = payload
+            assert isinstance(content_sha256, str)
+            record.playout_receipt_content_sha256[key] = content_sha256
             return dict(payload)
+
+    def _drop_pending_for_record_id(self, record_id: str) -> None:
+        for ticket, pending_record_id in tuple(self._pending_tickets.items()):
+            if pending_record_id == record_id:
+                self._pending_tickets.pop(ticket, None)
 
     def _prune(self, now: float) -> None:
         expired = [
-            ticket
-            for ticket, record in self._records.items()
+            record_id
+            for record_id, record in self._records.items()
             if now > record.authority_expires_at
             or (not record.ticket_consumed and now > record.ticket_expires_at)
         ]
-        for ticket in expired:
-            record = self._records.pop(ticket)
+        for record_id in expired:
+            record = self._records.pop(record_id)
+            self._drop_pending_for_record_id(record_id)
             subject_key = (record.binding.session_id, record.subject_id)
-            if self._subjects.get(subject_key) == ticket:
+            if self._subjects.get(subject_key) == record_id:
                 self._subjects.pop(subject_key, None)
             self._remember_revoked(
                 record.subject_id,
@@ -1336,9 +3196,12 @@ class DedicatedMediaProductRegistry:
             )
             record.pcm.clear()
             record.playout_receipts.clear()
+            record.playout_receipt_content_sha256.clear()
             record.downlink_results.clear()
             record.downlink_frames = ()
-            record.downlink_overlap_ticket = None
+            self._release_stream_source(record)
+            record.downlink_overlap_record_id = None
+            self._schedule_streaming_abort(record)
         expired_activations = [
             key
             for key, authority in self._product_activations.items()
@@ -1371,9 +3234,9 @@ class DedicatedMediaProductRegistry:
     def _revoke_media_for_product_activation(
         self, authority: _ProductActivationAuthority
     ) -> None:
-        tickets = [
-            ticket
-            for ticket, record in self._records.items()
+        record_ids = [
+            record_id
+            for record_id, record in self._records.items()
             if (
                 record.binding.session_id == authority.session_id
                 and record.binding.connection_id == authority.connection_id
@@ -1384,8 +3247,9 @@ class DedicatedMediaProductRegistry:
                 == authority.activation_generation
             )
         ]
-        for ticket in tickets:
-            record = self._records.pop(ticket)
+        for record_id in record_ids:
+            record = self._records.pop(record_id)
+            self._drop_pending_for_record_id(record_id)
             self._subjects.pop((record.binding.session_id, record.subject_id), None)
             self._remember_revoked(
                 record.subject_id,
@@ -1402,10 +3266,47 @@ class DedicatedMediaProductRegistry:
             record.recognition_content_sha256 = None
             record.synthesis_content_sha256.clear()
             record.playout_receipts.clear()
+            record.playout_receipt_content_sha256.clear()
             record.downlink_results.clear()
             record.downlink_frames = ()
-            record.downlink_overlap_ticket = None
+            self._release_stream_source(record)
+            record.downlink_overlap_record_id = None
             record.pcm.clear()
+            self._schedule_streaming_abort(record)
+
+    def _schedule_streaming_abort(self, record: _MediaAuthority) -> None:
+        owner = self._streaming_recognition_owner
+        begin_task = record.streaming_recognition_begin_task
+        record.streaming_recognition_begin_task = None
+        record.streaming_preopen_frames.clear()
+        handle = record.streaming_recognition_handle
+        record.streaming_recognition_handle = None
+        if owner is None or (begin_task is None and (handle is None or handle.settled)):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def abort_retained() -> None:
+            try:
+                if begin_task is not None:
+                    if not begin_task.done():
+                        begin_task.cancel()
+                    done, _pending = await asyncio.wait({begin_task}, timeout=1.0)
+                    if begin_task in done:
+                        begin_task.result()
+                if handle is not None and not handle.settled:
+                    await asyncio.wait_for(owner.abort(handle), timeout=6.0)
+            except (Exception, asyncio.CancelledError):
+                return
+
+        task = loop.create_task(
+            abort_retained(),
+            name=f"live-voice-streaming-stt-revoke-{record.record_id}",
+        )
+        self._streaming_cleanup_tasks.add(task)
+        task.add_done_callback(self._streaming_cleanup_tasks.discard)
 
     def _remember_revoked(
         self,
@@ -1442,6 +3343,7 @@ def register_dedicated_media_rpc_handlers(
                     "MEDIA_SESSION_MISMATCH",
                     "media activation must target the dispatcher-owned session",
                 )
+            await registry.prepare_streaming_provider()
             connection_id = str(getattr(ws, "_jiuwen_ws_id", "") or id(ws))
             payload = registry.activate(
                 params=params,
@@ -1506,9 +3408,87 @@ def register_dedicated_media_rpc_handlers(
                 ws, req_id, ok=False, error=str(exc), code=exc.reason_id
             )
 
+    async def streaming_recognition_result_handler(
+        ws: Any,
+        req_id: str,
+        params: object,
+        session_id: str,
+        user_id: str | None = None,
+    ) -> None:
+        del user_id
+        try:
+            if not isinstance(params, Mapping):
+                raise MediaTransportViolation(
+                    "MEDIA_INVALID_STREAMING_RESULT",
+                    "streaming recognition result must be an object",
+                )
+            payload = await registry.streaming_recognition_result(
+                params=params,
+                routed_session_id=session_id,
+                connection_id=str(getattr(ws, "_jiuwen_ws_id", "") or id(ws)),
+                request_origin=_request_origin(ws),
+            )
+            await channel.send_response(ws, req_id, ok=True, payload=payload)
+        except MediaTransportViolation as exc:
+            await channel.send_response(
+                ws, req_id, ok=False, error=str(exc), code=exc.reason_id
+            )
+
     channel.register_method(MEDIA_ACTIVATE_METHOD, activation_handler)
     channel.register_method(MEDIA_CLOSE_METHOD, close_handler)
     channel.register_method(MEDIA_PLAYOUT_RECEIPT_METHOD, playout_receipt_handler)
+    channel.register_method(
+        STREAMING_RECOGNITION_RESULT_METHOD,
+        streaming_recognition_result_handler,
+    )
+
+
+async def _authenticate_registered_media_socket(
+    registry: DedicatedMediaProductRegistry,
+    ws: Any,
+    request_path: str,
+) -> _MediaAuthority | None:
+    """Consume one capability without retaining its bytes in the media coroutine."""
+
+    fixed_route = request_path == MEDIA_ROUTE_PATH
+    first_frame: object = None
+    parsed_auth: tuple[str, MediaAuthorityBinding] | None = None
+    ticket: str | None = None
+    claimed_binding: MediaAuthorityBinding | None = None
+    try:
+        if fixed_route:
+            try:
+                first_frame = await asyncio.wait_for(
+                    ws.recv(), timeout=_MEDIA_AUTH_TIMEOUT_SECONDS
+                )
+            except Exception:
+                return None
+            parsed_auth = _parse_media_auth_frame(first_frame)
+            if parsed_auth is None:
+                return None
+            ticket, claimed_binding = parsed_auth
+            return registry.consume_ticket(
+                ticket,
+                request_origin=_request_origin(ws),
+                claimed_binding=claimed_binding,
+            )
+        if not registry.legacy_path_ticket_compat:
+            return None
+        ticket = request_path.removeprefix(MEDIA_ROUTE_PREFIX)
+        if 32 <= len(ticket) <= 128 and all(
+            character.isascii() and (character.isalnum() or character in "_-")
+            for character in ticket
+        ):
+            return registry.consume_ticket(ticket, request_origin=_request_origin(ws))
+        return None
+    finally:
+        # These references must die before the caller awaits a long-lived media
+        # leaf; traceback capture from a later route failure cannot recover the
+        # already-consumed one-use capability.
+        first_frame = None
+        parsed_auth = None
+        ticket = None
+        claimed_binding = None
 
 
 async def handle_registered_media_socket(
@@ -1516,21 +3496,25 @@ async def handle_registered_media_socket(
     ws: Any,
     request_path: str,
 ) -> bool:
-    """Handle a central media path and return whether it matched the prefix."""
+    """Authenticate the fixed Alpha path before entering the existing leaf."""
 
-    if not request_path.startswith(MEDIA_ROUTE_PREFIX):
+    fixed_route = request_path == MEDIA_ROUTE_PATH
+    legacy_route = request_path.startswith(MEDIA_ROUTE_PREFIX)
+    if not fixed_route and not legacy_route:
         return False
-    ticket = request_path.removeprefix(MEDIA_ROUTE_PREFIX)
-    if (
-        not ticket
-        or "/" in ticket
-        or getattr(ws, "subprotocol", None) != MEDIA_SUBPROTOCOL
-    ):
+    if getattr(ws, "subprotocol", None) != MEDIA_SUBPROTOCOL:
         await ws.close(code=1008, reason="invalid live-voice media route")
         return True
-    record = registry.consume_ticket(ticket, request_origin=_request_origin(ws))
+
+    record = await _authenticate_registered_media_socket(registry, ws, request_path)
+    # Legacy compatibility paths may contain a credential.  Rebind the caller
+    # local before any leaf await so later tracebacks retain only the fixed path.
+    request_path = MEDIA_ROUTE_PATH
     if record is None:
-        await ws.close(code=1008, reason="invalid or expired live-voice media ticket")
+        try:
+            await ws.close(code=1008, reason="invalid live-voice media route")
+        except Exception:
+            pass
         return True
     request = DedicatedMediaRouteRequest(
         enabled=registry.enabled,
@@ -1561,13 +3545,22 @@ async def handle_registered_media_socket(
             await run_dedicated_media_downlink_socket_leaf(
                 request,
                 socket=ws,
-                frames=record.downlink_frames,
+                frames=(
+                    record.downlink_stream_source
+                    if record.downlink_stream_source is not None
+                    else record.downlink_frames
+                ),
                 on_playback_stop=lambda _receipt: None,
                 on_complete=retain_downlink_completion,
                 max_pending_frames=8,
                 max_pending_bytes=131_072,
             )
         else:
+            registry.start_streaming_recognition(record)
+            # Give an immediately-ready Provider one scheduling turn, but never
+            # put its network connect deadline in front of browser media attach.
+            await asyncio.sleep(0)
+
             def retain_uplink_completion(
                 leaf_result: DedicatedMediaSocketLeafResult,
             ) -> None:
@@ -1577,23 +3570,64 @@ async def handle_registered_media_socket(
                         "MEDIA_ROUTE_COMPLETION_DUPLICATE",
                         "media route completion callback was repeated",
                     )
+                if (
+                    isinstance(leaf_result, DedicatedMediaSocketLeafResult)
+                    and not leaf_result.cleanup_complete
+                ):
+                    _LOGGER.warning(
+                        "live_voice_media_cleanup_pending pending_tasks=%d",
+                        leaf_result.cleanup_pending_tasks,
+                    )
                 registry.complete_route(record, leaf_result)
                 route_completion_retained = True
 
-            await run_dedicated_media_socket_leaf(
+            def retain_uplink_frame(frame: MediaAudioFrame) -> None:
+                # Batch fallback retains only its existing bounded digest path;
+                # the Provider mirror is independently bounded and cannot
+                # interrupt capture if it degrades.
+                registry.accept_frame(record, frame)
+                registry.accept_streaming_frame(record, frame)
+
+            result = await run_dedicated_media_socket_leaf(
                 request,
                 socket=ws,
-                on_audio_frame=lambda frame: registry.accept_frame(record, frame),
+                on_audio_frame=retain_uplink_frame,
                 on_complete=retain_uplink_completion,
+                next_end_of_turn=(
+                    (lambda: registry.wait_streaming_end_of_turn(record))
+                    if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+                    else None
+                ),
+                cleanup_owner=(
+                    registry._media_leaf_cleanup_owner
+                    if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+                    else None
+                ),
             )
+            if (
+                result.activated
+                and result.accepted_frames > 0
+                and record.recognition_content_sha256 is not None
+            ):
+                await registry.finish_streaming_recognition(record)
+            else:
+                await registry.abort_streaming_recognition(record)
         if not route_completion_retained:
             raise MediaTransportViolation(
                 "MEDIA_ROUTE_COMPLETION_UNAVAILABLE",
                 "media route completion callback was not retained",
             )
     except BaseException:
+        if record.binding.direction is MediaDirection.UPLINK:
+            await asyncio.shield(registry.abort_streaming_recognition(record))
         if not route_completion_retained:
             registry.abort_route(record)
+        cleanup_snapshot = registry.media_leaf_cleanup_snapshot
+        if not cleanup_snapshot.cleanup_complete:
+            _LOGGER.warning(
+                "live_voice_media_cleanup_pending pending_tasks=%d",
+                cleanup_snapshot.retained_tasks,
+            )
         raise
     return True
 
@@ -1601,9 +3635,12 @@ async def handle_registered_media_socket(
 __all__ = [
     "DedicatedMediaProductRegistry",
     "MEDIA_ACTIVATE_METHOD",
+    "MEDIA_AUTH_CONTRACT_VERSION",
     "MEDIA_CLOSE_METHOD",
     "MEDIA_PLAYOUT_RECEIPT_METHOD",
     "MEDIA_FEATURE_ENV",
+    "MEDIA_END_OF_TURN_FEATURE_ENV",
+    "MEDIA_ROUTE_PATH",
     "MEDIA_ROUTE_PREFIX",
     "MEDIA_SUBPROTOCOL",
     "handle_registered_media_socket",

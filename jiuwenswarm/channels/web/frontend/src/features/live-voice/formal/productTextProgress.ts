@@ -31,6 +31,11 @@ export interface ProductTextProgressEvent {
   readonly project_id: string;
   readonly correlation_id: string;
   readonly origin_id: string;
+  readonly origin_kind: 'text' | 'voice';
+  readonly requested_origin_kind: 'text' | 'voice';
+  readonly effective_origin_kind: 'text';
+  readonly delivery_mode: 'text' | 'text_fallback';
+  readonly fallback_reason: string | null;
   readonly generation_kind: string;
   readonly generation_id: string;
   readonly generation: number;
@@ -127,6 +132,11 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
   const projectId = textValue(raw.project_id);
   const correlationId = textValue(raw.correlation_id);
   const originId = textValue(raw.origin_id);
+  const originKind = raw.origin_kind;
+  const requestedOriginKind = raw.requested_origin_kind;
+  const effectiveOriginKind = raw.effective_origin_kind;
+  const deliveryMode = raw.delivery_mode;
+  const fallbackReason = raw.fallback_reason === null ? null : textValue(raw.fallback_reason);
   const generationKind = textValue(raw.generation_kind);
   const generationId = textValue(raw.generation_id);
   const generation = uintValue(raw.generation);
@@ -154,6 +164,12 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
     !projectId ||
     !correlationId ||
     !originId ||
+    (originKind !== 'text' && originKind !== 'voice') ||
+    requestedOriginKind !== originKind ||
+    effectiveOriginKind !== 'text' ||
+    (deliveryMode !== 'text' && deliveryMode !== 'text_fallback') ||
+    (deliveryMode === 'text_fallback' && originKind !== 'voice') ||
+    (deliveryMode === 'text_fallback') !== (fallbackReason !== null) ||
     generationKind !== 'web_task_progress_generation' ||
     !generationId ||
     generation === null ||
@@ -192,6 +208,11 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
     project_id: projectId,
     correlation_id: correlationId,
     origin_id: originId,
+    origin_kind: originKind,
+    requested_origin_kind: requestedOriginKind as 'text' | 'voice',
+    effective_origin_kind: effectiveOriginKind,
+    delivery_mode: deliveryMode,
+    fallback_reason: fallbackReason,
     generation_kind: generationKind,
     generation_id: generationId,
     generation,

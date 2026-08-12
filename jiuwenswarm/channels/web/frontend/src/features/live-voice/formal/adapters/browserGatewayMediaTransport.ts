@@ -5,6 +5,7 @@ export const MEDIA_TRANSPORT_KIND = 'websocket_binary' as const;
 export const MEDIA_WIRE_CODEC = 'pcm_f32le' as const;
 export const MEDIA_CAPTURE_ENCODING = 'pcm_f32' as const;
 export const MEDIA_FRAME_DURATION_MS = 20 as const;
+export const MEDIA_END_OF_TURN_CAPABILITY = 'media.end_of_turn.v1' as const;
 
 const WIRE_MAGIC = [0x4c, 0x56, 0x4d, 0x31] as const;
 const WIRE_VERSION = 1;
@@ -55,6 +56,7 @@ export type MediaDetachReason =
   | 'MEDIA_SEQUENCE_GAP'
   | 'MEDIA_SEQUENCE_VIOLATION'
   | 'MEDIA_STALE_GENERATION'
+  | 'MEDIA_STREAMING_TTS_TEXT_OR_RETRY'
   | 'MEDIA_TRANSPORT_CLOSED'
   | 'MEDIA_TRANSPORT_PROTOCOL_ERROR'
   | 'MEDIA_TRANSPORT_SEND_FAILED';
@@ -90,6 +92,7 @@ const MEDIA_DETACH_REASONS: readonly MediaDetachReason[] = Object.freeze([
   'MEDIA_SEQUENCE_GAP',
   'MEDIA_SEQUENCE_VIOLATION',
   'MEDIA_STALE_GENERATION',
+  'MEDIA_STREAMING_TTS_TEXT_OR_RETRY',
   'MEDIA_TRANSPORT_CLOSED',
   'MEDIA_TRANSPORT_PROTOCOL_ERROR',
   'MEDIA_TRANSPORT_SEND_FAILED',
@@ -163,6 +166,22 @@ export interface MediaDetach {
   readonly business_cancel_count_delta: 0;
 }
 
+export interface MediaEndOfTurn {
+  readonly type: 'media.end_of_turn';
+  readonly capability_version: typeof MEDIA_END_OF_TURN_CAPABILITY;
+  readonly lease_id: string;
+  readonly generation: number;
+  readonly detector: 'server_vad';
+  readonly speech_started_observed: true;
+  readonly provider_start_ms: number;
+  readonly provider_end_ms: number;
+  readonly timing_basis: 'provider_time';
+  readonly timing_provenance: 'adapter_derived';
+  readonly create_response: false;
+  readonly interrupt_response: false;
+  readonly business_cancel_count_delta: 0;
+}
+
 export interface MediaPlaybackStopReceipt {
   readonly type: 'media.playback_stop_receipt';
   readonly lease_id: string;
@@ -174,7 +193,7 @@ export interface MediaPlaybackStopReceipt {
   readonly business_cancel_count_delta: 0;
 }
 
-export type MediaControl = MediaAttach | MediaAck | MediaDetach | MediaPlaybackStopReceipt;
+export type MediaControl = MediaAttach | MediaAck | MediaDetach | MediaEndOfTurn | MediaPlaybackStopReceipt;
 
 export interface MediaAudioFrame {
   readonly seq: number;
@@ -719,6 +738,24 @@ export function serializeMediaControl(control: MediaControl): string {
         'playback stop cannot carry business cancellation',
       );
     }
+  } else if (control.type === 'media.end_of_turn') {
+    requireId('lease_id', control.lease_id, MAX_LEASE_ID_BYTES);
+    requireSafeUint('generation', control.generation);
+    requireSafeUint('provider_start_ms', control.provider_start_ms);
+    requireSafeUint('provider_end_ms', control.provider_end_ms);
+    if (
+      control.capability_version !== MEDIA_END_OF_TURN_CAPABILITY ||
+      control.detector !== 'server_vad' ||
+      control.speech_started_observed !== true ||
+      control.provider_end_ms < control.provider_start_ms ||
+      control.timing_basis !== 'provider_time' ||
+      control.timing_provenance !== 'adapter_derived' ||
+      control.create_response !== false ||
+      control.interrupt_response !== false ||
+      control.business_cancel_count_delta !== 0
+    ) {
+      throw new MediaTransportViolation('MEDIA_INVALID_CONTROL', 'EOT control contract is not exact');
+    }
   } else {
     validateBinding(control.binding);
   }
@@ -778,6 +815,60 @@ export function deserializeMediaControl(text: string): MediaControl {
       generation: raw.generation,
       reason_id: raw.reason_id,
       through_seq: raw.through_seq as number | null,
+      business_cancel_count_delta: 0,
+    });
+  }
+  if (raw.type === 'media.end_of_turn') {
+    requireExactKeys(
+      raw,
+      [
+        'type',
+        'contract_version',
+        'capability_version',
+        'lease_id',
+        'generation',
+        'detector',
+        'speech_started_observed',
+        'provider_start_ms',
+        'provider_end_ms',
+        'timing_basis',
+        'timing_provenance',
+        'create_response',
+        'interrupt_response',
+        'business_cancel_count_delta',
+      ],
+      'end_of_turn'
+    );
+    requireId('lease_id', raw.lease_id, MAX_LEASE_ID_BYTES);
+    requireSafeUint('generation', raw.generation, 'MEDIA_MALFORMED_CONTROL');
+    requireSafeUint('provider_start_ms', raw.provider_start_ms, 'MEDIA_MALFORMED_CONTROL');
+    requireSafeUint('provider_end_ms', raw.provider_end_ms, 'MEDIA_MALFORMED_CONTROL');
+    if (
+      raw.capability_version !== MEDIA_END_OF_TURN_CAPABILITY ||
+      raw.detector !== 'server_vad' ||
+      raw.speech_started_observed !== true ||
+      raw.provider_end_ms < raw.provider_start_ms ||
+      raw.timing_basis !== 'provider_time' ||
+      raw.timing_provenance !== 'adapter_derived' ||
+      raw.create_response !== false ||
+      raw.interrupt_response !== false ||
+      raw.business_cancel_count_delta !== 0
+    ) {
+      throw new MediaTransportViolation('MEDIA_MALFORMED_CONTROL', 'EOT control contract is not exact');
+    }
+    return Object.freeze({
+      type: 'media.end_of_turn',
+      capability_version: MEDIA_END_OF_TURN_CAPABILITY,
+      lease_id: raw.lease_id,
+      generation: raw.generation,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: raw.provider_start_ms,
+      provider_end_ms: raw.provider_end_ms,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
       business_cancel_count_delta: 0,
     });
   }

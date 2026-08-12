@@ -125,6 +125,27 @@ test('permission denial, missing devices, hidden page, and insecure deployment r
   assert.equal(snapshot.page_was_discarded, true);
   assert.equal(snapshot.network, 'offline');
   assert.equal(snapshot.aio_capability.capture_pcm_f32, false);
+  assert.equal(mediaDevices.enumerations ?? 0, 0);
+});
+
+test('prompt and denied permission perform zero diagnostic device enumeration', async () => {
+  for (const state of ['prompt', 'denied']) {
+    const permission = Object.assign(new EventTargetFake(), { state });
+    let enumerations = 0;
+    const mediaDevices = Object.assign(new EventTargetFake(), {
+      async enumerateDevices() {
+        enumerations += 1;
+        return [{ kind: 'audioinput', deviceId: 'private-id', label: 'private label' }];
+      },
+    });
+    const snapshot = await collectWebPlatformDiagnostics(
+      environment({ media_devices: mediaDevices, query_microphone_permission: async () => permission })
+    );
+    assert.equal(enumerations, 0);
+    assert.equal(snapshot.audio_input, 'not_enumerated');
+    assert.equal(snapshot.audio_output, 'not_enumerated');
+    assert.equal(JSON.stringify(snapshot).includes('private'), false);
+  }
 });
 
 test('localhost is disclosed as controlled scope and never relabelled secure when the browser says insecure', async () => {
@@ -144,7 +165,7 @@ test('mobile Chrome and other Chromium evidence remain outside the declared desk
   assert.equal(edge.aio_capability.capture_pcm_f32, true);
 });
 
-test('unavailable and failed browser queries stay unknown or unsupported instead of succeeding', async () => {
+test('unavailable and failed browser queries stay unknown or explicitly not enumerated instead of succeeding', async () => {
   const snapshot = await collectWebPlatformDiagnostics(
     environment({
       query_microphone_permission: async () => {
@@ -165,12 +186,12 @@ test('unavailable and failed browser queries stay unknown or unsupported instead
   assert.equal(snapshot.browser_family, 'unknown');
   assert.equal(snapshot.reported_platform, null);
   assert.equal(snapshot.microphone_permission, 'unknown');
-  assert.equal(snapshot.audio_input, 'unknown');
-  assert.equal(snapshot.audio_output, 'unknown');
+  assert.equal(snapshot.audio_input, 'not_enumerated');
+  assert.equal(snapshot.audio_output, 'not_enumerated');
   assert.equal(snapshot.user_activation, 'unknown');
   assert.equal(snapshot.page_visibility, 'unknown');
   assert.equal(snapshot.network, 'unknown');
-  assert.deepEqual(snapshot.diagnostic_errors, ['MICROPHONE_PERMISSION_QUERY_FAILED', 'MEDIA_DEVICE_ENUMERATION_FAILED']);
+  assert.deepEqual(snapshot.diagnostic_errors, ['MICROPHONE_PERMISSION_QUERY_FAILED']);
 });
 
 test('diagnostics flag-off performs zero permission, device, listener, callback, or timer effects', async () => {

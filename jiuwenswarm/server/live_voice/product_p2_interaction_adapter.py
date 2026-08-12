@@ -52,6 +52,7 @@ from .product_authority import (
     P2AuthorityAdapter,
     ProductAuthorityUnavailable,
 )
+from .task_progress_return import TaskProgressNotificationIntent
 
 
 _P2_OPERATION = "agent.chat"
@@ -670,6 +671,48 @@ class P2ActivationLease:
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome
+
+    async def deliver_task_progress(
+        self,
+        binding: P2InteractionBinding,
+        intent: TaskProgressNotificationIntent,
+        response_ref: ResponseRef,
+    ) -> bool:
+        """Deliver one exact voice-origin progress intent through CR ownership."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            if (
+                not isinstance(intent, TaskProgressNotificationIntent)
+                or intent.origin.scope != binding.scope
+                or intent.origin.session_id != binding.session_id
+                or intent.origin.origin_id != binding.interaction_id
+                or not isinstance(response_ref, ResponseRef)
+                or response_ref.interaction_id != binding.interaction_id
+            ):
+                raise _violation(
+                    "TASK_PROGRESS_ORIGIN_MISMATCH",
+                    "progress intent does not bind the exact active P2 route",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            deliver = getattr(
+                self._runtime, "accept_task_progress_notification", None
+            )
+            if not callable(deliver):
+                raise _violation(
+                    "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE",
+                    "retained runtime has no CR progress notification owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            delivered = await deliver(intent, response_ref=response_ref)
+            if delivered is not True:
+                raise _violation(
+                    "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE",
+                    "Conversation Runtime rejected the progress notification",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return True
 
     async def next_notification(
         self, binding: P2InteractionBinding

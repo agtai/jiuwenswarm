@@ -120,8 +120,9 @@ def protected_effects() -> dict[str, int]:
         "agent": 0,
         "tool": 0,
         "task": 0,
-        "chat_mutation": 0,
-        "speech_response": 0,
+        "audio": 0,
+        "history": 0,
+        "store": 0,
     }
 
 
@@ -953,6 +954,59 @@ def test_interaction_close_fences_pending_clarification_and_ready_route() -> Non
         candidate("普通问题", 6, interaction="interaction-3", input_generation=1)
     )
     assert unaffected.authorization is not None
+
+
+def test_bounded_gate_releases_terminal_commit_and_interaction_state() -> None:
+    gate = CriticalTokenSafetyGate(capacity=2)
+    first = gate.evaluate(candidate("ordinary question", 1))
+    second = gate.evaluate(
+        candidate(
+            "another question", 2, interaction="interaction-2", input_generation=1
+        )
+    )
+    assert first.authorization is not None
+    assert second.authorization is not None
+
+    full = gate.evaluate(
+        candidate("third question", 3, interaction="interaction-3", input_generation=1)
+    )
+    assert full.decision.reasons == (CriticalTokenReason.GATE_CAPACITY_EXCEEDED,)
+
+    gate.release_commit(first.authorization.commit_id)
+    assert first.authorization.authorization_id not in gate._authorizations
+    gate.release_interaction("interaction-1")
+    admitted = gate.evaluate(
+        candidate("third question", 3, interaction="interaction-3", input_generation=1)
+    )
+    assert admitted.authorization is not None
+    assert len(gate._commit_interactions) <= 2
+    assert len(gate._latest_input_generation) <= 2
+
+    gate.reset()
+    assert gate._commit_interactions == {}
+    assert gate._latest_input_generation == {}
+
+
+def test_bounded_gate_rejects_correction_before_growing_commit_state() -> None:
+    gate = CriticalTokenSafetyGate(capacity=1)
+    pending = gate.evaluate(candidate("run build_task 42", 1, confidence=None))
+    assert pending.clarification is not None
+    corrected = candidate(
+        "run build_task 42",
+        2,
+        supersedes="commit-1",
+        clarification_id=pending.clarification.clarification_id,
+        input_generation=2,
+    )
+
+    rejected = gate.resolve(
+        pending.clarification.clarification_id,
+        corrected,
+        confirmed=True,
+    )
+
+    assert rejected.decision.reasons == (CriticalTokenReason.GATE_CAPACITY_EXCEEDED,)
+    assert len(gate._commit_interactions) == 1
 
 
 def test_feature_off_is_explicit_bypass_and_fallback_does_not_relax_flag_on() -> None:

@@ -8,8 +8,11 @@ import json
 import logging
 import math
 import struct
+from collections.abc import Generator
+from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, Generic, TypeVar
 
 import pytest
 
@@ -23,6 +26,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaDetach,
     MediaDetachReason,
     MediaDirection,
+    MediaEndOfTurn,
     MediaFrameFormat,
     MediaGenerationBinding,
     MediaGenerationKind,
@@ -30,6 +34,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaPlaybackStopOutcome,
     MediaTransportViolation,
     create_playback_stop_receipt,
+    decode_audio_frame,
     deserialize_media_control,
     encode_audio_frame,
     serialize_media_control,
@@ -39,6 +44,8 @@ from jiuwenswarm.gateway.live_voice.dedicated_media_route import (
     MEDIA_LOGGER_ZERO_PERSISTENCE_UNPROVEN,
     MEDIA_ROUTE_REGISTRATION_UNAVAILABLE,
     ActiveDedicatedMediaRoute,
+    DedicatedMediaLeafCleanupOwner,
+    DedicatedMediaDownlinkSourceFailure,
     DedicatedMediaRouteEvidence,
     DedicatedMediaRouteReason,
     DedicatedMediaRouteRequest,
@@ -85,10 +92,59 @@ class _BlockingDedicatedSocket(_FakeDedicatedSocket):
         raise AssertionError("unreachable")
 
 
+class _CancellationObservedSocket(_BlockingDedicatedSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.receive_cancelled = asyncio.Event()
+
+    async def recv(self) -> str | bytes:
+        try:
+            return await super().recv()
+        except asyncio.CancelledError:
+            self.receive_cancelled.set()
+            raise
+
+
 class _BlockingCloseDedicatedSocket(_FakeDedicatedSocket):
     async def close(self, code: int = 1000, reason: str = "") -> None:
         self.close_calls.append((code, reason))
         await asyncio.Event().wait()
+
+
+class _CustomEndOfTurnAwaitable:
+    def __init__(self, future: asyncio.Future[MediaEndOfTurn]) -> None:
+        self.future = future
+
+    def __await__(self) -> Generator[Any, None, MediaEndOfTurn]:
+        return self.future.__await__()
+
+
+_HostileT = TypeVar("_HostileT")
+
+
+class _CancellationHostileAwaitable(Generic[_HostileT]):
+    def __init__(
+        self, value: _HostileT, *, late_failure: BaseException | None = None
+    ) -> None:
+        self.value = value
+        self.late_failure = late_failure
+        self.started = asyncio.Event()
+        self.cancel_observed = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def _wait(self) -> _HostileT:
+        self.started.set()
+        while not self.release.is_set():
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancel_observed.set()
+        if self.late_failure is not None:
+            raise self.late_failure
+        return self.value
+
+    def __await__(self) -> Generator[Any, None, _HostileT]:
+        return self._wait().__await__()
 
 
 def _binding(
@@ -781,7 +837,9 @@ def _downlink_binding() -> MediaAuthorityBinding:
 
 
 @pytest.mark.asyncio
-async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_detach() -> None:
+async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_detach() -> (
+    None
+):
     effects = {
         "audio": 0,
         "agent": 0,
@@ -832,6 +890,601 @@ async def test_injected_socket_leaf_sends_server_attach_ack_and_closes_on_typed_
     assert socket.close_calls == [(1000, "live-voice media leaf closed")]
     assert effects["audio"] == 1
     assert all(effects[name] == 0 for name in effects if name != "audio")
+
+
+@pytest.mark.asyncio
+async def test_socket_leaf_single_sender_orders_ack_before_eot_then_peer_detach() -> (
+    None
+):
+    binding = _binding()
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+        through_seq=0,
+    )
+
+    class _EotSocket(_FakeDedicatedSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.recv_count = 0
+            self.waiting_after_audio = asyncio.Event()
+            self.release_detach = asyncio.Event()
+
+        async def recv(self) -> str | bytes:
+            self.recv_count += 1
+            if self.recv_count == 1:
+                return encode_audio_frame(binding, _frame())
+            self.waiting_after_audio.set()
+            await self.release_detach.wait()
+            return serialize_media_control(peer_detach)
+
+    socket = _EotSocket()
+
+    async def next_end_of_turn() -> MediaEndOfTurn:
+        await socket.waiting_after_audio.wait()
+        return MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=next_end_of_turn,
+            cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+        )
+    )
+    for _ in range(40):
+        if len(socket.sent) == 3:
+            break
+        await asyncio.sleep(0)
+    controls = [deserialize_media_control(item) for item in socket.sent]
+    assert [type(control) for control in controls] == [
+        MediaAttach,
+        MediaAck,
+        MediaEndOfTurn,
+    ]
+    socket.release_detach.set()
+    result = await asyncio.wait_for(route_task, timeout=1)
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert result.business_cancel_count_delta == 0
+
+
+@pytest.mark.asyncio
+async def test_same_ready_peer_detach_wins_and_suppresses_eot() -> None:
+    binding = _binding()
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+    )
+    socket = _FakeDedicatedSocket([serialize_media_control(peer_detach)])
+
+    async def next_end_of_turn() -> MediaEndOfTurn:
+        return MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding),
+        socket=socket,
+        on_audio_frame=lambda _frame: None,
+        next_end_of_turn=next_end_of_turn,
+        cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+    )
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    controls = [deserialize_media_control(item) for item in socket.sent]
+    assert controls == [MediaAttach(binding)]
+
+
+@pytest.mark.asyncio
+async def test_socket_leaf_accepts_future_receive_and_end_of_turn_sources() -> None:
+    binding = _binding()
+    receive_future: asyncio.Future[str | bytes] = (
+        asyncio.get_running_loop().create_future()
+    )
+    end_of_turn_future: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+
+    class _FutureSocket:
+        def __init__(self) -> None:
+            self.sent: list[str | bytes] = []
+            self.close_calls: list[tuple[int, str]] = []
+
+        def recv(self) -> asyncio.Future[str | bytes]:
+            return receive_future
+
+        async def send(self, message: str | bytes) -> None:
+            self.sent.append(message)
+
+        async def close(self, code: int = 1000, reason: str = "") -> None:
+            self.close_calls.append((code, reason))
+
+    socket = _FutureSocket()
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: end_of_turn_future,
+            cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+        )
+    )
+    await asyncio.sleep(0)
+    end_of_turn_future.set_result(
+        MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+    )
+    for _ in range(40):
+        if len(socket.sent) == 2:
+            break
+        await asyncio.sleep(0)
+    controls = [deserialize_media_control(item) for item in socket.sent]
+    assert [type(control) for control in controls] == [MediaAttach, MediaEndOfTurn]
+
+    receive_future.set_result(
+        serialize_media_control(
+            MediaDetach(
+                lease_id=binding.lease_id,
+                generation=binding.generation.value,
+                reason_id=MediaDetachReason.PEER_CLOSE,
+            )
+        )
+    )
+    result = await asyncio.wait_for(route_task, timeout=1)
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_peer_detach_cancels_custom_end_of_turn_awaitable() -> None:
+    binding = _binding()
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+    )
+    socket = _FakeDedicatedSocket([serialize_media_control(peer_detach)])
+    source_future: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+    source = _CustomEndOfTurnAwaitable(source_future)
+
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding),
+        socket=socket,
+        on_audio_frame=lambda _frame: None,
+        next_end_of_turn=lambda: source,
+        cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+    )
+
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert source_future.cancelled()
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_socket_close_cancels_custom_end_of_turn_awaitable() -> None:
+    binding = _binding()
+    socket = _BlockingDedicatedSocket()
+    source_future: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+    source = _CustomEndOfTurnAwaitable(source_future)
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: source,
+            cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+        )
+    )
+    await socket.receiving.wait()
+
+    route_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await route_task
+
+    assert source_future.cancelled()
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_end_of_turn_process_control_closes_and_cancels_receive_sibling() -> None:
+    binding = _binding()
+    socket = _CancellationObservedSocket()
+    process_control = GeneratorExit("end-of-turn process control")
+
+    async def next_end_of_turn() -> MediaEndOfTurn:
+        await socket.receiving.wait()
+        raise process_control
+
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=next_end_of_turn,
+            cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+        )
+    )
+    with pytest.raises(GeneratorExit) as raised:
+        await route_task
+
+    assert raised.value is process_control
+    assert socket.receive_cancelled.is_set()
+    assert len(socket.sent) == 1
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_receive_process_control_closes_and_cancels_end_of_turn_sibling() -> None:
+    binding = _binding()
+    end_of_turn_started = asyncio.Event()
+    end_of_turn_future: asyncio.Future[MediaEndOfTurn] = (
+        asyncio.get_running_loop().create_future()
+    )
+    process_control = GeneratorExit("receive process control")
+
+    class _ProcessControlSocket(_FakeDedicatedSocket):
+        async def recv(self) -> str | bytes:
+            await end_of_turn_started.wait()
+            raise process_control
+
+    async def next_end_of_turn() -> MediaEndOfTurn:
+        end_of_turn_started.set()
+        return await end_of_turn_future
+
+    socket = _ProcessControlSocket([])
+    with pytest.raises(GeneratorExit) as raised:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=next_end_of_turn,
+            cleanup_owner=DedicatedMediaLeafCleanupOwner(),
+        )
+
+    assert raised.value is process_control
+    assert end_of_turn_future.cancelled()
+    assert len(socket.sent) == 1
+    assert len(socket.close_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_hostile_eot_is_retained_bounded_and_truthfully_converges(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 0.01)
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+    )
+    hostile = _CancellationHostileAwaitable(
+        MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        ),
+        late_failure=RuntimeError("content-free late EOT cleanup failure"),
+    )
+
+    class _DetachAfterEotStarts(_FakeDedicatedSocket):
+        async def recv(self) -> str | bytes:
+            await hostile.started.wait()
+            return serialize_media_control(peer_detach)
+
+    retained: list[object] = []
+    result = await run_dedicated_media_socket_leaf(
+        _request(binding),
+        socket=_DetachAfterEotStarts([]),
+        on_audio_frame=lambda _frame: None,
+        on_complete=retained.append,
+        next_end_of_turn=lambda: hostile,
+        cleanup_owner=owner,
+    )
+    assert result.cleanup_complete is False
+    assert result.cleanup_pending_tasks == 1
+    assert retained == [result]
+    assert hostile.cancel_observed.is_set()
+    assert owner.snapshot.in_use == 1
+    assert owner.snapshot.retained_tasks == 1
+    assert owner.snapshot.cleanup_complete is False
+
+    saturated_socket = _FakeDedicatedSocket([])
+    with pytest.raises(MediaTransportViolation) as saturated:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=saturated_socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: hostile,
+            cleanup_owner=owner,
+        )
+    assert saturated.value.reason_id == "MEDIA_CLEANUP_CAPACITY_EXCEEDED"
+    assert saturated_socket.sent == []
+    assert saturated_socket.close_calls == []
+
+    assert await owner.retry_cleanup(timeout_seconds=0.01) is False
+    hostile.release.set()
+    assert await owner.retry_cleanup(timeout_seconds=1) is True
+    assert await owner.close(timeout_seconds=1) is True
+    assert owner.snapshot.closed is True
+    assert owner.snapshot.cleanup_complete is True
+    closed_socket = _FakeDedicatedSocket([])
+    with pytest.raises(MediaTransportViolation) as closed:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=closed_socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: hostile,
+            cleanup_owner=owner,
+        )
+    assert closed.value.reason_id == "MEDIA_CLEANUP_OWNER_CLOSED"
+    assert closed_socket.sent == []
+    assert closed_socket.close_calls == []
+
+
+@pytest.mark.asyncio
+async def test_caller_cancellation_retains_hostile_eot_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 0.01)
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile_eot = _CancellationHostileAwaitable(
+        MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+    )
+    socket = _CancellationObservedSocket()
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: hostile_eot,
+            cleanup_owner=owner,
+        )
+    )
+    await hostile_eot.started.wait()
+    await socket.receiving.wait()
+
+    route_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await route_task
+
+    assert hostile_eot.cancel_observed.is_set()
+    assert socket.receive_cancelled.is_set()
+    assert len(socket.close_calls) == 1
+    assert owner.snapshot.in_use == 1
+    assert owner.snapshot.retained_tasks == 1
+    assert owner.snapshot.cleanup_complete is False
+
+    hostile_eot.release.set()
+    assert await owner.retry_cleanup(timeout_seconds=1) is True
+    assert owner.snapshot.cleanup_complete is True
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_hostile_settle_still_closes_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 1)
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile_eot = _CancellationHostileAwaitable(
+        MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+    )
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+    )
+
+    class _DetachAfterEotStarts(_FakeDedicatedSocket):
+        async def recv(self) -> str | bytes:
+            await hostile_eot.started.wait()
+            return serialize_media_control(peer_detach)
+
+    socket = _DetachAfterEotStarts([])
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: hostile_eot,
+            cleanup_owner=owner,
+        )
+    )
+    await hostile_eot.cancel_observed.wait()
+
+    route_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await route_task
+
+    assert len(socket.close_calls) == 1
+    assert owner.snapshot.in_use == 1
+    assert owner.snapshot.retained_tasks == 1
+    hostile_eot.release.set()
+    assert await owner.retry_cleanup(timeout_seconds=1) is True
+
+
+@pytest.mark.asyncio
+async def test_post_eot_hostile_receive_remains_owned_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 0.01)
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile_receive = _CancellationHostileAwaitable[str | bytes](b"late")
+
+    class _PostEotHostileSocket(_FakeDedicatedSocket):
+        def __init__(self) -> None:
+            super().__init__([])
+            self.recv_count = 0
+            self.eot_sent = asyncio.Event()
+
+        async def send(self, message: str | bytes) -> None:
+            await super().send(message)
+            if len(self.sent) == 2:
+                self.eot_sent.set()
+
+        async def recv(self) -> str | bytes:
+            self.recv_count += 1
+            if self.recv_count == 1:
+                await self.eot_sent.wait()
+                return encode_audio_frame(binding, _frame())
+            return await hostile_receive
+
+    async def next_end_of_turn() -> MediaEndOfTurn:
+        await asyncio.sleep(0)
+        return MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+
+    socket = _PostEotHostileSocket()
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=next_end_of_turn,
+            cleanup_owner=owner,
+        )
+    )
+    try:
+        await asyncio.wait_for(socket.eot_sent.wait(), timeout=1)
+        await asyncio.wait_for(hostile_receive.started.wait(), timeout=1)
+        assert [type(deserialize_media_control(item)) for item in socket.sent] == [
+            MediaAttach,
+            MediaEndOfTurn,
+            MediaAck,
+        ]
+    except BaseException:
+        hostile_receive.release.set()
+        route_task.cancel()
+        with suppress(BaseException):
+            await route_task
+        raise
+
+    route_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await route_task
+
+    assert hostile_receive.cancel_observed.is_set()
+    assert len(socket.close_calls) == 1
+    assert owner.snapshot.retained_tasks == 1
+    hostile_receive.release.set()
+    assert await owner.retry_cleanup(timeout_seconds=1) is True
+
+
+@pytest.mark.asyncio
+async def test_eot_process_control_retains_hostile_receive_until_owner_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 0.01)
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile_receive = _CancellationHostileAwaitable[str | bytes](b"late")
+    process_control = GeneratorExit("end-of-turn process control")
+
+    class _HostileReceiveSocket(_FakeDedicatedSocket):
+        def recv(  # type: ignore[override]
+            self,
+        ) -> _CancellationHostileAwaitable[str | bytes]:
+            return hostile_receive
+
+    async def next_end_of_turn() -> MediaEndOfTurn:
+        await hostile_receive.started.wait()
+        raise process_control
+
+    socket = _HostileReceiveSocket([])
+    with pytest.raises(GeneratorExit) as raised:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=next_end_of_turn,
+            cleanup_owner=owner,
+        )
+    assert raised.value is process_control
+    assert hostile_receive.cancel_observed.is_set()
+    assert owner.snapshot.retained_tasks == 1
+    assert len(socket.close_calls) == 1
+
+    hostile_receive.release.set()
+    assert await owner.close(timeout_seconds=1) is True
+    assert owner.snapshot.cleanup_complete is True
+
+
+@pytest.mark.asyncio
+async def test_receive_process_control_retains_hostile_eot_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 0.01)
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=2)
+    hostile_eot = _CancellationHostileAwaitable(
+        MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+    )
+    process_control = GeneratorExit("receive process control")
+
+    class _ProcessControlAfterEotSocket(_FakeDedicatedSocket):
+        async def recv(self) -> str | bytes:
+            await hostile_eot.started.wait()
+            raise process_control
+
+    socket = _ProcessControlAfterEotSocket([])
+    with pytest.raises(GeneratorExit) as raised:
+        await run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_end_of_turn=lambda: hostile_eot,
+            cleanup_owner=owner,
+        )
+    assert raised.value is process_control
+    assert hostile_eot.cancel_observed.is_set()
+    assert owner.snapshot.retained_tasks == 1
+    assert len(socket.close_calls) == 1
+
+    hostile_eot.release.set()
+    assert await owner.retry_cleanup(timeout_seconds=1) is True
+    assert owner.snapshot.cleanup_complete is True
 
 
 @pytest.mark.asyncio
@@ -910,12 +1563,14 @@ async def test_uplink_completion_is_not_downgraded_when_receipt_send_fails() -> 
 
 
 @pytest.mark.asyncio
-async def test_socket_leaf_flag_off_returns_before_socket_or_consumer_inspection() -> None:
+async def test_socket_leaf_flag_off_returns_before_socket_or_consumer_inspection() -> (
+    None
+):
     class _ForbiddenSocket:
         def __getattribute__(self, name: str) -> object:
             raise AssertionError(f"feature-off inspected socket.{name}")
 
-    effects = {"consumer": 0}
+    effects = {"consumer": 0, "eot": 0}
     result = await run_dedicated_media_socket_leaf(
         DedicatedMediaRouteRequest(
             enabled=False,
@@ -927,6 +1582,7 @@ async def test_socket_leaf_flag_off_returns_before_socket_or_consumer_inspection
         ),
         socket=_ForbiddenSocket(),  # type: ignore[arg-type]
         on_audio_frame=lambda _frame: effects.__setitem__("consumer", 1),
+        next_end_of_turn=lambda: effects.__setitem__("eot", 1),  # type: ignore[arg-type,return-value]
     )
 
     assert result.activated is False
@@ -935,7 +1591,7 @@ async def test_socket_leaf_flag_off_returns_before_socket_or_consumer_inspection
     assert result.accepted_frames == 0
     assert result.close_result is None
     assert result.reason_id is DedicatedMediaRouteReason.FEATURE_DISABLED
-    assert effects == {"consumer": 0}
+    assert effects == {"consumer": 0, "eot": 0}
 
 
 @pytest.mark.asyncio
@@ -1006,7 +1662,9 @@ async def test_socket_leaf_send_failure_retains_local_fence_without_retry() -> N
 
 
 @pytest.mark.asyncio
-async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exact_stop() -> None:
+async def test_downlink_socket_leaf_bounds_frames_waits_for_ack_and_accepts_exact_stop() -> (
+    None
+):
     binding = _downlink_binding()
     stop = create_playback_stop_receipt(
         binding,
@@ -1123,9 +1781,7 @@ async def test_downlink_public_limits_fail_before_socket_or_iterator_effects(
             _request(_downlink_binding()),
             socket=socket,
             frames=_UnconsumedFrames(),
-            on_playback_stop=lambda _receipt: effects.__setitem__(
-                "playback_stop", 1
-            ),
+            on_playback_stop=lambda _receipt: effects.__setitem__("playback_stop", 1),
             max_pending_frames=max_pending_frames,  # type: ignore[arg-type]
             max_pending_bytes=max_pending_bytes,  # type: ignore[arg-type]
         )
@@ -1140,7 +1796,11 @@ async def test_downlink_public_limits_fail_before_socket_or_iterator_effects(
 async def test_downlink_practical_limit_boundaries_are_accepted() -> None:
     binding = _downlink_binding()
     socket = _FakeDedicatedSocket(
-        [serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0))]
+        [
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 0)
+            )
+        ]
     )
 
     result = await run_dedicated_media_downlink_socket_leaf(
@@ -1158,6 +1818,148 @@ async def test_downlink_practical_limit_boundaries_are_accepted() -> None:
 
 
 @pytest.mark.asyncio
+async def test_downlink_async_source_streams_in_order_and_closes_exactly_once() -> None:
+    binding = _downlink_binding()
+
+    class _AsyncFrames:
+        def __init__(self) -> None:
+            self.next_seq = 0
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> MediaAudioFrame:
+            if self.next_seq >= 2:
+                raise StopAsyncIteration
+            frame = _frame(self.next_seq, self.next_seq * 160)
+            self.next_seq += 1
+            return frame
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    frames = _AsyncFrames()
+    socket = _FakeDedicatedSocket(
+        [
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 0)
+            ),
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 1)
+            ),
+        ]
+    )
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=frames,
+        on_playback_stop=lambda _receipt: None,
+        max_pending_frames=1,
+        max_pending_bytes=2048,
+    )
+
+    binaries = [item for item in socket.sent if isinstance(item, bytes)]
+    assert [decode_audio_frame(binding, item).seq for item in binaries] == [0, 1]
+    assert result.reason_id is MediaDetachReason.LOCAL_CLOSE
+    assert result.sent_frames == 2
+    assert result.acknowledged_through_seq == 1
+    assert frames.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_downlink_async_source_failure_is_typed_and_never_replays_audio() -> None:
+    binding = _downlink_binding()
+
+    class _FailAfterFirstFrame:
+        def __init__(self) -> None:
+            self.next_calls = 0
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> MediaAudioFrame:
+            self.next_calls += 1
+            if self.next_calls == 1:
+                return _frame()
+            raise DedicatedMediaDownlinkSourceFailure(
+                MediaDetachReason.STREAMING_TTS_TEXT_OR_RETRY
+            )
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    frames = _FailAfterFirstFrame()
+    socket = _FakeDedicatedSocket(
+        [
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 0)
+            )
+        ]
+    )
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=frames,
+        on_playback_stop=lambda _receipt: None,
+        max_pending_frames=1,
+        max_pending_bytes=2048,
+    )
+
+    assert result.reason_id is MediaDetachReason.STREAMING_TTS_TEXT_OR_RETRY
+    assert result.sent_frames == 1
+    assert len([item for item in socket.sent if isinstance(item, bytes)]) == 1
+    terminal = deserialize_media_control(socket.sent[-1])
+    assert isinstance(terminal, MediaDetach)
+    assert terminal.reason_id is MediaDetachReason.STREAMING_TTS_TEXT_OR_RETRY
+    assert terminal.business_cancel_count_delta == 0
+    assert frames.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_downlink_transport_loss_closes_async_source_without_retry() -> None:
+    binding = _downlink_binding()
+
+    class _OpenAsyncFrames:
+        def __init__(self) -> None:
+            self.emitted = False
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self) -> MediaAudioFrame:
+            if self.emitted:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+            self.emitted = True
+            return _frame()
+
+        async def aclose(self) -> None:
+            self.close_calls += 1
+
+    frames = _OpenAsyncFrames()
+    socket = _FakeDedicatedSocket([ConnectionError("private transport loss")])
+
+    result = await run_dedicated_media_downlink_socket_leaf(
+        _request(binding),
+        socket=socket,
+        frames=frames,
+        on_playback_stop=lambda _receipt: None,
+        max_pending_frames=1,
+        max_pending_bytes=2048,
+    )
+
+    assert result.reason_id is MediaDetachReason.TRANSPORT_CLOSED
+    assert result.sent_frames == 1
+    assert result.business_cancel_count_delta == 0
+    assert frames.close_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_downlink_completion_is_retained_before_physical_close() -> None:
     binding = _downlink_binding()
     effects = {"completed": False}
@@ -1168,7 +1970,11 @@ async def test_downlink_completion_is_retained_before_physical_close() -> None:
             await super().close(code, reason)
 
     socket = _OrderedCloseSocket(
-        [serialize_media_control(MediaAck(binding.lease_id, binding.generation.value, 0))]
+        [
+            serialize_media_control(
+                MediaAck(binding.lease_id, binding.generation.value, 0)
+            )
+        ]
     )
 
     result = await run_dedicated_media_downlink_socket_leaf(
@@ -1187,7 +1993,9 @@ async def test_downlink_completion_is_retained_before_physical_close() -> None:
 
 
 @pytest.mark.asyncio
-async def test_downlink_wrong_ack_generation_detaches_before_stop_or_other_scope_effects() -> None:
+async def test_downlink_wrong_ack_generation_detaches_before_stop_or_other_scope_effects() -> (
+    None
+):
     binding = _downlink_binding()
     socket = _FakeDedicatedSocket(
         [

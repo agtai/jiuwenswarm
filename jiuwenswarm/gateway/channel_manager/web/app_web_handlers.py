@@ -671,6 +671,8 @@ _FORWARD_REQ_METHODS = frozenset({
     "live_voice.composition.p2.presentation.ack",
     "live_voice.composition.p2.barge_in",
     "live_voice.composition.p3.confirmation.issue",
+    "live_voice.composition.p3.intent",
+    "live_voice.composition.p3.intent.status",
     "live_voice.composition.p3.mutate",
     "live_voice.composition.p3.progress.activate",
     "live_voice.composition.p3.progress.close",
@@ -780,6 +782,8 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "live_voice.composition.p2.presentation.ack",
     "live_voice.composition.p2.barge_in",
     "live_voice.composition.p3.confirmation.issue",
+    "live_voice.composition.p3.intent",
+    "live_voice.composition.p3.intent.status",
     "live_voice.composition.p3.mutate",
     "live_voice.composition.p3.progress.activate",
     "live_voice.composition.p3.progress.close",
@@ -1591,9 +1595,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         register_dedicated_media_rpc_handlers,
     )
     from jiuwenswarm.gateway.live_voice.speech_rpc import register_speech_rpc_handlers
+    from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
+        StreamingRecognitionRouteOwner,
+    )
+    from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
+        StreamingSynthesisRouteOwner,
+    )
     from jiuwenswarm.server.live_voice.batch_speech import (
         FormalBatchSpeechService,
         create_environment_batch_speech_provider,
+    )
+    from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+        STREAMING_SPEECH_FLAG,
+        select_environment_streaming_speech,
+    )
+    from jiuwenswarm.server.live_voice.observability import (
+        LiveVoiceObservabilityCollector,
     )
     media_registry = DedicatedMediaProductRegistry.from_environment()
     speech_service = bind.speech_service
@@ -1605,13 +1622,67 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
     capability = speech_service.capability_payload()
     provider = capability.get("provider") if isinstance(capability, dict) else None
-    media_registry.set_provider_available(
+    batch_available = bool(
         media_registry_owns_speech_authority
         and isinstance(provider, dict)
         and provider.get("available") is True
     )
+    media_registry.set_provider_available(batch_available)
+    streaming_recognition_owner = (
+        StreamingRecognitionRouteOwner(
+            lambda: select_environment_streaming_speech(
+                batch_available=batch_available
+            )
+        )
+        if media_registry_owns_speech_authority
+        else None
+    )
+    if streaming_recognition_owner is not None:
+        media_registry.configure_streaming_recognition(
+            streaming_recognition_owner,
+            receipt_issuer=speech_service.issue_streaming_voice_commit_receipt,
+        )
+    streaming_synthesis_owner = None
+    if (
+        media_registry.enabled
+        and media_registry_owns_speech_authority
+        and str(os.getenv(STREAMING_SPEECH_FLAG) or "").strip().lower()
+        in {"1", "true", "yes", "on"}
+    ):
+        async def select_streaming_speech():
+            return await select_environment_streaming_speech(
+                batch_available=batch_available
+            )
+
+        streaming_synthesis_owner = StreamingSynthesisRouteOwner(
+            select_streaming_speech
+        )
+        media_registry.configure_streaming_synthesis(
+            streaming_synthesis_owner,
+            observability=LiveVoiceObservabilityCollector(),
+        )
     channel.live_voice_media_registry = media_registry
+    # The formal P1->P2 receipt claim must reach either an owned or injected
+    # Speech service.  Lifecycle ownership is tracked separately so channel
+    # shutdown never closes an injected service.
     channel.live_voice_speech_service = speech_service
+    channel.live_voice_owned_speech_service = (
+        speech_service if media_registry_owns_speech_authority else None
+    )
+    channel.live_voice_streaming_speech_owner = streaming_recognition_owner
+    channel.live_voice_streaming_synthesis_owner = streaming_synthesis_owner
+
+    async def override_speech_operation(
+        operation_name, params, context, session_id
+    ):
+        return await media_registry.try_streaming_synthesis(
+            operation_name,
+            params,
+            context,
+            session_id,
+            batch_service=speech_service,
+        )
+
     register_speech_rpc_handlers(
         channel,
         service=speech_service,
@@ -1621,6 +1692,11 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         result_transform=(
             media_registry.prepare_synthesis_downlink
             if media_registry_owns_speech_authority
+            else None
+        ),
+        operation_override=(
+            override_speech_operation
+            if streaming_synthesis_owner is not None
             else None
         ),
     )

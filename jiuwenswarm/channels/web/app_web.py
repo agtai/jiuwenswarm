@@ -14,6 +14,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import select
 import socket
 import ssl
@@ -211,6 +212,16 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         "upgrade",
     }
     _WS_LOG_MAX_CHARS = 2000
+    _WS_PRIVATE_JSON_KEY = re.compile(
+        r'"(?:final[-_]*text|raw[-_]*text|voice[-_]*commit[-_]*receipt|'
+        r'data[-_]*base64|audio[-_]*base64|audio[-_]*bytes|raw[-_]*audio|pcm|'
+        r'samples|display[-_]*text|spoken[-_]*text|transcript|text|instruction|'
+        r'auth[-_]*token|authorization|api[-_]*key|access[-_]*token|'
+        r'refresh[-_]*token|credential|credentials|secret|ticket|media[-_]*ticket|'
+        r'endpoint[-_]*path|subject[-_]*id|lease[-_]*id|authority[-_]*evidence[-_]*id|'
+        r'media[-_]*session[-_]*id)"\s*:',
+        re.IGNORECASE,
+    )
     _HTTP_PROXY_TIMEOUT = 30
     _WS_CONNECT_TIMEOUT = 10
     _WS_SELECT_TIMEOUT = 60
@@ -340,10 +351,36 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _redact_ws_media_for_log(cls, value: Any) -> Any:
         """Project websocket diagnostics without private Live Voice content."""
 
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith(("{", "[")):
+                try:
+                    wrapped = json.loads(stripped)
+                except json.JSONDecodeError:
+                    wrapped = None
+                if isinstance(wrapped, (dict, list)):
+                    redacted = cls._redact_ws_media_for_log(wrapped)
+                    if redacted != wrapped:
+                        return json.dumps(
+                            redacted,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        )
+            if cls._WS_PRIVATE_JSON_KEY.search(value):
+                return "<redacted:live-voice-private>"
+            return value
         if isinstance(value, dict):
             projected: dict[Any, Any] = {}
             for key, item in value.items():
                 normalized = str(key).strip().lower().replace("-", "_")
+                compact_key = normalized.replace("_", "")
+                if compact_key in {
+                    "finaltext",
+                    "rawtext",
+                    "voicecommitreceipt",
+                }:
+                    projected[key] = "<redacted:live-voice-private>"
+                    continue
                 if normalized in {
                     "data_base64",
                     "audio_base64",
@@ -351,7 +388,6 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     "raw_audio",
                     "pcm",
                     "samples",
-                    "raw_text",
                     "display_text",
                     "spoken_text",
                     "transcript",
@@ -366,6 +402,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                     "credentials",
                     "secret",
                     "ticket",
+                    "media_ticket",
                     "endpoint_path",
                     "subject_id",
                     "lease_id",

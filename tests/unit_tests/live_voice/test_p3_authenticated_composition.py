@@ -416,14 +416,10 @@ def _issue_confirmation(
             model=model,
             source=str(params.get("source", "structured")),
             interaction_id=(
-                str(params["interaction_id"])
-                if "interaction_id" in params
-                else None
+                str(params["interaction_id"]) if "interaction_id" in params else None
             ),
             turn_id=(str(params["turn_id"]) if "turn_id" in params else None),
-            commit_id=(
-                str(params["commit_id"]) if "commit_id" in params else None
-            ),
+            commit_id=(str(params["commit_id"]) if "commit_id" in params else None),
         ),
     )
     params["confirmation_id"] = harness.confirmations.issue(
@@ -659,9 +655,12 @@ async def test_invalid_voice_origin_is_rejected_before_durable_confirmation(
             )
         assert raised.value.reason == "TURN_COMMIT_NOT_ACCEPTED"
         with sqlite3.connect(harness.database) as connection:
-            assert connection.execute(
-                "SELECT COUNT(*) FROM p3_confirmations"
-            ).fetchone()[0] == 0
+            assert (
+                connection.execute("SELECT COUNT(*) FROM p3_confirmations").fetchone()[
+                    0
+                ]
+                == 0
+            )
         assert _store_counts(harness.database) == (0, 0, 0, 0, 0)
         assert harness.executor.dispatches == []
     finally:
@@ -669,9 +668,7 @@ async def test_invalid_voice_origin_is_rejected_before_durable_confirmation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "outcome", (TerminalOutcome.COMPLETED, TerminalOutcome.FAILED)
-)
+@pytest.mark.parametrize("outcome", (TerminalOutcome.COMPLETED, TerminalOutcome.FAILED))
 async def test_product_registry_replays_terminal_p3_authority_after_clean_checkpoint(
     tmp_path: Path,
     outcome: TerminalOutcome,
@@ -993,8 +990,7 @@ async def test_read_queries_survive_clean_checkpoint_revision_but_cancel_fails_c
         )
 
         assert (
-            cancel.payload["error"]["reason"]
-            == "EXECUTION_CONTEXT_REVISION_MISMATCH"
+            cancel.payload["error"]["reason"] == "EXECUTION_CONTEXT_REVISION_MISMATCH"
         )
         assert _store_counts(harness.database) == before
         assert harness.executor.cancels == []
@@ -2644,9 +2640,7 @@ async def _effects(harness: _Harness) -> tuple[object, ...]:
     )
 
 
-async def _cancel_current(
-    harness: _Harness, task_id: str, *, command_id: str
-) -> None:
+async def _cancel_current(harness: _Harness, task_id: str, *, command_id: str) -> None:
     params = _issue_confirmation(
         harness,
         {
@@ -2665,8 +2659,10 @@ async def _cancel_current(
     )
     assert cancelled.ok is True, cancelled.payload
     await _wait_until(
-        lambda: harness.composition._core.store.get_task(task_id, _scope()).state.value
-        == "terminal"
+        lambda: (
+            harness.composition._core.store.get_task(task_id, _scope()).state.value
+            == "terminal"
+        )
     )
 
 
@@ -2692,10 +2688,10 @@ async def _terminal_task(
         await _cancel_current(harness, task_id, command_id=cancel_command_id)
     else:
         await _wait_until(
-            lambda: harness.composition._core.store.get_task(
-                task_id, _scope()
-            ).state.value
-            == "terminal"
+            lambda: (
+                harness.composition._core.store.get_task(task_id, _scope()).state.value
+                == "terminal"
+            )
         )
     return task_id
 
@@ -3433,6 +3429,40 @@ async def test_retry_route_surface_rejects_client_declared_or_extra_facts(
         assert denied.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
         assert denied.value.code is ErrorCode.PERMISSION_DENIED
         assert await _effects(harness) == before
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_product_authority_candidate_requires_exact_cancel_target(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        candidate, context = harness.composition.resolve_product_authority_candidate(
+            bearer_token=TOKEN,
+            operation="task.cancel",
+            session_id="session-1",
+            correlation_id="correlation:product-cancel",
+            required_capabilities=frozenset({"task.cancel"}),
+            task_id=task_id,
+        )
+
+        assert candidate.resource is not None
+        assert candidate.resource.resource_id == task_id
+        assert context.scope == _scope()
+        with pytest.raises(FormalTaskViolation) as missing:
+            harness.composition.resolve_product_authority_candidate(
+                bearer_token=TOKEN,
+                operation="task.cancel",
+                session_id="session-1",
+                correlation_id="correlation:product-cancel-missing",
+                required_capabilities=frozenset({"task.cancel"}),
+                task_id=None,
+            )
+        assert missing.value.reason == "INVALID_P3_ROUTE_ARGUMENT"
     finally:
         await harness.composition.stop()
 

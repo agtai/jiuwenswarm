@@ -39,6 +39,7 @@ from .task_event_subscription import TaskEventSubscription
 from .task_progress_return import (
     ForegroundSupplier,
     GenerationIsCurrent,
+    PreparedTaskProgressSource,
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
     TaskProgressNotificationIntent,
@@ -518,6 +519,14 @@ class ProductP3SubscriptionFactory(Protocol):
     ) -> TaskEventSubscription: ...
 
 
+class ProductP3PreparedSourceFactory(Protocol):
+    def __call__(
+        self,
+        authorization: TaskAuthorizationGrant,
+        binding: TaskProgressOriginBinding,
+    ) -> PreparedTaskProgressSource: ...
+
+
 def _valid_text(value: object) -> bool:
     if type(value) is not str or not value.strip():
         return False
@@ -538,6 +547,7 @@ class ProductP3TextAdapter:
         authority: P3AuthorityAdapter,
         query_owner: ProductP3QueryOwner,
         subscription_factory: ProductP3SubscriptionFactory,
+        prepared_source_factory: ProductP3PreparedSourceFactory | None = None,
         generation_is_current: GenerationIsCurrent,
         arbiter: ProgressNotificationArbiter,
         foreground: ForegroundSupplier,
@@ -573,6 +583,11 @@ class ProductP3TextAdapter:
         self._authority = authority
         self._query_owner = query_owner
         self._subscription_factory = subscription_factory
+        if prepared_source_factory is not None and not callable(
+            prepared_source_factory
+        ):
+            raise ValueError("product P3 prepared source factory is invalid")
+        self._prepared_source_factory = prepared_source_factory
         self._generation_is_current = generation_is_current
         self._arbiter = arbiter
         self._foreground = foreground
@@ -768,7 +783,10 @@ class ProductP3TextAdapter:
             return ProductP3ProgressActivation(
                 False, ProductP3TextReason.INVALID_REQUEST.value, None, None
             )
-        if request.origin_kind is TaskProgressOriginKind.VOICE:
+        if (
+            request.origin_kind is TaskProgressOriginKind.VOICE
+            and self._prepared_source_factory is None
+        ):
             return ProductP3ProgressActivation(
                 False,
                 TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE.value,
@@ -822,7 +840,10 @@ class ProductP3TextAdapter:
             return ProductP3ProgressActivation(
                 False, ProductP3TextReason.INVALID_REQUEST.value, None, None
             )
-        if request.origin_kind is TaskProgressOriginKind.VOICE:
+        if (
+            request.origin_kind is TaskProgressOriginKind.VOICE
+            and self._prepared_source_factory is None
+        ):
             return ProductP3ProgressActivation(
                 False,
                 TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE.value,
@@ -857,7 +878,7 @@ class ProductP3TextAdapter:
             session_id=authority.session_id,
             project_id=authority.project_id,
             correlation_id=authority.correlation_id,
-            origin_kind=TaskProgressOriginKind.TEXT,
+            origin_kind=request.origin_kind,
             origin_id=request.origin_id,
             generation_kind=request.generation_kind,
             generation_id=request.generation_id,
@@ -876,16 +897,22 @@ class ProductP3TextAdapter:
             )
 
         subscription: TaskEventSubscription | None = None
+        prepared_source: PreparedTaskProgressSource | None = None
         cleanup: ProductP3ProgressCleanupHandle | None = None
         try:
-            subscription = self._subscription_factory(grant, binding)
+            if request.origin_kind is TaskProgressOriginKind.VOICE:
+                assert self._prepared_source_factory is not None
+                prepared_source = self._prepared_source_factory(grant, binding)
+                subscription = prepared_source.subscription
+            else:
+                subscription = self._subscription_factory(grant, binding)
             cleanup = self._retain_cleanup(binding, subscription)
             if not self._subscription_surface_valid(subscription):
                 raise TypeError("invalid product P3 subscription")
             bridge = TaskProgressReturnBridge(
                 enabled=True,
                 subscription=subscription,
-                prepared_source=None,
+                prepared_source=prepared_source,
                 authorization=grant,
                 binding=binding,
                 generation_is_current=self._generation_is_current,
@@ -979,7 +1006,8 @@ class ProductP3TextAdapter:
     @staticmethod
     def _valid_progress_request(request: ProductP3ProgressRequest) -> bool:
         return (
-            request.origin_kind is TaskProgressOriginKind.TEXT
+            request.origin_kind
+            in {TaskProgressOriginKind.TEXT, TaskProgressOriginKind.VOICE}
             and isinstance(request.route, AuthorityRouteContext)
             and all(
                 (

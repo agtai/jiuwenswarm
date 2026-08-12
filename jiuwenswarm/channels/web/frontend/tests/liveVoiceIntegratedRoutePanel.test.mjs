@@ -138,6 +138,11 @@ function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, pro
     task_id: event.task_id,
     correlation_id: retryBinding.correlation_id,
     origin_id: 'origin-1',
+    origin_kind: 'text',
+    requested_origin_kind: 'text',
+    effective_origin_kind: 'text',
+    delivery_mode: 'text',
+    fallback_reason: null,
     generation_kind: 'web_task_progress_generation',
     generation_id: 'generation-1',
     generation: 1,
@@ -259,6 +264,11 @@ test('route panel renders only a validated authenticated text progress fact', as
     project_id: 'project-1',
     correlation_id: 'correlation-product-1',
     origin_id: 'web-surface-1',
+    origin_kind: 'voice',
+    requested_origin_kind: 'voice',
+    effective_origin_kind: 'text',
+    delivery_mode: 'text_fallback',
+    fallback_reason: 'TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE',
     generation_kind: 'web_task_progress_generation',
     generation_id: 'web-generation-1',
     generation: 2,
@@ -317,6 +327,9 @@ test('route panel renders only a validated authenticated text progress fact', as
   assert.equal(html.includes('correlation-product-1'), true);
   assert.equal(html.includes('delivery-product-1'), true);
   assert.equal(html.includes('web_task_progress_generation:web-generation-1:2'), true);
+  assert.equal(html.includes('voice-&gt;text'), true);
+  assert.equal(html.includes('text_fallback'), true);
+  assert.equal(html.includes('TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE'), true);
   assert.equal(html.includes('It is not voice progress or Integrated Gate evidence.'), true);
 });
 
@@ -336,6 +349,102 @@ test('formal P1 discloses the 30-second capture bound and disables restart on te
   assert.equal(html.includes('Speak and press Stop and recognize before the limit.'), true);
   assert.equal(html.includes('AUDIO_CAPTURE_DURATION_EXCEEDED'), true);
   assert.equal(html.includes('The expired capture was discarded without a new Speech or Agent submission. Refresh to start again.'), true);
+  assert.match(html, /<button type="button" disabled="">Start formal voice turn<\/button>/);
+});
+
+test('formal P1 renders explicit page-memory device selection without exposing raw device IDs', async () => {
+  const html = await renderPanel({
+    viewProps: {
+      p1VoiceEnabled: true,
+      p1VoiceStatus: 'idle',
+      deviceSelection: {
+        status: 'ready',
+        reason: null,
+        inventory_generation: 3,
+        selection_generation: 2,
+        inputs: [{ token: 'opaque-input', kind: 'audioinput', label: 'Desk microphone', deviceId: 'private-input-id' }],
+        outputs: [{ token: 'opaque-output', kind: 'audiooutput', label: 'Desk speaker', deviceId: 'private-output-id' }],
+        applied_input_token: 'system_default',
+        applied_output_token: 'system_default',
+      },
+      draftInputDeviceToken: 'opaque-input',
+      draftOutputDeviceToken: 'opaque-output',
+      onLoadAudioDevices: () => {},
+      onDraftInputDevice: () => {},
+      onDraftOutputDevice: () => {},
+      onApplyAudioDevices: () => {},
+      onP1VoiceStart: () => {},
+      onP1VoiceStop: () => {},
+    },
+  });
+
+  assert.match(html, /data-testid="live-voice-integrated-device-selection"/);
+  assert.match(html, /Audio input and output/);
+  assert.match(html, /Device names and identifiers stay only in this page memory/);
+  assert.match(html, /System default \(explicit\)/);
+  assert.match(html, /Desk microphone/);
+  assert.match(html, /Desk speaker/);
+  assert.doesNotMatch(html, /private-input-id|private-output-id/);
+});
+
+test('device selection controls remain locked throughout retained P1 recognition ownership', async () => {
+  const html = await renderPanel({
+    viewProps: {
+      p1VoiceEnabled: true,
+      p1VoiceStatus: 'recognizing',
+      deviceSelection: {
+        status: 'ready',
+        reason: null,
+        inventory_generation: 1,
+        selection_generation: 1,
+        inputs: [],
+        outputs: [],
+        applied_input_token: 'system_default',
+        applied_output_token: 'system_default',
+      },
+      onLoadAudioDevices: () => {},
+      onDraftInputDevice: () => {},
+      onDraftOutputDevice: () => {},
+      onApplyAudioDevices: () => {},
+      onP1VoiceStart: () => {},
+      onP1VoiceStop: () => {},
+    },
+  });
+
+  const fieldset = html.match(/data-testid="live-voice-integrated-device-selection"[\s\S]*?<\/fieldset>/)?.[0] ?? '';
+  assert.equal((fieldset.match(/disabled=""/g) ?? []).length, 4);
+});
+
+test('devicechange verification is visible and locks apply plus Product start until current inventory is verified', async () => {
+  const html = await renderPanel({
+    viewProps: {
+      p1VoiceEnabled: true,
+      p1VoiceStatus: 'idle',
+      deviceSelection: {
+        status: 'refreshing',
+        reason: null,
+        inventory_generation: 4,
+        selection_generation: 2,
+        inputs: [{ token: 'opaque-input', kind: 'audioinput', label: 'Desk microphone' }],
+        outputs: [{ token: 'opaque-output', kind: 'audiooutput', label: 'Desk speaker' }],
+        applied_input_token: 'opaque-input',
+        applied_output_token: 'opaque-output',
+      },
+      draftInputDeviceToken: 'opaque-input',
+      draftOutputDeviceToken: 'opaque-output',
+      onLoadAudioDevices: () => {},
+      onDraftInputDevice: () => {},
+      onDraftOutputDevice: () => {},
+      onApplyAudioDevices: () => {},
+      onP1VoiceStart: () => {},
+      onP1VoiceStop: () => {},
+    },
+  });
+
+  assert.match(html, /Checking current devices\.\.\./);
+  assert.match(html, /Device selection<\/span><code>refreshing<\/code>/);
+  const fieldset = html.match(/data-testid="live-voice-integrated-device-selection"[\s\S]*?<\/fieldset>/)?.[0] ?? '';
+  assert.equal((fieldset.match(/disabled=""/g) ?? []).length, 4);
   assert.match(html, /<button type="button" disabled="">Start formal voice turn<\/button>/);
 });
 
@@ -1164,9 +1273,10 @@ test('voice Task origin adopts only the canonical CR response returned by the se
 test('fresh task.create rebinds the panel progress owner to its exact task', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
 
-  assert.match(source, /setCreatedProgressTaskId\(createdTaskId\)/);
+  assert.match(source, /setCreatedProgressRoute\([\s\S]*?task_id: createdTaskId/);
+  assert.doesNotMatch(source, /setCreatedProgressTaskId|setCreatedProgressOrigin/);
   assert.match(source, /task_id: createdProgressTaskId/);
-  assert.match(source, /createdProgressTaskId, props\.activeSessionId/);
+  assert.match(source, /createdProgressRoute, props\.activeSessionId/);
 });
 
 test('product barge-in stops local playout before any response cancel request', async () => {
@@ -1241,7 +1351,7 @@ test('route panel discloses permission, origin, device, activation, lifecycle, n
     'required',
     'visibility:hidden; discarded:true',
     'offline',
-    'capture:false; playout:false; wired:false',
+    'capture:false; playout:false; output_selection:false; wired:false',
     'MICROPHONE_PERMISSION_QUERY_FAILED',
   ]) {
     assert.equal(html.includes(fact), true, fact);

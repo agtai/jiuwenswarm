@@ -161,9 +161,14 @@ export async function collectWebPlatformDiagnostics(
     }
   }
 
-  let audioInput: DeviceAvailabilityFact = environment.media_devices === null ? 'unsupported' : 'unknown';
-  let audioOutput: DeviceAvailabilityFact = environment.media_devices === null ? 'unsupported' : 'unknown';
-  if (environment.media_devices !== null) {
+  let audioInput: DeviceAvailabilityFact = environment.media_devices === null ? 'unsupported' : 'not_enumerated';
+  let audioOutput: DeviceAvailabilityFact = environment.media_devices === null ? 'unsupported' : 'not_enumerated';
+  // Device enumeration may expose stable identifiers and labels. The coarse
+  // diagnostics plane does not read it until microphone permission is already
+  // granted; the explicit device-selection owner owns any permission prompt.
+  if (environment.media_devices !== null && microphonePermission === 'granted') {
+    audioInput = 'unknown';
+    audioOutput = 'unknown';
     try {
       const devices = await environment.media_devices.enumerateDevices();
       audioInput = devices.some(device => device.kind === 'audioinput') ? 'enumerated' : 'not_enumerated';

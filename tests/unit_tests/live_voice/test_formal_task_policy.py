@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import replace
 from pathlib import Path
 
@@ -197,6 +198,52 @@ def test_voice_create_cannot_borrow_commit_for_different_instruction(
         )
 
     assert raised.value.reason == "VOICE_TASK_INSTRUCTION_MISMATCH"
+
+
+def test_natural_cancel_requires_the_exact_task_id_source_span() -> None:
+    commit = TurnCommit.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "commit_id": "commit-cancel",
+            "turn_id": "turn-cancel",
+            "interaction_id": "interaction-cancel",
+            "text": "cancel task task-1",
+            "hypothesis_provenance": {"provider": "test"},
+            "scope": _scope().to_dict(),
+            "context_refs": [],
+            "committed_at": NOW,
+        }
+    )
+    commits = TurnCommitLedger()
+    assert commits.accept(commit)
+    intent = FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED,
+        source="text",
+        operation="task.cancel",
+        request_id="request-cancel",
+        command_id="command-cancel",
+        issued_at=NOW,
+        scope=_scope(),
+        correlation_id="correlation-cancel",
+        authorization=_grant(
+            "task.cancel", command_id="command-cancel", target="task-2"
+        ),
+        interaction_id=commit.interaction_id,
+        turn_id=commit.turn_id,
+        commit_id=commit.commit_id,
+        origin_commit_sha256=hashlib.sha256(commit.canonical_bytes()).hexdigest(),
+        source_start=12,
+        source_end=18,
+        task_id="task-2",
+        destructive=True,
+        confirmed=True,
+        confirmation_id="confirm-1",
+    )
+
+    with pytest.raises(FormalTaskViolation) as raised:
+        FormalTaskPolicyAdapter(commits).map(intent)
+
+    assert raised.value.reason == "TASK_INTENT_SOURCE_SPAN_MISMATCH"
 
 
 def test_status_is_a_read_only_query_with_exact_task_and_no_context() -> None:

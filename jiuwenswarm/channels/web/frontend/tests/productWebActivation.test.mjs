@@ -60,6 +60,23 @@ function p3MutationResult() {
   };
 }
 
+function p3ProgressResult(status, binding, overrides = {}) {
+  return {
+    status,
+    ...binding,
+    ...(status === 'active'
+      ? {
+          requested_origin_kind: 'text',
+          origin_kind: 'text',
+          voice_progress: 'unavailable',
+          voice_reason: 'TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE',
+          fallback_reason: null,
+        }
+      : {}),
+    ...overrides,
+  };
+}
+
 test('retained product retries reuse the exact operation after transport loss', async () => {
   let calls = 0;
   const result = await retryRetainedProductOperation({
@@ -1724,15 +1741,14 @@ test('stock Web queries one formal task then owns exact P3 progress activate and
       }
       return {
         ok: true,
-        result: {
-          status: method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed',
+        result: p3ProgressResult(method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed', {
           session_id: 'session-1',
           task_id: 'task-1',
           correlation_id: 'correlation-1',
           origin_id: 'origin-1',
           generation_id: 'generation-1',
           generation: 1,
-        },
+        }),
       };
     },
   });
@@ -1754,6 +1770,40 @@ test('stock Web queries one formal task then owns exact P3 progress activate and
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
 });
 
+test('P3 progress snapshot publishes the server-declared voice to text fallback before any event', async () => {
+  const snapshots = [];
+  const owner = new ProductWebP3ProgressOwner({
+    enabled: true,
+    on_snapshot: snapshot => snapshots.push(snapshot),
+    request: async (method, params) => ({
+      ok: true,
+      result: p3ProgressResult(method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed', params, {
+        requested_origin_kind: 'voice',
+        origin_kind: 'text',
+        voice_progress: 'unavailable',
+        voice_reason: 'TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE',
+        fallback_reason: 'TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE',
+      }),
+    }),
+  });
+
+  const active = await owner.start({
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    task_id: 'task-voice-1',
+    origin_id: 'interaction-voice-1',
+    generation_id: 'generation-voice-1',
+    generation: 1,
+  });
+  assert.equal(active.status, 'active');
+  assert.equal(active.requested_origin_kind, 'voice');
+  assert.equal(active.effective_origin_kind, 'text');
+  assert.equal(active.voice_progress, 'unavailable');
+  assert.equal(active.fallback_reason, 'TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE');
+  assert.equal(snapshots.at(-1).fallback_reason, 'TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE');
+  await owner.close();
+});
+
 test('fresh task.create binds progress directly to the exact accepted task', async () => {
   const calls = [];
   const owner = new ProductWebP3ProgressOwner({
@@ -1765,10 +1815,7 @@ test('fresh task.create binds progress directly to the exact accepted task', asy
       }
       return {
         ok: true,
-        result: {
-          status: method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed',
-          ...params,
-        },
+        result: p3ProgressResult(method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed', params),
       };
     },
   });
@@ -1803,15 +1850,14 @@ test('P3 close waits for in-flight task selection and cleans the resulting activ
       if (method === PRODUCT_P3_TASK_LIST_METHOD) return taskList;
       return {
         ok: true,
-        result: {
-          status: method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed',
+        result: p3ProgressResult(method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed', {
           session_id: 'session-1',
           task_id: 'task-1',
           correlation_id: 'correlation-1',
           origin_id: 'origin-1',
           generation_id: 'generation-1',
           generation: 1,
-        },
+        }),
       };
     },
   });
@@ -1893,15 +1939,14 @@ test('P3 authoritative activation unavailability stays unavailable and permits r
         }
         return {
           ok: true,
-          result: {
-            status: method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed',
+          result: p3ProgressResult(method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed', {
             session_id: 'session-1',
             task_id: 'task-1',
             correlation_id: 'correlation-1',
             origin_id: 'origin-1',
             generation_id: 'generation-1',
             generation: 1,
-          },
+          }),
         };
       },
     });
@@ -1943,7 +1988,7 @@ test('P3 progress exact close remains retryable after response loss', async () =
         generation: 1,
       };
       if (method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD) {
-        return { ok: true, result: { ...result, status: 'active' } };
+        return { ok: true, result: p3ProgressResult('active', result) };
       }
       closeCalls += 1;
       if (closeCalls === 1) throw new Error('close response lost');
@@ -1982,7 +2027,7 @@ test('P3 cleanup and next-session reconciliation share one bounded close retry',
         generation: 1,
       };
       if (method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD) {
-        return { ok: true, result: { ...result, status: 'active' } };
+        return { ok: true, result: p3ProgressResult('active', result) };
       }
       closeCalls += 1;
       if (closeCalls === 1) throw new Error('close response lost');
@@ -2029,7 +2074,7 @@ test('P3 progress close rejects a partial binding response and retries exact cle
         generation: 1,
       };
       if (method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD) {
-        return { ok: true, result: { ...result, status: 'active' } };
+        return { ok: true, result: p3ProgressResult('active', result) };
       }
       closeCalls += 1;
       return {

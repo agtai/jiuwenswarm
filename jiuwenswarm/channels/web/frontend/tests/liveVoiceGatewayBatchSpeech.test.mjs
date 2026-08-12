@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -7,9 +8,15 @@ import {
   SPEECH_CAPABILITIES_METHOD,
   SPEECH_CANCEL_METHOD,
   SPEECH_RECOGNIZE_BATCH_METHOD,
+  SPEECH_RECOGNIZE_STREAMING_RESULT_METHOD,
   SPEECH_SYNTHESIZE_BATCH_METHOD,
   capturedFramesToPcm16Wav,
 } from '../node_modules/.cache/live-voice-gateway-batch-speech/gatewayBatchSpeechClient.mjs';
+
+const backendStreamingFallback = JSON.parse(readFileSync(
+  new URL('../../../../../tests/fixtures/live_voice_streaming_recognition_v1/backend_fallback.json', import.meta.url),
+  'utf8',
+));
 
 const scope = Object.freeze({
   subject_id: 'alice',
@@ -196,6 +203,68 @@ test('AIO-B final frames reach formal SR-B with provenance but never commit a tu
   assert.equal(calls.length, 1);
 });
 
+test('real backend streaming fallback fixture crosses into the frontend contract', async () => {
+  const client = new GatewayBatchSpeechClient({
+    enabled: true,
+    scope,
+    createId: ids(),
+    transport: {
+      async request(method, params) {
+        assert.equal(method, SPEECH_RECOGNIZE_STREAMING_RESULT_METHOD);
+        assert.equal(params.capture_id, backendStreamingFallback.capture.capture_id);
+        assert.equal(params.capture_generation, backendStreamingFallback.capture.capture_generation);
+        return backendStreamingFallback;
+      },
+    },
+  });
+
+  const decision = await client.recognizeStreamingFinal({
+    frames: [frame(0)],
+    locale: 'en-US',
+    correlationId: 'correlation-1',
+    interactionId: 'interaction-1',
+  });
+
+  const { status, ...fallback } = backendStreamingFallback;
+  assert.deepEqual(decision, { status, fallback });
+});
+
+test('diagnostic absence or corruption cannot change the server-owned fallback', async () => {
+  for (const [xObsEvent, xObsMetric] of [
+    [null, null],
+    ['live_voice.speech.degradation', 'live_voice.failure_total'],
+    ['failure.observed', 'live_voice.degradation_total'],
+  ]) {
+    const client = new GatewayBatchSpeechClient({
+      enabled: true,
+      scope,
+      createId: ids(),
+      transport: {
+        async request() {
+          return {
+            ...backendStreamingFallback,
+            capture: { ...backendStreamingFallback.capture },
+            x_obs_event: xObsEvent,
+            x_obs_metric: xObsMetric,
+          };
+        },
+      },
+    });
+    const decision = await client.recognizeStreamingFinal({
+      frames: [frame(0)],
+      locale: 'en-US',
+      correlationId: 'correlation-1',
+      interactionId: 'interaction-1',
+    });
+
+    assert.equal(decision.status, 'fallback');
+    assert.equal(decision.fallback.fallback_tier, 'batch');
+    assert.equal(decision.fallback.reason_id, 'STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED');
+    assert.equal(decision.fallback.x_obs_event, xObsEvent === 'failure.observed' && xObsMetric === 'live_voice.failure_total' ? xObsEvent : null);
+    assert.equal(decision.fallback.x_obs_metric, xObsEvent === 'failure.observed' && xObsMetric === 'live_voice.failure_total' ? xObsMetric : null);
+  }
+});
+
 test('authoritative Agent text reaches SS-B and maps exact-rate WAV into AIO-B chunks', async () => {
   const transport = {
     async request(method, params) {
@@ -225,6 +294,7 @@ test('authoritative Agent text reaches SS-B and maps exact-rate WAV into AIO-B c
 });
 
 test('authoritative synthesis accepts one closed dedicated downlink without exposing inline audio', async () => {
+  let streamingDescriptor = false;
   const transport = {
     async request(_method, params) {
       const envelope = synthesisEnvelope(params);
@@ -232,9 +302,10 @@ test('authoritative synthesis accepts one closed dedicated downlink without expo
         format: 'pcm_f32_mono_20ms',
         sample_rate_hz: 16_000,
         channel_count: 1,
-        frame_count: 2,
+        frame_count: streamingDescriptor ? null : 2,
         delivery: 'dedicated_media_downlink',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'S'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
         binding: {
@@ -269,6 +340,8 @@ test('authoritative synthesis accepts one closed dedicated downlink without expo
         },
         max_pending_frames: 8,
         max_pending_bytes: 131_072,
+        streaming: streamingDescriptor,
+        degradation_reason: null,
       };
       return envelope;
     },
@@ -287,7 +360,30 @@ test('authoritative synthesis accepts one closed dedicated downlink without expo
   assert.equal(result.chunks.length, 0);
   assert.equal(result.downlink.frame_count, 2);
   assert.equal(result.downlink.max_pending_frames, 8);
+  assert.equal(result.downlink.streaming, false);
+  assert.equal(result.downlink.degradation_reason, null);
   assert.equal(Object.hasOwn(result.downlink, 'data_base64'), false);
+  assert.equal(Object.hasOwn(result.downlink, 'media_ticket'), false);
+  assert.equal(JSON.stringify(result.downlink).includes('S'.repeat(43)), false);
+  assert.equal(result.downlink.take_media_ticket(), 'S'.repeat(43));
+  assert.throws(() => result.downlink.take_media_ticket(), /already consumed/);
+  assert.equal(JSON.stringify(result.downlink).includes('S'.repeat(43)), false);
+
+  streamingDescriptor = true;
+  const streamed = await client.synthesizeAuthoritative({
+    response: { interaction_id: 'interaction-1', response_id: 'response-2', response_generation: 2 },
+    unitId: 'unit-2',
+    renderPlan: { display_text: 'World', spoken_text: 'World', transforms: [] },
+    authoritativeAgentText: true,
+    locale: 'en-US',
+    requiredSampleRateHz: 16_000,
+    correlationId: 'correlation-1',
+  });
+  assert.equal(streamed.downlink.frame_count, null);
+  assert.equal(streamed.downlink.streaming, true);
+  assert.equal(streamed.downlink.degradation_reason, null);
+  assert.equal(streamed.downlink.endpoint_path, '/ws/live-voice/media');
+  assert.equal(streamed.downlink.take_media_ticket(), 'S'.repeat(43));
 });
 
 test('flag-off preserves Browser Speech fallback without any Gateway side effect', async () => {

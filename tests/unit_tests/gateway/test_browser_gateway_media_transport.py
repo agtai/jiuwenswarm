@@ -11,6 +11,7 @@ import pytest
 
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MEDIA_CONTRACT_VERSION,
+    MEDIA_END_OF_TURN_CAPABILITY,
     MEDIA_TRANSPORT_KIND,
     MEDIA_WIRE_CODEC,
     ActiveMediaActivation,
@@ -24,6 +25,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaDetach,
     MediaDetachReason,
     MediaDirection,
+    MediaEndOfTurn,
     MediaFrameFormat,
     MediaGenerationBinding,
     MediaGenerationKind,
@@ -184,6 +186,62 @@ def test_lvm1_cross_language_fixture_is_byte_exact() -> None:
 
     assert len(binary) == fixture["expected_binary_bytes"]
     assert hashlib.sha256(binary).hexdigest() == fixture["expected_sha256"]
+
+
+def test_end_of_turn_cross_language_fixture_is_exact_and_content_free() -> None:
+    fixture_path = (
+        Path(__file__).parents[2]
+        / "fixtures"
+        / "live_voice_media_transport_v1"
+        / "end_of_turn.json"
+    )
+    wire = fixture_path.read_text(encoding="utf-8")
+    raw = json.loads(wire)["control"]
+    control = deserialize_media_control(json.dumps(raw, separators=(",", ":")))
+    assert isinstance(control, MediaEndOfTurn)
+    assert control.capability_version == MEDIA_END_OF_TURN_CAPABILITY
+    assert (control.provider_start_ms, control.provider_end_ms) == (320, 1840)
+    assert control.create_response is False
+    assert control.interrupt_response is False
+    assert control.business_cancel_count_delta == 0
+    assert "item_id" not in raw
+    assert "audio_cursor" not in raw
+    assert "transcript" not in raw
+    assert deserialize_media_control(serialize_media_control(control)) == control
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("capability_version", "media.end_of_turn.v2"),
+        ("create_response", True),
+        ("interrupt_response", True),
+        ("business_cancel_count_delta", 1),
+        ("provider_end_ms", 319),
+    ],
+)
+def test_end_of_turn_malformed_or_authority_widening_fails_closed(
+    field: str, value: object
+) -> None:
+    raw = {
+        "type": "media.end_of_turn",
+        "contract_version": MEDIA_CONTRACT_VERSION,
+        "capability_version": MEDIA_END_OF_TURN_CAPABILITY,
+        "lease_id": "fixture-eot-lease",
+        "generation": 7,
+        "detector": "server_vad",
+        "speech_started_observed": True,
+        "provider_start_ms": 320,
+        "provider_end_ms": 1840,
+        "timing_basis": "provider_time",
+        "timing_provenance": "adapter_derived",
+        "create_response": False,
+        "interrupt_response": False,
+        "business_cancel_count_delta": 0,
+    }
+    raw[field] = value
+    with pytest.raises(MediaTransportViolation):
+        deserialize_media_control(json.dumps(raw, separators=(",", ":")))
 
 
 @pytest.mark.parametrize(

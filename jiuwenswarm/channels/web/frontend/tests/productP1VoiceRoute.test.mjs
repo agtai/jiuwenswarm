@@ -19,6 +19,13 @@ import {
 } from '../node_modules/.cache/live-voice-browser-dedicated-media/browserDedicatedMediaRoute.mjs';
 
 const captureProcessorSource = readFileSync(new URL('../src/features/live-voice/formal/adapters/liveVoiceCaptureProcessor.js', import.meta.url), 'utf8');
+const MANUAL_EOT_FALLBACK = Object.freeze({
+  status: 'fallback',
+  requested_capability: 'media.end_of_turn.v1',
+  reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
+  fallback: 'manual',
+  visible: true,
+});
 
 function attachRealCaptureProcessor(worklet, sampleRate = 48_000) {
   let Processor = null;
@@ -69,6 +76,22 @@ class FakeEventTarget {
   emit(type) {
     for (const listener of [...(this.listeners.get(type) ?? [])]) listener();
   }
+
+  listenerCount(type) {
+    return this.listeners.get(type)?.size ?? 0;
+  }
+}
+
+class FakePermissionStatus extends FakeEventTarget {
+  constructor(state = 'granted') {
+    super();
+    this.state = state;
+  }
+
+  change(state) {
+    this.state = state;
+    this.emit('change');
+  }
 }
 
 class FakeNode {
@@ -90,9 +113,13 @@ class FakeAudioContext {
   sourceStartCount = 0;
   sourceEndCount = 0;
   onSourceEnded = null;
+  sinkIds = [];
 
   async resume() {
     this.state = 'running';
+  }
+  async setSinkId(deviceId) {
+    this.sinkIds.push(deviceId);
   }
   async close() {
     this.state = 'closed';
@@ -237,7 +264,9 @@ function audioEnvironment(createId = () => 'capture-1') {
   const document = new FakeEventTarget();
   document.visibilityState = 'visible';
   const mediaDevices = new FakeEventTarget();
-  mediaDevices.getUserMedia = async () => {
+  mediaDevices.constraints = [];
+  mediaDevices.getUserMedia = async constraints => {
+    mediaDevices.constraints.push(constraints);
     const track = new FakeTrack();
     track.muted = environment.initialTrackMuted;
     environment.track = track;
@@ -246,11 +275,12 @@ function audioEnvironment(createId = () => 'capture-1') {
       getTracks: () => [track],
     };
   };
-  mediaDevices.enumerateDevices = async () => [{ kind: 'audioinput' }];
+  mediaDevices.enumerateDevices = async () => environment.devices;
   const environment = {
     isSecureContext: true,
     document,
     mediaDevices,
+    permissions: null,
     createAudioContext: () => {
       const context = new FakeAudioContext();
       environment.contexts.push(context);
@@ -265,12 +295,41 @@ function audioEnvironment(createId = () => 'capture-1') {
       return node;
     },
     createId,
+    outputDeviceSelection: false,
     worklet: null,
     track: null,
     contexts: [],
+    devices: [{ kind: 'audioinput' }],
     initialTrackMuted: false,
   };
   return environment;
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolveValue, rejectValue) => {
+    resolve = resolveValue;
+    reject = rejectValue;
+  });
+  return { promise, resolve, reject };
+}
+
+async function outcomeWithin(operation, timeoutMessage) {
+  let timeoutHandle = null;
+  try {
+    return await Promise.race([
+      operation.then(
+        () => null,
+        error => error
+      ),
+      new Promise(resolve => {
+        timeoutHandle = setTimeout(() => resolve(timeoutMessage), 100);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+  }
 }
 
 async function startCaptureWithFirstFrame(owner, environment, input, overrides = {}) {
@@ -367,17 +426,113 @@ function serverBinding() {
   };
 }
 
+function streamingMediaActivation(binding, degradation = null, endOfTurn = MANUAL_EOT_FALLBACK) {
+  return {
+    status: 'active',
+    reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+    subject_id: 'media-subject-1',
+    endpoint_path: '/ws/live-voice/media',
+    media_ticket: 'P'.repeat(43),
+    subprotocol: 'live-voice.media.v1',
+    ticket_ttl_ms: 30_000,
+    streaming_recognition: degradation === null,
+    streaming_degradation: degradation,
+    end_of_turn: endOfTurn,
+    binding,
+    privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+  };
+}
+
+function streamingRecognitionResult(params, text = 'streaming text') {
+  return {
+    status: 'completed',
+    operation: 'speech.recognize.stream',
+    capture: {
+      capture_id: params.capture_id,
+      capture_generation: params.capture_generation,
+      track_id: params.track_id,
+      final: true,
+    },
+    final_text: text,
+    raw_text: text,
+    commits_turn: false,
+    voice_commit_receipt: 'streaming-voice-receipt-1',
+    provider: {
+      provider_id: 'openai-streaming-speech',
+      implementation_class: 'formal',
+      fallback_from: null,
+    },
+    degradation: null,
+  };
+}
+
+function streamingFallbackResult(params, fallbackTier, reasonId) {
+  const routeAborted = reasonId === 'STREAMING_SPEECH_ROUTE_ABORTED';
+  return {
+    status: 'fallback',
+    operation: 'speech.recognize.stream',
+    capture: {
+      capture_id: params.capture_id,
+      capture_generation: params.capture_generation,
+      track_id: params.track_id,
+      final: true,
+    },
+    fallback_tier: fallbackTier,
+    reason_id: reasonId,
+    visible: true,
+    x_obs_event: routeAborted ? 'degradation.activated' : 'failure.observed',
+    x_obs_metric: routeAborted ? 'live_voice.degradation_total' : 'live_voice.failure_total',
+  };
+}
+
+function batchRecognitionResult(params, text = 'batch text') {
+  return {
+    contract_version: 'live-voice.contract.v2',
+    request_id: params.request_id,
+    operation_id: params.operation_id,
+    ok: true,
+    error: null,
+    result: {
+      operation: 'speech.recognize.batch',
+      voice_commit_receipt: 'batch-voice-receipt-1',
+      capture: params.capture,
+      event: {
+        session_id: params.capture.capture_id,
+        generation: params.capture.capture_generation,
+        seq: 0,
+        kind: 'final',
+        commits_turn: false,
+        hypothesis: {
+          alternatives: [{ raw_text: text, display_text: text, confidence: null }],
+          selected_index: 0,
+        },
+      },
+      provider: {
+        provider_id: 'provider-test',
+        implementation_class: 'formal',
+        fallback_from: null,
+        model: 'stt-test',
+      },
+    },
+  };
+}
+
 test('formal P1 binds media activation to the exact product P2 activation', async () => {
   const calls = [];
   const binding = serverBinding();
   const socket = new FakeSocket();
   const environment = audioEnvironment();
+  environment.outputDeviceSelection = true;
+  environment.devices = [
+    { kind: 'audioinput', deviceId: 'private-input-1' },
+    { kind: 'audiooutput', deviceId: 'private-output-1' },
+  ];
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     expected_origin: 'https://voice.example.test',
     audio_environment: environment,
     socket_factory: (url, protocols) => {
-      assert.equal(url, 'wss://voice.example.test/ws/live-voice/media/private-ticket');
+      assert.equal(url, 'wss://voice.example.test/ws/live-voice/media');
       assert.deepEqual(protocols, ['live-voice.media.v1']);
       queueMicrotask(() => socket.open(binding));
       return socket;
@@ -400,9 +555,11 @@ test('formal P1 binds media activation to the exact product P2 activation', asyn
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: {
           raw_audio_persisted: false,
@@ -420,9 +577,16 @@ test('formal P1 binds media activation to the exact product P2 activation', asyn
     activation_id: 'activation-1',
     activation_generation: 7,
     locale: 'zh-CN',
+    device_selection: {
+      selection_generation: 2,
+      input_device_id: 'private-input-1',
+      output_device_id: 'private-output-1',
+    },
   });
 
   assert.equal(owner.status().status, 'capturing');
+  assert.deepEqual(environment.contexts[0].sinkIds, ['private-output-1']);
+  assert.equal(environment.mediaDevices.constraints[0].audio.deviceId.exact, 'private-input-1');
   assert.deepEqual(calls, [
     [
       PRODUCT_P1_MEDIA_ACTIVATE_METHOD,
@@ -437,6 +601,7 @@ test('formal P1 binds media activation to the exact product P2 activation', asyn
         track_id: 'track-1',
         sample_rate_hz: 48_000,
         locale: 'zh-CN',
+        end_of_turn_capability: 'media.end_of_turn.v1',
       },
     ],
   ]);
@@ -469,9 +634,11 @@ test('formal P1 requires one real AIO frame before publishing capture readiness'
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -524,9 +691,11 @@ test('formal P1 remains starting until a delayed first frame is accepted', async
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -588,9 +757,11 @@ test('formal P1 drains capture accumulated before media attach through bounded A
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -660,9 +831,11 @@ test('formal P1 rejects a media leaf that closes in the first-frame readiness wi
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -717,9 +890,11 @@ test('formal P1 rejects a first frame that the Gateway never acknowledges', asyn
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -810,9 +985,11 @@ test('formal P1 latches a starting-window track end and revokes issued media aut
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -903,9 +1080,11 @@ test('formal P1 releases local audio while media activation remains pending, the
     status: 'active',
     reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
     subject_id: 'media-subject-1',
-    endpoint_path: '/ws/live-voice/media/private-ticket',
+    endpoint_path: '/ws/live-voice/media',
+    media_ticket: 'P'.repeat(43),
     subprotocol: 'live-voice.media.v1',
     ticket_ttl_ms: 30_000,
+    end_of_turn: MANUAL_EOT_FALLBACK,
     binding,
     privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
   });
@@ -984,9 +1163,11 @@ test('formal P1 close waits for pending activation registration and revokes the 
     status: 'active',
     reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
     subject_id: 'media-subject-late',
-    endpoint_path: '/ws/live-voice/media/private-ticket',
+    endpoint_path: '/ws/live-voice/media',
+    media_ticket: 'P'.repeat(43),
     subprotocol: 'live-voice.media.v1',
     ticket_ttl_ms: 30_000,
+    end_of_turn: MANUAL_EOT_FALLBACK,
     binding,
     privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
   });
@@ -1024,9 +1205,11 @@ test('formal P1 runtime mute closes exact capture and fences stale Worklet frame
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -1099,9 +1282,11 @@ test('formal P1 unexpected track end closes exact capture and fences stale Workl
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -1168,9 +1353,11 @@ test('formal P1 AudioContext loss closes exact capture without Speech or busines
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -1194,6 +1381,497 @@ test('formal P1 AudioContext loss closes exact capture without Speech or busines
   assert.deepEqual(
     calls.map(([method]) => method),
     [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.equal(
+    environment.contexts.every(context => context.state === 'closed'),
+    true
+  );
+});
+
+test('formal P1 fails the current capture when every browser audio input disappears', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      assert.equal(method, PRODUCT_P1_MEDIA_ACTIVATE_METHOD);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
+        binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  environment.devices = [];
+  environment.mediaDevices.emit('devicechange');
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_UNAVAILABLE' });
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.equal(
+    calls.some(([method]) => method === 'live_voice.speech.recognize_batch'),
+    false
+  );
+  assert.equal(
+    environment.contexts.every(context => context.state === 'closed'),
+    true
+  );
+});
+
+test('formal P1 fails closed when its exact input disappears while another microphone remains', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  environment.devices = [
+    { kind: 'audioinput', deviceId: 'private-input-1' },
+    { kind: 'audioinput', deviceId: 'private-input-2' },
+  ];
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      assert.equal(method, PRODUCT_P1_MEDIA_ACTIVATE_METHOD);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
+        binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+    device_selection: {
+      selection_generation: 2,
+      input_device_id: 'private-input-1',
+    },
+  });
+  environment.devices = [{ kind: 'audioinput', deviceId: 'private-input-2' }];
+  environment.mediaDevices.emit('devicechange');
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_INPUT_SELECTION_LOST' });
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.equal(calls.some(([method]) => method === 'live_voice.speech.recognize_batch'), false);
+  assert.equal(environment.track.readyState, 'ended');
+});
+
+test('formal P1 fails closed when its exact output disappears and never switches to an alternate', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  environment.outputDeviceSelection = true;
+  environment.devices = [
+    { kind: 'audioinput', deviceId: 'private-input-1' },
+    { kind: 'audiooutput', deviceId: 'private-output-1' },
+    { kind: 'audiooutput', deviceId: 'private-output-2' },
+  ];
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      assert.equal(method, PRODUCT_P1_MEDIA_ACTIVATE_METHOD);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
+        binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+    device_selection: {
+      selection_generation: 2,
+      input_device_id: 'private-input-1',
+      output_device_id: 'private-output-1',
+    },
+  });
+  environment.devices = [
+    { kind: 'audioinput', deviceId: 'private-input-1' },
+    { kind: 'audiooutput', deviceId: 'private-output-2' },
+  ];
+  environment.mediaDevices.emit('devicechange');
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_OUTPUT_SELECTION_LOST' });
+  assert.deepEqual(environment.contexts[0].sinkIds, ['private-output-1']);
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.equal(calls.some(([method]) => method === 'live_voice.speech.recognize_batch'), false);
+  assert.equal(environment.track.readyState, 'ended');
+  assert.equal(environment.mediaDevices.listenerCount('devicechange'), 0);
+});
+
+test('formal P1 preserves exact output loss while microphone startup is still pending', async () => {
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const mediaGrant = deferred();
+  const track = new FakeTrack();
+  environment.outputDeviceSelection = true;
+  environment.devices = [
+    { kind: 'audioinput', deviceId: 'private-input-1' },
+    { kind: 'audiooutput', deviceId: 'private-output-1' },
+    { kind: 'audiooutput', deviceId: 'private-output-2' },
+  ];
+  environment.mediaDevices.getUserMedia = async constraints => {
+    environment.mediaDevices.constraints.push(constraints);
+    const stream = await mediaGrant.promise;
+    environment.track = track;
+    return stream;
+  };
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async () => {
+      throw new Error('remote activation must not begin');
+    },
+  });
+
+  const starting = owner.startCapture({
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+    device_selection: {
+      selection_generation: 2,
+      input_device_id: 'private-input-1',
+      output_device_id: 'private-output-1',
+    },
+  });
+  for (let turn = 0; turn < 100 && environment.mediaDevices.constraints.length === 0; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(environment.mediaDevices.constraints.length, 1);
+  environment.devices = [
+    { kind: 'audioinput', deviceId: 'private-input-1' },
+    { kind: 'audiooutput', deviceId: 'private-output-2' },
+  ];
+  environment.mediaDevices.emit('devicechange');
+  await new Promise(resolve => setImmediate(resolve));
+  mediaGrant.resolve({ getAudioTracks: () => [track], getTracks: () => [track] });
+
+  const error = await starting.then(
+    () => null,
+    failure => failure
+  );
+  assert.equal(error?.reason, 'AUDIO_OUTPUT_SELECTION_LOST');
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'AUDIO_OUTPUT_SELECTION_LOST' });
+  assert.equal(track.readyState, 'ended');
+  assert.equal(environment.contexts.every(context => context.state === 'closed'), true);
+  assert.equal(environment.mediaDevices.listenerCount('devicechange'), 0);
+});
+
+test('formal P1 maps active microphone permission revocation and forbids Speech or playout effects', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const permission = new FakePermissionStatus('denied');
+  const environment = audioEnvironment();
+  let resolvePermissionQuery;
+  environment.permissions = {
+    query: () => new Promise(resolve => (resolvePermissionQuery = resolve)),
+  };
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      assert.equal(method, PRODUCT_P1_MEDIA_ACTIVATE_METHOD);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
+        binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  assert.equal(permission.listenerCount('change'), 0);
+  resolvePermissionQuery(permission);
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'MICROPHONE_PERMISSION_REVOKED' });
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.equal(
+    calls.some(([method]) => method === 'live_voice.speech.recognize_batch'),
+    false
+  );
+  assert.equal(
+    calls.some(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD),
+    false
+  );
+  assert.equal(permission.listenerCount('change'), 0);
+  assert.equal(environment.track.readyState, 'ended');
+  assert.equal(
+    environment.contexts.every(context => context.state === 'closed'),
+    true
+  );
+});
+
+test('formal P1 latches pending permission revocation while preserving initial-denial semantics and zero remote effects', async () => {
+  const permission = new FakePermissionStatus('prompt');
+  const environment = audioEnvironment();
+  environment.permissions = { query: async () => permission };
+  let resolveMedia;
+  environment.mediaDevices.getUserMedia = () =>
+    new Promise(resolve => {
+      const track = new FakeTrack();
+      environment.track = track;
+      resolveMedia = () =>
+        resolve({
+          getAudioTracks: () => [track],
+          getTracks: () => [track],
+        });
+    });
+  let requests = 0;
+  let socketAllocations = 0;
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      socketAllocations += 1;
+      throw new Error('socket must not be allocated');
+    },
+    request: async () => {
+      requests += 1;
+      throw new Error('request must not be called');
+    },
+  });
+
+  const starting = owner.startCapture({
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  for (let turn = 0; turn < 100 && permission.listenerCount('change') === 0; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(permission.listenerCount('change'), 1);
+  permission.change('denied');
+  const outcome = await outcomeWithin(starting, 'permission revocation did not settle product capture');
+  assert.equal(outcome?.reason, 'MICROPHONE_PERMISSION_REVOKED');
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'MICROPHONE_PERMISSION_REVOKED' });
+  assert.equal(requests, 0);
+  assert.equal(socketAllocations, 0);
+  assert.equal(permission.listenerCount('change'), 0);
+  resolveMedia();
+  for (let turn = 0; turn < 100 && environment.track.readyState !== 'ended'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  assert.equal(environment.track.readyState, 'ended');
+  assert.equal(
+    environment.contexts.every(context => context.state === 'closed'),
+    true
+  );
+
+  const deniedPermission = new FakePermissionStatus('denied');
+  const deniedEnvironment = audioEnvironment();
+  deniedEnvironment.permissions = { query: async () => deniedPermission };
+  deniedEnvironment.mediaDevices.getUserMedia = async () => {
+    const error = new Error('initial microphone denial');
+    error.name = 'NotAllowedError';
+    throw error;
+  };
+  let deniedRequests = 0;
+  const deniedOwner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: deniedEnvironment,
+    request: async () => {
+      deniedRequests += 1;
+    },
+  });
+  await assert.rejects(
+    deniedOwner.startCapture({
+      session_id: 'session-1',
+      interaction_id: 'interaction-1',
+      correlation_id: 'correlation-1',
+      activation_id: 'activation-1',
+      activation_generation: 7,
+    }),
+    error => error?.reason === 'MICROPHONE_PERMISSION_DENIED'
+  );
+  assert.deepEqual(deniedOwner.status(), { status: 'failed', reason: 'MICROPHONE_PERMISSION_DENIED' });
+  assert.equal(deniedRequests, 0);
+  assert.equal(deniedPermission.listenerCount('change'), 0);
+});
+
+test('formal P1 fails immediately when the current dedicated media transport closes', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      assert.equal(method, PRODUCT_P1_MEDIA_ACTIVATE_METHOD);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
+        binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  socket.readyState = 3;
+  socket.onclose?.({});
+  for (let turn = 0; turn < 100 && owner.status().status !== 'failed'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'MEDIA_TRANSPORT_CLOSED' });
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.equal(
+    calls.some(([method]) => method === 'live_voice.speech.recognize_batch'),
+    false
   );
   assert.equal(
     environment.contexts.every(context => context.state === 'closed'),
@@ -1235,9 +1913,11 @@ for (const [name, trigger, expectedReason] of [
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: 'media-subject-1',
-          endpoint_path: '/ws/live-voice/media/private-ticket',
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: 'P'.repeat(43),
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
           binding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
@@ -1288,9 +1968,11 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: 'media-subject-1',
-          endpoint_path: '/ws/live-voice/media/private-ticket',
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: 'P'.repeat(43),
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
           binding,
           privacy: {
             raw_audio_persisted: false,
@@ -1413,6 +2095,765 @@ test('formal P1 completes capture, STT, authoritative TTS, and browser playout',
   assert.equal(calls.at(-1)[0], PRODUCT_P1_MEDIA_CLOSE_METHOD);
 });
 
+test('formal P1 consumes the streaming STT final without replaying batch audio', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return streamingMediaActivation(binding);
+      if (method === 'live_voice.speech.recognize_streaming_result') {
+        return streamingRecognitionResult(params);
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        throw new Error('batch replay is forbidden after streaming success');
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  const recognition = await owner.stopAndRecognize();
+
+  assert.deepEqual(recognition, {
+    text: 'streaming text',
+    voice_commit_receipt: 'streaming-voice-receipt-1',
+  });
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, 'live_voice.speech.recognize_streaming_result']
+  );
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: null });
+});
+
+test('formal P1 auto and manual EOT retain one stop and recognition operation', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return streamingMediaActivation(binding, null, {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        });
+      }
+      if (method === 'live_voice.speech.recognize_streaming_result') {
+        return streamingRecognitionResult(params, 'automatic EOT text');
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected EOT method ${method}`);
+    },
+  });
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  let automatic = null;
+  let automaticCalls = 0;
+  assert.equal(
+    owner.armEndOfTurn(() => {
+      automaticCalls += 1;
+      automatic = owner.stopAndRecognize();
+    }),
+    true
+  );
+  socket.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: binding.lease_id,
+      generation: binding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 100,
+      provider_end_ms: 700,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  await Promise.resolve();
+  assert.equal(automaticCalls, 1);
+  assert.notEqual(automatic, null);
+  const manual = owner.stopAndRecognize();
+  assert.equal(manual, automatic);
+  const recognition = await manual;
+  assert.deepEqual(recognition, {
+    text: 'automatic EOT text',
+    voice_commit_receipt: 'streaming-voice-receipt-1',
+  });
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_streaming_result').length, 1);
+  assert.equal(
+    calls.some(([method]) => method.includes('agent') || method.includes('task')),
+    false
+  );
+  await owner.close();
+});
+
+test('formal P1 manual stop wins the queued EOT callback without a late second stop', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return streamingMediaActivation(binding, null, {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        });
+      }
+      if (method === 'live_voice.speech.recognize_streaming_result') {
+        return streamingRecognitionResult(params, 'manual race text');
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected EOT method ${method}`);
+    },
+  });
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  let automaticCalls = 0;
+  assert.equal(
+    owner.armEndOfTurn(() => {
+      automaticCalls += 1;
+      void owner.stopAndRecognize();
+    }),
+    true
+  );
+  socket.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.end_of_turn',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: binding.lease_id,
+      generation: binding.generation.value,
+      detector: 'server_vad',
+      speech_started_observed: true,
+      provider_start_ms: 100,
+      provider_end_ms: 700,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  const manual = owner.stopAndRecognize();
+  await Promise.resolve();
+  assert.equal(automaticCalls, 0);
+  assert.deepEqual(await manual, {
+    text: 'manual race text',
+    voice_commit_receipt: 'streaming-voice-receipt-1',
+  });
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_streaming_result').length, 1);
+  await owner.close();
+});
+
+test('formal P1 performs exactly one visible batch fallback after a sealed streaming failure', async () => {
+  const calls = [];
+  const warnings = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const originalWarn = console.warn;
+  console.warn = message => warnings.push(String(message));
+  try {
+    const owner = new ProductP1VoiceRouteOwner({
+      enabled: true,
+      expected_origin: 'https://voice.example.test',
+      audio_environment: environment,
+      socket_factory: () => {
+        queueMicrotask(() => socket.open(binding));
+        return socket;
+      },
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return streamingMediaActivation(binding);
+        if (method === 'live_voice.speech.recognize_streaming_result') {
+          return streamingFallbackResult(params, 'batch', 'STREAMING_SPEECH_PROVIDER_TIMEOUT');
+        }
+        if (method === 'live_voice.speech.recognize_batch') {
+          return batchRecognitionResult(params);
+        }
+        throw new Error(`unexpected method ${method}`);
+      },
+    });
+
+    await startCaptureWithFirstFrame(owner, environment, {
+      session_id: 'session-1',
+      interaction_id: 'interaction-1',
+      correlation_id: 'correlation-1',
+      activation_id: 'activation-1',
+      activation_generation: 7,
+    });
+    const recognition = await owner.stopAndRecognize();
+
+    assert.equal(recognition.text, 'batch text');
+    assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+    assert.equal(
+      warnings.some(message => message === 'live_voice_speech_degradation reason=STREAMING_SPEECH_PROVIDER_TIMEOUT target=batch visible=true'),
+      true
+    );
+    assert.deepEqual(owner.status(), {
+      status: 'recognized',
+      reason: 'STREAMING_SPEECH_PROVIDER_TIMEOUT',
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('formal P1 discloses startup streaming unavailability before using batch', async () => {
+  const calls = [];
+  const warnings = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const originalWarn = console.warn;
+  console.warn = message => warnings.push(String(message));
+  try {
+    const owner = new ProductP1VoiceRouteOwner({
+      enabled: true,
+      expected_origin: 'https://voice.example.test',
+      audio_environment: environment,
+      socket_factory: () => {
+        queueMicrotask(() => socket.open(binding));
+        return socket;
+      },
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+          return streamingMediaActivation(binding, {
+            reason_id: 'STREAMING_SPEECH_FEATURE_OFF',
+            fallback_tier: 'batch',
+            visible: true,
+            x_obs_event: null,
+            x_obs_metric: null,
+          });
+        }
+        if (method === 'live_voice.speech.recognize_batch') {
+          return batchRecognitionResult(params);
+        }
+        throw new Error(`unexpected method ${method}`);
+      },
+    });
+
+    await startCaptureWithFirstFrame(owner, environment, {
+      session_id: 'session-1',
+      interaction_id: 'interaction-1',
+      correlation_id: 'correlation-1',
+      activation_id: 'activation-1',
+      activation_generation: 7,
+    });
+    const recognition = await owner.stopAndRecognize();
+
+    assert.equal(recognition.text, 'batch text');
+    assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_streaming_result').length, 0);
+    assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 1);
+    assert.equal(warnings.includes('live_voice_speech_degradation reason=STREAMING_SPEECH_FEATURE_OFF target=batch visible=true'), true);
+    assert.deepEqual(owner.status(), {
+      status: 'recognized',
+      reason: 'STREAMING_SPEECH_FEATURE_OFF',
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('formal P1 honors a startup text fallback without replaying batch audio', async () => {
+  const calls = [];
+  const warnings = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const originalWarn = console.warn;
+  console.warn = message => warnings.push(String(message));
+  try {
+    const owner = new ProductP1VoiceRouteOwner({
+      enabled: true,
+      expected_origin: 'https://voice.example.test',
+      audio_environment: environment,
+      socket_factory: () => {
+        queueMicrotask(() => socket.open(binding));
+        return socket;
+      },
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+          return streamingMediaActivation(binding, {
+            reason_id: 'STREAMING_SPEECH_CONFIGURATION_UNAVAILABLE',
+            fallback_tier: 'text',
+            visible: true,
+            x_obs_event: null,
+            x_obs_metric: null,
+          });
+        }
+        if (method === 'live_voice.speech.recognize_batch') {
+          throw new Error('batch replay is forbidden for startup text fallback');
+        }
+        if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+          return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+        }
+        throw new Error(`unexpected method ${method}`);
+      },
+    });
+
+    await startCaptureWithFirstFrame(owner, environment, {
+      session_id: 'session-1',
+      interaction_id: 'interaction-1',
+      correlation_id: 'correlation-1',
+      activation_id: 'activation-1',
+      activation_generation: 7,
+    });
+    await assert.rejects(
+      owner.stopAndRecognize(),
+      error => error?.reason_id === 'STREAMING_SPEECH_CONFIGURATION_UNAVAILABLE'
+    );
+
+    assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_streaming_result').length, 0);
+    assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 0);
+    assert.equal(
+      warnings.includes(
+        'live_voice_speech_degradation reason=STREAMING_SPEECH_CONFIGURATION_UNAVAILABLE target=text visible=true'
+      ),
+      true
+    );
+    assert.deepEqual(owner.status(), {
+      status: 'failed',
+      reason: 'STREAMING_SPEECH_CONFIGURATION_UNAVAILABLE',
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('formal P1 text fallback never replays batch audio or hides the failure', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return streamingMediaActivation(binding);
+      if (method === 'live_voice.speech.recognize_streaming_result') {
+        return streamingFallbackResult(params, 'text', 'STREAMING_SPEECH_ROUTE_ABORTED');
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        throw new Error('batch replay is forbidden for text fallback');
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  await assert.rejects(owner.stopAndRecognize(), error => error?.reason_id === 'STREAMING_SPEECH_ROUTE_ABORTED');
+
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 0);
+  assert.deepEqual(owner.status(), {
+    status: 'failed',
+    reason: 'STREAMING_SPEECH_ROUTE_ABORTED',
+  });
+});
+
+test('formal P1 rejects private streaming fallback reasons without logging or batch replay', async () => {
+  const calls = [];
+  const warnings = [];
+  const privateReason = 'PRIVATE_PROVIDER_TRACE';
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  const originalWarn = console.warn;
+  console.warn = message => warnings.push(String(message));
+  try {
+    const owner = new ProductP1VoiceRouteOwner({
+      enabled: true,
+      expected_origin: 'https://voice.example.test',
+      audio_environment: environment,
+      socket_factory: () => {
+        queueMicrotask(() => socket.open(binding));
+        return socket;
+      },
+      request: async (method, params) => {
+        calls.push([method, params]);
+        if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) return streamingMediaActivation(binding);
+        if (method === 'live_voice.speech.recognize_streaming_result') {
+          return streamingFallbackResult(params, 'batch', privateReason);
+        }
+        if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+          return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+        }
+        throw new Error(`unexpected method ${method}`);
+      },
+    });
+
+    await startCaptureWithFirstFrame(owner, environment, {
+      session_id: 'session-1',
+      interaction_id: 'interaction-1',
+      correlation_id: 'correlation-1',
+      activation_id: 'activation-1',
+      activation_generation: 7,
+    });
+    await assert.rejects(owner.stopAndRecognize(), error => error?.reason === 'INVALID_STREAMING_RECOGNITION_FALLBACK');
+
+    assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, 0);
+    assert.equal(warnings.join('\n').includes(privateReason), false);
+    assert.equal(JSON.stringify(owner.status()).includes(privateReason), false);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
+test('formal P1 page-hidden playout fences browser sources without receipt or business effects', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  let heldSource = null;
+  environment.createAudioContext = () => {
+    const context = new FakeAudioContext();
+    context.createBufferSource = () => {
+      const source = {
+        buffer: null,
+        onended: null,
+        stopCount: 0,
+        disconnectCount: 0,
+        connect() {},
+        disconnect() {
+          source.disconnectCount += 1;
+        },
+        start() {
+          heldSource = source;
+        },
+        stop() {
+          source.stopCount += 1;
+        },
+      };
+      return source;
+    };
+    environment.contexts.push(context);
+    return context;
+  };
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return {
+          status: 'active',
+          reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+          subject_id: 'media-subject-1',
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: 'P'.repeat(43),
+          subprotocol: 'live-voice.media.v1',
+          ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
+          binding,
+          privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.recognize.batch',
+            voice_commit_receipt: 'voice-receipt-1',
+            capture: params.capture,
+            event: {
+              session_id: params.capture.capture_id,
+              generation: params.capture.capture_generation,
+              seq: 0,
+              kind: 'final',
+              commits_turn: false,
+              hypothesis: { alternatives: [{ raw_text: 'formal text', display_text: 'formal text', confidence: null }], selected_index: 0 },
+            },
+            provider: { provider_id: 'provider-test', implementation_class: 'formal', fallback_from: null, model: 'stt-test' },
+          },
+        };
+      }
+      if (method === 'live_voice.speech.synthesize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.synthesize.batch',
+            response: params.response,
+            unit_id: params.unit_id,
+            audio: { format: 'wav_pcm16_mono', sample_rate_hz: 48_000, channel_count: 1, data_base64: wavBase64() },
+            provider: {
+              provider_id: 'provider-test',
+              implementation_class: 'formal',
+              fallback_from: null,
+              model: 'tts-test',
+              voice: 'voice-test',
+            },
+            presented: false,
+          },
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  await owner.stopAndRecognize();
+  const playing = owner.playAgentText({
+    response: { interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 0 },
+    unit_id: 'unit-1',
+    text: 'formal Agent response',
+  });
+  for (let turn = 0; turn < 100 && heldSource === null; turn += 1) await new Promise(resolve => setImmediate(resolve));
+  assert.notEqual(heldSource, null);
+  const lateEnded = heldSource.onended;
+
+  environment.document.visibilityState = 'hidden';
+  environment.document.emit('visibilitychange');
+  const outcome = await outcomeWithin(playing, 'page-hidden playout remained pending');
+
+  assert.equal(outcome?.reason, 'PAGE_HIDDEN_PLAYOUT_FENCED');
+  assert.equal(heldSource.stopCount, 1);
+  assert.equal(heldSource.disconnectCount, 1);
+  assert.equal(
+    calls.some(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD),
+    false
+  );
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, 'live_voice.speech.recognize_batch', 'live_voice.speech.synthesize_batch', PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'PAGE_HIDDEN_PLAYOUT_FENCED' });
+  assert.equal(
+    environment.contexts.every(context => context.state === 'closed'),
+    true
+  );
+  const callsAfterFence = calls.length;
+  lateEnded();
+  await Promise.resolve();
+  assert.equal(calls.length, callsAfterFence);
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'PAGE_HIDDEN_PLAYOUT_FENCED' });
+});
+
+test('formal P1 page-hidden transition fences a TTS result before browser playout begins', async () => {
+  const calls = [];
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  const environment = audioEnvironment();
+  let releaseSynthesis = null;
+  const synthesisGate = new Promise(resolve => {
+    releaseSynthesis = resolve;
+  });
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
+        return {
+          status: 'active',
+          reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+          subject_id: 'media-subject-1',
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: 'P'.repeat(43),
+          subprotocol: 'live-voice.media.v1',
+          ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
+          binding,
+          privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+        };
+      }
+      if (method === 'live_voice.speech.recognize_batch') {
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.recognize.batch',
+            voice_commit_receipt: 'voice-receipt-1',
+            capture: params.capture,
+            event: {
+              session_id: params.capture.capture_id,
+              generation: params.capture.capture_generation,
+              seq: 0,
+              kind: 'final',
+              commits_turn: false,
+              hypothesis: { alternatives: [{ raw_text: 'formal text', display_text: 'formal text', confidence: null }], selected_index: 0 },
+            },
+            provider: { provider_id: 'provider-test', implementation_class: 'formal', fallback_from: null, model: 'stt-test' },
+          },
+        };
+      }
+      if (method === 'live_voice.speech.synthesize_batch') {
+        await synthesisGate;
+        return {
+          contract_version: 'live-voice.contract.v2',
+          request_id: params.request_id,
+          operation_id: params.operation_id,
+          ok: true,
+          error: null,
+          result: {
+            operation: 'speech.synthesize.batch',
+            response: params.response,
+            unit_id: params.unit_id,
+            audio: { format: 'wav_pcm16_mono', sample_rate_hz: 48_000, channel_count: 1, data_base64: wavBase64() },
+            provider: {
+              provider_id: 'provider-test',
+              implementation_class: 'formal',
+              fallback_from: null,
+              model: 'tts-test',
+              voice: 'voice-test',
+            },
+            presented: false,
+          },
+        };
+      }
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      throw new Error(`unexpected method ${method}`);
+    },
+  });
+
+  await startCaptureWithFirstFrame(owner, environment, {
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  await owner.stopAndRecognize();
+  const playing = owner.playAgentText({
+    response: { interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 0 },
+    unit_id: 'unit-1',
+    text: 'formal Agent response',
+  });
+  for (let turn = 0; turn < 100 && calls.filter(([method]) => method === 'live_voice.speech.synthesize_batch').length === 0; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  environment.document.visibilityState = 'hidden';
+  environment.document.emit('visibilitychange');
+  releaseSynthesis();
+
+  const outcome = await outcomeWithin(playing, 'page-hidden pre-playout result remained pending');
+  assert.equal(outcome?.reason, 'PAGE_HIDDEN_PLAYOUT_FENCED');
+  assert.equal(
+    environment.contexts.every(context => context.sourceStartCount === 0),
+    true
+  );
+  assert.equal(
+    calls.some(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD),
+    false
+  );
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P1_MEDIA_ACTIVATE_METHOD, 'live_voice.speech.recognize_batch', 'live_voice.speech.synthesize_batch', PRODUCT_P1_MEDIA_CLOSE_METHOD]
+  );
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'PAGE_HIDDEN_PLAYOUT_FENCED' });
+  assert.equal(
+    environment.contexts.every(context => context.state === 'closed'),
+    true
+  );
+});
+
 test('empty capture settles with zero commit while retaining authoritative P2 playout', async () => {
   const calls = [];
   const binding = serverBinding();
@@ -1433,9 +2874,11 @@ test('empty capture settles with zero commit while retaining authoritative P2 pl
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: 'media-subject-1',
-          endpoint_path: '/ws/live-voice/media/private-ticket',
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: 'P'.repeat(43),
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
           binding,
           privacy: {
             raw_audio_persisted: false,
@@ -1571,9 +3014,11 @@ test('a successor P1 turn revokes the exact prior media and Speech authority fir
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: `media-subject-${params.activation_generation}`,
-          endpoint_path: `/ws/live-voice/media/ticket-${params.activation_generation}`,
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: `${String(params.activation_generation).padStart(32, 'A')}BBBBBBBBBBB`,
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
           binding: activeBinding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
@@ -1697,9 +3142,11 @@ test('P1 playout source failure fences cleanup and every late source callback', 
           status: 'active',
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: 'media-subject-1',
-          endpoint_path: '/ws/live-voice/media/private-ticket',
+          endpoint_path: '/ws/live-voice/media',
+          media_ticket: 'P'.repeat(43),
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
           binding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
@@ -1854,9 +3301,11 @@ test('post-activation validation failure automatically revokes exact media autho
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: true, raw_audio_logged: false, memory_only: true },
       };
@@ -1908,9 +3357,11 @@ test('Agent output during capture cannot hide the reachable stop control or star
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -1997,9 +3448,11 @@ test('formal P1 fences successor capture while retained close is in flight', asy
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'media-subject-1',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
         binding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -2026,7 +3479,6 @@ test('formal P1 fences successor capture while retained close is in flight', asy
 async function runConcurrentCaptureJourney(options = {}) {
   const calls = [];
   const statuses = [];
-  const bindingsByPath = new Map();
   const sockets = [];
   let activationCount = 0;
   let concurrentFailureSnapshot = null;
@@ -2059,6 +3511,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     response_generation: 1,
   };
   const downlinkFrameCount = options.downlinkFrameCount ?? 1;
+  const downlinkFramesToSend = options.downlinkFramesToSend ?? downlinkFrameCount;
   const makeUplinkBinding = (params, index) => ({
     ...serverBinding(),
     lease_id: `media-uplink-lease-${index}`,
@@ -2087,12 +3540,19 @@ async function runConcurrentCaptureJourney(options = {}) {
   };
 
   class DuplexSocket extends FakeSocket {
-    constructor(binding) {
+    constructor() {
       super();
-      this.serverBinding = binding;
+      this.serverBinding = null;
     }
     send(value) {
       this.sent.push(value);
+      if (typeof value === 'string') {
+        const control = JSON.parse(value);
+        if (control.type === 'media.auth') {
+          this.serverBinding = control.binding;
+          return;
+        }
+      }
       if (this.serverBinding.direction === 'uplink' && typeof value !== 'string') {
         if (options.ackSecondCapture !== false || this.serverBinding.generation.id !== 'capture-2') {
           const throughSeq = decodeAudioFrame(this.serverBinding, value).seq;
@@ -2114,10 +3574,21 @@ async function runConcurrentCaptureJourney(options = {}) {
         }
       } else if (this.serverBinding.direction === 'downlink' && typeof value === 'string') {
         const control = JSON.parse(value);
-        if (control.type === 'media.ack' && control.through_seq === downlinkFrameCount - 1) {
+        if (control.type === 'media.ack' && control.through_seq === options.earlyDownlinkDetachThroughSeq) {
+          this.onmessage?.({
+            data: serializeMediaControl({
+              type: 'media.detach',
+              lease_id: this.serverBinding.lease_id,
+              generation: this.serverBinding.generation.value,
+              reason_id: 'MEDIA_LOCAL_CLOSE',
+              through_seq: control.through_seq,
+              business_cancel_count_delta: 0,
+            }),
+          });
+        } else if (control.type === 'media.ack' && control.through_seq === downlinkFrameCount - 1) {
           finalRenderAckResolve();
           if (options.holdDownlinkDetachAfterFinalRender !== true) {
-            queueMicrotask(() =>
+            const completeDownlink = () =>
               this.onmessage?.({
                 data: serializeMediaControl({
                   type: 'media.detach',
@@ -2127,8 +3598,9 @@ async function runConcurrentCaptureJourney(options = {}) {
                   through_seq: control.through_seq,
                   business_cancel_count_delta: 0,
                 }),
-              })
-            );
+              });
+            if (options.synchronousDownlinkDetachAfterFinalRender === true) completeDownlink();
+            else queueMicrotask(completeDownlink);
           }
         }
       }
@@ -2141,12 +3613,18 @@ async function runConcurrentCaptureJourney(options = {}) {
     on_status: status => statuses.push(status),
     audio_environment: environment,
     socket_factory: url => {
-      const binding = bindingsByPath.get(new URL(url).pathname);
-      assert.ok(binding);
-      const socket = new DuplexSocket(binding);
+      assert.equal(new URL(url).pathname, '/ws/live-voice/media');
+      const socket = new DuplexSocket();
       sockets.push(socket);
       queueMicrotask(() => {
-        socket.open(binding);
+        socket.protocol = 'live-voice.media.v1';
+        socket.readyState = 1;
+        socket.onopen?.({});
+        const binding = socket.serverBinding;
+        assert.ok(binding);
+        socket.onmessage?.({
+          data: serializeMediaControl({ type: 'media.attach', binding }),
+        });
         if (binding.direction === 'downlink') {
           if (options.exerciseDuplicateRenderFrameAtFinalPlayout === true) {
             assert.notEqual(realProcessorHarness, null);
@@ -2221,7 +3699,7 @@ async function runConcurrentCaptureJourney(options = {}) {
             });
             concurrentFailureSnapshot = owner.status();
           }
-          for (let seq = 0; seq < downlinkFrameCount; seq += 1) {
+          for (let seq = 0; seq < downlinkFramesToSend; seq += 1) {
             socket.onmessage?.({
               data: encodeAudioFrame(binding, {
                 seq,
@@ -2239,8 +3717,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       if (method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD) {
         activationCount += 1;
         const binding = makeUplinkBinding(params, activationCount);
-        const path = `/ws/live-voice/media/uplink-${activationCount}`;
-        bindingsByPath.set(path, binding);
+        const path = '/ws/live-voice/media';
         if (activationCount === 2 && options.failSecondCaptureWithMute === true) {
           environment.track.muted = true;
           environment.track.emit('mute');
@@ -2263,8 +3740,10 @@ async function runConcurrentCaptureJourney(options = {}) {
           reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
           subject_id: `media-subject-${activationCount}`,
           endpoint_path: path,
+          media_ticket: `${String(activationCount).padStart(32, 'U')}VVVVVVVVVVV`,
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: 30_000,
+          end_of_turn: MANUAL_EOT_FALLBACK,
           binding,
           privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
         };
@@ -2301,8 +3780,7 @@ async function runConcurrentCaptureJourney(options = {}) {
         };
       }
       if (method === 'live_voice.speech.synthesize_batch') {
-        const path = '/ws/live-voice/media/downlink-1';
-        bindingsByPath.set(path, downlinkBinding);
+        const path = '/ws/live-voice/media';
         return {
           contract_version: 'live-voice.contract.v2',
           request_id: params.request_id,
@@ -2317,14 +3795,17 @@ async function runConcurrentCaptureJourney(options = {}) {
               format: 'pcm_f32_mono_20ms',
               sample_rate_hz: 48_000,
               channel_count: 1,
-              frame_count: downlinkFrameCount,
+              frame_count: options.streamingDownlink === true ? null : downlinkFrameCount,
               delivery: 'dedicated_media_downlink',
               endpoint_path: path,
+              media_ticket: 'D'.repeat(43),
               subprotocol: 'live-voice.media.v1',
               ticket_ttl_ms: 30_000,
               binding: downlinkBinding,
               max_pending_frames: 8,
               max_pending_bytes: 131_072,
+              streaming: options.streamingDownlink === true,
+              degradation_reason: options.downlinkDegradationReason ?? null,
             },
             provider: {
               provider_id: 'provider-test',
@@ -2467,10 +3948,20 @@ async function runConcurrentCaptureJourney(options = {}) {
     assert.equal(uplinkSocket.sent.filter(value => typeof value !== 'string').length, captureDurationLateFrameUplinkCount);
   }
   let playError = null;
+  let playoutSettleTimer = null;
   try {
-    await playing;
+    await (options.requireBoundedPlayoutSettlement === true
+      ? Promise.race([
+          playing,
+          new Promise((_resolve, reject) => {
+            playoutSettleTimer = setTimeout(() => reject(new Error('formal P1 playout did not settle after an early downlink detach')), 500);
+          }),
+        ])
+      : playing);
   } catch (error) {
     playError = error;
+  } finally {
+    if (playoutSettleTimer !== null) clearTimeout(playoutSettleTimer);
   }
   if (playError === null && options.exercisePostReceiptCaptureAdvance === true) {
     assert.notEqual(realProcessorHarness, null);
@@ -2595,7 +4086,7 @@ async function runConcurrentCaptureJourney(options = {}) {
 }
 
 test('formal P1 dedicated downlink overlaps the next real capture and ACKs only rendered audio', async () => {
-  const journey = await runConcurrentCaptureJourney();
+  const journey = await runConcurrentCaptureJourney({ synchronousDownlinkDetachAfterFinalRender: true });
   const { owner, calls, sockets, activationCount, playError, environment } = journey;
 
   assert.equal(playError, null);
@@ -2611,6 +4102,84 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
   await owner.close();
   assert.equal(environment.contexts[0].state, 'closed');
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+});
+
+test('formal P1 streaming downlink derives its final rendered cursor only from expected completion', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    streamingDownlink: true,
+    downlinkFrameCount: 3,
+  });
+  const { owner, calls, sockets, playError } = journey;
+
+  assert.equal(playError, null);
+  assert.equal(owner.status().status, 'capturing');
+  const receipt = calls.find(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD)?.[1];
+  assert.ok(receipt);
+  assert.equal(receipt.rendered_chunks, 3);
+  assert.equal(receipt.rendered_through_seq, 2);
+  const downlinkSocket = sockets.find(socket => socket.serverBinding.direction === 'downlink');
+  assert.ok(downlinkSocket);
+  const controls = downlinkSocket.sent.filter(value => typeof value === 'string').map(JSON.parse);
+  assert.deepEqual(
+    controls.filter(control => control.type === 'media.ack').map(control => control.through_seq),
+    [0, 1, 2]
+  );
+  assert.equal(
+    calls.some(([method]) => method.includes('agent') || method.includes('task') || method.includes('history')),
+    false
+  );
+  await owner.close();
+});
+
+test('formal P1 batch fallback exposes its typed streaming degradation reason', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    downlinkDegradationReason: 'STREAMING_SPEECH_PROVIDER_UNAVAILABLE',
+  });
+  const { owner, calls, playError } = journey;
+
+  assert.equal(playError, null);
+  assert.deepEqual(owner.status(), {
+    status: 'capturing',
+    reason: 'STREAMING_SPEECH_PROVIDER_UNAVAILABLE',
+  });
+  assert.equal(
+    calls.some(([method]) => method.includes('agent') || method.includes('task') || method.includes('history')),
+    false
+  );
+  await owner.close();
+});
+
+test('formal P1 rejects a prefix-only downlink completion without receipt or business effects', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    downlinkFrameCount: 2,
+    downlinkFramesToSend: 1,
+    earlyDownlinkDetachThroughSeq: 0,
+    requireBoundedPlayoutSettlement: true,
+  });
+  const { owner, calls, sockets, playError, environment } = journey;
+
+  assert.equal(playError?.reason, 'MEDIA_TRANSPORT_PROTOCOL_ERROR');
+  assert.deepEqual(owner.status(), { status: 'failed', reason: 'MEDIA_TRANSPORT_PROTOCOL_ERROR' });
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 0);
+  assert.equal(
+    calls.some(([method]) => method.includes('cancel') || method.includes('agent') || method.includes('task') || method.includes('history')),
+    false
+  );
+  const downlinkSocket = sockets.find(socket => socket.serverBinding.direction === 'downlink');
+  const downlinkControls = downlinkSocket.sent.filter(value => typeof value === 'string').map(JSON.parse);
+  assert.deepEqual(
+    downlinkControls.filter(control => control.type === 'media.ack').map(control => control.through_seq),
+    [0]
+  );
+  assert.equal(
+    downlinkControls.every(control => control.business_cancel_count_delta === undefined || control.business_cancel_count_delta === 0),
+    true
+  );
+  assert.equal(
+    environment.contexts.every(context => context.state === 'closed'),
+    true
+  );
+  await owner.close();
 });
 
 test('formal P1 keeps duplex playout alive across bounded real-processor input gaps', async () => {

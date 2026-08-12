@@ -6,11 +6,103 @@ import test from 'node:test';
 
 import {
   INVALID_DEV_WS_PAYLOAD_REDACTION,
+  MEDIA_TICKET_REDACTION,
   RAW_AUDIO_REDACTION,
   RAW_TRANSPORT_DATA_REDACTION,
+  SPEECH_TEXT_REDACTION,
+  VOICE_COMMIT_RECEIPT_REDACTION,
   prepareDevWsTrafficPayloadForPersistence,
   redactRawAudioForDevLog,
 } from '../node_modules/.cache/live-voice-gateway-batch-speech/devWsTrafficPrivacy.mjs';
+
+test('streaming speech result text and commit receipt never reach the dev log', () => {
+  const transcript = 'PRIVATE_STREAMING_TRANSCRIPT';
+  const receipt = 'PRIVATE_VOICE_COMMIT_RECEIPT';
+  const source = {
+    type: 'res',
+    payload: JSON.stringify({
+      status: 'completed',
+      final_text: transcript,
+      raw_text: transcript,
+      voice_commit_receipt: receipt,
+    }),
+  };
+
+  const sanitized = redactRawAudioForDevLog(source);
+  const payload = JSON.parse(sanitized.payload);
+
+  assert.equal(payload.final_text, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.raw_text, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.voice_commit_receipt, VOICE_COMMIT_RECEIPT_REDACTION);
+  assert.equal(JSON.stringify(sanitized).includes(transcript), false);
+  assert.equal(JSON.stringify(sanitized).includes(receipt), false);
+  assert.equal(source.payload.includes(transcript), true);
+});
+
+test('JSON-wrapped and malformed speech key variants fail closed', () => {
+  const privateValues = Array.from({ length: 10 }, (_, index) => `PRIVATE_SPEECH_VARIANT_${index}`);
+  const source = {
+    type: 'res',
+    payload: JSON.stringify({
+      finalText: privateValues[0],
+      final_text: privateValues[1],
+      'final-text': privateValues[2],
+      rawtext: privateValues[3],
+      rawText: privateValues[4],
+      voiceCommitReceipt: privateValues[5],
+      wrapped: JSON.stringify({ 'RAW-TEXT': privateValues[6] }),
+      malformedCamel: `{"voiceCommitReceipt":"${privateValues[7]}"`,
+      malformedCompact: `{"rawtext":"${privateValues[8]}"`,
+      malformedMixed: `{"final_-text":"${privateValues[9]}"`,
+      finalTextDigest: 'safe-final-digest',
+      drawText: 'safe-drawing-label',
+      voiceCommitmentReceipt: 'safe-near-miss',
+    }),
+  };
+
+  const sanitized = redactRawAudioForDevLog(source);
+  const payload = JSON.parse(sanitized.payload);
+
+  assert.equal(payload.finalText, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.final_text, SPEECH_TEXT_REDACTION);
+  assert.equal(payload['final-text'], SPEECH_TEXT_REDACTION);
+  assert.equal(payload.rawtext, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.rawText, SPEECH_TEXT_REDACTION);
+  assert.equal(payload.voiceCommitReceipt, VOICE_COMMIT_RECEIPT_REDACTION);
+  assert.equal(JSON.parse(payload.wrapped)['RAW-TEXT'], SPEECH_TEXT_REDACTION);
+  assert.equal(payload.malformedCamel, RAW_TRANSPORT_DATA_REDACTION);
+  assert.equal(payload.malformedCompact, RAW_TRANSPORT_DATA_REDACTION);
+  assert.equal(payload.malformedMixed, RAW_TRANSPORT_DATA_REDACTION);
+  assert.equal(payload.finalTextDigest, 'safe-final-digest');
+  assert.equal(payload.drawText, 'safe-drawing-label');
+  assert.equal(payload.voiceCommitmentReceipt, 'safe-near-miss');
+  for (const privateValue of privateValues) {
+    assert.equal(JSON.stringify(sanitized).includes(privateValue), false);
+  }
+});
+
+test('media tickets are removed recursively and from JSON-wrapped persistence payloads', () => {
+  const ticket = 'PRIVATE_MEDIA_TICKET_8f2c6bb7d6af4ea78bf07a3e9ebf8505';
+  const source = {
+    type: 'res',
+    payload: JSON.stringify({
+      media_ticket: ticket,
+      nested: [{ 'media-ticket': ticket }],
+    }),
+  };
+
+  const sanitized = redactRawAudioForDevLog(source);
+  const payload = JSON.parse(sanitized.payload);
+
+  assert.equal(payload.media_ticket, MEDIA_TICKET_REDACTION);
+  assert.equal(payload.nested[0]['media-ticket'], MEDIA_TICKET_REDACTION);
+  assert.equal(JSON.stringify(sanitized).includes(ticket), false);
+  assert.equal(source.payload.includes(ticket), true);
+  assert.equal(
+    redactRawAudioForDevLog({ type: 'res', payload: `{"media_ticket":"${ticket}"` }).payload,
+    RAW_TRANSPORT_DATA_REDACTION
+  );
+});
 
 test('recursive log copy removes request and response audio without mutating WebSocket data', () => {
   const rawRequestAudio = 'UklGRlJFUVVFU1Q=';

@@ -2182,6 +2182,19 @@
         "status": "产品激活 lease",
         "scope": "路由 / generation"
       },
+      "audioDevices": {
+        "title": "音频输入与输出",
+        "memoryOnly": "设备名称和标识仅保留在当前页面内存中，刷新后清除。",
+        "loading": "正在加载音频设备…",
+        "refreshing": "正在核验当前设备…",
+        "load": "授权并加载设备",
+        "input": "麦克风",
+        "output": "扬声器",
+        "systemDefault": "系统默认（明确选择）",
+        "apply": "应用设备",
+        "status": "设备选择状态",
+        "reason": "设备选择原因"
+      },
       "textRoute": {
         "label": "正式 P2 文本输入",
         "placeholder": "通过 CR 和 JiuwenSwarm Agent 提交已确认文本",

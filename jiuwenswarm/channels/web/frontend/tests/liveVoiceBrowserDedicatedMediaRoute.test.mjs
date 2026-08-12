@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -126,13 +128,53 @@ class FakeSocket {
   }
 }
 
-function active({ exactBinding = binding(), socket = new FakeSocket(), effects, maxPendingFrames, maxPendingBytes, highWater, deferDownlinkAck } = {}) {
+class FakeDrainScheduler {
+  #nextHandle = 1;
+  callbacks = new Map();
+  cancelled = [];
+  delays = [];
+
+  schedule = (callback, delayMs) => {
+    const handle = this.#nextHandle++;
+    this.callbacks.set(handle, callback);
+    this.delays.push(delayMs);
+    return handle;
+  };
+
+  cancel = handle => {
+    this.cancelled.push(handle);
+  };
+
+  run(handle = Math.min(...this.callbacks.keys())) {
+    const callback = this.callbacks.get(handle);
+    assert.equal(typeof callback, 'function');
+    callback();
+    return handle;
+  }
+}
+
+function active({
+  exactBinding = binding(),
+  socket = new FakeSocket(),
+  effects,
+  maxPendingFrames,
+  maxPendingBytes,
+  highWater,
+  deferDownlinkAck,
+  onTerminal,
+  drainRetryDelayMs,
+  maxDrainStallRetries,
+  drainScheduler,
+  endOfTurnCapability,
+  onEndOfTurn,
+} = {}) {
   const counters = effects ?? { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
   const factoryCalls = [];
   const activation = createBrowserDedicatedMediaRoute({
     enabled: true,
     expected_origin: 'https://voice.example.test',
-    endpoint_url: 'wss://voice.example.test/live-voice/media',
+    endpoint_url: 'wss://voice.example.test/ws/live-voice/media',
+    media_ticket: 'A'.repeat(43),
     binding: exactBinding,
     provider_available: true,
     transport_available: true,
@@ -147,6 +189,13 @@ function active({ exactBinding = binding(), socket = new FakeSocket(), effects, 
     max_pending_bytes: maxPendingBytes,
     socket_high_water_bytes: highWater,
     defer_downlink_ack: deferDownlinkAck,
+    on_terminal: onTerminal,
+    drain_retry_delay_ms: drainRetryDelayMs,
+    max_drain_stall_retries: maxDrainStallRetries,
+    schedule_drain_retry: drainScheduler?.schedule,
+    cancel_drain_retry: drainScheduler?.cancel,
+    end_of_turn_capability: endOfTurnCapability,
+    on_end_of_turn: onEndOfTurn,
   });
   assert.equal(activation.active, true);
   return { activation, socket, effects: counters, factoryCalls };
@@ -154,6 +203,11 @@ function active({ exactBinding = binding(), socket = new FakeSocket(), effects, 
 
 function attach(route) {
   route.socket.open();
+  const auth = JSON.parse(route.socket.sent.shift());
+  assert.equal(auth.type, 'media.auth');
+  assert.equal(auth.contract_version, 'live-voice.media-auth.v1');
+  assert.match(auth.media_ticket, /^[A-Za-z0-9_-]{32,128}$/);
+  assert.deepEqual(auth.binding, JSON.parse(serializeMediaControl({ type: 'media.attach', binding: route.activation.binding })).binding);
   route.socket.message(serializeMediaControl({ type: 'media.attach', binding: route.activation.binding }));
   assert.equal(route.activation.leaf.attached, true);
 }
@@ -212,12 +266,25 @@ function localStopReceipt(route, confirmedThroughSeq = null) {
   });
 }
 
+test('EOT cross-language fixture round trips without cursor, item, transcript, or business authority', () => {
+  const fixture = JSON.parse(readFileSync(resolve(process.cwd(), '../../../../tests/fixtures/live_voice_media_transport_v1/end_of_turn.json'), 'utf8'));
+  const decoded = deserializeMediaControl(JSON.stringify(fixture.control));
+  assert.deepEqual(decoded, Object.fromEntries(Object.entries(fixture.control).filter(([key]) => key !== 'contract_version')));
+  assert.deepEqual(deserializeMediaControl(serializeMediaControl(decoded)), decoded);
+  assert.equal(Object.hasOwn(decoded, 'audio_cursor'), false);
+  assert.equal(Object.hasOwn(decoded, 'item_id'), false);
+  assert.equal(Object.hasOwn(decoded, 'transcript'), false);
+  assert.equal(decoded.create_response, false);
+  assert.equal(decoded.interrupt_response, false);
+  assert.equal(decoded.business_cancel_count_delta, 0);
+});
+
 test('uplink requires server attach then sends bounded LVM1 frames retained through ACK', () => {
   const route = active({ maxPendingFrames: 1 });
   assert.equal(route.socket.binaryType, 'arraybuffer');
   assert.deepEqual(route.factoryCalls, [
     {
-      url: 'wss://voice.example.test/live-voice/media',
+      url: 'wss://voice.example.test/ws/live-voice/media',
       protocols: [DEDICATED_MEDIA_SUBPROTOCOL],
     },
   ]);
@@ -256,8 +323,9 @@ test('socket leaf cannot bypass the same-origin activation factory', () => {
   assert.throws(() => new BrowserDedicatedMediaSocketLeaf({}, new FakeSocket(), 1024), /require the same-origin factory/);
 });
 
-test('socket bufferedAmount and bounded owner apply backpressure without retry or drop', () => {
-  const route = active({ maxPendingFrames: 1, highWater: 1024 });
+test('socket bufferedAmount backpressure autonomously drains without retrying or dropping a frame', () => {
+  const drainScheduler = new FakeDrainScheduler();
+  const route = active({ maxPendingFrames: 1, highWater: 1024, drainScheduler, drainRetryDelayMs: 7 });
   attach(route);
   route.socket.bufferedAmount = 1024;
 
@@ -268,9 +336,140 @@ test('socket bufferedAmount and bounded owner apply backpressure without retry o
     reason_id: 'MEDIA_BACKPRESSURE_LIMIT',
   });
 
+  assert.deepEqual(drainScheduler.delays, [7]);
+  const scheduledHandle = drainScheduler.run();
+  assert.equal(route.socket.sent.length, 0);
+  assert.equal(drainScheduler.callbacks.size, 2);
+
   route.socket.bufferedAmount = 0;
-  assert.equal(route.activation.leaf.flush().sent_frames, 1);
+  drainScheduler.run(2);
   assert.equal(route.socket.sent.length, 1);
+  assert.equal(decodeAudioFrame(route.activation.binding, route.socket.sent[0]).seq, 0);
+
+  route.socket.message(
+    serializeMediaControl({
+      type: 'media.ack',
+      lease_id: route.activation.binding.lease_id,
+      generation: route.activation.binding.generation.value,
+      through_seq: 0,
+    })
+  );
+  assert.ok(drainScheduler.cancelled.includes(3));
+  drainScheduler.run(scheduledHandle);
+  assert.equal(route.socket.sent.length, 1);
+  assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+});
+
+test('persistent socket backpressure fails closed after the bounded stall window', () => {
+  const drainScheduler = new FakeDrainScheduler();
+  const terminal = [];
+  const route = active({
+    maxPendingFrames: 1,
+    highWater: 1024,
+    drainScheduler,
+    drainRetryDelayMs: 5,
+    maxDrainStallRetries: 2,
+    onTerminal: event => terminal.push(event),
+  });
+  attach(route);
+  route.socket.bufferedAmount = 1024;
+
+  assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame()).accepted, true);
+  drainScheduler.run(1);
+  drainScheduler.run(2);
+
+  assert.equal(route.activation.leaf.closed, true);
+  assert.deepEqual(terminal, [
+    {
+      reason_id: 'MEDIA_TRANSPORT_SEND_FAILED',
+      source: 'transport_close',
+      direction: 'uplink',
+      attached_before_close: true,
+    },
+  ]);
+  assert.deepEqual(route.activation.leaf.sendCaptureFrame(capturedFrame(1)), {
+    accepted: false,
+    reason_id: 'MEDIA_TRANSPORT_SEND_FAILED',
+  });
+  const detach = route.socket.sent.map(value => (typeof value === 'string' ? deserializeMediaControl(value) : null)).find(Boolean);
+  assert.equal(detach.reason_id, 'MEDIA_TRANSPORT_SEND_FAILED');
+  assert.equal(detach.business_cancel_count_delta, 0);
+  assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+});
+
+test('drain scheduler failure fails closed and cancelled-generation callbacks stay inert', () => {
+  for (const schedule of [
+    () => {
+      throw new Error('private scheduler failure');
+    },
+    callback => {
+      callback();
+      return 1;
+    },
+  ]) {
+    const terminal = [];
+    const route = active({
+      maxPendingFrames: 1,
+      highWater: 1024,
+      drainScheduler: { schedule, cancel: () => {} },
+      onTerminal: event => terminal.push(event),
+    });
+    attach(route);
+    route.socket.bufferedAmount = 1024;
+    route.activation.leaf.sendCaptureFrame(capturedFrame());
+    assert.equal(route.activation.leaf.closed, true);
+    assert.deepEqual(terminal, [
+      {
+        reason_id: 'MEDIA_TRANSPORT_SEND_FAILED',
+        source: 'internal_failure',
+        direction: 'uplink',
+        attached_before_close: true,
+      },
+    ]);
+    assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+  }
+
+  const drainScheduler = new FakeDrainScheduler();
+  drainScheduler.cancel = handle => {
+    drainScheduler.cancelled.push(handle);
+    throw new Error('private cancellation failure');
+  };
+  const terminal = [];
+  const route = active({
+    maxPendingFrames: 1,
+    highWater: 1024,
+    drainScheduler,
+    onTerminal: event => terminal.push(event),
+  });
+  attach(route);
+  route.socket.bufferedAmount = 1024;
+  route.activation.leaf.sendCaptureFrame(capturedFrame());
+  route.activation.leaf.close('MEDIA_LOCAL_CLOSE');
+  drainScheduler.run(1);
+  assert.equal(route.socket.sent.filter(value => typeof value !== 'string').length, 0);
+  assert.equal(terminal.length, 1);
+  assert.equal(terminal[0].source, 'local_close');
+  assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+
+  const peerScheduler = new FakeDrainScheduler();
+  const peer = active({ maxPendingFrames: 1, highWater: 1024, drainScheduler: peerScheduler });
+  attach(peer);
+  peer.socket.bufferedAmount = 1024;
+  peer.activation.leaf.sendCaptureFrame(capturedFrame());
+  peer.socket.message(
+    serializeMediaControl({
+      type: 'media.detach',
+      lease_id: peer.activation.binding.lease_id,
+      generation: peer.activation.binding.generation.value,
+      reason_id: 'MEDIA_PEER_CLOSE',
+      through_seq: null,
+      business_cancel_count_delta: 0,
+    })
+  );
+  assert.deepEqual(peerScheduler.cancelled, [1]);
+  peerScheduler.run(1);
+  assert.equal(peer.socket.sent.filter(value => typeof value !== 'string').length, 0);
+  assert.equal(peer.activation.leaf.closed, true);
 });
 
 test('downlink accepts exact binary sequence, invokes audio once, and returns typed ACK', () => {
@@ -577,7 +776,9 @@ test('unattached, closed, and send-failed stop paths return no false delivery re
       error => error?.reasonId === 'MEDIA_STOP_NOT_DELIVERED'
     );
     const retained = route.activation.leaf.close();
-    const controls = route.socket.sent.filter(item => typeof item === 'string').map(item => deserializeMediaControl(item));
+    const controls = route.socket.sent
+      .filter(item => typeof item === 'string' && JSON.parse(item).type !== 'media.auth')
+      .map(item => deserializeMediaControl(item));
     assert.equal(returnedReceipt, false);
     assert.equal(
       controls.some(item => item.type === 'media.playback_stop_receipt'),
@@ -590,7 +791,11 @@ test('unattached, closed, and send-failed stop paths return no false delivery re
 });
 
 test('uplink completion waits for the exact server detach receipt before physical close', async () => {
-  const route = active();
+  const terminal = [];
+  let route;
+  route = active({
+    onTerminal: event => terminal.push({ event, closed: route.activation.leaf.closed, attached: route.activation.leaf.attached }),
+  });
   attach(route);
   assert.equal(route.activation.leaf.sendCaptureFrame(capturedFrame()).accepted, true);
   route.socket.message(
@@ -614,6 +819,160 @@ test('uplink completion waits for the exact server detach receipt before physica
   assert.equal(closed.business_cancel_count_delta, 0);
   assert.equal(route.activation.leaf.closed, true);
   assert.equal(route.socket.closes.length, 1);
+  assert.deepEqual(terminal, [
+    {
+      event: {
+        reason_id: 'MEDIA_LOCAL_CLOSE',
+        source: 'expected_completion',
+        direction: 'uplink',
+        attached_before_close: true,
+      },
+      closed: true,
+      attached: false,
+    },
+  ]);
+});
+
+test('negotiated EOT is content-free, one-shot, and preserves pending uplink completion', async () => {
+  const observed = [];
+  const route = active({
+    endOfTurnCapability: 'media.end_of_turn.v1',
+    onEndOfTurn: event => observed.push(event),
+  });
+  attach(route);
+  const completion = route.activation.leaf.completeUplink('MEDIA_LOCAL_CLOSE');
+  const detach = deserializeMediaControl(route.socket.sent.at(-1));
+  const endOfTurn = {
+    type: 'media.end_of_turn',
+    capability_version: 'media.end_of_turn.v1',
+    lease_id: route.activation.binding.lease_id,
+    generation: route.activation.binding.generation.value,
+    detector: 'server_vad',
+    speech_started_observed: true,
+    provider_start_ms: 320,
+    provider_end_ms: 1840,
+    timing_basis: 'provider_time',
+    timing_provenance: 'adapter_derived',
+    create_response: false,
+    interrupt_response: false,
+    business_cancel_count_delta: 0,
+  };
+  route.socket.message(serializeMediaControl(endOfTurn));
+  assert.deepEqual(observed, [endOfTurn]);
+  assert.equal(route.socket.closes.length, 0);
+  assert.deepEqual(route.effects, {
+    audio: 0,
+    agent: 0,
+    tool: 0,
+    task: 0,
+    history: 0,
+    persistence: 0,
+  });
+  route.socket.message(serializeMediaControl(detach));
+  assert.equal((await completion).reason_id, 'MEDIA_LOCAL_CLOSE');
+});
+
+test('unnegotiated, duplicate, or stale EOT fails closed with zero business effects', () => {
+  const exact = active();
+  attach(exact);
+  const control = {
+    type: 'media.end_of_turn',
+    capability_version: 'media.end_of_turn.v1',
+    lease_id: exact.activation.binding.lease_id,
+    generation: exact.activation.binding.generation.value,
+    detector: 'server_vad',
+    speech_started_observed: true,
+    provider_start_ms: 10,
+    provider_end_ms: 20,
+    timing_basis: 'provider_time',
+    timing_provenance: 'adapter_derived',
+    create_response: false,
+    interrupt_response: false,
+    business_cancel_count_delta: 0,
+  };
+  exact.socket.message(serializeMediaControl(control));
+  assert.equal(exact.activation.leaf.closed, true);
+  assert.deepEqual(exact.effects, {
+    audio: 0,
+    agent: 0,
+    tool: 0,
+    task: 0,
+    history: 0,
+    persistence: 0,
+  });
+
+  const observed = [];
+  const duplicate = active({
+    endOfTurnCapability: 'media.end_of_turn.v1',
+    onEndOfTurn: event => observed.push(event),
+  });
+  attach(duplicate);
+  const duplicateControl = {
+    ...control,
+    lease_id: duplicate.activation.binding.lease_id,
+    generation: duplicate.activation.binding.generation.value,
+  };
+  duplicate.socket.message(serializeMediaControl(duplicateControl));
+  duplicate.socket.message(serializeMediaControl(duplicateControl));
+  assert.equal(observed.length, 1);
+  assert.equal(duplicate.activation.leaf.closed, true);
+  assert.deepEqual(duplicate.effects, exact.effects);
+});
+
+test('a fully rendered downlink exact detach is expected completion while an early detach is peer-owned', () => {
+  const completedEvents = [];
+  const completed = active({
+    exactBinding: binding({ direction: 'downlink' }),
+    deferDownlinkAck: true,
+    onTerminal: event => completedEvents.push(event),
+  });
+  attach(completed);
+  completed.socket.message(encodeAudioFrame(completed.activation.binding, mediaFrame(0)));
+  completed.activation.leaf.acknowledgeDownlinkThrough(0);
+  completed.socket.message(
+    serializeMediaControl({
+      type: 'media.detach',
+      lease_id: completed.activation.binding.lease_id,
+      generation: completed.activation.binding.generation.value,
+      reason_id: 'MEDIA_LOCAL_CLOSE',
+      through_seq: 0,
+      business_cancel_count_delta: 0,
+    })
+  );
+  assert.deepEqual(completedEvents, [
+    {
+      reason_id: 'MEDIA_LOCAL_CLOSE',
+      source: 'expected_completion',
+      direction: 'downlink',
+      attached_before_close: true,
+    },
+  ]);
+
+  const peerEvents = [];
+  const peer = active({
+    exactBinding: binding({ direction: 'downlink' }),
+    deferDownlinkAck: true,
+    onTerminal: event => peerEvents.push(event),
+  });
+  attach(peer);
+  peer.socket.message(
+    serializeMediaControl({
+      type: 'media.detach',
+      lease_id: peer.activation.binding.lease_id,
+      generation: peer.activation.binding.generation.value,
+      reason_id: 'MEDIA_LOCAL_CLOSE',
+      through_seq: null,
+      business_cancel_count_delta: 0,
+    })
+  );
+  assert.deepEqual(peerEvents, [
+    {
+      reason_id: 'MEDIA_LOCAL_CLOSE',
+      source: 'peer_detach',
+      direction: 'downlink',
+      attached_before_close: true,
+    },
+  ]);
 });
 
 test('uplink completion rejects missing or foreign server receipts without business effects', async () => {
@@ -645,6 +1004,97 @@ test('uplink completion rejects missing or foreign server receipts without busin
   assert.equal(lost.socket.closes.length, 0);
 });
 
+test('Alpha socket uses a fixed URL and sends one exact first-frame ticket without retaining it in route snapshots', () => {
+  const route = active();
+
+  assert.deepEqual(route.factoryCalls, [
+    {
+      url: 'wss://voice.example.test/ws/live-voice/media',
+      protocols: ['live-voice.media.v1'],
+    },
+  ]);
+  assert.equal(JSON.stringify(route.activation).includes('A'.repeat(43)), false);
+
+  route.socket.open();
+  assert.equal(route.socket.sent.length, 1);
+  const auth = JSON.parse(route.socket.sent[0]);
+  assert.deepEqual(auth, {
+    type: 'media.auth',
+    contract_version: 'live-voice.media-auth.v1',
+    media_ticket: 'A'.repeat(43),
+    binding: JSON.parse(serializeMediaControl({ type: 'media.attach', binding: route.activation.binding })).binding,
+  });
+  assert.equal(JSON.stringify(route.activation).includes('A'.repeat(43)), false);
+
+  route.activation.leaf.close();
+  assert.equal(JSON.stringify(route.activation).includes('A'.repeat(43)), false);
+});
+
+test('Alpha auth send failure is terminal before attach with zero media or business effects', () => {
+  const socket = new FakeSocket();
+  socket.throwOnSend = true;
+  const terminal = [];
+  const route = active({ socket, onTerminal: event => terminal.push(event) });
+
+  socket.open();
+
+  assert.equal(route.activation.leaf.closed, true);
+  assert.equal(route.activation.leaf.attached, false);
+  assert.equal(socket.sent.length, 0);
+  assert.deepEqual(terminal, [
+    {
+      reason_id: 'MEDIA_TRANSPORT_SEND_FAILED',
+      source: 'internal_failure',
+      direction: 'uplink',
+      attached_before_close: false,
+    },
+  ]);
+  assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
+  assert.equal(JSON.stringify(route.activation).includes('A'.repeat(43)), false);
+});
+
+test('ticket-in-path routing is rejected by default and available only through explicit W2 compatibility', () => {
+  let allocations = 0;
+  let allocatedSocket = null;
+  const shared = {
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    binding: binding(),
+    provider_available: true,
+    transport_available: true,
+    socket_factory: () => {
+      allocations += 1;
+      allocatedSocket = new FakeSocket();
+      return allocatedSocket;
+    },
+    on_audio_frame: () => {},
+  };
+  const missingTicket = createBrowserDedicatedMediaRoute({
+    ...shared,
+    endpoint_url: 'wss://voice.example.test/ws/live-voice/media',
+  });
+  const legacyByDefault = createBrowserDedicatedMediaRoute({
+    ...shared,
+    endpoint_url: 'wss://voice.example.test/ws/live-voice/media/private-ticket',
+    media_ticket: 'A'.repeat(43),
+  });
+  const legacy = createBrowserDedicatedMediaRoute({
+    ...shared,
+    endpoint_url: 'wss://voice.example.test/ws/live-voice/media/private-ticket',
+    legacy_path_ticket_compat: true,
+  });
+
+  assert.equal(missingTicket.active, false);
+  assert.equal(missingTicket.reason_id, 'MEDIA_AUTHORITY_UNAVAILABLE');
+  assert.equal(legacyByDefault.active, false);
+  assert.equal(legacyByDefault.reason_id, 'MEDIA_ORIGIN_REJECTED');
+  assert.equal(legacy.active, true);
+  assert.equal(allocations, 1);
+  allocatedSocket.open();
+  assert.deepEqual(allocatedSocket.sent, []);
+  legacy.leaf.close();
+});
+
 test('flag-off and rejected origin allocate no socket and expose no effects', () => {
   let socketAllocations = 0;
   const disabled = createBrowserDedicatedMediaRoute({
@@ -654,6 +1104,12 @@ test('flag-off and rejected origin allocate no socket and expose no effects', ()
     },
     get endpoint_url() {
       throw new Error('must not inspect endpoint');
+    },
+    get media_ticket() {
+      throw new Error('must not inspect ticket');
+    },
+    get legacy_path_ticket_compat() {
+      throw new Error('must not inspect compatibility mode');
     },
     get binding() {
       throw new Error('must not inspect authority');
@@ -669,6 +1125,12 @@ test('flag-off and rejected origin allocate no socket and expose no effects', ()
     },
     get on_audio_frame() {
       throw new Error('must not inspect consumer');
+    },
+    get schedule_drain_retry() {
+      throw new Error('must not inspect retry scheduler');
+    },
+    get cancel_drain_retry() {
+      throw new Error('must not inspect retry canceller');
     },
   });
   const rejected = createBrowserDedicatedMediaRoute({
@@ -705,6 +1167,10 @@ test('public queue and socket limits are practical safe integers before allocati
     { socket_high_water_bytes: 8 * 1024 * 1024 + 1 },
     { socket_high_water_bytes: 1.5 },
     { socket_high_water_bytes: Number.MAX_SAFE_INTEGER + 1 },
+    { drain_retry_delay_ms: 0 },
+    { drain_retry_delay_ms: 1_001 },
+    { max_drain_stall_retries: 0 },
+    { max_drain_stall_retries: 10_001 },
   ];
 
   for (const limits of invalidLimits) {
@@ -715,7 +1181,8 @@ test('public queue and socket limits are practical safe integers before allocati
         createBrowserDedicatedMediaRoute({
           enabled: true,
           expected_origin: 'https://voice.example.test',
-          endpoint_url: 'wss://voice.example.test/live-voice/media',
+          endpoint_url: 'wss://voice.example.test/ws/live-voice/media',
+          media_ticket: 'B'.repeat(43),
           binding: binding(),
           provider_available: true,
           transport_available: true,
@@ -742,6 +1209,23 @@ test('public queue and socket limits are practical safe integers before allocati
   assert.equal(accepted.factoryCalls.length, 1);
   assert.equal(accepted.effects.audio, 0);
   accepted.activation.leaf.close();
+
+  assert.throws(
+    () =>
+      createBrowserDedicatedMediaRoute({
+        enabled: true,
+        expected_origin: 'https://voice.example.test',
+        endpoint_url: 'wss://voice.example.test/ws/live-voice/media',
+        media_ticket: 'C'.repeat(43),
+        binding: binding(),
+        provider_available: true,
+        transport_available: true,
+        socket_factory: () => new FakeSocket(),
+        on_audio_frame: () => {},
+        schedule_drain_retry: () => 1,
+      }),
+    /requires both schedule and cancel/
+  );
 });
 
 test('subprotocol mismatch and reused socket fail closed without sending media controls', () => {
@@ -760,7 +1244,8 @@ test('subprotocol mismatch and reused socket fail closed without sending media c
       createBrowserDedicatedMediaRoute({
         enabled: true,
         expected_origin: 'https://voice.example.test',
-        endpoint_url: 'wss://voice.example.test/live-voice/media',
+        endpoint_url: 'wss://voice.example.test/ws/live-voice/media',
+        media_ticket: 'D'.repeat(43),
         binding: binding(),
         provider_available: true,
         transport_available: true,
@@ -772,13 +1257,15 @@ test('subprotocol mismatch and reused socket fail closed without sending media c
   assert.equal(reused.closes.length, 1);
 });
 
-test('transport loss closes once and performs no implicit retry', () => {
+test('transport loss closes once, reports exact terminal provenance, and performs no implicit retry', () => {
   let allocations = 0;
+  const terminal = [];
   const socket = new FakeSocket();
   const route = createBrowserDedicatedMediaRoute({
     enabled: true,
     expected_origin: 'https://voice.example.test',
-    endpoint_url: 'wss://voice.example.test/live-voice/media',
+    endpoint_url: 'wss://voice.example.test/ws/live-voice/media',
+    media_ticket: 'E'.repeat(43),
     binding: binding(),
     provider_available: true,
     transport_available: true,
@@ -787,6 +1274,7 @@ test('transport loss closes once and performs no implicit retry', () => {
       return socket;
     },
     on_audio_frame: () => {},
+    on_terminal: event => terminal.push(event),
   });
   assert.equal(route.active, true);
   attach({ activation: route, socket });
@@ -798,4 +1286,42 @@ test('transport loss closes once and performs no implicit retry', () => {
   assert.equal(repeated.reason_id, 'MEDIA_TRANSPORT_CLOSED');
   assert.equal(repeated.business_cancel_count_delta, 0);
   assert.equal(allocations, 1);
+  assert.deepEqual(terminal, [
+    {
+      reason_id: 'MEDIA_TRANSPORT_CLOSED',
+      source: 'transport_close',
+      direction: 'uplink',
+      attached_before_close: true,
+    },
+  ]);
+  socket.onerror?.({});
+  assert.equal(terminal.length, 1);
+});
+
+test('local terminal provenance is one-shot and observer failure cannot alter the retained fence', () => {
+  let observations = 0;
+  let terminal = null;
+  const route = active({
+    onTerminal: event => {
+      observations += 1;
+      terminal = event;
+      throw new Error('observer failure');
+    },
+  });
+  attach(route);
+
+  const closed = route.activation.leaf.close('MEDIA_LOCAL_CLOSE');
+  route.socket.transportClose();
+
+  assert.equal(closed.reason_id, 'MEDIA_LOCAL_CLOSE');
+  assert.equal(closed.business_cancel_count_delta, 0);
+  assert.equal(route.activation.leaf.closed, true);
+  assert.equal(observations, 1);
+  assert.deepEqual(terminal, {
+    reason_id: 'MEDIA_LOCAL_CLOSE',
+    source: 'local_close',
+    direction: 'uplink',
+    attached_before_close: true,
+  });
+  assert.deepEqual(route.effects, { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 });
 });

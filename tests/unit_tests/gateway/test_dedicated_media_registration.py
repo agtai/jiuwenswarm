@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import base64
+import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +28,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
 )
 from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
     DedicatedMediaProductRegistry,
+    MEDIA_AUTH_CONTRACT_VERSION,
     MEDIA_ACTIVATE_METHOD,
     register_dedicated_media_rpc_handlers,
     handle_registered_media_socket,
@@ -78,6 +80,43 @@ def _active_registry() -> DedicatedMediaProductRegistry:
     registry = DedicatedMediaProductRegistry(enabled=True)
     registry.set_provider_available(True)
     return registry
+
+
+def _media_ticket(descriptor: dict[str, object]) -> str:
+    assert descriptor["endpoint_path"] == "/ws/live-voice/media"
+    ticket = descriptor["media_ticket"]
+    assert isinstance(ticket, str)
+    return ticket
+
+
+def _pending_record(registry: DedicatedMediaProductRegistry, ticket: str) -> object:
+    return registry._records[registry._pending_tickets[ticket]]
+
+
+def _media_auth_frame(descriptor: dict[str, object]) -> str:
+    return json.dumps(
+        {
+            "type": "media.auth",
+            "contract_version": MEDIA_AUTH_CONTRACT_VERSION,
+            "media_ticket": _media_ticket(descriptor),
+            "binding": descriptor["binding"],
+        },
+        separators=(",", ":"),
+    )
+
+
+class _AuthOnlySocket:
+    subprotocol = "live-voice.media.v1"
+    request_headers = {"Origin": ORIGIN}
+
+    def __init__(self, descriptor: dict[str, object]) -> None:
+        self._auth_frame = _media_auth_frame(descriptor)
+
+    async def recv(self) -> str:
+        return self._auth_frame
+
+    async def close(self, _code: int = 1000, _reason: str = "") -> None:
+        return None
 
 
 def _formal_p2_manifest() -> dict[str, object]:
@@ -211,7 +250,7 @@ def test_ticket_is_single_use_and_exact_origin_bound() -> None:
     activation = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
 
     assert (
         registry.consume_ticket(ticket, request_origin="https://other.example.test")
@@ -242,7 +281,7 @@ def test_stock_web_empty_identity_uses_connection_owned_p2_authority() -> None:
     assert activation["status"] == "active"
     assert activation["reason_id"] == "MEDIA_ROUTE_TICKET_ISSUED"
     assert activation["binding"]["connection_id"] == "stock-web-connection"
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.route_completed = True
@@ -322,7 +361,7 @@ def test_partial_capture_never_authorizes_speech() -> None:
         request_origin=ORIGIN,
         connection_id="connection-1",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     registry.accept_frame(
@@ -388,7 +427,7 @@ def test_exact_media_close_is_idempotent_and_revokes_all_speech_authority() -> N
         request_origin=ORIGIN,
         connection_id="connection-owner",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.recognition_content_sha256 = "a" * 64
@@ -445,7 +484,7 @@ def test_product_activation_expiry_retains_exact_media_close_tombstone() -> None
         connection_id="connection-owner",
         user_id="user-1",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     assert registry.consume_ticket(ticket, request_origin=ORIGIN) is not None
     close = {
         "session_id": "session-1",
@@ -502,7 +541,7 @@ def test_media_authority_expiry_retains_exact_media_close_tombstone() -> None:
         connection_id="connection-owner",
         user_id="user-1",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     assert registry.consume_ticket(ticket, request_origin=ORIGIN) is not None
 
     now = 11.0
@@ -541,7 +580,7 @@ def test_exact_final_notification_renews_live_product_media_trust() -> None:
         connection_id="connection-1",
         user_id="user-1",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.route_completed = True
@@ -697,7 +736,7 @@ def test_speech_context_requires_the_exact_activation_connection() -> None:
         request_origin=ORIGIN,
         connection_id="connection-owner",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.route_completed = True
@@ -781,7 +820,8 @@ async def test_exceptional_media_socket_exit_clears_every_raw_audio_byte(
         connection_id="connection-owner",
     )
     endpoint_path = str(activation["endpoint_path"])
-    ticket = endpoint_path.rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
+    record = _pending_record(registry, ticket)
 
     async def fail_after_frame(*_args: object, **kwargs: object) -> object:
         callback = kwargs["on_audio_frame"]
@@ -795,15 +835,11 @@ async def test_exceptional_media_socket_exit_clears_every_raw_audio_byte(
         "run_dedicated_media_socket_leaf",
         fail_after_frame,
     )
-    ws = SimpleNamespace(
-        subprotocol="live-voice.media.v1",
-        request_headers={"Origin": ORIGIN},
-    )
+    ws = _AuthOnlySocket(activation)
 
     with pytest.raises(RuntimeError, match="socket leaf failed"):
         await handle_registered_media_socket(registry, ws, endpoint_path)
 
-    record = registry._records[ticket]
     assert record.route_completed is True
     assert record.pcm == bytearray()
     assert record.recognition_content_sha256 is None
@@ -821,6 +857,8 @@ async def test_completed_media_socket_retains_recognition_content(
         connection_id="connection-owner",
     )
     endpoint_path = str(activation["endpoint_path"])
+    ticket = _media_ticket(activation)
+    record = _pending_record(registry, ticket)
 
     async def complete_after_frame(*_args: object, **kwargs: object) -> object:
         kwargs["on_audio_frame"](  # type: ignore[operator]
@@ -835,16 +873,12 @@ async def test_completed_media_socket_retains_recognition_content(
         "run_dedicated_media_socket_leaf",
         complete_after_frame,
     )
-    ws = SimpleNamespace(
-        subprotocol="live-voice.media.v1",
-        request_headers={"Origin": ORIGIN},
-    )
+    ws = _AuthOnlySocket(activation)
 
     assert await handle_registered_media_socket(registry, ws, endpoint_path)
 
-    ticket = endpoint_path.rsplit("/", 1)[1]
-    assert registry._records[ticket].route_completed is True
-    assert registry._records[ticket].recognition_content_sha256 is not None
+    assert record.route_completed is True
+    assert record.recognition_content_sha256 is not None
 
 
 @pytest.mark.asyncio
@@ -859,7 +893,8 @@ async def test_media_socket_success_without_completion_callback_fails_closed(
         connection_id="connection-1",
     )
     endpoint_path = str(activation["endpoint_path"])
-    ticket = endpoint_path.rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
+    record = _pending_record(registry, ticket)
 
     async def omit_completion(*_args: object, **kwargs: object) -> object:
         kwargs["on_audio_frame"](  # type: ignore[operator]
@@ -872,17 +907,13 @@ async def test_media_socket_success_without_completion_callback_fails_closed(
         "run_dedicated_media_socket_leaf",
         omit_completion,
     )
-    ws = SimpleNamespace(
-        subprotocol="live-voice.media.v1",
-        request_headers={"Origin": ORIGIN},
-    )
+    ws = _AuthOnlySocket(activation)
 
     with pytest.raises(
         MediaTransportViolation, match="completion callback was not retained"
     ):
         await handle_registered_media_socket(registry, ws, endpoint_path)
 
-    record = registry._records[ticket]
     assert record.route_completed is True
     assert record.recognition_content_sha256 is None
     assert record.pcm == bytearray()
@@ -898,8 +929,8 @@ async def test_uplink_registry_authority_is_visible_before_socket_close() -> Non
         connection_id="connection-1",
     )
     endpoint_path = str(activation["endpoint_path"])
-    ticket = endpoint_path.rsplit("/", 1)[1]
-    record = registry._records[ticket]
+    ticket = _media_ticket(activation)
+    record = _pending_record(registry, ticket)
     frame = MediaAudioFrame(
         seq=0,
         sample_cursor=0,
@@ -920,6 +951,7 @@ async def test_uplink_registry_authority_is_visible_before_socket_close() -> Non
 
         def __init__(self) -> None:
             self.incoming = [
+                _media_auth_frame(activation),
                 encode_audio_frame(record.binding, frame),
                 serialize_media_control(peer_detach),
             ]
@@ -968,8 +1000,8 @@ async def test_uplink_completion_is_not_aborted_when_close_wait_is_cancelled() -
         connection_id="connection-1",
     )
     endpoint_path = str(activation["endpoint_path"])
-    ticket = endpoint_path.rsplit("/", 1)[1]
-    record = registry._records[ticket]
+    ticket = _media_ticket(activation)
+    record = _pending_record(registry, ticket)
     frame = MediaAudioFrame(
         seq=0,
         sample_cursor=0,
@@ -989,6 +1021,7 @@ async def test_uplink_completion_is_not_aborted_when_close_wait_is_cancelled() -
 
         def __init__(self) -> None:
             self.incoming = [
+                _media_auth_frame(activation),
                 encode_audio_frame(record.binding, frame),
                 serialize_media_control(peer_detach),
             ]
@@ -1004,9 +1037,7 @@ async def test_uplink_completion_is_not_aborted_when_close_wait_is_cancelled() -
             await asyncio.Event().wait()
 
     task = asyncio.create_task(
-        handle_registered_media_socket(
-            registry, _BlockingCloseSocket(), endpoint_path
-        )
+        handle_registered_media_socket(registry, _BlockingCloseSocket(), endpoint_path)
     )
     await asyncio.wait_for(close_started.wait(), timeout=1)
     retained_hash = record.recognition_content_sha256
@@ -1082,7 +1113,7 @@ def test_completed_route_authorizes_only_exact_independent_capture_and_no_disk(
     activation = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
@@ -1127,14 +1158,12 @@ def test_completed_route_authorizes_only_exact_independent_capture_and_no_disk(
     assert registry.authorize(forged) is None
 
 
-
-
 def test_agent_notification_authorizes_only_exact_agent_text_render_plan() -> None:
     registry = _active_registry()
     activation = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.route_completed = True
@@ -1207,7 +1236,7 @@ def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow()
     activation = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.route_completed = True
@@ -1229,6 +1258,39 @@ def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow()
         "playout_peak_depth": 256,
         "capture_control_ack": "capture_flush_acked",
         "playout_state": "render_completed",
+    }
+
+    with pytest.raises(MediaTransportViolation) as missing:
+        registry.acknowledge_playout(
+            params=params,
+            routed_session_id="session-1",
+            connection_id="connection-1",
+            user_id="user-1",
+            request_origin=ORIGIN,
+        )
+    assert missing.value.reason_id == "MEDIA_PLAYOUT_RECEIPT_UNTRUSTED"
+    record.downlink_results[(ref, "unit-1")] = {
+        "complete": False,
+        "sent_frames": 300,
+        "acknowledged_through_seq": 299,
+        "overlap_observed": True,
+        "content_sha256": "a" * 64,
+    }
+    with pytest.raises(MediaTransportViolation) as incomplete:
+        registry.acknowledge_playout(
+            params=params,
+            routed_session_id="session-1",
+            connection_id="connection-1",
+            user_id="user-1",
+            request_origin=ORIGIN,
+        )
+    assert incomplete.value.reason_id == "MEDIA_PLAYOUT_RECEIPT_UNTRUSTED"
+    record.downlink_results[(ref, "unit-1")] = {
+        "complete": True,
+        "sent_frames": 300,
+        "acknowledged_through_seq": 299,
+        "overlap_observed": True,
+        "content_sha256": "a" * 64,
     }
 
     accepted = registry.acknowledge_playout(
@@ -1253,6 +1315,7 @@ def test_playout_receipt_requires_exact_authenticated_media_and_synthesis_flow()
     for updates in (
         {"capture_frames_acked": 2},
         {"response_id": "response-forged"},
+        {"rendered_chunks": 299, "rendered_through_seq": 298},
         {"playout_peak_depth": 257},
     ):
         with pytest.raises(MediaTransportViolation):
@@ -1277,21 +1340,68 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
     activation = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
     )
-    parent_ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    parent_ticket = _media_ticket(activation)
     parent = registry.consume_ticket(parent_ticket, request_origin=ORIGIN)
     assert parent is not None
     parent.route_completed = True
     parent.accepted_frames = 3
     ref = ResponseRef("interaction-1", "response-1", 0)
-    parent.synthesis_content_sha256[(ref, "unit-1")] = "a" * 64
+    registry.observe_agent_response(
+        {
+            "ok": True,
+            "result": {
+                "status": "notification",
+                "kind": "agent.output",
+                "session_id": "session-1",
+                "correlation_id": "correlation-1",
+                "activation_id": "activation-1",
+                "activation_generation": 1,
+                "response": {
+                    "interaction_id": "interaction-1",
+                    "response_id": "response-1",
+                    "response_generation": 0,
+                },
+                "agent_event": {
+                    "event_type": "chat.final",
+                    "text": "formal Agent text",
+                },
+                "presentation_unit": {"surface": "text", "unit_id": "unit-1"},
+            },
+        },
+        routed_session_id="session-1",
+        user_id="user-1",
+        connection_id="connection-1",
+    )
+    expected_content = parent.synthesis_content_sha256[(ref, "unit-1")]
     speech_params = {
+        "contract_version": "live-voice.contract.v2",
+        "request_id": "request-1",
+        "operation_id": "operation-1",
+        "operation": SYNTHESIZE_OPERATION,
         "correlation_id": "correlation-1",
+        "session_id": "session-1",
+        "scope": {
+            "subject_id": activation["subject_id"],
+            "project_id": None,
+            "session_id": "session-1",
+            "assurance": "authenticated",
+        },
+        "timeout_ms": 2_000,
         "response": {
             "interaction_id": "interaction-1",
             "response_id": "response-1",
             "response_generation": 0,
         },
         "unit_id": "unit-1",
+        "render_plan": {
+            "display_text": "formal Agent text",
+            "spoken_text": "formal Agent text",
+            "transforms": [],
+        },
+        "authoritative_agent_text": True,
+        "locale": "zh-CN",
+        "voice": None,
+        "required_sample_rate_hz": 16_000,
     }
     speech_result = {
         "ok": True,
@@ -1325,9 +1435,10 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
     assert audio["delivery"] == "dedicated_media_downlink"
     assert "data_base64" not in audio
     assert audio["frame_count"] == 1
-    downlink_ticket = str(audio["endpoint_path"]).rsplit("/", 1)[1]
+    downlink_ticket = _media_ticket(audio)
     downlink = registry.consume_ticket(downlink_ticket, request_origin=ORIGIN)
     assert downlink is not None
+    assert downlink.downlink_content_sha256 == expected_content
 
     next_activation = registry.activate(
         params=_params(
@@ -1339,11 +1450,11 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
         connection_id="connection-1",
         user_id="user-1",
     )
-    next_ticket = str(next_activation["endpoint_path"]).rsplit("/", 1)[1]
+    next_ticket = _media_ticket(next_activation)
     next_uplink = registry.consume_ticket(next_ticket, request_origin=ORIGIN)
     assert next_uplink is not None
     registry.mark_downlink_started(downlink)
-    assert downlink.downlink_overlap_ticket == next_ticket
+    assert downlink.downlink_overlap_record_id == next_uplink.record_id
     assert downlink.downlink_overlap_observed is False
     if accept_real_frame:
         registry.accept_frame(
@@ -1371,29 +1482,42 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
         is expected_duplex
     )
     assert downlink.downlink_overlap_observed is expected_duplex
-    receipt = registry.acknowledge_playout(
-        params={
-            "session_id": "session-1",
-            "subject_id": activation["subject_id"],
-            "correlation_id": "correlation-1",
-            "interaction_id": "interaction-1",
-            "response_id": "response-1",
-            "response_generation": 0,
-            "unit_id": "unit-1",
-            "capture_frames_acked": 3,
-            "rendered_chunks": 1,
-            "rendered_through_seq": 0,
-            "playout_queue_capacity": 256,
-            "playout_peak_depth": 1,
-            "capture_control_ack": "capture_flush_acked",
-            "playout_state": "render_completed",
-        },
-        routed_session_id="session-1",
-        connection_id="connection-1",
-        user_id="user-1",
-        request_origin=ORIGIN,
-    )
-    assert receipt["duplex_media_observed"] is expected_duplex
+    receipt_params = {
+        "session_id": "session-1",
+        "subject_id": activation["subject_id"],
+        "correlation_id": "correlation-1",
+        "interaction_id": "interaction-1",
+        "response_id": "response-1",
+        "response_generation": 0,
+        "unit_id": "unit-1",
+        "capture_frames_acked": 3,
+        "rendered_chunks": 1,
+        "rendered_through_seq": 0,
+        "playout_queue_capacity": 256,
+        "playout_peak_depth": 1,
+        "capture_control_ack": "capture_flush_acked",
+        "playout_state": "render_completed",
+    }
+    if expected_duplex:
+        receipt = registry.acknowledge_playout(
+            params=receipt_params,
+            routed_session_id="session-1",
+            connection_id="connection-1",
+            user_id="user-1",
+            request_origin=ORIGIN,
+        )
+        assert receipt["duplex_media_observed"] is True
+    else:
+        with pytest.raises(MediaTransportViolation) as caught:
+            registry.acknowledge_playout(
+                params=receipt_params,
+                routed_session_id="session-1",
+                connection_id="connection-1",
+                user_id="user-1",
+                request_origin=ORIGIN,
+            )
+        assert caught.value.reason_id == "MEDIA_PLAYOUT_RECEIPT_UNTRUSTED"
+        assert parent.playout_receipts == {}
     assert next_uplink.route_completed is False
 
 
@@ -1404,7 +1528,7 @@ def test_agent_notification_from_another_p2_activation_has_zero_speech_authority
     activation = _activate(
         registry, params=_params(), request_origin=ORIGIN, connection_id="connection-1"
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.route_completed = True
@@ -1493,7 +1617,7 @@ def test_p2_close_revokes_media_and_leaves_zero_speech_provider_effect() -> None
         request_origin=ORIGIN,
         connection_id="connection-1",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     registry.accept_frame(
@@ -1558,7 +1682,7 @@ def test_replacing_p2_activation_revokes_old_media_before_new_provider_use() -> 
         request_origin=ORIGIN,
         connection_id="connection-1",
     )
-    ticket = str(activation["endpoint_path"]).rsplit("/", 1)[1]
+    ticket = _media_ticket(activation)
     record = registry.consume_ticket(ticket, request_origin=ORIGIN)
     assert record is not None
     record.pcm.extend(b"private-pcm")

@@ -9,7 +9,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Mapping, cast
+from typing import Mapping, NoReturn, cast
 
 import pytest
 
@@ -20,8 +20,11 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     MAX_SAFE_INTEGER,
     OriginRef,
+    ProducerRef,
+    ResponseRef,
     ResultEnvelope,
     ScopeRef,
+    TurnCommit,
     TurnCommitLedger,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
@@ -49,10 +52,12 @@ from jiuwenswarm.server.live_voice.product_authority import (
 from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     PRODUCT_COMPOSITION_ENABLE_ENV,
+    PRODUCT_CRITICAL_INPUT_ENABLE_ENV,
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
     _ProgressDelivery,
+    _VoiceTaskOrigin,
     create_product_composition_registry_from_environment,
 )
 from jiuwenswarm.server.live_voice.product_p3_text_adapter import (
@@ -62,7 +67,14 @@ from jiuwenswarm.server.live_voice.task_event_subscription import (
     TaskEventSubscription,
 )
 from jiuwenswarm.server.live_voice.task_progress_return import (
+    TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
+    TaskProgressOriginKind,
+    _evidence_id,
+    project_task_progress_event,
+)
+from jiuwenswarm.server.live_voice.voice_task_bridge import (
+    VoiceTaskBridgeViolation,
 )
 
 
@@ -417,12 +429,21 @@ class _MutationP3Composition(_P3Composition):
             now=NOW,
         )
         self.mutation_calls.append((operation, dict(params)))
+        task_id = (
+            "task-created-natural-1"
+            if operation == "task.create"
+            else params.get("task_id")
+        )
         return P3RouteResult(
             True,
             {
                 "request_id": request_id,
                 "ok": True,
-                "result": {"accepted": True, "operation": operation},
+                "result": {
+                    "accepted": True,
+                    "operation": operation,
+                    "task_id": task_id,
+                },
                 "error": None,
             },
         )
@@ -469,6 +490,7 @@ def _registry(
     p3: bool = True,
     push_success: bool = True,
     commit_ledger: TurnCommitLedger | None = None,
+    critical_input: bool = False,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -482,6 +504,7 @@ def _registry(
         settings=ProductCompositionSettings(
             p2_enabled=p2,
             p3_text_enabled=p3,
+            critical_input_enabled=critical_input,
         ),
         p3_composition=p3_composition,
         agent_manager=manager,
@@ -589,10 +612,76 @@ def test_master_flag_off_constructs_no_registry_or_adapter(
     assert result is None
 
 
+def test_critical_input_product_composition_flag_is_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PRODUCT_CRITICAL_INPUT_ENABLE_ENV, raising=False)
+    assert ProductCompositionSettings.from_environment().critical_input_enabled is False
+    monkeypatch.setenv(PRODUCT_CRITICAL_INPUT_ENABLE_ENV, "1")
+    assert ProductCompositionSettings.from_environment().critical_input_enabled is True
 
 
+@pytest.mark.asyncio
+async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_authority(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, _p3, manager, _pushed = _registry(
+        tmp_path,
+        commit_ledger=ledger,
+        critical_input=True,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-critical-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    text = "create task 42 on feature/safe"
+    blocked_params = _p2_task_origin_params(stem="critical-blocked", text=text)
+    blocked = await registry.handle_p2_submit(
+        params=blocked_params,
+        request_id="request-critical-blocked",
+        session_id="session-product",
+        channel_id="web",
+    )
 
+    assert blocked.ok is False
+    assert cast(dict, blocked.payload["error"])["reason"] == (
+        "CRITICAL_TOKEN_CLARIFICATION_REQUIRED"
+    )
+    assert manager.agent.calls == 0
+    assert registry._pending_turn_commits_by_commit == {}
+    assert registry._accepted_turn_commits_by_commit == {}
+    assert registry._unknown_turn_commits_by_commit == {}
+    assert registry._critical_input_commit_generations == {}
+    with pytest.raises(ContractViolation, match="accepted commit"):
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-critical-blocked",
+                "commit-critical-blocked",
+            ),
+            SCOPE,
+        )
 
+    confirmed_params = _p2_task_origin_params(
+        stem="critical-confirmed",
+        text=text,
+    )
+    cast(dict[str, object], confirmed_params["gateway_voice_claim"])[
+        "critical_policy"
+    ] = "confirmed"
+    confirmed = await registry.handle_p2_submit(
+        params=confirmed_params,
+        request_id="request-critical-confirmed",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert confirmed.ok is True
+    assert "commit-critical-confirmed" in registry._accepted_turn_commits_by_commit
+    await registry.stop()
 
 
 def test_factory_requires_real_authenticated_authority_when_enabled(
@@ -934,6 +1023,247 @@ async def test_text_progress_reaches_web_sink_and_preserves_generation_cleanup(
     assert replayed_close.ok is True
     assert cast(dict, replayed_close.payload["result"])["replayed"] is True
     assert len(p3.authority_calls) == 6
+
+
+@pytest.mark.asyncio
+async def test_requested_voice_progress_without_exact_origin_is_explicit_text_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logged: list[dict[str, object]] = []
+
+    def capture_log(_message: str, **kwargs: object) -> None:
+        logged.append(cast(dict[str, object], kwargs["extra"]))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.logger.info",
+        capture_log,
+    )
+    registry, p3, _manager, pushed = _registry(tmp_path)
+
+    denied = await registry.handle_p3_progress_activate(
+        params=_progress_params(auth_token="wrong-token", origin_kind="voice"),
+        request_id="request-progress-voice-fallback-denied",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert denied.ok is False
+    assert pushed == []
+    assert not any(
+        record.get("live_voice_event") == "task_progress_activation_fallback"
+        for record in logged
+    )
+
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(origin_kind="voice"),
+        request_id="request-progress-voice-fallback",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert activated.ok is True
+    result = cast(dict[str, object], activated.payload["result"])
+    assert result["requested_origin_kind"] == "voice"
+    assert result["origin_kind"] == "text"
+    assert result["fallback_reason"] == "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
+    assert result["voice_reason"] == "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
+    assert len(p3.subscription_calls) == 1
+    assert len(pushed) == 1
+    payload = cast(dict[str, object], pushed[0]["payload"])
+    assert payload["origin_kind"] == "voice"
+    assert payload["requested_origin_kind"] == "voice"
+    assert payload["effective_origin_kind"] == "text"
+    assert payload["delivery_mode"] == "text_fallback"
+    assert payload["fallback_reason"] == "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
+    fallback = next(
+        record
+        for record in logged
+        if record.get("live_voice_event") == "task_progress_activation_fallback"
+    )
+    assert fallback["reason"] == "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
+    assert fallback["requested_origin_kind"] == "voice"
+    assert fallback["effective_origin_kind"] == "text"
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_exact_voice_origin_is_visible_text_when_no_audible_consumer_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    logged: list[dict[str, object]] = []
+
+    def capture_log(_message: str, **kwargs: object) -> None:
+        logged.append(cast(dict[str, object], kwargs["extra"]))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.logger.info",
+        capture_log,
+    )
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    activated_p2 = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-progress-voice-p2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated_p2.ok is True
+    retained = registry._p2_routes[("session-product", "interaction-1")]
+    registry._voice_task_origins["task-1"] = _VoiceTaskOrigin(
+        session_id="session-product",
+        interaction_id="interaction-1",
+        activation_id=retained.binding.activation_id,
+        activation_generation=retained.binding.activation_generation,
+        correlation_id=retained.binding.correlation_id,
+        response_ref=ResponseRef("interaction-1", "response-origin-1", 0),
+    )
+
+    activated = await registry.handle_p3_progress_activate(
+        params=_progress_params(
+            origin_kind="voice",
+            origin_id="interaction-1",
+            correlation_id="correlation-p2",
+        ),
+        request_id="request-progress-voice-visible-fallback",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert activated.ok is True
+    result = cast(dict[str, object], activated.payload["result"])
+    assert result["requested_origin_kind"] == "voice"
+    assert result["origin_kind"] == "text"
+    assert result["fallback_reason"] == ("TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE")
+    assert result["voice_progress"] == "unavailable"
+    payload = cast(dict[str, object], pushed[-1]["payload"])
+    assert payload["delivery_mode"] == "text_fallback"
+    assert payload["fallback_reason"] == ("TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE")
+    record = next(
+        item
+        for item in logged
+        if item.get("live_voice_event") == "task_progress_activation_fallback"
+        and item.get("reason") == "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE"
+    )
+    assert record["effective_origin_kind"] == "text"
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_superseded_cr_voice_response_projects_visible_text_with_stable_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    logged: list[dict[str, object]] = []
+
+    def capture_log(_message: str, **kwargs: object) -> None:
+        logged.append(cast(dict[str, object], kwargs["extra"]))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.logger.info",
+        capture_log,
+    )
+    binding = TaskProgressOriginBinding(
+        scope=SCOPE,
+        task_id="task-1",
+        session_id="session-product",
+        project_id="project-product",
+        correlation_id="correlation-p2",
+        origin_kind=TaskProgressOriginKind.VOICE,
+        origin_id="interaction-1",
+        generation_kind="web_task_progress_generation",
+        generation_id="web-session-generation-superseded",
+        generation=1,
+        source_instance_id="task-core-superseded",
+        progress_producer=ProducerRef(
+            component="task_progress_return",
+            instance_id="task-progress-return-superseded",
+            authority="adapter",
+        ),
+        progress_adapter="task_progress_return.v1",
+    )
+    task_event = PersistentTaskEvent(
+        event_id="event-superseded-0",
+        task_id=binding.task_id,
+        attempt_id="attempt-superseded-1",
+        scope=SCOPE,
+        seq=0,
+        event_type="task.accepted",
+        state="accepted",
+        outcome=None,
+        producer="task_core",
+        source_event_id=None,
+        causation_id="command-superseded-1",
+        correlation_id=binding.correlation_id,
+        occurred_at=NOW,
+        details={},
+    )
+    projection = project_task_progress_event(task_event, binding)
+    intent = TaskProgressNotificationIntent(
+        origin=binding,
+        task_event=task_event,
+        source_event=projection.source_event,
+        progress_event=projection.progress_event,
+        decision=cast(object, None),
+        evidence_id=_evidence_id(binding, task_event),
+    )
+
+    class _Superseded(RuntimeError):
+        reason = "TASK_PROGRESS_RESPONSE_SUPERSEDED"
+
+    class _Lease:
+        async def deliver_task_progress(self, *_args: object) -> None:
+            raise _Superseded("old response generation")
+
+    registry._voice_task_origins[binding.task_id] = _VoiceTaskOrigin(
+        session_id=binding.session_id,
+        interaction_id=binding.origin_id,
+        activation_id="activation-superseded",
+        activation_generation=1,
+        correlation_id=binding.correlation_id,
+        response_ref=ResponseRef(binding.origin_id, "response-old", 0),
+    )
+    registry._p2_routes[(binding.session_id, binding.origin_id)] = cast(
+        object,
+        SimpleNamespace(
+            binding=SimpleNamespace(
+                activation_id="activation-superseded",
+                activation_generation=1,
+                scope=SCOPE,
+            ),
+            activation_lease=_Lease(),
+        ),
+    )
+    registry._progress_targets[
+        (
+            binding.session_id,
+            binding.task_id,
+            binding.origin_id,
+            binding.generation_id,
+        )
+    ] = cast(
+        object,
+        SimpleNamespace(
+            channel_id="web",
+            request_id="request-superseded-fallback",
+            correlation_id=binding.correlation_id,
+            generation=binding.generation,
+            requested_origin_kind=TaskProgressOriginKind.VOICE,
+            fallback_reason=None,
+        ),
+    )
+
+    await registry._emit_voice_progress(intent)
+
+    assert len(pushed) == 1
+    payload = cast(dict[str, object], pushed[0]["payload"])
+    assert payload["delivery_mode"] == "text_fallback"
+    assert payload["fallback_reason"] == ("TASK_PROGRESS_VOICE_RESPONSE_SUPERSEDED")
+    assert any(
+        record.get("reason") == "TASK_PROGRESS_VOICE_RESPONSE_SUPERSEDED"
+        for record in logged
+    )
 
 
 @pytest.mark.asyncio
@@ -1962,20 +2292,10 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     assert len(history.assistants) == 1
 
 
-
-
-
-
-
-
-
-
 @pytest.mark.asyncio
 async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) -> None:
     ledger = TurnCommitLedger()
-    registry, _p3, manager, _pushed = _registry(
-        tmp_path, commit_ledger=ledger
-    )
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-activate-voice-origin",
@@ -2004,9 +2324,7 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
         )
 
     voice_text = "create the bounded voice task"
-    voice_origin_params = _p2_task_origin_params(
-        stem="voice-origin", text=voice_text
-    )
+    voice_origin_params = _p2_task_origin_params(stem="voice-origin", text=voice_text)
     submitted = await registry.handle_p2_submit(
         params=voice_origin_params,
         request_id="request-submit-voice-origin",
@@ -2014,9 +2332,7 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
         channel_id="web",
     )
     assert submitted.ok is True
-    assert cast(dict, submitted.payload["result"])["status"] == (
-        "task_origin_accepted"
-    )
+    assert cast(dict, submitted.payload["result"])["status"] == ("task_origin_accepted")
     response = cast(dict, submitted.payload["result"])["response"]
     assert response["interaction_id"] == "interaction-1"
     assert cast(str, response["response_id"]).strip()
@@ -2026,7 +2342,9 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
     ].activation_lease._runtime
     response_records = runtime.snapshot().conversation.conversation.responses
     canonical = next(
-        item for item in response_records if item.ref.response_id == response["response_id"]
+        item
+        for item in response_records
+        if item.ref.response_id == response["response_id"]
     )
     assert canonical.ref.response_generation == response["response_generation"]
     assert canonical.state.value == "terminal"
@@ -2038,10 +2356,13 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
         channel_id="web",
     )
     assert replayed.payload == submitted.payload
-    assert sum(
-        item.ref.response_id == response["response_id"]
-        for item in runtime.snapshot().conversation.conversation.responses
-    ) == 1
+    assert (
+        sum(
+            item.ref.response_id == response["response_id"]
+            for item in runtime.snapshot().conversation.conversation.responses
+        )
+        == 1
+    )
     accepted = ledger.require_origin(
         OriginRef("committed_turn", "turn-voice-origin", "commit-voice-origin"),
         SCOPE,
@@ -2088,9 +2409,7 @@ async def test_p2_task_origin_caller_cancellation_retains_exact_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger = TurnCommitLedger()
-    registry, _p3, manager, _pushed = _registry(
-        tmp_path, commit_ledger=ledger
-    )
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-activate-task-origin-cancel",
@@ -2124,9 +2443,7 @@ async def test_p2_task_origin_caller_cancellation_retains_exact_replay(
     with pytest.raises(asyncio.CancelledError):
         await caller
     release.set()
-    retained = registry._p2_submit_operations[
-        "request-submit-task-origin-cancel"
-    ]
+    retained = registry._p2_submit_operations["request-submit-task-origin-cancel"]
     first = await asyncio.wait_for(asyncio.shield(retained.task), timeout=1)
     replayed = await registry.handle_p2_submit(
         params=params,
@@ -2138,20 +2455,26 @@ async def test_p2_task_origin_caller_cancellation_retains_exact_replay(
     assert first.ok is True
     assert replayed.payload == first.payload
     assert manager.agent.calls == 0
-    assert ledger.require_origin(
-        OriginRef(
-            "committed_turn",
-            "turn-task-origin-cancel",
-            "commit-task-origin-cancel",
-        ),
-        SCOPE,
-    ).text == text
+    assert (
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-task-origin-cancel",
+                "commit-task-origin-cancel",
+            ),
+            SCOPE,
+        ).text
+        == text
+    )
     runtime = route.activation_lease._runtime
     response_id = cast(dict, first.payload["result"])["response"]["response_id"]
-    assert sum(
-        item.ref.response_id == response_id
-        for item in runtime.snapshot().conversation.conversation.responses
-    ) == 1
+    assert (
+        sum(
+            item.ref.response_id == response_id
+            for item in runtime.snapshot().conversation.conversation.responses
+        )
+        == 1
+    )
     await registry.close_active_routes()
 
 
@@ -2160,9 +2483,7 @@ async def test_p2_task_origin_canonical_accept_wins_concurrent_route_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger = TurnCommitLedger()
-    registry, _p3, manager, _pushed = _registry(
-        tmp_path, commit_ledger=ledger
-    )
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-activate-task-origin-close-race",
@@ -2217,23 +2538,24 @@ async def test_p2_task_origin_canonical_accept_wins_concurrent_route_close(
     )
 
     assert submitted.ok is True
-    assert cast(dict, submitted.payload["result"])["status"] == (
-        "task_origin_accepted"
-    )
+    assert cast(dict, submitted.payload["result"])["status"] == ("task_origin_accepted")
     assert closed.ok is True
     assert replayed.payload == submitted.payload
     assert manager.agent.calls == 0
     assert "commit-task-origin-close-race" in (
         registry._accepted_turn_commits_by_commit
     )
-    assert ledger.require_origin(
-        OriginRef(
-            "committed_turn",
-            "turn-task-origin-close-race",
-            "commit-task-origin-close-race",
-        ),
-        SCOPE,
-    ).text == text
+    assert (
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-task-origin-close-race",
+                "commit-task-origin-close-race",
+            ),
+            SCOPE,
+        ).text
+        == text
+    )
 
 
 @pytest.mark.asyncio
@@ -2501,14 +2823,18 @@ async def test_failed_voice_create_eviction_retires_exact_reserved_origin(
         failed = await mutation
         assert failed.ok is False
 
-    assert registry._reserved_voice_origin_requests[
-        f"commit-create-{terminal_mode}"
-    ] == mutation_request_id
+    assert (
+        registry._reserved_voice_origin_requests[f"commit-create-{terminal_mode}"]
+        == mutation_request_id
+    )
     async with registry._lock:
-        assert registry._evict_completed_product_operation(
-            registry._p3_mutation_operations,
-            namespace="p3.mutate",
-        ) is True
+        assert (
+            registry._evict_completed_product_operation(
+                registry._p3_mutation_operations,
+                namespace="p3.mutate",
+            )
+            is True
+        )
 
     assert registry._reserved_voice_origin_requests == {}
     assert registry._accepted_turn_commits_by_commit == {}
@@ -2548,9 +2874,7 @@ async def test_p2_task_origin_partial_cr_failure_is_stable_result_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger = TurnCommitLedger()
-    registry, _p3, manager, _pushed = _registry(
-        tmp_path, commit_ledger=ledger
-    )
+    registry, _p3, manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
     activated = await registry.handle_p2_activate(
         params=_p2_params(),
         request_id="request-activate-task-origin-unknown",
@@ -2564,9 +2888,7 @@ async def test_p2_task_origin_partial_cr_failure_is_stable_result_unknown(
     async def fail_terminal_transition(*_args: object, **_kwargs: object):
         raise RuntimeError("injected transition loss")
 
-    monkeypatch.setattr(
-        runtime._cr, "transition_response", fail_terminal_transition
-    )
+    monkeypatch.setattr(runtime._cr, "transition_response", fail_terminal_transition)
     text = "retain unknown after partial canonical write"
     params = _p2_task_origin_params(stem="task-origin-unknown", text=text)
     first = await registry.handle_p2_submit(
@@ -2598,17 +2920,21 @@ async def test_p2_task_origin_partial_cr_failure_is_stable_result_unknown(
         "TURN_COMMIT_ALREADY_SUBMITTED"
     )
     assert manager.agent.calls == 0
-    assert ledger.require_origin(
-        OriginRef(
-            "committed_turn",
-            "turn-task-origin-unknown",
-            "commit-task-origin-unknown",
-        ),
-        SCOPE,
-    ).text == text
-    assert registry._unknown_turn_commits_by_commit[
-        "commit-task-origin-unknown"
-    ].turn_id == "turn-task-origin-unknown"
+    assert (
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-task-origin-unknown",
+                "commit-task-origin-unknown",
+            ),
+            SCOPE,
+        ).text
+        == text
+    )
+    assert (
+        registry._unknown_turn_commits_by_commit["commit-task-origin-unknown"].turn_id
+        == "turn-task-origin-unknown"
+    )
     assert len(runtime.snapshot().conversation.conversation.responses) == 1
     await registry.stop()
     assert registry._unknown_turn_commits_by_commit == {}
@@ -2628,9 +2954,7 @@ async def test_p2_task_origin_unknown_eviction_retires_identity_and_frees_capaci
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ledger = TurnCommitLedger(capacity=2)
-    registry, _p3, _manager, _pushed = _registry(
-        tmp_path, commit_ledger=ledger
-    )
+    registry, _p3, _manager, _pushed = _registry(tmp_path, commit_ledger=ledger)
     monkeypatch.setattr(registry, "_TURN_COMMIT_CAPACITY", 2)
     monkeypatch.setattr(registry, "_TURN_COMMIT_CAPACITY_PER_ROUTE", 1)
     activated = await registry.handle_p2_activate(
@@ -2648,9 +2972,7 @@ async def test_p2_task_origin_unknown_eviction_retires_identity_and_frees_capaci
     async def fail_terminal_transition(*_args: object, **_kwargs: object):
         raise RuntimeError("injected transition loss")
 
-    monkeypatch.setattr(
-        runtime._cr, "transition_response", fail_terminal_transition
-    )
+    monkeypatch.setattr(runtime._cr, "transition_response", fail_terminal_transition)
     text = "retire an unknown canonical response without reopening it"
     params = _p2_task_origin_params(stem="unknown-eviction", text=text)
     unknown = await registry.handle_p2_submit(
@@ -2663,9 +2985,10 @@ async def test_p2_task_origin_unknown_eviction_retires_identity_and_frees_capaci
     assert cast(dict, unknown.payload["error"])["code"] == (
         ErrorCode.RESULT_UNKNOWN.value
     )
-    assert registry._unknown_turn_commits_by_commit[
-        "commit-unknown-eviction"
-    ].turn_id == "turn-unknown-eviction"
+    assert (
+        registry._unknown_turn_commits_by_commit["commit-unknown-eviction"].turn_id
+        == "turn-unknown-eviction"
+    )
     monkeypatch.setattr(runtime._cr, "transition_response", original_transition)
     fresh = await registry.handle_p2_submit(
         params=_p2_task_origin_params(
@@ -2850,9 +3173,7 @@ async def test_product_p2_barge_in_is_exact_replayable_and_playback_scoped(
     effects = route.activation_lease._runtime._cr.snapshot().effects
     effect_types = [record.effect.effect_type for record in effects]
     assert effect_types.count("playback.stop") == 1
-    assert not {"response.cancel", "round.cancel", "task.cancel"} & set(
-        effect_types
-    )
+    assert not {"response.cancel", "round.cancel", "task.cancel"} & set(effect_types)
 
     blocking.release.set()
     await registry.close_active_routes()
@@ -2937,6 +3258,817 @@ def _mutation_params(**changes: object) -> dict[str, object]:
     }
     params.update(changes)
     return params
+
+
+def _text_intent_params(
+    *, stem: str, text: str, operation: str, task_id: str | None = None
+) -> dict[str, object]:
+    params: dict[str, object] = {
+        "auth_token": "trusted-token",
+        "session_id": "session-product",
+        "correlation_id": f"correlation-{stem}",
+        "source": "text",
+        "operation_hint": operation,
+        "interaction_id": "chat-task-intent-1",
+        "turn_id": f"turn-{stem}",
+        "commit_id": f"commit-{stem}",
+        "committed_at": NOW,
+        "text": text,
+    }
+    if task_id is not None:
+        params["task_id_hint"] = task_id
+    return params
+
+
+def _voice_intent_params(
+    *, stem: str, operation: str, task_id: str | None = None
+) -> dict[str, object]:
+    params: dict[str, object] = {
+        "auth_token": "trusted-token",
+        "session_id": "session-product",
+        "correlation_id": "correlation-p2",
+        "source": "voice",
+        "operation_hint": operation,
+        "interaction_id": "interaction-1",
+        "turn_id": f"turn-{stem}",
+        "commit_id": f"commit-{stem}",
+    }
+    if task_id is not None:
+        params["task_id_hint"] = task_id
+    return params
+
+
+@pytest.mark.asyncio
+async def test_voice_intent_create_uses_two_exact_p2_commits_and_retains_live_progress_origin(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-natural-voice-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    first_text = "create task: inspect the repository"
+    first_commit = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(stem="natural-voice", text=first_text),
+        request_id="request-natural-voice-commit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first_commit.ok is True
+    first = await registry.handle_p3_intent(
+        params=_voice_intent_params(
+            stem="natural-voice",
+            operation="task.create",
+        ),
+        request_id="request-natural-voice-intent",
+        session_id="session-product",
+    )
+    assert first.ok is True, first.payload
+    first_result = cast(dict[str, object], first.payload["result"])
+    assert first_result["status"] == "clarification"
+    token = cast(str, first_result["confirmation_token"])
+    assert composition.mutation_calls == []
+
+    confirmation_text = f"confirm task request {token}"
+    confirmation_commit = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="natural-voice-confirm",
+            text=confirmation_text,
+        ),
+        request_id="request-natural-voice-confirm-commit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert confirmation_commit.ok is True
+    confirmed = await registry.handle_p3_intent(
+        params=_voice_intent_params(
+            stem="natural-voice-confirm",
+            operation="task.create",
+        ),
+        request_id="request-natural-voice-confirm-intent",
+        session_id="session-product",
+    )
+
+    assert confirmed.ok is True, confirmed.payload
+    result = cast(dict[str, object], confirmed.payload["result"])
+    assert result["status"] == "dispatched"
+    assert result["task_id"] == "task-created-natural-1"
+    assert result["origin_kind"] == "voice"
+    assert result["origin_id"] == "interaction-1"
+    assert result["confirmation_commit_id"] == "commit-natural-voice-confirm"
+    assert len(composition.mutation_calls) == 1
+    assert registry._voice_task_origins["task-created-natural-1"].interaction_id == (
+        "interaction-1"
+    )
+    assert registry._voice_task_origins["task-created-natural-1"].correlation_id == (
+        "correlation-p2"
+    )
+    assert (
+        registry._voice_task_origins[
+            "task-created-natural-1"
+        ].response_ref.interaction_id
+        == "interaction-1"
+    )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_voice_pending_confirmation_is_released_when_exact_route_closes(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-pending-close-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    sentinel = "create task: SENTINEL_PENDING_VOICE_TEXT"
+    committed = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(stem="pending-close", text=sentinel),
+        request_id="request-pending-close-commit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert committed.ok is True
+    pending = await registry.handle_p3_intent(
+        params=_voice_intent_params(
+            stem="pending-close",
+            operation="task.create",
+        ),
+        request_id="request-pending-close-intent",
+        session_id="session-product",
+    )
+    token = cast(dict[str, object], pending.payload["result"])["confirmation_token"]
+    assert token in registry._pending_task_intents
+    assert (
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-pending-close",
+                "commit-pending-close",
+            ),
+            SCOPE,
+        ).text
+        == sentinel
+    )
+
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-pending-close-route",
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-pending-close-route-replay",
+        session_id="session-product",
+    )
+    registry._drop_voice_task_origins_for_route_locked(
+        ("session-foreign", "interaction-foreign")
+    )
+
+    assert closed.ok is True
+    assert replayed.ok is True
+    assert registry._pending_task_intents == {}
+    assert "commit-pending-close" not in registry._accepted_turn_commits_by_commit
+    assert "commit-pending-close" not in registry._accepted_voice_commit_routes
+    assert sentinel not in repr(registry._pending_task_intents)
+    assert composition.mutation_calls == []
+    with pytest.raises(ContractViolation):
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-pending-close",
+                "commit-pending-close",
+            ),
+            SCOPE,
+        )
+
+
+@pytest.mark.asyncio
+async def test_voice_intent_obtain_then_close_race_releases_unstored_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-obtain-close-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    committed = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="obtain-close",
+            text="create task: bounded race request",
+        ),
+        request_id="request-obtain-close-commit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert committed.ok is True
+    original_obtain = registry._obtain_task_intent_commit
+    obtained = asyncio.Event()
+    release = asyncio.Event()
+
+    async def blocked_obtain(**kwargs: object) -> TurnCommit:
+        commit = await original_obtain(**kwargs)
+        obtained.set()
+        await release.wait()
+        return commit
+
+    monkeypatch.setattr(registry, "_obtain_task_intent_commit", blocked_obtain)
+    intent = asyncio.create_task(
+        registry.handle_p3_intent(
+            params=_voice_intent_params(
+                stem="obtain-close",
+                operation="task.create",
+            ),
+            request_id="request-obtain-close-intent",
+            session_id="session-product",
+        )
+    )
+    await asyncio.wait_for(obtained.wait(), timeout=1)
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-obtain-close-route",
+        session_id="session-product",
+    )
+    release.set()
+    rejected = await asyncio.wait_for(intent, timeout=1)
+
+    assert closed.ok is True
+    assert rejected.ok is False
+    assert cast(dict, rejected.payload["error"])["reason"] == (
+        "VOICE_TASK_ROUTE_MISMATCH"
+    )
+    assert registry._pending_task_intents == {}
+    assert "commit-obtain-close" not in registry._accepted_turn_commits_by_commit
+    assert "commit-obtain-close" not in registry._accepted_voice_commit_routes
+    assert composition.mutation_calls == []
+    with pytest.raises(ContractViolation):
+        ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-obtain-close",
+                "commit-obtain-close",
+            ),
+            SCOPE,
+        )
+
+
+@pytest.mark.asyncio
+async def test_text_intent_create_requires_later_exact_committed_confirmation(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    first = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-create",
+            text="create task: inspect the repository",
+            operation="task.create",
+        ),
+        request_id="request-natural-create",
+        session_id="session-product",
+    )
+
+    assert first.ok is True, first.payload
+    clarification = cast(dict[str, object], first.payload["result"])
+    assert clarification["status"] == "clarification"
+    token = cast(str, clarification["confirmation_token"])
+    assert len(token) == 32
+    assert composition.prepare_calls == []
+    assert composition.mutation_calls == []
+
+    confirmed = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-create-confirm",
+            text=f"confirm task request {token}",
+            operation="task.create",
+        ),
+        request_id="request-natural-create-confirm",
+        session_id="session-product",
+    )
+
+    assert confirmed.ok is True, confirmed.payload
+    result = cast(dict[str, object], confirmed.payload["result"])
+    assert result["status"] == "dispatched"
+    assert result["confirmation_commit_id"] == "commit-natural-create-confirm"
+    assert len(composition.mutation_calls) == 1
+    operation, forwarded = composition.mutation_calls[0]
+    assert operation == "task.create"
+    assert forwarded["instruction"] == "inspect the repository"
+    assert forwarded["commit_id"] == "commit-natural-create"
+    assert forwarded["origin_commit_sha256"] == clarification["commit_sha256"]
+    assert registry._pending_task_intents == {}
+
+
+@pytest.mark.asyncio
+async def test_completed_text_intent_recovers_content_free_without_replaying_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    secret_instruction = "inspect SENTINEL_PROVIDER_SECRET without retaining this text"
+    first = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-recovery",
+            text=f"create task: {secret_instruction}",
+            operation="task.create",
+        ),
+        request_id="request-natural-recovery",
+        session_id="session-product",
+    )
+    token = cast(dict[str, object], first.payload["result"])["confirmation_token"]
+    confirmed_request_id = "request-natural-recovery-confirm"
+    confirmed = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-recovery-confirm",
+            text=f"confirm task request {token}",
+            operation="task.create",
+        ),
+        request_id=confirmed_request_id,
+        session_id="session-product",
+    )
+    assert confirmed.ok is True
+    assert len(composition.mutation_calls) == 1
+
+    status_params = {
+        "auth_token": "trusted-token",
+        "session_id": "session-product",
+        "correlation_id": "correlation-natural-recovery-confirm",
+        "intent_request_id": confirmed_request_id,
+    }
+    recovered = await registry.handle_p3_intent_status(
+        params=status_params,
+        request_id="request-natural-recovery-status",
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p3_intent_status(
+        params=status_params,
+        request_id="request-natural-recovery-status-replay",
+        session_id="session-product",
+    )
+
+    assert recovered.ok is True, recovered.payload
+    assert replayed.ok is True, replayed.payload
+    assert recovered.payload["result"] == replayed.payload["result"]
+    assert cast(dict, recovered.payload["result"])["status"] == "settled"
+    assert cast(dict, recovered.payload["result"])["phase"] == "final"
+    recovered_wire = repr(recovered.payload)
+    assert secret_instruction not in recovered_wire
+    assert "SENTINEL_PROVIDER_SECRET" not in recovered_wire
+    assert "confirm task request" not in recovered_wire
+    intent = cast(dict[str, object], cast(dict, recovered.payload["result"])["intent"])
+    assert intent["status"] == "dispatched"
+    assert intent["formal_task_result"] == {
+        "recovered": True,
+        "task_id": "task-created-natural-1",
+    }
+    assert len(composition.mutation_calls) == 1
+
+    wrong_scope = await registry.handle_p3_intent_status(
+        params={**status_params, "correlation_id": "correlation-foreign"},
+        request_id="request-natural-recovery-wrong-scope",
+        session_id="session-product",
+    )
+    unknown = await registry.handle_p3_intent_status(
+        params={**status_params, "intent_request_id": "request-unknown"},
+        request_id="request-natural-recovery-unknown",
+        session_id="session-product",
+    )
+    assert wrong_scope.ok is False
+    assert unknown.ok is False
+    assert len(composition.mutation_calls) == 1
+
+    exception_canary = "SENTINEL_RECOVERY_AUTHORITY_SECRET"
+
+    async def fail_authority(**_kwargs: object) -> NoReturn:
+        raise RuntimeError(exception_canary)
+
+    monkeypatch.setattr(registry, "_preauthorize_task_intent", fail_authority)
+    failed = await registry.handle_p3_intent_status(
+        params=status_params,
+        request_id="request-natural-recovery-authority-failed",
+        session_id="session-product",
+    )
+    assert failed.ok is False
+    assert failed.payload["error"] == {
+        "reason": "TASK_INTENT_RECOVERY_FAILED",
+        "code": ErrorCode.UNAVAILABLE.value,
+        "message": "task intent recovery failed closed",
+    }
+    assert exception_canary not in repr(failed.payload)
+    assert len(composition.mutation_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_pending_intent_status_recovers_exact_phase_then_expires_without_mutation(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    request_id = "request-natural-pending-status"
+    first = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-pending-status",
+            text="create task: bounded pending status",
+            operation="task.create",
+        ),
+        request_id=request_id,
+        session_id="session-product",
+    )
+    first_result = cast(dict[str, object], first.payload["result"])
+    token = cast(str, first_result["confirmation_token"])
+    status_params = {
+        "auth_token": "trusted-token",
+        "session_id": "session-product",
+        "correlation_id": "correlation-natural-pending-status",
+        "intent_request_id": request_id,
+    }
+
+    pending = await registry.handle_p3_intent_status(
+        params=status_params,
+        request_id="request-natural-pending-status-query",
+        session_id="session-product",
+    )
+    replayed = await registry.handle_p3_intent_status(
+        params=status_params,
+        request_id="request-natural-pending-status-replay",
+        session_id="session-product",
+    )
+    assert pending.ok is True and replayed.ok is True
+    pending_result = cast(dict[str, object], pending.payload["result"])
+    assert pending_result["status"] == "pending"
+    assert pending_result["phase"] == "awaiting_confirmation"
+    assert cast(dict, pending_result["intent"])["confirmation_token"] == token
+    assert pending_result == replayed.payload["result"]
+    assert composition.mutation_calls == []
+
+    assert registry._evict_oldest_pending_task_intent_locked() is True
+    expired = await registry.handle_p3_intent_status(
+        params=status_params,
+        request_id="request-natural-pending-status-expired",
+        session_id="session-product",
+    )
+    assert expired.ok is True
+    assert expired.payload["result"] == {
+        "status": "expired",
+        "phase": "expired",
+        "intent_request_id": request_id,
+        "source": "text",
+        "intent": None,
+    }
+    assert composition.mutation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_non_destructive_clarification_status_remains_content_free_pending(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _manager, _pushed = _registry(tmp_path, p2=False, p3=True)
+    request_id = "request-natural-unclear-status"
+    unclear = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-unclear-status",
+            text="what is its task status",
+            operation="task.status",
+            task_id="task-alpha",
+        ),
+        request_id=request_id,
+        session_id="session-product",
+    )
+    assert unclear.ok is True
+    recovered = await registry.handle_p3_intent_status(
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "correlation_id": "correlation-natural-unclear-status",
+            "intent_request_id": request_id,
+        },
+        request_id="request-natural-unclear-status-query",
+        session_id="session-product",
+    )
+    assert recovered.ok is True
+    result = cast(dict[str, object], recovered.payload["result"])
+    assert result["status"] == "pending"
+    assert result["phase"] == "clarification"
+    intent = cast(dict[str, object], result["intent"])
+    assert intent["confirmation_token"] is None
+    assert intent["confirmation_form"] is None
+    assert "what is its task status" not in repr(recovered.payload)
+    assert composition.query_calls == []
+
+
+@pytest.mark.asyncio
+async def test_natural_task_intent_rejects_client_model_intent_before_authority(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    result = await registry.handle_p3_intent(
+        params={
+            **_text_intent_params(
+                stem="natural-model-tamper",
+                text="create task: bounded request",
+                operation="task.create",
+            ),
+            "model_intent": "client-selected-provider",
+        },
+        request_id="request-natural-model-tamper",
+        session_id="session-product",
+    )
+
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "INVALID_PRODUCT_COMPOSITION_ARGUMENT"
+    )
+    assert composition.authority_calls == []
+    assert composition.prepare_calls == []
+    assert composition.mutation_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resolver_exception_is_content_free_on_wire_and_in_logs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    sentinel = "SENTINEL_PROVIDER_SECRET_TRANSCRIPT"
+    logged: list[tuple[str, dict[str, object]]] = []
+
+    def capture_warning(message: str, **kwargs: object) -> None:
+        logged.append((message, cast(dict[str, object], kwargs["extra"])))
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.logger.warning",
+        capture_warning,
+    )
+
+    class _LeakingResolver:
+        def resolve(self, *_args: object) -> object:
+            raise VoiceTaskBridgeViolation(
+                "SENTINEL_PROVIDER_REASON",
+                sentinel,
+                ErrorCode.PERMISSION_DENIED,
+            )
+
+    registry._task_intent_bridge = cast(object, _LeakingResolver())
+    result = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-resolver-canary",
+            text="create task: bounded resolver canary",
+            operation="task.create",
+        ),
+        request_id="request-natural-resolver-canary",
+        session_id="session-product",
+    )
+
+    assert result.ok is False
+    error = cast(dict[str, object], result.payload["error"])
+    assert error == {
+        "code": ErrorCode.PERMISSION_DENIED.value,
+        "reason": "TASK_INTENT_RESOLUTION_REJECTED",
+        "message": "task intent resolution was rejected",
+    }
+    rendered = repr(result.payload) + repr(logged)
+    assert sentinel not in rendered
+    assert "SENTINEL_PROVIDER_REASON" not in rendered
+    _message, record = next(
+        item
+        for item in logged
+        if item[1].get("live_voice_event") == "task_intent_resolution_rejected"
+    )
+    assert record["exception_class"] == "VoiceTaskBridgeViolation"
+    assert len(cast(str, record["request_digest"])) == 16
+    assert composition.query_calls == []
+    with pytest.raises(ContractViolation):
+        registry._commit_ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-natural-resolver-canary",
+                "commit-natural-resolver-canary",
+            ),
+            SCOPE,
+        )
+
+
+@pytest.mark.asyncio
+async def test_untyped_resolver_exception_is_content_free_and_releases_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    sentinel = "SENTINEL_UNTYPED_PROVIDER_SECRET"
+    logged: list[tuple[str, dict[str, object]]] = []
+
+    def capture_warning(message: str, **kwargs: object) -> None:
+        logged.append((message, cast(dict[str, object], kwargs["extra"])))
+
+    class _FailingResolver:
+        def resolve(self, *_args: object) -> object:
+            raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry.logger.warning",
+        capture_warning,
+    )
+    registry._task_intent_bridge = cast(object, _FailingResolver())
+    result = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-resolver-untyped",
+            text="create task: bounded resolver failure",
+            operation="task.create",
+        ),
+        request_id="request-natural-resolver-untyped",
+        session_id="session-product",
+    )
+
+    assert result.ok is False
+    assert cast(dict[str, object], result.payload["error"]) == {
+        "code": ErrorCode.UNAVAILABLE.value,
+        "reason": "TASK_INTENT_RESOLUTION_FAILED",
+        "message": "task intent resolver failed closed",
+    }
+    assert sentinel not in repr(result.payload) + repr(logged)
+    _message, record = next(
+        item
+        for item in logged
+        if item[1].get("live_voice_event") == "task_intent_resolution_failed"
+    )
+    assert record["exception_class"] == "RuntimeError"
+    assert composition.mutation_calls == []
+    with pytest.raises(ContractViolation):
+        registry._commit_ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-natural-resolver-untyped",
+                "commit-natural-resolver-untyped",
+            ),
+            SCOPE,
+        )
+
+
+@pytest.mark.asyncio
+async def test_abandoned_pending_intent_evicts_oldest_exact_commit_at_capacity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry, _composition, _owner = _mutation_registry(tmp_path)
+    monkeypatch.setattr(registry, "_PRODUCT_OPERATION_CAPACITY", 1)
+    first = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-abandoned-first",
+            text="create task: first bounded request",
+            operation="task.create",
+        ),
+        request_id="request-natural-abandoned-first",
+        session_id="session-product",
+    )
+    second = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-abandoned-second",
+            text="create task: second bounded request",
+            operation="task.create",
+        ),
+        request_id="request-natural-abandoned-second",
+        session_id="session-product",
+    )
+
+    first_token = cast(dict[str, object], first.payload["result"])["confirmation_token"]
+    second_token = cast(dict[str, object], second.payload["result"])[
+        "confirmation_token"
+    ]
+    assert first.ok is True and second.ok is True
+    assert first_token not in registry._pending_task_intents
+    assert second_token in registry._pending_task_intents
+    with pytest.raises(ContractViolation):
+        registry._commit_ledger.require_origin(
+            OriginRef(
+                "committed_turn",
+                "turn-natural-abandoned-first",
+                "commit-natural-abandoned-first",
+            ),
+            SCOPE,
+        )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancel_confirmation_wrong_task_and_scope_have_zero_effect(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _owner = _mutation_registry(tmp_path)
+    first = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-cancel",
+            text="cancel task task-alpha",
+            operation="task.cancel",
+            task_id="task-alpha",
+        ),
+        request_id="request-natural-cancel",
+        session_id="session-product",
+    )
+    token = cast(dict[str, object], first.payload["result"])["confirmation_token"]
+
+    wrong_task = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-cancel-wrong",
+            text=f"confirm task request {token}",
+            operation="task.cancel",
+            task_id="task-beta",
+        ),
+        request_id="request-natural-cancel-wrong",
+        session_id="session-product",
+    )
+
+    assert wrong_task.ok is False
+    assert cast(dict, wrong_task.payload["error"])["reason"] == (
+        "TASK_CONFIRMATION_BINDING_MISMATCH"
+    )
+    assert composition.prepare_calls == []
+    assert composition.mutation_calls == []
+    assert token in registry._pending_task_intents
+
+
+@pytest.mark.asyncio
+async def test_text_status_dispatches_formal_query_and_partial_like_form_clarifies(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _manager, _pushed = _registry(tmp_path, p2=False, p3=True)
+    status = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-status",
+            text="task status task-alpha",
+            operation="task.status",
+            task_id="task-alpha",
+        ),
+        request_id="request-natural-status",
+        session_id="session-product",
+    )
+    assert status.ok is True, status.payload
+    assert cast(dict, status.payload["result"])["status"] == "dispatched"
+    assert len(composition.query_calls) == 1
+
+    unclear = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-unclear",
+            text="what is its task status",
+            operation="task.status",
+            task_id="task-alpha",
+        ),
+        request_id="request-natural-unclear",
+        session_id="session-product",
+    )
+    assert unclear.ok is True
+    assert cast(dict, unclear.payload["result"])["status"] == "clarification"
+    assert len(composition.query_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_task_intent_flag_off_has_zero_authority_or_commit_effect(
+    tmp_path: Path,
+) -> None:
+    composition = _P3Composition(tmp_path)
+    ledger = TurnCommitLedger()
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(False, False, False),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=cast(object, lambda _message: None),
+        commit_ledger=ledger,
+    )
+    result = await registry.handle_p3_intent(
+        params=_text_intent_params(
+            stem="natural-off",
+            text="task status task-alpha",
+            operation="task.status",
+            task_id="task-alpha",
+        ),
+        request_id="request-natural-off",
+        session_id="session-product",
+    )
+    assert result.ok is False
+    assert composition.authority_calls == []
+    with pytest.raises(ContractViolation):
+        ledger.require_origin(
+            OriginRef("committed_turn", "turn-natural-off", "commit-natural-off"),
+            SCOPE,
+        )
 
 
 @pytest.mark.asyncio
@@ -3879,7 +5011,9 @@ def _retry_mutation_params(**changes: object) -> dict[str, object]:
     return params
 
 
-def _mutation_registry(tmp_path: Path) -> tuple[
+def _mutation_registry(
+    tmp_path: Path,
+) -> tuple[
     AgentServerProductCompositionRegistry,
     _MutationP3Composition,
     BoundedP3ConfirmationOwner,
@@ -3943,10 +5077,6 @@ async def test_product_retry_mutation_issues_and_forwards_one_exact_target(
     assert forwarded["task_id"] == "task-1"
     assert "previous_attempt_id" not in forwarded
     assert "attempt_number" not in forwarded
-
-
-
-
 
 
 @pytest.mark.asyncio

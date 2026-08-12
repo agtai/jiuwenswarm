@@ -2184,6 +2184,19 @@
         "status": "Product activation lease",
         "scope": "Route / generation"
       },
+      "audioDevices": {
+        "title": "Audio input and output",
+        "memoryOnly": "Device names and identifiers stay only in this page memory and are cleared on refresh.",
+        "loading": "Loading audio devices...",
+        "refreshing": "Checking current devices...",
+        "load": "Authorize and load devices",
+        "input": "Microphone",
+        "output": "Speaker",
+        "systemDefault": "System default (explicit)",
+        "apply": "Apply devices",
+        "status": "Device selection",
+        "reason": "Device selection reason"
+      },
       "textRoute": {
         "label": "Formal P2 text input",
         "placeholder": "Send committed text through CR and the JiuwenSwarm Agent",

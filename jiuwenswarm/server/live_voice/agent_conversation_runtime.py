@@ -73,6 +73,10 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationSurface,
     PresentationUnit,
 )
+from jiuwenswarm.server.live_voice.task_progress_return import (
+    TaskProgressNotificationIntent,
+    TaskProgressOriginKind,
+)
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
@@ -1022,6 +1026,106 @@ class AgentConversationRuntime:
                     "Task-origin CR write did not reach a provable terminal result",
                     ErrorCode.RESULT_UNKNOWN,
                 )
+
+    async def accept_task_progress_notification(
+        self,
+        intent: TaskProgressNotificationIntent,
+        *,
+        response_ref: ResponseRef,
+    ) -> bool:
+        """Admit one arbiter-owned Task progress intent into CR observation.
+
+        This method deliberately emits no TTS command, presentation unit,
+        history write, response/round cancellation, or Task command.  The
+        active Conversation Runtime merely owns the exact notification and its
+        current response-generation correlation for the product consumer.
+        """
+
+        self._require_admission()
+        if not isinstance(intent, TaskProgressNotificationIntent):
+            raise AgentConversationRuntimeViolation(
+                "INVALID_TASK_PROGRESS_NOTIFICATION",
+                "Conversation Runtime requires a canonical progress intent",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        origin = intent.origin
+        if (
+            origin.origin_kind is not TaskProgressOriginKind.VOICE
+            or origin.scope != self._scope
+            or origin.session_id != self._scope.session_id
+            or origin.origin_id == ""
+        ):
+            raise AgentConversationRuntimeViolation(
+                "TASK_PROGRESS_ORIGIN_MISMATCH",
+                "voice progress must bind this exact Conversation Runtime scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        snapshot = self._cr.snapshot().conversation
+        interaction = next(
+            (
+                item
+                for item in snapshot.interactions
+                if item.interaction_id == origin.origin_id
+            ),
+            None,
+        )
+        if interaction is None or interaction.state is not InteractionState.OPEN:
+            raise AgentConversationRuntimeViolation(
+                "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE",
+                "voice progress has no exact live origin interaction",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            not isinstance(response_ref, ResponseRef)
+            or response_ref.interaction_id != origin.origin_id
+        ):
+            raise AgentConversationRuntimeViolation(
+                "TASK_PROGRESS_RESPONSE_MISMATCH",
+                "voice progress must bind its exact canonical origin response",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        response = next(
+            (item for item in snapshot.responses if item.ref == response_ref),
+            None,
+        )
+        successor_exists = any(
+            item.ref.interaction_id == origin.origin_id
+            and item.ref.response_generation > response_ref.response_generation
+            for item in snapshot.responses
+        )
+        if response is None or successor_exists:
+            raise AgentConversationRuntimeViolation(
+                (
+                    "TASK_PROGRESS_RESPONSE_SUPERSEDED"
+                    if successor_exists
+                    else "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
+                ),
+                (
+                    "voice progress response has a canonical successor"
+                    if successor_exists
+                    else "voice progress has no canonical response generation"
+                ),
+                ErrorCode.UNAVAILABLE,
+            )
+        progress = WorkProgressEventV2.from_dict(
+            intent.progress_event.payload, scope=intent.progress_event.scope
+        )
+        self._publish(
+            AgentConversationNotification(
+                kind="task.progress.notification",
+                request_id=intent.evidence_id,
+                round_id=f"task:{origin.task_id}",
+                response_ref=response_ref,
+                source_event=intent.source_event,
+                progress_event=intent.progress_event,
+            ),
+            critical_key=(
+                ("task-progress-terminal", intent.evidence_id)
+                if progress.state is WorkState.TERMINAL
+                else None
+            ),
+        )
+        return True
 
     def _register_committed_turn_submission(
         self,

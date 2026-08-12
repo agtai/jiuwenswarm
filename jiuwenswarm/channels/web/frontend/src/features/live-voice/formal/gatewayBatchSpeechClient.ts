@@ -12,8 +12,43 @@ import type { BrowserAudioPcmChunk } from './adapters/browserAudioIOAdapter.js';
 export const LIVE_VOICE_SPEECH_CONTRACT_VERSION = 'live-voice.contract.v2';
 export const SPEECH_CAPABILITIES_METHOD = 'live_voice.speech.capabilities';
 export const SPEECH_RECOGNIZE_BATCH_METHOD = 'live_voice.speech.recognize_batch';
+export const SPEECH_RECOGNIZE_STREAMING_RESULT_METHOD = 'live_voice.speech.recognize_streaming_result';
 export const SPEECH_SYNTHESIZE_BATCH_METHOD = 'live_voice.speech.synthesize_batch';
 export const SPEECH_CANCEL_METHOD = 'live_voice.speech.cancel';
+
+export const STREAMING_SPEECH_DEGRADATION_REASONS = Object.freeze([
+  'STREAMING_SPEECH_FEATURE_OFF',
+  'STREAMING_SPEECH_CONFIGURATION_UNAVAILABLE',
+  'STREAMING_SPEECH_PROVIDER_UNAVAILABLE',
+  'STREAMING_SPEECH_PROVIDER_PROTOCOL',
+  'STREAMING_SPEECH_PROVIDER_TIMEOUT',
+  'STREAMING_SPEECH_CANCEL_UNACKNOWLEDGED',
+  'STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED',
+  'STREAMING_SPEECH_ROUTE_ABORTED',
+] as const);
+export type StreamingSpeechDegradationReason = (typeof STREAMING_SPEECH_DEGRADATION_REASONS)[number];
+
+export function isStreamingSpeechDegradationReason(value: unknown): value is StreamingSpeechDegradationReason {
+  return typeof value === 'string' && (STREAMING_SPEECH_DEGRADATION_REASONS as readonly string[]).includes(value);
+}
+
+export type StreamingXObsEvent = 'failure.observed' | 'degradation.activated' | null;
+export type StreamingXObsMetric = 'live_voice.failure_total' | 'live_voice.degradation_total' | null;
+
+export function normalizeStreamingXObs(
+  event: unknown,
+  metric: unknown,
+): Readonly<{ event: StreamingXObsEvent; metric: StreamingXObsMetric }> {
+  if (
+    (event === 'failure.observed' && metric === 'live_voice.failure_total')
+    || (event === 'degradation.activated' && metric === 'live_voice.degradation_total')
+  ) {
+    return Object.freeze({ event, metric });
+  }
+  // X-OBS is diagnostic-only. Missing, rejected, or malformed diagnostic
+  // delivery must never authorize or suppress the server-owned fallback.
+  return Object.freeze({ event: null, metric: null });
+}
 
 const MAX_BATCH_AUDIO_BYTES = 4 * 1024 * 1024;
 const MAX_SYNTHESIS_AUDIO_BYTES = 8 * 1024 * 1024;
@@ -97,6 +132,34 @@ export interface FormalBatchRecognitionResult {
   readonly provider: Readonly<GatewaySpeechProvider>;
 }
 
+export interface FormalStreamingRecognitionResult {
+  readonly operation: 'speech.recognize.stream';
+  readonly capture: FormalBatchRecognitionResult['capture'];
+  readonly final_text: string;
+  readonly raw_text: string;
+  readonly commits_turn: false;
+  readonly voice_commit_receipt: string;
+  readonly provider: Readonly<{
+    provider_id: string;
+    implementation_class: 'formal';
+    fallback_from: null;
+  }>;
+}
+
+export interface FormalStreamingRecognitionFallback {
+  readonly operation: 'speech.recognize.stream';
+  readonly capture: FormalBatchRecognitionResult['capture'];
+  readonly fallback_tier: 'batch' | 'text';
+  readonly reason_id: StreamingSpeechDegradationReason;
+  readonly visible: true;
+  readonly x_obs_event: StreamingXObsEvent;
+  readonly x_obs_metric: StreamingXObsMetric;
+}
+
+export type FormalStreamingRecognitionDecision =
+  | Readonly<{ status: 'completed'; result: Readonly<FormalStreamingRecognitionResult> }>
+  | Readonly<{ status: 'fallback'; fallback: Readonly<FormalStreamingRecognitionFallback> }>;
+
 export interface FormalBatchSynthesisResult {
   readonly operation: 'speech.synthesize.batch';
   readonly response: Readonly<AudioResponseRef>;
@@ -109,9 +172,13 @@ export interface FormalBatchSynthesisResult {
 
 export interface FormalSynthesisDownlink {
   readonly endpoint_path: string;
+  /** Return the memory-only ticket exactly once, clearing the retained value. */
+  readonly take_media_ticket: () => string;
   readonly subprotocol: 'live-voice.media.v1';
   readonly ticket_ttl_ms: number;
-  readonly frame_count: number;
+  readonly frame_count: number | null;
+  readonly streaming: boolean;
+  readonly degradation_reason: string | null;
   readonly sample_rate_hz: number;
   readonly binding: Readonly<Record<string, unknown>>;
   readonly max_pending_frames: number;
@@ -122,6 +189,7 @@ export interface FormalRecognitionInput {
   readonly frames: readonly Readonly<CapturedAudioFrame>[];
   readonly locale: string;
   readonly correlationId: string;
+  readonly interactionId?: string;
   readonly operationId?: string;
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
@@ -233,6 +301,34 @@ function objectValue(value: unknown, field: string): Record<string, unknown> {
     throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_GATEWAY_RESPONSE', `${field} must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function consumePrivateText(record: Record<string, unknown>, key: string, field: string): string {
+  const value = requiredText(record[key], field);
+  if (!Reflect.deleteProperty(record, key) || Object.prototype.hasOwnProperty.call(record, key)) {
+    throw new GatewayBatchSpeechError(
+      'PROTOCOL_VIOLATION',
+      'PRIVATE_DESCRIPTOR_NOT_RELEASABLE',
+      `${field} could not be released from memory`,
+    );
+  }
+  return value;
+}
+
+function oneUsePrivateText(value: string, field: string): () => string {
+  let retained: string | null = value;
+  return () => {
+    if (retained === null) {
+      throw new GatewayBatchSpeechError(
+        'PROTOCOL_VIOLATION',
+        'PRIVATE_DESCRIPTOR_ALREADY_CONSUMED',
+        `${field} was already consumed`,
+      );
+    }
+    const selected = retained;
+    retained = null;
+    return selected;
+  };
 }
 
 function closedGatewayObject(
@@ -667,6 +763,130 @@ export class GatewayBatchSpeechClient {
     });
   }
 
+  async recognizeStreamingFinal(input: Readonly<FormalRecognitionInput>): Promise<Readonly<FormalStreamingRecognitionDecision>> {
+    this.#requireEnabled();
+    const first = input.frames[0];
+    if (first === undefined) {
+      throw new GatewayBatchSpeechError('INVALID_ARGUMENT', 'EMPTY_RECOGNITION_AUDIO', 'streaming recognition requires one finalized capture');
+    }
+    const capture = first.capture;
+    const captureId = requiredText(capture.capture_id, 'capture_id');
+    const captureGeneration = nonNegativeSafeInteger(capture.capture_generation, 'capture_generation');
+    const seenGeneration = this.#seenCaptures.get(captureId);
+    if (seenGeneration !== undefined) {
+      const reason = seenGeneration === captureGeneration ? 'STALE_RECOGNITION_SESSION' : 'CAPTURE_ID_REUSED';
+      const code = seenGeneration === captureGeneration ? 'STALE' : 'CONFLICT';
+      throw new GatewayBatchSpeechError(code, reason, 'capture identity was already consumed');
+    }
+    const raw = await this.#transport!.request(
+      SPEECH_RECOGNIZE_STREAMING_RESULT_METHOD,
+      {
+        session_id: this.#scope!.session_id,
+        subject_id: this.#scope!.subject_id,
+        correlation_id: requiredText(input.correlationId, 'correlation_id'),
+        interaction_id: requiredText(input.interactionId, 'interaction_id'),
+        capture_id: captureId,
+        capture_generation: captureGeneration,
+        track_id: requiredText(capture.track_id, 'track_id'),
+      },
+      { timeoutMs: 38_000, signal: input.signal }
+    );
+    const envelope = objectValue(raw, 'streaming_recognition_result');
+    const resultCapture = exactArgumentRecord(
+      envelope.capture,
+      ['capture_id', 'capture_generation', 'track_id', 'final'],
+      'streaming_recognition_result.capture'
+    );
+    if (
+      resultCapture.capture_id !== captureId ||
+      resultCapture.capture_generation !== captureGeneration ||
+      resultCapture.track_id !== capture.track_id ||
+      resultCapture.final !== true ||
+      envelope.operation !== 'speech.recognize.stream'
+    ) {
+      throw new GatewayBatchSpeechError(
+        'PROTOCOL_VIOLATION',
+        'STREAMING_RECOGNITION_RESULT_MISMATCH',
+        'Gateway streaming recognition result does not match the capture'
+      );
+    }
+    const frozenCapture = Object.freeze({
+      capture_id: captureId,
+      capture_generation: captureGeneration,
+      track_id: capture.track_id,
+      final: true as const,
+    });
+    if (envelope.status === 'completed') {
+      exactArgumentRecord(
+        envelope,
+        ['status', 'operation', 'capture', 'final_text', 'raw_text', 'commits_turn', 'voice_commit_receipt', 'provider', 'degradation'],
+        'streaming_recognition_result'
+      );
+      if (envelope.commits_turn !== false || envelope.degradation !== null) {
+        throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_STREAMING_RECOGNITION_RESULT', 'Gateway streaming recognition completion is invalid');
+      }
+      const provider = exactArgumentRecord(
+        envelope.provider,
+        ['provider_id', 'implementation_class', 'fallback_from'],
+        'streaming_recognition_result.provider'
+      );
+      if (provider.implementation_class !== 'formal' || provider.fallback_from !== null) {
+        throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_PROVIDER_PROVENANCE', 'streaming recognition requires formal Provider provenance');
+      }
+      this.#boundedSet(this.#seenCaptures, captureId, captureGeneration);
+      return Object.freeze({
+        status: 'completed' as const,
+        result: Object.freeze({
+          operation: 'speech.recognize.stream' as const,
+          capture: frozenCapture,
+          final_text: requiredText(envelope.final_text, 'final_text'),
+          raw_text: requiredText(envelope.raw_text, 'raw_text'),
+          commits_turn: false as const,
+          voice_commit_receipt: requiredText(envelope.voice_commit_receipt, 'voice_commit_receipt'),
+          provider: Object.freeze({
+            provider_id: requiredText(provider.provider_id, 'provider.provider_id'),
+            implementation_class: 'formal' as const,
+            fallback_from: null,
+          }),
+        }),
+      });
+    }
+    exactArgumentRecord(
+      envelope,
+      ['status', 'operation', 'capture', 'fallback_tier', 'reason_id', 'visible', 'x_obs_event', 'x_obs_metric'],
+      'streaming_recognition_result'
+    );
+    if (
+      envelope.status !== 'fallback' ||
+      !['batch', 'text'].includes(String(envelope.fallback_tier)) ||
+      envelope.visible !== true
+    ) {
+      throw new GatewayBatchSpeechError('PROTOCOL_VIOLATION', 'INVALID_STREAMING_RECOGNITION_FALLBACK', 'Gateway streaming recognition fallback is invalid');
+    }
+    const xObs = normalizeStreamingXObs(envelope.x_obs_event, envelope.x_obs_metric);
+    return Object.freeze({
+      status: 'fallback' as const,
+      fallback: Object.freeze({
+        operation: 'speech.recognize.stream' as const,
+        capture: frozenCapture,
+        fallback_tier: envelope.fallback_tier as 'batch' | 'text',
+        reason_id: (() => {
+          if (!isStreamingSpeechDegradationReason(envelope.reason_id)) {
+            throw new GatewayBatchSpeechError(
+              'PROTOCOL_VIOLATION',
+              'INVALID_STREAMING_RECOGNITION_FALLBACK',
+              'Gateway streaming recognition fallback reason is invalid'
+            );
+          }
+          return envelope.reason_id;
+        })(),
+        visible: true as const,
+        x_obs_event: xObs.event,
+        x_obs_metric: xObs.metric,
+      }),
+    });
+  }
+
   async recognizeFinal(input: Readonly<FormalRecognitionInput>): Promise<Readonly<FormalBatchRecognitionResult> | null> {
     this.#requireEnabled();
     const wav = capturedFramesToPcm16Wav(input.frames);
@@ -871,7 +1091,8 @@ export class GatewayBatchSpeechClient {
       const expectedKeys = [
         'binding', 'channel_count', 'delivery', 'endpoint_path', 'format',
         'frame_count', 'max_pending_bytes', 'max_pending_frames',
-        'sample_rate_hz', 'subprotocol', 'ticket_ttl_ms',
+        'media_ticket', 'sample_rate_hz', 'streaming', 'subprotocol',
+        'ticket_ttl_ms', 'degradation_reason',
       ].sort();
       if (
         actualKeys.length !== expectedKeys.length
@@ -885,7 +1106,31 @@ export class GatewayBatchSpeechClient {
           'Gateway returned an invalid dedicated media downlink descriptor',
         );
       }
-      const frameCount = positiveSafeInteger(audio.frame_count, 'audio.frame_count');
+      const streaming = audio.streaming === true;
+      if (typeof audio.streaming !== 'boolean') {
+        throw new GatewayBatchSpeechError(
+          'PROTOCOL_VIOLATION',
+          'INVALID_DEDICATED_MEDIA_DOWNLINK',
+          'Gateway returned no typed synthesis delivery mode',
+        );
+      }
+      const frameCount = streaming
+        ? (audio.frame_count === null ? null : positiveSafeInteger(audio.frame_count, 'audio.frame_count'))
+        : positiveSafeInteger(audio.frame_count, 'audio.frame_count');
+      const degradationReason = audio.degradation_reason === null
+        ? null
+        : requiredText(audio.degradation_reason, 'audio.degradation_reason');
+      if (
+        (streaming && (frameCount !== null || degradationReason !== null))
+        || (!streaming && degradationReason !== null && !/^[A-Z][A-Z0-9_]{0,127}$/.test(degradationReason))
+        || audio.endpoint_path !== '/ws/live-voice/media'
+      ) {
+        throw new GatewayBatchSpeechError(
+          'PROTOCOL_VIOLATION',
+          'INVALID_DEDICATED_MEDIA_DOWNLINK',
+          'Gateway returned inconsistent streaming synthesis route truth',
+        );
+      }
       const maxPendingFrames = positiveSafeInteger(
         audio.max_pending_frames,
         'audio.max_pending_frames',
@@ -894,13 +1139,14 @@ export class GatewayBatchSpeechClient {
         audio.max_pending_bytes,
         'audio.max_pending_bytes',
       );
-      if (frameCount > 1_500 || maxPendingFrames > 256 || maxPendingBytes > MAX_SYNTHESIS_AUDIO_BYTES) {
+      if ((frameCount ?? 0) > 1_500 || maxPendingFrames > 256 || maxPendingBytes > MAX_SYNTHESIS_AUDIO_BYTES) {
         throw new GatewayBatchSpeechError(
           'PROTOCOL_VIOLATION',
           'AUDIO_LIMIT_EXCEEDED',
           'Gateway returned an oversized dedicated media downlink descriptor',
         );
       }
+      const mediaTicket = consumePrivateText(audio, 'media_ticket', 'audio.media_ticket');
       return Object.freeze({
         operation: 'speech.synthesize.batch',
         response: Object.freeze({ ...response }),
@@ -908,9 +1154,12 @@ export class GatewayBatchSpeechClient {
         chunks: Object.freeze([]),
         downlink: Object.freeze({
           endpoint_path: requiredText(audio.endpoint_path, 'audio.endpoint_path'),
+          take_media_ticket: oneUsePrivateText(mediaTicket, 'audio.media_ticket'),
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: positiveSafeInteger(audio.ticket_ttl_ms, 'audio.ticket_ttl_ms'),
           frame_count: frameCount,
+          streaming,
+          degradation_reason: degradationReason,
           sample_rate_hz: requiredRate,
           binding: Object.freeze({ ...objectValue(audio.binding, 'audio.binding') }),
           max_pending_frames: maxPendingFrames,

@@ -6,7 +6,7 @@ This module is deliberately not a registered WebSocket handler.  It accepts an
 already server-authored :class:`MediaAuthorityBinding`, enforces a same-origin
 request context, and exposes typed LVM1 sessions plus runners for an injected,
 already-accepted socket.  It has no JSON logger, persistence callback, socket
-factory, background task, or retry surface.
+factory, or retry surface; short-lived tasks exist only for socket/EOT arbitration.
 
 An active object proves only the package contract.  Product route truth remains
 ``unavailable`` until the Integration Owner registers the real handler and an
@@ -17,10 +17,23 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import math
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Awaitable, Callable, Iterable, Protocol, TypeAlias
+from typing import (
+    Any,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Iterator,
+    Protocol,
+    TypeAlias,
+    TypeVar,
+    cast,
+)
 from urllib.parse import urlsplit
 
 from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
@@ -35,6 +48,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaDetach,
     MediaDetachReason,
     MediaDirection,
+    MediaEndOfTurn,
     MediaPlaybackStopReceipt,
     MediaTransportViolation,
     StrictMediaReceiver,
@@ -53,6 +67,17 @@ _ROUTE_CONSTRUCTION_TOKEN = object()
 _SOCKET_CLOSE_TIMEOUT_SECONDS = 1.0
 _MAX_PENDING_FRAMES = 256
 _MAX_PENDING_BYTES = 8 * 1024 * 1024
+_PROCESS_CONTROL = (GeneratorExit, KeyboardInterrupt, SystemExit)
+
+
+class DedicatedMediaDownlinkSourceFailure(RuntimeError):
+    """A typed, content-free async source failure safe for the media peer."""
+
+    def __init__(self, reason_id: MediaDetachReason) -> None:
+        if not isinstance(reason_id, MediaDetachReason):
+            raise TypeError("downlink source failure requires a media detach reason")
+        super().__init__(reason_id.value)
+        self.reason_id = reason_id
 
 
 class DedicatedMediaRouteTruth(StrEnum):
@@ -225,6 +250,146 @@ class DedicatedMediaSocket(Protocol):
     def close(self, code: int = 1000, reason: str = "") -> Awaitable[None]: ...
 
 
+_AwaitedT = TypeVar("_AwaitedT")
+
+
+async def _await_owned_call(
+    source: Callable[[], Awaitable[_AwaitedT]],
+) -> _AwaitedT:
+    """Own any contract-valid Awaitable behind one cancellable Task."""
+
+    return await source()
+
+
+@dataclass(frozen=True, slots=True)
+class DedicatedMediaLeafCleanupSnapshot:
+    capacity: int
+    in_use: int
+    retained_tasks: int
+    closed: bool
+    cleanup_complete: bool
+
+
+class DedicatedMediaLeafCleanupOwner:
+    """Bounded lifecycle owner for cancellation-hostile socket/EOT tasks."""
+
+    def __init__(self, *, capacity: int = 64) -> None:
+        if type(capacity) is not int or capacity < 2:
+            raise ValueError("media cleanup capacity must be an integer >= 2")
+        self._capacity = capacity
+        self._in_use = 0
+        self._closed = False
+        self._reservations: dict[object, int] = {}
+        self._retained: set[asyncio.Task[Any]] = set()
+
+    @property
+    def snapshot(self) -> DedicatedMediaLeafCleanupSnapshot:
+        return DedicatedMediaLeafCleanupSnapshot(
+            capacity=self._capacity,
+            in_use=self._in_use,
+            retained_tasks=len(self._retained),
+            closed=self._closed,
+            cleanup_complete=self._in_use == 0,
+        )
+
+    def reserve(self, slots: int = 2) -> object:
+        if type(slots) is not int or slots <= 0:
+            raise ValueError("media cleanup reservation must be positive")
+        if self._closed:
+            raise MediaTransportViolation(
+                "MEDIA_CLEANUP_OWNER_CLOSED", "media cleanup owner is closed"
+            )
+        if self._in_use + slots > self._capacity:
+            raise MediaTransportViolation(
+                "MEDIA_CLEANUP_CAPACITY_EXCEEDED",
+                "media cleanup capacity is exhausted",
+            )
+        token = object()
+        self._reservations[token] = slots
+        self._in_use += slots
+        return token
+
+    def settle_reservation(
+        self,
+        token: object,
+        pending: set[asyncio.Task[Any]],
+    ) -> int:
+        slots = self._reservations.get(token)
+        if slots is None:
+            return 0
+        completed: set[asyncio.Task[Any]] = set()
+        still_pending: set[asyncio.Task[Any]] = set()
+        for task in pending:
+            (completed if task.done() else still_pending).add(task)
+        pending = still_pending
+        if len(pending) > slots:
+            raise RuntimeError("media cleanup reservation was exceeded")
+        self._reservations.pop(token)
+        self._in_use -= slots - len(pending)
+        for task in completed:
+            self._consume_task_result(task)
+        for task in pending:
+            self._retained.add(task)
+            task.add_done_callback(self._consume_retained)
+        for task in tuple(pending):
+            if task.done():
+                self._consume_retained(task)
+        return sum(task in self._retained for task in pending)
+
+    async def retry_cleanup(
+        self, *, timeout_seconds: float = _SOCKET_CLOSE_TIMEOUT_SECONDS
+    ) -> bool:
+        if not isinstance(timeout_seconds, (int, float)) or isinstance(
+            timeout_seconds, bool
+        ):
+            raise TypeError("cleanup timeout must be numeric")
+        if not math.isfinite(float(timeout_seconds)) or timeout_seconds <= 0:
+            raise ValueError("cleanup timeout must be finite and positive")
+        tasks = set(self._retained)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            done, _pending = await asyncio.wait(tasks, timeout=float(timeout_seconds))
+            for task in done:
+                self._consume_retained(task)
+        return self.snapshot.cleanup_complete
+
+    async def close(
+        self, *, timeout_seconds: float = _SOCKET_CLOSE_TIMEOUT_SECONDS
+    ) -> bool:
+        if not isinstance(timeout_seconds, (int, float)) or isinstance(
+            timeout_seconds, bool
+        ):
+            raise TypeError("cleanup timeout must be numeric")
+        if not math.isfinite(float(timeout_seconds)) or timeout_seconds <= 0:
+            raise ValueError("cleanup timeout must be finite and positive")
+        self._closed = True
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + float(timeout_seconds)
+        if await self.retry_cleanup(timeout_seconds=timeout_seconds):
+            return True
+        if not self._reservations:
+            return self.snapshot.cleanup_complete
+        while self._reservations and loop.time() < deadline:
+            await asyncio.sleep(0)
+        return self.snapshot.cleanup_complete
+
+    def _consume_retained(self, task: asyncio.Task[Any]) -> None:
+        if task not in self._retained:
+            return
+        self._retained.discard(task)
+        self._in_use -= 1
+        self._consume_task_result(task)
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Task[Any]) -> None:
+        try:
+            task.exception()
+        except BaseException:
+            pass
+
+
 @dataclass(frozen=True, slots=True)
 class DedicatedMediaSocketLeafResult:
     """Runtime facts for one unregistered, injected socket leaf."""
@@ -242,10 +407,10 @@ class DedicatedMediaSocketLeafResult:
     configured_max_pending_bytes: int = 0
     peak_pending_frames: int = 0
     peak_pending_bytes: int = 0
+    cleanup_complete: bool = True
+    cleanup_pending_tasks: int = 0
     business_cancel_count_delta: int = field(default=0, init=False)
-    evidence_scope: str = field(
-        default="dedicated_media_socket_leaf_only", init=False
-    )
+    evidence_scope: str = field(default="dedicated_media_socket_leaf_only", init=False)
     registered_route_observed: bool = field(default=False, init=False)
     route_to_disk_zero_persistence_observed: bool = field(default=False, init=False)
     formal_route_ready: bool = field(default=False, init=False)
@@ -255,6 +420,16 @@ class DedicatedMediaSocketLeafResult:
             raise MediaTransportViolation(
                 "MEDIA_CANCEL_SCOPE_VIOLATION",
                 "media socket leaf cannot mutate business cancellation",
+            )
+        if (
+            type(self.cleanup_complete) is not bool
+            or type(self.cleanup_pending_tasks) is not int
+            or self.cleanup_pending_tasks < 0
+            or self.cleanup_complete != (self.cleanup_pending_tasks == 0)
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_CLEANUP_TRUTH",
+                "media cleanup count contradicts completion truth",
             )
         if self.activated is False and (
             self.socket_touched
@@ -274,9 +449,7 @@ class DedicatedMediaSocketLeafResult:
                 "MEDIA_INVALID_ROUTE_EVIDENCE",
                 "inactive socket leaves require zero transport effects",
             )
-        if self.activated is True and not isinstance(
-            self.reason_id, MediaDetachReason
-        ):
+        if self.activated is True and not isinstance(self.reason_id, MediaDetachReason):
             raise MediaTransportViolation(
                 "MEDIA_INVALID_ROUTE_EVIDENCE",
                 "active socket leaf reason must use the media close vocabulary",
@@ -524,13 +697,16 @@ async def run_dedicated_media_socket_leaf(
     socket: DedicatedMediaSocket,
     on_audio_frame: Callable[[MediaAudioFrame], None],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
+    cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
 ) -> DedicatedMediaSocketLeafResult:
     """Run one injected uplink WebSocket after the central handshake.
 
     The central route remains responsible for registration, subprotocol
     negotiation, trusted binding lookup, and passing the observed Origin into
-    ``request``.  This leaf performs no logging, persistence, task creation, or
-    retry.  Feature-off returns before inspecting or touching ``socket``.
+    ``request``.  This leaf performs no logging, persistence, or retry and owns
+    its socket/EOT arbitration tasks through a bounded cleanup owner. Feature-off
+    returns before inspecting or touching ``socket``.
     """
 
     activation = create_dedicated_media_route(
@@ -550,11 +726,80 @@ async def run_dedicated_media_socket_leaf(
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "uplink completion consumer must be callable"
         )
+    if next_end_of_turn is not None and not callable(next_end_of_turn):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "end-of-turn source must be callable"
+        )
+    if next_end_of_turn is not None and not isinstance(
+        cleanup_owner, DedicatedMediaLeafCleanupOwner
+    ):
+        raise MediaTransportViolation(
+            "MEDIA_CLEANUP_OWNER_REQUIRED",
+            "end-of-turn arbitration requires a bounded cleanup owner",
+        )
+    cleanup_token = (
+        cleanup_owner.reserve(2)
+        if next_end_of_turn is not None and cleanup_owner is not None
+        else None
+    )
 
     session = activation.session
     binding = session.binding
     attach_sent = False
     socket_touched = False
+    end_of_turn_task: asyncio.Task[MediaEndOfTurn] | None = None
+    end_of_turn_sent = False
+    receive_task: asyncio.Task[str | bytes | bytearray | memoryview] | None = None
+    cleanup_settled = False
+    cleanup_pending_count = 0
+
+    async def settle_owned_tasks(
+        *tasks: asyncio.Future[Any] | None,
+    ) -> tuple[BaseException | None, int]:
+        nonlocal cleanup_pending_count, cleanup_settled
+        if cleanup_settled:
+            return None, cleanup_pending_count
+        process_control: BaseException | None = None
+        wait_interruption: BaseException | None = None
+        owned_tasks = {task for task in tasks if task is not None}
+        for task in owned_tasks:
+            if not task.done():
+                task.cancel()
+        pending = {task for task in owned_tasks if not task.done()}
+        done = {task for task in owned_tasks if task.done()}
+        if pending:
+            try:
+                settled, pending = await asyncio.wait(
+                    pending, timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS
+                )
+                done.update(settled)
+            except BaseException as error:
+                # Even caller cancellation or process control during the
+                # bounded wait must hand every child to the lifecycle owner.
+                wait_interruption = error
+                done.update(task for task in pending if task.done())
+                pending = {task for task in pending if not task.done()}
+        for task in done:
+            try:
+                task.result()
+            except _PROCESS_CONTROL as error:
+                if process_control is None:
+                    process_control = error
+            except (Exception, asyncio.CancelledError):
+                pass
+        retained = {
+            cast(asyncio.Task[Any], task)
+            for task in pending
+            if isinstance(task, asyncio.Task)
+        }
+        if cleanup_owner is not None and cleanup_token is not None:
+            cleanup_pending_count = cleanup_owner.settle_reservation(
+                cleanup_token, retained
+            )
+        cleanup_settled = True
+        if wait_interruption is not None:
+            raise wait_interruption
+        return process_control, cleanup_pending_count
 
     async def close_socket() -> None:
         nonlocal socket_touched
@@ -575,7 +820,9 @@ async def run_dedicated_media_socket_leaf(
             # cannot confirm physical closure.
             pass
 
-    async def send_control(control: MediaAck | MediaDetach | MediaAttach) -> bool:
+    async def send_control(
+        control: MediaAck | MediaDetach | MediaAttach | MediaEndOfTurn,
+    ) -> bool:
         nonlocal socket_touched
         try:
             send = socket.send
@@ -587,8 +834,9 @@ async def run_dedicated_media_socket_leaf(
         try:
             await send(serialize_media_control(control))
         except asyncio.CancelledError:
+            if receive_task is not None and not receive_task.done():
+                receive_task.cancel()
             session.close(MediaDetachReason.TRANSPORT_CLOSED)
-            await asyncio.shield(close_socket())
             raise
         except Exception:
             return False
@@ -599,7 +847,9 @@ async def run_dedicated_media_socket_leaf(
             return False
         return await send_control(closed.detach)
 
-    def result(closed: MediaCloseResult) -> DedicatedMediaSocketLeafResult:
+    def result(
+        closed: MediaCloseResult, *, cleanup_pending_tasks: int = 0
+    ) -> DedicatedMediaSocketLeafResult:
         snapshot = session.snapshot()
         return DedicatedMediaSocketLeafResult(
             activated=True,
@@ -608,6 +858,8 @@ async def run_dedicated_media_socket_leaf(
             accepted_frames=snapshot.accepted_frames,
             close_result=closed,
             reason_id=closed.reason_id,
+            cleanup_complete=cleanup_pending_tasks == 0,
+            cleanup_pending_tasks=cleanup_pending_tasks,
         )
 
     async def terminate(
@@ -615,7 +867,27 @@ async def run_dedicated_media_socket_leaf(
         *,
         acknowledge_peer_detach: bool = False,
     ) -> DedicatedMediaSocketLeafResult:
-        leaf_result = result(closed)
+        owned_end_of_turn = end_of_turn_task
+        owned_receive = receive_task
+        for owned_task in (owned_receive, owned_end_of_turn):
+            if owned_task is not None and not owned_task.done():
+                owned_task.cancel()
+        try:
+            task_process_control, cleanup_pending_tasks = await settle_owned_tasks(
+                owned_receive, owned_end_of_turn
+            )
+        except BaseException:
+            try:
+                await close_socket()
+            except BaseException:
+                pass
+            raise
+        if task_process_control is not None:
+            try:
+                await close_socket()
+            finally:
+                raise task_process_control
+        leaf_result = result(closed, cleanup_pending_tasks=cleanup_pending_tasks)
         try:
             if on_complete is not None:
                 on_complete(leaf_result)
@@ -628,20 +900,74 @@ async def run_dedicated_media_socket_leaf(
         finally:
             # Completion must become registry-visible before the peer observes
             # physical close and can submit its batch Speech request.
-            await close_socket()
+            try:
+                await close_socket()
+            except _PROCESS_CONTROL:
+                raise
         return leaf_result
 
     attach = MediaAttach(binding)
     attach_failure = session.accept_server_attach(attach)
     assert attach_failure is None
-    if not await send_control(attach):
+    try:
+        attach_sent_ok = await send_control(attach)
+    except asyncio.CancelledError:
+        try:
+            await close_socket()
+        except BaseException:
+            pass
+        try:
+            await settle_owned_tasks()
+        except BaseException:
+            pass
+        raise
+    except _PROCESS_CONTROL:
+        session.close(MediaDetachReason.TRANSPORT_CLOSED)
+        try:
+            await close_socket()
+        except BaseException:
+            pass
+        try:
+            await settle_owned_tasks()
+        except BaseException:
+            pass
+        raise
+    if not attach_sent_ok:
         closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
         return await terminate(closed)
     attach_sent = True
+    if next_end_of_turn is not None:
+        try:
+            end_of_turn_task = asyncio.create_task(
+                _await_owned_call(next_end_of_turn),
+                name="live-voice-media-end-of-turn",
+            )
+        except BaseException:
+            session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            try:
+                await close_socket()
+            except BaseException:
+                pass
+            try:
+                await settle_owned_tasks()
+            except BaseException:
+                pass
+            raise
 
     while True:
         try:
             recv = socket.recv
+        except _PROCESS_CONTROL:
+            session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            try:
+                await close_socket()
+            except BaseException:
+                pass
+            try:
+                await settle_owned_tasks(end_of_turn_task)
+            except BaseException:
+                pass
+            raise
         except Exception:
             recv = None
         if not callable(recv):
@@ -650,10 +976,74 @@ async def run_dedicated_media_socket_leaf(
             return await terminate(closed)
         socket_touched = True
         try:
-            message = await recv()
+            if end_of_turn_task is None:
+                message = await recv()
+            else:
+                receive_task = asyncio.create_task(
+                    _await_owned_call(recv),
+                    name="live-voice-media-uplink-receive",
+                )
+                if end_of_turn_sent:
+                    message = await asyncio.shield(receive_task)
+                else:
+                    done, _pending = await asyncio.wait(
+                        {receive_task, end_of_turn_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    if receive_task in done:
+                        # Peer input wins an exact same-loop race. Its ACK/detach
+                        # is serialized before the already-ready server control.
+                        message = receive_task.result()
+                    else:
+                        try:
+                            end_of_turn = end_of_turn_task.result()
+                        except Exception:
+                            # The product owner logs/XOBS the typed failure. Keep
+                            # manual stop usable without claiming automatic EOT.
+                            end_of_turn_task = None
+                        else:
+                            if (
+                                end_of_turn.lease_id != binding.lease_id
+                                or end_of_turn.generation != binding.generation.value
+                                or binding.direction is not MediaDirection.UPLINK
+                            ):
+                                closed = session.close(
+                                    MediaDetachReason.BINDING_MISMATCH
+                                )
+                                await send_close_detach(closed)
+                                return await terminate(closed)
+                            if not await send_control(end_of_turn):
+                                closed = session.close(
+                                    MediaDetachReason.TRANSPORT_SEND_FAILED
+                                )
+                                return await terminate(closed)
+                            end_of_turn_sent = True
+                        message = await asyncio.shield(receive_task)
+                receive_task = None
         except asyncio.CancelledError:
             session.close(MediaDetachReason.TRANSPORT_CLOSED)
-            await asyncio.shield(close_socket())
+            try:
+                await close_socket()
+            except BaseException:
+                # The caller cancellation remains authoritative after the
+                # local socket and sibling-task cleanup attempt.
+                pass
+            try:
+                await settle_owned_tasks(receive_task, end_of_turn_task)
+            except BaseException:
+                pass
+            raise
+        except _PROCESS_CONTROL:
+            session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            try:
+                await close_socket()
+            except BaseException:
+                # Preserve the exact EOT/recv process-control exception.
+                pass
+            try:
+                await settle_owned_tasks(receive_task, end_of_turn_task)
+            except BaseException:
+                pass
             raise
         except Exception:
             closed = session.close(MediaDetachReason.TRANSPORT_CLOSED)
@@ -691,7 +1081,7 @@ async def run_dedicated_media_downlink_socket_leaf(
     request: DedicatedMediaRouteRequest,
     *,
     socket: DedicatedMediaSocket,
-    frames: Iterable[MediaAudioFrame],
+    frames: Iterable[MediaAudioFrame] | AsyncIterable[MediaAudioFrame],
     on_playback_stop: Callable[[MediaPlaybackStopReceipt], None],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
     max_pending_frames: int = 8,
@@ -759,8 +1149,16 @@ async def run_dedicated_media_downlink_socket_leaf(
         max_pending_frames=max_pending_frames,
         max_pending_bytes=max_pending_bytes,
     )
+    frame_iterator: Iterator[MediaAudioFrame] | None = None
+    async_frame_iterator: AsyncIterator[MediaAudioFrame] | None = None
     try:
-        frame_iterator = iter(frames)
+        async_factory = getattr(frames, "__aiter__", None)
+        if callable(async_factory):
+            async_frame_iterator = async_factory()
+            if not hasattr(async_frame_iterator, "__anext__"):
+                raise TypeError("async downlink source returned no iterator")
+        else:
+            frame_iterator = iter(cast(Iterable[MediaAudioFrame], frames))
     except TypeError as error:
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "downlink frames must be iterable"
@@ -859,108 +1257,148 @@ async def run_dedicated_media_downlink_socket_leaf(
     source_exhausted = False
     pending_frame: MediaAudioFrame | None = None
 
-    while True:
-        while not source_exhausted:
-            if pending_frame is None:
-                try:
-                    pending_frame = next(frame_iterator)
-                except StopIteration:
-                    source_exhausted = True
+    async def take_source_frame() -> MediaAudioFrame:
+        if async_frame_iterator is not None:
+            return await async_frame_iterator.__anext__()
+        assert frame_iterator is not None
+        try:
+            return next(frame_iterator)
+        except StopIteration as error:
+            # StopIteration cannot escape an async function (PEP 479).
+            raise StopAsyncIteration from error
+
+    async def close_source() -> None:
+        iterator = async_frame_iterator
+        if iterator is None:
+            return
+        close = getattr(iterator, "aclose", None)
+        if not callable(close):
+            return
+        try:
+            await asyncio.wait_for(close(), timeout=_SOCKET_CLOSE_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            return
+        except BaseException:
+            return
+
+    try:
+        while True:
+            while not source_exhausted:
+                if pending_frame is None:
+                    try:
+                        pending_frame = await take_source_frame()
+                    except StopAsyncIteration:
+                        source_exhausted = True
+                        break
+                    except DedicatedMediaDownlinkSourceFailure as error:
+                        return await terminate(error.reason_id)
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException:
+                        return await terminate(MediaDetachReason.CONSUMER_FAILED)
+                if not isinstance(pending_frame, MediaAudioFrame):
+                    return await terminate(MediaDetachReason.INVALID_FRAME)
+                enqueued = sender.enqueue(pending_frame)
+                if enqueued.accepted:
+                    peak_pending_frames = max(
+                        peak_pending_frames, sender.pending_frames
+                    )
+                    peak_pending_bytes = max(peak_pending_bytes, sender.pending_bytes)
+                    pending_frame = None
+                    # A native stream may not have its next Provider chunk yet.
+                    # Drain the accepted chunk immediately and wait for its
+                    # browser render ACK instead of blocking first audio behind
+                    # a speculative pull or reading beyond downlink pressure.
+                    if async_frame_iterator is not None:
+                        break
+                    continue
+                if enqueued.reason_id == "MEDIA_BACKPRESSURE_LIMIT":
                     break
-                except Exception:
-                    return await terminate(MediaDetachReason.CONSUMER_FAILED)
-            if not isinstance(pending_frame, MediaAudioFrame):
-                return await terminate(MediaDetachReason.INVALID_FRAME)
-            enqueued = sender.enqueue(pending_frame)
-            if enqueued.accepted:
-                peak_pending_frames = max(
-                    peak_pending_frames, sender.pending_frames
-                )
-                peak_pending_bytes = max(peak_pending_bytes, sender.pending_bytes)
-                pending_frame = None
-                continue
-            if enqueued.reason_id == "MEDIA_BACKPRESSURE_LIMIT":
-                break
-            return await terminate(coerce_reason(enqueued.reason_id))
+                return await terminate(coerce_reason(enqueued.reason_id))
 
-        outbound: list[bytes] = []
+            outbound: list[bytes] = []
 
-        def retain_outbound(binary: bytes) -> BinarySendDisposition:
-            outbound.append(binary)
-            return BinarySendDisposition.SENT
+            def retain_outbound(binary: bytes) -> BinarySendDisposition:
+                outbound.append(binary)
+                return BinarySendDisposition.SENT
 
-        drained = sender.drain(retain_outbound)
-        if sender.closed:
-            return await terminate(coerce_reason(drained.reason_id))
-        for binary in outbound:
-            if not await send_message(binary):
+            drained = sender.drain(retain_outbound)
+            if sender.closed:
+                return await terminate(coerce_reason(drained.reason_id))
+            for binary in outbound:
+                if not await send_message(binary):
+                    return await terminate(
+                        MediaDetachReason.TRANSPORT_SEND_FAILED,
+                        send_detach=False,
+                    )
+                sent_frames += 1
+
+            if source_exhausted and sender.pending_frames == 0:
+                return await terminate(MediaDetachReason.LOCAL_CLOSE)
+
+            try:
+                recv = socket.recv
+            except Exception:
+                recv = None
+            if not callable(recv):
+                return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+            socket_touched = True
+            try:
+                message = await recv()
+            except asyncio.CancelledError:
+                sender.close(MediaDetachReason.TRANSPORT_CLOSED)
+                await asyncio.shield(close_socket())
+                raise
+            except Exception:
                 return await terminate(
-                    MediaDetachReason.TRANSPORT_SEND_FAILED,
+                    MediaDetachReason.TRANSPORT_CLOSED,
                     send_detach=False,
                 )
-            sent_frames += 1
-
-        if source_exhausted and sender.pending_frames == 0:
-            return await terminate(MediaDetachReason.LOCAL_CLOSE)
-
-        try:
-            recv = socket.recv
-        except Exception:
-            recv = None
-        if not callable(recv):
-            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-        socket_touched = True
-        try:
-            message = await recv()
-        except asyncio.CancelledError:
-            sender.close(MediaDetachReason.TRANSPORT_CLOSED)
-            await asyncio.shield(close_socket())
-            raise
-        except Exception:
-            return await terminate(
-                MediaDetachReason.TRANSPORT_CLOSED,
-                send_detach=False,
-            )
-        if not isinstance(message, str):
-            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-        try:
-            control = deserialize_media_control(message)
-        except MediaTransportViolation:
-            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
-        if isinstance(control, MediaAck):
-            detach = sender.acknowledge(control)
-            if detach is not None:
-                return await terminate(detach.reason_id)
-            acknowledged_through_seq = control.through_seq
-            continue
-        if isinstance(control, MediaPlaybackStopReceipt):
+            if not isinstance(message, str):
+                return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
             try:
-                exact_stop = validate_playback_stop_receipt(binding, control)
+                control = deserialize_media_control(message)
+            except MediaTransportViolation:
+                return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+            if isinstance(control, MediaAck):
+                detach = sender.acknowledge(control)
+                if detach is not None:
+                    return await terminate(detach.reason_id)
+                acknowledged_through_seq = control.through_seq
+                continue
+            if isinstance(control, MediaPlaybackStopReceipt):
+                try:
+                    exact_stop = validate_playback_stop_receipt(binding, control)
+                    if (
+                        exact_stop.confirmed_through_seq is not None
+                        and exact_stop.confirmed_through_seq >= sent_frames
+                    ):
+                        return await terminate(MediaDetachReason.ACK_UNSENT)
+                    on_playback_stop(exact_stop)
+                except MediaTransportViolation as error:
+                    return await terminate(coerce_reason(error.reason_id))
+                except Exception:
+                    return await terminate(MediaDetachReason.CONSUMER_FAILED)
+                playback_stop_receipts += 1
+                return await terminate(MediaDetachReason.PEER_CLOSE)
+            if isinstance(control, MediaDetach):
                 if (
-                    exact_stop.confirmed_through_seq is not None
-                    and exact_stop.confirmed_through_seq >= sent_frames
+                    control.lease_id != binding.lease_id
+                    or control.generation != binding.generation.value
                 ):
-                    return await terminate(MediaDetachReason.ACK_UNSENT)
-                on_playback_stop(exact_stop)
-            except MediaTransportViolation as error:
-                return await terminate(coerce_reason(error.reason_id))
-            except Exception:
-                return await terminate(MediaDetachReason.CONSUMER_FAILED)
-            playback_stop_receipts += 1
-            return await terminate(MediaDetachReason.PEER_CLOSE)
-        if isinstance(control, MediaDetach):
-            if (
-                control.lease_id != binding.lease_id
-                or control.generation != binding.generation.value
-            ):
-                mismatch = (
-                    MediaDetachReason.STALE_GENERATION
-                    if control.generation != binding.generation.value
-                    else MediaDetachReason.BINDING_MISMATCH
-                )
-                return await terminate(mismatch)
-            return await terminate(control.reason_id, send_detach=False)
-        return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+                    mismatch = (
+                        MediaDetachReason.STALE_GENERATION
+                        if control.generation != binding.generation.value
+                        else MediaDetachReason.BINDING_MISMATCH
+                    )
+                    return await terminate(mismatch)
+                return await terminate(control.reason_id, send_detach=False)
+            return await terminate(MediaDetachReason.TRANSPORT_PROTOCOL_ERROR)
+    finally:
+        await close_source()
 
 
 __all__ = [
@@ -969,12 +1407,15 @@ __all__ = [
     "MEDIA_LOGGER_ZERO_PERSISTENCE_UNPROVEN",
     "MEDIA_ROUTE_REGISTRATION_UNAVAILABLE",
     "ActiveDedicatedMediaRoute",
+    "DedicatedMediaLeafCleanupOwner",
+    "DedicatedMediaLeafCleanupSnapshot",
     "DedicatedMediaRouteActivation",
     "DedicatedMediaRouteEvidence",
     "DedicatedMediaRouteRequest",
     "DedicatedMediaRouteReason",
     "DedicatedMediaRouteSnapshot",
     "DedicatedMediaRouteTruth",
+    "DedicatedMediaDownlinkSourceFailure",
     "DedicatedMediaSocket",
     "DedicatedMediaSocketLeafResult",
     "InactiveDedicatedMediaRoute",

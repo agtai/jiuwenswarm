@@ -20,6 +20,9 @@ from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
 from jiuwenswarm.server.live_voice import p3_authenticated_composition as p3_module
 from jiuwenswarm.server.live_voice import product_composition_registry as product_module
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import P3RouteResult
+from jiuwenswarm.server.live_voice.observability import (
+    LiveVoiceObservabilityCollector,
+)
 
 
 class _WebSocket:
@@ -84,6 +87,8 @@ class _ProductRegistry:
         progress_result_overrides: dict[str, object] | None = None,
         progress_minimal_result: bool = False,
         progress_payload_request_id: str | None = None,
+        intent_result: P3RouteResult | None = None,
+        progress_activation_result: P3RouteResult | None = None,
     ) -> None:
         self.p2_enabled = True
         self.p3_text_enabled = p3_text_enabled
@@ -95,6 +100,8 @@ class _ProductRegistry:
         self.progress_result_overrides = progress_result_overrides or {}
         self.progress_minimal_result = progress_minimal_result
         self.progress_payload_request_id = progress_payload_request_id
+        self.intent_result = intent_result
+        self.progress_activation_result = progress_activation_result
 
     async def handle_p3_query(self, **kwargs):
         self.calls.append(("query", kwargs))
@@ -131,13 +138,25 @@ class _ProductRegistry:
         self.calls.append(("p3.confirmation.issue", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"issued": True}})
 
+    async def handle_p3_intent(self, **kwargs):
+        self.calls.append(("p3.intent", kwargs))
+        return self.intent_result or P3RouteResult(
+            True, {"ok": True, "result": {"status": "dispatched"}}
+        )
+
+    async def handle_p3_intent_status(self, **kwargs):
+        self.calls.append(("p3.intent.status", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"status": "settled"}})
+
     async def handle_p3_mutation(self, **kwargs):
         self.calls.append(("p3.mutate", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
 
     async def handle_p3_progress_activate(self, **kwargs):
         self.calls.append(("progress.activate", kwargs))
-        return P3RouteResult(True, {"ok": True, "result": {"active": True}})
+        return self.progress_activation_result or P3RouteResult(
+            True, {"ok": True, "result": {"active": True}}
+        )
 
     async def handle_p3_progress_close(self, **kwargs):
         self.calls.append(("progress.close", kwargs))
@@ -321,6 +340,7 @@ def _server(composition) -> AgentWebSocketServer:
     server = object.__new__(AgentWebSocketServer)
     server._live_voice_p3_composition = composition
     server._live_voice_product_composition = None
+    server._image_modality_refresh_task = None
     return server
 
 
@@ -479,13 +499,59 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
         "live_voice.composition.p2.presentation.ack",
         "live_voice.composition.p2.barge_in",
         "live_voice.composition.p3.confirmation.issue",
+        "live_voice.composition.p3.intent",
+        "live_voice.composition.p3.intent.status",
         "live_voice.composition.p3.mutate",
         "live_voice.composition.p3.progress.activate",
         "live_voice.composition.p3.progress.close",
         "live_voice.composition.p3.progress.ack",
     }
+    assert product_module.PRODUCT_COMPOSITION_METHODS == methods
     assert methods <= _FORWARD_REQ_METHODS
     assert methods <= _FORWARD_NO_LOCAL_HANDLER_METHODS
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method",
+    sorted(
+        (ReqMethod(value) for value in product_module.PRODUCT_COMPOSITION_METHODS),
+        key=lambda value: value.value,
+    ),
+)
+async def test_top_level_dispatch_reaches_every_product_composition_method(
+    method: ReqMethod,
+) -> None:
+    server = object.__new__(AgentWebSocketServer)
+    captured: list[ReqMethod | None] = []
+
+    async def no_hook(_request: AgentRequest) -> None:
+        return None
+
+    async def record_product_request(
+        _ws: object,
+        request: AgentRequest,
+        _send_lock: asyncio.Lock,
+    ) -> None:
+        captured.append(request.req_method)
+
+    server._trigger_before_chat_request_hook = no_hook
+    server._handle_live_voice_product_request = record_product_request
+    await server._handle_message(
+        _WebSocket(),
+        json.dumps(
+            {
+                "request_id": f"request-top-level-{method.name.lower()}",
+                "channel_id": "web",
+                "session_id": "session-1",
+                "req_method": method.value,
+                "params": {},
+            }
+        ),
+        asyncio.Lock(),
+    )
+
+    assert captured == [method]
 
 
 @pytest.mark.asyncio
@@ -506,6 +572,7 @@ async def test_product_master_flag_off_does_not_invoke_registry_factory(
 
     assert calls == []
     assert server._live_voice_product_composition is None
+    assert getattr(server, "_live_voice_product_observability", None) is None
 
 
 @pytest.mark.asyncio
@@ -526,11 +593,14 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
     )
 
     await server._start_live_voice_product_composition()
+    collector = server._live_voice_product_observability
     await server._stop_live_voice_product_composition()
     await server._stop_live_voice_product_composition()
 
     assert registry.stop_calls == 1
     assert server._live_voice_product_composition is None
+    assert isinstance(collector, LiveVoiceObservabilityCollector)
+    assert server._live_voice_product_observability is None
     assert captured[0]["commit_ledger"] is commit_ledger
 
 
@@ -705,6 +775,12 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
             "p3.confirmation.issue",
             False,
         ),
+        (ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT, "p3.intent", False),
+        (
+            ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT_STATUS,
+            "p3.intent.status",
+            False,
+        ),
         (ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE, "p3.mutate", False),
     ],
 )
@@ -747,6 +823,337 @@ async def test_product_business_methods_dispatch_only_exact_rpc_context(
         expected["channel_id"] = "web"
     assert registry.calls == [(label, expected)]
     assert json.loads(ws.sent[0])["status"] == "succeeded"
+
+
+def _intent_observation_route_result(
+    *,
+    request_id: str,
+    operation: str,
+    status: str,
+    source: str,
+    task_id: str | None,
+    ok: bool = True,
+    error_code: str = "UNAVAILABLE",
+) -> P3RouteResult:
+    payload: dict[str, object] = {
+        "request_id": request_id,
+        "ok": ok,
+        "result": {
+            "status": status,
+            "reason": (
+                "TASK_INTENT_DISPATCHED"
+                if status == "dispatched"
+                else (
+                    "TASK_CONFIRMATION_REQUIRED"
+                    if status == "clarification"
+                    else "TASK_PROVIDER_UNAVAILABLE"
+                )
+            ),
+            "resolver_provider": "local.closed_schema",
+            "resolver_implementation_class": "bounded_deterministic_alpha_v1",
+            "resolution_id": "a" * 64,
+            "commit_sha256": "b" * 64,
+            "operation": operation,
+            "task_id": task_id,
+            "origin_kind": source,
+            "origin_id": "interaction-intent-server",
+            "formal_task_result": (
+                {"task_id": task_id, "state": "accepted"}
+                if status == "dispatched"
+                else None
+            ),
+        },
+        "error": (
+            None
+            if ok
+            else {
+                "code": error_code,
+                "reason": "TASK_PROVIDER_UNAVAILABLE",
+                "message": "formal route unavailable",
+            }
+        ),
+    }
+    return P3RouteResult(ok, payload)
+
+
+@pytest.mark.asyncio
+async def test_product_intent_observation_uses_validated_result_not_client_hint() -> None:
+    request_id = "request-observed-intent"
+    registry = _ProductRegistry(
+        intent_result=_intent_observation_route_result(
+            request_id=request_id,
+            operation="task.create",
+            status="dispatched",
+            source="voice",
+            task_id="task-server-created",
+        )
+    )
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    observer = LiveVoiceObservabilityCollector()
+    server._live_voice_product_observability = observer
+    params = {
+        "auth_token": "opaque",
+        "session_id": "session-1",
+        "correlation_id": "correlation-intent",
+        "source": "voice",
+        "operation_hint": "task.create",
+        "task_id_hint": None,
+        "interaction_id": "interaction-client",
+        "turn_id": "turn-client",
+        "commit_id": "commit-client",
+    }
+    request = AgentRequest(
+        request_id=request_id,
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+        params=params,
+    )
+
+    await server._handle_live_voice_product_request(
+        _WebSocket(), request, asyncio.Lock()
+    )
+
+    assert len(observer.observations()) == 1
+    projected = observer.observations()[0]
+    assert projected.event_name == "segment.completed"
+    assert projected.segment_name == "task.command"
+    assert projected.outcome == "completed"
+    assert projected.binding.correlation_id == "correlation-intent"
+    assert projected.binding.task_id == "task-server-created"
+    assert projected.binding.interaction_id == "interaction-intent-server"
+    assert projected.source_record_id == "a" * 64
+    assert projected.route.implementation_class == "formal"
+    assert projected.route.capability_provider == "voice_task_bridge"
+    assert "turn-client" not in repr(projected)
+    assert "commit-client" not in repr(projected)
+
+    forged_registry = _ProductRegistry(
+        intent_result=_intent_observation_route_result(
+            request_id=request_id,
+            operation="task.cancel",
+            status="clarification",
+            source="text",
+            task_id="task-forged",
+        )
+    )
+    server._live_voice_product_composition = forged_registry
+    forged_observer = LiveVoiceObservabilityCollector()
+    server._live_voice_product_observability = forged_observer
+    await server._handle_live_voice_product_request(
+        _WebSocket(), request, asyncio.Lock()
+    )
+    assert forged_observer.observations() == ()
+    assert forged_observer.metrics() == ()
+
+
+@pytest.mark.asyncio
+async def test_product_text_intent_and_voice_activation_fallback_are_explicit() -> None:
+    intent_request_id = "request-observed-intent-fallback"
+    intent_registry = _ProductRegistry(
+        intent_result=_intent_observation_route_result(
+            request_id=intent_request_id,
+            operation="task.status",
+            status="rejected",
+            source="text",
+            task_id="task-status-1",
+            ok=False,
+        )
+    )
+    server = _server(object())
+    server._live_voice_product_composition = intent_registry
+    observer = LiveVoiceObservabilityCollector()
+    server._live_voice_product_observability = observer
+    await server._handle_live_voice_product_request(
+        _WebSocket(),
+        AgentRequest(
+            request_id=intent_request_id,
+            channel_id="web",
+            session_id="session-1",
+            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+            params={
+                "auth_token": "opaque",
+                "session_id": "session-1",
+                "correlation_id": "correlation-intent-fallback",
+                "source": "text",
+                "operation_hint": "task.status",
+                "task_id_hint": "task-status-1",
+                "interaction_id": "interaction-text",
+                "turn_id": "turn-text",
+                "commit_id": "commit-text",
+                "committed_at": "2026-08-12T00:00:00Z",
+                "text": "task status task-status-1",
+            },
+        ),
+        asyncio.Lock(),
+    )
+    assert len(observer.observations()) == 1
+    fallback = observer.observations()[0]
+    assert fallback.event_name == "degradation.activated"
+    assert fallback.segment_name == "system.degradation"
+    assert fallback.reason_code == "DEGRADED"
+    assert fallback.binding.task_id == "task-status-1"
+    assert fallback.binding.interaction_id == "interaction-intent-server"
+    assert len(observer.metrics()) == 1
+    assert observer.metrics()[0].metric_name == "live_voice.degradation_total"
+
+    activation_request_id = "request-observed-progress-fallback"
+    activation_params = {
+        "auth_token": "opaque",
+        "session_id": "session-1",
+        "task_id": "task-progress-1",
+        "correlation_id": "correlation-progress",
+        "origin_id": "interaction-progress",
+        "origin_kind": "voice",
+        "generation_id": "generation-progress",
+        "generation": 1,
+    }
+    activation_registry = _ProductRegistry(
+        progress_activation_result=P3RouteResult(
+            True,
+            {
+                "request_id": activation_request_id,
+                "ok": True,
+                "result": {
+                    "status": "active",
+                    **activation_params,
+                    "requested_origin_kind": "voice",
+                    "origin_kind": "text",
+                    "voice_progress": "unavailable",
+                    "voice_reason": "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE",
+                    "fallback_reason": "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE",
+                },
+            },
+        )
+    )
+    server._live_voice_product_composition = activation_registry
+    activation_observer = LiveVoiceObservabilityCollector()
+    server._live_voice_product_observability = activation_observer
+    await server._handle_live_voice_product_request(
+        _WebSocket(),
+        AgentRequest(
+            request_id=activation_request_id,
+            channel_id="web",
+            session_id="session-1",
+            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
+            params=activation_params,
+        ),
+        asyncio.Lock(),
+    )
+    assert len(activation_observer.observations()) == 1
+    projected_activation = activation_observer.observations()[0]
+    assert projected_activation.event_name == "degradation.activated"
+    assert projected_activation.binding.task_id == "task-progress-1"
+    assert projected_activation.binding.interaction_id == "interaction-progress"
+    assert projected_activation.source_record_id == "generation-progress"
+    assert len(activation_observer.metrics()) == 1
+
+    malformed_registry = _ProductRegistry(
+        progress_activation_result=P3RouteResult(
+            True,
+            {
+                "request_id": activation_request_id,
+                "ok": True,
+                "result": {
+                    **activation_registry.progress_activation_result.payload["result"],
+                    "generation": 2,
+                },
+            },
+        )
+    )
+    server._live_voice_product_composition = malformed_registry
+    malformed_observer = LiveVoiceObservabilityCollector()
+    server._live_voice_product_observability = malformed_observer
+    await server._handle_live_voice_product_request(
+        _WebSocket(),
+        AgentRequest(
+            request_id=activation_request_id,
+            channel_id="web",
+            session_id="session-1",
+            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
+            params=activation_params,
+        ),
+        asyncio.Lock(),
+    )
+    assert malformed_observer.observations() == ()
+    assert malformed_observer.metrics() == ()
+
+
+@pytest.mark.asyncio
+async def test_task_observability_does_not_relabel_rejection_or_query_as_fallback_command() -> None:
+    request_id = "request-observed-non-fallback"
+    server = _server(object())
+    observer = LiveVoiceObservabilityCollector()
+    server._live_voice_product_observability = observer
+    server._live_voice_product_composition = _ProductRegistry(
+        intent_result=_intent_observation_route_result(
+            request_id=request_id,
+            operation="task.cancel",
+            status="rejected",
+            source="text",
+            task_id="task-protected",
+            ok=False,
+            error_code="PERMISSION_DENIED",
+        )
+    )
+    await server._handle_live_voice_product_request(
+        _WebSocket(),
+        AgentRequest(
+            request_id=request_id,
+            channel_id="web",
+            session_id="session-1",
+            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+            params={
+                "auth_token": "opaque",
+                "session_id": "session-1",
+                "correlation_id": "correlation-protected",
+                "source": "text",
+                "operation_hint": "task.cancel",
+                "task_id_hint": "task-protected",
+                "interaction_id": "interaction-client",
+                "turn_id": "turn-client",
+                "commit_id": "commit-client",
+            },
+        ),
+        asyncio.Lock(),
+    )
+    assert observer.observations() == ()
+    assert observer.metrics() == ()
+
+    status_request_id = "request-observed-read-only-status"
+    server._live_voice_product_composition = _ProductRegistry(
+        intent_result=_intent_observation_route_result(
+            request_id=status_request_id,
+            operation="task.status",
+            status="dispatched",
+            source="text",
+            task_id="task-read-only",
+        )
+    )
+    await server._handle_live_voice_product_request(
+        _WebSocket(),
+        AgentRequest(
+            request_id=status_request_id,
+            channel_id="web",
+            session_id="session-1",
+            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+            params={
+                "auth_token": "opaque",
+                "session_id": "session-1",
+                "correlation_id": "correlation-read-only",
+                "source": "text",
+                "operation_hint": "task.status",
+                "task_id_hint": "task-read-only",
+                "interaction_id": "interaction-client",
+                "turn_id": "turn-client",
+                "commit_id": "commit-client",
+            },
+        ),
+        asyncio.Lock(),
+    )
+    assert observer.observations() == ()
+    assert observer.metrics() == ()
 
 
 def _progress_delivery_id(attempt_id: str) -> str:

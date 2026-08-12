@@ -13,6 +13,7 @@ import math
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, ClassVar, Optional
 from weakref import WeakValueDictionary
@@ -969,6 +970,10 @@ class AgentWebSocketServer:
         # master flag is off no registry, Adapter, registration, or worker is
         # constructed or called.
         self._live_voice_product_composition: Any = None
+        # Closed, content-free diagnostic facts only.  This is never a
+        # lifecycle or mutation authority and remains absent while the product
+        # composition flag is off.
+        self._live_voice_product_observability: Any = None
         # Model cache for scheduled task execution (same approach as interface_deep)
         self._model_cache: dict[str, Any] = {}
         self._default_model: Optional[Any] = None
@@ -1428,7 +1433,12 @@ class AgentWebSocketServer:
             if registry is None:
                 logger.info("[LiveVoiceProduct] central composition disabled")
                 return
+            from jiuwenswarm.server.live_voice.observability import (
+                LiveVoiceObservabilityCollector,
+            )
+
             self._live_voice_product_composition = registry
+            self._live_voice_product_observability = LiveVoiceObservabilityCollector()
             logger.info(
                 "[LiveVoiceProduct] central composition registered; "
                 "p2=%s p3_text=%s",
@@ -1447,10 +1457,12 @@ class AgentWebSocketServer:
                         "[LiveVoiceProduct] failed registry cleanup failed"
                     )
             self._live_voice_product_composition = None
+            self._live_voice_product_observability = None
 
     async def _stop_live_voice_product_composition(self) -> bool:
         registry = self._live_voice_product_composition
         if registry is None:
+            self._live_voice_product_observability = None
             return True
         try:
             await registry.stop()
@@ -1459,6 +1471,7 @@ class AgentWebSocketServer:
             return False
         if self._live_voice_product_composition is registry:
             self._live_voice_product_composition = None
+            self._live_voice_product_observability = None
         return True
 
     def _set_scheduler_agent(self, agent: Any) -> None:
@@ -1981,6 +1994,8 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT,
+                ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT_STATUS,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_CLOSE,
@@ -9085,6 +9100,7 @@ class AgentWebSocketServer:
         """Dispatch only the default-off central P2/P3 lifecycle methods."""
 
         registry = getattr(self, "_live_voice_product_composition", None)
+        operation_started = time.monotonic()
         if registry is None:
             result_ok = False
             payload: dict[str, object] = {
@@ -9148,6 +9164,18 @@ class AgentWebSocketServer:
                     request_id=request.request_id,
                     session_id=request.session_id,
                 )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT:
+                result = await registry.handle_p3_intent(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT_STATUS:
+                result = await registry.handle_p3_intent_status(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_MUTATE:
                 result = await registry.handle_p3_mutation(
                     params=params,
@@ -9176,6 +9204,13 @@ class AgentWebSocketServer:
                 )
             result_ok = result.ok
             payload = result.payload
+            self._observe_live_voice_task_product_result(
+                request=request,
+                params=params,
+                payload=payload,
+                result_ok=result_ok,
+                duration_ms=max(0.0, (time.monotonic() - operation_started) * 1000.0),
+            )
         response = AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -9189,6 +9224,236 @@ class AgentWebSocketServer:
         )
         async with send_lock:
             await send_wire_payload(ws, wire)
+
+    def _observe_live_voice_task_product_result(
+        self,
+        *,
+        request: AgentRequest,
+        params: dict[str, object],
+        payload: object,
+        result_ok: bool,
+        duration_ms: float,
+    ) -> None:
+        """Emit only validated, content-free task-route facts.
+
+        The retired W2 evidence owner is intentionally not involved.  A
+        rejected fact or saturated collector cannot alter the business result.
+        """
+
+        collector = getattr(self, "_live_voice_product_observability", None)
+        if collector is None or not isinstance(payload, dict):
+            return
+        if payload.get("request_id") != request.request_id:
+            return
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return
+        method = request.req_method
+        correlation_id = params.get("correlation_id")
+        if not isinstance(correlation_id, str) or not correlation_id:
+            return
+        event_kind: str | None = None
+        task_id: str | None = None
+        interaction_id: str | None = None
+        source_record_id: str | None = None
+        if method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_INTENT:
+            operation = result.get("operation")
+            disposition = result.get("status")
+            source = result.get("origin_kind")
+            origin_id = result.get("origin_id")
+            resolution_id = result.get("resolution_id")
+            commit_sha256 = result.get("commit_sha256")
+            if (
+                operation not in {"task.create", "task.status", "task.cancel"}
+                or params.get("operation_hint") != operation
+                or disposition not in {"dispatched", "clarification", "rejected"}
+                or source not in {"text", "voice"}
+                or not isinstance(origin_id, str)
+                or not origin_id
+                or not isinstance(resolution_id, str)
+                or len(resolution_id) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in resolution_id
+                )
+                or not isinstance(commit_sha256, str)
+                or len(commit_sha256) != 64
+                or any(
+                    character not in "0123456789abcdef"
+                    for character in commit_sha256
+                )
+            ):
+                return
+            task_id_value = result.get("task_id")
+            task_id = (
+                task_id_value
+                if isinstance(task_id_value, str) and task_id_value
+                else None
+            )
+            if operation == "task.create":
+                if params.get("task_id_hint") is not None:
+                    return
+            elif task_id is None or params.get("task_id_hint") != task_id:
+                return
+            interaction_id = origin_id
+            source_record_id = resolution_id
+            if disposition == "dispatched":
+                if result_ok is not True or task_id is None or not isinstance(
+                    result.get("formal_task_result"), dict
+                ):
+                    return
+                # task.status is a read-only Query.  The current closed
+                # observability vocabulary has no task-query completion fact,
+                # so do not mislabel it as task.command.
+                if operation == "task.status":
+                    return
+                event_kind = "completed"
+            elif disposition == "rejected":
+                error = payload.get("error")
+                if (
+                    result_ok is not False
+                    or not isinstance(error, dict)
+                    or error.get("code")
+                    not in {"TIMEOUT", "CAPABILITY_UNAVAILABLE", "UNAVAILABLE"}
+                ):
+                    return
+                event_kind = "degraded"
+            else:
+                # Clarification is an explicit user-visible control state, not
+                # a completion or a degradation fact.
+                return
+        elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE:
+            exact_keys = (
+                "session_id",
+                "task_id",
+                "correlation_id",
+                "origin_id",
+                "generation_id",
+                "generation",
+            )
+            if (
+                result_ok is not True
+                or result.get("status") != "active"
+                or params.get("origin_kind") != "voice"
+                or result.get("requested_origin_kind") != "voice"
+                or result.get("origin_kind") != "text"
+                or result.get("voice_progress") != "unavailable"
+                or not isinstance(result.get("fallback_reason"), str)
+                or result.get("voice_reason") != result.get("fallback_reason")
+                or any(result.get(key) != params.get(key) for key in exact_keys)
+            ):
+                return
+            task_value = result.get("task_id")
+            origin_value = result.get("origin_id")
+            generation_value = result.get("generation_id")
+            if not all(
+                isinstance(value, str) and value
+                for value in (task_value, origin_value, generation_value)
+            ):
+                return
+            task_id = task_value
+            interaction_id = origin_value
+            source_record_id = generation_value
+            event_kind = "degraded"
+        else:
+            return
+
+        try:
+            import hashlib
+
+            from jiuwenswarm.server.live_voice.observability import (
+                LIVE_VOICE_CONTRACT_VERSION,
+                OBSERVABILITY_SCHEMA_VERSION,
+                create_metric,
+                create_observation,
+            )
+
+            digest = hashlib.sha256(
+                f"{request.request_id}:{event_kind}".encode("utf-8")
+            ).hexdigest()
+            observed_at = _dt.datetime.now(_dt.UTC).isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z")
+            binding = {
+                "correlation_id": correlation_id,
+                "interaction_id": interaction_id,
+                "task_id": task_id,
+            }
+            if event_kind == "completed":
+                route = {
+                    "implementation_class": "formal",
+                    "owner_module": "agentserver.product",
+                    "capability_provider": "voice_task_bridge",
+                    "contract_version": LIVE_VOICE_CONTRACT_VERSION,
+                    "reason_code": None,
+                }
+                observation = create_observation(
+                    {
+                        "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                        "event_id": f"task-intent-{digest}",
+                        "event_name": "segment.completed",
+                        "segment_name": "task.command",
+                        "observed_at": observed_at,
+                        "monotonic_ms": time.monotonic() * 1000.0,
+                        "binding": binding,
+                        "route": route,
+                        "source_component": "agentserver.product",
+                        "source_record_id": source_record_id,
+                        "state": "terminal",
+                        "outcome": "completed",
+                        "duration_ms": duration_ms,
+                    }
+                )
+                collector.emit_observation(observation)
+                return
+            route = {
+                "implementation_class": "fallback",
+                "owner_module": "agentserver.product",
+                "capability_provider": "voice_task_bridge",
+                "contract_version": None,
+                "reason_code": "ROUTE_FALLBACK",
+            }
+            observation = create_observation(
+                {
+                    "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                    "event_id": f"task-degraded-{digest}",
+                    "event_name": "degradation.activated",
+                    "segment_name": "system.degradation",
+                    "observed_at": observed_at,
+                    "monotonic_ms": time.monotonic() * 1000.0,
+                    "binding": binding,
+                    "route": route,
+                    "source_component": "agentserver.product",
+                    "source_record_id": source_record_id,
+                    "reason_code": "DEGRADED",
+                }
+            )
+            metric = create_metric(
+                {
+                    "schema_version": OBSERVABILITY_SCHEMA_VERSION,
+                    "measurement_id": f"task-degraded-{digest}",
+                    "metric_name": "live_voice.degradation_total",
+                    "metric_kind": "counter",
+                    "unit": "count",
+                    "value": 1,
+                    "observed_at": observed_at,
+                    "binding": binding,
+                    "route": route,
+                    "segment_name": "system.degradation",
+                    "implementation_class": "fallback",
+                    "reason_code": "DEGRADED",
+                }
+            )
+            collector.emit_observation(observation)
+            collector.emit_metric(metric)
+            logger.warning(
+                "[LiveVoiceProduct] task route degraded; reason=DEGRADED method=%s",
+                method.value if method is not None else "unknown",
+            )
+        except Exception:  # noqa: BLE001 -- diagnostic-only fail-safe
+            logger.warning(
+                "[LiveVoiceProduct] task route observation rejected; reason=FACT_REJECTED"
+            )
 
     async def _handle_schedule_request(
         self,

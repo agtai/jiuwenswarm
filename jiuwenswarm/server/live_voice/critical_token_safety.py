@@ -107,6 +107,7 @@ class CriticalTokenReason(StrEnum):
     INPUT_GENERATION_PROVENANCE_MISMATCH = "INPUT_GENERATION_PROVENANCE_MISMATCH"
     COMMIT_ID_CONFLICT = "COMMIT_ID_CONFLICT"
     INTERACTION_CLOSED = "INTERACTION_CLOSED"
+    GATE_CAPACITY_EXCEEDED = "GATE_CAPACITY_EXCEEDED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,14 +715,23 @@ class CriticalTokenSafetyGate:
     """Stateful clarification fence and once-only protected-route dispatch seam."""
 
     def __init__(
-        self, policy: CriticalTokenPolicy | None = None, *, enabled: bool = True
+        self,
+        policy: CriticalTokenPolicy | None = None,
+        *,
+        enabled: bool = True,
+        capacity: int = 4_096,
     ) -> None:
         if type(enabled) is not bool:
             raise CriticalTokenSafetyViolation(
                 "INVALID_FEATURE_FLAG", "enabled must be a strict boolean"
             )
+        if type(capacity) is not int or not 1 <= capacity <= 65_536:
+            raise CriticalTokenSafetyViolation(
+                "INVALID_GATE_CAPACITY", "capacity must be an integer from 1 to 65536"
+            )
         self._policy = policy or CriticalTokenPolicy()
         self._enabled = enabled
+        self._capacity = capacity
         self._lock = threading.RLock()
         self._candidate_fingerprints: dict[str, str] = {}
         self._commit_interactions: dict[str, str] = {}
@@ -745,6 +755,19 @@ class CriticalTokenSafetyGate:
                 )
             known_commit = candidate.commit.commit_id in self._candidate_fingerprints
             known_blocked = candidate.commit.commit_id in self._blocked_commit_ids
+            if (
+                not known_commit
+                and not known_blocked
+                and (
+                    len(self._commit_interactions) >= self._capacity
+                    or (
+                        candidate.commit.interaction_id
+                        not in self._latest_input_generation
+                        and len(self._latest_input_generation) >= self._capacity
+                    )
+                )
+            ):
+                return _blocked_result(CriticalTokenReason.GATE_CAPACITY_EXCEEDED)
             if known_commit or known_blocked:
                 if self._known_commit_conflicts(candidate):
                     return _blocked_result(CriticalTokenReason.COMMIT_ID_CONFLICT)
@@ -847,6 +870,8 @@ class CriticalTokenSafetyGate:
                 if self._known_commit_conflicts(corrected):
                     return _blocked_result(CriticalTokenReason.COMMIT_ID_CONFLICT)
                 return _blocked_result(CriticalTokenReason.STALE_INPUT)
+            if len(self._commit_interactions) >= self._capacity:
+                return _blocked_result(CriticalTokenReason.GATE_CAPACITY_EXCEEDED)
             latest = self._latest_input_generation.get(
                 corrected.commit.interaction_id,
                 record.requirement.source_input_generation,
@@ -939,6 +964,15 @@ class CriticalTokenSafetyGate:
                 "INVALID_INTERACTION_ID", "interaction_id must be non-empty"
             )
         with self._lock:
+            if (
+                interaction_id not in self._closed_interactions
+                and interaction_id not in self._latest_input_generation
+                and len(self._closed_interactions) >= self._capacity
+            ):
+                raise CriticalTokenSafetyViolation(
+                    "GATE_CAPACITY_EXCEEDED",
+                    "the bounded interaction fence is full",
+                )
             self._closed_interactions.add(interaction_id)
             clarification_id = self._active_clarification.pop(interaction_id, None)
             clarification_state = None
@@ -963,6 +997,78 @@ class CriticalTokenSafetyGate:
                 authorization_id,
                 authorization_state,
             )
+
+    def release_commit(self, commit_id: str) -> None:
+        """Release terminal per-commit evidence while preserving generation fences."""
+
+        if not isinstance(commit_id, str) or not commit_id.strip():
+            raise CriticalTokenSafetyViolation(
+                "INVALID_COMMIT_ID", "commit_id must be non-empty"
+            )
+        with self._lock:
+            result = self._results.pop(commit_id, None)
+            self._candidate_fingerprints.pop(commit_id, None)
+            self._blocked_commit_ids.discard(commit_id)
+            self._commit_interactions.pop(commit_id, None)
+            self._commit_generations.pop(commit_id, None)
+            if result is None:
+                return
+            if result.clarification is not None:
+                clarification_id = result.clarification.clarification_id
+                record = self._clarifications.pop(clarification_id, None)
+                if record is not None:
+                    self._active_clarification.pop(
+                        record.requirement.interaction_id, None
+                    )
+            if result.authorization is not None:
+                authorization_id = result.authorization.authorization_id
+                record = self._authorizations.pop(authorization_id, None)
+                if record is not None:
+                    self._active_authorization.pop(
+                        record.authorization.interaction_id, None
+                    )
+
+    def release_interaction(self, interaction_id: str) -> None:
+        """Release a product-owned interaction after its outer route is fenced."""
+
+        if not isinstance(interaction_id, str) or not interaction_id.strip():
+            raise CriticalTokenSafetyViolation(
+                "INVALID_INTERACTION_ID", "interaction_id must be non-empty"
+            )
+        with self._lock:
+            commit_ids = tuple(
+                commit_id
+                for commit_id, owner in self._commit_interactions.items()
+                if owner == interaction_id
+            )
+            for commit_id in commit_ids:
+                self.release_commit(commit_id)
+            for clarification_id, record in tuple(self._clarifications.items()):
+                if record.requirement.interaction_id == interaction_id:
+                    self._clarifications.pop(clarification_id, None)
+            for authorization_id, record in tuple(self._authorizations.items()):
+                if record.authorization.interaction_id == interaction_id:
+                    self._authorizations.pop(authorization_id, None)
+            self._active_clarification.pop(interaction_id, None)
+            self._active_authorization.pop(interaction_id, None)
+            self._latest_input_generation.pop(interaction_id, None)
+            self._closed_interactions.discard(interaction_id)
+
+    def reset(self) -> None:
+        """Release every retained fact after the composition owner stops."""
+
+        with self._lock:
+            self._candidate_fingerprints.clear()
+            self._commit_interactions.clear()
+            self._commit_generations.clear()
+            self._blocked_commit_ids.clear()
+            self._latest_input_generation.clear()
+            self._results.clear()
+            self._clarifications.clear()
+            self._authorizations.clear()
+            self._active_clarification.clear()
+            self._active_authorization.clear()
+            self._closed_interactions.clear()
 
     def dispatch(
         self,

@@ -47,6 +47,8 @@ export interface BrowserMediaStreamLike {
 
 export interface BrowserMediaDeviceInfoLike {
   readonly kind: string;
+  readonly deviceId?: string;
+  readonly label?: string;
 }
 
 export interface BrowserMediaDevicesLike {
@@ -54,6 +56,16 @@ export interface BrowserMediaDevicesLike {
   enumerateDevices(): Promise<BrowserMediaDeviceInfoLike[]>;
   addEventListener(type: 'devicechange', listener: BrowserEventListener): void;
   removeEventListener(type: 'devicechange', listener: BrowserEventListener): void;
+}
+
+export interface BrowserPermissionStatusLike {
+  readonly state: string;
+  addEventListener(type: 'change', listener: BrowserEventListener): void;
+  removeEventListener(type: 'change', listener: BrowserEventListener): void;
+}
+
+export interface BrowserPermissionsLike {
+  query(descriptor: Readonly<{ name: 'microphone' }>): Promise<BrowserPermissionStatusLike>;
 }
 
 export interface BrowserAudioMessagePortLike {
@@ -90,6 +102,7 @@ export interface BrowserAudioContextLike {
   readonly state: 'suspended' | 'running' | 'closed' | string;
   onstatechange: BrowserEventListener | null;
   resume(): Promise<void>;
+  setSinkId?(sinkId: string): Promise<void>;
   close(): Promise<void>;
   createMediaStreamSource(stream: unknown): BrowserAudioNodeLike;
   createBuffer(numberOfChannels: number, length: number, sampleRate: number): BrowserAudioBufferLike;
@@ -100,10 +113,13 @@ export interface BrowserAudioEnvironment {
   readonly isSecureContext: boolean;
   readonly document: BrowserAudioDocumentLike | null;
   readonly mediaDevices: BrowserMediaDevicesLike | null;
+  readonly permissions?: BrowserPermissionsLike | null;
   readonly createAudioContext: (() => BrowserAudioContextLike) | null;
   readonly createAudioWorkletNode:
-    ((context: BrowserAudioContextLike, name: string, options: Readonly<Record<string, unknown>>) => BrowserAudioWorkletNodeLike) | null;
+    | ((context: BrowserAudioContextLike, name: string, options: Readonly<Record<string, unknown>>) => BrowserAudioWorkletNodeLike)
+    | null;
   readonly createId: (() => string) | null;
+  readonly outputDeviceSelection?: boolean;
 }
 
 export interface BrowserAudioPlatformCapability {
@@ -117,7 +133,7 @@ export interface BrowserAudioPlatformCapability {
   readonly capture_pcm_f32: boolean;
   readonly playout_pcm_f32: boolean;
   readonly media_recorder_realtime: false;
-  readonly output_device_selection: false;
+  readonly output_device_selection: boolean;
   readonly physical_heard_ack: false;
   readonly reasons: readonly string[];
 }
@@ -154,7 +170,7 @@ export interface BrowserAudioPlayoutMetadata {
   readonly encoding: 'pcm_f32';
   readonly sample_rate_hz: number;
   readonly channel_count: 1;
-  readonly output_device_selection: false;
+  readonly output_device_selection: boolean;
   readonly physical_heard_ack: false;
 }
 
@@ -271,8 +287,25 @@ interface CaptureSession {
   readonly priorContextStateChange: BrowserEventListener | null;
   readonly installedContextStateChange: BrowserEventListener;
   readonly ownsContext: boolean;
+  readonly permissionObservation: CapturePermissionObservation;
+  readonly requestedDeviceId: string | null;
   expectedSeq: number;
   closed: boolean;
+}
+
+type MicrophonePermissionState = 'granted' | 'prompt' | 'denied';
+
+interface CapturePermissionObservation {
+  readonly token: number;
+  readonly onChange: BrowserEventListener;
+  readonly revocation: Promise<never>;
+  readonly rejectRevocation: (failure: BrowserAudioIOViolation) => void;
+  status: BrowserPermissionStatusLike | null;
+  lastKnownState: MicrophonePermissionState | null;
+  mediaAccessGranted: boolean;
+  listenerAttached: boolean;
+  closed: boolean;
+  revocationFailure: BrowserAudioIOViolation | null;
 }
 
 interface PendingCaptureResources {
@@ -283,11 +316,15 @@ interface PendingCaptureResources {
   source: BrowserAudioNodeLike | null;
   worklet: BrowserAudioWorkletNodeLike | null;
   readonly onTrackEnded: BrowserEventListener;
+  readonly onDeviceChange: BrowserEventListener;
   readonly onContextStateChange: BrowserEventListener;
   priorContextStateChange: BrowserEventListener | null;
   installedContextStateChange: BrowserEventListener | null;
   ownsContext: boolean;
+  readonly permissionObservation: CapturePermissionObservation;
+  requestedDeviceId: string | null;
   trackListenerAttached: boolean;
+  deviceListenerAttached: boolean;
   contextHasRun: boolean;
   cleanupPromise: Promise<void> | null;
 }
@@ -319,12 +356,40 @@ interface PlaybackSourceCleanupSummary {
 
 const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
 
+const DISABLED_BROWSER_AUDIO_ENVIRONMENT: BrowserAudioEnvironment = Object.freeze({
+  isSecureContext: false,
+  document: null,
+  mediaDevices: null,
+  permissions: null,
+  createAudioContext: null,
+  createAudioWorkletNode: null,
+  createId: null,
+  outputDeviceSelection: false,
+});
+
+const DISABLED_BROWSER_AUDIO_CAPABILITY: Readonly<BrowserAudioPlatformCapability> = Object.freeze({
+  enabled: false,
+  secure_context: false,
+  document_visibility: false,
+  media_devices: false,
+  audio_context: false,
+  audio_worklet_node: false,
+  stable_identity: false,
+  capture_pcm_f32: false,
+  playout_pcm_f32: false,
+  media_recorder_realtime: false,
+  output_device_selection: false,
+  physical_heard_ack: false,
+  reasons: Object.freeze(['FEATURE_DISABLED']),
+});
+
 function defaultBrowserAudioEnvironment(): BrowserAudioEnvironment {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return Object.freeze({
       isSecureContext: false,
       document: null,
       mediaDevices: null,
+      permissions: null,
       createAudioContext: null,
       createAudioWorkletNode: null,
       createId: null,
@@ -334,47 +399,49 @@ function defaultBrowserAudioEnvironment(): BrowserAudioEnvironment {
     webkitAudioContext?: typeof AudioContext;
     AudioWorkletNode?: typeof AudioWorkletNode;
   };
+  const browserNavigator = navigator as Navigator & { permissions?: BrowserPermissionsLike };
   const audioContextConstructor = (typeof AudioContext === 'undefined' ? undefined : AudioContext) ?? browserWindow.webkitAudioContext;
   const workletNodeConstructor = browserWindow.AudioWorkletNode ?? (globalThis as { AudioWorkletNode?: typeof AudioWorkletNode }).AudioWorkletNode;
   return Object.freeze({
     isSecureContext: window.isSecureContext,
     document: document as unknown as BrowserAudioDocumentLike,
     mediaDevices: navigator.mediaDevices ? (navigator.mediaDevices as unknown as BrowserMediaDevicesLike) : null,
+    permissions: browserNavigator.permissions ?? null,
     createAudioContext: audioContextConstructor ? () => new audioContextConstructor() as unknown as BrowserAudioContextLike : null,
     createAudioWorkletNode: workletNodeConstructor
       ? (context: BrowserAudioContextLike, name: string, options: Readonly<Record<string, unknown>>) =>
           new workletNodeConstructor(context as unknown as BaseAudioContext, name, options as AudioWorkletNodeOptions) as unknown as BrowserAudioWorkletNodeLike
       : null,
     createId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? () => crypto.randomUUID() : null,
+    outputDeviceSelection: Boolean(audioContextConstructor && 'setSinkId' in audioContextConstructor.prototype),
   });
 }
 
-export function inspectBrowserAudioPlatform(
-  enabled: boolean,
-  environment: BrowserAudioEnvironment = defaultBrowserAudioEnvironment()
-): Readonly<BrowserAudioPlatformCapability> {
+export function inspectBrowserAudioPlatform(enabled: boolean, environment?: BrowserAudioEnvironment): Readonly<BrowserAudioPlatformCapability> {
+  if (!enabled) return DISABLED_BROWSER_AUDIO_CAPABILITY;
+  const selectedEnvironment = environment ?? defaultBrowserAudioEnvironment();
   const reasons: string[] = [];
-  if (!enabled) reasons.push('FEATURE_DISABLED');
-  if (!environment.isSecureContext) reasons.push('INSECURE_CONTEXT');
-  if (environment.document === null) reasons.push('DOCUMENT_VISIBILITY_UNAVAILABLE');
-  if (environment.mediaDevices === null) reasons.push('MEDIA_DEVICES_UNAVAILABLE');
-  if (environment.createAudioContext === null) reasons.push('AUDIO_CONTEXT_UNAVAILABLE');
-  if (environment.createAudioWorkletNode === null) reasons.push('AUDIO_WORKLET_NODE_UNAVAILABLE');
-  if (environment.createId === null) reasons.push('STABLE_IDENTITY_UNAVAILABLE');
+  if (!selectedEnvironment.isSecureContext) reasons.push('INSECURE_CONTEXT');
+  if (selectedEnvironment.document === null) reasons.push('DOCUMENT_VISIBILITY_UNAVAILABLE');
+  if (selectedEnvironment.mediaDevices === null) reasons.push('MEDIA_DEVICES_UNAVAILABLE');
+  if (selectedEnvironment.createAudioContext === null) reasons.push('AUDIO_CONTEXT_UNAVAILABLE');
+  if (selectedEnvironment.createAudioWorkletNode === null) reasons.push('AUDIO_WORKLET_NODE_UNAVAILABLE');
+  if (selectedEnvironment.createId === null) reasons.push('STABLE_IDENTITY_UNAVAILABLE');
   const captureSupported = reasons.length === 0;
-  const playoutSupported = enabled && environment.isSecureContext && environment.createAudioContext !== null;
+  const playoutSupported =
+    selectedEnvironment.isSecureContext && selectedEnvironment.document !== null && selectedEnvironment.createAudioContext !== null;
   return Object.freeze({
     enabled,
-    secure_context: environment.isSecureContext,
-    document_visibility: environment.document !== null,
-    media_devices: environment.mediaDevices !== null,
-    audio_context: environment.createAudioContext !== null,
-    audio_worklet_node: environment.createAudioWorkletNode !== null,
-    stable_identity: environment.createId !== null,
+    secure_context: selectedEnvironment.isSecureContext,
+    document_visibility: selectedEnvironment.document !== null,
+    media_devices: selectedEnvironment.mediaDevices !== null,
+    audio_context: selectedEnvironment.createAudioContext !== null,
+    audio_worklet_node: selectedEnvironment.createAudioWorkletNode !== null,
+    stable_identity: selectedEnvironment.createId !== null,
     capture_pcm_f32: captureSupported,
     playout_pcm_f32: playoutSupported,
     media_recorder_realtime: false,
-    output_device_selection: false,
+    output_device_selection: selectedEnvironment.outputDeviceSelection === true && selectedEnvironment.mediaDevices !== null,
     physical_heard_ack: false,
     reasons: Object.freeze(reasons),
   });
@@ -459,6 +526,21 @@ function mapAudioContextFailure(error: unknown, fallbackReason: string): Browser
   return new BrowserAudioIOViolation(fallbackReason, 'browser AudioContext operation failed', true);
 }
 
+function mapAudioOutputFailure(error: unknown): BrowserAudioIOViolation {
+  if (error instanceof BrowserAudioIOViolation) return error;
+  const name = errorName(error);
+  if (name === 'NotAllowedError' || name === 'SecurityError') {
+    return new BrowserAudioIOViolation('AUDIO_OUTPUT_PERMISSION_DENIED', 'audio output selection was denied');
+  }
+  if (name === 'NotFoundError') {
+    return new BrowserAudioIOViolation('AUDIO_OUTPUT_NOT_FOUND', 'the selected audio output is unavailable', true);
+  }
+  if (name === 'InvalidStateError') {
+    return new BrowserAudioIOViolation('AUDIO_OUTPUT_CONTEXT_INVALID', 'the AudioContext cannot select an output', true);
+  }
+  return new BrowserAudioIOViolation('AUDIO_OUTPUT_SELECTION_FAILED', 'audio output selection failed', true);
+}
+
 function stopStream(stream: BrowserMediaStreamLike | null): boolean {
   if (stream === null) return false;
   let failed = false;
@@ -489,6 +571,7 @@ export class BrowserAudioIOAdapter {
   readonly #audioPort = new AudioPort();
   readonly #seenCaptureIds = new Set<string>();
   readonly #onVisibilityChange: BrowserEventListener;
+  readonly #onPlayoutDeviceChange: BrowserEventListener;
   #captureState: BrowserAudioCaptureState = 'idle';
   #playoutState: BrowserAudioPlayoutState = 'locked';
   #captureToken = 0;
@@ -503,6 +586,10 @@ export class BrowserAudioIOAdapter {
   #playoutSourceCleanupFailure: BrowserAudioIOViolation | null = null;
   #playoutGeneration = 0;
   #pendingPlayoutGeneration: number | null = null;
+  #pageHiddenPlayoutGeneration: number | null = null;
+  #playoutDeviceId: string | null = null;
+  #playoutDeviceListenerAttached = false;
+  #playoutSinkExplicit = false;
   #playbackMutationToken = 0;
   #closed = false;
   #closePromise: Promise<void> | null = null;
@@ -510,17 +597,33 @@ export class BrowserAudioIOAdapter {
 
   constructor(options: Readonly<BrowserAudioIOAdapterOptions>) {
     this.#enabled = options.enabled;
-    this.#environment = options.environment ?? defaultBrowserAudioEnvironment();
+    this.#environment = this.#enabled ? (options.environment ?? defaultBrowserAudioEnvironment()) : DISABLED_BROWSER_AUDIO_ENVIRONMENT;
     this.#observer = options.observer ?? {};
     this.#captureWorkletModuleUrl = options.captureWorkletModuleUrl ?? new URL('./liveVoiceCaptureProcessor.js', import.meta.url).href;
     this.#monotonicNowMs = options.monotonicNowMs ?? defaultMonotonicNowMs;
     this.#onVisibilityChange = () => {
-      if (this.#environment.document?.visibilityState === 'hidden') {
-        void this.stopCapture('page_hidden').catch(() => {
-          this.#emitCaptureState('failed', 'capture_cleanup_failed', null);
-        });
+      if (this.#closed || this.#environment.document?.visibilityState !== 'hidden') return;
+      if (this.#pendingPlayoutGeneration !== null) this.#pageHiddenPlayoutGeneration = this.#pendingPlayoutGeneration;
+      ++this.#playoutGeneration;
+      const playback = this.#playback;
+      if (playback !== null) {
+        try {
+          if (!this.stopPlayout(playback.response, 'page_hidden') && this.#playback === playback) {
+            ++this.#playbackMutationToken;
+            this.#lastLocallyStoppedResponse = playback.response;
+            this.#stopPlaybackSources(playback, 'page_hidden_stop_failed');
+          }
+        } catch {
+          ++this.#playbackMutationToken;
+          this.#lastLocallyStoppedResponse = playback.response;
+          this.#stopPlaybackSources(playback, 'page_hidden_stop_failed');
+        }
       }
+      void this.stopCapture('page_hidden').catch(() => {
+        this.#emitCaptureState('failed', 'capture_cleanup_failed', null);
+      });
     };
+    this.#onPlayoutDeviceChange = () => void this.#observePlayoutDeviceChange(this.#playoutGeneration);
   }
 
   capability(): Readonly<BrowserAudioPlatformCapability> {
@@ -557,6 +660,23 @@ export class BrowserAudioIOAdapter {
     const createId = this.#environment.createId as () => string;
     const token = ++this.#captureToken;
     this.#pendingCaptureToken = token;
+    let rejectRevocation: (failure: BrowserAudioIOViolation) => void = () => undefined;
+    const revocation = new Promise<never>((_resolve, reject) => {
+      rejectRevocation = reject;
+    });
+    let permissionObservation: CapturePermissionObservation;
+    permissionObservation = {
+      token,
+      onChange: () => this.#observeMicrophonePermissionChange(permissionObservation),
+      revocation,
+      rejectRevocation,
+      status: null,
+      lastKnownState: null,
+      mediaAccessGranted: false,
+      listenerAttached: false,
+      closed: false,
+      revocationFailure: null,
+    };
     const pending: PendingCaptureResources = {
       token,
       stream: null,
@@ -569,6 +689,7 @@ export class BrowserAudioIOAdapter {
           this.#stopCaptureFromBrowser(this.#capture?.token === token ? 'track_ended' : 'track_ended_during_start');
         }
       },
+      onDeviceChange: () => void this.#observeDeviceChange(token),
       onContextStateChange: () => {
         if (
           (this.#pendingCaptureToken === token || this.#capture?.token === token) &&
@@ -582,22 +703,31 @@ export class BrowserAudioIOAdapter {
       priorContextStateChange: null,
       installedContextStateChange: null,
       ownsContext: true,
+      permissionObservation,
+      requestedDeviceId: null,
       trackListenerAttached: false,
+      deviceListenerAttached: false,
       contextHasRun: false,
       cleanupPromise: null,
     };
     this.#pendingCaptureResources = pending;
-    this.#listenForVisibility();
-    this.#emitCaptureState('starting', 'start_requested', null, token);
 
     let stream: BrowserMediaStreamLike | null = null;
+    let mediaAcquisition: Promise<BrowserMediaStreamLike> | null = null;
     let context: BrowserAudioContextLike | null = null;
     let source: BrowserAudioNodeLike | null = null;
     let worklet: BrowserAudioWorkletNodeLike | null = null;
     let startedSession: CaptureSession | null = null;
     try {
+      this.#listenForVisibility();
+      this.#emitCaptureState('starting', 'start_requested', null, token);
+      void this.#attachMicrophonePermissionObservation(permissionObservation);
       this.#requireCurrentCaptureToken(token);
-      const deviceId = typeof input.deviceId === 'string' && input.deviceId.trim() ? input.deviceId : null;
+      pending.deviceListenerAttached = true;
+      mediaDevices.addEventListener('devicechange', pending.onDeviceChange);
+      this.#requireCurrentCaptureToken(token);
+      const deviceId = typeof input.deviceId === 'string' && input.deviceId.trim() ? input.deviceId.trim() : null;
+      pending.requestedDeviceId = deviceId;
       const audioConstraints: MediaTrackConstraints = {
         echoCancellation: { ideal: true },
         noiseSuppression: { ideal: true },
@@ -605,7 +735,14 @@ export class BrowserAudioIOAdapter {
         channelCount: { ideal: 1 },
         ...(deviceId === null ? {} : { deviceId: { exact: deviceId } }),
       };
-      stream = await mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+      mediaAcquisition = mediaDevices.getUserMedia({ audio: audioConstraints, video: false });
+      stream = await Promise.race([mediaAcquisition, permissionObservation.revocation]);
+      if (this.#ownsCapturePermissionObservation(permissionObservation)) {
+        permissionObservation.mediaAccessGranted = true;
+        if (permissionObservation.lastKnownState === 'denied') {
+          this.#revokeMicrophonePermission(permissionObservation);
+        }
+      }
       if (this.#pendingCaptureResources !== pending || this.#pendingCaptureToken !== token) {
         stopStream(stream);
         stream = null;
@@ -650,7 +787,7 @@ export class BrowserAudioIOAdapter {
       const frameSamples = audioFrameSamples(context.sampleRate);
       if (context.state === 'suspended') {
         try {
-          await context.resume();
+          await Promise.race([context.resume(), permissionObservation.revocation]);
         } catch (error) {
           throw mapAudioContextFailure(error, 'AUDIO_CONTEXT_RESUME_FAILED');
         }
@@ -664,8 +801,9 @@ export class BrowserAudioIOAdapter {
         throw new BrowserAudioIOViolation('AUDIO_WORKLET_UNAVAILABLE', 'AudioWorklet is unavailable in this context');
       }
       try {
-        await context.audioWorklet.addModule(this.#captureWorkletModuleUrl);
-      } catch {
+        await Promise.race([context.audioWorklet.addModule(this.#captureWorkletModuleUrl), permissionObservation.revocation]);
+      } catch (error) {
+        if (error instanceof BrowserAudioIOViolation) throw error;
         throw new BrowserAudioIOViolation('AUDIO_WORKLET_LOAD_FAILED', 'the capture AudioWorklet module could not be loaded', true);
       }
       this.#requireCurrentCaptureToken(token);
@@ -730,7 +868,7 @@ export class BrowserAudioIOAdapter {
           this.#emitCaptureState('active', 'track_unmuted', metadata);
         }
       };
-      const onDeviceChange = () => void this.#observeDeviceChange(token);
+      const onDeviceChange = pending.onDeviceChange;
       const onContextStateChange = pending.onContextStateChange;
       const session: CaptureSession = {
         token,
@@ -748,6 +886,8 @@ export class BrowserAudioIOAdapter {
         priorContextStateChange: pending.priorContextStateChange,
         installedContextStateChange,
         ownsContext: pending.ownsContext,
+        permissionObservation,
+        requestedDeviceId: pending.requestedDeviceId,
         expectedSeq: 0,
         closed: false,
       };
@@ -756,7 +896,6 @@ export class BrowserAudioIOAdapter {
       worklet.onprocessorerror = () => this.#stopCaptureFromBrowser('audio_processor_error');
       track.addEventListener('mute', onTrackMute);
       track.addEventListener('unmute', onTrackUnmute);
-      mediaDevices.addEventListener('devicechange', onDeviceChange);
       context.onstatechange = installedContextStateChange;
       this.#requireCurrentCaptureToken(token);
       if ((track.readyState !== undefined && track.readyState !== 'live') || context.state !== 'running') {
@@ -766,6 +905,7 @@ export class BrowserAudioIOAdapter {
         throw new BrowserAudioIOViolation('AUDIO_INPUT_MUTED', 'audio input is muted during capture startup');
       }
       this.#capture = session;
+      pending.deviceListenerAttached = false;
       this.#pendingCaptureToken = null;
       this.#pendingCaptureResources = null;
       source.connect(worklet);
@@ -776,6 +916,18 @@ export class BrowserAudioIOAdapter {
       return metadata;
     } catch (error) {
       const cancelled = token !== this.#captureToken;
+      if (error === permissionObservation.revocationFailure && mediaAcquisition !== null && stream === null) {
+        void mediaAcquisition.then(
+          lateStream => {
+            try {
+              stopStream(lateStream);
+            } catch {
+              // The fenced startup cannot recover a malformed late browser stream.
+            }
+          },
+          () => undefined
+        );
+      }
       let cleanupFailure: unknown = null;
       const cleanupOperation = startedSession === null ? this.#cleanupPendingCapture(pending) : this.#cleanupCaptureSession(startedSession);
       this.#captureCleanupPromise = cleanupOperation;
@@ -789,13 +941,16 @@ export class BrowserAudioIOAdapter {
       } finally {
         if (this.#captureCleanupPromise === cleanupOperation) this.#captureCleanupPromise = null;
       }
-      this.#unlistenForVisibilityWhenIdle();
+      if (this.#unlistenForVisibilityWhenIdle() && cleanupFailure === null) {
+        cleanupFailure = new BrowserAudioIOViolation('CAPTURE_CLEANUP_FAILED', 'browser visibility listener could not be removed', true);
+      }
       if (cleanupFailure !== null) {
         const mapped = mapBrowserFailure(cleanupFailure, 'CAPTURE_CLEANUP_FAILED');
         this.#emitCaptureState('failed', mapped.reason.toLowerCase(), null, token);
         throw mapped;
       }
       if (cancelled) {
+        if (permissionObservation.revocationFailure !== null) throw permissionObservation.revocationFailure;
         throw new BrowserAudioIOViolation('CAPTURE_CANCELLED', 'capture was stopped before startup completed');
       }
       const mapped = mapBrowserFailure(error, 'CAPTURE_START_FAILED');
@@ -832,43 +987,84 @@ export class BrowserAudioIOAdapter {
     this.#pendingCaptureResources = null;
     this.#capture = null;
     this.#emitCaptureState('stopping', reason, session?.metadata ?? null);
-    this.#unlistenForVisibilityWhenIdle();
+    let cleanupFailure: unknown = this.#unlistenForVisibilityWhenIdle()
+      ? new BrowserAudioIOViolation('CAPTURE_CLEANUP_FAILED', 'browser visibility listener could not be removed', true)
+      : null;
     if (session !== null || pending !== null) {
       try {
         if (session !== null) await this.#cleanupCaptureSession(session);
         else if (pending !== null) await this.#cleanupPendingCapture(pending);
       } catch (error) {
-        const mapped = mapBrowserFailure(error, 'CAPTURE_CLEANUP_FAILED');
-        this.#emitCaptureState('failed', mapped.reason.toLowerCase(), session?.metadata ?? null);
-        throw mapped;
+        cleanupFailure ??= error;
       }
+    }
+    if (cleanupFailure !== null) {
+      const mapped = mapBrowserFailure(cleanupFailure, 'CAPTURE_CLEANUP_FAILED');
+      this.#emitCaptureState('failed', mapped.reason.toLowerCase(), session?.metadata ?? null);
+      throw mapped;
     }
     this.#emitCaptureState('stopped', reason, session?.metadata ?? null);
     return true;
   }
 
-  async unlockPlayout(): Promise<Readonly<BrowserAudioPlayoutMetadata>> {
+  async unlockPlayout(input: Readonly<{ deviceId?: string }> = {}): Promise<Readonly<BrowserAudioPlayoutMetadata>> {
     if (this.#closed) throw new BrowserAudioIOViolation('ADAPTER_CLOSED', 'browser audio adapter is closed');
     this.#requirePlayoutSourceCleanupHealthy();
     if (!this.#enabled) throw new BrowserAudioIOViolation('FEATURE_DISABLED', 'browser audio is disabled');
     if (!this.#environment.isSecureContext) throw new BrowserAudioIOViolation('INSECURE_CONTEXT', 'browser audio requires a secure context');
+    if (this.#environment.document === null) {
+      throw new BrowserAudioIOViolation('DOCUMENT_VISIBILITY_UNAVAILABLE', 'browser playout requires document lifecycle visibility');
+    }
+    if (this.#environment.document?.visibilityState === 'hidden') {
+      throw new BrowserAudioIOViolation('PAGE_HIDDEN', 'playout unlock requires a visible page');
+    }
     const createContext = this.#environment.createAudioContext;
     if (createContext === null) throw new BrowserAudioIOViolation('AUDIO_CONTEXT_UNAVAILABLE', 'AudioContext is unavailable');
+    const deviceId = typeof input.deviceId === 'string' && input.deviceId.trim() ? input.deviceId.trim() : null;
+    if (deviceId !== null && (this.#environment.outputDeviceSelection !== true || this.#environment.mediaDevices === null)) {
+      throw new BrowserAudioIOViolation('AUDIO_OUTPUT_SELECTION_UNAVAILABLE', 'browser output device selection is unavailable');
+    }
     if (this.#pendingPlayoutGeneration !== null) {
       throw new BrowserAudioIOViolation('PLAYOUT_UNLOCK_IN_PROGRESS', 'browser playout unlock is already in progress');
     }
     const generation = ++this.#playoutGeneration;
     this.#pendingPlayoutGeneration = generation;
-    if (this.#playoutContext === null || this.#playoutContext.state === 'closed') {
-      try {
-        this.#playoutContext = createContext();
-      } catch (error) {
-        if (this.#pendingPlayoutGeneration === generation) this.#pendingPlayoutGeneration = null;
-        throw mapAudioContextFailure(error, 'AUDIO_CONTEXT_CREATE_FAILED');
-      }
-    }
-    const context = this.#playoutContext;
     try {
+      this.#listenForVisibility();
+      if (this.#playoutContext === null || this.#playoutContext.state === 'closed') {
+        this.#playoutContext = null;
+        this.#playoutSinkExplicit = false;
+        if (this.#unbindPlayoutDeviceSelection()) {
+          throw new BrowserAudioIOViolation('AUDIO_OUTPUT_DEVICE_LISTENER_CLEANUP_FAILED', 'audio output device monitoring could not be released', true);
+        }
+        this.#playoutContext = createContext();
+      }
+      const context = this.#playoutContext;
+      if (deviceId !== null) {
+        if (typeof context.setSinkId !== 'function') {
+          throw new BrowserAudioIOViolation('AUDIO_OUTPUT_SELECTION_UNAVAILABLE', 'AudioContext output selection is unavailable');
+        }
+        try {
+          await context.setSinkId(deviceId);
+        } catch (error) {
+          this.#requireCurrentPlayoutUnlock(generation, context);
+          throw mapAudioOutputFailure(error);
+        }
+        this.#playoutSinkExplicit = true;
+        this.#requireCurrentPlayoutUnlock(generation, context);
+      } else if (this.#playoutSinkExplicit) {
+        if (typeof context.setSinkId !== 'function') {
+          throw new BrowserAudioIOViolation('AUDIO_OUTPUT_SELECTION_UNAVAILABLE', 'AudioContext output selection is unavailable');
+        }
+        try {
+          await context.setSinkId('');
+        } catch (error) {
+          this.#requireCurrentPlayoutUnlock(generation, context);
+          throw mapAudioOutputFailure(error);
+        }
+        this.#playoutSinkExplicit = false;
+        this.#requireCurrentPlayoutUnlock(generation, context);
+      }
       if (context.state === 'suspended') {
         try {
           await context.resume();
@@ -895,25 +1091,43 @@ export class BrowserAudioIOAdapter {
         };
       }
       this.#requireCurrentPlayoutUnlock(generation, context);
+      this.#bindPlayoutDeviceSelection(deviceId);
       this.#emitPlayoutState('ready', 'playout_unlocked', null);
       this.#requireCurrentPlayoutUnlock(generation, context);
       return Object.freeze({
         encoding: 'pcm_f32' as const,
         sample_rate_hz: context.sampleRate,
         channel_count: 1 as const,
-        output_device_selection: false as const,
+        output_device_selection: deviceId !== null,
         physical_heard_ack: false as const,
       });
+    } catch (error) {
+      const mapped =
+        error instanceof BrowserAudioIOViolation ? error : mapAudioContextFailure(error, 'AUDIO_CONTEXT_CREATE_FAILED');
+      // Once an exact sink is requested (or an exact sink is being reset), a
+      // failed unlock cannot leave an older ready route admissible. Recovery is
+      // always another explicit unlock; there is no silent output fallback.
+      if (!this.#closed && (deviceId !== null || this.#playoutSinkExplicit)) {
+        this.#emitPlayoutState('failed', mapped.reason.toLowerCase(), null);
+      }
+      throw mapped;
     } finally {
       if (this.#pendingPlayoutGeneration === generation) this.#pendingPlayoutGeneration = null;
+      if (this.#pageHiddenPlayoutGeneration === generation) this.#pageHiddenPlayoutGeneration = null;
+      if (this.#playoutContext === null && this.#unlistenForVisibilityWhenIdle()) {
+        throw new BrowserAudioIOViolation('PLAYOUT_CLEANUP_FAILED', 'browser visibility listener could not be removed after playout unlock failed', true);
+      }
     }
   }
 
   beginPlayout(response: Readonly<AudioResponseRef>): void {
     if (this.#closed) throw new BrowserAudioIOViolation('ADAPTER_CLOSED', 'browser audio adapter is closed');
     this.#requirePlayoutSourceCleanupHealthy();
+    if (this.#environment.document?.visibilityState === 'hidden') {
+      throw new BrowserAudioIOViolation('PAGE_HIDDEN', 'playout cannot begin while the page is hidden');
+    }
     const context = this.#playoutContext;
-    if (context === null || context.state !== 'running') {
+    if (context === null || context.state !== 'running' || ['locked', 'failed', 'closed'].includes(this.#playoutState)) {
       throw new BrowserAudioIOViolation('PLAYOUT_NOT_UNLOCKED', 'playout must be unlocked by a user action');
     }
     const prior = this.#playback;
@@ -1273,8 +1487,14 @@ export class BrowserAudioIOAdapter {
   }
 
   #requireCurrentPlayoutUnlock(generation: number, context: BrowserAudioContextLike): void {
+    if (this.#pageHiddenPlayoutGeneration === generation) {
+      throw new BrowserAudioIOViolation('PAGE_HIDDEN', 'playout unlock was fenced because the page was hidden');
+    }
     if (this.#closed || this.#playoutGeneration !== generation || this.#pendingPlayoutGeneration !== generation || this.#playoutContext !== context) {
       throw new BrowserAudioIOViolation('PLAYOUT_CANCELLED', 'playout unlock was fenced by close or replacement');
+    }
+    if (this.#environment.document?.visibilityState === 'hidden') {
+      throw new BrowserAudioIOViolation('PAGE_HIDDEN', 'playout unlock was fenced because the page is hidden');
     }
     this.#requirePlayoutSourceCleanupHealthy();
   }
@@ -1282,6 +1502,7 @@ export class BrowserAudioIOAdapter {
   #fencePlayoutForClose(): Readonly<{ context: BrowserAudioContextLike | null; failure: unknown }> {
     const context = this.#playoutContext;
     this.#playoutContext = null;
+    this.#playoutSinkExplicit = false;
     let failure: unknown = this.#playoutSourceCleanupFailure;
     if (context !== null) context.onstatechange = null;
     const playback = this.#playback;
@@ -1299,6 +1520,9 @@ export class BrowserAudioIOAdapter {
 
   async #closeResources(context: BrowserAudioContextLike | null, initialFailure: unknown): Promise<void> {
     let failure = initialFailure;
+    if (this.#unbindPlayoutDeviceSelection()) {
+      failure ??= new BrowserAudioIOViolation('AUDIO_OUTPUT_DEVICE_LISTENER_CLEANUP_FAILED', 'audio output device monitoring could not be released', true);
+    }
     const captureCleanup = this.stopCapture('adapter_closed').catch(error => {
       failure ??= error;
     });
@@ -1311,6 +1535,9 @@ export class BrowserAudioIOAdapter {
       }
     })();
     await Promise.all([captureCleanup, playoutCleanup]);
+    if (this.#unlistenForVisibilityWhenIdle()) {
+      failure ??= new BrowserAudioIOViolation('ADAPTER_CLOSE_FAILED', 'browser visibility listener could not be removed', true);
+    }
     if (failure !== null) {
       const mapped = mapBrowserFailure(failure, 'ADAPTER_CLOSE_FAILED');
       this.#emitPlayoutState('failed', mapped.reason === 'PLAYOUT_SOURCE_CLEANUP_UNKNOWN' ? 'adapter_closed_source_unknown' : 'adapter_close_failed', null);
@@ -1402,17 +1629,205 @@ export class BrowserAudioIOAdapter {
     }
   }
 
+  async #attachMicrophonePermissionObservation(observation: CapturePermissionObservation): Promise<void> {
+    let permissions: BrowserPermissionsLike | null;
+    try {
+      permissions = this.#environment.permissions ?? null;
+    } catch {
+      return;
+    }
+    if (permissions === null || !this.#ownsCapturePermissionObservation(observation)) return;
+
+    let statusValue: unknown;
+    try {
+      if (typeof permissions.query !== 'function') return;
+      statusValue = await permissions.query(Object.freeze({ name: 'microphone' }));
+    } catch {
+      return;
+    }
+    if (!this.#ownsCapturePermissionObservation(observation) || typeof statusValue !== 'object' || statusValue === null) return;
+
+    const status = statusValue as BrowserPermissionStatusLike;
+    let addListener: BrowserPermissionStatusLike['addEventListener'];
+    let removeListener: BrowserPermissionStatusLike['removeEventListener'];
+    try {
+      addListener = status.addEventListener;
+      removeListener = status.removeEventListener;
+    } catch {
+      return;
+    }
+    if (typeof addListener !== 'function' || typeof removeListener !== 'function') return;
+
+    observation.lastKnownState = this.#readMicrophonePermissionState(status);
+    if (observation.lastKnownState === 'denied' && observation.mediaAccessGranted) {
+      this.#revokeMicrophonePermission(observation);
+      return;
+    }
+    observation.status = status;
+    observation.listenerAttached = true;
+    try {
+      addListener.call(status, 'change', observation.onChange);
+    } catch {
+      this.#closeMicrophonePermissionObservation(observation);
+      return;
+    }
+
+    if (!this.#ownsCapturePermissionObservation(observation)) {
+      this.#removeMicrophonePermissionListener(status, observation.onChange);
+      this.#closeMicrophonePermissionObservation(observation);
+      return;
+    }
+    const stateAfterAttach = this.#readMicrophonePermissionState(status);
+    if (stateAfterAttach !== null) this.#acceptMicrophonePermissionState(observation, stateAfterAttach);
+  }
+
+  #observeMicrophonePermissionChange(observation: CapturePermissionObservation): void {
+    if (!this.#ownsCapturePermissionObservation(observation) || observation.status === null) return;
+    const state = this.#readMicrophonePermissionState(observation.status);
+    if (state !== null) this.#acceptMicrophonePermissionState(observation, state);
+  }
+
+  #acceptMicrophonePermissionState(observation: CapturePermissionObservation, state: MicrophonePermissionState): void {
+    if (!this.#ownsCapturePermissionObservation(observation)) return;
+    const priorState = observation.lastKnownState;
+    observation.lastKnownState = state;
+    if (state !== 'denied' || (!observation.mediaAccessGranted && priorState !== 'granted' && priorState !== 'prompt')) return;
+    this.#revokeMicrophonePermission(observation);
+  }
+
+  #revokeMicrophonePermission(observation: CapturePermissionObservation): void {
+    if (!this.#ownsCapturePermissionObservation(observation) || observation.revocationFailure !== null) return;
+    observation.revocationFailure = new BrowserAudioIOViolation('MICROPHONE_PERMISSION_REVOKED', 'microphone permission was revoked while capture was owned');
+    observation.rejectRevocation(observation.revocationFailure);
+    this.#stopCaptureFromBrowser('microphone_permission_revoked');
+  }
+
+  #readMicrophonePermissionState(status: BrowserPermissionStatusLike): MicrophonePermissionState | null {
+    try {
+      const state = status.state;
+      return state === 'granted' || state === 'prompt' || state === 'denied' ? state : null;
+    } catch {
+      return null;
+    }
+  }
+
+  #ownsCapturePermissionObservation(observation: CapturePermissionObservation): boolean {
+    if (observation.closed || observation.token !== this.#captureToken) return false;
+    return this.#capture?.permissionObservation === observation || this.#pendingCaptureResources?.permissionObservation === observation;
+  }
+
+  #removeMicrophonePermissionListener(status: BrowserPermissionStatusLike, listener: BrowserEventListener): void {
+    try {
+      status.removeEventListener('change', listener);
+    } catch {
+      // The closed generation fence keeps a retained browser callback inert.
+    }
+  }
+
+  #closeMicrophonePermissionObservation(observation: CapturePermissionObservation): void {
+    if (observation.closed) return;
+    observation.closed = true;
+    const status = observation.status;
+    const listenerAttached = observation.listenerAttached;
+    observation.status = null;
+    observation.listenerAttached = false;
+    if (status !== null && listenerAttached) this.#removeMicrophonePermissionListener(status, observation.onChange);
+  }
+
   async #observeDeviceChange(token: number): Promise<void> {
-    if (this.#capture?.token !== token || this.#environment.mediaDevices === null) return;
+    if (!this.#ownsCaptureToken(token) || this.#environment.mediaDevices === null) return;
+    const requestedDeviceId = this.#capture?.token === token ? this.#capture.requestedDeviceId : this.#pendingCaptureResources?.requestedDeviceId ?? null;
     try {
       const devices = await this.#environment.mediaDevices.enumerateDevices();
-      if (this.#capture?.token !== token) return;
+      if (!this.#ownsCaptureToken(token)) return;
       const count = devices.filter(device => device.kind === 'audioinput').length;
       this.#notifyDeviceChange(Object.freeze({ audio_input_count: count, reason: 'devicechange' }));
+      const exactDeviceAvailable =
+        requestedDeviceId === null ||
+        devices.some(device => device.kind === 'audioinput' && typeof device.deviceId === 'string' && device.deviceId === requestedDeviceId);
+      if ((!exactDeviceAvailable || count === 0) && this.#ownsCaptureToken(token)) {
+        this.#stopCaptureFromBrowser(exactDeviceAvailable ? 'audio_input_unavailable' : 'audio_input_selection_lost');
+      }
     } catch {
-      if (this.#capture?.token !== token) return;
+      if (!this.#ownsCaptureToken(token)) return;
       this.#notifyDeviceChange(Object.freeze({ audio_input_count: null, reason: 'enumeration_failed' }));
+      if (requestedDeviceId !== null) this.#stopCaptureFromBrowser('audio_input_selection_unverified');
     }
+  }
+
+  #bindPlayoutDeviceSelection(deviceId: string | null): void {
+    if (deviceId === null) {
+      if (this.#unbindPlayoutDeviceSelection()) {
+        throw new BrowserAudioIOViolation('AUDIO_OUTPUT_DEVICE_LISTENER_CLEANUP_FAILED', 'audio output device monitoring could not be released', true);
+      }
+      return;
+    }
+    if (this.#environment.mediaDevices === null) {
+      throw new BrowserAudioIOViolation('AUDIO_OUTPUT_SELECTION_UNAVAILABLE', 'audio output device monitoring is unavailable');
+    }
+    this.#playoutDeviceId = deviceId;
+    if (this.#playoutDeviceListenerAttached) return;
+    try {
+      this.#environment.mediaDevices.addEventListener('devicechange', this.#onPlayoutDeviceChange);
+      this.#playoutDeviceListenerAttached = true;
+    } catch {
+      try {
+        this.#environment.mediaDevices.removeEventListener('devicechange', this.#onPlayoutDeviceChange);
+      } catch {
+        // The output generation fence makes any partially retained callback inert.
+      }
+      this.#playoutDeviceId = null;
+      throw new BrowserAudioIOViolation('AUDIO_OUTPUT_DEVICE_LISTENER_FAILED', 'audio output device monitoring is unavailable');
+    }
+  }
+
+  async #observePlayoutDeviceChange(generation: number): Promise<void> {
+    const deviceId = this.#playoutDeviceId;
+    const mediaDevices = this.#environment.mediaDevices;
+    if (this.#closed || deviceId === null || mediaDevices === null || generation !== this.#playoutGeneration) return;
+    let reason: string | null = null;
+    try {
+      const devices = await mediaDevices.enumerateDevices();
+      if (this.#closed || deviceId !== this.#playoutDeviceId || generation !== this.#playoutGeneration) return;
+      if (!devices.some(device => device.kind === 'audiooutput' && typeof device.deviceId === 'string' && device.deviceId === deviceId)) {
+        reason = 'audio_output_selection_lost';
+      }
+    } catch {
+      if (this.#closed || deviceId !== this.#playoutDeviceId || generation !== this.#playoutGeneration) return;
+      reason = 'audio_output_selection_unverified';
+    }
+    if (reason === null) return;
+    ++this.#playoutGeneration;
+    const listenerCleanupFailed = this.#unbindPlayoutDeviceSelection();
+    const playback = this.#playback;
+    if (playback !== null) {
+      try {
+        this.stopPlayout(playback.response, reason);
+      } catch {
+        this.#stopPlaybackSources(playback, reason);
+      }
+    }
+    this.#emitPlayoutState('failed', reason, playback);
+    if (listenerCleanupFailed) this.#emitPlayoutState('failed', 'audio_output_device_listener_cleanup_failed', null);
+    this.#stopCaptureFromBrowser(reason);
+  }
+
+  #unbindPlayoutDeviceSelection(): boolean {
+    let failed = false;
+    if (this.#playoutDeviceListenerAttached) {
+      try {
+        this.#environment.mediaDevices?.removeEventListener('devicechange', this.#onPlayoutDeviceChange);
+      } catch {
+        failed = true;
+      }
+    }
+    this.#playoutDeviceListenerAttached = false;
+    this.#playoutDeviceId = null;
+    return failed;
+  }
+
+  #ownsCaptureToken(token: number): boolean {
+    return this.#capture?.token === token || (this.#pendingCaptureToken === token && this.#pendingCaptureResources?.token === token);
   }
 
   #stopCaptureFromBrowser(reason: string): void {
@@ -1424,15 +1839,41 @@ export class BrowserAudioIOAdapter {
   async #cleanupCaptureSession(session: CaptureSession): Promise<void> {
     if (session.closed) return;
     session.closed = true;
-    session.worklet.port.onmessage = null;
-    session.worklet.onprocessorerror = null;
-    if (session.context.onstatechange === session.installedContextStateChange) {
-      session.context.onstatechange = session.priorContextStateChange;
+    let cleanupFailed = false;
+    this.#closeMicrophonePermissionObservation(session.permissionObservation);
+    try {
+      session.worklet.port.onmessage = null;
+    } catch {
+      cleanupFailed = true;
     }
-    session.track.removeEventListener('ended', session.onTrackEnded);
-    session.track.removeEventListener('mute', session.onTrackMute);
-    session.track.removeEventListener('unmute', session.onTrackUnmute);
-    this.#environment.mediaDevices?.removeEventListener('devicechange', session.onDeviceChange);
+    try {
+      session.worklet.onprocessorerror = null;
+    } catch {
+      cleanupFailed = true;
+    }
+    try {
+      if (session.context.onstatechange === session.installedContextStateChange) {
+        session.context.onstatechange = session.priorContextStateChange;
+      }
+    } catch {
+      cleanupFailed = true;
+    }
+    for (const [type, listener] of [
+      ['ended', session.onTrackEnded],
+      ['mute', session.onTrackMute],
+      ['unmute', session.onTrackUnmute],
+    ] as const) {
+      try {
+        session.track.removeEventListener(type, listener);
+      } catch {
+        cleanupFailed = true;
+      }
+    }
+    try {
+      this.#environment.mediaDevices?.removeEventListener('devicechange', session.onDeviceChange);
+    } catch {
+      cleanupFailed = true;
+    }
     try {
       session.source.disconnect();
     } catch {
@@ -1443,14 +1884,25 @@ export class BrowserAudioIOAdapter {
     } catch {
       // A zero-output worklet may already be disconnected.
     }
-    let cleanupFailed = false;
     try {
       session.worklet.port.close();
     } catch {
       cleanupFailed = true;
     }
-    cleanupFailed = stopStream(session.stream) || cleanupFailed;
-    if (session.ownsContext && session.context.state !== 'closed') {
+    try {
+      cleanupFailed = stopStream(session.stream) || cleanupFailed;
+    } catch {
+      cleanupFailed = true;
+    }
+    let closeOwnedContext = session.ownsContext;
+    if (closeOwnedContext) {
+      try {
+        closeOwnedContext = session.context.state !== 'closed';
+      } catch {
+        cleanupFailed = true;
+      }
+    }
+    if (closeOwnedContext) {
       try {
         await session.context.close();
       } catch {
@@ -1465,14 +1917,39 @@ export class BrowserAudioIOAdapter {
   #cleanupPendingCapture(pending: PendingCaptureResources): Promise<void> {
     if (pending.cleanupPromise !== null) return pending.cleanupPromise;
     pending.cleanupPromise = (async () => {
+      let cleanupFailed = false;
+      this.#closeMicrophonePermissionObservation(pending.permissionObservation);
       if (pending.track !== null && pending.trackListenerAttached) {
-        pending.track.removeEventListener('ended', pending.onTrackEnded);
         pending.trackListenerAttached = false;
+        try {
+          pending.track.removeEventListener('ended', pending.onTrackEnded);
+        } catch {
+          cleanupFailed = true;
+        }
       }
-      if (pending.context !== null && pending.installedContextStateChange !== null && pending.context.onstatechange === pending.installedContextStateChange) {
-        pending.context.onstatechange = pending.priorContextStateChange;
+      if (pending.deviceListenerAttached) {
+        pending.deviceListenerAttached = false;
+        try {
+          this.#environment.mediaDevices?.removeEventListener('devicechange', pending.onDeviceChange);
+        } catch {
+          cleanupFailed = true;
+        }
       }
-      await this.#cleanupLooseCapture(pending.stream, pending.context, pending.source, pending.worklet, pending.ownsContext);
+      try {
+        if (pending.context !== null && pending.installedContextStateChange !== null && pending.context.onstatechange === pending.installedContextStateChange) {
+          pending.context.onstatechange = pending.priorContextStateChange;
+        }
+      } catch {
+        cleanupFailed = true;
+      }
+      try {
+        await this.#cleanupLooseCapture(pending.stream, pending.context, pending.source, pending.worklet, pending.ownsContext);
+      } catch {
+        cleanupFailed = true;
+      }
+      if (cleanupFailed) {
+        throw new BrowserAudioIOViolation('CAPTURE_CLEANUP_FAILED', 'partial browser capture resources could not be released', true);
+      }
     })();
     return pending.cleanupPromise;
   }
@@ -1486,8 +1963,16 @@ export class BrowserAudioIOAdapter {
   ): Promise<void> {
     let cleanupFailed = false;
     if (worklet !== null) {
-      worklet.port.onmessage = null;
-      worklet.onprocessorerror = null;
+      try {
+        worklet.port.onmessage = null;
+      } catch {
+        cleanupFailed = true;
+      }
+      try {
+        worklet.onprocessorerror = null;
+      } catch {
+        cleanupFailed = true;
+      }
       try {
         worklet.disconnect();
       } catch {
@@ -1506,12 +1991,24 @@ export class BrowserAudioIOAdapter {
         // Best-effort cleanup before the session became active.
       }
     }
-    cleanupFailed = stopStream(stream) || cleanupFailed;
-    if (closeContext && context !== null && context.state !== 'closed') {
+    try {
+      cleanupFailed = stopStream(stream) || cleanupFailed;
+    } catch {
+      cleanupFailed = true;
+    }
+    if (closeContext && context !== null) {
+      let shouldCloseContext = true;
       try {
-        await context.close();
+        shouldCloseContext = context.state !== 'closed';
       } catch {
         cleanupFailed = true;
+      }
+      if (shouldCloseContext) {
+        try {
+          await context.close();
+        } catch {
+          cleanupFailed = true;
+        }
       }
     }
     if (cleanupFailed) {
@@ -1521,15 +2018,37 @@ export class BrowserAudioIOAdapter {
 
   #listenForVisibility(): void {
     if (this.#visibilityListening || this.#environment.document === null) return;
-    this.#environment.document.addEventListener('visibilitychange', this.#onVisibilityChange);
     this.#visibilityListening = true;
+    try {
+      this.#environment.document.addEventListener('visibilitychange', this.#onVisibilityChange);
+    } catch {
+      try {
+        this.#environment.document.removeEventListener('visibilitychange', this.#onVisibilityChange);
+        this.#visibilityListening = false;
+      } catch {
+        throw new BrowserAudioIOViolation('VISIBILITY_LISTENER_CLEANUP_FAILED', 'browser visibility listener registration cleanup failed', true);
+      }
+      throw new BrowserAudioIOViolation('VISIBILITY_LISTENER_FAILED', 'browser visibility listener registration failed', true);
+    }
   }
 
-  #unlistenForVisibilityWhenIdle(): void {
-    if (!this.#visibilityListening || this.#environment.document === null) return;
-    if (this.#capture !== null || this.#pendingCaptureToken !== null) return;
-    this.#environment.document.removeEventListener('visibilitychange', this.#onVisibilityChange);
-    this.#visibilityListening = false;
+  #unlistenForVisibilityWhenIdle(): boolean {
+    if (!this.#visibilityListening || this.#environment.document === null) return false;
+    if (
+      this.#capture !== null ||
+      this.#pendingCaptureToken !== null ||
+      this.#pendingPlayoutGeneration !== null ||
+      this.#playoutContext !== null ||
+      this.#playback !== null
+    )
+      return false;
+    try {
+      this.#environment.document.removeEventListener('visibilitychange', this.#onVisibilityChange);
+      this.#visibilityListening = false;
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   #emitCaptureState(

@@ -53,6 +53,7 @@ from jiuwenswarm.server.live_voice.speech_ports import (
     SynthesisPort,
     SynthesisRequest,
 )
+
 FORMAL_BATCH_SPEECH_FLAG = "LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED"
 SPEECH_PROVIDER_ENV = "LIVE_VOICE_SPEECH_PROVIDER"
 SPEECH_API_BASE_ENV = "LIVE_VOICE_SPEECH_API_BASE"
@@ -920,7 +921,7 @@ def create_environment_batch_speech_provider(
     if not _enabled(env.get(FORMAL_BATCH_SPEECH_FLAG)):
         return UnavailableBatchSpeechProvider()
     provider = str(env.get(SPEECH_PROVIDER_ENV) or "").strip().lower()
-    if provider != "openai-compatible":
+    if provider not in {"openai", "openai-compatible"}:
         return UnavailableBatchSpeechProvider()
     api_base = str(env.get(SPEECH_API_BASE_ENV) or "").strip()
     api_key = str(env.get(SPEECH_API_KEY_ENV) or "").strip()
@@ -932,6 +933,8 @@ def create_environment_batch_speech_provider(
     try:
         normalized_base = _validate_api_base(api_base)
     except ValueError:
+        return UnavailableBatchSpeechProvider()
+    if provider == "openai" and normalized_base != "https://api.openai.com/v1":
         return UnavailableBatchSpeechProvider()
     return OpenAICompatibleBatchSpeechProvider(
         OpenAICompatibleSpeechConfig(
@@ -1336,6 +1339,7 @@ class _VoiceCommitReceipt:
     capture_generation: int
     session_id: str
     correlation_id: str
+    interaction_id: str | None
     text: str
     expires_at: float
     claimed_binding: tuple[str, str, str, str, str, str] | None = None
@@ -1445,6 +1449,10 @@ class FormalBatchSpeechService:
             if (
                 retained.session_id != binding[0]
                 or retained.correlation_id != binding[1]
+                or (
+                    retained.interaction_id is not None
+                    and retained.interaction_id != binding[2]
+                )
                 or retained.text != binding[5]
             ):
                 raise ValueError("voice commit receipt does not match recognition")
@@ -1470,8 +1478,79 @@ class FormalBatchSpeechService:
     async def _issue_voice_commit_receipt(
         self, request: RecognitionBatchRequest, text: str
     ) -> str:
+        return await self.issue_streaming_voice_commit_receipt(
+            operation_id=request.operation_id,
+            capture_id=request.capture_id,
+            capture_generation=request.capture_generation,
+            session_id=request.scope.session_id or "",
+            correlation_id=request.correlation_id,
+            interaction_id=None,
+            text=text,
+        )
+
+    async def issue_streaming_voice_commit_receipt(
+        self,
+        *,
+        operation_id: str,
+        capture_id: str,
+        capture_generation: int,
+        session_id: str,
+        correlation_id: str,
+        interaction_id: str | None,
+        text: str,
+    ) -> str:
+        """Mint the existing opaque TurnCommit capability for verified STT.
+
+        This is an in-process product seam, not an RPC.  The dedicated-media
+        registry calls it only after exact media authority and one Provider
+        final have settled.  It stores no audio and grants no Agent/Tool/Task
+        authority by itself.
+        """
+
+        identities = {
+            "operation_id": operation_id,
+            "capture_id": capture_id,
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+        }
+        if interaction_id is not None:
+            identities["interaction_id"] = interaction_id
+        if any(
+            _safe_response_identity({field: value}, field) != value
+            for field, value in identities.items()
+        ):
+            raise _fail(
+                ErrorCode.INVALID_ARGUMENT,
+                "INVALID_STREAMING_RECEIPT_BINDING",
+                "streaming recognition receipt identity is invalid",
+            )
+        if (
+            type(capture_generation) is not int
+            or not 0 <= capture_generation <= 9_007_199_254_740_991
+        ):
+            raise _fail(
+                ErrorCode.INVALID_ARGUMENT,
+                "INVALID_STREAMING_RECEIPT_BINDING",
+                "streaming recognition generation is invalid",
+            )
+        retained_text = _required_text(text, "streaming recognition text")
+        if (
+            retained_text != retained_text.strip()
+            or len(retained_text) > MAX_RECOGNITION_TEXT_CHARS
+        ):
+            raise _fail(
+                ErrorCode.INVALID_ARGUMENT,
+                "INVALID_STREAMING_RECEIPT_TEXT",
+                "streaming recognition text is invalid",
+            )
         now = self._monotonic()
         async with self._lock:
+            if self._closed:
+                raise _fail(
+                    ErrorCode.CANCELLED,
+                    "SPEECH_SERVICE_CLOSED",
+                    "formal speech service is closed",
+                )
             self._prune_voice_commit_receipts_locked(now)
             if len(self._voice_commit_receipts) >= MAX_VOICE_COMMIT_RECEIPTS:
                 raise _fail(
@@ -1482,12 +1561,13 @@ class FormalBatchSpeechService:
                 )
             token = secrets.token_urlsafe(32)
             self._voice_commit_receipts[token] = _VoiceCommitReceipt(
-                operation_id=request.operation_id,
-                capture_id=request.capture_id,
-                capture_generation=request.capture_generation,
-                session_id=request.scope.session_id or "",
-                correlation_id=request.correlation_id,
-                text=text,
+                operation_id=operation_id,
+                capture_id=capture_id,
+                capture_generation=capture_generation,
+                session_id=session_id,
+                correlation_id=correlation_id,
+                interaction_id=interaction_id,
+                text=retained_text,
                 expires_at=now + VOICE_COMMIT_RECEIPT_TTL_SECONDS,
             )
             return token

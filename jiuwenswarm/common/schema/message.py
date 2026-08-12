@@ -234,6 +234,10 @@ class ReqMethod(Enum):
     LIVE_VOICE_COMPOSITION_P3_CONFIRMATION_ISSUE = (
         "live_voice.composition.p3.confirmation.issue"
     )
+    LIVE_VOICE_COMPOSITION_P3_INTENT = "live_voice.composition.p3.intent"
+    LIVE_VOICE_COMPOSITION_P3_INTENT_STATUS = (
+        "live_voice.composition.p3.intent.status"
+    )
     LIVE_VOICE_COMPOSITION_P3_MUTATE = "live_voice.composition.p3.mutate"
     LIVE_VOICE_COMPOSITION_P3_PROGRESS_ACTIVATE = (
         "live_voice.composition.p3.progress.activate"

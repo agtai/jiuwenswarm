@@ -1,0 +1,18 @@
+{
+  "control": {
+    "business_cancel_count_delta": 0,
+    "capability_version": "media.end_of_turn.v1",
+    "contract_version": "live-voice.media.v1",
+    "create_response": false,
+    "detector": "server_vad",
+    "generation": 7,
+    "interrupt_response": false,
+    "lease_id": "fixture-eot-lease",
+    "provider_end_ms": 1840,
+    "provider_start_ms": 320,
+    "speech_started_observed": true,
+    "timing_basis": "provider_time",
+    "timing_provenance": "adapter_derived",
+    "type": "media.end_of_turn"
+  }
+}

@@ -13,6 +13,22 @@ import { act, create } from 'react-test-renderer';
 import { LiveVoiceIntegratedRoutePanel, progressMatchesOwnedBinding } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import { parseProductTextProgressEvent } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
+function mountedProgressActivation(params, overrides = {}) {
+  const requested = params.origin_kind === 'voice' ? 'voice' : 'text';
+  const fallback = requested === 'voice' ? 'TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE' : null;
+  return {
+    status: 'active',
+    ...params,
+    requested_origin_kind: requested,
+    origin_kind: 'text',
+    voice_progress: 'unavailable',
+    voice_reason: fallback ?? 'TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE',
+    fallback_reason: fallback,
+    replayed: false,
+    ...overrides,
+  };
+}
+
 const mountedBundleDirectory = await mkdtemp(fileURLToPath(new URL('../node_modules/.cache/jiuwenswarm-live-voice-mounted-', import.meta.url)));
 after(async () => {
   await rm(mountedBundleDirectory, { recursive: true, force: true });
@@ -184,7 +200,7 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
   const audioWorkletNodeDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'AudioWorkletNode');
   const webSocketDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
   const values = new Map();
-  const counts = { getUserMedia: 0 };
+  const counts = { getUserMedia: 0, enumerateDevices: 0, constraints: [], sinkIds: [] };
   let latestWorklet = null;
 
   class FakeAudioTrack {
@@ -237,6 +253,10 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
 
     async resume() {
       this.state = 'running';
+    }
+
+    async setSinkId(deviceId) {
+      counts.sinkIds.push(deviceId);
     }
 
     async close() {
@@ -336,16 +356,24 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
     setItem: (key, value) => values.set(key, value),
   };
   const mediaDeviceListeners = new Map();
+  let enumerateDevices = async () => [
+    { kind: 'audioinput', deviceId: 'mounted-private-input', label: 'Mounted microphone' },
+    { kind: 'audiooutput', deviceId: 'mounted-private-output', label: 'Mounted speaker' },
+  ];
   const mediaDevices = {
-    async getUserMedia() {
+    async getUserMedia(constraints) {
       counts.getUserMedia += 1;
+      counts.constraints.push(constraints);
       const track = new FakeAudioTrack(`mounted-p1-track-${counts.getUserMedia}`);
       return {
         getAudioTracks: () => [track],
         getTracks: () => [track],
       };
     },
-    enumerateDevices: async () => [{ kind: 'audioinput' }, { kind: 'audiooutput' }],
+    enumerateDevices: async () => {
+      counts.enumerateDevices += 1;
+      return enumerateDevices();
+    },
     addEventListener: (name, listener) => mediaDeviceListeners.set(name, listener),
     removeEventListener: name => mediaDeviceListeners.delete(name),
   };
@@ -389,6 +417,12 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
 
   return {
     counts,
+    emitDeviceChange() {
+      mediaDeviceListeners.get('devicechange')?.();
+    },
+    setEnumerateDevices(implementation) {
+      enumerateDevices = implementation;
+    },
     async emitFirstFrame() {
       await waitForMounted(() => typeof latestWorklet?.port.onmessage === 'function', 'mounted P1 worklet did not become ready');
       await new Promise(resolve => setImmediate(resolve));
@@ -421,7 +455,7 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
   };
 }
 
-function mountedP1Element(i18n, sessionId, request) {
+function mountedP1Element(i18n, sessionId, request, extraProps = {}) {
   return React.createElement(
     I18nextProvider,
     { i18n },
@@ -431,6 +465,7 @@ function mountedP1Element(i18n, sessionId, request) {
       agentRouteAvailable: true,
       taskCompatibilityAvailable: false,
       request,
+      ...extraProps,
     })
   );
 }
@@ -477,6 +512,16 @@ function mountedP3Controls(renderer) {
   };
   const hasButton = label => buttons.some(candidate => candidate.children.some(child => child === label));
   return { root, select, button, hasButton };
+}
+
+function mountedTaskIntentControls(renderer) {
+  const root = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-formal-task-intent' });
+  return {
+    root,
+    select: root.findByProps({ 'aria-label': 'Task intent operation hint' }),
+    textarea: root.findByProps({ 'aria-label': 'Committed natural-language Task intent' }),
+    submit: root.findAllByType('button').find(button => button.children.some(child => child === 'Submit committed Task turn')),
+  };
 }
 
 function mountedP3Status(binding, { attemptId = 'attempt-a', attemptNumber = 1, state = 'running', outcome = null, eventHead = 1 } = {}) {
@@ -702,6 +747,11 @@ function mountedTerminalProgress(binding, activation, outcome) {
     task_id: 'task-a',
     correlation_id: binding.correlation_id,
     origin_id: activation.origin_id,
+    origin_kind: 'text',
+    requested_origin_kind: 'text',
+    effective_origin_kind: 'text',
+    delivery_mode: 'text',
+    fallback_reason: null,
     generation_kind: 'web_task_progress_generation',
     generation_id: activation.generation_id,
     generation: activation.generation,
@@ -757,6 +807,22 @@ function formalVoiceStopButton(renderer) {
     .find(candidate => candidate.children.some(child => typeof child === 'string' && child.includes('Stop and recognize')));
   assert.ok(button, 'formal P1 Stop button must be mounted');
   return button;
+}
+
+function mountedAudioDeviceControls(renderer) {
+  const root = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-device-selection' });
+  const selects = root.findAllByType('select');
+  const button = label => {
+    const selected = root.findAllByType('button').find(candidate => candidate.children.some(child => child === label));
+    assert.ok(selected, `audio device button ${label} must exist`);
+    return selected;
+  };
+  const token = (select, label) => {
+    const option = select.findAllByType('option').find(candidate => candidate.children.some(child => child === label));
+    assert.ok(option, `audio device option ${label} must exist`);
+    return option.props.value;
+  };
+  return { root, input: selects[0], output: selects[1], button, token };
 }
 
 function mountedRecognizedConfirmation(renderer) {
@@ -860,6 +926,306 @@ async function waitForMounted(predicate, message, timeoutMs = 1_000) {
   }
 }
 
+test('mounted bounded text Task route requires a later committed confirmation and activates exact origin progress', async () => {
+  const i18n = await createI18n();
+  const calls = [];
+  const resolutionId = 'a'.repeat(64);
+  const commitSha256 = 'b'.repeat(64);
+  const confirmationToken = resolutionId.slice(0, 32);
+  let intentCalls = 0;
+  let renderer;
+  const request = async (method, params, options) => {
+    const requestId = options?.requestId ?? null;
+    calls.push({ method, params: { ...params }, requestId });
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.intent') {
+      intentCalls += 1;
+      const base = {
+        resolver_provider: 'local.closed_schema',
+        resolver_implementation_class: 'bounded_deterministic_alpha_v1',
+        resolution_id: resolutionId,
+        commit_sha256: commitSha256,
+        operation: 'task.create',
+        source_span: { start: 13, end: 35 },
+        target_span: null,
+      };
+      return intentCalls === 1
+        ? {
+            request_id: requestId,
+            ok: true,
+            error: null,
+            result: {
+              status: 'clarification',
+              reason: 'TASK_CONFIRMATION_REQUIRED',
+              ...base,
+              task_id: null,
+              confirmation_token: confirmationToken,
+              confirmation_form: `confirm task request ${confirmationToken}`,
+              partial_command_count: 0,
+            },
+          }
+        : {
+            request_id: requestId,
+            ok: true,
+            error: null,
+            result: {
+              status: 'dispatched',
+              reason: 'TASK_INTENT_DISPATCHED',
+              ...base,
+              task_id: 'task-natural-1',
+              origin_kind: 'text',
+              origin_id: params.interaction_id,
+              confirmation_commit_id: params.commit_id,
+              formal_task_result: { task_id: 'task-natural-1', state: 'accepted' },
+            },
+          };
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    throw new Error(`unexpected mounted request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, 'session-natural', request));
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('Bounded natural-language Task route'),
+        'bounded task intent route did not mount'
+      );
+    });
+    const first = mountedTaskIntentControls(renderer);
+    assert.equal(first.submit !== undefined, true);
+    await act(async () => {
+      first.textarea.props.onChange({ target: { value: 'create task: inspect the repository' } });
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      mountedTaskIntentControls(renderer).root.props.onSubmit({ preventDefault() {} });
+      await waitForMounted(
+        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-task-intent-confirmation' }).length === 1,
+        'task intent did not expose its later-turn confirmation form'
+      );
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
+    await act(async () => {
+      mountedTaskIntentControls(renderer).textarea.props.onChange({
+        target: { value: `confirm task request ${confirmationToken}` },
+      });
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      mountedTaskIntentControls(renderer).root.props.onSubmit({ preventDefault() {} });
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p3.progress.activate' && call.params.task_id === 'task-natural-1'),
+        'natural task did not activate progress on its exact created task'
+      );
+    });
+    const intents = calls.filter(call => call.method === 'live_voice.composition.p3.intent');
+    assert.equal(intents.length, 2);
+    assert.equal(intents[0].params.interaction_id, intents[1].params.interaction_id);
+    assert.notEqual(intents[0].params.commit_id, intents[1].params.commit_id);
+    assert.equal('confirmed' in intents[0].params, false);
+    assert.equal('confirmed' in intents[1].params, false);
+    const progress = calls.find(call => call.method === 'live_voice.composition.p3.progress.activate' && call.params.task_id === 'task-natural-1');
+    assert.equal(progress.params.origin_kind, 'text');
+    assert.equal(progress.params.origin_id, intents[0].params.interaction_id);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
+
+test('mounted Task intent failure renders only the stable content-free reason', async () => {
+  const i18n = await createI18n();
+  const sentinel = 'SENTINEL_PROVIDER_SECRET_TRANSCRIPT';
+  let renderer;
+  const request = async (method, params) => {
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.intent') throw new Error(sentinel);
+    throw new Error(`unexpected mounted request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, 'session-safe-error', request));
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('Bounded natural-language Task route'),
+        'bounded task intent route did not mount'
+      );
+    });
+    await act(async () => {
+      mountedTaskIntentControls(renderer).textarea.props.onChange({
+        target: { value: 'create task: bounded request' },
+      });
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      mountedTaskIntentControls(renderer).root.props.onSubmit({ preventDefault() {} });
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('FORMAL_TASK_INTENT_REQUEST_FAILED'),
+        'stable content-free task intent failure was not rendered'
+      );
+    });
+    const rendered = JSON.stringify(renderer.toJSON());
+    assert.equal(rendered.includes('FORMAL_TASK_INTENT_REQUEST_FAILED'), true);
+    assert.equal(rendered.includes(sentinel), false);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
+
+test('mounted Task intent response loss reconnects by content-free status with one side effect', async () => {
+  const i18n = await createI18n();
+  const values = new Map();
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: key => values.delete(key),
+  };
+  const restore = installP2RecoveryBrowser(storage);
+  const sessionId = 'session-natural-recovery';
+  const formalJournalKey = 'jiuwenswarm.liveVoice.formalTaskIntentRecovery.v2';
+  const instructionCanary = 'SENTINEL_PRIVATE_TASK_INSTRUCTION';
+  const calls = [];
+  let completedIntent = null;
+  let taskSideEffects = 0;
+  let renderer;
+  const resolutionId = 'c'.repeat(64);
+  const commitSha256 = 'd'.repeat(64);
+  const request = async (method, params, options) => {
+    const requestId = options?.requestId ?? null;
+    calls.push({ method, params: { ...params }, requestId });
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.intent') {
+      taskSideEffects += 1;
+      completedIntent = { params: { ...params }, requestId };
+      throw new Error('response lost after server completion');
+    }
+    if (method === 'live_voice.composition.p3.intent.status') {
+      assert.notEqual(completedIntent, null);
+      assert.deepEqual(Object.keys(params).sort(), ['correlation_id', 'intent_request_id', 'session_id']);
+      assert.equal(params.intent_request_id, completedIntent.requestId);
+      return {
+        request_id: requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'settled',
+          phase: 'final',
+          intent_request_id: completedIntent.requestId,
+          source: 'text',
+          intent: {
+            status: 'dispatched',
+            reason: 'TASK_INTENT_DISPATCHED',
+            resolver_provider: 'local.closed_schema',
+            resolver_implementation_class: 'bounded_deterministic_alpha_v1',
+            resolution_id: resolutionId,
+            commit_sha256: commitSha256,
+            operation: 'task.create',
+            task_id: 'task-natural-recovered',
+            source_span: { start: 13, end: 35 },
+            target_span: null,
+            confirmation_token: null,
+            confirmation_form: null,
+            partial_command_count: 0,
+            origin_kind: 'text',
+            origin_id: completedIntent.params.interaction_id,
+            formal_task_result: { recovered: true, task_id: 'task-natural-recovered' },
+          },
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return {
+        ok: true,
+        result: {
+          status: 'active',
+          ...params,
+          requested_origin_kind: params.origin_kind,
+          origin_kind: 'text',
+          voice_progress: 'unavailable',
+          voice_reason: 'TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE',
+          fallback_reason: null,
+          replayed: false,
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    throw new Error(`unexpected mounted recovery request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, sessionId, request));
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('Bounded natural-language Task route'),
+        'bounded recovery task intent route did not mount'
+      );
+    });
+    await act(async () => {
+      mountedTaskIntentControls(renderer).textarea.props.onChange({
+        target: { value: `create task: ${instructionCanary}` },
+      });
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      mountedTaskIntentControls(renderer).root.props.onSubmit({ preventDefault() {} });
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('FORMAL_TASK_INTENT_REQUEST_FAILED'),
+        'response loss did not retain the recoverable task status'
+      );
+    });
+    assert.equal(taskSideEffects, 1);
+    assert.equal(values.get(formalJournalKey).includes(instructionCanary), false);
+
+    await act(async () => {
+      renderer.update(mountedP3Element(i18n, sessionId, request, undefined, false));
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    await act(async () => {
+      renderer.update(mountedP3Element(i18n, sessionId, request, undefined, true));
+      await waitForMounted(
+        () =>
+          calls.some(
+            call =>
+              call.method === 'live_voice.composition.p3.progress.activate' &&
+              call.params.task_id === 'task-natural-recovered'
+          ),
+        'content-free recovered task did not reactivate its exact progress route'
+      );
+    });
+
+    assert.equal(taskSideEffects, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.intent').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.intent.status').length, 1);
+    assert.equal(values.has(formalJournalKey), false);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    restore();
+  }
+});
+
 test('mounted recognized speech requires an exact in-page second action and fences Agent and task dispatch', async () => {
   const i18n = await createI18n();
   const calls = [];
@@ -867,6 +1233,7 @@ test('mounted recognized speech requires an exact in-page second action and fenc
   const productVoiceStates = [];
   let activeMediaBinding = null;
   let recognitionIndex = 0;
+  let mutationIndex = 0;
   let resolveAgentSubmit = null;
   let resolveTaskSubmit = null;
   let renderer;
@@ -888,9 +1255,17 @@ test('mounted recognized speech requires an exact in-page second action and fenc
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'mounted-media-subject',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'S'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'fallback',
+          requested_capability: 'media.end_of_turn.v1',
+          reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
+          fallback: 'manual',
+          visible: true,
+        },
         binding: activeMediaBinding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -935,6 +1310,7 @@ test('mounted recognized speech requires an exact in-page second action and fenc
       };
     }
     if (method === 'live_voice.composition.p3.mutate') {
+      mutationIndex += 1;
       return {
         ok: true,
         result: {
@@ -943,14 +1319,20 @@ test('mounted recognized speech requires an exact in-page second action and fenc
           command_id: params.command_id,
           target_task_id: null,
           formal_task_result: {
-            task_id: 'mounted-structured-task',
-            attempt_id: 'mounted-structured-attempt',
+            task_id: `mounted-structured-task-${mutationIndex}`,
+            attempt_id: `mounted-structured-attempt-${mutationIndex}`,
             attempt_number: 1,
             state: 'accepted',
-            outbox_id: 'mounted-structured-outbox',
+            outbox_id: `mounted-structured-outbox-${mutationIndex}`,
           },
         },
       };
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
     }
     throw new Error(`unexpected fully-enabled mounted request: ${method}`);
   };
@@ -1174,6 +1556,30 @@ test('mounted recognized speech requires an exact in-page second action and fenc
         instruction: taskSubmit.params.text,
       }
     );
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(
+        () =>
+          calls.filter(
+            call =>
+              call.method === 'live_voice.composition.p3.progress.activate' &&
+              call.params.origin_kind === 'voice'
+          ).length === 1,
+        'exact voice task did not activate its voice-origin progress route'
+      );
+    });
+    const activationFacts = renderer.root
+      .findByProps({ 'data-testid': 'live-voice-integrated-p3-activation' })
+      .findAllByType('code')
+      .flatMap(node => node.children);
+    assert.equal(activationFacts.includes('voice->text'), true);
+    assert.equal(activationFacts.includes('unavailable'), true);
+    assert.equal(activationFacts.includes('TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE'), true);
+    assert.equal(
+      renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length,
+      0,
+      'voice activation fallback must be visible before any progress event exists'
+    );
   } finally {
     if (renderer) {
       await act(async () => {
@@ -1224,9 +1630,17 @@ test('mounted recognized speech cannot cross a same-Session P2 activation rollov
         status: 'active',
         reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
         subject_id: 'mounted-rollover-media-subject',
-        endpoint_path: '/ws/live-voice/media/private-ticket',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'S'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'fallback',
+          requested_capability: 'media.end_of_turn.v1',
+          reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
+          fallback: 'manual',
+          visible: true,
+        },
         binding: activeMediaBinding,
         privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
       };
@@ -1406,7 +1820,7 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
       if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
       if (method === 'live_voice.composition.p3.progress.activate') {
         exactProgressActivation = { ...params };
-        return { ok: true, result: { status: 'active', ...params } };
+        return { ok: true, result: mountedProgressActivation(params) };
       }
       if (method === 'live_voice.composition.p3.progress.close') {
         return { ok: true, result: { status: 'closed', ...params } };
@@ -1604,7 +2018,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
     if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.composition.p3.progress.activate') {
-      return { ok: true, result: { status: 'active', ...params } };
+      return { ok: true, result: mountedProgressActivation(params) };
     }
     if (method === 'live_voice.composition.p3.progress.close') {
       return { ok: true, result: { status: 'closed', ...params } };
@@ -2101,6 +2515,187 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
   }
 });
 
+test('mounted P1 applies opaque UI device choices to exact local browser routes without sending IDs to the backend', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const mediaActivations = [];
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = value => warnings.push(String(value));
+  let renderer;
+  const request = async (method, params) => {
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    if (method === 'live_voice.media.activate') {
+      mediaActivations.push({ ...params });
+      return { status: 'unavailable', reason_id: 'MOUNTED_DEVICE_ROUTE_PROBE_COMPLETE' };
+    }
+    throw new Error(`unexpected mounted device-selection request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-p1-device-session', request));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'P2 did not expose formal P1');
+      mountedAudioDeviceControls(renderer).button('Authorize and load devices').props.onClick();
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('Mounted microphone') && JSON.stringify(renderer.toJSON()).includes('Mounted speaker'),
+        'page-memory device inventory did not render'
+      );
+    });
+    const controls = mountedAudioDeviceControls(renderer);
+    const inputToken = controls.token(controls.input, 'Mounted microphone');
+    const outputToken = controls.token(controls.output, 'Mounted speaker');
+    assert.notEqual(inputToken, 'mounted-private-input');
+    assert.notEqual(outputToken, 'mounted-private-output');
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('mounted-private-input'), false);
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('mounted-private-output'), false);
+
+    await act(async () => {
+      controls.input.props.onChange({ target: { value: inputToken } });
+      controls.output.props.onChange({ target: { value: outputToken } });
+      await Promise.resolve();
+    });
+    await act(async () => {
+      mountedAudioDeviceControls(renderer).button('Apply devices').props.onClick();
+      await Promise.resolve();
+      formalVoiceStartButton(renderer).props.onClick();
+      await waitForMounted(() => mediaActivations.length === 1, 'exact local device route did not reach formal P1 startup');
+    });
+
+    assert.deepEqual(browser.counts.sinkIds, ['mounted-private-output']);
+    assert.equal(browser.counts.constraints[0].audio.deviceId.exact, 'mounted-private-input');
+    assert.equal(JSON.stringify(mediaActivations[0]).includes('mounted-private-input'), false);
+    assert.equal(JSON.stringify(mediaActivations[0]).includes('mounted-private-output'), false);
+    assert.equal(browser.counts.getUserMedia, 1, 'granted inventory load must not allocate a permission-probe stream');
+    assert.equal(warnings.some(value => value.includes('MOUNTED_DEVICE_ROUTE_PROBE_COMPLETE') && value.includes('fallback=text visible=true')), true);
+    assert.equal(warnings.some(value => value.includes('mounted-private-input') || value.includes('mounted-private-output')), false);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    console.warn = originalWarn;
+    browser.restore();
+  }
+});
+
+test('mounted Product start fails closed while devicechange verification owns the selected route', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const productVoiceControlRef = { current: null };
+  const mediaActivations = [];
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = value => warnings.push(String(value));
+  let renderer;
+  let resolveRefresh;
+  const refresh = new Promise(resolve => {
+    resolveRefresh = resolve;
+  });
+  const currentDevices = [
+    { kind: 'audioinput', deviceId: 'mounted-private-input', label: 'Mounted microphone' },
+    { kind: 'audiooutput', deviceId: 'mounted-private-output', label: 'Mounted speaker' },
+  ];
+  const request = async (method, params) => {
+    if (method === 'live_voice.composition.p2.activate') {
+      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    if (method === 'live_voice.media.activate') {
+      mediaActivations.push({ ...params });
+      return { status: 'unavailable', reason_id: 'UNEXPECTED_REFRESHING_PRODUCT_START' };
+    }
+    throw new Error(`unexpected mounted refreshing-device request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedP1Element(i18n, 'mounted-p1-refreshing-device-session', request, {
+          productVoiceControlRef,
+        })
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'P2 did not expose formal P1');
+      mountedAudioDeviceControls(renderer).button('Authorize and load devices').props.onClick();
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('Mounted microphone'),
+        'page-memory device inventory did not render'
+      );
+    });
+    const controls = mountedAudioDeviceControls(renderer);
+    const inputToken = controls.token(controls.input, 'Mounted microphone');
+    await act(async () => {
+      controls.input.props.onChange({ target: { value: inputToken } });
+      await Promise.resolve();
+      mountedAudioDeviceControls(renderer).button('Apply devices').props.onClick();
+      await Promise.resolve();
+    });
+
+    browser.setEnumerateDevices(() => refresh);
+    await act(async () => {
+      browser.emitDeviceChange();
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('Checking current devices...'),
+        'devicechange verification did not become visible'
+      );
+    });
+    assert.equal(formalVoiceStartButton(renderer).props.disabled, true);
+    assert.equal(productVoiceControlRef.current !== null, true);
+
+    await act(async () => {
+      await productVoiceControlRef.current.start();
+      await Promise.resolve();
+    });
+    assert.equal(mediaActivations.length, 0);
+    assert.equal(browser.counts.getUserMedia, 0);
+    assert.deepEqual(browser.counts.sinkIds, []);
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('AUDIO_DEVICE_REFRESH_IN_PROGRESS'), true);
+    assert.equal(
+      warnings.some(value => value.includes('AUDIO_DEVICE_REFRESH_IN_PROGRESS') && value.includes('fallback=text visible=true')),
+      true
+    );
+    assert.equal(warnings.some(value => value.includes('mounted-private-input') || value.includes('mounted-private-output')), false);
+
+    await act(async () => {
+      resolveRefresh(currentDevices);
+      await waitForMounted(
+        () => !JSON.stringify(renderer.toJSON()).includes('Checking current devices...'),
+        'verified device route did not leave refreshing status'
+      );
+    });
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    console.warn = originalWarn;
+    browser.restore();
+  }
+});
+
 test('mounted P1 cleanup singleflight fences two retained Start attempts until exact close, then allocates one successor', async () => {
   const i18n = await createI18n();
   const browser = installP1BrowserEnvironment();
@@ -2126,6 +2721,7 @@ test('mounted P1 cleanup singleflight fences two retained Start attempts until e
           reason_id: null,
           subject_id: 'mounted-p1-old-subject',
           endpoint_path: '/api/v1/live_voice/media',
+          media_ticket: 'S'.repeat(43),
           subprotocol: 'live-voice.media.v1',
           ticket_ttl_ms: 30_000,
           binding: {},
@@ -2242,6 +2838,7 @@ test('mounted P1 retained Start cannot allocate an old-binding successor after S
         reason_id: null,
         subject_id: 'mounted-p1-replaced-session-subject',
         endpoint_path: '/api/v1/live_voice/media',
+        media_ticket: 'S'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
         binding: {},
@@ -2357,6 +2954,7 @@ test('mounted P1 retained Start cannot allocate a successor after unmount wins d
         reason_id: null,
         subject_id: 'mounted-p1-unmount-subject',
         endpoint_path: '/api/v1/live_voice/media',
+        media_ticket: 'S'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
         binding: {},
@@ -2458,6 +3056,7 @@ test('mounted P1 retains failed exact authority and blocks two user Start attemp
         reason_id: null,
         subject_id: 'mounted-p1-retained-subject',
         endpoint_path: '/api/v1/live_voice/media',
+        media_ticket: 'S'.repeat(43),
         subprotocol: 'live-voice.media.v1',
         ticket_ttl_ms: 30_000,
         binding: {},

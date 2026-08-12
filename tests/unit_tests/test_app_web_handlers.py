@@ -18,6 +18,18 @@ from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import (
     _register_web_handlers,
     _validate_wechat_numeric_params,
 )
+from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
+    MEDIA_FEATURE_ENV,
+)
+from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
+    StreamingSynthesisRouteOwner,
+)
+from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
+    StreamingRecognitionRouteOwner,
+)
+from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    STREAMING_SPEECH_FLAG,
+)
 
 
 class FakeWebChannel:
@@ -147,6 +159,45 @@ async def test_session_list_preserves_team_name_in_projected_metadata(
     assert payload["sessions"][0]["mode"] == "team"
     assert payload["sessions"][0]["team_name"] == "dev-team-swarm_sess-team-1"
     assert "delivery_context" not in payload["sessions"][0]
+
+
+@pytest.mark.asyncio
+async def test_web_registration_constructs_both_streaming_direction_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    enabled_channel = FakeWebChannel()
+    monkeypatch.setenv(MEDIA_FEATURE_ENV, "true")
+    monkeypatch.setenv(STREAMING_SPEECH_FLAG, "true")
+
+    _register_web_handlers(WebHandlersBindParams(channel=enabled_channel))
+
+    owner = enabled_channel.live_voice_streaming_synthesis_owner
+    recognition_owner = enabled_channel.live_voice_streaming_speech_owner
+    assert isinstance(owner, StreamingSynthesisRouteOwner)
+    assert isinstance(recognition_owner, StreamingRecognitionRouteOwner)
+    assert (
+        enabled_channel.live_voice_media_registry._streaming_synthesis_owner is owner
+    )
+    assert (
+        enabled_channel.live_voice_media_registry._streaming_recognition_owner
+        is recognition_owner
+    )
+    assert enabled_channel.live_voice_speech_service is not None
+    await owner.close()
+    await recognition_owner.close()
+
+    disabled_channel = FakeWebChannel()
+    monkeypatch.setenv(STREAMING_SPEECH_FLAG, "false")
+
+    _register_web_handlers(WebHandlersBindParams(channel=disabled_channel))
+
+    assert disabled_channel.live_voice_streaming_synthesis_owner is None
+    assert disabled_channel.live_voice_media_registry._streaming_synthesis_owner is None
+    assert isinstance(
+        disabled_channel.live_voice_streaming_speech_owner,
+        StreamingRecognitionRouteOwner,
+    )
+    await disabled_channel.live_voice_streaming_speech_owner.close()
 
 
 @pytest.mark.asyncio

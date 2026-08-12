@@ -14,6 +14,7 @@ import {
   type MediaControl,
   type MediaDetach,
   type MediaDetachReason,
+  type MediaEndOfTurn,
   type MediaEnqueueResult,
   type MediaAudioFrame,
   type MediaPlaybackStopReceipt,
@@ -23,6 +24,8 @@ import {
 export { decodeAudioFrame, deserializeMediaControl, encodeAudioFrame, serializeMediaControl } from './browserGatewayMediaTransport.js';
 
 export const DEDICATED_MEDIA_SUBPROTOCOL = 'live-voice.media.v1' as const;
+export const DEDICATED_MEDIA_ROUTE_PATH = '/ws/live-voice/media' as const;
+export const DEDICATED_MEDIA_AUTH_CONTRACT_VERSION = 'live-voice.media-auth.v1' as const;
 export const DEDICATED_MEDIA_ROUTE_EVIDENCE_SCOPE = 'browser_dedicated_media_socket_leaf_only' as const;
 
 const SOCKET_CONNECTING = 0;
@@ -30,10 +33,16 @@ const SOCKET_OPEN = 1;
 const SOCKET_CLOSING = 2;
 const SOCKET_CLOSED = 3;
 const DEFAULT_SOCKET_HIGH_WATER_BYTES = 256 * 1024;
+const DEFAULT_DRAIN_RETRY_DELAY_MS = 25;
+const DEFAULT_MAX_DRAIN_STALL_RETRIES = 120;
 const MAX_PENDING_FRAMES = 256;
 const MAX_PENDING_BYTES = 8 * 1024 * 1024;
 const MAX_SOCKET_HIGH_WATER_BYTES = 8 * 1024 * 1024;
+const MAX_DRAIN_RETRY_DELAY_MS = 1_000;
+const MAX_DRAIN_STALL_RETRIES = 10_000;
 const MAX_LOCAL_STOP_CURSOR_FACTS = 256;
+const MAX_MEDIA_TICKET_CHARS = 128;
+const MAX_MEDIA_AUTH_FRAME_BYTES = 8 * 1024;
 const DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN = Symbol('dedicated-media-socket-leaf');
 const BROWSER_AUDIO_LOCAL_STOP_OUTCOMES: ReadonlySet<string> = new Set([
   'local_fence_established',
@@ -96,19 +105,40 @@ interface PendingUplinkCompletion {
 }
 
 export type DedicatedMediaSocketFactory = (url: string, protocols: readonly string[]) => DedicatedMediaSocketLike;
+export type DedicatedMediaDrainRetryScheduler = (callback: () => void, delayMs: number) => unknown;
+export type DedicatedMediaDrainRetryCanceller = (handle: unknown) => void;
+
+export type DedicatedMediaTerminalSource = 'local_close' | 'expected_completion' | 'peer_detach' | 'transport_close' | 'internal_failure';
+
+export interface DedicatedMediaTerminalEvent {
+  readonly reason_id: MediaDetachReason;
+  readonly source: DedicatedMediaTerminalSource;
+  readonly direction: MediaAuthorityBinding['direction'];
+  readonly attached_before_close: boolean;
+}
 
 export interface BrowserDedicatedMediaRouteRequest {
   readonly enabled: boolean;
   readonly expected_origin: string;
   readonly endpoint_url: string;
+  readonly media_ticket?: string;
+  /** W2-only ticket-in-path compatibility. Alpha product never enables this. */
+  readonly legacy_path_ticket_compat?: boolean;
   readonly binding: MediaAuthorityBinding | null;
   readonly provider_available: boolean;
   readonly transport_available: boolean;
   readonly socket_factory: DedicatedMediaSocketFactory;
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
+  readonly on_terminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
+  readonly end_of_turn_capability?: 'media.end_of_turn.v1';
+  readonly on_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly max_pending_frames?: number;
   readonly max_pending_bytes?: number;
   readonly socket_high_water_bytes?: number;
+  readonly drain_retry_delay_ms?: number;
+  readonly max_drain_stall_retries?: number;
+  readonly schedule_drain_retry?: DedicatedMediaDrainRetryScheduler;
+  readonly cancel_drain_retry?: DedicatedMediaDrainRetryCanceller;
   /** Hold downlink ACKs until the corresponding browser audio chunk renders. */
   readonly defer_downlink_ack?: boolean;
 }
@@ -177,7 +207,7 @@ function canonicalOrigin(value: unknown): URL | null {
   return parsed;
 }
 
-function dedicatedEndpoint(expectedOrigin: unknown, endpointUrl: unknown): string | null {
+function dedicatedEndpoint(expectedOrigin: unknown, endpointUrl: unknown, legacyPathTicketCompat: boolean): string | null {
   const origin = canonicalOrigin(expectedOrigin);
   if (origin === null || typeof endpointUrl !== 'string' || endpointUrl !== endpointUrl.trim()) return null;
   let endpoint: URL;
@@ -194,10 +224,37 @@ function dedicatedEndpoint(expectedOrigin: unknown, endpointUrl: unknown): strin
     endpoint.password !== '' ||
     endpoint.search !== '' ||
     endpoint.hash !== '' ||
-    endpoint.pathname === '/'
+    (
+      legacyPathTicketCompat
+        ? !endpoint.pathname.startsWith(`${DEDICATED_MEDIA_ROUTE_PATH}/`)
+        : endpoint.pathname !== DEDICATED_MEDIA_ROUTE_PATH
+    )
   )
     return null;
   return endpoint.href;
+}
+
+function validMediaTicket(value: unknown): value is string {
+  return (
+    typeof value === 'string'
+    && value.length >= 32
+    && value.length <= MAX_MEDIA_TICKET_CHARS
+    && /^[A-Za-z0-9_-]+$/.test(value)
+  );
+}
+
+function mediaAuthFrame(ticket: string, binding: MediaAuthorityBinding): string {
+  const attach = JSON.parse(serializeMediaControl({ type: 'media.attach', binding })) as { binding?: unknown };
+  const frame = JSON.stringify({
+    type: 'media.auth',
+    contract_version: DEDICATED_MEDIA_AUTH_CONTRACT_VERSION,
+    media_ticket: ticket,
+    binding: attach.binding,
+  });
+  if (new TextEncoder().encode(frame).byteLength > MAX_MEDIA_AUTH_FRAME_BYTES) {
+    throw new TypeError('dedicated media authentication frame exceeds its bound');
+  }
+  return frame;
 }
 
 function closeReasonFrom(error: unknown): MediaDetachReason {
@@ -223,6 +280,16 @@ function boundedPositiveInteger(value: unknown, maximum: number, field: string):
     throw new TypeError(`${field} must be a positive safe integer no greater than ${maximum}`);
   }
   return value as number;
+}
+
+const scheduleDefaultDrainRetry: DedicatedMediaDrainRetryScheduler = (callback, delayMs) => globalThis.setTimeout(callback, delayMs);
+const cancelDefaultDrainRetry: DedicatedMediaDrainRetryCanceller = handle => globalThis.clearTimeout(handle as number);
+
+interface ScheduledDrainRetry {
+  readonly generation: number;
+  scheduling: boolean;
+  fired: boolean;
+  handle: unknown;
 }
 
 function hasExactFrozenDataFields(value: unknown, fields: readonly string[]): value is Readonly<Record<string, unknown>> {
@@ -400,10 +467,28 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   }
   if (request.provider_available !== true) return inactive('MEDIA_PROVIDER_UNAVAILABLE');
   if (request.transport_available !== true) return inactive('MEDIA_TRANSPORT_UNAVAILABLE');
-  const endpoint = dedicatedEndpoint(request.expected_origin, request.endpoint_url);
+  if (request.legacy_path_ticket_compat !== undefined && typeof request.legacy_path_ticket_compat !== 'boolean') {
+    throw new TypeError('legacy_path_ticket_compat must be boolean');
+  }
+  const legacyPathTicketCompat = request.legacy_path_ticket_compat === true;
+  const endpoint = dedicatedEndpoint(request.expected_origin, request.endpoint_url, legacyPathTicketCompat);
   if (endpoint === null) return inactive('MEDIA_ORIGIN_REJECTED');
+  const ticket = request.media_ticket;
+  if (!legacyPathTicketCompat && !validMediaTicket(ticket)) {
+    return inactive('MEDIA_AUTHORITY_UNAVAILABLE');
+  }
   if (typeof request.socket_factory !== 'function') {
     return inactive('MEDIA_TRANSPORT_UNAVAILABLE');
+  }
+  if (request.on_terminal !== undefined && typeof request.on_terminal !== 'function') {
+    throw new TypeError('on_terminal must be a function');
+  }
+  if (
+    (request.end_of_turn_capability === undefined) !== (request.on_end_of_turn === undefined) ||
+    (request.end_of_turn_capability !== undefined && request.end_of_turn_capability !== 'media.end_of_turn.v1') ||
+    (request.on_end_of_turn !== undefined && typeof request.on_end_of_turn !== 'function')
+  ) {
+    throw new TypeError('end-of-turn requires one exact negotiated capability and consumer');
   }
   const maxPendingFrames = boundedPositiveInteger(request.max_pending_frames ?? 8, MAX_PENDING_FRAMES, 'max_pending_frames');
   const maxPendingBytes = boundedPositiveInteger(request.max_pending_bytes ?? 131_072, MAX_PENDING_BYTES, 'max_pending_bytes');
@@ -412,6 +497,27 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
     MAX_SOCKET_HIGH_WATER_BYTES,
     'socket_high_water_bytes'
   );
+  const drainRetryDelayMs = boundedPositiveInteger(
+    request.drain_retry_delay_ms ?? DEFAULT_DRAIN_RETRY_DELAY_MS,
+    MAX_DRAIN_RETRY_DELAY_MS,
+    'drain_retry_delay_ms'
+  );
+  const maxDrainStallRetries = boundedPositiveInteger(
+    request.max_drain_stall_retries ?? DEFAULT_MAX_DRAIN_STALL_RETRIES,
+    MAX_DRAIN_STALL_RETRIES,
+    'max_drain_stall_retries'
+  );
+  const customDrainScheduler = request.schedule_drain_retry;
+  const customDrainCanceller = request.cancel_drain_retry;
+  if ((customDrainScheduler === undefined) !== (customDrainCanceller === undefined)) {
+    throw new TypeError('custom drain retry scheduling requires both schedule and cancel functions');
+  }
+  if (customDrainScheduler !== undefined && typeof customDrainScheduler !== 'function') {
+    throw new TypeError('schedule_drain_retry must be a function');
+  }
+  if (customDrainCanceller !== undefined && typeof customDrainCanceller !== 'function') {
+    throw new TypeError('cancel_drain_retry must be a function');
+  }
   if (request.defer_downlink_ack !== undefined && typeof request.defer_downlink_ack !== 'boolean') throw new TypeError('defer_downlink_ack must be boolean');
 
   const activation = createBrowserGatewayMediaActivation({
@@ -428,6 +534,7 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   }
   let socket: DedicatedMediaSocketLike | null = null;
   try {
+    const authenticationFrame = legacyPathTicketCompat ? null : mediaAuthFrame(ticket as string, activation.binding);
     socket = request.socket_factory(endpoint, Object.freeze([DEDICATED_MEDIA_SUBPROTOCOL]));
     if (socket.readyState !== SOCKET_CONNECTING) {
       throw new TypeError('dedicated media socket factory must return a new connecting socket');
@@ -438,7 +545,15 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
       maxPendingFrames,
       maxPendingBytes,
       highWaterBytes,
+      drainRetryDelayMs,
+      maxDrainStallRetries,
+      customDrainScheduler ?? scheduleDefaultDrainRetry,
+      customDrainCanceller ?? cancelDefaultDrainRetry,
       request.defer_downlink_ack === true,
+      authenticationFrame,
+      request.on_terminal,
+      request.end_of_turn_capability,
+      request.on_end_of_turn,
       DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN
     );
     return Object.freeze({
@@ -467,7 +582,15 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly #maxPendingFrames: number;
   readonly #maxPendingBytes: number;
   readonly #socketHighWaterBytes: number;
+  readonly #drainRetryDelayMs: number;
+  readonly #maxDrainStallRetries: number;
+  readonly #scheduleDrainRetry: DedicatedMediaDrainRetryScheduler;
+  readonly #cancelDrainRetry: DedicatedMediaDrainRetryCanceller;
   readonly #deferDownlinkAck: boolean;
+  #pendingAuthenticationFrame: string | null;
+  readonly #onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
+  readonly #endOfTurnCapability?: 'media.end_of_turn.v1';
+  readonly #onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #pendingDownlinkAcks = new Map<number, Readonly<{ ack: Readonly<MediaAck>; byteLength: number }>>();
   #pendingDownlinkBytes = 0;
   #lastDeferredDownlinkAck = -1;
@@ -475,6 +598,11 @@ export class BrowserDedicatedMediaSocketLeaf {
   #closed = false;
   #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
   #pendingUplinkCompletion: PendingUplinkCompletion | null = null;
+  #terminalNotified = false;
+  #endOfTurnSeen = false;
+  #scheduledDrainRetry: ScheduledDrainRetry | null = null;
+  #drainRetryGeneration = 0;
+  #drainStallRetries = 0;
 
   constructor(
     activation: ActiveMediaActivation,
@@ -482,7 +610,15 @@ export class BrowserDedicatedMediaSocketLeaf {
     maxPendingFrames: number,
     maxPendingBytes: number,
     socketHighWaterBytes: number,
+    drainRetryDelayMs: number,
+    maxDrainStallRetries: number,
+    scheduleDrainRetry: DedicatedMediaDrainRetryScheduler,
+    cancelDrainRetry: DedicatedMediaDrainRetryCanceller,
     deferDownlinkAck: boolean,
+    authenticationFrame: string | null,
+    onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void,
+    endOfTurnCapability?: 'media.end_of_turn.v1',
+    onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void,
     constructionToken?: symbol
   ) {
     if (constructionToken !== DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN) {
@@ -494,22 +630,40 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#maxPendingFrames = maxPendingFrames;
     this.#maxPendingBytes = maxPendingBytes;
     this.#socketHighWaterBytes = socketHighWaterBytes;
+    this.#drainRetryDelayMs = drainRetryDelayMs;
+    this.#maxDrainStallRetries = maxDrainStallRetries;
+    this.#scheduleDrainRetry = scheduleDrainRetry;
+    this.#cancelDrainRetry = cancelDrainRetry;
     this.#deferDownlinkAck = deferDownlinkAck;
+    this.#pendingAuthenticationFrame = authenticationFrame;
+    this.#onTerminal = onTerminal;
+    this.#endOfTurnCapability = endOfTurnCapability;
+    this.#onEndOfTurn = onEndOfTurn;
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
       if (this.#closed) return;
       if (socket.protocol !== DEDICATED_MEDIA_SUBPROTOCOL) {
         this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR', false);
+        return;
+      }
+      const authenticationFrame = this.#pendingAuthenticationFrame;
+      if (authenticationFrame !== null) {
+        this.#pendingAuthenticationFrame = null;
+        try {
+          socket.send(authenticationFrame);
+        } catch {
+          this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false);
+        }
       }
     };
     socket.onmessage = event => {
       this.#acceptMessage(event.data);
     };
     socket.onerror = () => {
-      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
     };
     socket.onclose = () => {
-      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
     };
   }
 
@@ -567,7 +721,12 @@ export class BrowserDedicatedMediaSocketLeaf {
   }
 
   flush(): Readonly<{ sent_frames: number; pending_frames: number; pending_bytes: number; reason_id: string }> {
+    return this.#drain(false);
+  }
+
+  #drain(fromRetry: boolean): Readonly<{ sent_frames: number; pending_frames: number; pending_bytes: number; reason_id: string }> {
     if (this.closed || !this.#attached) {
+      this.#cancelScheduledDrainRetry();
       const snapshot = this.#activation.owner.lifecycleSnapshot();
       return {
         sent_frames: 0,
@@ -586,8 +745,80 @@ export class BrowserDedicatedMediaSocketLeaf {
       this.#socket.send(binary);
       return 'sent';
     });
-    if (this.#activation.owner.closed) this.#terminate(closeReasonFrom({ reasonId: drained.reason_id }));
+    if (this.#activation.owner.closed) {
+      const reasonId = closeReasonFrom({ reasonId: drained.reason_id });
+      const source = ['MEDIA_TRANSPORT_CLOSED', 'MEDIA_TRANSPORT_SEND_FAILED'].includes(reasonId) ? 'transport_close' : 'internal_failure';
+      this.#terminate(reasonId, true, source);
+      return drained;
+    }
+    if (fromRetry) {
+      if (drained.pending_frames === 0 || drained.sent_frames > 0 || drained.reason_id === 'MEDIA_AWAITING_ACK') this.#drainStallRetries = 0;
+      else if (drained.reason_id === 'MEDIA_BACKPRESSURED') this.#drainStallRetries += 1;
+    }
+    if (this.#drainStallRetries >= this.#maxDrainStallRetries) {
+      this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', true, 'transport_close');
+      return { ...drained, reason_id: 'MEDIA_TRANSPORT_SEND_FAILED' };
+    }
+    if (drained.pending_frames > 0 && (drained.reason_id === 'MEDIA_BACKPRESSURED' || (drained.reason_id === 'MEDIA_DRAINED' && drained.pending_frames > 0))) {
+      this.#scheduleDrainProbe();
+    } else {
+      this.#cancelScheduledDrainRetry();
+    }
     return drained;
+  }
+
+  #scheduleDrainProbe(): void {
+    if (this.closed || this.#scheduledDrainRetry !== null) return;
+    const scheduled: ScheduledDrainRetry = {
+      generation: ++this.#drainRetryGeneration,
+      scheduling: true,
+      fired: false,
+      handle: undefined,
+    };
+    this.#scheduledDrainRetry = scheduled;
+    try {
+      const handle = this.#scheduleDrainRetry(() => {
+        scheduled.fired = true;
+        if (scheduled.scheduling) {
+          if (this.#scheduledDrainRetry === scheduled) {
+            this.#scheduledDrainRetry = null;
+            this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', true, 'internal_failure');
+          }
+          return;
+        }
+        if (this.#scheduledDrainRetry !== scheduled || scheduled.generation !== this.#drainRetryGeneration) return;
+        this.#scheduledDrainRetry = null;
+        if (this.closed) return;
+        try {
+          this.#drain(true);
+        } catch {
+          this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', true, 'internal_failure');
+        }
+      }, this.#drainRetryDelayMs);
+      scheduled.handle = handle;
+      scheduled.scheduling = false;
+      if (handle === undefined || handle === null) {
+        if (this.#scheduledDrainRetry === scheduled) this.#scheduledDrainRetry = null;
+        this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', true, 'internal_failure');
+      }
+    } catch {
+      scheduled.scheduling = false;
+      if (this.#scheduledDrainRetry === scheduled) this.#scheduledDrainRetry = null;
+      this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', true, 'internal_failure');
+    }
+  }
+
+  #cancelScheduledDrainRetry(): void {
+    const scheduled = this.#scheduledDrainRetry;
+    if (scheduled === null) return;
+    this.#scheduledDrainRetry = null;
+    ++this.#drainRetryGeneration;
+    if (scheduled.handle === undefined || scheduled.handle === null) return;
+    try {
+      this.#cancelDrainRetry(scheduled.handle);
+    } catch {
+      // The leaf generation fence keeps a late callback inert.
+    }
   }
 
   sendLocalPlaybackStop(value: unknown): MediaPlaybackStopReceipt {
@@ -613,27 +844,27 @@ export class BrowserDedicatedMediaSocketLeaf {
       throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered because the media leaf is closed');
     }
     if (!this.#attached) {
-      this.#terminate('MEDIA_LOCAL_CLOSE');
+      this.#terminate('MEDIA_LOCAL_CLOSE', true, 'local_close');
       throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered before server attach');
     }
     if (this.#socket.readyState !== SOCKET_OPEN) {
-      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
       throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop was not delivered because the transport is unavailable');
     }
     try {
       this.#socket.send(serializeMediaControl(control));
     } catch {
-      this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false);
+      this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false, 'transport_close');
       throw new MediaTransportViolation('MEDIA_STOP_NOT_DELIVERED', 'local playback stop transport send failed');
     }
     if (!this.#closed) {
-      this.#terminate('MEDIA_LOCAL_CLOSE');
+      this.#terminate('MEDIA_LOCAL_CLOSE', true, 'local_close');
     }
     return control;
   }
 
   close(reasonId: MediaDetachReason = 'MEDIA_LOCAL_CLOSE'): MediaRegistrationOwnerCloseResult {
-    return this.#terminate(reasonId);
+    return this.#terminate(reasonId, true, 'local_close');
   }
 
   async completeUplink(reasonId: MediaDetachReason = 'MEDIA_LOCAL_CLOSE'): Promise<MediaRegistrationOwnerCloseResult> {
@@ -647,9 +878,10 @@ export class BrowserDedicatedMediaSocketLeaf {
       throw new MediaTransportViolation('MEDIA_LEASE_CLOSED', 'authoritative detach completion requires an active media leaf');
     }
     if (!this.#attached || this.#socket.readyState !== SOCKET_OPEN) {
-      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
       throw new MediaTransportViolation('MEDIA_TRANSPORT_CLOSED', 'authoritative detach completion requires an attached transport');
     }
+    this.#cancelScheduledDrainRetry();
     const closed = this.#activation.owner.close(reasonId);
     const expected = closed.sender_detach;
     if (expected === null) {
@@ -669,7 +901,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     try {
       this.#socket.send(serializeMediaControl(expected));
     } catch {
-      this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_SEND_FAILED');
+      this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_SEND_FAILED', 'transport_close');
     }
     return promise;
   }
@@ -769,11 +1001,25 @@ export class BrowserDedicatedMediaSocketLeaf {
       return;
     }
     if (control.type === 'media.detach') {
+      const attachedBeforeClose = this.#attached;
+      this.#cancelScheduledDrainRetry();
       const closed = this.#activation.owner.acceptDetach(control);
       this.#retainedClose = closed;
       this.#closed = true;
       this.#attached = false;
+      const expectedCompletion =
+        this.binding.direction === 'downlink' &&
+        this.#deferDownlinkAck &&
+        control.reason_id === 'MEDIA_LOCAL_CLOSE' &&
+        this.#lastDeferredDownlinkAck >= 0 &&
+        control.through_seq === this.#lastDeferredDownlinkAck &&
+        this.#pendingDownlinkAcks.size === 0;
+      this.#notifyTerminal(closed.reason_id, expectedCompletion ? 'expected_completion' : 'peer_detach', attachedBeforeClose);
       this.#closeSocket();
+      return;
+    }
+    if (control.type === 'media.end_of_turn') {
+      this.#acceptEndOfTurn(control);
       return;
     }
     if (control.type === 'media.ack' && this.binding.direction === 'uplink') {
@@ -791,13 +1037,13 @@ export class BrowserDedicatedMediaSocketLeaf {
 
   #sendControl(control: MediaControl): void {
     if (this.#socket.readyState !== SOCKET_OPEN) {
-      this.#terminate('MEDIA_TRANSPORT_CLOSED', false);
+      this.#terminate('MEDIA_TRANSPORT_CLOSED', false, 'transport_close');
       return;
     }
     try {
       this.#socket.send(serializeMediaControl(control));
     } catch {
-      this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false);
+      this.#terminate('MEDIA_TRANSPORT_SEND_FAILED', false, 'transport_close');
     }
   }
 
@@ -805,6 +1051,10 @@ export class BrowserDedicatedMediaSocketLeaf {
     const pending = this.#pendingUplinkCompletion;
     if (pending === null) return;
     const expected = pending.expected;
+    if (control.type === 'media.end_of_turn') {
+      this.#acceptEndOfTurn(control);
+      return;
+    }
     if (
       control.type !== 'media.detach' ||
       control.lease_id !== expected.lease_id ||
@@ -822,30 +1072,66 @@ export class BrowserDedicatedMediaSocketLeaf {
       return;
     }
     this.#pendingUplinkCompletion = null;
+    const attachedBeforeClose = this.#attached;
     this.#closed = true;
     this.#attached = false;
-    this.#closeSocket();
     pending.resolve(closed);
+    this.#notifyTerminal(closed.reason_id, 'expected_completion', attachedBeforeClose);
+    this.#closeSocket();
   }
 
-  #failPendingUplinkCompletion(reasonId: MediaDetachReason): void {
+  #acceptEndOfTurn(control: Readonly<MediaEndOfTurn>): void {
+    if (
+      this.#endOfTurnCapability !== 'media.end_of_turn.v1' ||
+      this.#onEndOfTurn === undefined ||
+      this.binding.direction !== 'uplink' ||
+      control.capability_version !== this.#endOfTurnCapability ||
+      control.lease_id !== this.binding.lease_id ||
+      control.generation !== this.binding.generation.value ||
+      this.#endOfTurnSeen
+    ) {
+      if (this.#pendingUplinkCompletion !== null) {
+        this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+      } else {
+        this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+      }
+      return;
+    }
+    this.#endOfTurnSeen = true;
+    try {
+      this.#onEndOfTurn(control);
+    } catch {
+      if (this.#pendingUplinkCompletion !== null) {
+        this.#failPendingUplinkCompletion('MEDIA_CONSUMER_FAILED');
+      } else {
+        this.#terminate('MEDIA_CONSUMER_FAILED');
+      }
+    }
+  }
+
+  #failPendingUplinkCompletion(reasonId: MediaDetachReason, source: DedicatedMediaTerminalSource = 'internal_failure'): void {
     const pending = this.#pendingUplinkCompletion;
     if (pending === null) return;
+    const attachedBeforeClose = this.#attached;
     this.#pendingUplinkCompletion = null;
     this.#closed = true;
     this.#attached = false;
-    this.#closeSocket();
     pending.reject(new MediaTransportViolation(reasonId, 'authoritative media completion receipt was not observed'));
+    this.#notifyTerminal(reasonId, source, attachedBeforeClose);
+    this.#closeSocket();
   }
 
-  #terminate(reasonId: MediaDetachReason, sendDetach = true): MediaRegistrationOwnerCloseResult {
+  #terminate(reasonId: MediaDetachReason, sendDetach = true, source: DedicatedMediaTerminalSource = 'internal_failure'): MediaRegistrationOwnerCloseResult {
+    this.#pendingAuthenticationFrame = null;
     if (this.#pendingUplinkCompletion !== null) {
       const retained = this.#retainedClose ?? this.#activation.owner.close(reasonId);
       this.#retainedClose = retained;
-      this.#failPendingUplinkCompletion(reasonId);
+      this.#failPendingUplinkCompletion(reasonId, source);
       return retained;
     }
     if (this.#retainedClose !== null) return this.#retainedClose;
+    this.#cancelScheduledDrainRetry();
+    const attachedBeforeClose = this.#attached;
     const closed = this.#activation.owner.close(reasonId);
     this.#retainedClose = closed;
     this.#pendingDownlinkAcks.clear();
@@ -862,8 +1148,26 @@ export class BrowserDedicatedMediaSocketLeaf {
         }
       }
     }
+    this.#notifyTerminal(closed.reason_id, source, attachedBeforeClose);
     this.#closeSocket();
     return closed;
+  }
+
+  #notifyTerminal(reasonId: MediaDetachReason, source: DedicatedMediaTerminalSource, attachedBeforeClose: boolean): void {
+    if (this.#terminalNotified) return;
+    this.#terminalNotified = true;
+    try {
+      this.#onTerminal?.(
+        Object.freeze({
+          reason_id: reasonId,
+          source,
+          direction: this.binding.direction,
+          attached_before_close: attachedBeforeClose,
+        })
+      );
+    } catch {
+      // Terminal observers cannot change the already-established media fence.
+    }
   }
 
   #closeSocket(): void {

@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,6 +14,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     ContextRef,
     ErrorCode,
+    ResponseRef,
     ScopeRef,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
@@ -43,6 +45,10 @@ from jiuwenswarm.server.live_voice.product_p2_interaction_adapter import (
     P2LeaseState,
     ProductP2AdapterViolation,
     ProductP2InteractionAdapter,
+)
+from jiuwenswarm.server.live_voice.task_progress_return import (
+    TaskProgressNotificationIntent,
+    TaskProgressOriginKind,
 )
 
 
@@ -95,6 +101,7 @@ class FakeRuntime:
         close_statuses: list[AgentConversationShutdownStatus] | None = None,
         close_gate: asyncio.Event | None = None,
         attach_failure: Exception | None = None,
+        progress_result: bool = True,
         order: list[str] | None = None,
     ) -> None:
         self.start_result = start_result
@@ -108,10 +115,20 @@ class FakeRuntime:
         self.close_gate = close_gate
         self.attach_failure = attach_failure
         self.order = order
+        self.progress_result = progress_result
+        self.progress_intents: list[TaskProgressNotificationIntent] = []
+        self.progress_responses: list[ResponseRef] = []
         self.start_calls = 0
         self.open_calls: list[str] = []
         self.close_calls = 0
         self.closed = False
+
+    async def accept_task_progress_notification(
+        self, intent: TaskProgressNotificationIntent, *, response_ref: ResponseRef
+    ) -> bool:
+        self.progress_intents.append(intent)
+        self.progress_responses.append(response_ref)
+        return self.progress_result
 
     def attach_notification_consumer(
         self, *, consumer_id: str, connection_epoch: int
@@ -326,6 +343,55 @@ async def test_authority_succeeds_before_any_factory_or_runtime_effect() -> None
     assert result.evidence.evidence_scope == "package_only"
     assert result.evidence.formal_route_ready is False
     assert result.evidence.real_runtime_path_observed is False
+
+
+@pytest.mark.asyncio
+async def test_voice_task_progress_requires_exact_open_p2_binding_and_cr_acceptance() -> None:
+    resolver = RecordingResolver((candidate(),))
+    runtime = FakeRuntime()
+    result = await adapter_for(resolver, lambda _context, _binding: runtime).activate(
+        request()
+    )
+    assert result.lease is not None
+    binding = result.lease.binding
+    intent = TaskProgressNotificationIntent(
+        origin=SimpleNamespace(
+            scope=binding.scope,
+            session_id=binding.session_id,
+            origin_id=binding.interaction_id,
+            origin_kind=TaskProgressOriginKind.VOICE,
+        ),
+        task_event=None,
+        source_event=None,
+        progress_event=None,
+        decision=None,
+        evidence_id="progress-evidence-1",
+    )
+    response = ResponseRef(binding.interaction_id, "response-progress-1", 0)
+
+    assert await result.lease.deliver_task_progress(binding, intent, response) is True
+    assert runtime.progress_intents == [intent]
+    assert runtime.progress_responses == [response]
+
+    foreign = replace(
+        intent,
+        origin=SimpleNamespace(
+            scope=binding.scope,
+            session_id=binding.session_id,
+            origin_id="interaction-foreign",
+            origin_kind=TaskProgressOriginKind.VOICE,
+        ),
+    )
+    with pytest.raises(ProductP2AdapterViolation) as rejected:
+        await result.lease.deliver_task_progress(binding, foreign, response)
+    assert rejected.value.reason == "TASK_PROGRESS_ORIGIN_MISMATCH"
+    assert runtime.progress_intents == [intent]
+
+    runtime.progress_result = False
+    with pytest.raises(ProductP2AdapterViolation) as unavailable:
+        await result.lease.deliver_task_progress(binding, intent, response)
+    assert unavailable.value.reason == "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
+    assert runtime.progress_intents == [intent, intent]
 
 
 @pytest.mark.asyncio

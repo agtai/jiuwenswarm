@@ -67,7 +67,10 @@ from .project_code_executor import (
     ProjectExecutionBinding,
 )
 from .task_event_subscription import TaskEventSubscription
-from .task_progress_return import TaskProgressOriginBinding
+from .task_progress_return import (
+    TaskEventAuthorityProgressSource,
+    TaskProgressOriginBinding,
+)
 from .task_store import SqliteTaskStore
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
@@ -973,7 +976,12 @@ class P3AuthenticatedComposition:
                 "formal product capability is unavailable",
                 ErrorCode.PERMISSION_DENIED,
             )
-        targeted = operation in {"task.get", "task.status", "task.events"}
+        targeted = operation in {
+            "task.get",
+            "task.status",
+            "task.events",
+            "task.cancel",
+        }
         if targeted != bool(task_id):
             raise FormalTaskViolation(
                 "INVALID_P3_ROUTE_ARGUMENT",
@@ -1134,6 +1142,45 @@ class P3AuthenticatedComposition:
             queue_capacity=256,
             validation_capacity=4096,
             authority_atomic_replay=True,
+        )
+
+    def create_product_progress_source(
+        self,
+        authorization: TaskAuthorizationGrant,
+        binding: TaskProgressOriginBinding,
+    ) -> TaskEventAuthorityProgressSource:
+        """Create the Store-owned atomic cursor handoff required by voice."""
+
+        if not self._accepting:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_ROUTE_DISABLED",
+                "formal task route is unavailable",
+                ErrorCode.UNAVAILABLE,
+            )
+        if (
+            not isinstance(authorization, TaskAuthorizationGrant)
+            or not isinstance(binding, TaskProgressOriginBinding)
+            or authorization.scope != binding.scope
+            or authorization.operation != "task.events"
+            or authorization.target_task_id != binding.task_id
+        ):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "formal voice progress source binding is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        store = self._core.store
+        if type(store) is not SqliteTaskStore:
+            raise FormalTaskViolation(
+                "TASK_PROGRESS_AUTHORITY_HANDOFF_UNAVAILABLE",
+                "voice progress requires the concrete SQLite Task authority",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        return TaskEventAuthorityProgressSource(
+            store=store,
+            authorization=authorization,
+            scope=binding.scope,
+            task_id=binding.task_id,
         )
 
     async def start(self) -> dict[str, int]:
@@ -1619,7 +1666,23 @@ class P3AuthenticatedComposition:
                     clean.get("model_intent"),
                     instantiate=False,
                 )
-                if clean["source"] == "voice":
+                if (
+                    clean["source"] in {"voice", "text"}
+                    and clean.get("origin_commit_sha256") is not None
+                ):
+                    self._policy.require_committed_origin(
+                        scope=authority.scope,
+                        interaction_id=str(clean["interaction_id"]),
+                        turn_id=str(clean["turn_id"]),
+                        commit_id=str(clean["commit_id"]),
+                        commit_sha256=str(clean["origin_commit_sha256"]),
+                        operation=operation,
+                        instruction=str(clean["instruction"]),
+                        task_id=None,
+                        source_start=int(clean["source_start"]),
+                        source_end=int(clean["source_end"]),
+                    )
+                elif clean["source"] == "voice":
                     self._policy.require_voice_origin(
                         scope=authority.scope,
                         interaction_id=str(clean["interaction_id"]),
@@ -1627,6 +1690,22 @@ class P3AuthenticatedComposition:
                         commit_id=str(clean["commit_id"]),
                         instruction=str(clean["instruction"]),
                     )
+            elif operation == "task.cancel" and clean["source"] in {
+                "voice",
+                "text",
+            }:
+                self._policy.require_committed_origin(
+                    scope=authority.scope,
+                    interaction_id=str(clean["interaction_id"]),
+                    turn_id=str(clean["turn_id"]),
+                    commit_id=str(clean["commit_id"]),
+                    commit_sha256=str(clean["origin_commit_sha256"]),
+                    operation=operation,
+                    instruction=None,
+                    task_id=str(clean["task_id"]),
+                    source_start=int(clean["source_start"]),
+                    source_end=int(clean["source_end"]),
+                )
             target_task_id = (
                 str(clean["task_id"]) if operation in P3_TARGETED_MUTATIONS else None
             )
@@ -1885,6 +1964,9 @@ class P3AuthenticatedComposition:
                 interaction_id=clean.get("interaction_id"),
                 turn_id=clean.get("turn_id"),
                 commit_id=clean.get("commit_id"),
+                origin_commit_sha256=clean.get("origin_commit_sha256"),
+                source_start=clean.get("source_start"),
+                source_end=clean.get("source_end"),
                 task_id=clean.get("task_id"),
                 name=clean.get("name"),
                 instruction=clean.get("instruction"),
@@ -2016,6 +2098,9 @@ class P3AuthenticatedComposition:
                         "interaction_id",
                         "turn_id",
                         "commit_id",
+                        "origin_commit_sha256",
+                        "source_start",
+                        "source_end",
                     }
                 ),
             ),
@@ -2031,7 +2116,17 @@ class P3AuthenticatedComposition:
                         "task_id",
                     }
                 ),
-                frozenset({"source"}),
+                frozenset(
+                    {
+                        "source",
+                        "interaction_id",
+                        "turn_id",
+                        "commit_id",
+                        "origin_commit_sha256",
+                        "source_start",
+                        "source_end",
+                    }
+                ),
             ),
             # ``task.retry`` submits only its target task plus the immutable
             # request facts its product fingerprint binds.  Predecessor,
@@ -2126,36 +2221,85 @@ class P3AuthenticatedComposition:
         source = _required_text(
             params.get("source", "structured"), "source", maximum=32
         )
-        if source not in {"structured", "voice"}:
+        if source not in {"structured", "voice", "text"}:
             raise FormalTaskViolation(
                 "INVALID_TASK_INTENT_SOURCE",
-                "formal task intent source must be voice or structured",
+                "formal task intent source must be voice, text or structured",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if source == "voice":
-            if operation != "task.create" or not {
+        if source in {"voice", "text"}:
+            origin_fields = {
                 "interaction_id",
                 "turn_id",
                 "commit_id",
-            }.issubset(params):
+            }
+            content_binding_fields = {
+                "origin_commit_sha256",
+                "source_start",
+                "source_end",
+            }
+            legacy_voice_create = source == "voice" and operation == "task.create"
+            if (
+                operation not in {"task.create", "task.cancel"}
+                or not origin_fields.issubset(params)
+                or (
+                    not legacy_voice_create
+                    and not content_binding_fields.issubset(params)
+                )
+                or (
+                    set(params).intersection(content_binding_fields)
+                    and not content_binding_fields.issubset(params)
+                )
+            ):
                 raise FormalTaskViolation(
                     "COMMITTED_ORIGIN_REQUIRED",
-                    "voice task.create requires the exact committed turn origin",
+                    "natural-language task mutation requires an exact content-bound committed origin",
                     ErrorCode.PERMISSION_DENIED,
                 )
             clean["interaction_id"] = _required_text(
                 params["interaction_id"], "interaction_id", maximum=256
             )
-            clean["turn_id"] = _required_text(
-                params["turn_id"], "turn_id", maximum=256
-            )
+            clean["turn_id"] = _required_text(params["turn_id"], "turn_id", maximum=256)
             clean["commit_id"] = _required_text(
                 params["commit_id"], "commit_id", maximum=256
             )
+            if "origin_commit_sha256" in params:
+                clean["origin_commit_sha256"] = _required_text(
+                    params["origin_commit_sha256"],
+                    "origin_commit_sha256",
+                    maximum=64,
+                )
+                if len(clean["origin_commit_sha256"]) != 64 or any(
+                    character not in "0123456789abcdef"
+                    for character in clean["origin_commit_sha256"]
+                ):
+                    raise FormalTaskViolation(
+                        "INVALID_P3_ROUTE_ARGUMENT",
+                        "origin_commit_sha256 must be lowercase hexadecimal",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                for key in ("source_start", "source_end"):
+                    value = params[key]
+                    if type(value) is not int or value < 0 or value > 100_000:
+                        raise FormalTaskViolation(
+                            "INVALID_P3_ROUTE_ARGUMENT",
+                            "natural-language source spans must be bounded integers",
+                            ErrorCode.INVALID_ARGUMENT,
+                        )
+                    clean[key] = value
+                if clean["source_start"] >= clean["source_end"]:
+                    raise FormalTaskViolation(
+                        "INVALID_P3_ROUTE_ARGUMENT",
+                        "natural-language source span must be non-empty",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
         elif (
             "interaction_id" in params
             or "turn_id" in params
             or "commit_id" in params
+            or "origin_commit_sha256" in params
+            or "source_start" in params
+            or "source_end" in params
         ):
             raise FormalTaskViolation(
                 "INVALID_STRUCTURED_ORIGIN",

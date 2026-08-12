@@ -43,6 +43,11 @@ export interface ProductWebP3ProgressSnapshot {
   readonly status: ProductWebP2ActivationStatus;
   readonly binding: ProductWebP3ProgressBinding | null;
   readonly reason: string | null;
+  readonly requested_origin_kind: 'text' | 'voice' | null;
+  readonly effective_origin_kind: 'text' | 'voice' | null;
+  readonly voice_progress: 'available' | 'unavailable' | null;
+  readonly voice_reason: string | null;
+  readonly fallback_reason: string | null;
 }
 
 type ProductWebCloseRetryObserver<TSnapshot> = (snapshot: Readonly<TSnapshot>, attempt: number) => void;
@@ -655,6 +660,35 @@ function requireP3Result(value: unknown, expectedStatus: 'active' | 'closed', bi
     throw new Error(`product P3 progress ${expectedStatus} binding mismatch`);
   }
   return Object.freeze({ ...result });
+}
+
+function parseP3ActivationDelivery(result: JsonObject): Pick<
+  ProductWebP3ProgressSnapshot,
+  'requested_origin_kind' | 'effective_origin_kind' | 'voice_progress' | 'voice_reason' | 'fallback_reason'
+> {
+  const requested = result.requested_origin_kind;
+  const effective = result.origin_kind;
+  const voiceProgress = result.voice_progress;
+  const fallbackReason = result.fallback_reason === null ? null : requiredText(String(result.fallback_reason ?? ''), 'fallback_reason');
+  const voiceReason = result.voice_reason === null ? null : requiredText(String(result.voice_reason ?? ''), 'voice_reason');
+  if (
+    (requested !== 'text' && requested !== 'voice') ||
+    (effective !== 'text' && effective !== 'voice') ||
+    (voiceProgress !== 'available' && voiceProgress !== 'unavailable') ||
+    (effective === 'voice') !== (voiceProgress === 'available') ||
+    (effective === 'voice' && (requested !== 'voice' || fallbackReason !== null || voiceReason !== null)) ||
+    (requested === 'voice' && effective === 'text' && (fallbackReason === null || voiceReason !== fallbackReason)) ||
+    (requested === 'text' && (effective !== 'text' || fallbackReason !== null))
+  ) {
+    throw new Error('product P3 progress activation delivery is invalid');
+  }
+  return Object.freeze({
+    requested_origin_kind: requested,
+    effective_origin_kind: effective,
+    voice_progress: voiceProgress,
+    voice_reason: voiceReason,
+    fallback_reason: fallbackReason,
+  });
 }
 
 function ambiguousActivationResponse(error: unknown): ProductWebAmbiguousActivationError {
@@ -1325,6 +1359,11 @@ export class ProductWebP3ProgressOwner {
   private binding: ProductWebP3ProgressBinding | null = null;
   private status: ProductWebP2ActivationStatus;
   private reason: string | null = null;
+  private requestedOriginKind: 'text' | 'voice' | null = null;
+  private effectiveOriginKind: 'text' | 'voice' | null = null;
+  private voiceProgress: 'available' | 'unavailable' | null = null;
+  private voiceReason: string | null = null;
+  private fallbackReason: string | null = null;
   private activationAttempted = false;
   private cleanupRequired = false;
   private startPromise: Promise<ProductWebP3ProgressSnapshot> | null = null;
@@ -1342,7 +1381,16 @@ export class ProductWebP3ProgressOwner {
   }
 
   snapshot(): ProductWebP3ProgressSnapshot {
-    return Object.freeze({ status: this.status, binding: this.binding, reason: this.reason });
+    return Object.freeze({
+      status: this.status,
+      binding: this.binding,
+      reason: this.reason,
+      requested_origin_kind: this.requestedOriginKind,
+      effective_origin_kind: this.effectiveOriginKind,
+      voice_progress: this.voiceProgress,
+      voice_reason: this.voiceReason,
+      fallback_reason: this.fallbackReason,
+    });
   }
 
   needsCleanup(): boolean {
@@ -1375,6 +1423,11 @@ export class ProductWebP3ProgressOwner {
     this.cleanupRequired = false;
     this.status = 'activating';
     this.reason = null;
+    this.requestedOriginKind = null;
+    this.effectiveOriginKind = null;
+    this.voiceProgress = null;
+    this.voiceReason = null;
+    this.fallbackReason = null;
     this.publish();
     const selectedTask =
       exactTaskId === null ? this.request(PRODUCT_P3_TASK_LIST_METHOD, { session_id: sessionId }).then(selectSingleActiveTask) : Promise.resolve(exactTaskId);
@@ -1384,8 +1437,15 @@ export class ProductWebP3ProgressOwner {
         this.binding = binding;
         this.activationAttempted = true;
         return this.request(PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, { ...binding }).then(response => {
+          let result: JsonObject;
           try {
-            requireP3Result(response, 'active', binding);
+            result = requireP3Result(response, 'active', binding);
+            const delivery = parseP3ActivationDelivery(result);
+            this.requestedOriginKind = delivery.requested_origin_kind;
+            this.effectiveOriginKind = delivery.effective_origin_kind;
+            this.voiceProgress = delivery.voice_progress;
+            this.voiceReason = delivery.voice_reason;
+            this.fallbackReason = delivery.fallback_reason;
           } catch (error) {
             throw ambiguousActivationResponse(error);
           }
@@ -1424,6 +1484,11 @@ export class ProductWebP3ProgressOwner {
           this.binding = null;
           this.activationAttempted = false;
           this.cleanupRequired = false;
+          this.requestedOriginKind = null;
+          this.effectiveOriginKind = null;
+          this.voiceProgress = null;
+          this.voiceReason = null;
+          this.fallbackReason = null;
           return this.publish();
         }
         const value = await this.request(PRODUCT_P3_PROGRESS_CLOSE_METHOD, {
@@ -1435,6 +1500,11 @@ export class ProductWebP3ProgressOwner {
         this.binding = null;
         this.activationAttempted = false;
         this.cleanupRequired = false;
+        this.requestedOriginKind = null;
+        this.effectiveOriginKind = null;
+        this.voiceProgress = null;
+        this.voiceReason = null;
+        this.fallbackReason = null;
         return this.publish();
       })
       .catch(error => {

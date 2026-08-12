@@ -1,4 +1,7 @@
 export const RAW_AUDIO_REDACTION = '[REDACTED_RAW_AUDIO]';
+export const MEDIA_TICKET_REDACTION = '[REDACTED_MEDIA_TICKET]';
+export const SPEECH_TEXT_REDACTION = '[REDACTED_SPEECH_TEXT]';
+export const VOICE_COMMIT_RECEIPT_REDACTION = '[REDACTED_VOICE_COMMIT_RECEIPT]';
 export const RAW_TRANSPORT_DATA_REDACTION = '[REDACTED_RAW_TRANSPORT_DATA]';
 export const INVALID_DEV_WS_PAYLOAD_REDACTION = '[REDACTED_INVALID_DEV_WS_PAYLOAD]';
 
@@ -11,7 +14,8 @@ interface RedactionResult {
   readonly changed: boolean;
 }
 
-const RAW_AUDIO_KEY_IN_JSON_TEXT = /"data_base64"\s*:/;
+const PRIVATE_KEY_IN_JSON_TEXT =
+  /"(?:data[-_]base64|media[-_]ticket|final[-_]*text|raw[-_]*text|voice[-_]*commit[-_]*receipt)"\s*:/i;
 
 function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionResult {
   if (typeof payload === 'string' && inspectJsonStrings) {
@@ -23,7 +27,7 @@ function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionRe
       const redacted = redactValue(parsed, true);
       return redacted.changed ? { value: JSON.stringify(redacted.value), changed: true } : { value: payload, changed: false };
     } catch {
-      return RAW_AUDIO_KEY_IN_JSON_TEXT.test(payload) ? { value: RAW_TRANSPORT_DATA_REDACTION, changed: true } : { value: payload, changed: false };
+      return PRIVATE_KEY_IN_JSON_TEXT.test(payload) ? { value: RAW_TRANSPORT_DATA_REDACTION, changed: true } : { value: payload, changed: false };
     }
   }
 
@@ -42,9 +46,23 @@ function redactValue(payload: unknown, inspectJsonStrings: boolean): RedactionRe
   const normalizeIgnored = payload.normalize === 'ignored';
   let changed = false;
   const entries = Object.entries(payload).map(([key, value]) => {
+    const normalizedKey = key.trim().toLowerCase().replace(/-/g, '_');
+    const compactKey = normalizedKey.replace(/_/g, '');
     if (key === 'data_base64') {
       changed = true;
       return [key, RAW_AUDIO_REDACTION] as const;
+    }
+    if (normalizedKey === 'media_ticket') {
+      changed = true;
+      return [key, MEDIA_TICKET_REDACTION] as const;
+    }
+    if (compactKey === 'finaltext' || compactKey === 'rawtext') {
+      changed = true;
+      return [key, SPEECH_TEXT_REDACTION] as const;
+    }
+    if (compactKey === 'voicecommitreceipt') {
+      changed = true;
+      return [key, VOICE_COMMIT_RECEIPT_REDACTION] as const;
     }
     if ((key === 'rawData' && parseFailed) || (key === 'parsed' && normalizeIgnored)) {
       changed = true;

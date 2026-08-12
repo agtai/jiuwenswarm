@@ -19,6 +19,9 @@ from jiuwenswarm.gateway.channel_manager.web.web_connect import (
     _HANDLER_BEFORE_CALLBACK_METHODS,
     _LOCAL_HANDLER_ONLY_METHODS,
 )
+from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
+    STREAMING_RECOGNITION_RESULT_METHOD,
+)
 from jiuwenswarm.gateway.live_voice.speech_rpc import (
     CANCEL_METHOD,
     CAPABILITIES_METHOD,
@@ -98,6 +101,16 @@ class FakeChannel:
             {"ws": ws, "req_id": req_id, "ok": ok, "payload": payload}
         )
 
+
+class _CloseOwner:
+    def __init__(self, failure: BaseException | None = None) -> None:
+        self.calls = 0
+        self.failure = failure
+
+    async def close(self) -> None:
+        self.calls += 1
+        if self.failure is not None:
+            raise self.failure
 
 class SpyService:
     def __init__(self) -> None:
@@ -201,6 +214,67 @@ async def test_result_transform_runs_before_response() -> None:
         "ok": True,
         "result": {"route": "dedicated-downlink"},
     }
+
+
+@pytest.mark.asyncio
+async def test_operation_override_only_replaces_an_exact_non_null_result() -> None:
+    channel = FakeChannel()
+    service = SpyService()
+    override_calls: list[tuple[object, ...]] = []
+    transform_calls: list[tuple[object, ...]] = []
+
+    async def override(
+        operation: str,
+        params: object,
+        context: SpeechRpcContext,
+        session_id: str,
+    ) -> dict[str, object] | None:
+        override_calls.append((operation, params, context, session_id))
+        if operation == "speech.synthesize.batch":
+            return {"ok": True, "result": {"route": "streaming"}}
+        return None
+
+    def transform(
+        operation: str,
+        params: object,
+        context: SpeechRpcContext,
+        result: dict[str, object],
+        session_id: str,
+    ) -> dict[str, object]:
+        transform_calls.append((operation, params, context, result, session_id))
+        return result
+
+    register_speech_rpc_handlers(
+        channel,
+        service=service,  # type: ignore[arg-type]
+        result_transform=transform,
+        operation_override=override,
+    )
+    synthesize_params = {"correlation_id": "correlation-streaming"}
+    recognize_params = {"correlation_id": "correlation-batch"}
+
+    await channel.handlers[SYNTHESIZE_BATCH_METHOD](
+        "ws", "rpc-streaming", synthesize_params, "session-1", user_id="alice"
+    )
+    await channel.handlers[RECOGNIZE_BATCH_METHOD](
+        "ws", "rpc-batch", recognize_params, "session-1", user_id="alice"
+    )
+
+    assert [call[0] for call in override_calls] == [
+        "speech.synthesize.batch",
+        "speech.recognize.batch",
+    ]
+    assert service.calls == [
+        ("recognize", recognize_params, SpeechRpcContext("alice", "session-1"))
+    ]
+    assert [call[3] for call in transform_calls] == [
+        {"ok": True, "result": {"route": "streaming"}},
+        {"ok": True, "result": {"route": "recognize"}},
+    ]
+    assert [response["payload"] for response in channel.responses] == [
+        {"ok": True, "result": {"route": "streaming"}},
+        {"ok": True, "result": {"route": "recognize"}},
+    ]
 
 
 @pytest.mark.asyncio
@@ -366,6 +440,7 @@ def test_speech_methods_bypass_agent_callback_and_tool_task_authority() -> None:
     assert {
         CAPABILITIES_METHOD,
         RECOGNIZE_BATCH_METHOD,
+        STREAMING_RECOGNITION_RESULT_METHOD,
         SYNTHESIZE_BATCH_METHOD,
         CANCEL_METHOD,
         "live_voice.media.activate",
@@ -375,6 +450,7 @@ def test_speech_methods_bypass_agent_callback_and_tool_task_authority() -> None:
     assert {
         CAPABILITIES_METHOD,
         RECOGNIZE_BATCH_METHOD,
+        STREAMING_RECOGNITION_RESULT_METHOD,
         SYNTHESIZE_BATCH_METHOD,
         CANCEL_METHOD,
         "live_voice.media.activate",
@@ -479,3 +555,53 @@ async def test_raw_speech_rpc_never_enters_agent_message_callback() -> None:
             "payload": {"ok": True, "result": {"route": "recognize"}},
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_web_channel_stop_closes_streaming_and_batch_speech_owners() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    streaming = _CloseOwner()
+    batch = _CloseOwner()
+    channel.live_voice_streaming_speech_owner = streaming
+    channel.live_voice_speech_service = batch
+    channel.live_voice_owned_speech_service = batch
+
+    await channel.stop()
+
+    assert streaming.calls == 1
+    assert batch.calls == 1
+    assert channel.live_voice_streaming_speech_owner is None
+    assert channel.live_voice_speech_service is None
+    assert channel.live_voice_owned_speech_service is None
+
+
+@pytest.mark.asyncio
+async def test_web_channel_stop_drops_injected_speech_claim_without_closing_service() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    injected = _CloseOwner()
+    channel.live_voice_speech_service = injected
+
+    await channel.stop()
+
+    assert injected.calls == 0
+    assert channel.live_voice_speech_service is None
+    assert channel.live_voice_owned_speech_service is None
+
+
+@pytest.mark.asyncio
+async def test_web_channel_stop_finishes_other_cleanup_before_process_control() -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    streaming = _CloseOwner(GeneratorExit())
+    batch = _CloseOwner()
+    channel.live_voice_streaming_speech_owner = streaming
+    channel.live_voice_speech_service = batch
+    channel.live_voice_owned_speech_service = batch
+
+    with pytest.raises(GeneratorExit):
+        await channel.stop()
+
+    assert streaming.calls == 1
+    assert batch.calls == 1
+    assert channel.live_voice_streaming_speech_owner is streaming
+    assert channel.live_voice_speech_service is None
+    assert channel.live_voice_owned_speech_service is None

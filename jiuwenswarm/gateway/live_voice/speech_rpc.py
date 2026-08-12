@@ -32,6 +32,11 @@ def register_speech_rpc_handlers(
         [str, object, SpeechRpcContext, dict[str, object], str], dict[str, object]
     ]
     | None = None,
+    operation_override: Callable[
+        [str, object, SpeechRpcContext, str],
+        Awaitable[dict[str, object] | None],
+    ]
+    | None = None,
 ) -> FormalBatchSpeechService:
     """Register the package-local methods without composing a Web product route."""
 
@@ -73,7 +78,15 @@ def register_speech_rpc_handlers(
                 context = context_factory(ws, params, str(session_id), user_id)
                 if not isinstance(context, SpeechRpcContext):
                     raise TypeError("speech context factory returned no typed context")
-            result = await operation(params, context)
+            result = (
+                await operation_override(
+                    operation_name, params, context, str(session_id)
+                )
+                if operation_override is not None
+                else None
+            )
+            if result is None:
+                result = await operation(params, context)
             if result_transform is not None:
                 try:
                     transformed_result = result_transform(

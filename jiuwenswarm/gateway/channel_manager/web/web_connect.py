@@ -63,6 +63,7 @@ _LOCAL_HANDLER_ONLY_METHODS = frozenset(
     {
         "live_voice.speech.capabilities",
         "live_voice.speech.recognize_batch",
+        "live_voice.speech.recognize_streaming_result",
         "live_voice.speech.synthesize_batch",
         "live_voice.speech.cancel",
         "live_voice.media.activate",
@@ -174,6 +175,13 @@ class WebChannel(BaseWsChannel):
         # Integration-Owner registration for the dedicated Live Voice route.
         # The package media leaf never mutates this attribute itself.
         self.live_voice_media_registry: Any = None
+        # Claim reachability and lifecycle ownership are deliberately
+        # separate: an injected service remains claimable but is never closed
+        # by this channel.
+        self.live_voice_speech_service: Any = None
+        self.live_voice_owned_speech_service: Any = None
+        self.live_voice_streaming_speech_owner: Any = None
+        self.live_voice_streaming_synthesis_owner: Any = None
 
     @staticmethod
     def _coalescible_stream_frame(
@@ -607,20 +615,156 @@ class WebChannel(BaseWsChannel):
         """停止 WebSocket 服务并清理连接."""
         self._running = False
 
+        shutdown_failure: BaseException | None = None
+
+        def retain_failure(error: BaseException, message: str) -> None:
+            nonlocal shutdown_failure
+            if shutdown_failure is None:
+                shutdown_failure = error
+            logger.warning(message)
+
+        streaming_owner = self.live_voice_streaming_synthesis_owner
+        if streaming_owner is not None:
+            try:
+                await streaming_owner.close()
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice streaming TTS owner cleanup failed",
+                )
+            finally:
+                self.live_voice_streaming_synthesis_owner = None
+
+        streaming_speech_owner = self.live_voice_streaming_speech_owner
+        if streaming_speech_owner is not None:
+            try:
+                await streaming_speech_owner.close()
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice streaming STT owner cleanup failed",
+                )
+            else:
+                self.live_voice_streaming_speech_owner = None
+
+        speech_service = self.live_voice_owned_speech_service
+        if speech_service is not None:
+            try:
+                await speech_service.close()
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice batch Speech owner cleanup failed",
+                )
+            else:
+                self.live_voice_owned_speech_service = None
+                if self.live_voice_speech_service is speech_service:
+                    self.live_voice_speech_service = None
+        elif self.live_voice_speech_service is not None:
+            # Drop only the channel's claim reference. The injected service's
+            # external owner retains its lifetime authority.
+            self.live_voice_speech_service = None
+
+        media_registry = self.live_voice_media_registry
+        if media_registry is not None:
+            close_streaming_observability = getattr(
+                media_registry, "close_streaming_observability", None
+            )
+            if callable(close_streaming_observability):
+                try:
+                    close_streaming_observability()
+                except BaseException as error:
+                    retain_failure(
+                        error,
+                        "WebChannel live voice streaming STT diagnostic cleanup failed",
+                    )
+            close_diagnostics = getattr(
+                media_registry, "close_streaming_diagnostics", None
+            )
+            try:
+                cleanup_complete = (
+                    close_diagnostics() if callable(close_diagnostics) else True
+                )
+            except BaseException as error:
+                retain_failure(
+                    error,
+                    "WebChannel live voice streaming TTS diagnostic cleanup failed",
+                )
+            else:
+                if cleanup_complete is not True:
+                    logger.warning(
+                        "WebChannel live voice streaming TTS diagnostic cleanup "
+                        "incomplete"
+                    )
+
         all_clients = list(self.clients)
-        close_tasks = [
-            client.close(code=1001, reason="server shutdown") for client in all_clients
-        ]
+        close_tasks: list[Awaitable[object]] = []
+        for client in all_clients:
+            try:
+                close_result = client.close(code=1001, reason="server shutdown")
+                if not inspect.isawaitable(close_result):
+                    raise TypeError("WebSocket close returned no awaitable")
+                close_tasks.append(close_result)
+            except BaseException as error:
+                retain_failure(error, "WebChannel client cleanup failed")
         if close_tasks:
-            await asyncio.gather(*close_tasks, return_exceptions=True)
+            try:
+                close_results = await asyncio.gather(
+                    *close_tasks, return_exceptions=True
+                )
+            except BaseException as error:
+                retain_failure(error, "WebChannel client cleanup failed")
+            else:
+                for close_result in close_results:
+                    if isinstance(close_result, BaseException):
+                        retain_failure(
+                            close_result,
+                            "WebChannel client cleanup failed",
+                        )
+        if media_registry is not None:
+            close_media_leaf_cleanup = getattr(
+                media_registry, "close_media_leaf_cleanup", None
+            )
+            if callable(close_media_leaf_cleanup):
+                try:
+                    media_cleanup_complete = await close_media_leaf_cleanup()
+                except BaseException as error:
+                    retain_failure(
+                        error,
+                        "WebChannel live voice media task cleanup failed",
+                    )
+                else:
+                    if media_cleanup_complete is not True:
+                        retain_failure(
+                            RuntimeError("live voice media task cleanup is incomplete"),
+                            "WebChannel live voice media task cleanup incomplete",
+                        )
         self._clients_by_key.clear()
 
-        if self._server is not None:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server = None
+        server = self._server
+        if server is not None:
+            server_close_complete = True
+            try:
+                server.close()
+            except BaseException as error:
+                server_close_complete = False
+                retain_failure(error, "WebChannel server close failed")
+            try:
+                await server.wait_closed()
+            except BaseException as error:
+                server_close_complete = False
+                retain_failure(error, "WebChannel server wait-closed failed")
+            if server_close_complete:
+                self._server = None
         # 兜底清理未走正常断连路径的 writer 协程（正常断连已由 unregister_ws 清理）
-        await self._shutdown_all_writers()
+        try:
+            await self._shutdown_all_writers()
+        except BaseException as error:
+            retain_failure(error, "WebChannel writer cleanup failed")
+
+        if shutdown_failure is not None:
+            logger.warning("WebChannel cleanup incomplete")
+            raise shutdown_failure
         logger.info("WebChannel 已停止")
 
     async def connect(self) -> None:
@@ -635,12 +779,18 @@ class WebChannel(BaseWsChannel):
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
         origin = get_header_value(request_headers, "Origin")
+        parsed_path = urlparse(path)
+        handshake_path = parsed_path.path or path
+        is_dedicated_media_path = (
+            handshake_path == "/ws/live-voice/media"
+            or handshake_path.startswith("/ws/live-voice/media/")
+        )
         logged_path = (
             "/ws/live-voice/media/<redacted>"
-            if path.startswith("/ws/live-voice/media/")
-            else path
+            if handshake_path.startswith("/ws/live-voice/media/")
+            else handshake_path
         )
-        if path.startswith("/ws/live-voice/media/") and (
+        if is_dedicated_media_path and (
             origin is None or not is_allowed_browser_origin(origin)
         ):
             logger.warning(

@@ -13,6 +13,7 @@ from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CommandEnvelope,
+    ProducerRef,
     ResponseRef,
     ScopeRef,
     TurnCommit,
@@ -46,6 +47,20 @@ from jiuwenswarm.server.live_voice.presentation_ledger import (
     PresentationLedgerViolation,
     PresentationSurface,
     PresentationUnit,
+)
+from jiuwenswarm.server.live_voice.formal_task_models import PersistentTaskEvent
+from jiuwenswarm.server.live_voice.progress_notification_arbiter import (
+    ForegroundFact,
+    ForegroundSnapshot,
+    ProgressNotificationArbiter,
+    SpeechPolicy,
+)
+from jiuwenswarm.server.live_voice.task_progress_return import (
+    TaskProgressNotificationIntent,
+    TaskProgressOriginBinding,
+    TaskProgressOriginKind,
+    _evidence_id,
+    project_task_progress_event,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
@@ -301,6 +316,139 @@ async def dispatch(
         commit=selected,
         context=FormalContextSnapshot(selected.scope),
     )
+
+
+def task_progress_intent(*, origin_id: str = "interaction-1") -> TaskProgressNotificationIntent:
+    current_scope = scope()
+    binding = TaskProgressOriginBinding(
+        scope=current_scope,
+        task_id="task-progress-1",
+        session_id=current_scope.session_id or "",
+        project_id=current_scope.project_id or "",
+        correlation_id="correlation-task-progress",
+        origin_kind=TaskProgressOriginKind.VOICE,
+        origin_id=origin_id,
+        generation_kind="conversation_generation",
+        generation_id="conversation-task-progress-1",
+        generation=1,
+        source_instance_id="task-core-1",
+        progress_producer=ProducerRef(
+            component="task_progress_return",
+            instance_id="task-progress-return-1",
+            authority="adapter",
+        ),
+        progress_adapter="task_progress_return.v1",
+    )
+    task_event = PersistentTaskEvent(
+        event_id="task-progress-source-0",
+        task_id=binding.task_id,
+        attempt_id="attempt-progress-1",
+        scope=current_scope,
+        seq=0,
+        event_type="task.accepted",
+        state="accepted",
+        outcome=None,
+        producer="task_core",
+        source_event_id=None,
+        causation_id="command-progress-1",
+        correlation_id=binding.correlation_id,
+        occurred_at="2026-08-05T08:00:01Z",
+        details={},
+    )
+    projection = project_task_progress_event(task_event, binding)
+    decision = ProgressNotificationArbiter().offer(
+        projection.source_event,
+        projection.progress_event,
+        ForegroundSnapshot(
+            interaction=ForegroundFact.UNKNOWN,
+            response=ForegroundFact.UNKNOWN,
+            presentation=ForegroundFact.UNKNOWN,
+            speech_policy=SpeechPolicy.DISPLAY_ONLY,
+        ),
+        projection.notification_binding,
+    )
+    return TaskProgressNotificationIntent(
+        origin=binding,
+        task_event=task_event,
+        source_event=projection.source_event,
+        progress_event=projection.progress_event,
+        decision=decision,
+        evidence_id=_evidence_id(binding, task_event),
+    )
+
+
+@pytest.mark.asyncio
+async def test_voice_task_progress_enters_cr_notification_without_business_or_presentation_effects() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit(text="create task: inspect the repository")
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+    response = await current.accept_task_origin(
+        request_id="task-origin-request-1",
+        response_id="task-origin-response-1",
+        correlation_id="task-origin-correlation-1",
+        commit=selected,
+    )
+    conversation_before = current.snapshot().conversation
+
+    assert (
+        await current.accept_task_progress_notification(
+            task_progress_intent(), response_ref=response
+        )
+        is True
+    )
+    notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+    conversation_after = current.snapshot().conversation
+
+    assert notification.kind == "task.progress.notification"
+    assert notification.response_ref == response
+    assert notification.source_event is not None
+    assert notification.progress_event is not None
+    assert notification.presentation_unit is None
+    assert notification.agent_event is None
+    assert conversation_after == conversation_before
+    assert lower.calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+
+    with pytest.raises(AgentConversationRuntimeViolation) as rejected:
+        await current.accept_task_progress_notification(
+            task_progress_intent(origin_id="interaction-foreign"),
+            response_ref=response,
+        )
+    assert rejected.value.reason == "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
+    assert current.snapshot().queued_notifications == 0
+    assert current.snapshot().conversation == conversation_after
+
+    successor_commit = commit(
+        turn_id="turn-2",
+        commit_id="commit-2",
+        text="confirm task request 0123456789abcdef0123456789abcdef",
+    )
+    successor = await current.accept_task_origin(
+        request_id="task-origin-request-2",
+        response_id="task-origin-response-2",
+        correlation_id="task-origin-correlation-2",
+        commit=successor_commit,
+    )
+    assert successor.response_generation > response.response_generation
+
+    with pytest.raises(AgentConversationRuntimeViolation) as stale_response:
+        await current.accept_task_progress_notification(
+            task_progress_intent(),
+            response_ref=response,
+        )
+    assert stale_response.value.reason == "TASK_PROGRESS_RESPONSE_SUPERSEDED"
+    assert current.snapshot().queued_notifications == 0
+    assert (
+        await current.accept_task_progress_notification(
+            task_progress_intent(), response_ref=successor
+        )
+        is True
+    )
+    await current.close(timeout_seconds=1)
 
 
 async def submit(

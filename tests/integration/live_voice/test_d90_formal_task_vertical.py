@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import subprocess
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -13,6 +16,7 @@ from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     Assurance,
+    ErrorCode,
     InputCommitState,
     ScopeRef,
     TerminalOutcome,
@@ -29,6 +33,24 @@ from jiuwenswarm.server.live_voice.persistent_task_core import (
     PersistentTaskCore,
     project_task_event,
 )
+from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
+    AuthenticatedPrincipal,
+    P3AuthenticatedComposition,
+    P3_OPERATIONS,
+    ResolvedAuthority,
+    StaticBearerAuthenticator,
+)
+from jiuwenswarm.server.live_voice.p3_confirmation import (
+    BoundedP3ConfirmationOwner,
+)
+from jiuwenswarm.server.live_voice.p3_model_resolution import ResolvedP3Model
+from jiuwenswarm.server.live_voice.p3_product_confirmation import (
+    ProductP3ConfirmationForwarder,
+)
+from jiuwenswarm.server.live_voice.product_composition_registry import (
+    AgentServerProductCompositionRegistry,
+    ProductCompositionSettings,
+)
 from jiuwenswarm.server.live_voice.project_code_executor import (
     DirectProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
@@ -39,9 +61,11 @@ from jiuwenswarm.server.live_voice.voice_task_policy import (
     FormalTaskPolicyAdapter,
     FormalTaskPolicyInput,
 )
+from jiuwenswarm.server.runtime.agent_adapter.interface import JiuWenSwarm
 
 NOW = "2026-08-07T12:00:00Z"
 EXPIRY = "2100-01-01T00:00:00Z"
+PRODUCT_TOKEN = "test-only-product-token-000000000000"
 
 
 def _git(project: Path, *args: str) -> str:
@@ -111,6 +135,7 @@ def _voice_create(
     suffix: str,
     confirmed: bool = True,
 ) -> FormalTaskInvocation:
+    interaction_id = f"interaction-{suffix}"
     turn_id = f"turn-{suffix}"
     commit_id = f"commit-{suffix}"
     command_id = f"command-{suffix}"
@@ -122,7 +147,7 @@ def _voice_create(
                 "contract_version": CONTRACT_VERSION,
                 "commit_id": commit_id,
                 "turn_id": turn_id,
-                "interaction_id": f"interaction-{suffix}",
+                "interaction_id": interaction_id,
                 "text": instruction,
                 "hypothesis_provenance": {"provider": "integration"},
                 "scope": _scope().to_dict(),
@@ -146,7 +171,7 @@ def _voice_create(
             confirmed=confirmed,
         ),
         command_id=command_id,
-        interaction_id=f"interaction-{suffix}",
+        interaction_id=interaction_id,
         turn_id=turn_id,
         commit_id=commit_id,
         name=f"Formal task {suffix}",
@@ -219,6 +244,33 @@ class _DirectAgentFacade:
         )
 
 
+class _SlowConversationAdapter:
+    _is_session_scoped_adapter = False
+
+    def __init__(self) -> None:
+        self.entered: dict[str, asyncio.Event] = {}
+        self.release: dict[str, asyncio.Event] = {}
+
+    async def process_formal_live_voice_stream_impl(
+        self, request, _inputs
+    ) -> AsyncIterator[AgentResponseChunk]:
+        self.entered.setdefault(request.request_id, asyncio.Event()).set()
+        await self.release.setdefault(request.request_id, asyncio.Event()).wait()
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={
+                "event_type": "chat.final",
+                "content": f"joint:{request.request_id}",
+            },
+            is_complete=True,
+        )
+
+    async def process_message_stream_impl(self, *_args, **_kwargs):
+        raise AssertionError("joint scenario must not use the legacy Chat stream")
+        yield  # pragma: no cover
+
+
 class _Resolver:
     def __init__(self, binding: ProjectExecutionBinding) -> None:
         self.binding = binding
@@ -230,7 +282,149 @@ class _Resolver:
         return self.binding
 
 
-async def _wait(predicate, *, attempts: int = 200) -> None:
+class _ProductAuthorityResolver:
+    def __init__(self, context: ResolvedTaskContext, project: Path) -> None:
+        self.context = context
+        self.project = project
+        self.calls: list[tuple[str, bool]] = []
+
+    def resolve(
+        self,
+        principal: AuthenticatedPrincipal,
+        *,
+        session_id: str,
+        now: str,
+        require_clean: bool,
+    ) -> ResolvedAuthority:
+        del now
+        self.calls.append((session_id, require_clean))
+        if (
+            session_id != self.context.scope.session_id
+            or self.context.scope.project_id not in principal.allowed_project_ids
+        ):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "formal task scope is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if require_clean and _git(self.project, "status", "--porcelain"):
+            raise FormalTaskViolation(
+                "TASK_CONTEXT_WORKTREE_DIRTY",
+                "formal task project must have a clean worktree",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return ResolvedAuthority(principal, self.context.scope, self.context)
+
+
+class _ProductModelResolver:
+    def resolve(
+        self,
+        model_intent: str | None,
+        *,
+        expected_identity: str | None = None,
+        expected_config_version: str | None = None,
+        instantiate: bool = False,
+    ) -> ResolvedP3Model:
+        if model_intent not in {None, "default", "default#0"}:
+            raise FormalTaskViolation(
+                "P3_MODEL_INTENT_UNKNOWN",
+                "formal task model is unavailable",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        if expected_identity not in {
+            None,
+            "default#0",
+        } or expected_config_version not in {
+            None,
+            "catalog-v1",
+        }:
+            raise FormalTaskViolation(
+                "EXECUTOR_MODEL_BINDING_DRIFT",
+                "formal task model binding changed",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        return ResolvedP3Model(
+            object() if instantiate else None,
+            "default#0",
+            "catalog-v1",
+        )
+
+
+class _JointProductAgentManager:
+    def __init__(self, adapter: _SlowConversationAdapter) -> None:
+        self.agent = JiuWenSwarm()
+        self.agent._adapter = adapter  # type: ignore[assignment]
+        self.pins = 0
+        self.unpins = 0
+
+    async def get_agent(self, *_args: object) -> JiuWenSwarm:
+        return self.agent
+
+    def pin_agent(self, agent: JiuWenSwarm) -> None:
+        assert agent is self.agent
+        self.pins += 1
+
+    def unpin_agent(self, agent: JiuWenSwarm) -> None:
+        assert agent is self.agent
+        self.unpins += 1
+
+
+def _joint_product_p2_params(**changes: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "auth_token": PRODUCT_TOKEN,
+        "session_id": "session-1",
+        "correlation_id": "correlation-joint",
+        "interaction_id": "interaction-joint",
+        "activation_id": "activation-joint",
+        "activation_generation": 1,
+    }
+    params.update(changes)
+    return params
+
+
+def _joint_product_task_commit(*, stem: str, text: str) -> dict[str, object]:
+    commit_id = f"commit-{stem}"
+    turn_id = f"turn-{stem}"
+    return _joint_product_p2_params(
+        commit_id=commit_id,
+        turn_id=turn_id,
+        committed_at=NOW,
+        text=text,
+        dispatch_target="task",
+        gateway_voice_claim={
+            "kind": "formal_speech_recognition",
+            "speech_operation_id": f"speech-operation-{stem}",
+            "capture_id": f"capture-{stem}",
+            "capture_generation": 1,
+            "session_id": "session-1",
+            "correlation_id": "correlation-joint",
+            "interaction_id": "interaction-joint",
+            "turn_id": turn_id,
+            "commit_id": commit_id,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "critical_policy": "confirmed",
+        },
+    )
+
+
+def _joint_product_voice_intent(
+    *, stem: str, operation: str, task_id: str | None = None
+) -> dict[str, object]:
+    params = _joint_product_p2_params(
+        source="voice",
+        operation_hint=operation,
+        turn_id=f"turn-{stem}",
+        commit_id=f"commit-{stem}",
+    )
+    params.pop("activation_id")
+    params.pop("activation_generation")
+    if task_id is not None:
+        params["task_id_hint"] = task_id
+    return params
+
+
+async def _wait(predicate, *, attempts: int = 500) -> None:
+    # Test-only Windows scheduling allowance; this is not a product deadline or SLO.
     for _ in range(attempts):
         if predicate():
             return
@@ -430,3 +624,449 @@ async def test_only_confirmed_task_cancel_mutates_direct_task_and_other_cancels_
     assert terminal.outcome is TerminalOutcome.CANCELLED
     assert not (project / "RESULT-cancel.md").exists()
     assert _git(project, "rev-parse", "HEAD") == revision
+
+
+@pytest.mark.asyncio
+async def test_s6_joint_slow_conversation_detached_task_and_exact_cancel_domains(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "joint-project"
+    revision = _project(project)
+    database = tmp_path / "joint-isolated-data" / "formal-task.sqlite3"
+    task_facade = _DirectAgentFacade(project)
+
+    async def fence() -> None:
+        assert _git(project, "rev-parse", "HEAD") == revision
+
+    binding = ProjectExecutionBinding(
+        service=None,
+        execution_agent=object(),
+        project_executor=task_facade,
+        effective_execution_root=str(project.resolve()),
+        execution_target={
+            "project_dir": str(project.resolve()),
+            "project_id": "project-1",
+            "origin_session_id": "session-1",
+            "origin_channel_id": "web",
+        },
+        owner_scope={
+            "channel_id": "formal-task-core",
+            "session_id": "session-1",
+            "app_id": "live-voice",
+        },
+        resolved_revision_kind="version",
+        resolved_revision_value=revision,
+        model_identity="default#0",
+        model_config_version="catalog-v1",
+        dispatch_fence=fence,
+    )
+    executor = DirectProjectCodeExecutorAdapter(_Resolver(binding), database)
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, executor)
+    conversation_adapter = _SlowConversationAdapter()
+    manager = _JointProductAgentManager(conversation_adapter)
+    commit_ledger = TurnCommitLedger(capacity=128)
+    confirmation_owner = BoundedP3ConfirmationOwner(
+        database,
+        enabled=True,
+    )
+    confirmation_forwarder = ProductP3ConfirmationForwarder(confirmation_owner)
+    p3_composition = P3AuthenticatedComposition(
+        authenticator=StaticBearerAuthenticator(
+            token=PRODUCT_TOKEN,
+            principal=AuthenticatedPrincipal(
+                principal_id="principal-1",
+                allowed_project_ids=frozenset({"project-1"}),
+                allowed_operations=P3_OPERATIONS | {"agent.chat"},
+                expires_at=EXPIRY,
+            ),
+        ),
+        authority_resolver=_ProductAuthorityResolver(
+            _context(project, revision), project
+        ),
+        core=core,
+        confirmation_verifier=confirmation_forwarder,
+        model_resolver=_ProductModelResolver(),
+        policy=FormalTaskPolicyAdapter(commit_ledger),
+        reconcile_interval=3600,
+        clock=lambda: NOW,
+    )
+    pushed: list[dict[str, object]] = []
+
+    async def push_text_event(message: dict[str, object]) -> bool:
+        pushed.append(message)
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+            critical_input_enabled=True,
+        ),
+        p3_composition=p3_composition,
+        agent_manager=manager,
+        push_text_event=push_text_event,
+        p3_confirmation_owner=confirmation_owner,
+        p3_confirmation_forwarder=confirmation_forwarder,
+        commit_ledger=commit_ledger,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._server_agent_mode",
+        lambda _session_id: ("code", "normal"),
+    )
+    await p3_composition.start()
+    activated = await registry.handle_p2_activate(
+        params=_joint_product_p2_params(),
+        request_id="request-joint-activate",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert activated.ok is True, activated.payload
+
+    first = await registry.handle_p2_submit(
+        params=_joint_product_p2_params(
+            commit_id="commit-joint-text",
+            turn_id="turn-joint-text",
+            response_id="response-joint-text",
+            committed_at=NOW,
+            text="review the current state slowly",
+            dispatch_target="agent",
+        ),
+        request_id="request-joint-text",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert first.ok is True, first.payload
+    await _wait(lambda: "request-joint-text" in conversation_adapter.entered)
+    await asyncio.wait_for(
+        conversation_adapter.entered["request-joint-text"].wait(), timeout=1
+    )
+
+    create_text = "create task: Create RESULT-joint.md with one bounded result."
+    create_origin = await registry.handle_p2_submit(
+        params=_joint_product_task_commit(
+            stem="joint-task-create",
+            text=create_text,
+        ),
+        request_id="request-joint-task-create-origin",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert create_origin.ok is True, create_origin.payload
+    create_pending = await registry.handle_p3_intent(
+        params=_joint_product_voice_intent(
+            stem="joint-task-create",
+            operation="task.create",
+        ),
+        request_id="request-joint-task-create-intent",
+        session_id="session-1",
+    )
+    assert create_pending.ok is True, create_pending.payload
+    pending_result = cast(dict[str, object], create_pending.payload["result"])
+    assert pending_result["status"] == "clarification"
+    confirmation_token = cast(str, pending_result["confirmation_token"])
+    create_confirmation_text = f"confirm task request {confirmation_token}"
+    create_confirmation_origin = await registry.handle_p2_submit(
+        params=_joint_product_task_commit(
+            stem="joint-task-create-confirm",
+            text=create_confirmation_text,
+        ),
+        request_id="request-joint-task-create-confirm-origin",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert create_confirmation_origin.ok is True, create_confirmation_origin.payload
+    created = await registry.handle_p3_intent(
+        params=_joint_product_voice_intent(
+            stem="joint-task-create-confirm",
+            operation="task.create",
+        ),
+        request_id="request-joint-task-create-confirm-intent",
+        session_id="session-1",
+    )
+    assert created.ok is True, created.payload
+    create_result = cast(dict[str, object], created.payload["result"])
+    assert create_result["status"] == "dispatched"
+    assert create_result["origin_kind"] == "voice"
+    assert create_result["origin_id"] == "interaction-joint"
+    task_id = cast(str, create_result["task_id"])
+    assert registry._voice_task_origins[task_id].interaction_id == ("interaction-joint")
+    await _wait(lambda: task_facade.started.get("joint", asyncio.Event()).is_set())
+
+    second_route = _joint_product_p2_params(
+        correlation_id="correlation-joint-response",
+        interaction_id="interaction-joint-response",
+        activation_id="activation-joint-response",
+        activation_generation=1,
+    )
+    second_activated = await registry.handle_p2_activate(
+        params=second_route,
+        request_id="request-joint-response-activate",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert second_activated.ok is True, second_activated.payload
+
+    status_text = f"task status {task_id}"
+    status_origin = await registry.handle_p2_submit(
+        params=_joint_product_task_commit(
+            stem="joint-task-status",
+            text=status_text,
+        ),
+        request_id="request-joint-task-status-origin",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert status_origin.ok is True, status_origin.payload
+    status = await registry.handle_p3_intent(
+        params=_joint_product_voice_intent(
+            stem="joint-task-status",
+            operation="task.status",
+            task_id=task_id,
+        ),
+        request_id="request-joint-task-status-intent",
+        session_id="session-1",
+    )
+    assert status.ok is True, status.payload
+    status_result = cast(dict[str, object], status.payload["result"])
+    assert status_result["status"] == "dispatched"
+    formal_status = cast(dict[str, object], status_result["formal_task_result"])
+    assert cast(dict, formal_status["task"])["state"] == "running"
+
+    revised = await registry.handle_p2_submit(
+        params={
+            **second_route,
+            "commit_id": "commit-joint-voice-revision",
+            "turn_id": "turn-joint-voice-revision",
+            "response_id": "response-joint-voice-revision",
+            "committed_at": NOW,
+            "text": "revise the answer while detached work continues",
+            "dispatch_target": "agent",
+        },
+        request_id="request-joint-voice-revision",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert revised.ok is True, revised.payload
+    await _wait(lambda: "request-joint-voice-revision" in conversation_adapter.entered)
+    await asyncio.wait_for(
+        conversation_adapter.entered["request-joint-voice-revision"].wait(),
+        timeout=1,
+    )
+    revised_response = cast(
+        dict[str, object],
+        cast(dict[str, object], revised.payload["result"])["response"],
+    )
+    interrupted = await registry.handle_p2_barge_in(
+        params={
+            **second_route,
+            "action_id": "joint-response-interruption",
+            "response_id": revised_response["response_id"],
+            "response_generation": revised_response["response_generation"],
+            "cancel_response": True,
+        },
+        request_id="request-joint-barge-in",
+        session_id="session-1",
+    )
+    assert interrupted.ok is True, interrupted.payload
+    assert cast(dict, interrupted.payload["result"])["applied"] is True
+    post_barge = await registry.handle_p2_submit(
+        params={
+            **second_route,
+            "commit_id": "commit-joint-post-barge",
+            "turn_id": "turn-joint-post-barge",
+            "response_id": "response-joint-post-barge",
+            "committed_at": NOW,
+            "text": "continue the revised answer while detached work remains active",
+            "dispatch_target": "agent",
+        },
+        request_id="request-joint-post-barge",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert post_barge.ok is True, post_barge.payload
+    await _wait(lambda: "request-joint-post-barge" in conversation_adapter.entered)
+    post_barge_response = cast(
+        dict[str, object],
+        cast(dict[str, object], post_barge.payload["result"])["response"],
+    )
+    assert cast(int, post_barge_response["response_generation"]) > cast(
+        int, revised_response["response_generation"]
+    )
+
+    progress = await registry.handle_p3_progress_activate(
+        params={
+            "auth_token": PRODUCT_TOKEN,
+            "session_id": "session-1",
+            "task_id": task_id,
+            "correlation_id": "correlation-joint",
+            "origin_id": "interaction-joint",
+            "generation_id": "joint-task-progress-generation",
+            "generation": 1,
+            "origin_kind": "voice",
+        },
+        request_id="request-joint-task-progress",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert progress.ok is True, progress.payload
+    progress_result = cast(dict[str, object], progress.payload["result"])
+    assert progress_result["requested_origin_kind"] == "voice"
+    assert progress_result["origin_kind"] == "text"
+    assert progress_result["fallback_reason"] == (
+        "TASK_PROGRESS_VOICE_DELIVERY_UNAVAILABLE"
+    )
+
+    counts_before_rejections = store.counts()
+    stale = await registry.handle_p3_intent(
+        params=_joint_product_voice_intent(
+            stem="joint-stale-missing",
+            operation="task.status",
+            task_id=task_id,
+        ),
+        request_id="request-joint-stale-intent",
+        session_id="session-1",
+    )
+    wrong_scope = await registry.handle_p3_query(
+        operation="task.status",
+        params={
+            "auth_token": PRODUCT_TOKEN,
+            "session_id": "session-1",
+            "task_id": task_id,
+            "claimed_project_id": "project-foreign",
+        },
+        request_id="request-joint-wrong-scope",
+        session_id="session-1",
+    )
+    partial = await registry.handle_p3_intent(
+        params={
+            "auth_token": PRODUCT_TOKEN,
+            "session_id": "session-1",
+            "correlation_id": "correlation-joint-partial",
+            "source": "text",
+            "operation_hint": "task.create",
+            "interaction_id": "interaction-joint-partial",
+            "turn_id": "turn-joint-partial",
+            "commit_id": "commit-joint-partial",
+            "committed_at": NOW,
+            "text": "create task:",
+        },
+        request_id="request-joint-partial-intent",
+        session_id="session-1",
+    )
+    assert stale.ok is False
+    assert wrong_scope.ok is False
+    assert partial.ok is False or cast(dict, partial.payload["result"])["status"] == (
+        "clarification"
+    )
+    assert store.counts() == counts_before_rejections
+
+    cancel_text = f"cancel task {task_id}"
+    cancel_origin = await registry.handle_p2_submit(
+        params=_joint_product_task_commit(
+            stem="joint-task-cancel",
+            text=cancel_text,
+        ),
+        request_id="request-joint-task-cancel-origin",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert cancel_origin.ok is True, cancel_origin.payload
+    cancel_pending = await registry.handle_p3_intent(
+        params=_joint_product_voice_intent(
+            stem="joint-task-cancel",
+            operation="task.cancel",
+            task_id=task_id,
+        ),
+        request_id="request-joint-task-cancel-intent",
+        session_id="session-1",
+    )
+    assert cancel_pending.ok is True, cancel_pending.payload
+    cancel_token = cast(
+        str,
+        cast(dict[str, object], cancel_pending.payload["result"])["confirmation_token"],
+    )
+    cancel_confirmation = await registry.handle_p2_submit(
+        params=_joint_product_task_commit(
+            stem="joint-task-cancel-confirm",
+            text=f"confirm task request {cancel_token}",
+        ),
+        request_id="request-joint-task-cancel-confirm-origin",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert cancel_confirmation.ok is True, cancel_confirmation.payload
+    cancelled = await registry.handle_p3_intent(
+        params=_joint_product_voice_intent(
+            stem="joint-task-cancel-confirm",
+            operation="task.cancel",
+            task_id=task_id,
+        ),
+        request_id="request-joint-task-cancel-confirm-intent",
+        session_id="session-1",
+    )
+    assert cancelled.ok is True, cancelled.payload
+    assert cast(dict, cancelled.payload["result"])["status"] == "dispatched"
+    await _wait(
+        lambda: store.get_task(task_id, _scope()).outcome is TerminalOutcome.CANCELLED
+    )
+    assert conversation_adapter.release["request-joint-post-barge"].is_set() is False
+
+    def terminal_progress() -> dict[str, Any] | None:
+        for message in reversed(pushed):
+            payload = message.get("payload")
+            if not isinstance(payload, dict) or payload.get("event_type") != (
+                "live_voice.task.progress"
+            ):
+                continue
+            progress_event = payload.get("progress_event")
+            if isinstance(progress_event, dict):
+                projected = WorkProgressEventV2.from_dict(
+                    cast(dict[str, object], progress_event["payload"])
+                )
+                if projected.state.value == "terminal":
+                    return cast(dict[str, Any], payload)
+        return None
+
+    await _wait(lambda: terminal_progress() is not None)
+    terminal_payload = cast(dict[str, Any], terminal_progress())
+    returned = WorkProgressEventV2.from_dict(
+        cast(dict[str, object], terminal_payload["progress_event"])["payload"]
+    )
+    assert returned.work_ref.id == task_id
+    assert returned.state.value == "terminal"
+    assert returned.outcome is TerminalOutcome.CANCELLED
+    assert create_text not in repr(pushed)
+    source_event = cast(dict[str, object], terminal_payload["source_event"])
+    progress_event = cast(dict[str, object], terminal_payload["progress_event"])
+    acknowledged = await registry.handle_p3_progress_ack(
+        params={
+            "auth_token": PRODUCT_TOKEN,
+            "session_id": "session-1",
+            "task_id": task_id,
+            "correlation_id": "correlation-joint",
+            "origin_id": "interaction-joint",
+            "generation_id": "joint-task-progress-generation",
+            "generation": 1,
+            "delivery_id": terminal_payload["delivery_id"],
+            "source_event_id": source_event["event_id"],
+            "progress_event_id": progress_event["event_id"],
+            "seq": source_event["seq"],
+            "evidence_id": terminal_payload["evidence_id"],
+        },
+        request_id="request-joint-task-progress-ack",
+        session_id="session-1",
+        channel_id="web",
+    )
+    assert acknowledged.ok is True, acknowledged.payload
+
+    conversation_adapter.release["request-joint-text"].set()
+    conversation_adapter.release["request-joint-voice-revision"].set()
+    conversation_adapter.release["request-joint-post-barge"].set()
+    await registry.stop()
+    assert manager.pins == manager.unpins
+    assert not (project / "RESULT-joint.md").exists()
+    assert _git(project, "rev-parse", "HEAD") == revision
+    await p3_composition.stop()
