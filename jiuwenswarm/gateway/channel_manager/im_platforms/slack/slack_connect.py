@@ -138,7 +138,8 @@ class SlackChannel(BaseChannel):
         if self._client is None:
             return
         if msg.event_type == EventType.CHAT_DELTA:
-            card_spec = (getattr(msg, "payload", None) or {}).get("interactive_card")
+            return
+        card_spec = (getattr(msg, "payload", None) or {}).get("interactive_card")
         if card_spec:
             channel_id, thread_ts = self._extract_delivery(msg, routing_target)
             if not channel_id:
@@ -188,7 +189,7 @@ class SlackChannel(BaseChannel):
             return
         chat_id = (body.get("channel") or {}).get("id", "")
         await self._handle_message(chat_id, value, metadata={"slack_card_action": True}) 
-        
+
     async def _handle_message_event(
         self, event: dict[str, Any], body: dict[str, Any]
     ) -> None:
