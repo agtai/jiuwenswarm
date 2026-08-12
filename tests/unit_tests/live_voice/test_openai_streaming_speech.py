@@ -661,7 +661,10 @@ async def test_realtime_recognition_resamples_and_orders_partial_then_final() ->
     async def socket_factory(
         url: str, headers: Mapping[str, str], timeout: float
     ) -> FakeSocket:
-        assert url == ("wss://api.openai.com/v1/realtime?model=gpt-4o-mini-transcribe")
+        # The transcription snapshot must not be the realtime session model; the
+        # server rejects that with invalid_model. It travels in session.update as
+        # session.audio.input.transcription.model instead.
+        assert url == "wss://api.openai.com/v1/realtime?intent=transcription"
         assert headers["Authorization"].startswith("Bearer ")
         assert timeout > 0
         return socket

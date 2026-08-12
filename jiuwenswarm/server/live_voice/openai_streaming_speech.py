@@ -866,7 +866,7 @@ class OpenAIStreamingSpeechProvider:
             )
             conformance_started = True
             deadline = started_at + float(timeout_seconds)
-            url = _realtime_url(self._config.api_base, self._config.stt_model)
+            url = _realtime_url(self._config.api_base)
             remaining = deadline - self._monotonic()
             if remaining <= 0:
                 raise TimeoutError("recognition stream timed out before connect")
@@ -2321,10 +2321,21 @@ def _validate_api_base(value: object) -> str:
     return "https://api.openai.com/v1"
 
 
-def _realtime_url(api_base: str, model: str) -> str:
+def _realtime_url(api_base: str) -> str:
+    """Build the realtime transcription session URL.
+
+    The session is opened with ``intent=transcription`` rather than a ``model``
+    parameter. A realtime session's ``model`` must be a realtime model; passing
+    the transcription snapshot there makes the server reject the session with
+    ``invalid_model`` before any audio is sent. The transcription snapshot is
+    carried by the ``session.update`` payload as
+    ``session.audio.input.transcription.model`` instead.
+    """
     parsed = urlparse(api_base)
     path = f"{parsed.path.rstrip('/')}/realtime"
-    return urlunparse(("wss", parsed.netloc, path, "", urlencode({"model": model}), ""))
+    return urlunparse(
+        ("wss", parsed.netloc, path, "", urlencode({"intent": "transcription"}), "")
+    )
 
 
 def _required_secret(value: object) -> None:
