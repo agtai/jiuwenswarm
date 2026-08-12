@@ -1,12 +1,11 @@
-# Live Voice cumulative P1/P2/P3alpha showcase
+# Live Voice W2 cumulative P1/P2/P3alpha showcase
 
 > Runtime/acceptance state: see [STATUS.md](../STATUS.md)
 > Week 2 pass/fail authority: [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
-> Week 3–4 Web Alpha pass/fail authority: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
 > Environment procedure: [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md)
 > Stable delivery/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
-This script defines the single complete human product journey used by D-071 after automated verification. It is not a second implementation status source: only actually observed behavior may pass, and unavailable or unsupported behavior must remain explicit.
+This script defines the S3/W2 complete human product journey used by D-071 after automated verification. It does not close Alpha; Alpha A3 uses [ALPHA_SHOWCASE.md](ALPHA_SHOWCASE.md). It is not a second implementation status source: only actually observed behavior may pass, and unavailable or unsupported behavior must remain explicit.
 
 ## 1. Showcase claim
 
@@ -36,7 +35,6 @@ The UI/trace must identify every segment as `formal`, `fallback`, `demo_substitu
 4. Confirm the Demo target is safe for one real side-effecting task or select an isolated/disposable project.
 5. Confirm route telemetry, correlated events and sanitized diagnostic logging are active.
 6. Confirm text fallback remains usable.
-7. For Web Alpha acceptance, verify the declared Google Chrome version, secure origin, permission/device/autoplay/page-lifecycle checks and Browser↔Gateway deployment route before opening the microphone. Non-Chrome results remain exploratory unless the accepted browser scope changes.
 
 ## 3. Integrated script
 
@@ -81,4 +79,4 @@ Exercise one controlled Provider/media/permission or Executor failure. Show a bo
 
 Recommended closing statement:
 
-> This run used one cumulative product path. The route trace shows which P1, P2 and P3alpha segments are formal, which use declared fallback, and which remain substitutes. The Agent, Tool, task identity, status and result were real; automated verification and the human observations recorded here determine the Week 2 product result.
+> This run used one cumulative product path. The route trace shows which P1, P2 and P3alpha segments are formal, which use declared fallback, and which remain substitutes. The Agent, Tool, task identity, status and result were real; automated verification and the human observations recorded here determine the W2 product result, not Alpha.

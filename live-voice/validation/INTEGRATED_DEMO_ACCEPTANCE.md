@@ -1,10 +1,10 @@
 # Live Voice W2 Integrated Demo product acceptance
 
 > Run state and current checklist: [STATUS.md](../STATUS.md)
-> Authority: D-071, with D-046/D-053 retained for risk-proportional automated verification and review
+> Authority: D-071, with D-046 risk tiers and D-074 staged review
 > Manual journey: [INTEGRATED_SHOWCASE.md](../demo/INTEGRATED_SHOWCASE.md)
 
-This contract decides whether the cumulative P1/P2/P3alpha W2 Demo is product-accepted. Under D-071, acceptance requires applicable automated verification plus one complete human product journey. It does not require a signed evidence Gate, Replacement Ledger score, fixed artifact manifest or repeated full-showcase runs.
+This contract decides whether the cumulative P1/P2/P3alpha W2 Demo (D-075 stage S3) is product-accepted. It is retained for W2 regression/reproduction and does not define Alpha A0–A3. Under D-071, acceptance requires applicable automated verification plus one complete human product journey. It does not require a signed evidence Gate, Replacement Ledger score, fixed artifact manifest or repeated full-showcase runs.
 
 `W2` is a delivery-order label, not a promised calendar week. A PASS proves the bounded Integrated Demo product scope only; it does not claim Production, complete P3, D1/D2, public compatibility or an audit-grade release certification.
 

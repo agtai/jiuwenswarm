@@ -7,11 +7,11 @@
 ## D-001 方案知识保存在 Git 跟踪的普通文档中
 
 - 日期：2026-07-31
-- 状态：Accepted（“知识进入 Git 跟踪文档”的原则保留；旧 `docs/zh/live-voice/` 路径由 D-040 取代，commit/push 操作由根 `AGENTS.md` 的逐次审批规则取代）
+- 状态：Accepted（“知识进入 Git 跟踪文档”的原则保留；旧 `docs/zh/live-voice/` 路径由 D-040 取代，本地 commit/远端 push 操作由根 `AGENTS.md` 和 D-074 的当前规则控制）
 - 背景：需要在多台机器上通过 GitHub 同步代码并让新的 Codex 会话快速接续。
 - 原决策：完整方案和 Demo 方案保存在 `docs/zh/live-voice/`；D-040 后续把权威位置调整为根 `live-voice/`。不把完整知识仅存入 `.codex`、`.agent`、本地数据库或聊天记录的原则不变。
 - 原因：普通 Markdown 可审查、可 diff、可提交、可跨工具阅读；隐藏工具目录容易与某一运行环境绑定。
-- 原影响：实质性工作更新 STATUS，新取舍更新本文件；其中自动 commit/push 要求已失效，当前每次 commit 与 push 都按根 `AGENTS.md` 分别取得精确批准。
+- 原影响：实质性工作更新 STATUS，新取舍更新本文件。D-074 当前允许已授权任务形成 coherent local commit；所有远端 ref 更新仍按根 `AGENTS.md` 单独精确批准。
 - 重新评估条件：仓库建立了统一且跨工具的项目知识系统。
 
 ## D-002 先交付纵向 Demo，不把它称为 Alpha
@@ -407,20 +407,20 @@
 - 决策：文档深度（简要/完整）与读取策略（必读/涉及才读）是正交分类。每个 Live Voice 任务只强制读取根 AGENTS、README、STATUS；普通模块再读相关源码/tests/路线/决策，架构或协议任务才完整读取方案，验收任务才读取验收/runbook/showcase/evidence，文档任务必须读取 `DOCUMENTATION_RULES.md`。
 - 决策：删除重复的 `HANDOFF.md`。可变事实只在 STATUS 更新；README 不复制状态；决策只记录选择与理由；不可变 evidence/方案不被事后改写；archive 明确不能覆盖当前状态。移动文档时必须统一修复链接并验证 `docs/zh/live-voice/` 无 tracked 副本。
 - 原因：新机器和新 Codex 可以用很小的必读集恢复正确方向，需要细节时仍能进入完整记录；单一权威避免简要版与完整版各自维护同一状态而漂移。
-- 影响：旧决策中的历史路径、旧分支和当时状态仍作为历史事实保留，但当前操作必须以根 AGENTS、`live-voice/README.md`、`live-voice/STATUS.md` 和 `DOCUMENTATION_RULES.md` 为准。文档同步不构成自动 commit/push 授权。
+- 影响：旧决策中的历史路径、旧分支和当时状态仍作为历史事实保留，但当前操作必须以根 AGENTS、`live-voice/README.md`、`live-voice/STATUS.md` 和 `DOCUMENTATION_RULES.md` 为准。D-074 当前允许已授权文档任务形成 coherent local commit，但不自动授权任何 push。
 - 重新评估条件：仓库出现可自动生成并可靠校验的文档索引/状态投影，或根知识库影响上游文档发布流程。
 
 ## D-041 以 Sol 冻结高风险语义并由非 Sol 模型执行有界工作包
 
 - 日期：2026-08-03
-- 状态：Partially superseded（风险判断和历史设计职责保留；面向未来任务的非 Sol 执行分工由 D-052 取代，原 D-031-first 排序和普遍 D-032 流程由 D-046 取代）
+- 状态：Partially superseded（风险判断和历史设计职责保留；面向未来任务的非 Sol 执行分工由 D-052 取代，原 D-031-first 排序和普遍 D-032 流程由 D-046 取代，交付/review/commit 节奏由 D-074 取代）
 - 当前解释：以下非 Sol owner、交接和成本分配正文只记录接受本决定时的策略，不能用于分配当前或未来任务。
 - 背景：Live Voice 后续同时包含契约、并发状态机、取消与副作用安全、持久化、真机媒体和大量可机械执行的 Adapter/tests 工作。高能力模型额度有限；若让同一模型承担全部编码，会把稀缺推理消耗在已经能够由明确规范驱动的实现上。反过来，若让执行模型自行决定状态权威、错误语义、恢复、权限或测试放行标准，则可能把错误实现固化为预期。
 - 优先级决策：P1/P2/P3 是能力平面，不作为简单的串行开发顺序。当前排序以 D-046 为权威：先在 1–2 天内冻结并实现 ACG critical kernel，同时建立累计 Integrated Demo 的 route telemetry 与 Replacement Ledger；随后 P1、P2、P3alpha 和集成轨按已冻结依赖并行。D-031 只保留 Day 5/Day 7 决策点，若正式 `TC-B + TaskEvent/projection` 不能及时进入 Demo，再把最小单任务 monitor 限时为 1–2 个工作日；不再把完整 D-031 作为共享 Contract Gate 和全部能力轨的前置任务。
 - 模型职责决策：GPT-5.6 Sol 是指定的设计与审查模型，负责 D-046 风险分级要求的开发前/开发后回顾、模块定义与非目标、适用的 P/N/B/S/T/C/R/I/F/K/X 场景及 test oracle、跨模块 schema/state authority/identity/ownership/cancel/commit/fence/compatibility、安全与 durability 边界、架构变更、证据解释以及 `CLOSED/PARTIAL/BLOCKED` 和版本放行判断。Sol 不承担已冻结规范下的常规执行和实现，除非用户以后明确改变该分工。
 - 执行职责决策：代码实现交给非 Sol 模型，例如已配置环境中的 DeepSeek-V4-Flash 或其他执行模型。执行模型适合在所消费的契约、状态转换、scenario IDs、允许与禁止副作用、目标文件和验证命令齐全后，实现 types/ports/reducers/adapters/fakes/conformance、受限 UI/协议接线、测试、fault injection、instrumentation、benchmark runner、打包和机械文档整理。Tier 2/3 或共享契约 `*-A` 工作包由 Sol 冻结 contract/oracle，执行模型落实 types/fake/conformance；其余包按 D-046 的风险等级采用最小充分交接。`*-B`、`*-C` 由执行模型按其实际依赖 Gate 实现和验证，再由 Sol 审查高风险语义与累计证据。
 - 停止条件：执行模型不得自行新增或放宽契约、把 `unknown/unsupported/error` 改成成功、改变状态权威或 cancel scope、删除或弱化失败断言、用 snapshot 更新掩盖差异，或把 Demo consistency scope 写成生产安全。发现规范歧义、上下游冲突、需要新状态/错误、测试与设计不一致或无法证明禁止副作用为零时，必须停止该语义分支并交回 Sol；不能凭当前代码更易实现而猜测产品行为。
-- 交付约束：Sol 保持完整项目的模块级依赖图，但只详细冻结未来一周的滚动执行队列。每个工作包必须可独立说明和验证；共享同一契约与风险边界的相关包可以共用一次设计 checkpoint、实现批次、post-review 和 commit，依赖已冻结且文件范围不冲突的包可以并行。交接必须包含 authoritative sources、目标与非目标、输入输出、状态与 ownership、scenario→test/evidence、禁止副作用、目标文件、验证命令和明确 exclusions。执行结果保持未提交并报告 status、diff、测试与未决问题；commit 和 push 继续分别遵守根 `AGENTS.md` 的精确批准门。具体模型/provider、凭据、API base 和可用性属于机器私有条件，不写成 Git 可恢复能力。
+- 历史交付约束：接受本决定时，工作包要求完整交接并保持未提交等待逐次批准。当前由 D-074 取代为：开发中做 affected review，模块收口审完整 scoped diff，阶段收口审累计 diff；已授权任务可形成 coherent local commit，所有 push 仍须单独批准。具体模型/provider、凭据、API base 和可用性属于机器私有条件，不写成 Git 可恢复能力。
 - 原因：把 Sol 额度沉淀为可复用的契约、状态机、测试 oracle 和审查结论，可以让后续较低成本模型安全地持续实现；同时通过 Tier 2/3 的适用双回顾和 Week 2/Week 4 累计 Gate，阻止高风险执行偏差被测试自洽地掩盖。该策略按风险和依赖分配模型，而不是按文件类型或代码量分配，也不要求低风险机械工作承担完整矩阵成本。
 - 影响：Sol 维护完整项目的模块级依赖图和未来一周滚动执行队列；当前 dated queue 由 `STATUS.md` 路由到 [WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](../roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)。非 Sol 模型只执行明确标为 `READY` 或其依赖 Gate 已实际通过的有界包；共享 kernel 在被下游消费前由 Sol grouped post-review。D-031 的旧 `B1..B4` 表仅保留为历史设计输入，只有 Day 5/Day 7 go 决策通过后才由 Sol 重新裁成最小当前包。Observability/X-E2E/Windows 真机等证据仍需工具、环境或人工后验，不能由任一模型的文字判断代替。
 - 重新评估条件：用户明确更改模型分工；受控对比证明某执行模型可在不降低适用风险等级证据质量的前提下可靠承担某类设计/审查；模型或工具可用性变化；或某切片的风险、合规、安全与生产责任要求升级到需要重新分类。
@@ -483,16 +483,16 @@
 ## D-046 以两周 90% 累计 Demo 和四周 Integrated Alpha 驱动并行交付
 
 - 日期：2026-08-03
-- 状态：Partially superseded（累计路线、范围、评分和风险分级保留；Windows/X-WIN 载体由 D-055 取代，未来模型分工和原并行资源假设先由 D-052 取代，D-060 后来恢复有界并行，D-062 再将固定四 Session 改为 W2 优先的按批次自适应 worker 图；`W2/W3/W4` 当前是顺序窗口，不是日历承诺）
+- 状态：Partially superseded（累计路线、范围和风险分级保留；Windows/X-WIN 载体由 D-055 取代，签名 Gate/评分由 D-071 取代，固定三轮/逐次 commit 审批节奏由 D-074 取代，D-060/D-062 的并行模型只在 active packet 中按需启用；D-075 将 `W1/W2/W3/W4` 进一步限定为历史交付窗口，并以 S0–S9/A0–A3 表示当前顺序状态）
 - 背景：用户明确项目目标不是无限期平台建设，也不是只维护 V0 或只完成 D-031。V0 要第一时间打通真实端到端，随后正式模块沿同一工程路径持续替换 Demo 中的手工代码、固定限制和兼容实现；第 2 周 Demo 达到可审计的 90% 完成度，第 3–4 周完成 P1 + P2 + P3，若完整 P3 风险过高则 P3alpha 可作为承诺结果。完整方案现有 31 个 Alpha 工程包的顺序时间盒约为 47–78 人日，尚未包含完整 P3 扩展；若按每个小切片独立 D-032 checkpoint、单执行流和末期统一集成推进，四周目标在流程上即不可达。
 - 接受时的目标定义：原四周并行范围写作 **Integrated Windows Alpha = P1 + P2 + P3alpha + Context/Progress/Failure/Observability + 三个真实纵向切片 + P2/P3alpha 联合 Gate**。D-055 已把 carrier 映射为 Web/X-WEB，D-052 已取消原并行日历承诺；D-060 的有界并行只改变执行分配，不恢复该日历承诺。能力范围仍不是 RC/Production，完整 P3 仍是 stretch，P3alpha 是当前 Alpha 的最低 Task 范围。
 - 两周决策：Week 2 必须运行一个累计 Integrated Demo，而不是分别运行互斥的 V0、稳定句和 Task 样例。完成度按权威 Demo Replacement Ledger 的用户旅程权重计算，不按代码行数、测试数、文件数或模块名计数；总分至少 90/100，且 committed-only、副作用确认、精确 identity/scope、stale fence、unknown/error 不冒充成功、文字 flag-off 回归等 mandatory invariant 全部通过。`fallback`、`Demo substitute`、`unsupported` 和 `unknown` 必须可见；substitute 可以证明类别价值，但不能自动获得正式模块全部分值。
 - 演进决策：V0 `ee2896a4` 保持不可变证据基线。新模块通过 Port/Adapter/capability/feature flag 逐段接管同一累计 Demo，必须由 route telemetry/trace 证明每段实际使用 formal、fallback 或 substitute；不另建第二套假 UX，也不等到所有模块完成后再进行首次集成。
 - 并行决策：共享 ACG critical kernel 在最初 1–2 天冻结并实现，包含 identity/scope、authority、committed input、核心 lifecycle、四种 cancel、generation fence、Event/Error/Capability 和 feature-off primitives。随后 P1（AIO/SR/SS）、P2（CR/RM/II/AB）、P3alpha（TC/ED/VB）与 X-OBS/X-E2E/Windows 集成按依赖并行。ACG 的 ContextRef 全量策略、presentation ACK、完整 restart reconciliation 等扩展仍属于完整目标，但只在消费它们的 B/C 接线前成为局部门槛，不阻塞无关 A 包。
 - D-031 决策：D-031 不再是整个项目无条件第一任务。它是 P3alpha 轨上的 legacy Demo Adapter 候选：若 `TC-B + TaskEvent/projection` 可在 Day 7 前进入累计 Demo，则跳过或缩减 D-031；否则把最小单任务 monitor 限时为 1–2 个工作日。必须保留 single in-flight、精确 identity/target、迟到结果 fence、错误不冒充终态、零 Chat mutation 和播报仲裁，但不得把临时 poll 路径扩成通用多任务、持久 replay、跨进程恢复或第二个 Task Core。
-- D-032 决策：测试与 Sol 回顾按风险分级。Tier 0 文档/机械/纯重构执行受影响检查；Tier 1 普通功能/Adapter/UI 覆盖正向旅程、关键反例/flag-off、受影响集成和回归；Tier 2 状态/并发/副作用边界执行 scoped Sol pre/post review 和全部适用维度；Tier 3 共享协议、authority、安全、durability、Week 2/Week 4 Release Gate 执行完整 D-032、fault/recovery、immutable candidate 和真实路径证据。相关包可以共享一次设计 checkpoint、实现批次、post-review 和 commit；不再要求每个小包独立 pre-review commit/push。根 `AGENTS.md` 的每次 commit 与 push 分别精确批准仍保持不变。
+- D-032 决策：测试按风险分级。Tier 0 文档/机械/纯重构执行受影响检查；Tier 1 普通功能/Adapter/UI 覆盖正向旅程、关键反例/flag-off、受影响集成和回归；Tier 2 状态/并发/副作用边界覆盖全部适用维度与零禁止副作用；Tier 3 共享协议、authority、安全、durability 与阶段放行执行完整适用 D-032、fault/recovery 和真实路径证据。D-074 当前要求仅在新增/改变高风险契约时先做设计 checkpoint，并把 review 聚合到模块/阶段收口；普通 local commit 无需逐次批准，所有 push 仍须单独精确批准。
 - 历史模型分工：本决定接受时沿用 D-041；D-052 后续把设计、实现、测试和审查统一为当前 GPT/Sol 默认单线，D-060 再为有界 Alpha 范围建立四个 GPT/Sol 实现 Session 和单一集成所有权。这里保留的跨轨契约、高风险判断和 Gate 责任仍有效，但不授权切换到外部模型。
-- 文档影响：`STATUS.md` 只保留短 dashboard、当前 replacement ledger、blocker 和 next actions；2026-08-03 已完成的详细 D-031/ACG/CR-A/SR-A/SS-A/TC-A 设计移入冻结 review record。Roadmap 以 Week 2/Week 4 Gate 和并行轨为权威；V0 acceptance/evidence/showcase 保持历史边界，并新增 Integrated Demo 与 Alpha acceptance/showcase。Runbook 在代码具备组合路由前必须诚实标注 Integrated mode 尚不可运行。
+- 历史文档影响：本决定接受时要求 STATUS 保存 replacement ledger 并以 Week 2/Week 4 Gate 表达路线；D-071/D-072 已退役该 ledger/evidence Gate，D-075 现以 S0–S9/A0–A3 和 milestone-specific showcase 取代其当前执行解释。详细设计继续保留在冻结 review record，Runbook 必须诚实标注实际可运行路线。
 - 原因：架构规模与明确的 P1/P2/P3alpha 目标匹配，真正的风险是串行 Gate、临时 Adapter 过度建设和最后一刻集成。风险分级不降低 committed-only、精确对象、副作用、fence、truthfulness 和兼容性底线，而是把完整证明集中到真正高风险边界和累计 Gate，使三至四周并行交付具有可执行性。
 - 重新评估条件：Week 1 结束仍只有一个有效执行轨；共享 kernel 超过两天仍不能支持并行；Week 2 route telemetry 无法证明 90% 分值；真实 Provider/Web/Executor 条件不可用；P3alpha 联合 Gate 暴露必须提前实现完整 P3 的依赖；或用户改变范围、资源并行度、日历目标或生产责任。D-052 已触发资源假设重新估算，D-060 已改变有界 Alpha 的资源并行度，但当前仍没有接受新的四周日历承诺。
 
@@ -564,7 +564,7 @@
 ## D-053 高风险开发批次采用三轮 review
 
 - 日期：2026-08-04
-- 状态：Accepted（面向本决定之后开始的开发批次，不追溯改变已经接受的历史 Gate 结果）
+- 状态：Partially superseded by D-074（历史批次的三轮 review 事实保留；当前改为开发中 affected review、模块收口完整 scoped review、Tier 2/3 独立 review 与阶段累计 review）
 - 背景：实现者自我检查、脱离实现理由的完整 diff 检查和独立 `/review` 能发现不同类型的问题。只依赖第一次检查容易遗漏实现者已经习惯的假设；只规定测试次数又不能证明需求、兼容性、并发、取消和禁止副作用正确。但对文档、格式和低风险机械修改一律执行三轮会增加时间而没有对应收益。
 - 决策：一个完整开发批次按 D-046 风险分级 review。Tier 2/3 在接受前必须依次完成三轮：第一轮由实现者对需求、边界、代码和测试自我 review；第二轮不采信开发过程中的实现理由，只依据原始需求、仓库规则、既有行为/API、完整 Git diff 和真实测试结果进行冷态 diff review；第三轮使用独立 `/review`，或使用当前环境中等价的独立审查入口。每轮发现的问题先修改并重跑受影响测试；若修改明显改变语义，必须再执行一次最终完整 diff review，直到没有可操作缺陷。
 - 低风险规则：Tier 0 只执行相关检查；Tier 1 默认执行自我 review 和完整 diff review，涉及取消、权限、跨范围副作用、并发或发布影响时升级为三轮。三轮以一个 coherent implementation batch 为单位，不要求每个文件、每次保存或每个小 commit 重复三次。
@@ -578,17 +578,17 @@
 - 状态：Completed scope decision（本条在接受时只决定 `TIMEBOX`、不自动授权开发；用户后来已单独授权并完成 D-031 最小监控，当前状态和下一缺口只看 STATUS）
 - 背景：当前 P3alpha 只有内存 Task Core、确定性 Executor fake、Voice Task Bridge 和 fake WorkProgress 投影。真实 Store/outbox、Harness Adapter、restart reconciliation、生产 AuthorizationContext、公开 events API 和累计 Demo 接线都未完成；在当前单一 GPT/Sol 执行线上，`TC-B + TaskEvent/projection` 无法可信地在 Day 7 前进入累计 Demo。
 - 决策：W1-S3 结果为 `TIMEBOX`，不选择 `SKIP` 或 `REDUCE`。若用户批准后续执行包，D-031 只实现 roadmap §9 的一个 current task、1–2 个工作日轮询 Adapter，并保留 single in-flight、精确 task/target、generation/context fence、真实 unknown/error、零 Chat mutation 和安全播报仲裁。
-- 影响：本决定不把旧 schedule/JSON 路径称为正式 TC/TaskEvent，也不增加 Demo Replacement Ledger 分值。所需实现授权后来已经取得；这句话不再阻止当前 D-031 修正，但任何 commit/push 仍需新的精确批准。
+- 影响：本决定不把旧 schedule/JSON 路径称为正式 TC/TaskEvent，也不增加 Demo Replacement Ledger 分值。所需实现授权后来已经取得；D-031 当前已关闭。这里的逐次 commit/push 审批是历史规则，当前 local commit/remote push 边界分别由 D-074 与根 `AGENTS.md` 决定。
 - 重新评估条件：D-031 开始前正式 Store/Event/Harness 依赖已经具备并可在相同时间内进入累计 Demo；用户拒绝临时 polling 路径；或 Day 7/Week 2 范围发生变化。
 
 ## D-055 Live Voice Alpha 产品载体从 Windows Desktop/WebView2 调整为 Web
 
 - 日期：2026-08-05
-- 状态：Accepted（用户已明确将当前 Alpha 产品目标从 Windows Desktop/WebView2 调整为 Web；本条把此前对话中的产品决定同步为仓库权威记录）
+- 状态：Accepted product-carrier decision（Web 载体继续有效；D-058 后续冻结单 Chrome 基线，D-071 取代评分 Gate，D-075 取代 W3/W4 的当前阶段用法）
 - 背景：当前可运行 V0 和 Post-V0 Demo 已经通过 JiuwenSwarm Web 前端、浏览器麦克风和浏览器音频路径验证产品价值；继续把 Windows `.exe`、WebView2 权限、原生设备生命周期和安装包作为四周 Alpha Gate，会把平台产品化工作放在真实 Speech/Media/Conversation/Task 纵向链之前。用户已经决定当前交付载体改为 Web，但 D-046、roadmap、STATUS 和 Alpha acceptance 仍保留 Windows Alpha 表述，造成当前目标与文档权威不一致。
-- 产品决定：当前范围目标为 **Integrated Web Alpha**。`W2/W3/W4` 表示累计交付顺序；D-052 取消了原四周并行估算的日历承诺，D-060 后来的有界并行也不自动恢复该承诺，必须根据实际速度和外部依赖重新估算。首期载体是 JiuwenSwarm 桌面 Web 前端；实际验收必须使用并记录明确声明的桌面浏览器、操作系统、设备和网络标签，但不把固定验收环境冒充公开兼容矩阵。D-055 不自行承诺 Chrome+Edge 双浏览器覆盖；X-WEB 真实 Gate 前必须明确冻结是单一 Chromium 基线还是 Chrome+Edge 双 Chromium 基线。移动 Web、PWA、Firefox、Safari 和全平台兼容不属于当前 Alpha 范围。
+- 产品决定：当前范围目标为 **Integrated Web Alpha**。本决定接受时用 `W2/W3/W4` 表示累计交付顺序；D-075 现将其限定为历史窗口，当前 Alpha 使用 S5–S8/A0–A3。D-052 取消了原四周并行估算的日历承诺，后续有界并行也不自动恢复该承诺。首期载体是 JiuwenSwarm 桌面 Web 前端；实际验收必须记录明确的浏览器、操作系统、设备和网络标签，但不把固定验收环境冒充公开兼容矩阵。D-058 已选择单一桌面 Google Chrome Alpha 基线；移动 Web、PWA、Firefox、Safari 和全平台兼容不属于当前 Alpha 范围。
 - 安全与部署边界：部署环境必须使用安全上下文；`localhost` 只作为本地开发和受控验收例外。Speech/模型 Provider 凭据只能保存在 Gateway/服务端，浏览器不得持有长期 Provider 密钥。麦克风权限、权限撤销、设备变化、autoplay/user-activation、页面隐藏/后台、CSP、CORS、反向代理、连接失败和文字降级必须在 Web Alpha Gate 中可见且无静默失败。原始音频默认不持久化。
-- 架构保持：P1/P2/P3alpha、ACG v2 wire contract、identity/scope/authority、committed-only、四种取消作用域、generation fence、presented history、Task/Core/Executor 边界、Week 2 90% 评分和风险分级不变。Web 是产品载体变化，不授权 Browser、UI、Provider 或 Transport 成为新的生命周期权威。
+- 架构保持：P1/P2/P3alpha、ACG v2 wire contract、identity/scope/authority、committed-only、四种取消作用域、generation fence、presented history、Task/Core/Executor 边界和风险分级不变。Week 2 90% 评分在本决定接受时未改变，但后来由 D-071 退役。Web 是产品载体变化，不授权 Browser、UI、Provider 或 Transport 成为新的生命周期权威。
 - 工作包影响：`AIO-B/C` 保留稳定 ID，交付解释改为浏览器采集、播放、权限、设备和 exact-response stop；`RM-B` 保留稳定 ID，改为 Browser↔Gateway 实时媒体传输；`X-WEB` 取代 `X-WIN`，负责 Web UI、权限/隐私、部署、诊断和正式 P3alpha 控件接线。Browser Speech Recognition/Synthesis 继续作为显式 fallback，不获得正式 Provider 或 Realtime Media credit。不得为所有包机械增加 `-Web` 后缀。
 - 待消费包决定：AudioWorklet/MediaRecorder 的组合、上行与下行编码/采样率/frame、WebSocket/WebTransport 及其 fallback、具体 Provider 和部署拓扑，不由本决策提前指定；它们必须在 AIO-B/C、RM-B/C、SR-C/SS-C 的设计与真实接线前形成有证据的消费决策。未决定或不可用时必须标记 `unknown/unsupported`，不得由实现默认值静默成为产品合同。
 - 文档和历史：D-055 取代不可变 Full Solution、D-046、D-048 和历史 X-WIN 计划中的 Windows 产品载体与产品化安排，但不倒写带日期的 Full Solution、V0 evidence/showcase、Week 1 execution plan 或历史 review。V0 的 Windows/Chrome/Jabra 证据继续是不可变历史事实，不代表当前 Web Alpha 的兼容范围。当前目标、阶段和 blocker 只在 STATUS 维护；稳定工作包、替换关系和目标窗口记录在 dated Web Alpha delivery matrix。
@@ -650,44 +650,44 @@
 ## D-060 Live Voice Alpha 采用四实现 Session、单一集成所有权和有界本地 Git 例外
 
 - 日期：2026-08-06
-- 状态：Partially superseded by D-062（四个历史 lane 的文件/语义所有权、单一集成所有权和有界本地 Git 例外保留；固定 Session 数和 Session-only 形式由 D-062 取代；任何远端 ref 更新仍需单独精确批准）
+- 状态：Partially superseded by D-062/D-074/D-075（四个历史 lane 仅保留分解参考；固定 Session 数和 Session-only 形式已被取代，ownership/single-writer/Main-only integration 只在 active parallel packet 中启用；普通本地 commit 由 D-074 管理，任何远端 ref 更新仍需单独精确批准）
 - 背景：剩余 Alpha 工作可分为 P1、P2、P3alpha 和横切四个长期非重叠实现 lane，但 Web auth/activation、共享 Authority/协议、产品 Composition、累计 Gate 和冲突裁决存在跨 lane 依赖。D-052 的单实现 lane 会把可并行的 leaf/package 工作串行化；完全分散合入又会让共享语义和 review 失去单一 owner。
 - 决策：建立四个实现 Session：P1 Speech/Media、P2 Runtime/Interaction/Agent Bridge、P3alpha Task/Confirmation、X-OBS/X-WEB/X-E2E；当前 Main Session 是唯一 Integration Owner，同时推进共享依赖、执行完整 diff 冷审、分配 integration lease、合入已通过候选并运行累计验证。独立 review 按 D-046/D-053 风险在需要时启动，不占用某个实现 lane 的所有权。稳定范围、文件边界和 handoff 记录在 [Alpha parallel execution plan](../roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md)。
 - 本地 Git 例外：在该执行计划范围内，Main 和 Task Sessions 无需再次取得用户批准即可 stage、commit、amend、squash、rebase、merge、cherry-pick、创建或更新本地 branch/ref/worktree，以及在单写 integration lease 下完成本地 task integration。Task Session 在 review 通过后可生成自己的最终 commit；Main 可拉取、整理、修正和本地合入这些 commit。语义修复必须回到 owning Session，或由 Main 明确记录为 integration glue 并重跑受影响 review/tests。
 - 远端边界：上述例外不包含任何 push 或远端 ref 变更。普通 push、force/force-with-lease、远端 branch/tag 创建、更新和删除都必须在操作前取得对精确 remote/ref/commit/方式的单独批准；Task Session 不得 push。
-- 不变量：共享 Authority/Composition/协议文件与最终 activation/Gate 归 Main；同一 integration worktree 同时只有一个 writer；formal/fallback/demo_substitute/unavailable/disabled 如实表达；缺少 Provider、凭据、部署、设备或真实 owner 时 fail closed，不以 mock、contract-only、测试数量或本地 Git 集成宣称 Alpha/production-ready；Replacement Ledger 仍只按真实产品验收更新。
+- 不变量：active parallel packet 中共享 Authority/Composition/协议与最终集成归 Main；同一 integration worktree 同时只有一个 writer；formal/fallback/demo_substitute/unavailable/disabled 如实表达；缺少 Provider、凭据、部署、设备或真实 owner 时 fail closed，不以 mock、contract-only、测试数量或本地 Git 集成宣称 Alpha/production-ready。Replacement Ledger 已由 D-071 退役。
 - 重新评估条件：文件范围无法保持非重叠；两个 lane 必须同时修改同一共享语义；integration lease 不能防止交叉污染；review 往返成本持续高于并行收益；用户改变并发数、合入职责或 Git 授权；本地 immutable Alpha candidate 已关闭；或任何远端更新进入范围。
 
 ## D-061 Alpha integration smoke 在完整 reviewed cherry-pick 批次后统一执行
 
 - 日期：2026-08-07
-- 状态：Accepted execution amendment（用户明确要求调整 D-060 的集成验证节奏）
+- 状态：Accepted reusable integration rule（完整 reviewed integration batch 后一次累计 smoke 继续有效；D-071 退役 Gate/Ledger，D-074 取代 D-053 review cadence，D-075 把该规则放在 A2 candidate closure）
 - 背景：D-060 原计划在每个 segment 合入后重复累计 smoke。当前四个 Task commit 均已在各自 branch 完成风险相称的 focused tests、冷审和独立 review，再逐个合入同一 integration branch；每次 cherry-pick 后重复全量 smoke 会消耗时间，但不会增加独立语义证据。
 - 决策：Main 仍按真实依赖顺序逐个声明 source branch、exact commit、target branch 和 cherry-pick/merge 方式并保持单写 integration lease，但不在每个无冲突 cherry-pick 后运行累计 smoke。完整 reviewed commit 批次全部合入后，只运行一次累计 smoke，覆盖正常产品 route、authority denied/unavailable、correlation/binding mismatch、cleanup/retry、feature-off 零副作用及 fallback/Demo/legacy 回归。
 - 例外：任何语义冲突、手工 conflict resolution 或 integration glue 都必须先完成受影响检查和必要 review；若它改变共享 authority/protocol/lifecycle 语义，不得等待最终 smoke 来代替缺失的 review closure。
-- 不变量：该优化不改变 D-046/D-053 的 task-level 验证、D-060 的单写与远端批准边界、真实 E2E/Immutable Alpha Gate，也不允许以一次 aggregate smoke、mock 或测试数量授予 Replacement Ledger credit。
+- 当前不变量：该优化不改变 D-046 风险验证、active packet 的单写/集成所有权或远端批准边界；一次 aggregate smoke、mock 或测试数量不能替代 D-032 场景、真实路径或 A3 人工验收。D-053 固定 cadence 与 Replacement Ledger/Immutable evidence Gate 已分别由 D-074 和 D-071 取代。
 
 ## D-062 W2 优先并采用按批次自适应的并行执行图
 
 - 日期：2026-08-07
-- 状态：Accepted execution amendment（用户明确接受 W2 90% Demo → Integrated Web Alpha → complete project 的优先顺序，并要求 Session/subagent 数量按每批实际任务调整，不固定为四个）
-- 里程碑优先级：当前关键路径只服务 W2 累计 Integrated Demo 的真实路线、mandatory invariant、Replacement Ledger、环境依赖和不可变证据。只属于 W3/W4 或 Later、且不是 W2 实际前置条件的工作不得占用关键路径；当 W2 lane 因外部 Provider、设备、Executor、部署或用户决定阻塞且存在闲置容量时，可以有界推进不制造第二 authority 的后续工作。W2 PASS 后当前优先级切换到 Integrated Web Alpha；Alpha PASS 后再切换到完整 P3、D1/D2 和生产化。
+- 状态：Accepted reusable execution model（W2 优先级和历史 packet 已完成；当前仅在新批次声明独立 lane/ownership 时启用，不构成永久并行任务分配）
+- 历史里程碑优先级：W2 当时的关键路径只服务累计 Integrated Demo；D-071 已关闭其 Gate/Ledger 解释，W2 现为 `PRODUCT-ACCEPTED`。D-075 把当前优先级固定为 S5/A0 Alpha baseline freeze，Alpha PASS 后才进入 S9 完整 P3、D1/D2 和生产化。
 - 自适应执行图：D-060 的 P1、P2、P3alpha、X 四项是一次历史上有效的逻辑分解，不是永久 worker 数量。Main 在每个 coherent batch 开始时按依赖独立性、文件和语义所有权、关键路径、外部阻塞、review/integration 吞吐与实际工具容量，选择最小的有用 lane 图；可以拆分、合并、暂停或结束 lane，不设固定数量，也不得为占满并发而创建无独立产出的任务。Main 自身计入可用并发容量。
 - Worker 形式：一个 lane 可以由独立 Session/worktree、bounded subagent 或 Main 承担。独立 Session/worktree 按包边界持有自己的 branch 和 reviewed final commit。与 Main 共享 worktree 的 subagent 只编辑明确授权且不重叠的文件，不切换 branch、不 stage/commit、不修改历史；Main 在完整 diff review 后统一执行 Git 操作。只读调查、测试和独立 review 优先使用 bounded subagent；执行实现的 worker 不同时充当该批的独立 reviewer。
 - 集成和 Git：Main 继续是共享 Authority/协议/Composition、集成分支、stage/commit、分支历史、累计证据和 Gate 的唯一 owner。共享 integration worktree 任一时刻只有一个持明确 lease 的 filesystem editor；若由 shared-worktree subagent 编辑，Main 和其他 agent 在 lease 返回前不同时编辑。D-060 的有界本地 Git 例外扩展到当前 W2/Alpha execution packet 内的上述 worker 形式，但不扩展任何远端权限。每次 normal/force push 或其他远端 ref 更新仍需用户对精确 remote/ref/commit/方式单独批准，Task worker 永不 push。
-- 验证：D-046/D-053 的风险分级和 D-061 的批次后累计 smoke 保持不变。Tier 0/1 不制造 Tier 2/3 仪式；相关修改按 coherent batch 共享 review 和 commit。缺少真实 Provider、设备、Executor 或用户感知证据时保持 fail-closed，不用更多 agent、mock、测试数量或文档完成度换取 Replacement Ledger credit。
-- 执行合同：当前 W2 范围、依赖、工作量、退出条件和防漂移规则记录在 [90% Demo execution packet](../roadmap/DEMO_90_EXECUTION_2026-08-07.md)。D-060/旧 Alpha parallel plan 的稳定文件边界和 single-writer 规则继续适用，固定 Session 数和当前任务选择由本决定及 STATUS 取代。
-- 重新评估条件：W2 Gate 通过或范围变化；实际 lane 冲突/协调成本持续高于并行收益；工具并发容量改变；共享 worktree 无法保证隔离；用户改变里程碑、并发、Git 或远端授权；或进入 D-060/D-062 以外的工作。
+- 当前验证：D-046 风险分级和 D-061 的批次后累计 smoke 保持；review cadence 由 D-074 控制。Tier 0/1 不制造 Tier 2/3 仪式；缺少真实 Provider、设备、Executor 或用户感知时保持 `PARTIAL/BLOCKED`，不用更多 worker、mock、测试数量或文档完成度换取 Alpha closure。
+- 历史执行合同：W2 范围、依赖和防漂移规则保留在 [90% Demo execution packet](../roadmap/DEMO_90_EXECUTION_2026-08-07.md)，不得作为当前队列。当前任务选择由 D-075/STATUS 与新的 bounded packet 决定；只有 packet 激活时才继承适用的 single-writer/ownership 规则。
+- 重新评估条件：当前 A0/A1 batch 范围变化；实际 lane 冲突/协调成本持续高于并行收益；工具并发容量改变；共享 worktree 无法保证隔离；用户改变里程碑、并发、Git 或远端授权；或工作没有 active parallel packet。
 
 ## D-063 用户明确要求最少介入时启用任务级本地自主推进
 
 - 日期：2026-08-07
-- 状态：Accepted execution/Git policy（用户要求把最少介入授权写入权威文档，并对当前 W2→Integrated Web Alpha 任务启用；当前 D-060/D-062 的更窄 worker/integration 边界继续同时适用）
+- 状态：Partially superseded by D-074（普通本地 stage/commit 已成为已授权任务的默认权限；本决定继续控制更广的最少介入、历史组合/改写和用户介入边界）
 - 触发和期限：只有用户明确要求“最少介入”“自主推进、只在必须时找我”或等价的 reduced-approval handling 时才启用；普通“继续”不自动启用。授权只覆盖已经接受的目标和 active routed packet，跨 Session、context compaction 和 task resume 保持有效，直到该任务/候选关闭、工作离开授权范围或用户撤销。STATUS 只记录当前是否 active。
 - 本地自主权：在适用检查和 review 完成后，Main 自行选择 coherent commit 边界和消息，可无需逐操作批准地 stage、commit、amend、squash、rebase、merge、cherry-pick，以及创建或更新 local branch/ref/worktree。独立 worktree worker 和 shared-worktree subagent 仍受 active packet 的所有权、review、single-writer、Main-only integration 与 Git 限制；任何 worker 都不因本决定获得自行集成或 push 权限。
-- 不扩张边界：最少介入只减少审批往返，不扩大产品/任务范围，不降低测试、D-053 review、acceptance、truthfulness 或 fail-closed 要求，不允许覆盖无关用户修改，也不授权 destructive/hard-to-recover 操作、凭据披露或迁移、外部 account/provider/billing 变更、公开部署、安全策略选择或未经接受的重大产品语义变更。遇到这些边界时继续所有不受阻工作，并向用户说明精确问题、为何需要介入、需要执行的动作和推荐方案。
+- 不扩张边界：最少介入只减少审批往返，不扩大产品/任务范围，不降低测试、D-074 review、acceptance、truthfulness 或 fail-closed 要求，不允许覆盖无关用户修改，也不授权 destructive/hard-to-recover 操作、凭据披露或迁移、外部 account/provider/billing 变更、公开部署、安全策略选择或未经接受的重大产品语义变更。遇到这些边界时继续所有不受阻工作，并向用户说明精确问题、为何需要介入、需要执行的动作和推荐方案。
 - 远端边界：默认不包含任何 remote ref 更新。只有用户另行授予包含精确 remote、branch/tag、允许的 update mode 和有效窗口的窄授权时，Main 才可在该窗口内执行相应远端操作；否则每次 normal/force push 及远端 branch/tag/ref 创建、更新或删除仍须单独精确批准。Task worker 永不 push。
-- 当前影响：本决定现在对 W2 90% Demo → Integrated Web Alpha 的 active execution 生效；D-060/D-062 已经允许的本地操作不再因 Session 更换或上下文恢复被误判为需要逐次批准。完整 P3/production 或其他新 scope 在进入时必须由 STATUS/用户确认授权是否继续。
+- 当前影响：原 W2 minimum-intervention activation 随候选关闭成为历史。普通已授权任务的本地 stage/commit 现在由 D-074 直接允许；只有用户再次明确要求更广的最少介入或历史组合/改写时才重新激活本决定。完整 P3/production 或其他新 scope 进入时仍须由 STATUS/用户确认边界。
 - 重新评估条件：用户撤销或收窄授权；任务或 immutable candidate 关闭；进入未接受范围；需要远端、破坏性、凭据/账户、部署/安全或重大产品选择；发现自动 commit 边界持续混杂无关修改；或 required review/test 无法在不请求用户输入的情况下诚实完成。
 
 ## D-064 W2 真实 Speech 验证采用 Gateway 托管的 OpenAI-compatible Batch Speech
@@ -776,7 +776,7 @@
 
 - 日期：2026-08-11
 - 状态：Accepted product-acceptance policy（用户明确撤销 W2 及后续 Live Voice 里程碑的签名证据 Gate/Replacement Ledger 完成门槛）
-- 范围：本决定适用于当前 W2 Integrated Demo、后续 Integrated Web Alpha 及之后的 Live Voice 产品里程碑，直到用户为明确的审计、合规或正式发布场景重新要求更高等级认证。它只取代 D-046、D-060、D-062 和相关执行包中的签名取证、固定槽位、重复展示、计分与 Gate 阻塞规则；产品范围、真实 Agent/Tool/Task 要求、架构权威、安全边界、D-046 风险分级、D-053 高风险 review 和负向零副作用要求继续有效。
+- 范围：本决定适用于当前 W2 Integrated Demo、后续 Integrated Web Alpha 及之后的 Live Voice 产品里程碑，直到用户为明确的审计、合规或正式发布场景重新要求更高等级认证。它只取代 D-046、D-060、D-062 和相关执行包中的签名取证、固定槽位、重复展示、计分与 Gate 阻塞规则；产品范围、真实 Agent/Tool/Task 要求、架构权威、安全边界、D-046 风险分级、D-074 当前高风险 review（D-053 历史 cadence 保留）和负向零副作用要求继续有效。
 - 完成标准：先在被识别的测试源码上完成适用的自动化验证，包括正向旅程、关键负向、flag-off、受影响回归、构建和静态检查；再由用户在一个完整产品会话中人工验收所有适用的用户可见能力。人工步骤可以复用同一源码和环境中已经通过且未被后续语义修改影响的结果，不得仅为仪式重复。修复若影响某个可见步骤，只重跑受影响自动检查和人工步骤。
 - 退役内容：W2/Alpha 完成不再要求 root/leaf key、trust policy、artifact signature、evidence owner、七个 runtime artifact、31 个 non-runtime artifact、38-slot manifest、三次连续 showcase、`w2_gate_cli evaluate` 或 Replacement Ledger 分数。相关代码、脚本、旧 candidate 和历史文档保留为诊断/取证历史，不再进入关键路径，不得因其失败、缺失或 `0/100` 阻止产品验收或后续里程碑。
 - 记录：STATUS 记录自动验证、人工验收的通过/未通过项目、测试源码和真实限制；必要时新增简短的脱敏验收记录。不得把自动测试称为人工体验，也不得把未实际观察的麦克风、完整朗读、打断、非阻塞、Task UI、刷新/重连或降级行为写成通过。
@@ -789,7 +789,7 @@
 - 日期：2026-08-11
 - 状态：Accepted implementation-removal decision（用户要求在 W2 人工验收继续按 D-071 推进的同时，深度分析并至少分三轮删除 Gate 代码；最终只保留一个提交）
 - 删除范围：删除 W2 Gate evaluator/scoring/CLI、root/leaf key 与 trust-policy/signature/manifest/Replacement Ledger 处理、自动报告与 runtime evidence exporter/owner、38-slot rehearsal/choreography/controller/fault runner，以及只为该 Gate 服务的 P1/P2/P3 request-id 故障注入和专属测试。
-- 保留范围：保留真实 P1/P2/P3 产品路由、Agent/Tool/Task 权威、P3 confirmation、replay/idempotency、fail-closed/零副作用、Task Core/Store/Executor/outbox/lease、普通产品观测、D-046/D-053 风险与 review、Architecture Contract Gate、Product Composition Gate 0 和历史冻结记录。确定性 WAV Speech preflight 与真实 D-069 A→B→C/restart 诊断不签名、不计分，作为产品验证工具保留。
+- 保留范围：保留真实 P1/P2/P3 产品路由、Agent/Tool/Task 权威、P3 confirmation、replay/idempotency、fail-closed/零副作用、Task Core/Store/Executor/outbox/lease、普通产品观测、D-046 风险分级与 D-074 当前 review 节奏（D-053 历史记录保留）、Architecture Contract Gate、Product Composition Gate 0 和历史冻结记录。确定性 WAV Speech preflight 与真实 D-069 A→B→C/restart 诊断不签名、不计分，作为产品验证工具保留。
 - 执行约束：删除分为纯 evaluator/编排、runtime evidence/故障 seam、残余入口/配置/文档三轮；每轮都必须完成依赖分析、实际删除和针对保留产品路径的无副作用确认。中间允许本地临时 commit，但最终历史只允许一个本任务 commit；任何 remote ref 更新仍需单独精确授权。
 - 完成影响：当前 checkout 不再提供或接受旧签名 Gate 命令和环境变量，历史 D90–D102 只解释过去事实。W2 状态、人工验收范围和后续 Alpha 顺序不因删除而自动改变，仍由 D-071、验收合同与 STATUS 决定。
 - 重新评估条件：用户为新的审计/合规/客户交付明确批准一个重新设计且有界的认证需求。不得直接复活被删除的 W2 实现；新认证必须重新定义威胁模型、所有者、成本和产品交付关系。
@@ -803,3 +803,52 @@
 - 本次适用：删除恢复的 `prompt_attachment_loader.py`、其测试和 `get_prompt_attachment_dir`；删除恢复的 `resolve_project_coding_memory_workspace_path` 并采用 `resolve_project_coding_memory_dir`；保持 `ReqMethod.SKILLS_GRAPH_*`；使用 agent-core 公共 `get_agent_history_root()`；继续服从 develop 已删除“自动改写项目 `.gitignore`”的决定；公共 Agent 启动继续遵守 develop 的失败传播契约。`ProjectCodeExecutorAdapter` 作为有测试覆盖的兼容 Adapter 暂时保留，但正式 P3 组合继续使用 `DirectProjectCodeExecutorAdapter`。
 - 依赖规则：浮动的 agent-core develop 依赖必须由 `uv.lock` 的解析 commit 固定迁移验证边界；源码需适配该 commit 的公共 rail/history API，不得依赖已移除的私有属性。
 - 重新评估条件：develop 重新引入官方文件热加载契约；Live Voice 出现经产品范围确认且当前 PromptAttachmentManager 无法满足的文件附件需求；agent-core 再次变更公共 API；或兼容 Adapter 的所有调用方和测试被一个独立移除批次明确关闭。
+
+
+## D-074 本地提交与 review 改为按模块、风险和阶段分层
+
+- 日期：2026-08-12
+- 状态：Accepted repository execution/review policy（用户明确允许在已授权任务内自行创建本地 commit，要求避免为了 commit 而产生过小、过频的提交；所有 push 仍须单独审批，并要求评估旧 Gate、diff 和 review 流程是否阻碍交付）
+- 本地 Git 决定：实现、修复、文档或集成任务已经获得范围授权时，Main 可在完成适用检查后自行 stage/commit，无需再申请逐次 commit 批准。commit 应对应一个可审阅、可解释的模块、缺陷批次、集成批次或文档决策；不得为了展示进度制造微小 checkpoint，不得把已知破损或语义未闭合状态当作普通完成提交。handoff 必须报告 commit、状态、验证和明确排除项。amend/squash/rebase/cherry-pick/merge 等现有历史组合或改写，仅在用户请求本身、accepted execution packet 或 D-063 最少介入授权明确涵盖时自主执行。
+- 远端决定：任何 normal/force/force-with-lease push，以及远端 branch/tag/ref 创建、更新或删除，仍须在操作前取得对 exact remote、ref、commits 和 update mode 的单独明确批准。之前的 commit、push 或“继续”不自动授权下一次远端更新；worker 不得 push。
+- 开发中节奏：模块推进期间只要求实现者自查实际受影响 diff、运行 focused tests，并在触及新风险时补充相应 scenario。中间小修改或每个 commit 不触发独立 `/review`，也不要求对未变化的全项目历史反复做 complete-diff review。
+- 模块收口：一个 coherent module 或相关 package group 收口时，对从该模块起点到当前结果的完整 scoped diff 做冷审，核对原始请求、仓库规则、现有 API/行为和实际测试。Tier 2/3 的 changed boundary 在此时运行一次独立 `/review` 或等价独立入口；相关包改变同一契约时可共享一次收口 review。若独立入口不可用，记录实际替代方式和限制，不得声称 `/review` 已运行。
+- 阶段收口：Integrated Web Alpha 等阶段 candidate 对阶段基线到 tested source 的累计 diff、跨模块集成 seam、配置/flag-off/回归和适用真实路径进行大范围 review 与自动验证，再按 D-071 完成一次完整人工产品验收。已在模块收口审过且后续未变化的内部细节无需机械重复逐行 review，但其集成关系必须进入阶段审查。
+- 修复反馈：任何 review finding 先修复并重跑受影响测试；只有修复实质改变了某一模块、共享契约或阶段集成语义时，才重复对应层级的最终 review，不因无关文件或格式调整重跑整个未受影响阶段。
+- 不变安全底线：D-032 的 contract-first tests、正例成功、负例拒绝/fail closed、Agent/Tool/Task/audio/history/store/other-scope 禁止副作用为 0，以及真实 Provider/设备/Executor/用户感知不能由 fake 代替的原则继续有效。Tier 3 的 shared protocol、authority、security、durability 与 release 仍需完整适用矩阵；本决定只调整 review 的聚合层级和时点，不降低产品或安全标准。
+- 取代关系：本决定取代 D-053“每个 coherent implementation batch 固定三轮”的节奏，以及 D-046 中“每个 Tier 2 都固定 pre/post review”和“默认 commit 逐次精确审批”的操作性表述。D-063 不再是普通本地 commit 的必要前提，但继续控制更广的最少介入、历史组合/改写和用户介入边界。D-060/D-062 的 ownership、single-writer 与 Main-only integration 只在存在 active parallel packet 时启用；已完成 W2 的固定 lane 和 D-070 模型分工是历史，不是当前 Alpha 默认任务分配。D-061 的完整 reviewed integration batch 后一次累计 smoke、D-071 的自动加一次人工验收、D-072 的 Gate 删除和 D-073 的迁移原则继续有效。
+- 重新评估条件：模块级 review 持续遗漏只在阶段 review 才发现的高风险问题；独立 review 在 Tier 2/3 收口长期无法运行且替代方式无效；coherent commit 长期混入无关修改或变得不可审阅；公共发布、监管、客户交付或安全审计需要更强的可追溯认证；或用户更改 local/remote Git 授权。
+
+## D-075 用交付阶段、能力轨、工作包和关键节点四层模型管理后续 Alpha
+
+- 日期：2026-08-12
+- 状态：Accepted project-structure decision（用户要求整理项目阶段与模块、明确完成/未完成和后续关键节点，并同步全部当前文档以消除后续执行歧义）
+- 术语边界：`P1/P2/P3alpha/Shared/X` 是长期能力轨，AIO/SR/SS、RM/CR/II/AB、TC/ED/VB 是模块，`*-A/*-B/*-C` 是模块内工作包；它们都不是当前项目的顺序阶段。`W1/W2/W3/W4` 只保留为历史交付窗口和文档索引，不再表示当前日历周、当前阶段或默认任务队列。完整方案中把 P1/P2/P3 称为 Phase 的表述保留为历史架构分组，当前执行统一解释为 capability track。
+- 顺序阶段：`S0 V0 Proof`、`S1 Shared Foundations`、`S2 D-031 Bounded Compatibility`、`S3 W2 Integrated Demo`、`S4 Develop Rebaseline`、`S5 Alpha Baseline & Gap Freeze`、`S6 Alpha Module Closure`、`S7 Alpha Integrated Candidate`、`S8 Alpha Product Acceptance`、`S9 Later/Beta/Production`。阶段状态只由 `STATUS.md` 维护；截至本决定，S0/S1/S2/S4 为 `CLOSED`，S3 为 `PRODUCT-ACCEPTED`，S5 为当前进行阶段，S6–S8 尚未关闭，S9 不属于当前 Alpha 范围。
+- Alpha 关键节点：`A0 Baseline Freeze` 固定测试源码、Alpha 范围/非目标、逐条 acceptance→module gap、risk tier、机器私有依赖和需要用户决定的产品输入；`A1 Module Closures` 分别关闭 P1、P2、P3alpha 与 Shared/X 的 Alpha gap，并完成 D-074 模块级 review；`A2 Integrated Candidate` 在干净且被识别的源码上完成累计 diff/integration review、适用自动验证、构建/静态检查和关键真实路径；`A3 Product Acceptance` 按 Alpha 专用 showcase 完成一次完整人工旅程后才能标记 `PASS — INTEGRATED WEB ALPHA`。
+- 完成语义：历史 W2 能力已经通过并不等于对应模块满足 Alpha；当前实现存在也不等于模块 `CLOSED`。模块表必须同时写“已证明到哪个 milestone”和“Alpha 尚缺什么”。没有完成 Alpha 验收合同的模块统一保持 `PARTIAL`，但这不回退 W2 `PRODUCT-ACCEPTED` 或 W3 rebaseline `CLOSED`。
+- 执行顺序：S5/A0 关闭前不建立大规模实现队列；A0 后只把依赖已满足、所有权不重叠的 module batch 并行化。A1 的模块 closure 可以并行，A2 必须在全部必需模块 closure 返回后由 Main 统一集成，A3 必须针对 A2 的 exact tested source。后续任务必须声明所属 stage、target node、track/module、risk tier、包含项和排除项，避免把历史 packet 当作当前授权。
+- 验收入口：W2 保留 `INTEGRATED_DEMO_ACCEPTANCE.md + INTEGRATED_SHOWCASE.md`；Alpha 使用 `ALPHA_ACCEPTANCE.md + ALPHA_SHOWCASE.md`。两者不得共用一个含糊的人工脚本，也不得用 W2 观察自动换取 Alpha PASS。ACG 和 Product Composition Gate 0 的 `Gate` 继续表示合同/组合 checkpoint；D-071/D-072 退役的是签名证据 Gate，不能把二者混为一谈。
+- 文档同步：README 只路由，STATUS 只保存当前阶段/模块/node，roadmap 定义稳定顺序和退出条件，acceptance 定义 pass/fail，showcase 定义人工操作，runbook 定义环境/启动步骤，D109 保存本次同步审计。冻结的完整方案、W1/W2 execution packets、D90–D108 和 evidence 不倒写；其中旧术语只通过本决定和当前路由解释。
+- 重新评估条件：Alpha 产品范围改变；某个 module gap 被证明需要新增共享协议或第二 authority；A0 无法在不做产品选择的情况下冻结；模块 closure 长期无法组合成一个 candidate；或用户重新接受日历承诺、完整 P3/生产范围或审计级认证。
+
+## D-076 S5–S8 使用一份 verify-first 的当前执行合同
+
+- 日期：2026-08-12
+- 状态：Accepted execution-planning decision（用户确认 S5–S8 的具体任务应当在 Markdown 中落实，避免只有阶段出口而没有可执行、可判定完成的工作）
+- 当前合同：`roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md` 是 S5/A0 到 S8/A3 的 active task contract。它冻结任务 ID、依赖、风险、模块边界、必须验证的行为、退出条件和非目标；STATUS 仍是唯一 mutable progress/branch/gap/next-action source，acceptance 仍是 pass/fail authority，showcase 仍是 A3 人工操作脚本。
+- Verify-first：当前源码已经包含大量正式 P1/P2/P3alpha/Shared-X 实现和测试。A1 不按历史 W3/W4 行重新开发；先检查真实源码和测试，将 requirement 分类为 satisfied/implementation/verification/environment/deviation/Later，只实现被源码审计或真实验证证明的缺口。旧 Wave packet、worker、owner、日期和 replacement queue 不自动恢复为当前授权。
+- 冻结的主要缺口方向：AIO、RM、CR/AB、TC/ED 的多数工作先做 Alpha 级 real-path/fault/performance closure；当前明确需要实施或决定的边界包括选择正式 streaming Speech 路径或接受偏差、把 critical-token safety 接入受保护的 committed product path、补齐 committed natural-language `task.status` 正式查询路径、建立可复现 p50/p95/sample/failure benchmark 与 whole-stack raw-audio zero-persistence 回归，以及形成一个 slow conversational round + detached Task 的 joint X-E2E 场景。后续源码检查若推翻任一判断，以源码为事实并更新 STATUS/新决定，不静默改写本决定。
+- 执行顺序：S5-01 source audit、S5-02 product/environment freeze、S5-03 batch/ownership freeze 完成后进入 A1；A1 的非重叠模块组可并行，X-E2E 消费所有必需 closure；A2 由 Main 形成一个 exact candidate 并完成累计自动验证和 review；A3 只在该 candidate 上运行一次完整 Alpha 人工旅程。自动音频语料或程序化声音检查可以支持 A2/A3，但不能替代用户对物理权限、设备、可听质量和产品可用性的人工观察。
+- 用户介入边界：S5-02 的 Provider/streaming-or-deviation、浏览器/设备/网络/secure deployment、真实 Executor/可丢弃项目和任何重大 acceptance 偏差由用户或已有明确决定提供；其余只读审计、测试准备和不改变产品选择的工作继续推进。凭据、billing、公开部署、破坏性真实目标和远端 ref 更新不由本决定授权。
+- 重新评估条件：Alpha acceptance 变更；已选 Speech/Media/Executor 无法满足声明能力；源码审计发现新的 shared authority/protocol gap；任务边界长期产生所有权冲突；A2 无法组合为一个 candidate；或用户收窄/扩展 Alpha 产品范围。
+
+## D-077 Live Voice 文档按当前任务段渐进读取
+
+- 日期：2026-08-12
+- 状态：Accepted documentation-routing decision（用户要求文档瘦身，避免新 Session 读取与当前任务无关的完整计划、验收、历史和架构材料）
+- 最小入口：每个 Live Voice task 只固定读取根 `AGENTS.md`、轻量 `live-voice/README.md` 和精简 `live-voice/STATUS.md`；文档结构/更新任务再读取 `DOCUMENTATION_RULES.md`。链接只表示 route，不表示整份读取。
+- 当前执行：S5–S8 普通工作只读 execution plan §1–2 和 STATUS 命名的 task section、受影响源码/tests 与该任务消费的 acceptance bullets；A2 才读完整 Alpha acceptance，A3/runtime 才读 showcase 和相关 runbook。完整 plan 只用于 task-graph 审计/调整；ACG 只读实际涉及的 sections，完整方案只在长期边界本身变化或仍有歧义时读取。
+- 历史隔离：模块旧 review、W1/W2/Wave packet、D90–D109、evidence、archive 和 fresh-clone 说明移至条件式 `REFERENCE_INDEX.md`；普通 bootstrap 禁止读取该索引。STATUS 不再保存历史证据目录，README 不再保存完整文档角色表。
+- 不改变内容：本决定只缩小默认读取面，不改变 D-075 阶段、D-076 任务、Alpha acceptance、D-074 review、D-032 安全不变量或任何已冻结历史事实。
+- 重新评估条件：新 Session 经常无法仅凭最小入口定位当前任务；sectional route 导致必需 contract 被遗漏；条件索引无法定位回归来源；或 README/STATUS 再次持续膨胀为完整 handoff/catalog。

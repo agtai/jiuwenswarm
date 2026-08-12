@@ -1,25 +1,54 @@
 # Live Voice：W2 90% Demo 与 Integrated Web Alpha 交付路线
 
-> 更新日期：2026-08-11
-> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061、D-062、D-071](../decisions/DECISIONS.md)
+> 更新日期：2026-08-12
+> 当前产品和交付决策：[D-046、D-055、D-056、D-058、D-059、D-060、D-061、D-062、D-071、D-072、D-074–D-076](../decisions/DECISIONS.md)
 > 当前实现事实、track 状态和产品验收清单：[STATUS.md](../STATUS.md)
+> 当前 S5–S8 任务、依赖、风险、module-close oracle 和退出条件：[ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md)
 > 已完成 Week 1 的历史 priority/dependency/boundary 与 package contracts：[WEEK_1_EXECUTION_PACKAGES_2026-08-03.md](WEEK_1_EXECUTION_PACKAGES_2026-08-03.md)
 > Web Alpha 稳定工作包、Demo 替换关系、依赖和目标窗口：[WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
-> 当前执行方式：[D-060、D-061、D-062](../decisions/DECISIONS.md) 在有界 W2→Alpha 窗口内以按批次自适应的非重叠 worker 图、一个 Main Integration Owner 和一次完整 reviewed 批次 smoke 取代 D-052 的默认单线；worker 可由独立 Session/worktree、bounded subagent 或 Main 承担，不设固定数量，远端更新继续单独批准。
+> 当前执行方式：[D-074–D-076](../decisions/DECISIONS.md) 定义 coherent 本地提交、模块/阶段 review、S5→S8 关键节点和 verify-first 当前任务合同；D-060/D-062 的非重叠 worker 图只在当前 packet 明确启用并行时生效，D-061 保留完整 reviewed 集成批次后的一次累计 smoke，远端更新继续单独批准。
 > 完整目标架构仍由不可变 [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) 定义；本文负责当前范围、顺序窗口和验收，不把 Alpha 写成 Production，也不把原并行估算继续写成单线日历承诺。
 
 ## 1. 交付目标
 
-项目只维护一条累计工程路线：
+项目只维护一条累计工程路线。D-075 将顺序交付状态、长期能力结构和实现工作包分开：
 
 1. **V0 — 已完成且冻结**：第一时间证明真实麦克风输入、committed transcript、真实 JiuwenSwarm Agent/Tool、真实结果和语音输出能端到端运行。
 2. **Week 2 — Integrated Demo**：P1、P2、P3alpha、Context、Progress、Failure/Degradation 和 Observability 在同一 Demo 中累计运行；正式模块按 Port/Adapter/flag 逐段替换 V0 shortcut，适用自动验证通过，并完成一次完整人工产品验收。
-3. **Week 3–4 — Integrated Web Alpha**：P1 + P2 + P3alpha 三个真实纵向切片、桌面 Web 产品路径以及 P2/P3alpha 联合自动与人工验收通过。完整 P3 是 stretch goal。
+3. **Historical Week 3–4 window — Integrated Web Alpha**：对应当前 S5–S8；P1 + P2 + P3alpha 三个真实纵向切片、桌面 Web 产品路径以及 P2/P3alpha 联合自动与人工验收通过。完整 P3 是 stretch goal。
 4. **Later — Beta/RC/Production**：完整 P3、D1/D2、生产鉴权、跨平台、运营 SLO、隐私/retention、兼容矩阵和发布加固继续累计，不倒灌为当前 Web Alpha 的隐含阻塞项。
 
-V0、Week 2 和 Week 4 使用不同的验收合同。一次 V0 PASS 不能证明 Alpha，一次模块 conformance 也不能证明累计 Demo 或真实设备路径。
+V0、W2 Integrated Demo 和 Integrated Web Alpha 使用不同的验收合同。一次 V0/W2 PASS 不能证明 Alpha，一次模块 conformance 也不能证明累计产品或真实设备路径。
 
-本文沿用 `W2/W3/W4` 作为依赖和交付顺序窗口。D-060/D-062 的有界自适应并行恢复了非重叠 leaf/package 工作的并发，但没有恢复原“两周/四周”日历承诺；只有新的资源与工期决定才能重新冻结日期。
+本文只在回溯旧计划或 package target window 时沿用 `W1/W2/W3/W4`。它们不是当前阶段、当前日历周或默认队列。D-060/D-062 可在明确 packet 中恢复非重叠 leaf/package 并发，但没有恢复原“两周/四周”日历承诺；只有新的资源与工期决定才能重新冻结日期。
+
+### 1.1 四层结构
+
+| 层 | 标识 | 用途 | 当前事实由谁维护 |
+|---|---|---|---|
+| 项目阶段 | `S0`–`S9` | 表示顺序交付状态，只能前后推进 | [STATUS.md](../STATUS.md) |
+| Alpha 关键节点 | `A0`–`A3` | 定义 S5–S8 的进入/退出条件 | 本文；当前结果在 STATUS |
+| 能力轨与模块 | `Shared/X`、`P1/P2/P3alpha`；AIO/SR/SS、RM/CR/II/AB、TC/ED/VB | 表示长期架构所有权，可跨多个阶段演进 | 完整方案/ACG；当前覆盖在 STATUS |
+| 工作包 | `*-A/*-B/*-C` | 表示模块内 contract、first-real、closure/hardening 批次 | [Web Alpha delivery matrix](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md) |
+
+完整方案中 `P1/P2/P3` 的 Phase 用法按 D-075 解释为架构能力分组，不再作为当前项目阶段。一个模块“W2 已证明”只说明其 W2 覆盖通过；没有满足本文件和 Alpha acceptance 的部分仍为 `Alpha PARTIAL`。
+
+### 1.2 顺序阶段与 Alpha 关键节点
+
+| Stage | 名称 | 稳定退出条件 |
+|---|---|---|
+| S0 | V0 Proof | 真实麦克风→committed text→真实 Agent/Tool→真实结果→语音输出的冻结证据通过 |
+| S1 | Shared Foundations | ACG critical kernel、A-package foundations、fixtures/fakes/conformance 的既定范围关闭 |
+| S2 | D-031 Bounded Compatibility | 项目绑定的有界单任务兼容 Adapter 按自身合同关闭，不取得正式 TC/ED/VB authority |
+| S3 | W2 Integrated Demo | 适用自动验证加一次完整 W2 人工产品旅程；结果可为 `PRODUCT-ACCEPTED` |
+| S4 | Develop Rebaseline | 已迁移实现与 develop 删除/替代意图一致，受影响及累计验证通过 |
+| S5 / A0 | Alpha Baseline & Gap Freeze | 固定 tested baseline、范围/非目标、acceptance→module gap、risk/owner/dependency、机器条件和待用户选择项 |
+| S6 / A1 | Alpha Module Closure | P1、P2、P3alpha、Shared/X 的必需 gap 分别完成实现、自动验证和 D-074 模块收口 review |
+| S7 / A2 | Alpha Integrated Candidate | 全部必需 module closure 组合进同一干净 tested source；累计 review、自动矩阵、构建/静态和关键真实路径通过 |
+| S8 / A3 | Alpha Product Acceptance | 用户在 A2 exact source 上按 Alpha 专用 showcase 完成一次完整人工旅程并作最终决定 |
+| S9 | Later/Beta/Production | 完整 P3、D1/D2、生产鉴权、广泛兼容、发布/运营/隐私加固；不属于当前 Alpha |
+
+S5/A0 是当前 Alpha 的唯一入口；A0 未关闭前可以做只读调查和有界缺陷修复，但不得把历史 W3/W4 package rows直接当作当前大规模实现队列。D-076 的 [S5–S8 execution plan](ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md) 将这些稳定出口落实为当前 task IDs、依赖、风险、oracles 和 exclusions；mutable result 仍只看 STATUS。A1 可按独立所有权并行，A2/A3 必须串行并绑定同一 tested source。
 
 ## 2. Web Alpha 范围与非目标
 
@@ -50,14 +79,14 @@ Integrated Web Alpha 至少包括：
 - 至少三条能够持续产出的并行实现轨；
 - 一个共享契约/集成 owner，避免各轨创造第二套 authority；
 - 从 Day 1 开始持续接回同一个 Demo；
-- 所有实现和审查 worker 使用当前 GPT/Sol，不再提醒、委派或切换到 DeepSeek/其他外部执行模型；
+- 当前没有固定 lane、worker 数量或跨模型分工；只有 active packet 才能按可用执行环境声明并行所有权和独立 review 入口；
 - Provider、桌面 Chromium 浏览器、音频设备、Web 部署/代理、Executor 和私有配置在相应真实产品验收前可用。
 
-D-060/D-062 只在接受的 W2→Alpha 范围内提供按实际依赖和容量生成的非重叠 worker 图和一个单写集成 owner；它们不改变外部 Provider、浏览器/设备、部署、Executor 或真实产品验收的依赖，也不把原并行 timebox 恢复为日历承诺。该范围外仍按 D-052 的默认分配执行。
+D-060/D-062 只在当前任务包明确启用时提供按实际依赖和容量生成的非重叠 worker 图和一个单写集成 owner；没有 active parallel packet 时不保留历史 lane、worker 或模型分工。它们不改变外部 Provider、浏览器/设备、部署、Executor 或真实产品验收的依赖，也不把原并行 timebox 恢复为日历承诺。
 
 ## 4. Architecture Contract Gate 的渐进实现
 
-ACG 的完整语义保持有效，但实现 Gate 分两层。
+这里的 Architecture Contract Gate 是共享协议/authority 合同，不是 D-071/D-072 已退役并删除的签名证据 Gate。ACG 的完整语义保持有效，但实现 checkpoint 分两层。
 
 ### 4.1 ACG critical kernel：Day 1–2 的公共阻断项
 
@@ -81,7 +110,7 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 - P3alpha Store/Executor 接线前：AuthorizationContext、atomic command/event/snapshot/outbox、attempt dedup、restart reconciliation；
 - Web/Release acceptance 前：route telemetry、benchmark schema、安全上下文、权限/设备/页面生命周期、部署/代理以及真实 Provider/Executor verification。
 
-无关模块不等待未消费的扩展 contract。完整 ACG conformance 仍在 Week 4 Alpha acceptance 前闭环。
+无关模块不等待未消费的扩展 contract。完整 Alpha-consumed ACG conformance 必须在 A2 Integrated Candidate 前闭环。
 
 ## 5. 并行 delivery tracks
 
@@ -109,9 +138,11 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 
 遇到风险时，优先保住共享 authority、committed-only、真实状态、fence、文字降级和累计可运行 Demo；降低非关键 UI 精度、扩展 Context adapter 或完整 P3 stretch，而不是用 hardcode 伪造结果。
 
-## 7. W3/W4 顺序窗口
+## 7. 历史 W3/W4 顺序窗口到当前 S5–S8 的映射
 
-### Week 3
+本节保留原目标窗口以解释 dated package matrix，不是当前阶段表或日历计划。当前执行按 §1.2 的 A0→A1→A2→A3 进入和退出。
+
+### Week 3（映射到当前 A0 freeze 与 A1 module closure）
 
 - 完成主要 B/C 包和 consumer-specific ACG 扩展；
 - 用真实 Media/Speech/Agent/Executor 替换剩余关键 substitute；
@@ -119,10 +150,10 @@ Kernel 通过 grouped Tier 3 review 后，P1/P2/P3alpha A 包可以并行。
 - 连续运行 P1/P2/P3alpha 三个纵向切片；
 - 开始 P2/P3alpha 联合 non-blocking interaction/progress 场景。
 
-### Week 4
+### Week 4（映射到当前 A1 closure、A2 candidate、A3 acceptance）
 
 - 关闭所有 Tier 2/3 必需 gap；
-- 对共享 ACG 和各真实 Adapter 执行 grouped Sol post-review；
+- 按 D-074 完成必需 module closure review，并在 A2 审查累计 diff 与跨模块 integration seams；
 - 在同一被识别的测试源码上运行受影响 unit/contract/integration/build 与真实 Web/Provider/Executor 自动检查；
 - 完成一次覆盖纵向与联合场景的人工产品验收，并形成简短的 sanitized acceptance record；
 - 只有在 P1 + P2 + P3alpha 和 Web 平台的适用自动与人工要求全部通过时标记 Integrated Web Alpha。
@@ -154,21 +185,22 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 
 原始完整 pre-review 在 [SOL_MODULE_PRE_REVIEWS_2026-08-03.md](../SOL_MODULE_PRE_REVIEWS_2026-08-03.md) 中保留，用于选取必要风险和审阅实际 diff，不再强制逐行实现其全部 legacy 设计。
 
-## 10. 风险分级验证与 Sol 签字
+## 10. 风险分级验证与分层 review
 
-| Tier | 适用范围 | Required evidence | Sol involvement |
+| Tier | 适用范围 | Required evidence | Review boundary |
 |---|---|---|---|
 | 0 | docs、机械修改、纯重构 | affected checks、链接/格式/characterization | 按需；不建立完整矩阵 |
-| 1 | 普通功能、Port/Adapter/UI | positive journey、关键 negative/flag-off、affected integration/regression | grouped contract/diff review 按需 |
-| 2 | 状态、并发、mutation、cancel/fence | scoped pre/post review；所有适用 P/N/B/S/T/C/R/I/F/K/X 风险；零禁止副作用 | Sol 必须签署边界和实际 diff |
-| 3 | shared protocol/authority/security/durability、production release | 完整适用 D-032、fault/recovery、真实 E2E；里程碑另按 D-071 完成人工产品验收 | Sol 最终判断高风险语义和实际 diff |
+| 1 | 普通功能、Port/Adapter/UI | positive journey、关键 negative/flag-off、affected integration/regression | 模块收口时做完整 scoped diff review |
+| 2 | 状态、并发、mutation、cancel/fence | 所有适用 P/N/B/S/T/C/R/I/F/K/X 风险；零禁止副作用 | 新增/改变高风险契约时先做设计 checkpoint；模块收口做冷审和一次独立 review |
+| 3 | shared protocol/authority/security/durability、production release | 完整适用 D-032、fault/recovery、真实 E2E；里程碑另按 D-071 完成人工产品验收 | 模块边界独立 review，阶段 candidate 再审累计 diff 和集成 seam |
 
-### D-053 三轮 review
+### D-074 分层 review 节奏
 
-- Tier 2/3 的一个完整开发批次依次执行：实现者自我 review、脱离开发理由的完整 diff review、独立 `/review` 或当前环境中等价的独立审查入口。
-- 每轮发现的问题先修改并重跑受影响测试；修改改变核心语义时，最终完整 diff review 必须再执行一次。
-- `/review` 不可用时必须记录替代方式和限制，不得写成已经运行 `/review`。
-- Tier 0 继续只做相关检查；Tier 1 默认自我 review 加完整 diff review，只有跨取消、副作用或其他较高风险边界时才增加第三轮。
+- 开发中：检查实际受影响 diff 并运行 focused tests；每次小修改、保存或中间 commit 不触发独立 review 仪式。
+- 模块/相关 package group 收口：对模块起点到当前结果的完整 scoped diff 做冷审；Tier 2/3 changed boundary 在这里运行一次独立 `/review` 或等价入口。
+- 集成批次收口：冲突处理和 integration glue 先做 affected review/tests，完整 reviewed batch 组装后按 D-061 运行一次累计 smoke。
+- 阶段/里程碑收口：审查阶段基线到 tested source 的累计 diff、跨模块 seam 和实际验证，再按 D-071 完成一次完整人工产品验收。
+- finding 修复后重跑受影响检查；只有修复实质改变相应模块、共享契约或阶段语义时才重复对应层级 review。独立入口不可用时记录替代方式和限制，不得声称 `/review` 已运行。
 
 ### D-032 保留的不变量
 
@@ -182,11 +214,11 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 ### D-046 调整的流程
 
 - STATUS 不保存巨型矩阵；详细设计保存在 review record；
-- coherent package group 可以共享 pre-review、implementation batch、post-review 和 commit；
+- coherent package group 可以共享设计 checkpoint、implementation batch、模块收口 review 和 commit；
 - Tier 0/1 不制造完整 11 维 N/A 表；
 - 不要求每个小包独立 checkpoint commit/push；
-- Week 2/Week 4 在被识别且干净的测试源码上运行自动验证与一次完整人工产品验收；
-- 默认 Git commit 和 push 仍分别遵守根 `AGENTS.md` 的精确批准门；active D-060/D-062 packet 内的本地操作按其有界例外执行，所有远端 ref 更新仍须单独精确批准。
+- W2/A3 在被识别且干净的测试源码上运行适用自动验证与各自一次完整人工产品验收；
+- 普通本地 commit 按根 `AGENTS.md` 和 D-074 在已授权范围内自主形成 coherent scope，避免为 commit 而 commit；所有远端 ref 更新仍须单独精确批准。
 
 ## 11. 集成与兼容规则
 
@@ -203,7 +235,9 @@ D-031 仅在 Day 5 go/no-go 选择后执行。若需要，范围固定为：
 - `NOT STARTED`：没有实现和测试事实；设计接受不改变该状态。
 - `IN PROGRESS`：实现或自动验证尚未完成。
 - `PARTIAL`：存在可运行 foundation/substitute，或自动/人工验收尚有未完成项。
-- `CLOSED`：相应 Tier 的必需行为、风险、真实接线、自动验证和适用人工验收全部满足。
+- `CLOSED`：明确命名的工程阶段或模块边界已经满足其适用 Tier、真实接线和自动验证；必须同时写清关闭到哪个 milestone，不能把 `W2 CLOSED` 外推为 `Alpha CLOSED`。
+- `PRODUCT-ACCEPTED`：一个 milestone 已完成 D-071 自动验证加一次完整人工产品验收；当前只适用于 W2。
 - `BLOCKED`：缺少外部条件或必要决策，当前无法诚实完成。
+- `OUT OF CURRENT SCOPE`：属于 S9 或明确非目标，不进入当前 Alpha 队列，也不是 blocker。
 
-设计文档的 accepted/sign-off 不等于实现 `CLOSED`。Week 2 产品验收也不自动关闭 Week 4 Alpha 模块。
+设计文档的 accepted/sign-off 不等于实现 `CLOSED`。W2 产品验收也不自动关闭任何 Alpha 模块或 A1–A3 节点。

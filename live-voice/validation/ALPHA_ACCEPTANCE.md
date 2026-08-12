@@ -1,13 +1,22 @@
-# Live Voice W3/W4 Integrated Web Alpha acceptance
+# Live Voice Integrated Web Alpha acceptance (S5–S8)
 
 > Run state: see [STATUS.md](../STATUS.md)
 > Accepted scope: P1 + P2 + P3alpha; complete P3 is stretch
-> Architecture: historical [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), normative [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), and all applicable current decisions, especially D-046, D-047, D-050, D-052, D-053, D-055, D-058–D-061 and D-071
+> Architecture: historical [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md), normative [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md), and all applicable current decisions, especially D-046, D-047, D-050, D-055, D-058–D-061 and D-071–D-075
 > Stable package/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
+> Active S5–S8 task contract: [ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](../roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md)
+> Human A3 journey: [ALPHA_SHOWCASE.md](../demo/ALPHA_SHOWCASE.md)
 
-This contract decides whether the Integrated Web Alpha scope is complete; `W3/W4` is a delivery-order window, not a calendar promise under either the default or bounded-parallel execution model. The accepted carrier is the JiuwenSwarm desktop Web frontend. Chrome/Chromium 107 remains the implementation compatibility floor for modified frontend code, while the acceptance record must name the actual single-desktop-Google-Chrome baseline. D-058 does not turn that run into a Chrome+Edge or wider compatibility promise. This is not a mobile/PWA, Firefox/Safari, public compatibility-matrix, RC, or Production approval.
+This contract decides whether the Integrated Web Alpha scope is complete. Under D-075, Alpha progresses through `S5/A0 Baseline Freeze → S6/A1 Module Closures → S7/A2 Integrated Candidate → S8/A3 Product Acceptance`; `W3/W4` remains only a historical delivery-order window, not a current stage or calendar promise. The accepted carrier is the JiuwenSwarm desktop Web frontend. Chrome/Chromium 107 remains the implementation compatibility floor for modified frontend code, while the acceptance record must name the actual single-desktop-Google-Chrome baseline. D-058 does not turn that run into a Chrome+Edge or wider compatibility promise. This is not a mobile/PWA, Firefox/Safari, public compatibility-matrix, RC, or Production approval.
 
 Under D-071, Alpha closes with applicable automated verification plus one complete human product acceptance. No signed evidence bundle, fixed manifest, repeated full run or Replacement Ledger score is required.
+
+## 0. Stage entry and exit
+
+- `A0` maps every requirement below to an inspected source/test owner, classifies the gap and freezes the exact environment/product inputs. A package row or historical W2 PASS cannot substitute for this audit.
+- `A1` closes every required module gap with risk-proportional tests and D-074 module review. A module may be W2-proven while remaining Alpha `PARTIAL`.
+- `A2` composes all mandatory A1 returns into one clean tested source and passes cumulative review plus applicable automated and real-path verification.
+- `A3` runs [ALPHA_SHOWCASE.md](../demo/ALPHA_SHOWCASE.md) once on the A2 exact source. Only A3 may produce the final Alpha PASS below.
 
 ## 1. Tested-source boundary
 
@@ -97,9 +106,9 @@ Pass requires:
 
 ## 8. Final decision
 
-First run the applicable automated positive, negative, flag-off, regression, build and static checks. Then the user completes one end-to-end human journey covering every applicable section above, including physical audio, interruption/correction, concurrent P2/P3alpha behavior, Task UI, refresh/reconnect and visible degradation. Reuse of an already passed human step is allowed only when later changes do not affect it.
+First run the applicable automated positive, negative, flag-off, regression, build and static checks at A2. Then the user completes [the Alpha-specific A3 journey](../demo/ALPHA_SHOWCASE.md) covering every applicable section above, including physical audio, interruption/correction, concurrent P2/P3alpha behavior, structured and natural-language Task control, platform lifecycle, refresh/reconnect, visible degradation, privacy and cleanup. Reuse of an already passed human step is allowed only when the exact source and relevant environment are unchanged and later changes do not affect it.
 
-Review the actual diff, automated results, tested source, human observations, unresolved gaps and every accepted deviation. Result is one of:
+Apply D-074 before the final decision: module reviews cover each changed boundary, then the Alpha candidate review covers the cumulative phase diff and cross-module integration seams. Review the automated results, tested source, human observations, unresolved gaps and every accepted deviation. Result is one of:
 
 - `PASS — INTEGRATED WEB ALPHA`;
 - `PARTIAL — the source runs but one or more automated or human product requirements remain`;

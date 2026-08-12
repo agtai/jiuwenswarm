@@ -10,9 +10,14 @@
 >
 > Week 2 pass/fail: [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
 >
-> Week 3–4 pass/fail: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
+> Integrated Web Alpha S5–S8 pass/fail: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
+> Current S5–S8 task contract: [ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md)
 >
 > D-071 supersedes Gate-era scoring and signed-evidence completion rules for W2 and later Live Voice milestones. Package identities, dependencies and product requirements remain; acceptance is automated verification plus one complete human product run.
+>
+> D-075 keeps every dated package/window row below unchanged but reclassifies `W1/W2/W3/W4` as historical delivery windows. Current sequential state uses S0–S9 and Alpha nodes A0–A3 in the roadmap/STATUS; P1/P2/P3alpha remain capability tracks.
+
+In package rows, `Gate` means a contract or product-acceptance checkpoint. It does not refer to the removed signed-evidence evaluator, manifest or rehearsal system.
 
 ## 1. Purpose and reading contract
 
@@ -22,7 +27,7 @@ This file is **not** a second status page or an implementation-ready queue:
 
 - `STATUS.md` alone says whether a package is not started, partial, blocked, committed or verified. Every row here therefore uses `see STATUS` rather than copying live state, HEAD, test counts, scores, blockers or next actions.
 - A target window is an ordering goal (`W2`, `W3`, `W4`, `Later`), not a promised calendar date. A package timebox preserves the original one-engineer/available-dependency estimate and cannot be added mechanically under either D-052's default allocation or D-060's bounded parallel exception.
-- Risk tiers are the default classification for the package boundary shown here. The actual diff may raise the tier when it introduces authority, security, concurrency, durability or release risk; a row never lowers D-046/D-053 requirements.
+- Risk tiers are the default classification for the package boundary shown here. The actual diff may raise the tier when it introduces authority, security, concurrency, durability or release risk; a row never lowers D-046/D-074 requirements.
 - The immutable [2026-07-30 full solution](../architecture/FULL_SOLUTION_2026-07-30.md) remains the historical architecture snapshot. D-055 changes its Windows carrier interpretation; the [ACG](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md) remains the normative shared contract.
 - A package may start only after STATUS says its dependencies are satisfied and a bounded plan identifies exact source/tests, allowed and forbidden effects, evidence and exclusions. A row in this matrix never means `READY` or `PASS` by itself.
 
@@ -139,6 +144,8 @@ Source examples at the matrix freeze date are [useLiveVoiceDemo.ts](../../jiuwen
 
 ## 10. Milestones and product acceptance
 
+The `Window` column is historical. Its current D-075 mapping is V0→S0, W1→S1, bounded D-031→S2, W2→S3, develop rebaseline→S4, W3/W4→S5–S8, and Later→S9. Only STATUS reports the current stage or whether a module is Alpha-closed.
+
 | Window | Human-readable outcome | Required package relationship | Pass/fail authority | Current status |
 |---|---|---|---|---|
 | V0 | Real voice can drive real Agent/Tool and speak the truthful answer in one fixed environment | Frozen predecessor only | [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md) | see STATUS |
@@ -172,12 +179,12 @@ Week 4 acceptance: real P1/P2/P3alpha verticals + Web platform and joint automat
 
 When an Agent uses this matrix to plan or implement work, it must:
 
-1. read `README.md` and `STATUS.md`, then select only a package whose real dependency state allows progress;
+1. read `README.md`, `STATUS.md` and the active S5–S8 execution plan, then select only an activated task/package whose real dependency state allows progress;
 2. preserve the canonical WP ID and parent-module authority shown here;
 3. read the package's consumed ACG/decision/roadmap sections, actual source/tests and current diff before proposing implementation;
 4. write a bounded plan with exact files, positive journey, key negative/fault/flag-off cases, forbidden effects, verification commands, non-goals and acceptance authority;
 5. keep fallback/substitute provenance visible and never award replacement credit from design, fake, test count or UI appearance alone;
 6. update STATUS only after implementation or evidence changes current facts; update this matrix only when a stable package, dependency, replacement or target-window decision changes;
-7. apply D-053 review depth and the repository's separate commit/push approval gates.
+7. apply D-074's affected-diff → module-closure → phase-closure review cadence, create only coherent local commits, and obtain separate exact approval before every remote-ref update.
 
 If the required implementation would change an identity, state, authority, cancel scope, durability promise, product compatibility claim or package ownership recorded here, stop and create an explicit decision/matrix revision before coding.

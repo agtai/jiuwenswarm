@@ -5,6 +5,7 @@
 > Decision: D-042
 > Status: accepted normative design; implementation and conformance progress are reported only in STATUS and package review records
 > Delivery interpretation: D-046 preserves all semantics in this document but implements them through a Day 1–2 critical kernel plus consumer-specific gates. D-055 changes the current product carrier from Windows Desktop/WebView2 to Web without changing this wire contract. Sections not consumed by an A-package do not globally block unrelated A-package work; every consumed section and the complete Alpha boundary still require the applicable conformance and Sol review before real B/C integration or Week 4 closure.
+> Current terminology: under D-075, P1/P2/P3alpha are capability tracks and references here to phases or Week 4 are historical architecture/delivery labels. Current sequential stages and Alpha nodes are defined by the roadmap and reported only in STATUS; this clarification does not change the contract below.
 
 ## 1. Purpose and authority
 

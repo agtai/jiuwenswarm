@@ -14,7 +14,10 @@ Two evidence-free product validation aids remain:
   for real Speech-provider readiness checks. This is repeatability input, not a
   substitute for physical microphone or audible human acceptance.
 
-Current product acceptance is defined by
-[`live-voice/validation/INTEGRATED_DEMO_ACCEPTANCE.md`](../../../live-voice/validation/INTEGRATED_DEMO_ACCEPTANCE.md)
-and the live next action is owned only by
+These are W2-only diagnostics. W2 regression/reproduction is defined by
+[`live-voice/validation/INTEGRATED_DEMO_ACCEPTANCE.md`](../../../live-voice/validation/INTEGRATED_DEMO_ACCEPTANCE.md);
+Alpha uses
+[`live-voice/validation/ALPHA_ACCEPTANCE.md`](../../../live-voice/validation/ALPHA_ACCEPTANCE.md)
+and its A2/A3 closure cannot be replaced by either script here. The live stage,
+module state and next action are owned only by
 [`live-voice/STATUS.md`](../../../live-voice/STATUS.md).

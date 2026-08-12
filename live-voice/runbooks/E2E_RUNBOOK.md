@@ -1,9 +1,9 @@
 # Live Voice 固定环境与真实 E2E 运行手册
 
-- 最近恢复审计：2026-08-02
-- 适用共享分支：`hx/0803_live_voice`；`d4c3e32a` 在 Gate 3 FAIL，`ee2896a4afb186e693c720476b6de10797e66f72` 已完成 Gate 0–6 并标记 `V0 Released / 已冻结`
+- 最近运行手册同步：2026-08-12
+- 历史 V0 复现分支：`hx/0803_live_voice`；`d4c3e32a` 在 V0 Gate 3 FAIL，`ee2896a4afb186e693c720476b6de10797e66f72` 已完成 V0 Gate 0–6 并标记 `V0 Released / 已冻结`。当前开发分支和拉取命令只由 [README](../README.md) 与 Git 决定，不得从该历史分支行恢复当前 Alpha。
 - 最终脱敏证据：[evidence/V0_20260802_ee2896a4.md](../evidence/V0_20260802_ee2896a4.md)；本文仍是以后重建相同受控环境的操作手册
-- 当前交付解释：D-046 定义 Week 2 cumulative Integrated Demo，D-055 将 Week 3–4 产品载体调整为 Integrated Web Alpha。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；默认关闭的产品组合代码不等于完整 P1/P2/P3alpha 路径或可运行验收，是否可运行只看 [STATUS](../STATUS.md) 和本手册是否已经给出精确启动步骤。
+- 当前交付解释：D-075 将 W2 映射为已验收 S3，将 W3/W4 保留为历史窗口，并以 S5/A0→S8/A3 推进 Integrated Web Alpha；D-076 的 [S5–S8 execution plan](../roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md) 定义当前任务、依赖和退出条件。下述 V0/稳定句/Task 三种旧模式仍按现有代码诚实记录；默认关闭的产品组合代码不等于 Alpha module closure 或可运行验收，是否可运行只看 [STATUS](../STATUS.md) 和本手册是否已经给出精确启动步骤。
 
 本手册用于把“代码可以构建”推进到“固定演示机上真实可演示”。它固定可复现边界，但不会把密钥、个人配置或硬件状态写进 Git。
 
@@ -221,16 +221,18 @@ $env:JIUWENSWARM_DATA_DIR = $dataDirItem.FullName
 
 Vite 也会读取 `JIUWENSWARM_DATA_DIR`，所以前端终端必须使用与本次后端相同的隔离路径。下述默认 V0、稳定句预读和 Task Demo 三种兼容/Demo 模式一次只能选一种；切换模式时先按 `Ctrl+C` 停止现有 Vite，确认 `5173` 已释放，再在新终端完成变量设置后启动。不得先运行 `npm run dev` 再修改变量，也不得仅打开产品组合 flag 就把这些模式算作累计验收路径。
 
-### 7.1 Cumulative Integrated / Web Alpha 产品验收
+### 7.1 按 milestone 选择 Cumulative Integrated 或 Web Alpha 产品验收
 
 D-071 将当前及后续 Live Voice 里程碑统一为**适用自动验证通过 + 一次完整人工产品验收**。不再创建或修复 trust policy、root/leaf key、artifact signature、38-slot manifest、Replacement Ledger 或 `w2_gate_cli evaluate` 结果，也不要求连续重复三次完整 showcase。
+
+先选择且只选择一个合同：W2 回归/复现使用 [W2 acceptance](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 与 [W2 showcase](../demo/INTEGRATED_SHOWCASE.md)；当前 Alpha 按 [S5–S8 execution plan](../roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md) 形成 A2 candidate，再使用 [Alpha acceptance](../validation/ALPHA_ACCEPTANCE.md) 与 [Alpha showcase](../demo/ALPHA_SHOWCASE.md) 完成 A3。不得用 W2 脚本签署 Alpha。
 
 验收按以下顺序进行：
 
 1. 记录测试源码 SHA，确认 source worktree 无无法解释的改动；恢复隔离数据目录、持久 Session、注册 project、真实 Agent/Speech 配置、浏览器权限和实际输入/输出设备。
-2. 按 [W2 acceptance](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) 运行适用的自动正向、负向、flag-off、回归、构建和静态检查。自动化必须继续验证 committed-only、身份/范围、stale/cancel、wrong-target 和零禁止副作用。
+2. 按所选 acceptance 合同运行适用的自动正向、负向、flag-off、回归、构建和静态检查。Alpha 只在 A0/A1 已关闭并形成 A2 exact candidate 后进入这一步。自动化必须继续验证 committed-only、身份/范围、stale/cancel、wrong-target 和零禁止副作用。
 3. 使用正式 Integrated Web flags 启动单一产品页面：`VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB=true`、`VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1=true`、`VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION=true`；保持兼容 Demo flags 关闭。
-4. 用户按 [Integrated showcase](../demo/INTEGRATED_SHOWCASE.md) 完成一次完整旅程：物理 P1、真实 Agent/只读 Tool、完整 TTS、打断/纠正、P2/P3 非阻塞、P3 create/cancel/retry A→B→C、刷新/重连/重启与一个安全可见降级。
+4. 用户按所选 milestone showcase 完成一次完整旅程。W2 覆盖已接受的物理 P1、真实 Agent/只读 Tool、完整 TTS、打断/纠正、P2/P3 非阻塞、P3 create/cancel/retry A→B→C、刷新/重连/重启与一个安全可见降级；Alpha 还必须覆盖完整 structured/natural-language P3alpha、平台 permission/device/background lifecycle、joint slow-round+detached-task、privacy/trace 和 Alpha cleanup。
 5. 正常停止服务并核对 worktree、fixture、端口、task/attempt/outbox/owner/lease。将每项记录为 `PASS`、`FAIL`、`BLOCKED` 或 `NOT APPLICABLE`，更新 STATUS；无需签名或计分。
 
 同一源码和相关环境中已经人工通过、且未被后续语义修改影响的步骤可以复用。不得为了旧 Gate 仪式要求用户重复，也不得用自动化替代麦克风、完整朗读、交互手感或 UI 状态的人工观察。
@@ -245,16 +247,17 @@ policy/key/signature/manifest 编排、rehearsal/fault runner 及产品内专属
 旧命令和操作步骤只存在于 Git 历史及 D90–D102 冻结记录中，不得在当前 checkout
 执行，也不得重新实现为 W2/Alpha 完成条件。
 
-当前验收只按 [Integrated Demo acceptance](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
-和 [Integrated showcase](../demo/INTEGRATED_SHOWCASE.md) 执行适用自动验证加一次完整
-人工产品旅程。仓库仍保留两个与 Gate 无关的可选工具：
+当前 W2 回归只按 [Integrated Demo acceptance](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
+和 [Integrated showcase](../demo/INTEGRATED_SHOWCASE.md)；当前 Alpha 则按
+[Alpha acceptance](../validation/ALPHA_ACCEPTANCE.md) 和
+[Alpha showcase](../demo/ALPHA_SHOWCASE.md)。仓库仍保留两个与 Gate 无关的 W2 可选工具：
 
 - `scripts/live_voice/w2_rehearsal/w2_wav_speech_preflight.py`：验证真实 Speech
   Provider 与确定性 WAV；
 - `scripts/live_voice/w2_rehearsal/w2_d069_runtime_diagnostic.py`：验证真实 P3
   A→B→C/重启拓扑。
 
-两者不签名、不计分、不写证据 artifact，也不能替代物理麦克风、完整实听或人工验收。
+两者不签名、不计分、不写证据 artifact，也不能替代物理麦克风、完整实听、Alpha A2 自动矩阵或 A3 人工验收。
 
 ### 7.2 默认 V0 模式
 
@@ -449,6 +452,7 @@ project.create（首次注册时）
 
 ```text
 日期/时间：
+Milestone / stage / node：
 Git commit：
 工作区是否干净：
 OS 版本/build：
@@ -497,4 +501,4 @@ ASR 误识别样本：
 - 停止 Vite、Gateway 和 AgentServer 进程。
 - 若采用方案 A，恢复之前备份的用户 channel 配置。
 - 记录本次使用的 `JIUWENSWARM_DATA_DIR` 标签，停止所有引用它的进程后执行 `Remove-Item Env:JIUWENSWARM_DATA_DIR -ErrorAction SilentlyContinue`；不要自动删除证据目录。
-- 按 [V0_ACCEPTANCE.md](../validation/V0_ACCEPTANCE.md) 保存脱敏验收结果，只在 [STATUS.md](../STATUS.md) 更新通过项、失败项和下一步，并按根 `AGENTS.md` 对每次 commit 和 push 分别取得明确批准；`ee2896a4` 已冻结，后续只在独立 checkout/worktree 中复现或调查回归，`d4c3e32a` 只作失败历史，Release 证据和后续开发事实分别提交，不得混为同一能力结论。
+- 按所选 acceptance 合同保存脱敏结果，只在 [STATUS.md](../STATUS.md) 更新当前 stage/node、通过项、失败项和下一步。按根 `AGENTS.md` 可为已授权工作形成 coherent 本地 commit；每次 push/远端 ref 更新仍须单独精确审批。`ee2896a4` 已冻结，后续只在独立 checkout/worktree 中复现或调查回归，`d4c3e32a` 只作失败历史，V0/W2/Alpha 结果不得混为同一能力结论。
