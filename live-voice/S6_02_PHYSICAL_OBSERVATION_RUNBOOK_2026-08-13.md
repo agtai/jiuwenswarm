@@ -45,10 +45,31 @@ hidden/background/resume 与听感确认。这些都发生在浏览器权限层�
 也就是说：证书、同源、CSP（含音频所需的 `media-src blob:` 与 `worker-src blob:`）
 都不会成为你的障碍。**Chrome 直接打开即可，不会有证书警告，不需要任何开关。**
 
-### 2c. 界面位置（精确到按钮）
+### 2c. 在哪个页面、怎么让语音块出现
 
-Live Voice 的正式路由面板是聊天页里一个可折叠区块，标题
+**页面**：只有一个 —— `https://live-voice.localhost` 打开后的**聊天页**。
+Live Voice 没有独立路由，它的正式路由面板渲染在 `ChatPanel` 内部
+（消息区下方、输入框上方），是一个可折叠 `<details>`，标题
 **「Integrated Web 路由事实」**（`data-testid="live-voice-integrated-route"`）。
+
+**「Formal P1 voice」块不是一进页面就有的**，它的渲染条件是
+`p1VoiceEnabled = FEATURE_LIVE_VOICE_INTEGRATED_P1 && isConnected &&
+p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"按钮），
+但它要求 `mode === 'agent'` 且已有 session。所以按下面三步走：
+
+1. **工作区选中项目 `live-voice-alpha-fixture`**
+   （`proj_43562811`，目录 `D:\lvalpha\run-20260812\fixture-project`，
+   `work_mode=code`，未隐藏，会出现在项目列表里）。
+   这一步决定 session 绑定哪个项目 —— 服务端 P2 授权要求所绑项目的
+   `work_mode` 恰为 `code`，绑错项目会直接拒绝。
+2. **聊天模式选择器保持/切到 `agent`**（这是默认值）。
+   注意这与上一步的 `work_mode` 是**两个独立概念**：`work_mode` 属于工作区/项目，
+   `mode` 属于聊天回合。P2 的自动激活看的是 `mode === 'agent'`。
+   若界面上有待回答的追问或 evolution 状态，激活会被挡住，先把它处理掉。
+3. **先发一条普通文字消息**。session 是首次发送时才创建的；session 建立后
+   面板会自动激活 P2，`p2.agent_interaction` 变为 `formal`，
+   「Formal P1 voice」块随即出现。
+
 展开后你会用到两块：
 
 1. **「音频输入与输出」**（`音频设备` fieldset）
@@ -72,8 +93,9 @@ Live Voice 的正式路由面板是聊天页里一个可折叠区块，标题
 
 ### O1 麦克风权限：授予
 
-1. Chrome 打开 `https://live-voice.localhost`。
-2. 展开 **「Integrated Web 路由事实」**。
+1. Chrome 打开 `https://live-voice.localhost`，按 §2c 三步让语音块出现
+   （选 `live-voice-alpha-fixture` → `agent` 模式 → 发一条文字消息）。
+2. 展开 **「Integrated Web 路由事实」**，确认 `p2.agent_interaction` 是 `formal`。
 3. 点 **「授权并加载设备」**，在权限弹窗上点**允许**。
 4. 「麦克风」「扬声器」按需选择，点 **「应用设备」**。
 5. 点 **`Start formal voice turn`**，说一句可核对的话
@@ -84,7 +106,8 @@ Live Voice 的正式路由面板是聊天页里一个可折叠区块，标题
 
 ### O2 麦克风权限：拒绝
 
-1. 新开一个**无痕窗口**（保证权限状态干净），打开同一地址并展开同一区块。
+1. 新开一个**无痕窗口**（保证权限状态干净），打开同一地址，同样按 §2c 三步
+   把语音块调出来，展开同一区块。
 2. 点 **「授权并加载设备」**，在弹窗上点**阻止**。
 
 **要记录**：界面是否给出**显式**的不可用原因（而不是静默失败）；是否退回到
@@ -154,5 +177,6 @@ Live Voice 的正式路由面板是聊天页里一个可折叠区块，标题
 ## 5. 边界
 
 - 不要为了让某项通过而改系统信任设置、hosts 文件或浏览器安全开关。
-- 不要用真实项目做目标；session 已绑定一次性 fixture。
+- 不要用真实项目做目标：工作区必须选 `live-voice-alpha-fixture`，
+  不要选你自己的项目，也不要选 JiuwenSwarm 源码仓库。
 - 观察记录里不要包含 key / token / 浏览器 profile 路径 / 原始音频。
