@@ -431,7 +431,14 @@ class _TransportCleanupOwner:
             )
             raise
         if task not in done:
-            task.cancel()
+            # The caller's budget is spent, but the close itself must keep
+            # running: a real WebSocket close handshake needs a network round
+            # trip, which never fits this budget.  Cancelling here would leave
+            # the transport half-open and, because a cancelled cleanup is
+            # retained as failed, would permanently consume one cleanup slot
+            # per stream until capacity is exhausted.  Retaining the task keeps
+            # the caller hard-bounded while the owner still finishes and
+            # releases the slot.
             _log_transport_cleanup(
                 kind=kind, reason="timeout", retained_count=len(self._tasks)
             )
@@ -1483,7 +1490,14 @@ class OpenAIStreamingSpeechProvider:
         if kind in {
             "session.created",
             "transcription_session.created",
+            # ``conversation.item.created`` is the retired beta name. The GA
+            # transcription session announces the committed item as ``added``
+            # and then ``done``; both carry their id under ``item.id`` rather
+            # than a top-level ``item_id``, and the committed identity this
+            # stream binds already came from ``input_audio_buffer.committed``.
             "conversation.item.created",
+            "conversation.item.added",
+            "conversation.item.done",
             "rate_limits.updated",
         }:
             # These observations don't alter Speech output truth.

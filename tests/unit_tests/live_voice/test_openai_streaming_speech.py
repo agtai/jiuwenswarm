@@ -2036,3 +2036,116 @@ async def test_invalid_or_insecure_configuration_falls_back_without_secret_echo(
     assert selected.tier is SpeechRouteTier.BATCH
     assert selected.fact is not None
     assert secret not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_ga_transcription_item_lifecycle_events_do_not_fail_the_stream() -> None:
+    """The live GA transcription session announces its committed item.
+
+    A real ``intent=transcription`` socket emits ``conversation.item.added``
+    and ``conversation.item.done`` between ``input_audio_buffer.committed`` and
+    the transcript events; ``conversation.item.created`` is the retired beta
+    name and is no longer sent.  Treating the GA names as unknown events aborts
+    every real recognition after commit, so this order must stay accepted while
+    output truth still comes only from the transcript events.
+    """
+
+    socket = FakeSocket((session_updated_event(),))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    ref = recognition_ref()
+    await provider.open_recognition(
+        RecognitionStreamRequest(ref, RecognitionTurnDetection.manual()),
+        timeout_seconds=2,
+    )
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    socket.push({"type": "input_audio_buffer.committed", "item_id": "ga-item-1"})
+    socket.push(
+        {
+            "type": "conversation.item.added",
+            "item": {"id": "ga-item-1", "type": "message", "role": "user"},
+        }
+    )
+    socket.push(
+        {
+            "type": "conversation.item.done",
+            "item": {"id": "ga-item-1", "type": "message", "role": "user"},
+        }
+    )
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "content_index": 0,
+            "item_id": "ga-item-1",
+            "delta": "语音",
+        }
+    )
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "ga-item-1",
+            "transcript": "语音联调成功",
+        }
+    )
+    partial = await provider.next_recognition_event(ref, timeout_seconds=1)
+    final = await provider.next_recognition_event(ref, timeout_seconds=1)
+    assert partial.kind is RecognitionEventKind.PARTIAL
+    assert partial.hypothesis.selected.display_text == "语音"
+    assert final.kind is RecognitionEventKind.FINAL
+    assert final.hypothesis.selected.display_text == "语音联调成功"
+    # The item lifecycle observations produced no extra recognition output.
+    assert final.seq == partial.seq + 1
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot() -> None:
+    """A close slower than the attempt budget must still complete.
+
+    A real WebSocket close handshake needs a network round trip and can never
+    fit the attempt budget.  Cancelling it would leave the transport half-open
+    and permanently retain one failed cleanup slot per stream, so a bounded
+    number of streams would exhaust ``MAX_INCOMPLETE_TRANSPORT_CLEANUPS`` and
+    close the route.  The caller must stay bounded while the owner finishes.
+    """
+
+    owner = _TransportCleanupOwner()
+    release = asyncio.Event()
+    completed = 0
+
+    async def slow_cleanup() -> None:
+        nonlocal completed
+        await release.wait()
+        completed += 1
+
+    resources = [object() for _ in range(4)]
+    for resource in resources:
+        assert (
+            await owner.attempt(
+                kind="socket", resource=resource, cleanup=slow_cleanup
+            )
+            is False
+        )
+    pending = owner.snapshot()
+    assert pending.retained_task_count == len(resources)
+    assert pending.failed_resource_count == 0
+
+    release.set()
+    for _ in range(100):
+        await asyncio.sleep(0)
+        if owner.snapshot().clean:
+            break
+    settled = owner.snapshot()
+    assert completed == len(resources)
+    # Every slot is returned: nothing is retained and nothing is marked failed.
+    assert settled.retained_task_count == 0
+    assert settled.failed_resource_count == 0
+    assert settled.clean is True
+    owner.require_session_capacity(active_sessions=0)
+    assert (await owner.close()).clean is True
