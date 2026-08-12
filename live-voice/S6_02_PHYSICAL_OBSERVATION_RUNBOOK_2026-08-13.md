@@ -45,6 +45,48 @@ hidden/background/resume 与听感确认。这些都发生在浏览器权限层�
 也就是说：证书、同源、CSP（含音频所需的 `media-src blob:` 与 `worker-src blob:`）
 都不会成为你的障碍。**Chrome 直接打开即可，不会有证书警告，不需要任何开关。**
 
+### 2b2. 用哪个浏览器：普通 Chrome 的**专用 profile**
+
+用你平常那个 Chrome 程序，但**开一个独立 profile**，不要用日常 profile，也不要
+把无痕当主战场。
+
+**为什么不是日常 profile**
+
+- 权限状态必须确定且要跨观察保留：O1 授予 → O3 再从站点设置撤销。日常 profile
+  可能早就为这个 origin 存过一次决定，那样 O1 的弹窗根本不会出现，观察就无效了。
+- 扩展会干扰：广告/隐私/脚本拦截类扩展可能挡掉 `getUserMedia`、WebSocket
+  或 `blob:` worker（本站 CSP 正是 `worker-src 'self' blob:` /
+  `media-src 'self' blob:`）。干净 profile 里出问题才能归因到产品，而不是扩展。
+  这一点直接决定我能否把失败归属到 Alpha 还是 develop。
+
+**为什么隔离不会带来证书麻烦**
+
+Caddy 的本地 CA `CN=Caddy Local Authority - 2026 ECC Root` 已在**当前 Windows
+用户**的 Root 信任库（有效期至 2036），所以该用户的**任何** Chrome profile
+（含全新 profile 与无痕）都信任它。隔离在证书上零成本。
+
+**启动命令**（profile 落在 Git 之外的运行根目录）
+
+```bash
+"C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="D:\lvalpha\run-20260812\browser-profile" https://live-voice.localhost
+```
+
+它会启动一个与你日常 Chrome 并存的独立实例。第一次启动是全新 profile：没有扩展、
+没有历史站点权限、没有该 origin 的媒体互动记录。
+
+**无痕只用于 O2**：O1 授予之后，同一 profile 不会再弹窗；O2（拒绝）就在这个专用
+profile 里开一个无痕窗口做，这样不会破坏主窗口已授予的状态。
+
+**绝对不要加的启动参数**：`--ignore-certificate-errors`、
+`--unsafely-treat-insecure-origin-as-secure`、`--allow-running-insecure-content`
+或任何关闭安全策略的开关。CA 已受信、origin 已是 https，这些都不需要，
+且超出本次授权边界。
+
+**顺手确认一下浏览器基线**：打开 `chrome://version`，把第一行版本号发我。
+本机安装了两个版本目录（`151.0.7922.109` 与 `151.0.7922.77`），而 D111 声明的
+基线是 `151.0.7922.109`；S6-02 要求「在声明的 Chrome 基线上」观察，所以实际跑的
+版本要以你看到的为准记录，不能照抄旧记录。
+
 ### 2c. 在哪个页面、怎么让语音块出现
 
 **页面**：只有一个 —— `https://live-voice.localhost` 打开后的**聊天页**。
@@ -152,6 +194,10 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 
 把结果按下表回给我（一句话一项即可，写你看到/听到的事实）：
 
+| 项 | 值 |
+|---|---|
+| `chrome://version` 第一行 | |
+
 | 观察 | 结果 | 你看到 / 听到的 |
 |---|---|---|
 | O1 授予 | PASS / FAIL | |
@@ -176,7 +222,8 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 
 ## 5. 边界
 
-- 不要为了让某项通过而改系统信任设置、hosts 文件或浏览器安全开关。
+- 不要为了让某项通过而改系统信任设置、hosts 文件或浏览器安全开关；
+  也不要为省事去用日常 profile 的既有权限状态顶替一次真实的授权观察。
 - 不要用真实项目做目标：工作区必须选 `live-voice-alpha-fixture`，
   不要选你自己的项目，也不要选 JiuwenSwarm 源码仓库。
 - 观察记录里不要包含 key / token / 浏览器 profile 路径 / 原始音频。
