@@ -2279,6 +2279,11 @@ async def test_dispatch_handoff_fence_rechecks_clean_state_after_agent_setup(
         def get_instance(self):
             return object()
 
+        async def ensure_instance(self):
+            # A formal dispatch runs outside the chat path and awaits
+            # this rather than reading the bare accessor.
+            return object()
+
         async def process_background_code_task_stream(self):
             return None
 
@@ -3632,3 +3637,79 @@ def test_p3_model_builder_uses_the_shared_module_level_entry_builder() -> None:
     assert seen == [
         ({"model_name": "probe-model", "client_provider": "probe"}, {"temperature": 0.0})
     ]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_builds_the_agent_handle_instead_of_reading_the_accessor(
+    tmp_path: Path,
+) -> None:
+    """A formal dispatch must build the DeepAgent, not read the bare accessor.
+
+    ``JiuWenSwarm.get_instance`` is a plain accessor that returns None until the
+    chat path has built the root DeepAgent.  A formal task dispatches outside
+    that path onto a freshly created project Agent, so reading the accessor left
+    ``execution_agent`` None and every real attempt failed closed with
+    EXECUTOR_CAPABILITY_UNAVAILABLE and no project effect.
+    """
+
+    class Authority:
+        def revalidate(self, _context, **_kwargs):
+            return SimpleNamespace(
+                project_dir=str(tmp_path),
+                project_id="project-1",
+                session_id="session-1",
+                revision="a77516a0",
+            )
+
+    built = object()
+
+    class Agent:
+        def __init__(self) -> None:
+            self.ensure_calls = 0
+
+        def get_instance(self):
+            # The root DeepAgent does not exist yet outside the chat path.
+            return None
+
+        async def ensure_instance(self):
+            self.ensure_calls += 1
+            return built
+
+        def get_project_execution_root(self) -> str:
+            return str(tmp_path)
+
+    agent = Agent()
+
+    class Manager:
+        async def get_live_voice_formal_task_agent(self, _project_dir: str):
+            return agent
+
+        def pin_agent(self, _agent) -> None:
+            return None
+
+        def unpin_agent(self, _agent) -> None:
+            return None
+
+    resolver = AgentManagerProjectBindingResolver(
+        authority_resolver=Authority(),
+        agent_manager=Manager(),
+        service=object(),
+        model_resolver=_ModelResolver(),
+        principal=_principal(),
+        clock=lambda: NOW,
+    )
+
+    binding = await resolver.resolve(
+        SimpleNamespace(
+            context=object(),
+            attributes=(
+                ("model_identity", "default#0"),
+                ("model_config_version", "catalog-v1"),
+            ),
+        ),
+        for_dispatch=True,
+    )
+
+    assert binding.execution_agent is built
+    assert agent.ensure_calls == 1
+    assert binding.project_executor is agent

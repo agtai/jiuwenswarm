@@ -1289,6 +1289,12 @@ async def test_production_resolver_manager_real_facade_executes_exact_d0_root(
             self.sub_mode = sub_mode
             self._project_dir = str(Path(config["project_dir"]).resolve())
 
+        async def ensure_instance(self):
+            # Mirrors the real adapter: return the DeepAgent, building it on
+            # first use. A formal dispatch runs outside the chat path and must
+            # await this instead of reading the bare ``get_instance`` accessor.
+            return self._instance
+
         async def prepare_background_project_session(self, session_id: str) -> None:
             self.sessions.add(session_id)
 
@@ -1399,6 +1405,11 @@ async def test_production_partial_attempt_initialization_releases_before_worktre
             self._instance = object()
             self._project_dir = ""
             self.runtime = False
+
+        async def ensure_instance(self):
+            # Mirrors the real adapter: a formal dispatch runs outside the
+            # chat path and awaits this rather than reading the accessor.
+            return self._instance
 
         async def create_instance(
             self,
@@ -1588,6 +1599,11 @@ async def test_binding_resolve_close_race_releases_owner_before_closed(
             return str(tmp_path.resolve())
 
         def get_instance(self) -> object:
+            return object()
+
+        async def ensure_instance(self) -> object:
+            # A formal dispatch runs outside the chat path and awaits
+            # this rather than reading the bare accessor.
             return object()
 
     class Manager:

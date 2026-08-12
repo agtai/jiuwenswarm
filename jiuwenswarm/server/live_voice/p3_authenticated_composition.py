@@ -683,7 +683,13 @@ class AgentManagerProjectBindingResolver:
                 effective_root = (
                     get_root() if callable(get_root) else snapshot.project_dir
                 )
-                execution_agent = agent.get_instance()
+                # ``get_instance`` is a plain accessor and returns None until
+                # the root DeepAgent has been built by the chat path.  A formal
+                # task dispatches outside that path on a freshly created
+                # project Agent, so it must build the handle it needs; using
+                # the accessor left ``execution_agent`` None and failed every
+                # real attempt with EXECUTOR_CAPABILITY_UNAVAILABLE.
+                execution_agent = await agent.ensure_instance()
                 project_executor = agent
             except BaseException:  # noqa: BLE001 -- no acquired pin may be lost
                 release()
