@@ -6,6 +6,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import struct
 import traceback
 from dataclasses import replace
@@ -1228,11 +1229,13 @@ async def test_post_validation_failures_capture_no_request_text(
         except StreamingSynthesisRouteViolation as error:
             assert error.reason == expected_reason
             route_traceback = error.__traceback__
+            # Match the route module frame by exact basename. A suffix match also
+            # accepts this test file (``test_streaming_synthesis_route.py`` ends
+            # with the module name), which would stop the walk on the caller frame
+            # and capture the test's own canary locals instead of the route's.
             while route_traceback is not None and (
-                "jiuwenswarm" not in route_traceback.tb_frame.f_code.co_filename
-                or not route_traceback.tb_frame.f_code.co_filename.endswith(
-                    "streaming_synthesis_route.py"
-                )
+                os.path.basename(route_traceback.tb_frame.f_code.co_filename)
+                != "streaming_synthesis_route.py"
             ):
                 route_traceback = route_traceback.tb_next
             assert route_traceback is not None
