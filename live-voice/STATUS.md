@@ -14,9 +14,10 @@
 - Current stage/node: `S6 - Alpha Module Closure` / `A1`, `ENVIRONMENT`.
 - Current task: complete the declared real Provider/device/private-topology
   acceptance for `S6-02`, `S6-03`, `S6-05` and the real-path portion of
-  `S6-06`. The private topology and real Speech path are now live and proven;
-  what remains is the physical device/heard-playout observation plus the P2,
-  whole-stack and joint real measurements.
+  `S6-06`. The private topology, the real Speech path and the real P2 media
+  route are now live and proven; what remains is the physical
+  device/heard-playout observation, the P2 fault/load profiles and route
+  latency report, and the whole-stack and joint real measurements.
 - Next gate: close the environment rows below before starting `S7-01` candidate
   assembly.
 - Closed: S0 V0, S1 Shared Foundations, S2 D-031 bounded compatibility,
@@ -46,18 +47,31 @@ S6 implementation and review record is
 | Task | Status | Current fact |
 |---|---|---|
 | S6-01 critical-input safety | `SATISFIED` | The bounded `CriticalTokenSafetyGate` is on committed text/voice/Task product paths. Partial, stale, low-confidence and wrong-scope cases assert zero Agent, Tool, Task, audio, history and Store effects. |
-| S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | Real streaming STT/TTS now run against the official OpenAI origin: 5/5 recognitions and 5/5 syntheses with p50/p95 recorded. Two Adapter defects that broke every real recognition were found and fixed here. Physical microphone, device change/loss and heard playout still require the user. |
-| S6-03 P2 realtime conversation | `ENVIRONMENT` | The real Agent/Tool text path is proven end to end on the private origin. Real P2 media, fault/load profiles and route latency measurements have not run. |
+| S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | Real streaming STT/TTS run against the official OpenAI origin: 5/5 recognitions and 5/5 syntheses with p50/p95 recorded, plus a real `server_vad` open and provider-time end of turn. Three Adapter defects that broke every real recognition were found and fixed here. Physical microphone, device change/loss and heard playout still require the user. |
+| S6-03 P2 realtime conversation | `ENVIRONMENT` | The complete real media route is proven on the private origin: first-frame media auth, 227 uplink frames with 227 ACKs, provider-time end of turn, streaming recognition `completed` with no degradation, real Agent final, a real streaming TTS downlink of 1208 frames and an accepted playout receipt. Bounded-queue/backpressure/drop/reorder/reconnect profiles, slow Harness, cancel fences and the complete route latency report have not run. |
 | S6-04 P3alpha Task vertical | `SATISFIED` | Proven on the real path against the authoritative Store: confirmation issue/consume, command idempotency, TaskEvent-only lifecycle truth, outbox accounting, scope isolation, replay rejection and terminal-cancel rejection. Two Alpha defects blocked every real dispatch; with them fixed a real attempt now completes, the real Code Agent makes exactly the instructed change on the disposable fixture, and cross-project effects are 0. |
 | S6-05 observability/privacy/Web | `ENVIRONMENT` | The private same-origin HTTPS/WSS topology is built and measured: real CA trust, CSP, WSS routing and zero browser-tier credentials. The whole-stack benchmark, raw-audio zero-persistence regression and degradation matrix have not run. |
-| S6-06 joint route | `ENVIRONMENT` | Depends on the remaining real paths in S6-02/03/05. Fake external claims are not treated as proof of the required physical P1/P2 route. |
+| S6-06 joint route | `ENVIRONMENT` | The automated joint scenario passes, including a race the real-path repair exposed. The real joint run depends on the remaining real paths in S6-02/03/05. Fake external claims are not treated as proof of the required physical P1/P2 route. |
 
 No known S6 source defect remains. The open rows are environment evidence, not
 hidden fallback success or accepted product deviations.
 
-Latest verification is bound to `31ee31abb` and recorded in
-[D111](D111_ALPHA_REAL_PATH_ACTIVATION_2026-08-12.md); the automated baseline it
-builds on is [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md).
+Latest verification is bound to `39870d85a` and recorded in
+[D112](D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md), which follows
+[D111](D111_ALPHA_REAL_PATH_ACTIVATION_2026-08-12.md); the automated baseline
+both build on is [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md).
+
+D112 adds four more Alpha real-path defects, all behind declared fail-closed
+gates and all invisible to the suites: P2 activation requested the Agent
+profile that does not own the formal Live Voice seam; the WebChannel dispatcher
+accepted only the legacy media path while activation returns the fixed one; the
+real GA transcription echo drops the two response fields the Adapter compared
+byte for byte, so every `server_vad` open was rejected; and end-of-turn
+arbitration cancelled the Provider open it was waiting for. Each is fixed with
+a regression test proven to fail when the fix is reverted. The dedicated media
+route also requires the deployment to list the private origin host in
+`JIUWENSWARM_WS_ALLOWED_ORIGIN_HOSTS`; that is a deployment prerequisite, not a
+defect, and no source was changed for it.
 
 D110's two external blockers are cleared: the Gateway-only Speech credential and
 a private `https://live-voice.localhost` HTTPS/WSS reverse proxy now exist, with
@@ -128,10 +142,11 @@ D1/D2, Production and public deployment remain outside scope.
 1. With the user on real Chrome at `https://live-voice.localhost`: grant, deny and
    revoke microphone permission, change/lose a device, and confirm heard playout
    of a complete answer. This is the only remaining S6-02 gap.
-2. Run the remaining real measurements: P2 media/fault/load and route latency
-   (S6-03), whole-stack benchmark plus raw-audio zero-persistence and degradation
-   regression (S6-05), and the joint slow-round + detached-task scenario (S6-06),
-   whose P3 side is now unblocked.
+2. Run the remaining real measurements: the P2 fault/load profiles and complete
+   route latency report (S6-03, whose media chain is now proven), whole-stack
+   benchmark plus raw-audio zero-persistence and degradation regression
+   (S6-05), and the joint slow-round + detached-task scenario (S6-06), whose P3
+   and media sides are now unblocked.
 3. If those pass without source repair, mark the environment rows `SATISFIED` and
    start `S7-01`. If a run exposes a defect, repair it, rerun the affected checks
    and repeat the materially changed cold-review scope.
