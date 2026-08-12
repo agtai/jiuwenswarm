@@ -14,7 +14,9 @@
 - Current stage/node: `S6 - Alpha Module Closure` / `A1`, `ENVIRONMENT`.
 - Current task: complete the declared real Provider/device/private-topology
   acceptance for `S6-02`, `S6-03`, `S6-05` and the real-path portion of
-  `S6-06`; source and deterministic automation are integrated and reviewed.
+  `S6-06`. The private topology and real Speech path are now live and proven;
+  what remains is the physical device/heard-playout observation plus the P2,
+  whole-stack and joint real measurements.
 - Next gate: close the environment rows below before starting `S7-01` candidate
   assembly.
 - Closed: S0 V0, S1 Shared Foundations, S2 D-031 bounded compatibility,
@@ -44,32 +46,48 @@ S6 implementation and review record is
 | Task | Status | Current fact |
 |---|---|---|
 | S6-01 critical-input safety | `SATISFIED` | The bounded `CriticalTokenSafetyGate` is on committed text/voice/Task product paths. Partial, stale, low-confidence and wrong-scope cases assert zero Agent, Tool, Task, audio, history and Store effects. |
-| S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | Streaming contract, official-OpenAI Gateway providers, explicit Streaming -> Batch -> Browser/text fallback, device selection, Server VAD/EOT and Web lifecycle automation are complete and default-off. A real key, Chrome, microphone/output and heard playout run are still required. |
-| S6-03 P2 realtime conversation | `ENVIRONMENT` | Slow/failing harness, network fault/load, notification, stop/revise/delegate, cancel/fence and latency instrumentation are automated. Real Jiuwen Agent/network/device measurements remain. |
-| S6-04 P3alpha Task vertical | `SATISFIED` | Structured and committed natural-language create/status/cancel traverse the current formal Task Core, exact authority checks, SQLite Store/outbox and `DirectProjectCodeExecutorAdapter` on a disposable Git fixture; no second Task authority exists. |
-| S6-05 observability/privacy/Web | `ENVIRONMENT` | Benchmark p50/p95/failure/sample reporting, privacy/zero-persistence checks, private-only same-origin deployment observation and degradation automation are complete. A real private HTTPS/WSS candidate and whole-stack report remain. |
-| S6-06 joint route | `ENVIRONMENT` | The deterministic product-composition scenario passes across the registry, safety gate, P2 turns, formal Task bridge/Core/Direct Executor, exact status/cancel, progress/terminal return, degradation and privacy seams. Fake external claims are not treated as proof of the required physical P1/P2 route. |
+| S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | Real streaming STT/TTS now run against the official OpenAI origin: 5/5 recognitions and 5/5 syntheses with p50/p95 recorded. Two Adapter defects that broke every real recognition were found and fixed here. Physical microphone, device change/loss and heard playout still require the user. |
+| S6-03 P2 realtime conversation | `ENVIRONMENT` | The real Agent/Tool text path is proven end to end on the private origin. Real P2 media, fault/load profiles and route latency measurements have not run. |
+| S6-04 P3alpha Task vertical | `SATISFIED` | Structured and committed natural-language create/status/cancel traverse the current formal Task Core, exact authority checks, SQLite Store/outbox and `DirectProjectCodeExecutorAdapter` on a disposable Git fixture; no second Task authority exists. A real mutation run on the disposable fixture is still outstanding under S6-06. |
+| S6-05 observability/privacy/Web | `ENVIRONMENT` | The private same-origin HTTPS/WSS topology is built and measured: real CA trust, CSP, WSS routing and zero browser-tier credentials. The whole-stack benchmark, raw-audio zero-persistence regression and degradation matrix have not run. |
+| S6-06 joint route | `ENVIRONMENT` | Depends on the remaining real paths in S6-02/03/05. Fake external claims are not treated as proof of the required physical P1/P2 route. |
 
-No known S6 source defect or deterministic-automation defect remains after the
-final independent review. The open rows are environment evidence, not hidden
-fallback success or accepted product deviations.
+No known S6 source defect remains. The open rows are environment evidence, not
+hidden fallback success or accepted product deviations.
 
-Latest verification is bound to `07cd6df86` and recorded in
-[D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md):
-backend `4731 passed, 13 failed, 4 skipped`, frontend `16/16` scripts and
-`713 tests`, `tsc && vite build` PASS, `git diff --check` clean, 283 doc links
-with 0 broken. All 13 backend failures reproduce on the `3f3cdbb7f` develop
-baseline with no Live Voice code (14 there), so 0 are Alpha-attributable. One
-Alpha-introduced test defect was found and fixed in that commit: a traceback
-frame filter in the gateway synthesis privacy test matched the test file itself.
-That test lives under `tests/unit_tests/gateway`, outside the live_voice suite
-paths used for previous runs — future verification must include gateway
-live-voice tests.
+Latest verification is bound to `31ee31abb` and recorded in
+[D111](D111_ALPHA_REAL_PATH_ACTIVATION_2026-08-12.md); the automated baseline it
+builds on is [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md).
+
+D110's two external blockers are cleared: the Gateway-only Speech credential and
+a private `https://live-voice.localhost` HTTPS/WSS reverse proxy now exist, with
+an isolated data dir, isolated P3 SQLite Store and a disposable no-remote Git
+fixture. The first real run immediately exposed defects no fake-socket suite
+could reach, which is the point of the real path:
+
+1. the GA transcription session sends `conversation.item.added`/`.done` and no
+   longer sends the beta `conversation.item.created`, so the Adapter aborted
+   every real recognition right after commit;
+2. a transport close slower than the 50 ms attempt budget was cancelled and
+   permanently retained as failed, leaking one cleanup slot per stream and
+   closing the STT route after roughly fifteen recognitions;
+3. `ReasoningToolLoopCompactProcessor`, wired by develop `b06ff06d0`, does not
+   exist in the pinned agent-core, which fails every `chat.send` at runtime.
+
+(1) and (2) are Alpha-attributable and fixed in `31ee31abb` with regression tests
+proven to fail when either fix is reverted. (3) is identical on the `3f3cdbb7f`
+develop baseline and the `2a69c2b87` comparison base, so it is out of scope and
+unmodified; the isolated run disables it through configuration only.
+
+Verification commands must keep `--asyncio-mode=auto`: `pytest.ini` carries it in
+`addopts`, and the common `-o addopts=''` silently drops it and manufactures
+dozens of false async failures.
 
 S6 remains open on environment evidence only. Under
 [ALPHA_ACCEPTANCE.md](validation/ALPHA_ACCEPTANCE.md) §8 the current result is
-`BLOCKED`: no Speech credential and no private HTTPS/WSS topology exist on the
-current machine, so S7 has not been entered and S8 has not run.
+`BLOCKED`: the physical microphone/device/heard-playout observations and the
+remaining P2/whole-stack/joint real measurements have not run, so S7 has not been
+entered and S8 has not run.
 
 ## Frozen product boundary
 
@@ -89,14 +107,18 @@ D1/D2, Production and public deployment remain outside scope.
 
 ## Next actions
 
-1. On an approved private candidate machine, configure the Gateway-only Speech
-   key, current Jiuwen Agent, exact Chrome/device permissions, private
-   same-origin HTTPS/WSS and isolated runtime/project roots.
-2. Run the real P1/P2/whole-stack benchmark, fault, degradation, privacy and
-   heard-playout acceptance; record only sanitized labels/results.
-3. If those runs pass without source repair, mark the environment rows
-   `SATISFIED` and start `S7-01`. If a run exposes a defect, repair it, rerun the
-   affected checks and repeat the materially changed cold-review scope.
+1. With the user on real Chrome at `https://live-voice.localhost`: grant, deny and
+   revoke microphone permission, change/lose a device, and confirm heard playout
+   of a complete answer. This is the only remaining S6-02 gap.
+2. Run the remaining real measurements: P2 media/fault/load and route latency
+   (S6-03), whole-stack benchmark plus raw-audio zero-persistence and degradation
+   regression (S6-05), a real P3 mutation on the disposable fixture, and the joint
+   slow-round + detached-task scenario (S6-06).
+3. If those pass without source repair, mark the environment rows `SATISFIED` and
+   start `S7-01`. If a run exposes a defect, repair it, rerun the affected checks
+   and repeat the materially changed cold-review scope.
+4. `S7-03` still owes the complete 45,044-line cumulative cold review and one
+   independent review; neither has run.
 
 No push is authorized. Machine-private credentials, provider configuration,
 browser profiles, raw audio and private run data must stay out of Git.
