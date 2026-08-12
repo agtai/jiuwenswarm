@@ -8916,13 +8916,16 @@ class AgentWebSocketServer:
         model_client_config: dict[str, Any],
         model_config_obj: dict[str, Any],
     ) -> Any:
+        # ``build_model_from_entry`` is the module-level function the adapter,
+        # the model cache and the modality warmup all share; it has never been
+        # a JiuWenSwarmDeepAdapter attribute.  Calling it as one raised
+        # AttributeError inside model resolution, which surfaced only as
+        # P3_MODEL_UNAVAILABLE and failed every real attempt dispatch.
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
-            JiuWenSwarmDeepAdapter,
+            build_model_from_entry,
         )
 
-        return JiuWenSwarmDeepAdapter._build_model_from_entry(
-            model_client_config, model_config_obj
-        )
+        return build_model_from_entry(model_client_config, model_config_obj)
 
     @staticmethod
     def _live_voice_p3_model_catalog() -> list[dict[str, Any]]:

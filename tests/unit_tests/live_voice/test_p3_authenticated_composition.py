@@ -3594,3 +3594,41 @@ async def test_cancel_before_dispatch_predecessor_admits_exactly_one_successor(
         assert harness.executor.cancels == []
     finally:
         await harness.composition.stop()
+
+
+def test_p3_model_builder_uses_the_shared_module_level_entry_builder() -> None:
+    """P3 must build its model through the function the runtime actually exports.
+
+    ``build_model_from_entry`` is the module-level function the deep adapter,
+    the model cache and the modality warmup all share; it has never been an
+    attribute of ``JiuWenSwarmDeepAdapter``.  Calling it as a class method
+    raised AttributeError inside model resolution, which the Task Core could
+    only report as ``P3_MODEL_UNAVAILABLE``.  Every real attempt dispatch then
+    failed with a suppressed outbox item and no project effect, while fake
+    resolvers in tests never constructed a model at all.
+    """
+
+    from jiuwenswarm.server.runtime.agent_adapter import interface_deep
+    from jiuwenswarm.server.agent_ws_server import AgentWebSocketServer
+
+    assert hasattr(interface_deep, "build_model_from_entry")
+    assert not hasattr(interface_deep.JiuWenSwarmDeepAdapter, "_build_model_from_entry")
+
+    seen: list[tuple[dict, dict]] = []
+    sentinel = object()
+    original = interface_deep.build_model_from_entry
+    interface_deep.build_model_from_entry = (  # type: ignore[assignment]
+        lambda mcc, mco: (seen.append((mcc, mco)), sentinel)[1]
+    )
+    try:
+        built = AgentWebSocketServer._build_live_voice_p3_model(
+            {"model_name": "probe-model", "client_provider": "probe"},
+            {"temperature": 0.0},
+        )
+    finally:
+        interface_deep.build_model_from_entry = original  # type: ignore[assignment]
+
+    assert built is sentinel
+    assert seen == [
+        ({"model_name": "probe-model", "client_provider": "probe"}, {"temperature": 0.0})
+    ]
