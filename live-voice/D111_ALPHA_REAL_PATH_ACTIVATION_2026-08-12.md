@@ -120,6 +120,47 @@ Gateway flags：`LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED`、
   `react.context_engine_config.reasoning_tool_loop_compact_config` 置为 `null` 解除阻塞
   （配置深度合并只在用户值非 dict 时整体覆盖）。源码未改动。
 
+## 6b. 缺陷 4（Alpha 引入，已修）：P3 模型构造调用了不存在的方法
+
+- **现象**：真实 P3alpha 分发在一次性 fixture 上 **3/3 全部失败**。权威 Store 里
+  outbox `state=suppressed`、`last_error=P3_MODEL_UNAVAILABLE`，attempt 与 task
+  均为 `terminal/failed`，**项目零副作用**（HEAD 不变、remote 仍为 0、工作树无变化）。
+- **根因**：`agent_ws_server._build_live_voice_p3_model` 调用
+  `JiuWenSwarmDeepAdapter._build_model_from_entry`，该属性**不存在**。runtime 导出的是
+  模块级公开函数 `build_model_from_entry`（`interface_deep.py:793`，其 docstring 明确
+  说明 deep adapter / 模型缓存 / 图像模态预热共用这一份实现）。
+  AttributeError 被模型解析吞掉，只以 `P3_MODEL_UNAVAILABLE` 这一 capability 错误浮现。
+- **归属**：`_build_live_voice_p3_model` 在 develop 基线 `3f3cdbb7f` 中**不存在**，
+  只在对比基线 `2a69c2b87` 与当前候选中存在，因此是 **Alpha 引入**；
+  `build_model_from_entry` 在三个 ref 中一直同名存在。
+- **为何自动化没发现**：全部 P3 套件使用 fake model resolver，从不真的构造模型。
+  这是本轮第三次出现同一模式。
+- **修复**：改调模块级函数。修复后同一真实分发越过模型构造，失败推进到下一层
+  `EXECUTOR_CAPABILITY_UNAVAILABLE`（见 §11）。提交 `44b275d5d`，回归测试断言
+  调用确实到达模块级函数且参数原样透传，回退修复即失败。
+
+## 6c. P3alpha 真实垂直已证实的正向事实
+
+即使分发最终失败，下列产品权威事实由真实运行与权威 SQLite Store 共同证明：
+
+- `live_voice.composition.p3.confirmation.issue` 正常签发，返回 `confirmation_id`
+  与 `expires_at`，`replayed=false`；
+- `live_voice.composition.p3.mutate` 返回 `mutation_processed`，并带回形式化 Task Core
+  自有的 `task_id` / `attempt_id` / `outbox_id` / `state=accepted`；
+- Store 中 TaskEvent 序列完整且是唯一生命周期真值：
+  `task.accepted`(producer=`task_core`) → `attempt.terminal` → `task.terminal`
+  (producer=`task_core.delivery`)，`causation_id` 指向对应 outbox/command；
+- attempt 记录 `executor_id=jiuwenswarm_code_agent.project_code`、`attempt_number=1`；
+  outbox `kind=attempt.dispatch`、`delivery_count=1`；commands 表持有幂等指纹；
+- scope 精确绑定 `project_id` + `session_id` + `assurance=authenticated`；
+- **重放保护实测有效**：脚本两次运行复用同一 `request_id` 但内容不同时，服务端返回
+  `P3_CONFIRMATION_BINDING_MISMATCH / PERMISSION_DENIED`，正确拒绝；
+- **终态不可取消实测有效**：对已 terminal 的任务发 `task.cancel` 返回
+  `TASK_ALREADY_TERMINAL / CONFLICT`；
+- **session scope 隔离实测有效**：换一个 session 后 `task.list` 返回 0 条，
+  旧 session 的任务不可见；
+- 全程浏览器层 42 帧扫描 Speech key 与 P3 token，**0 泄漏**。
+
 ## 7. 真实 Speech 结果（S6-02 Provider 层）
 
 固定语料 `voice-command-48k-mono-pcm16.wav`（4,523 ms，口令「请回复：语音联调成功。」），
@@ -184,7 +225,7 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 | S6-01 | `SATISFIED` | 源码与确定性自动化通过，无 Alpha 归因失败 |
 | S6-02 | `ENVIRONMENT` | 真实 Streaming STT/TTS 已首次跑通并给出 p50/p95/failure/sample；物理麦克风、设备切换与听感确认仍需用户 |
 | S6-03 | `ENVIRONMENT` | 真实 Agent/Tool 文字路径已验证；P2 真实媒体、故障/负载与延迟测量未执行 |
-| S6-04 | `SATISFIED` | 同 D110；真实 Executor 在一次性 fixture 上的 P3 mutation 垂直未在本批次执行 |
+| S6-04 | `ENVIRONMENT` | 由 `SATISFIED` 下调。授权、确认、命令幂等、TaskEvent 权威、outbox、scope 隔离、重放与终态保护均在真实运行中证实；但真实 attempt 分发尚未成功执行过一次，`EXECUTOR_CAPABILITY_UNAVAILABLE` 未闭合，因此不能声称真实 D0 Executor 的 capability/outcome 真值已验收 |
 | S6-05 | `ENVIRONMENT` | 私有 HTTPS/WSS 同源拓扑已建立并实测；whole-stack benchmark、raw-audio 零持久化回归与降级矩阵未执行 |
 | S6-06 | `ENVIRONMENT` | 依赖 S6-02/03/05 的剩余真实路径 |
 
@@ -192,10 +233,26 @@ gateway 的 2 项失败为 `test_harmonyos_dev.py` 与 `test_upload_storage.py`�
 
 ## 11. 剩余阻塞
 
-1. 用户在真实 Chrome + 麦克风 + 输出设备上完成 S6-02/03/06 的物理与听感确认。
-2. S6-03 的真实 P2 媒体/故障/负载测量；S6-05 的 whole-stack 隐私与降级回归；
-   S6-06 的联合慢回合 + 分离 Task 场景；P3 mutation 在一次性 fixture 上的真实执行。
-3. S7-03 的 45,044 行完整累计 cold review 与一次独立 review 仍未完成（D110 §10 已记，本批次未推进）。
+1. **`EXECUTOR_CAPABILITY_UNAVAILABLE`（已精确定位，最高优先级）**：
+   `project_code_executor.py:235` 的 `for_dispatch and self.execution_agent is None`
+   成立。`execution_agent` 由 `AgentManagerProjectBindingResolver._resolve_transition`
+   在 `for_dispatch=True` 时经 `agent_manager.get_live_voice_formal_task_agent(project_dir)`
+   与 `agent.get_instance()` 取得，需查明二者哪一步返回 `None`。在此闭合前
+   S6-04 与 S6-06 都不能声称真实 Executor 已验收。
+2. 用户在真实 Chrome + 麦克风 + 输出设备上完成 S6-02/03/06 的物理与听感确认。
+3. S6-03 的真实 P2 媒体/故障/负载测量；S6-05 的 whole-stack 隐私与降级回归；
+   S6-06 的联合慢回合 + 分离 Task 场景。
+4. S7-03 的 45,044 行完整累计 cold review 与一次独立 review 仍未完成（D110 §10 已记，本批次未推进）。
+
+## 12. 本批次的方法学结论
+
+四个真实路径缺陷（GA 事件白名单、清理槽位泄漏、P3 模型构造，以及仍未闭合的
+Executor Agent 绑定）**没有一个**能被现有自动化发现，原因完全一致：streaming 的
+socket、P3 的 model resolver 与 executor 都是 fake，只回放实现已知的形状。
+`4731 passed` 与真实链路可用之间没有任何蕴含关系。
+
+因此后续任何「真实路径」判定都必须绑定真实 Provider/设备/网络/Executor 的运行证据，
+并优先以权威 Store（SQLite）与去敏日志作为事实来源，而不是产品响应信封的字段。
 
 任一缺失都不得关闭 S6，也不得据此给出 Alpha PASS。原始运行数据（隔离数据目录、
 fixture、日志、报告）保留在 Git 之外的 `D:\lvalpha\run-20260812`。

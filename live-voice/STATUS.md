@@ -48,7 +48,7 @@ S6 implementation and review record is
 | S6-01 critical-input safety | `SATISFIED` | The bounded `CriticalTokenSafetyGate` is on committed text/voice/Task product paths. Partial, stale, low-confidence and wrong-scope cases assert zero Agent, Tool, Task, audio, history and Store effects. |
 | S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | Real streaming STT/TTS now run against the official OpenAI origin: 5/5 recognitions and 5/5 syntheses with p50/p95 recorded. Two Adapter defects that broke every real recognition were found and fixed here. Physical microphone, device change/loss and heard playout still require the user. |
 | S6-03 P2 realtime conversation | `ENVIRONMENT` | The real Agent/Tool text path is proven end to end on the private origin. Real P2 media, fault/load profiles and route latency measurements have not run. |
-| S6-04 P3alpha Task vertical | `SATISFIED` | Structured and committed natural-language create/status/cancel traverse the current formal Task Core, exact authority checks, SQLite Store/outbox and `DirectProjectCodeExecutorAdapter` on a disposable Git fixture; no second Task authority exists. A real mutation run on the disposable fixture is still outstanding under S6-06. |
+| S6-04 P3alpha Task vertical | `ENVIRONMENT` | Downgraded from `SATISFIED` by the first real run. Confirmation issue/consume, command idempotency, TaskEvent-only lifecycle truth, outbox, scope isolation, replay rejection and terminal-cancel rejection are all proven against the authoritative Store. But no real attempt has yet dispatched: after the model-builder fix it now fails at `EXECUTOR_CAPABILITY_UNAVAILABLE`, so real D0 Executor capability/outcome truth is not accepted. |
 | S6-05 observability/privacy/Web | `ENVIRONMENT` | The private same-origin HTTPS/WSS topology is built and measured: real CA trust, CSP, WSS routing and zero browser-tier credentials. The whole-stack benchmark, raw-audio zero-persistence regression and degradation matrix have not run. |
 | S6-06 joint route | `ENVIRONMENT` | Depends on the remaining real paths in S6-02/03/05. Fake external claims are not treated as proof of the required physical P1/P2 route. |
 
@@ -72,12 +72,24 @@ could reach, which is the point of the real path:
    permanently retained as failed, leaking one cleanup slot per stream and
    closing the STT route after roughly fifteen recognitions;
 3. `ReasoningToolLoopCompactProcessor`, wired by develop `b06ff06d0`, does not
-   exist in the pinned agent-core, which fails every `chat.send` at runtime.
+   exist in the pinned agent-core, which fails every `chat.send` at runtime;
+4. the P3 model hook called `JiuWenSwarmDeepAdapter._build_model_from_entry`,
+   which does not exist — the runtime exports `build_model_from_entry` as a
+   module-level function — so every real attempt dispatch failed closed with a
+   suppressed outbox and `P3_MODEL_UNAVAILABLE`.
 
-(1) and (2) are Alpha-attributable and fixed in `31ee31abb` with regression tests
-proven to fail when either fix is reverted. (3) is identical on the `3f3cdbb7f`
-develop baseline and the `2a69c2b87` comparison base, so it is out of scope and
-unmodified; the isolated run disables it through configuration only.
+(1), (2) and (4) are Alpha-attributable and fixed in `31ee31abb` and `44b275d5d`,
+each with a regression test proven to fail when its fix is reverted. (3) is
+identical on the `3f3cdbb7f` develop baseline and the `2a69c2b87` comparison base,
+so it is out of scope and unmodified; the isolated run disables it through
+configuration only.
+
+None of the four could be reached by the existing suites: the streaming sockets,
+the P3 model resolver and the executor are all fakes that replay only shapes the
+implementation already knows. A passing suite says nothing about the real path.
+After (4) the same real dispatch now fails one layer later at
+`EXECUTOR_CAPABILITY_UNAVAILABLE` (`project_code_executor.py:235`), which is the
+highest-priority open item.
 
 Verification commands must keep `--asyncio-mode=auto`: `pytest.ini` carries it in
 `addopts`, and the common `-o addopts=''` silently drops it and manufactures
@@ -107,13 +119,16 @@ D1/D2, Production and public deployment remain outside scope.
 
 ## Next actions
 
-1. With the user on real Chrome at `https://live-voice.localhost`: grant, deny and
+1. Close `EXECUTOR_CAPABILITY_UNAVAILABLE`: find whether
+   `get_live_voice_formal_task_agent(project_dir)` or `agent.get_instance()`
+   returns `None`, so a real attempt can dispatch on the disposable fixture.
+   S6-04 and S6-06 both block on this.
+2. With the user on real Chrome at `https://live-voice.localhost`: grant, deny and
    revoke microphone permission, change/lose a device, and confirm heard playout
    of a complete answer. This is the only remaining S6-02 gap.
-2. Run the remaining real measurements: P2 media/fault/load and route latency
+3. Run the remaining real measurements: P2 media/fault/load and route latency
    (S6-03), whole-stack benchmark plus raw-audio zero-persistence and degradation
-   regression (S6-05), a real P3 mutation on the disposable fixture, and the joint
-   slow-round + detached-task scenario (S6-06).
+   regression (S6-05), and the joint slow-round + detached-task scenario (S6-06).
 3. If those pass without source repair, mark the environment rows `SATISFIED` and
    start `S7-01`. If a run exposes a defect, repair it, rerun the affected checks
    and repeat the materially changed cold-review scope.
