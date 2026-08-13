@@ -323,7 +323,9 @@ class SynthesisStreamRequest:
     spoken_text: str
     display_span: TextSpan
     sample_rate_hz: int
-    timeout_seconds: float
+    # Maximum idle interval until the next valid Provider synthesis event.
+    # This is deliberately not a whole-stream duration budget.
+    event_timeout_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -436,7 +438,7 @@ class _RecognitionState:
 @dataclass(slots=True)
 class _SynthesisState:
     request: SynthesisStreamRequest
-    deadline: float
+    event_deadline: float
     next_event_seq: int = 0
     next_audio_cursor: int = 0
     next_display_cursor: int = 0
@@ -1025,7 +1027,7 @@ class StreamingSpeechConformance:
             )
             self._synthesis[_synthesis_key(ref)] = _SynthesisState(
                 request=request,
-                deadline=self._deadline(request.timeout_seconds),
+                event_deadline=self._deadline(request.event_timeout_seconds),
                 next_display_cursor=request.display_span.start,
             )
             self._next_unit_seq[ref.response] = expected_unit_seq + 1
@@ -1111,6 +1113,10 @@ class StreamingSpeechConformance:
                         "synthesis event sequence exceeded the safe integer range",
                     )
                 state.next_event_seq += 1
+                if not state.terminal:
+                    state.event_deadline = self._deadline(
+                        state.request.event_timeout_seconds
+                    )
                 return event
             except StreamingSpeechViolation as error:
                 if error.reason not in {
@@ -1160,7 +1166,7 @@ class StreamingSpeechConformance:
                 if (
                     not synthesis_state.terminal
                     and not synthesis_state.cancel_requested
-                    and now >= synthesis_state.deadline
+                    and now >= synthesis_state.event_deadline
                 ):
                     self._request_synthesis_cancel(synthesis_state, "timeout")
                     expired += 1
@@ -1517,12 +1523,12 @@ class StreamingSpeechConformance:
             )
 
     def _require_before_deadline_synthesis(self, state: _SynthesisState) -> None:
-        if self._now() >= state.deadline:
+        if self._now() >= state.event_deadline:
             if not state.cancel_requested:
                 self._request_synthesis_cancel(state, "timeout")
             raise StreamingSpeechViolation(
                 "SYNTHESIS_STREAM_TIMEOUT",
-                "synthesis session crossed its absolute deadline",
+                "synthesis session crossed its next-event deadline",
             )
 
     def _fail_recognition(self, state: _RecognitionState, reason: str) -> None:
@@ -1943,7 +1949,7 @@ def _validate_synthesis_request(request: SynthesisStreamRequest) -> None:
             "unit display span length must match its exact display text",
         )
     _positive_int(request.sample_rate_hz, "synthesis.sample_rate_hz")
-    _timeout_seconds(request.timeout_seconds)
+    _timeout_seconds(request.event_timeout_seconds)
 
 
 def _validate_span(span: TextSpan, field: str) -> None:

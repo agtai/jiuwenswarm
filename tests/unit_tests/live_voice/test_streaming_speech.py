@@ -145,7 +145,7 @@ def synthesis_request(
     display_text: str = "API",
     spoken_text: str = "A P I",
     display_start: int = 10,
-    timeout_seconds: float = 5.0,
+    event_timeout_seconds: float = 5.0,
 ) -> SynthesisStreamRequest:
     selected_response = response_ref or response()
     return SynthesisStreamRequest(
@@ -160,7 +160,7 @@ def synthesis_request(
         spoken_text=spoken_text,
         display_span=TextSpan(display_start, display_start + len(display_text)),
         sample_rate_hz=24_000,
-        timeout_seconds=timeout_seconds,
+        event_timeout_seconds=event_timeout_seconds,
     )
 
 
@@ -1430,7 +1430,7 @@ def test_synthesis_cancel_accepts_exact_provider_ack_after_deadline() -> None:
         native_capability(), enabled=True, monotonic=lambda: now[0]
     )
     response_ref = response()
-    request = synthesis_request(response_ref=response_ref, timeout_seconds=1)
+    request = synthesis_request(response_ref=response_ref, event_timeout_seconds=1)
     runtime.activate_response(response_ref)
     runtime.start_synthesis(request)
     runtime.request_synthesis_cancel(request.ref)
@@ -1454,6 +1454,48 @@ def test_synthesis_cancel_accepts_exact_provider_ack_after_deadline() -> None:
     assert_zero_authority_effects(runtime)
 
 
+def test_synthesis_event_timeout_slides_after_each_valid_event() -> None:
+    now = [3.0]
+    runtime = StreamingSpeechConformance(
+        native_capability(), enabled=True, monotonic=lambda: now[0]
+    )
+    response_ref = response()
+    request = synthesis_request(
+        response_ref=response_ref, event_timeout_seconds=1
+    )
+    runtime.activate_response(response_ref)
+    runtime.start_synthesis(request)
+
+    now[0] = 3.75
+    runtime.accept_synthesis_event(
+        synthesis_event(request, seq=0, cursor=0, kind=SynthesisEventKind.STARTED)
+    )
+    now[0] = 4.5
+    chunk = runtime.accept_synthesis_event(
+        synthesis_event(
+            request,
+            seq=1,
+            cursor=0,
+            kind=SynthesisEventKind.CHUNK,
+            samples=1,
+            display_span=TextSpan(10, 11),
+            spoken_span=TextSpan(0, 1),
+        )
+    )
+
+    assert chunk.kind is SynthesisEventKind.CHUNK
+    now[0] = 5.49
+    assert runtime.expire() == 0
+    now[0] = 5.5
+    assert runtime.expire() == 1
+    assert_one_provider_cancel(
+        runtime,
+        kind=ProviderControlKind.CANCEL_SYNTHESIS,
+        expected_ref=request.ref,
+    )
+    assert_zero_authority_effects(runtime)
+
+
 def test_synthesis_timeout_and_capacity_are_bounded() -> None:
     now = [3.0]
     runtime = StreamingSpeechConformance(
@@ -1463,7 +1505,7 @@ def test_synthesis_timeout_and_capacity_are_bounded() -> None:
         monotonic=lambda: now[0],
     )
     first_response = response()
-    first = synthesis_request(response_ref=first_response, timeout_seconds=1)
+    first = synthesis_request(response_ref=first_response, event_timeout_seconds=1)
     runtime.activate_response(first_response)
     runtime.start_synthesis(first)
     with pytest.raises(StreamingSpeechViolation) as capacity:

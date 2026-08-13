@@ -448,6 +448,7 @@ class _PreparedSynthesisRequest:
     ref: SynthesisStreamRef
     binding_ref: str
     sample_rate_hz: int
+    event_timeout_seconds: float
     _payload: SynthesisStreamRequest = field(repr=False)
     open_attempted: bool = field(default=False, repr=False)
 
@@ -466,6 +467,7 @@ class StreamingSynthesisHandle:
     ref: SynthesisStreamRef
     request_binding_ref: str
     sample_rate_hz: int
+    event_timeout_seconds: float
     provider_ref: ProviderRef
     capability: StreamingSynthesisCapabilityProvenance
     provider: NativeStreamingSpeechProvider = field(repr=False)
@@ -829,6 +831,7 @@ class StreamingSynthesisRouteOwner:
                 ref=ref,
                 request_binding_ref=binding_ref,
                 sample_rate_hz=prepared.sample_rate_hz,
+                event_timeout_seconds=prepared.event_timeout_seconds,
                 provider_ref=declared_capability.provider,
                 capability=capability,
                 provider=provider,
@@ -1346,13 +1349,16 @@ class StreamingSynthesisRouteOwner:
     async def _produce(self, handle: StreamingSynthesisHandle) -> None:
         pending: list[float] = []
         pending_source_seq = 0
+        event_timeout_seconds = min(
+            handle.event_timeout_seconds, self._event_timeout_seconds
+        )
         try:
             while True:
                 event = await self._task_owner.run(
                     handle.provider.next_synthesis_event(
-                        handle.ref, timeout_seconds=self._event_timeout_seconds
+                        handle.ref, timeout_seconds=event_timeout_seconds
                     ),
-                    timeout_seconds=self._event_timeout_seconds,
+                    timeout_seconds=event_timeout_seconds,
                     operation="provider-event",
                 )
                 self._validate_event(handle, event)
@@ -1925,6 +1931,7 @@ def _prepare_synthesis_request(
             ref=request.ref,
             binding_ref=binding_ref,
             sample_rate_hz=request.sample_rate_hz,
+            event_timeout_seconds=request.event_timeout_seconds,
             _payload=request,
         )
         request = None  # type: ignore[assignment]
@@ -1999,8 +2006,8 @@ def _request_binding_ref_inner(request: SynthesisStreamRequest) -> str:
             "INVALID_SYNTHESIS_SAMPLE_RATE",
             "synthesis sample rate must support exact 20 ms media frames",
         )
-    timeout_seconds = _bounded_timeout(
-        request.timeout_seconds, "request.timeout_seconds"
+    event_timeout_seconds = _bounded_timeout(
+        request.event_timeout_seconds, "request.event_timeout_seconds"
     )
     digest = hashlib.sha256()
     for value in (
@@ -2014,7 +2021,7 @@ def _request_binding_ref_inner(request: SynthesisStreamRequest) -> str:
         str(request.display_span.start),
         str(request.display_span.end),
         str(request.sample_rate_hz),
-        timeout_seconds.hex(),
+        event_timeout_seconds.hex(),
         request.display_text,
         request.spoken_text,
     ):

@@ -211,11 +211,13 @@ class _DelayedFirstAudioProvider(_Provider):
 class _Batch:
     def __init__(self) -> None:
         self.calls = 0
+        self.params: list[object] = []
 
     async def synthesize(
-        self, _params: object, _context: SpeechRpcContext
+        self, params: object, _context: SpeechRpcContext
     ) -> dict[str, object]:
         self.calls += 1
+        self.params.append(params)
         return {
             "contract_version": "live-voice.contract.v2",
             "request_id": "request-1",
@@ -500,6 +502,7 @@ async def test_exact_agent_final_opens_real_streaming_product_downlink() -> None
     assert request.ref.response.response_id == "response-1"
     assert request.ref.unit_id == "unit-1"
     assert request.display_span.start == 0
+    assert request.event_timeout_seconds == 2.0
     downlink = registry.consume_ticket(
         str(audio["media_ticket"]), request_origin=ORIGIN
     )
@@ -723,6 +726,8 @@ async def test_pre_first_audio_failure_calls_batch_exactly_once() -> None:
         == "STREAMING_SPEECH_PROVIDER_UNAVAILABLE"
     )
     assert batch.calls == 1
+    assert isinstance(batch.params[0], dict)
+    assert batch.params[0]["timeout_ms"] == 2_000
     await owner.close()
 
 

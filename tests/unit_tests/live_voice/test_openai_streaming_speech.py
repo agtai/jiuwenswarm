@@ -28,7 +28,6 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_VOICE,
     MAX_DEGRADATION_SINK_TASKS_PER_OWNER,
-    MAX_EVENT_QUEUE,
     MAX_INCOMPLETE_TRANSPORT_CLEANUPS,
     OpenAIStreamingSpeechError,
     OpenAIStreamingSpeechConfig,
@@ -109,6 +108,17 @@ class FakeSseStream:
     async def aclose(self) -> None:
         self.closed = True
         self.closed_event.set()
+
+
+class PacedSseStream(FakeSseStream):
+    def __init__(self, lines: tuple[tuple[float, str], ...]) -> None:
+        super().__init__(tuple(line for _, line in lines))
+        self._paced_lines = lines
+
+    async def __aiter__(self):
+        for delay_seconds, line in self._paced_lines:
+            await asyncio.sleep(delay_seconds)
+            yield line
 
 
 class BlockingSseStream:
@@ -312,7 +322,7 @@ def adapter_traceback_with_locals(exc: BaseException) -> str:
 
 
 def synthesis_request(
-    *, generation: int = 0, timeout_seconds: float = 1.0
+    *, generation: int = 0, event_timeout_seconds: float = 1.0
 ) -> SynthesisStreamRequest:
     response = ResponseRef("interaction-1", f"response-{generation}", generation)
     return SynthesisStreamRequest(
@@ -321,7 +331,7 @@ def synthesis_request(
         spoken_text="A P I",
         display_span=TextSpan(10, 13),
         sample_rate_hz=48_000,
-        timeout_seconds=timeout_seconds,
+        event_timeout_seconds=event_timeout_seconds,
     )
 
 
@@ -1631,6 +1641,76 @@ async def test_streaming_tts_sse_has_derived_cursor_and_request_level_text_prove
 
 
 @pytest.mark.asyncio
+async def test_synthesis_timeout_is_per_event_not_whole_stream() -> None:
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    audio_delta = "data: " + json.dumps(
+        {
+            "type": "speech.audio.delta",
+            "audio": base64.b64encode(pcm).decode("ascii"),
+        }
+    )
+    stream = PacedSseStream(
+        (
+            (0.12, audio_delta),
+            (0, ""),
+            (0.12, audio_delta),
+            (0, ""),
+            (0.12, 'data: {"type":"speech.audio.done","usage":{}}'),
+            (0, ""),
+        )
+    )
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = synthesis_request(event_timeout_seconds=0.3)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+
+    events = [
+        await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+        for _ in range(5)
+    ]
+
+    assert [event.kind for event in events] == [
+        SynthesisEventKind.STARTED,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.CHUNK,
+        SynthesisEventKind.COMPLETED,
+    ]
+    assert stream.closed is True
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_synthesis_sse_comments_do_not_renew_event_timeout() -> None:
+    facts: list[SpeechDegradationFact] = []
+    stream = PacedSseStream(tuple((0.04, ": keep-alive") for _ in range(5)))
+
+    async def sse_factory(*_args):
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), sse_factory=sse_factory, degradation_sink=facts.append
+    )
+    request = synthesis_request(event_timeout_seconds=0.1)
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+    await asyncio.wait_for(stream.closed_event.wait(), timeout=1)
+    assert facts[-1].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
+    assert provider.conformance.snapshot().active_synthesis == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
+
+
+@pytest.mark.asyncio
 async def test_tts_request_failure_retains_only_safe_fact_and_no_task_exception() -> (
     None
 ):
@@ -1795,7 +1875,7 @@ async def test_synthesis_timeout_is_visible_and_bounded() -> None:
     provider = OpenAIStreamingSpeechProvider(
         config(), sse_factory=sse_factory, degradation_sink=facts.append
     )
-    request = synthesis_request(timeout_seconds=0.05)
+    request = synthesis_request(event_timeout_seconds=0.05)
     provider.conformance.activate_response(request.ref.response)
     await provider.open_synthesis(request)
     await provider.next_synthesis_event(request.ref, timeout_seconds=1)

@@ -273,7 +273,7 @@ def _request(
         spoken_text=spoken_text,
         display_span=TextSpan(10, 10 + len(display_text)),
         sample_rate_hz=sample_rate_hz,
-        timeout_seconds=2.0,
+        event_timeout_seconds=2.0,
     )
 
 
@@ -917,6 +917,28 @@ async def test_caller_cancel_cleans_provider_retires_and_rethrows() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_event_timeout_bounds_gateway_provider_wait() -> None:
+    provider = _FakeProvider()
+    request = replace(
+        _request(stream_id="request-event-timeout"), event_timeout_seconds=0.02
+    )
+    owner, handle = await _begin(
+        provider,
+        request,
+        event_timeout_seconds=1.0,
+    )
+
+    terminal = await owner.next_chunk(handle, timeout_seconds=0.2)
+
+    assert terminal.outcome is not None
+    assert terminal.outcome.reason is StreamingSynthesisReason.PROVIDER_TIMEOUT
+    assert terminal.outcome.first_audio_emitted is False
+    assert terminal.outcome.batch_eligible is True
+    assert provider.cancelled == [handle.ref]
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_hard_deadlines_bound_cancellation_hostile_provider_calls(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1343,7 +1365,7 @@ async def test_request_binding_binds_timeout_and_complete_capability_provenance(
     first_request = _request(stream_id="binding-timeout")
     first_owner, first_handle = await _begin(first_provider, first_request)
     second_provider = _FakeProvider()
-    second_request = replace(first_request, timeout_seconds=3.0)
+    second_request = replace(first_request, event_timeout_seconds=3.0)
     second_owner, second_handle = await _begin(second_provider, second_request)
     assert first_handle.request_binding_ref != second_handle.request_binding_ref
     assert first_handle.capability.provider == _PROVIDER_REF

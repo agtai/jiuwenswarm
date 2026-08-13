@@ -2615,7 +2615,7 @@ class DedicatedMediaProductRegistry:
                 spoken_text=request.spoken_text,
                 display_span=TextSpan(0, len(request.display_text)),
                 sample_rate_hz=request.required_sample_rate_hz,
-                timeout_seconds=request.timeout_ms / 1000,
+                event_timeout_seconds=request.timeout_ms / 1000,
             ),
             on_outcome=observe_outcome,
         )

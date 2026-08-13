@@ -1585,24 +1585,24 @@ class OpenAIStreamingSpeechProvider:
         failure: BaseException | None = None
         tail: bytes | None = None
         try:
-            async with asyncio.timeout(session.request.timeout_seconds):
+            async with asyncio.timeout(session.request.event_timeout_seconds):
                 session.stream = await self._open_synthesis_stream(session)
-                await self._publish_synthesis(session, SynthesisEventKind.STARTED)
-                done = await self._consume_synthesis_stream(session)
-                if not done:
-                    raise OpenAIStreamingSpeechError(
-                        "SPEECH_PROVIDER_TTS_INCOMPLETE",
-                        "speech Provider closed without a done event",
-                    )
-                tail = _encode_s16le(session.resampler.finish())
-                if tail:
-                    await self._publish_synthesis(
-                        session, SynthesisEventKind.CHUNK, pcm=tail
-                    )
-                if session.stream is not None:
-                    await self._close_stream(session.stream)
-                await self._publish_synthesis(session, SynthesisEventKind.COMPLETED)
-                session.terminal = True
+            await self._publish_synthesis(session, SynthesisEventKind.STARTED)
+            done = await self._consume_synthesis_stream(session)
+            if not done:
+                raise OpenAIStreamingSpeechError(
+                    "SPEECH_PROVIDER_TTS_INCOMPLETE",
+                    "speech Provider closed without a done event",
+                )
+            tail = _encode_s16le(session.resampler.finish())
+            if tail:
+                await self._publish_synthesis(
+                    session, SynthesisEventKind.CHUNK, pcm=tail
+                )
+            if session.stream is not None:
+                await self._close_stream(session.stream)
+            await self._publish_synthesis(session, SynthesisEventKind.COMPLETED)
+            session.terminal = True
         except BaseException as exc:
             failure = _safe_boundary_exception(exc)
         tail = None
@@ -1682,12 +1682,35 @@ class OpenAIStreamingSpeechProvider:
                 "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
                 "synthesis Provider transport is unavailable",
             )
+        iterator = session.stream.__aiter__()
+        while True:
+            async with asyncio.timeout(session.request.event_timeout_seconds):
+                event = await self._read_synthesis_sse_event(session, iterator)
+            if event is None:
+                return False
+            if event:
+                return True
+
+    async def _read_synthesis_sse_event(
+        self,
+        session: _SynthesisSession,
+        iterator: AsyncIterator[str],
+    ) -> bool | None:
+        """Read one complete SSE event without letting comments renew its budget."""
+
         data_lines: list[str] = []
         data_bytes = 0
-        done = False
-        async for line in session.stream:
+        while True:
+            try:
+                line = await anext(iterator)
+            except StopAsyncIteration:
+                if data_lines:
+                    return await self._consume_sse_event(
+                        session, "\n".join(data_lines)
+                    )
+                return None
             if session.closing:
-                return False
+                return None
             if len(line.encode("utf-8")) > MAX_SSE_LINE_BYTES:
                 raise OpenAIStreamingSpeechError(
                     "SPEECH_PROVIDER_SSE_LINE_LIMIT",
@@ -1695,11 +1718,9 @@ class OpenAIStreamingSpeechProvider:
                 )
             if line == "":
                 if data_lines:
-                    done = await self._consume_sse_event(session, "\n".join(data_lines))
-                    data_lines.clear()
-                    data_bytes = 0
-                    if done:
-                        break
+                    return await self._consume_sse_event(
+                        session, "\n".join(data_lines)
+                    )
                 continue
             if line.startswith(":"):
                 continue
@@ -1712,9 +1733,6 @@ class OpenAIStreamingSpeechProvider:
                         "speech Provider SSE event exceeds the limit",
                     )
                 data_lines.append(data_line)
-        if data_lines and not done:
-            done = await self._consume_sse_event(session, "\n".join(data_lines))
-        return done
 
     async def _consume_sse_event(self, session: _SynthesisSession, data: str) -> bool:
         event = _json_object(data)

@@ -57,7 +57,8 @@ const MAX_SYNTHESIS_TEXT_CHARS = 4_000;
 const MAX_BATCH_TIMEOUT_MS = 30_000;
 const MAX_CLOSE_TIMEOUT_MS = 5_000;
 const MAX_IDENTITY_TOMBSTONES = 512;
-const DEFAULT_TIMEOUT_MS = 15_000;
+const DEFAULT_BATCH_TIMEOUT_MS = 15_000;
+const DEFAULT_SYNTHESIS_EVENT_TIMEOUT_MS = 15_000;
 const SPEECH_CAPABILITY_CONTROL_OPERATION = 'speech.capabilities.get' as const;
 const SPEECH_CANCEL_OPERATION = 'speech.batch.cancel' as const;
 const GATEWAY_SPEECH_OPERATIONS = Object.freeze([
@@ -205,6 +206,11 @@ export interface FormalSynthesisInput {
   readonly requiredSampleRateHz: number;
   readonly correlationId: string;
   readonly operationId?: string;
+  /**
+   * Gateway batch fallback treats this as its whole-operation budget; the
+   * selected streaming route treats it as the maximum wait for its next
+   * synthesis event. The streaming media lifetime is not capped by this value.
+   */
   readonly timeoutMs?: number;
   readonly signal?: AbortSignal;
 }
@@ -906,7 +912,7 @@ export class GatewayBatchSpeechClient {
     if (prior !== null) void this.#cancelBestEffort(prior);
     this.#activeRecognition = operation;
     this.#boundedSet(this.#seenCaptures, captureId, captureGeneration);
-    const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs = input.timeoutMs ?? DEFAULT_BATCH_TIMEOUT_MS;
     const requestId = this.#createId();
     let raw: unknown;
     try {
@@ -1024,7 +1030,7 @@ export class GatewayBatchSpeechClient {
     if (prior !== undefined) void this.#cancelBestEffort(prior);
     this.#responses.set(response.interaction_id, operation);
     this.#boundedSet(this.#responseGenerations, response.interaction_id, generation);
-    const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const timeoutMs = input.timeoutMs ?? DEFAULT_SYNTHESIS_EVENT_TIMEOUT_MS;
     const requestId = this.#createId();
     let raw: unknown;
     try {

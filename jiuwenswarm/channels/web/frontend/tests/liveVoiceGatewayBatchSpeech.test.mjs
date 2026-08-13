@@ -265,11 +265,13 @@ test('diagnostic absence or corruption cannot change the server-owned fallback',
   }
 });
 
-test('authoritative Agent text reaches SS-B and maps exact-rate WAV into AIO-B chunks', async () => {
+test('authoritative Agent text declares the synthesis event budget and maps exact-rate WAV into AIO-B chunks', async () => {
   const transport = {
-    async request(method, params) {
+    async request(method, params, options) {
       assert.equal(method, SPEECH_SYNTHESIZE_BATCH_METHOD);
       assert.equal(params.authoritative_agent_text, true);
+      assert.equal(params.timeout_ms, 15_000);
+      assert.equal(options.timeoutMs, 16_000);
       return synthesisEnvelope(params);
     },
   };
