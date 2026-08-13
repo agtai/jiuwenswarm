@@ -8,35 +8,22 @@
 ## Resume capsule
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
-  `agtai/hx/0812_live_voice_w3`. `origin` is the atomgit upstream and has no W3
-  ref; an earlier `origin/...` claim here was wrong. Verify live Git before
-  trusting prose.
-- Current stage/node: `S6 - Alpha Module Closure` / `A1`, `ENVIRONMENT`.
-- Current task: `S6-02` physical closure, and nothing else. `S6-01`, `S6-03`,
-  `S6-04`, `S6-05` and `S6-06` are `SATISFIED`; the previously declared
-  automated S6 measurements have run on the real private topology. Physical
-  rows O1-O4 (permission grant, deny, revoke and device loss) are also observed
-  PASS. The B environment at `C:\lvalpha\run-20260813` is restored and the
-  current repair is deployed. Source `70dcc563` fixes the newly measured cold
-  short-utterance EOT loss, the exact 30-second streaming-playout cutoff and
-  browser ACK-induced audio gaps. Automated regression, production build,
-  runtime/Agent/media probes and Computer Use formal-route activation pass.
-  The user has now observed PASS for the cold short-utterance auto-EOT and the
-  complete long-answer playout/voice/quality rows. The same run exposed a
-  distinct 500 ms server-VAD breath-pause false stop; source `e6ccb3e9` raises
-  the silence duration to 1,200 ms, passes its red/green proof and is deployed
-  to the ready B environment. Window minimization interrupted playout as the
-  declared page-hidden fail-closed policy requires. One breath-pause retest and
-  the O6 return-to-visible/no-stale-audio observation remain. Execute them from
-  [the S6-02 runbook](S6_02_PHYSICAL_OBSERVATION_RUNBOOK_2026-08-13.md); Main
-  must not claim to have heard speaker output or answered a permission prompt.
-- Next gate: the `S6-02` physical observation is the only row left before
-  `S7-01` candidate assembly can start.
+  `origin/hx/0812_live_voice_w3`. The configured `origin` resolves to the agtai
+  GitHub repository. Verify live Git before trusting prose; no push is
+  authorized.
+- Current stage/node: `S6 - Alpha Module Closure` / `A1`, `CLOSED`; S7/A2 is
+  `NOT_STARTED` at the user's instruction.
+- Current task: none. All six S6 module rows are `SATISFIED`. The user completed
+  the remaining breath-pause and O6 return/no-stale observations against
+  deployed source `e6ccb3e9` in the prepared B environment. D116 records the
+  physical closure; it does not claim that Main heard speaker output or handled
+  a browser permission prompt.
+- Next gate: none active. Start `S7-01` only when the user resumes S7.
 - Closed: S0 V0, S1 Shared Foundations, S2 D-031 bounded compatibility,
   S3 W2 Integrated Demo (`PRODUCT-ACCEPTED`), S4 develop rebaseline, S5 entry
-  audit/ownership activation, and the S6 source/automated implementation scope.
-- Open: the `S6-02` physical microphone/device/heard-playout evidence, the S6
-  exit that depends on it, A2 and A3.
+  audit/ownership activation, and S6/A1 module closure.
+- Not started: S7/A2 candidate assembly/verification/review and S8/A3 product
+  acceptance.
 
 Terminology follows D-075. The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md); the complete
@@ -60,20 +47,18 @@ S6 implementation and review record is
 | Task | Status | Current fact |
 |---|---|---|
 | S6-01 critical-input safety | `SATISFIED` | The bounded `CriticalTokenSafetyGate` is on committed text/voice/Task product paths. Partial, stale, low-confidence and wrong-scope cases assert zero Agent, Tool, Task, audio, history and Store effects. |
-| S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | D112's real streaming route and O1-O4 remain proven. D113 repaired the Provider event timeout. D114 records source `70dcc563` for cold Provider pre-open, recognition lifetime, 180-second playout, deferred successor capture, scheduled-frame ACK and browser scheduling lead. The user has now physically observed PASS for cold “你好” auto-EOT/recognition and the complete long answer with correct voice/quality. D115 records the newly exposed breath-pause false stop and source `e6ccb3e9`, which preserves `server_vad` while increasing its silence duration from 500 to 1,200 ms; red/green, 177 affected tests, Ruff, restart readiness and media-control probe pass. Minimization correctly fences playout under `PAGE_HIDDEN_PLAYOUT_FENCED`; one breath-pause retest and the physical return-to-visible/no-stale-audio half of O6 remain. |
+| S6-02 P1 speech/browser lifecycle | `SATISFIED` | D112's real streaming route and O1-O4 remain proven. D113 repaired the Provider event timeout. D114 records source `70dcc563` for cold Provider pre-open, recognition lifetime, 180-second playout, deferred successor capture, scheduled-frame ACK and browser scheduling lead. D115 records source `e6ccb3e9`, which preserves `server_vad` while increasing its silence duration from 500 to 1,200 ms. The user physically observed PASS for cold “你好” auto-EOT/recognition, the complete long answer with correct voice/quality, an internal breath pause without false stop, and O6 page-hidden interruption followed by no replay, duplicate or stale tail. D116 closes the row. |
 | S6-03 P2 realtime conversation | `SATISFIED` | The complete real media route is proven on the private origin: first-frame media auth, 227 uplink frames with 227 ACKs, provider-time end of turn, streaming recognition `completed` with no degradation, real Agent final, a real streaming TTS downlink and an accepted playout receipt. Nine real fault/load profiles all fail closed as declared, including sequence gap, duplicate/out-of-order, cursor mismatch, stale generation, one-use ticket replay, audio before authentication, an unpaced burst with no drop, and reconnect after a terminal detach. The route latency report covers thirteen targets with p50/p95/max over 5/5 clean rounds. The slow-round profile and the real cancel fences are proven in one live run: cancelling the Task mid-response left 184 further deltas and a normal final, a barge-in on another response left the Task state and outcome unchanged, and a stale generation and an unknown response target were both refused with no new effect. No fake result stands in for a real path. |
 | S6-04 P3alpha Task vertical | `SATISFIED` | Proven on the real path against the authoritative Store: confirmation issue/consume, command idempotency, TaskEvent-only lifecycle truth, outbox accounting, scope isolation, replay rejection and terminal-cancel rejection. Two Alpha defects blocked every real dispatch; with them fixed a real attempt now completes, the real Code Agent makes exactly the instructed change on the disposable fixture, and cross-project effects are 0. |
 | S6-05 observability/privacy/Web | `SATISFIED` | The private same-origin HTTPS/WSS topology is built and measured: real CA trust, CSP, WSS routing and zero browser-tier credentials. The whole-stack benchmark reports p50/p95/failures/sample for every declared target with 5/5 rounds clean; the raw-audio zero-persistence regression scans 66 configured surfaces and 16.2 MB with zero hits; the degradation matrix proves Streaming -> W2 Batch -> Browser/text with each tier explicitly identified and the text path surviving both Speech-provider and media removal; and the sanitized trace reproduction rebuilds the route, cancel, queue and Task facts from logs and the authoritative Store alone, cross-checking state/outcome/cancel against the live run, with zero credentials and zero raw audio on those surfaces. |
 | S6-06 joint route | `SATISFIED` | The automated joint scenario passes, including a race the real-path repair exposed, and the real joint run has now executed: one detached P3alpha Task on the disposable fixture, one committed voice Turn through the real media route, two slow conversational rounds, a barge-in, a cancel issued while a response was still streaming, and two cancel targets that had to be refused, all in one run with zero cross-domain effect and zero unauthorized fixture mutation. Fake external claims are still not treated as proof of the physical P1 route, which S6-02 owns. |
 
-No located S6 source defect remains open after `e6ccb3e9`. The cold-EOT,
-long-playout and audio-quality failures are physically observed PASS. The later
-breath-pause sensitivity is attributed and repaired, but `S6-02` stays
-`ENVIRONMENT` until its targeted physical retest and the O6
-return-to-visible/no-stale-audio observation. The other five rows do not consume
-those observations.
+No S6 source or environment gap remains open. Every S6 module row is
+`SATISFIED` and S6/A1 is closed. S7-01 has not started.
 
-Latest source verification is bound to `e6ccb3e9` and recorded in
+The physical closure is recorded in
+[D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md). Its latest source verification
+is bound to `e6ccb3e9` in
 [D115](D115_S6_02_BREATH_PAUSE_VAD_REPAIR_2026-08-13.md). Its playout/cold-EOT
 predecessor is [D114](D114_S6_02_COLD_EOT_AND_LONG_PLAYOUT_REPAIR_2026-08-13.md). Its timeout
 predecessor is [D113](D113_S6_02_SYNTHESIS_EVENT_TIMEOUT_REPAIR_2026-08-13.md),
@@ -133,12 +118,10 @@ Verification commands must keep `--asyncio-mode=auto`: `pytest.ini` carries it i
 `addopts`, and the common `-o addopts=''` silently drops it and manufactures
 dozens of false async failures.
 
-S6 remains open only on the breath-pause retest and the remaining O6 physical
-return/no-stale observation. Under
-[ALPHA_ACCEPTANCE.md](validation/ALPHA_ACCEPTANCE.md) §8 the current result is
-still `BLOCKED`: the physical microphone/device/heard-playout observation has not
-run, so S7 has not been entered and S8 has not run. Every other S6 measurement
-has run on the real private topology.
+S6/A1 is closed. Under
+[ALPHA_ACCEPTANCE.md](validation/ALPHA_ACCEPTANCE.md) §0 and §8, final Alpha PASS
+is not yet available: S7 must compose and verify one exact candidate, and S8
+must run the complete human product journey on that candidate.
 
 ## Frozen product boundary
 
@@ -158,17 +141,10 @@ D1/D2, Production and public deployment remain outside scope.
 
 ## Next actions
 
-1. In the prepared project-scoped Chrome task at
-   `https://live-voice.localhost`, speak one sentence with a deliberate
-   0.7–1.0-second internal pause. Confirm listening continues across that pause,
-   then stops once after at least 1.2 seconds of final silence.
-2. For O6, minimize during playout, return after at least five seconds and
-   confirm the explicit page-hidden stopped/failed state with no automatic
-   replay, duplicate audio or stale tail. Interruption itself is expected.
-3. When those two observations pass, mark `S6-02` and S6 exit, then start `S7-01` candidate
-   assembly.
-4. `S7-03` still owes the complete 45,044-line cumulative cold review and one
-   independent review; neither has run.
+1. Hold at the closed S6/A1 boundary. Do not execute S7 while the user's pause
+   remains in effect.
+2. When the user resumes S7, start at S7-01 candidate assembly and identity;
+   S7-02, S7-03 and S7-04 remain unstarted.
 
 No push is authorized. Machine-private credentials, provider configuration,
 browser profiles, raw audio and private run data must stay out of Git.
