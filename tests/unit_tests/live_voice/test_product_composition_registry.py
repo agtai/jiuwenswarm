@@ -56,6 +56,7 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV,
+    PRODUCT_S8_5_FIXTURE_MANIFEST_ENV,
     ProductCompositionSettings,
     _ProgressDelivery,
     _VoiceTaskOrigin,
@@ -73,6 +74,16 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressOriginKind,
     _evidence_id,
     project_task_progress_event,
+)
+from jiuwenswarm.server.live_voice.task_revision import (
+    RevisionApplicationState,
+    TaskRevisionConstraints,
+    TaskRevisionGrant,
+    TaskRevisionTargetSnapshot,
+)
+from jiuwenswarm.server.live_voice.task_revision_store import (
+    SqliteTaskRevisionStore,
+    TaskRevisionReceipt,
 )
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
     VoiceTaskBridgeViolation,
@@ -641,9 +652,14 @@ def test_s8_5_task_revision_product_flag_is_default_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, raising=False)
-    assert ProductCompositionSettings.from_environment().s8_5_task_revision_enabled is False
+    assert (
+        ProductCompositionSettings.from_environment().s8_5_task_revision_enabled
+        is False
+    )
     monkeypatch.setenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, "true")
-    assert ProductCompositionSettings.from_environment().s8_5_task_revision_enabled is True
+    assert (
+        ProductCompositionSettings.from_environment().s8_5_task_revision_enabled is True
+    )
 
 
 def test_enabled_s8_5_projection_requires_a_store_truth_reader(tmp_path: Path) -> None:
@@ -665,8 +681,45 @@ def test_s8_5_projection_requires_authenticated_p3_text_route(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(PRODUCT_COMPOSITION_ENABLE_ENV, "true")
+    monkeypatch.setenv(PRODUCT_P2_ENABLE_ENV, "true")
     monkeypatch.setenv(PRODUCT_P3_TEXT_ENABLE_ENV, "false")
     monkeypatch.setenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, "true")
+    with pytest.raises(FormalTaskViolation) as caught:
+        create_product_composition_registry_from_environment(
+            p3_composition=_P3Composition(tmp_path),
+            agent_manager=_AgentManager(),
+            push_text_event=cast(object, lambda _message: None),
+        )
+    assert caught.value.reason == "INVALID_PRODUCT_COMPOSITION_CONFIGURATION"
+
+
+def test_s8_5_revision_requires_authenticated_p2_voice_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PRODUCT_COMPOSITION_ENABLE_ENV, "true")
+    monkeypatch.setenv(PRODUCT_P2_ENABLE_ENV, "false")
+    monkeypatch.setenv(PRODUCT_P3_TEXT_ENABLE_ENV, "true")
+    monkeypatch.setenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, "true")
+    with pytest.raises(FormalTaskViolation) as caught:
+        create_product_composition_registry_from_environment(
+            p3_composition=_P3Composition(tmp_path),
+            agent_manager=_AgentManager(),
+            push_text_event=cast(object, lambda _message: None),
+        )
+    assert caught.value.reason == "INVALID_PRODUCT_COMPOSITION_CONFIGURATION"
+
+
+def test_s8_5_product_factory_requires_fixture_and_confirmation_wiring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PRODUCT_COMPOSITION_ENABLE_ENV, "true")
+    monkeypatch.setenv(PRODUCT_P2_ENABLE_ENV, "true")
+    monkeypatch.setenv(PRODUCT_P3_TEXT_ENABLE_ENV, "true")
+    monkeypatch.setenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, "true")
+    monkeypatch.delenv(PRODUCT_S8_5_FIXTURE_MANIFEST_ENV, raising=False)
+
     with pytest.raises(FormalTaskViolation) as caught:
         create_product_composition_registry_from_environment(
             p3_composition=_P3Composition(tmp_path),
@@ -3455,6 +3508,236 @@ def _voice_intent_params(
     if task_id is not None:
         params["task_id_hint"] = task_id
     return params
+
+
+class _RevisionProductStore:
+    def __init__(self) -> None:
+        self.requests: list[
+            tuple[object, TaskRevisionGrant, TaskRevisionConstraints, str | None]
+        ] = []
+
+    def read_target(self, task_id: str, scope: ScopeRef) -> TaskRevisionTargetSnapshot:
+        return TaskRevisionTargetSnapshot(
+            task_id=task_id,
+            scope=scope,
+            task_revision=1,
+            attempt_id="attempt-revision-1",
+            attempt_number=1,
+            task_state="running",
+        )
+
+    def request_revision(
+        self,
+        command: object,
+        grant: TaskRevisionGrant,
+        *,
+        initial_constraints: TaskRevisionConstraints,
+        observed_at: str | None = None,
+    ) -> TaskRevisionReceipt:
+        self.requests.append((command, grant, initial_constraints, observed_at))
+        return TaskRevisionReceipt(
+            command_id=getattr(command, "command_id"),
+            task_id=getattr(command, "task_id"),
+            application_state=RevisionApplicationState.FENCING,
+            predecessor_revision=1,
+            successor_revision=2,
+            predecessor_attempt_id="attempt-revision-1",
+            successor_attempt_id=None,
+            fence_outbox_id="revision-fence-product-1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_voice_task_revision_uses_exact_commit_confirmation_and_store_write(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    owner = BoundedP3ConfirmationOwner(
+        tmp_path / "revision-confirmations.sqlite3",
+        enabled=True,
+        task_revision_enabled=True,
+    )
+    forwarder = ProductP3ConfirmationForwarder(owner)
+    composition = _P3Composition(tmp_path)
+    revision_store = _RevisionProductStore()
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=True,
+            s8_5_task_revision_enabled=True,
+        ),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=push,
+        p3_confirmation_owner=owner,
+        p3_confirmation_forwarder=forwarder,
+        commit_ledger=ledger,
+        task_revision_truth_reader=lambda _task_id, _scope: None,
+        task_revision_store=cast(SqliteTaskRevisionStore, revision_store),
+        task_revision_fixtures=cast(
+            object,
+            SimpleNamespace(
+                fixture=lambda project_id: SimpleNamespace(
+                    project_id=project_id,
+                    write_scope=("src", "tests"),
+                )
+            ),
+        ),
+        task_revision_coordinator=cast(object, SimpleNamespace()),
+        clock=lambda: NOW,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-revision-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="revision-input",
+            text="provide task input: negative inputs retain current behavior",
+        ),
+        request_id="request-revision-input-commit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    first = await registry.handle_p3_intent(
+        params=_voice_intent_params(
+            stem="revision-input",
+            operation="task.provide_input",
+            task_id="task-revision-1",
+        ),
+        request_id="request-revision-input-intent",
+        session_id="session-product",
+    )
+    assert first.ok is True, first.payload
+    first_result = cast(dict[str, object], first.payload["result"])
+    assert first_result["reason"] == "TASK_REVISION_CONFIRMATION_REQUIRED"
+    assert first_result["task_revision"] == 1
+    assert first_result["attempt_id"] == "attempt-revision-1"
+    assert revision_store.requests == []
+
+    pending_status = await registry.handle_p3_intent_status(
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "correlation_id": "correlation-p2",
+            "intent_request_id": "request-revision-input-intent",
+        },
+        request_id="request-revision-input-status",
+        session_id="session-product",
+    )
+    assert pending_status.ok is True, pending_status.payload
+    pending_result = cast(dict[str, object], pending_status.payload["result"])
+    assert pending_result["status"] == "pending"
+    assert pending_result["phase"] == "awaiting_confirmation"
+
+    token = cast(str, first_result["confirmation_token"])
+    duplicate = await registry.handle_p3_intent(
+        params=_voice_intent_params(
+            stem="revision-input",
+            operation="task.provide_input",
+            task_id="task-revision-1",
+        ),
+        request_id="request-revision-input-duplicate",
+        session_id="session-product",
+    )
+    assert duplicate.ok is False
+    assert cast(dict, duplicate.payload["error"])["reason"] == (
+        "TASK_REVISION_RESOLUTION_CONFLICT"
+    )
+    assert registry._accepted_turn_commits_by_commit.get(
+        "commit-revision-input"
+    ) is registry._pending_task_revisions[token].commit
+
+    confirmed_commit = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="revision-confirm",
+            text=f"confirm task request {token}",
+        ),
+        request_id="request-revision-confirm-commit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert confirmed_commit.ok is True
+    confirmed = await registry.handle_p3_intent(
+        params=_voice_intent_params(
+            stem="revision-confirm",
+            operation="task.provide_input",
+            task_id="task-revision-1",
+        ),
+        request_id="request-revision-confirm-intent",
+        session_id="session-product",
+    )
+
+    assert confirmed.ok is True, confirmed.payload
+    result = cast(dict[str, object], confirmed.payload["result"])
+    assert result["status"] == "dispatched"
+    assert result["reason"] == "TASK_REVISION_ACCEPTED"
+    formal = cast(dict[str, object], result["formal_task_result"])
+    assert formal["application_state"] == "fencing"
+    assert formal["predecessor_revision"] == 1
+    assert formal["successor_revision"] == 2
+    assert len(revision_store.requests) == 1
+    command, grant, constraints, observed_at = revision_store.requests[0]
+    assert getattr(command, "operation").value == "task.provide_input"
+    assert getattr(command, "facts") == ("negative inputs retain current behavior",)
+    assert grant.command_fingerprint == getattr(command, "fingerprint")()
+    assert constraints == TaskRevisionConstraints(
+        ("src", "tests"), regression_verifier_required=True
+    )
+    assert observed_at == NOW
+
+    settled_status = await registry.handle_p3_intent_status(
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "correlation_id": "correlation-p2",
+            "intent_request_id": "request-revision-confirm-intent",
+        },
+        request_id="request-revision-confirm-status",
+        session_id="session-product",
+    )
+    assert settled_status.ok is True, settled_status.payload
+    settled_result = cast(dict[str, object], settled_status.payload["result"])
+    assert settled_result["status"] == "settled"
+    assert settled_result["phase"] == "final"
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_revision_flag_off_rejects_before_authority_or_commit(
+    tmp_path: Path,
+) -> None:
+    composition = _P3Composition(tmp_path)
+    ledger = TurnCommitLedger()
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(True, True, False),
+        p3_composition=composition,
+        agent_manager=_AgentManager(),
+        push_text_event=cast(object, lambda _message: None),
+        commit_ledger=ledger,
+    )
+    result = await registry.handle_p3_intent(
+        params=_voice_intent_params(
+            stem="revision-off",
+            operation="task.provide_input",
+            task_id="task-revision-1",
+        ),
+        request_id="request-revision-off",
+        session_id="session-product",
+    )
+    assert result.ok is False
+    assert cast(dict, result.payload["error"])["reason"] == (
+        "UNSUPPORTED_FORMAL_TASK_INTENT"
+    )
+    assert composition.authority_calls == []
 
 
 @pytest.mark.asyncio

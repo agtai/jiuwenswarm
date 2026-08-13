@@ -164,6 +164,77 @@ test('voice cancel forwards only the accepted TurnCommit identity and binds a la
   assert.notEqual(calls[1].commit_id, calls[0].commit_id);
 });
 
+test('S8.5 revision is separately gated, voice-only and confirmation-bound', async () => {
+  const origin = {
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    interaction_id: 'interaction-revision',
+    turn_id: 'turn-revision-1',
+    commit_id: 'commit-revision-1',
+  };
+  let disabledCalls = 0;
+  const disabled = new ProductFormalTaskIntentOwner({
+    enabled: true,
+    request: async () => {
+      disabledCalls += 1;
+      throw new Error('must not dispatch');
+    },
+  });
+  await assert.rejects(
+    disabled.submitVoice({ origin, operation: 'task.provide_input', task_id: 'task-abc_123' }),
+    /revision route is disabled/
+  );
+  assert.equal(disabledCalls, 0);
+  assert.equal(disabled.snapshot().reason, 'TASK_REVISION_PRODUCT_ROUTE_DISABLED');
+
+  const calls = [];
+  const owner = new ProductFormalTaskIntentOwner({
+    enabled: true,
+    task_revision_enabled: true,
+    request: async (_method, params, requestId) => {
+      calls.push(params);
+      return calls.length === 1
+        ? envelope(requestId, {
+            ...clarification('task.provide_input', 'task-abc_123'),
+            reason: 'TASK_REVISION_CONFIRMATION_REQUIRED',
+          })
+        : envelope(
+            requestId,
+            {
+              ...dispatched('task.provide_input', 'task-abc_123', 'interaction-revision', 'voice'),
+              reason: 'TASK_REVISION_ACCEPTED',
+            }
+          );
+    },
+  });
+  await assert.rejects(
+    owner.submitText({
+      session_id: 'session-1',
+      correlation_id: 'correlation-1',
+      operation: 'task.provide_input',
+      task_id: 'task-abc_123',
+      text: 'provide task input: preserve negative inputs',
+    }),
+    /committed voice origin/
+  );
+  assert.equal(owner.snapshot().reason, 'TASK_REVISION_VOICE_ORIGIN_REQUIRED');
+  const first = await owner.submitVoice({
+    origin,
+    operation: 'task.provide_input',
+    task_id: 'task-abc_123',
+  });
+  assert.equal(first.reason, 'TASK_REVISION_CONFIRMATION_REQUIRED');
+  assert.equal(owner.snapshot().pending_confirmation?.operation, 'task.provide_input');
+  const confirmed = await owner.submitVoice({
+    origin: { ...origin, turn_id: 'turn-revision-2', commit_id: 'commit-revision-2' },
+    operation: 'task.provide_input',
+    task_id: 'task-abc_123',
+  });
+  assert.equal(confirmed.disposition, 'dispatched');
+  assert.equal(confirmed.reason, 'TASK_REVISION_ACCEPTED');
+  assert.equal(calls.length, 2);
+});
+
 test('pending confirmation cannot change task, operation, source or scope and sends zero request', async () => {
   let calls = 0;
   const owner = new ProductFormalTaskIntentOwner({

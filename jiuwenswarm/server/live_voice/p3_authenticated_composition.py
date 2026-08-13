@@ -72,6 +72,7 @@ from .task_progress_return import (
     TaskProgressOriginBinding,
 )
 from .task_store import SqliteTaskStore
+from .task_revision import S8_5_TASK_REVISION_OPERATIONS
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
 logger = logging.getLogger(__name__)
@@ -92,7 +93,6 @@ P3_QUERY_OPERATIONS = frozenset({"task.get", "task.list", "task.status", "task.e
 # class P3 operation, because dropping it here would silently disable the
 # mutation validation every retry admission depends on.
 P3_OPERATIONS = frozenset(P3_ROUTE_METHODS.values()) | P3_MUTATIONS
-
 _ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_ENABLED"
 _TOKEN_ENV = "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN"
 _PRINCIPAL_ENV = "JIUWENSWARM_LIVE_VOICE_P3_PRINCIPAL_ID"
@@ -103,6 +103,7 @@ _RECONCILE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS"
 _PRODUCT_COMPOSITION_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 _PRODUCT_P2_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 _PRODUCT_P2_OPERATION = "agent.chat"
+_S8_5_TASK_REVISION_ENV = "JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED"
 
 
 def _parse_utc(value: str, field_name: str) -> datetime:
@@ -944,6 +945,19 @@ class P3AuthenticatedComposition:
 
         return self._core.store
 
+    @property
+    def task_executor(self) -> DirectProjectCodeExecutorAdapter:
+        """Expose the exact Task-Core Executor to the gated revision coordinator."""
+
+        executor = self._core.executor
+        if type(executor) is not DirectProjectCodeExecutorAdapter:
+            raise FormalTaskViolation(
+                "TASK_REVISION_EXECUTOR_UNAVAILABLE",
+                "S8.5 task revision requires the direct project Executor",
+                ErrorCode.UNAVAILABLE,
+            )
+        return executor
+
     def resolve_product_authority_candidate(
         self,
         *,
@@ -968,7 +982,24 @@ class P3AuthenticatedComposition:
                 "formal task route is unavailable",
                 ErrorCode.UNAVAILABLE,
             )
-        if operation not in P3_OPERATIONS | {_PRODUCT_P2_OPERATION}:
+        revision_operation = operation in S8_5_TASK_REVISION_OPERATIONS
+        revision_authority_enabled = all(
+            _is_enabled(os.getenv(name))
+            for name in (
+                _PRODUCT_COMPOSITION_ENV,
+                _PRODUCT_P2_ENV,
+                _S8_5_TASK_REVISION_ENV,
+            )
+        )
+        if revision_operation and not revision_authority_enabled:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHORIZATION_DENIED",
+                "S8.5 task revision authority is disabled",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if operation not in (
+            P3_OPERATIONS | {_PRODUCT_P2_OPERATION} | S8_5_TASK_REVISION_OPERATIONS
+        ):
             raise FormalTaskViolation(
                 "FORMAL_TASK_AUTHORIZATION_DENIED",
                 "formal product operation is unavailable",
@@ -993,6 +1024,7 @@ class P3AuthenticatedComposition:
             "task.status",
             "task.events",
             "task.cancel",
+            *S8_5_TASK_REVISION_OPERATIONS,
         }
         if targeted != bool(task_id):
             raise FormalTaskViolation(
@@ -1017,10 +1049,10 @@ class P3AuthenticatedComposition:
             scope=authority.scope,
             required_permissions=(
                 frozenset({"task.execute", "project.write"})
-                if operation == _PRODUCT_P2_OPERATION
+                if operation == _PRODUCT_P2_OPERATION or revision_operation
                 else frozenset()
             ),
-            destructive=False,
+            destructive=revision_operation,
             now=now,
         )
         if targeted:
@@ -1336,7 +1368,9 @@ class P3AuthenticatedComposition:
         context: ResolvedTaskContext,
         now: str,
     ) -> None:
-        destructive = operation == "task.cancel"
+        destructive = operation == "task.cancel" or operation in (
+            S8_5_TASK_REVISION_OPERATIONS
+        )
         context.require_usable(
             scope=authority.scope,
             required_permissions=(
@@ -2387,10 +2421,20 @@ def create_p3_composition_from_environment(
         principal_id=principal_id,
         allowed_project_ids=project_ids,
         allowed_operations=(
-            P3_OPERATIONS | {_PRODUCT_P2_OPERATION}
-            if _is_enabled(os.getenv(_PRODUCT_COMPOSITION_ENV))
-            and _is_enabled(os.getenv(_PRODUCT_P2_ENV))
-            else P3_OPERATIONS
+            P3_OPERATIONS
+            | (
+                {_PRODUCT_P2_OPERATION}
+                if _is_enabled(os.getenv(_PRODUCT_COMPOSITION_ENV))
+                and _is_enabled(os.getenv(_PRODUCT_P2_ENV))
+                else frozenset()
+            )
+            | (
+                S8_5_TASK_REVISION_OPERATIONS
+                if _is_enabled(os.getenv(_PRODUCT_COMPOSITION_ENV))
+                and _is_enabled(os.getenv(_PRODUCT_P2_ENV))
+                and _is_enabled(os.getenv(_S8_5_TASK_REVISION_ENV))
+                else frozenset()
+            )
         ),
         expires_at=expires_at,
     )

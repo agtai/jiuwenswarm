@@ -95,6 +95,7 @@ class _ProductRegistry:
         self.p3_mutation_enabled = True
         self.s8_5_task_revision_enabled = False
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.start_calls = 0
         self.stop_calls = 0
         self.stop_failures = stop_failures
         self.progress_attempt_id = progress_attempt_id
@@ -103,6 +104,9 @@ class _ProductRegistry:
         self.progress_payload_request_id = progress_payload_request_id
         self.intent_result = intent_result
         self.progress_activation_result = progress_activation_result
+
+    async def start(self) -> None:
+        self.start_calls += 1
 
     async def handle_p3_query(self, **kwargs):
         self.calls.append(("query", kwargs))
@@ -599,6 +603,7 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
     await server._stop_live_voice_product_composition()
 
     assert registry.stop_calls == 1
+    assert registry.start_calls == 1
     assert server._live_voice_product_composition is None
     assert isinstance(collector, LiveVoiceObservabilityCollector)
     assert server._live_voice_product_observability is None
@@ -1358,6 +1363,48 @@ async def test_agentserver_allocates_product_confirmation_owner_only_when_all_fl
     await server._stop_live_voice_p3_composition()
     assert server._live_voice_p3_confirmation_owner is None
     assert server._live_voice_p3_confirmation_forwarder is None
+
+
+@pytest.mark.asyncio
+async def test_agentserver_allocates_separate_s8_5_revision_confirmation_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    composition = _LifecycleComposition()
+    captured: list[dict[str, object]] = []
+    server = _server(None)
+    server._agent_manager = object()
+    monkeypatch.delenv(
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED", raising=False
+    )
+    for name in (
+        "JIUWENSWARM_LIVE_VOICE_P3_ENABLED",
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED",
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED",
+        "JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED",
+    ):
+        monkeypatch.setenv(name, "1")
+    monkeypatch.setattr(
+        p3_module,
+        "resolve_p3_database_path_from_environment",
+        lambda: tmp_path / "formal_tasks.sqlite3",
+    )
+    monkeypatch.setattr(
+        p3_module,
+        "create_p3_composition_from_environment",
+        lambda **kwargs: captured.append(kwargs) or composition,
+    )
+
+    await server._start_live_voice_p3_composition()
+
+    assert server._live_voice_p3_confirmation_owner is not None
+    assert server._live_voice_p3_confirmation_forwarder is not None
+    assert captured[0]["confirmation_verifier"] is None
+    assert (
+        server._live_voice_p3_confirmation_owner._task_revision_enabled is True
+    )
+    await server._stop_live_voice_p3_composition()
 
 
 @pytest.mark.asyncio

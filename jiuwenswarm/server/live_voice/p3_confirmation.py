@@ -22,6 +22,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from .formal_task_models import FormalTaskViolation
 from .formal_task_models import ResolvedTaskContext
 from .p3_model_resolution import ResolvedP3Model
+from .task_revision import S8_5_TASK_REVISION_OPERATIONS
 
 
 P3_CONFIRMATION_MAX_TTL = timedelta(minutes=2)
@@ -791,8 +792,9 @@ class BoundedP3ConfirmationOwner:
         *,
         enabled: bool = False,
         capacity: int = P3_CONFIRMATION_MAX_CAPACITY,
+        task_revision_enabled: bool = False,
     ) -> None:
-        if type(enabled) is not bool:
+        if type(enabled) is not bool or type(task_revision_enabled) is not bool:
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION_OWNER",
                 "confirmation owner enabled must be a boolean",
@@ -800,6 +802,7 @@ class BoundedP3ConfirmationOwner:
             )
         validated_capacity = _validate_capacity(capacity)
         self._enabled = enabled
+        self._task_revision_enabled = task_revision_enabled
         self._ledger = (
             SqliteP3ConfirmationLedger(
                 database_path,
@@ -832,6 +835,7 @@ class BoundedP3ConfirmationOwner:
                 "trusted server confirmation issue is required",
                 ErrorCode.INVALID_ARGUMENT,
             )
+        self._require_operation_enabled(issue.binding)
         self._validate_trusted_issue(issue, now=now)
         return ledger.issue_owned(issue, now=now)
 
@@ -850,6 +854,7 @@ class BoundedP3ConfirmationOwner:
         """
 
         ledger = self._require_ledger()
+        self._require_operation_enabled(binding)
         self._validate_binding_owner(binding, owner)
         return ledger.validate_owned_for_forwarding(
             confirmation_id,
@@ -866,6 +871,17 @@ class BoundedP3ConfirmationOwner:
                 ErrorCode.UNAVAILABLE,
             )
         return self._ledger
+
+    def _require_operation_enabled(self, binding: P3ConfirmationBinding) -> None:
+        if (
+            binding.operation in S8_5_TASK_REVISION_OPERATIONS
+            and not self._task_revision_enabled
+        ):
+            raise FormalTaskViolation(
+                "INVALID_P3_CONFIRMATION_OPERATION",
+                "S8.5 task revision confirmation is disabled",
+                ErrorCode.INVALID_ARGUMENT,
+            )
 
     @staticmethod
     def _validate_trusted_issue(
@@ -902,10 +918,12 @@ class BoundedP3ConfirmationOwner:
                 "exact trusted confirmation binding and owner context are required",
                 ErrorCode.INVALID_ARGUMENT,
             )
-        if binding.operation not in _P3_MUTATION_OPERATIONS:
+        if binding.operation not in (
+            _P3_MUTATION_OPERATIONS | S8_5_TASK_REVISION_OPERATIONS
+        ):
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION_OPERATION",
-                "confirmation operation must be task.create, task.cancel or task.retry",
+                "confirmation operation is outside the bounded task mutation profile",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if binding.operation == "task.create" and binding.target_task_id is not None:
@@ -915,7 +933,13 @@ class BoundedP3ConfirmationOwner:
                 ErrorCode.INVALID_ARGUMENT,
             )
         if (
-            binding.operation in {"task.cancel", "task.retry"}
+            binding.operation
+            in {
+                "task.cancel",
+                "task.retry",
+                "task.provide_input",
+                "task.update_constraints",
+            }
             and binding.target_task_id is None
         ):
             raise FormalTaskViolation(

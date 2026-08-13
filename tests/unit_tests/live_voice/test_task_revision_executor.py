@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +56,7 @@ from jiuwenswarm.server.live_voice.task_revision_executor import (
     TrustedRevisionFixtureManifest,
     TrustedRevisionFixtureRegistry,
     TrustedVerifierCommand,
+    load_trusted_revision_fixture_registry,
 )
 from jiuwenswarm.server.live_voice.task_revision_store import (
     SqliteTaskRevisionStore,
@@ -338,10 +340,7 @@ def test_fixture_manifest_rejects_dirty_remote_and_unmarked_targets(
     (root / "ignored" / "hidden.txt").write_text("hidden\n", encoding="utf-8")
     with pytest.raises(FormalTaskViolation) as ignored:
         manifest.require_original_clean_base()
-    assert (
-        ignored.value.reason
-        == "TASK_REVISION_IGNORED_FIXTURE_CONTENT_FORBIDDEN"
-    )
+    assert ignored.value.reason == "TASK_REVISION_IGNORED_FIXTURE_CONTENT_FORBIDDEN"
     (root / "ignored" / "hidden.txt").unlink()
     (root / "ignored").rmdir()
 
@@ -355,6 +354,58 @@ def test_fixture_manifest_rejects_dirty_remote_and_unmarked_targets(
     with pytest.raises(FormalTaskViolation) as marker:
         manifest.require_original_clean_base()
     assert marker.value.reason == "TASK_REVISION_FIXTURE_MARKER_MISMATCH"
+
+
+def test_fixture_registry_loader_requires_exact_clean_manifest(
+    tmp_path: Path,
+) -> None:
+    _root, manifest = _fixture(tmp_path)
+    registry_path = tmp_path / "revision-fixtures.json"
+    registry_path.write_text(
+        json.dumps(
+            {
+                "profile": S8_5_FIXTURE_PROFILE,
+                "fixtures": [
+                    {
+                        "fixture_id": manifest.fixture_id,
+                        "project_id": manifest.project_id,
+                        "fixture_parent": manifest.fixture_parent,
+                        "project_root": manifest.project_root,
+                        "baseline_head": manifest.baseline_head,
+                        "baseline_tree": manifest.baseline_tree,
+                        "baseline_content": manifest.baseline_content,
+                        "write_scope": list(manifest.write_scope),
+                        "immutable_paths": list(manifest.immutable_paths),
+                        "verifier_id": manifest.verifier_id,
+                    }
+                ],
+                "verifiers": [
+                    {
+                        "verifier_id": manifest.verifier_id,
+                        "argv": [sys.executable, "-c", "raise SystemExit(0)"],
+                        "timeout_seconds": 2,
+                        "maximum_output_bytes": 1024,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    registry = load_trusted_revision_fixture_registry(registry_path)
+    assert registry.fixture("project-1") == manifest
+    assert registry.verifier("python-check").argv[0] == sys.executable
+
+    malformed = json.loads(registry_path.read_text(encoding="utf-8"))
+    malformed["fixtures"][0]["write_scope"] = "src"
+    registry_path.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(FormalTaskViolation) as invalid:
+        load_trusted_revision_fixture_registry(registry_path)
+    assert invalid.value.reason == "INVALID_TASK_REVISION_FIXTURE_REGISTRY"
+
+    with pytest.raises(FormalTaskViolation) as missing:
+        load_trusted_revision_fixture_registry(tmp_path / "missing.json")
+    assert missing.value.reason == "TASK_REVISION_FIXTURE_REGISTRY_UNAVAILABLE"
 
 
 def _delivery(item: PersistentOutboxItem) -> ExecutorDeliveryResult:
@@ -585,9 +636,7 @@ async def test_coordinator_runs_exact_fence_clean_successor_and_persisted_verifi
     predecessor_id = str(created.result["attempt_id"])
     initial = task_store.claim_outbox("initial-dispatch")
     assert initial is not None
-    adapter = await _dispatching_adapter(
-        tmp_path, root, agent, item=initial
-    )
+    adapter = await _dispatching_adapter(tmp_path, root, agent, item=initial)
     initial_delivery = await adapter.dispatch(initial)
     task_store.complete_outbox(
         initial,
@@ -641,31 +690,27 @@ async def test_coordinator_runs_exact_fence_clean_successor_and_persisted_verifi
     assert applied is not None and applied.successor_attempt_id is not None
     dispatched = await coordinator.dispatch_once()
     assert dispatched is not None
+    pending = revisions.pending_execution_items()
+    assert len(pending) == 1
+    assert pending[0].attempt_id == dispatched.item.attempt_id
     agent.release.set()
     for _ in range(300):
         if not adapter.has_live_workers:
             break
         await asyncio.sleep(0.01)
-    truth = revisions.truth(task_id, _scope())
-    terminal = await adapter.status(truth.task, truth.attempt)
-    assert isinstance(terminal, ExecutorDeliveryResult)
-    task_store.apply_observations(terminal.observations)
-    truth = revisions.truth(task_id, _scope())
-    ack = await TaskRevisionFixtureVerifier(
-        registry, cleanup_proof=adapter.revision_cleanup_resolved
-    ).verify(
-        item=dispatched.item,
-        delivery=terminal,
-        task_revision=truth.current_revision.task_revision,
-        constraints=truth.current_revision.constraints,
+    reopened = SqliteTaskRevisionStore(SqliteTaskStore(task_store.database_path))
+    resumed = TaskRevisionExecutionCoordinator(
+        reopened, adapter, registry, worker_id="revision-worker-restarted"
     )
-    revisions.record_execution_ack(_scope(), ack)
+    ack = await resumed.verify_once()
+    assert ack is not None and ack.verified_success is True
 
-    final = revisions.truth(task_id, _scope())
+    final = reopened.truth(task_id, _scope())
     assert final.current_revision.task_revision == 2
     assert final.execution_ack is not None
     assert final.execution_ack.verified_success is True
     assert final.execution_ack.changed_paths == ("src/result.py",)
     assert final.cleanup_ack is not None
     assert final.cleanup_ack.checkout_identity == manifest.checkout_identity
+    assert reopened.pending_execution_items() == ()
     await adapter.close()

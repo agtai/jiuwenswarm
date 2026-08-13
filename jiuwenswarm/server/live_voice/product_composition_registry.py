@@ -48,7 +48,7 @@ from .critical_token_safety import (
     ProtectedRoute,
     SpeechAlternativeEvidence,
 )
-from .formal_task_models import FormalTaskViolation, ResolvedTaskContext
+from .formal_task_models import FormalTaskViolation, ResolvedTaskContext, utc_now
 from .interaction_engine import InteractionEnginePort
 from .p3_authenticated_composition import (
     P3_MUTATIONS,
@@ -127,6 +127,23 @@ from .task_progress_return import (
     TaskProgressReturnState,
     TaskProgressTextEvent,
 )
+from .task_revision import (
+    S8_5_TASK_REVISION_OPERATIONS,
+    TaskRevisionConstraints,
+    TaskRevisionGrant,
+)
+from .task_revision_bridge import (
+    BoundedTaskRevisionVoiceBridge,
+    PreparedTaskRevision,
+    TaskRevisionBridgeViolation,
+    TaskRevisionIntentDisposition,
+    TaskRevisionPolicyAdapter,
+)
+from .task_revision_executor import (
+    TaskRevisionExecutionCoordinator,
+    TrustedRevisionFixtureRegistry,
+)
+from .task_revision_store import SqliteTaskRevisionStore
 from .voice_task_bridge import (
     ResolvedTaskIntent,
     TaskIntentDisposition,
@@ -143,6 +160,7 @@ PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENA
 PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV = (
     "JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED"
 )
+PRODUCT_S8_5_FIXTURE_MANIFEST_ENV = "JIUWENSWARM_LIVE_VOICE_S8_5_FIXTURE_MANIFEST"
 PRODUCT_CRITICAL_INPUT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED"
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
 # The only Agent profile whose facade implements the formal Live Voice seam.
@@ -402,6 +420,16 @@ class _PendingTaskIntent:
 
 
 @dataclass(frozen=True, slots=True)
+class _PendingTaskRevision:
+    token: str
+    prepared: PreparedTaskRevision
+    commit: TurnCommit
+    session_id: str
+    correlation_id: str
+    origin_key: str
+
+
+@dataclass(frozen=True, slots=True)
 class _VoiceTaskOrigin:
     session_id: str
     interaction_id: str
@@ -580,6 +608,10 @@ class AgentServerProductCompositionRegistry:
             [str, ScopeRef], Mapping[str, object] | None
         ]
         | None = None,
+        task_revision_store: SqliteTaskRevisionStore | None = None,
+        task_revision_fixtures: TrustedRevisionFixtureRegistry | None = None,
+        task_revision_coordinator: TaskRevisionExecutionCoordinator | None = None,
+        clock: Callable[[], str] = utc_now,
     ) -> None:
         if not isinstance(settings, ProductCompositionSettings):
             raise ValueError("product composition settings are required")
@@ -606,12 +638,16 @@ class AgentServerProductCompositionRegistry:
             enabled=settings.critical_input_enabled
         )
         self._task_revision_truth_reader = task_revision_truth_reader
+        self._task_revision_store = task_revision_store
+        self._task_revision_fixtures = task_revision_fixtures
+        self._task_revision_coordinator = task_revision_coordinator
+        self._clock = clock
         self._critical_input_sequence = 0
         self._critical_input_commit_generations: dict[str, tuple[str, int]] = {}
         self._critical_input_guarded_commits: set[str] = set()
         self._p3_confirmation_generation = (
             secrets.randbits(52) + 1
-            if settings.p3_mutation_enabled
+            if (settings.p3_mutation_enabled or settings.s8_5_task_revision_enabled)
             and p3_confirmation_owner is not None
             and p3_confirmation_forwarder is not None
             else None
@@ -619,6 +655,8 @@ class AgentServerProductCompositionRegistry:
         self._lock = asyncio.Lock()
         self._p3_operation_lock = asyncio.Lock()
         self._stopped = False
+        self._task_revision_wake = asyncio.Event()
+        self._task_revision_worker: asyncio.Task[None] | None = None
         self._p2_routes: dict[tuple[str, str], _P2Route] = {}
         self._closed_p2_routes: dict[tuple[str, str], _ClosedP2Route] = {}
         self._progress_routes: dict[tuple[str, str, str, str], _ProgressRoute] = {}
@@ -654,10 +692,30 @@ class AgentServerProductCompositionRegistry:
         self._p3_mutation_operations: dict[str, _RetainedProductOperation] = {}
         self._p3_intent_operations: dict[str, _RetainedProductOperation] = {}
         self._pending_task_intents: dict[str, _PendingTaskIntent] = {}
+        self._pending_task_revisions: dict[str, _PendingTaskRevision] = {}
         self._voice_task_origins: dict[str, _VoiceTaskOrigin] = {}
         self._task_intent_bridge = (
             VoiceTaskBridge()
-            if settings.p3_text_enabled or settings.p3_mutation_enabled
+            if settings.p3_text_enabled
+            or settings.p3_mutation_enabled
+            or settings.s8_5_task_revision_enabled
+            else None
+        )
+        self._task_revision_bridge = (
+            BoundedTaskRevisionVoiceBridge(
+                enabled=True,
+                commits=self._commit_ledger,
+                targets=task_revision_store,
+            )
+            if settings.s8_5_task_revision_enabled and task_revision_store is not None
+            else None
+        )
+        self._task_revision_policy = (
+            TaskRevisionPolicyAdapter(
+                commits=self._commit_ledger,
+                targets=task_revision_store,
+            )
+            if settings.s8_5_task_revision_enabled and task_revision_store is not None
             else None
         )
         # Fixed-size fail-closed membership fence: evicted request IDs can be
@@ -3282,6 +3340,54 @@ class AgentServerProductCompositionRegistry:
             and self._p3_confirmation_generation is not None
         )
 
+    def _task_revision_control_ready(self) -> bool:
+        return bool(
+            self._settings.s8_5_task_revision_enabled
+            and self._p3_confirmation_owner is not None
+            and self._p3_confirmation_forwarder is not None
+            and self._p3_confirmation_generation is not None
+            and self._task_revision_store is not None
+            and self._task_revision_fixtures is not None
+            and self._task_revision_coordinator is not None
+            and self._task_revision_bridge is not None
+            and self._task_revision_policy is not None
+        )
+
+    async def start(self) -> None:
+        """Start the separately gated durable revision outbox pump."""
+
+        if not self._task_revision_control_ready() or self._task_revision_worker:
+            return
+        self._task_revision_worker = asyncio.create_task(
+            self._task_revision_loop(),
+            name="live-voice-s8-5-task-revision",
+        )
+        self._task_revision_wake.set()
+
+    async def _task_revision_loop(self) -> None:
+        coordinator = self._task_revision_coordinator
+        assert coordinator is not None
+        while not self._stopped:
+            try:
+                await asyncio.wait_for(self._task_revision_wake.wait(), timeout=1.0)
+            except TimeoutError:
+                pass
+            self._task_revision_wake.clear()
+            if self._stopped:
+                return
+            try:
+                while await coordinator.fence_once() is not None:
+                    pass
+                while await coordinator.dispatch_once() is not None:
+                    pass
+                await coordinator.verify_once()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[LiveVoiceProduct] S8.5 task revision recovery failed closed"
+                )
+
     @staticmethod
     def _p3_control_manifest() -> ProductCompositionManifest:
         return create_product_composition_manifest(
@@ -4028,9 +4134,8 @@ class AgentServerProductCompositionRegistry:
             if activation.lease is not None:
                 await activation.lease.close()
 
-    @staticmethod
     def _validate_task_intent_params(
-        params: Mapping[str, object], *, session_id: str | None
+        self, params: Mapping[str, object], *, session_id: str | None
     ) -> dict[str, object]:
         allowed = frozenset(
             {
@@ -4067,10 +4172,13 @@ class AgentServerProductCompositionRegistry:
         operation = _required_text(
             params.get("operation_hint"), "operation_hint", maximum=32
         )
-        if operation not in {"task.create", "task.status", "task.cancel"}:
+        allowed_operations = {"task.create", "task.status", "task.cancel"}
+        if self._settings.s8_5_task_revision_enabled:
+            allowed_operations.update(S8_5_TASK_REVISION_OPERATIONS)
+        if operation not in allowed_operations:
             raise FormalTaskViolation(
                 "UNSUPPORTED_FORMAL_TASK_INTENT",
-                "natural-language Alpha supports create, status and cancel",
+                "natural-language operation is outside the enabled bounded profile",
                 ErrorCode.UNSUPPORTED,
             )
         task_id = params.get("task_id_hint")
@@ -4103,6 +4211,12 @@ class AgentServerProductCompositionRegistry:
             if key in params:
                 clean[key] = _required_text(params[key], key)
         if source == "text":
+            if operation in S8_5_TASK_REVISION_OPERATIONS:
+                raise FormalTaskViolation(
+                    "TASK_REVISION_VOICE_ORIGIN_REQUIRED",
+                    "S8.5 task revision accepts only a committed Live Voice origin",
+                    ErrorCode.PERMISSION_DENIED,
+                )
             clean["committed_at"] = _required_text(
                 params.get("committed_at"), "committed_at", maximum=64
             )
@@ -4134,6 +4248,12 @@ class AgentServerProductCompositionRegistry:
             if operation == "task.status":
                 if not self._settings.p3_text_enabled:
                     return _error_result(request_id, reason="PRODUCT_P3_TEXT_DISABLED")
+            elif operation in S8_5_TASK_REVISION_OPERATIONS:
+                if not self._task_revision_control_ready():
+                    return _error_result(
+                        request_id,
+                        reason="TASK_REVISION_PRODUCT_ROUTE_UNAVAILABLE",
+                    )
             elif not self._p3_control_ready():
                 return _error_result(
                     request_id, reason="P3_CONFIRMATION_ISSUER_UNAVAILABLE"
@@ -4329,7 +4449,10 @@ class AgentServerProductCompositionRegistry:
                     or retained.intent_session_id != routed_session
                     or retained.intent_correlation_id != correlation_id
                     or retained.intent_operation
-                    not in {"task.create", "task.status", "task.cancel"}
+                    not in (
+                        {"task.create", "task.status", "task.cancel"}
+                        | S8_5_TASK_REVISION_OPERATIONS
+                    )
                     or retained.intent_source not in {"text", "voice"}
                     or retained.intent_scope is None
                 ):
@@ -4380,23 +4503,51 @@ class AgentServerProductCompositionRegistry:
                 )
                 if isinstance(confirmation_token, str):
                     async with self._lock:
-                        pending = self._pending_task_intents.get(confirmation_token)
-                        pending_is_current = bool(
-                            pending is not None
-                            and pending.session_id == retained.intent_session_id
-                            and pending.correlation_id == retained.intent_correlation_id
-                            and pending.source == retained.intent_source
-                            and pending.origin_key == retained.intent_interaction_id
-                            and pending.commit.turn_id == retained.intent_turn_id
-                            and pending.commit.commit_id == retained.intent_commit_id
-                            and pending.resolution.operation
-                            == retained.intent_operation
-                            and pending.resolution.task_id == retained.intent_task_id
-                            and pending.resolution.resolution_id
-                            == safe.get("resolution_id")
-                            and pending.resolution.commit_sha256
-                            == safe.get("commit_sha256")
-                        )
+                        if retained.intent_operation in S8_5_TASK_REVISION_OPERATIONS:
+                            revision = self._pending_task_revisions.get(
+                                confirmation_token
+                            )
+                            pending_is_current = bool(
+                                revision is not None
+                                and revision.session_id == retained.intent_session_id
+                                and revision.correlation_id
+                                == retained.intent_correlation_id
+                                and retained.intent_source == "voice"
+                                and revision.origin_key
+                                == retained.intent_interaction_id
+                                and revision.commit.turn_id == retained.intent_turn_id
+                                and revision.commit.commit_id
+                                == retained.intent_commit_id
+                                and revision.prepared.command.operation.value
+                                == retained.intent_operation
+                                and revision.prepared.command.task_id
+                                == retained.intent_task_id
+                                and revision.prepared.draft.resolution_id
+                                == safe.get("resolution_id")
+                                and revision.prepared.draft.commit_sha256
+                                == safe.get("commit_sha256")
+                            )
+                        else:
+                            pending = self._pending_task_intents.get(confirmation_token)
+                            pending_is_current = bool(
+                                pending is not None
+                                and pending.session_id == retained.intent_session_id
+                                and pending.correlation_id
+                                == retained.intent_correlation_id
+                                and pending.source == retained.intent_source
+                                and pending.origin_key == retained.intent_interaction_id
+                                and pending.commit.turn_id == retained.intent_turn_id
+                                and pending.commit.commit_id
+                                == retained.intent_commit_id
+                                and pending.resolution.operation
+                                == retained.intent_operation
+                                and pending.resolution.task_id
+                                == retained.intent_task_id
+                                and pending.resolution.resolution_id
+                                == safe.get("resolution_id")
+                                and pending.resolution.commit_sha256
+                                == safe.get("commit_sha256")
+                            )
                     if not pending_is_current:
                         return _success_result(
                             request_id,
@@ -4545,6 +4696,10 @@ class AgentServerProductCompositionRegistry:
             ):
                 self._pending_task_intents.pop(token, None)
                 self._release_task_intent_commit_locked(pending.commit, pending.source)
+        for token, pending in tuple(self._pending_task_revisions.items()):
+            if (pending.session_id, pending.origin_key) == route_key:
+                self._pending_task_revisions.pop(token, None)
+                self._release_task_intent_commit_locked(pending.commit, "voice")
 
     def _evict_oldest_pending_task_intent_locked(self) -> bool:
         try:
@@ -4554,6 +4709,407 @@ class AgentServerProductCompositionRegistry:
         pending = self._pending_task_intents.pop(token)
         self._release_task_intent_commit_locked(pending.commit, pending.source)
         return True
+
+    def _evict_oldest_pending_task_revision_locked(self) -> bool:
+        try:
+            token = next(iter(self._pending_task_revisions))
+        except StopIteration:
+            return False
+        pending = self._pending_task_revisions.pop(token)
+        self._release_task_intent_commit_locked(pending.commit, "voice")
+        return True
+
+    @staticmethod
+    def _task_revision_facts(prepared: PreparedTaskRevision) -> dict[str, object]:
+        draft = prepared.draft
+        return {
+            "resolver_provider": "bounded_task_revision_voice_bridge",
+            "resolver_implementation_class": "deterministic",
+            "resolution_id": draft.resolution_id,
+            "commit_sha256": draft.commit_sha256,
+            "operation": prepared.command.operation.value,
+            "task_id": prepared.command.task_id,
+            "task_revision": prepared.command.expected_task_revision,
+            "attempt_id": prepared.command.expected_attempt_id,
+            "source_span": (
+                None
+                if draft.source_span is None
+                else {
+                    "start": draft.source_span.start,
+                    "end": draft.source_span.end,
+                }
+            ),
+            "command_fingerprint_sha256": (prepared.command_fingerprint_sha256),
+        }
+
+    async def _run_task_revision_intent(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        canonical: ResolvedProductAuthority,
+        commit: TurnCommit,
+    ) -> P3RouteResult:
+        bridge = self._task_revision_bridge
+        policy = self._task_revision_policy
+        if bridge is None or policy is None:
+            async with self._lock:
+                self._release_task_intent_commit_locked(commit, "voice")
+            return _error_result(
+                request_id, reason="TASK_REVISION_PRODUCT_ROUTE_UNAVAILABLE"
+            )
+        confirmation_token: str | None = None
+        try:
+            confirmation_resolution = self._task_intent_bridge.resolve(
+                commit, canonical.scope
+            )
+            confirmation_token = confirmation_resolution.confirmation_token
+        except VoiceTaskBridgeViolation:
+            # A revision form is intentionally outside the older create/status/
+            # cancel bridge.  Only its exact confirmation grammar is reused.
+            pass
+        if confirmation_token is not None:
+            return await self._confirm_pending_task_revision(
+                clean=clean,
+                request_id=request_id,
+                canonical=canonical,
+                commit=commit,
+                confirmation_token=confirmation_token,
+            )
+        task_id = str(clean["task_id_hint"])
+        try:
+            draft = bridge.resolve(
+                commit,
+                authorized_scope=canonical.scope,
+                task_id=task_id,
+            )
+        except TaskRevisionBridgeViolation as exc:
+            async with self._lock:
+                self._release_task_intent_commit_locked(commit, "voice")
+            return self._intent_rejected_result(
+                request_id,
+                reason=exc.reason,
+                code=exc.code,
+                message=str(exc),
+                origin_kind="voice",
+                origin_id=commit.interaction_id,
+            )
+        if draft.disposition is not TaskRevisionIntentDisposition.CONFIRMATION_REQUIRED:
+            async with self._lock:
+                self._release_task_intent_commit_locked(commit, "voice")
+            disposition = (
+                TaskIntentDisposition.CLARIFICATION.value
+                if draft.disposition
+                is TaskRevisionIntentDisposition.CLARIFICATION_REQUIRED
+                else TaskIntentDisposition.REJECTED.value
+            )
+            payload = {
+                "status": disposition,
+                "reason": draft.reason,
+                "operation": None,
+                "task_id": task_id,
+                "origin_kind": "voice",
+                "origin_id": commit.interaction_id,
+                "confirmation_token": None,
+                "partial_command_count": 0,
+            }
+            if disposition == TaskIntentDisposition.CLARIFICATION.value:
+                return _success_result(request_id, payload, self._p3_control_manifest())
+            return P3RouteResult(
+                False,
+                {
+                    "request_id": request_id,
+                    "ok": False,
+                    "result": payload,
+                    "error": {
+                        "code": ErrorCode.UNSUPPORTED.value,
+                        "reason": draft.reason,
+                        "message": "committed voice is outside the S8.5 revision forms",
+                    },
+                    "product_composition": _serialize_manifest(
+                        self._p3_control_manifest()
+                    ),
+                },
+            )
+        if (
+            draft.operation is None
+            or draft.operation.value != clean["operation_hint"]
+            or draft.target.task_id != task_id
+        ):
+            async with self._lock:
+                self._release_task_intent_commit_locked(commit, "voice")
+            return self._intent_rejected_result(
+                request_id,
+                reason="TASK_INTENT_HINT_MISMATCH",
+                code=ErrorCode.PERMISSION_DENIED,
+                message="request hints do not match the committed revision intent",
+                origin_kind="voice",
+                origin_id=commit.interaction_id,
+            )
+        try:
+            prepared = policy.prepare(
+                draft,
+                request_id=request_id,
+                command_id=f"revision-{draft.resolution_id}",
+                issued_at=commit.committed_at,
+                correlation_id=str(clean["correlation_id"]),
+            )
+        except TaskRevisionBridgeViolation as exc:
+            async with self._lock:
+                self._release_task_intent_commit_locked(commit, "voice")
+            return self._intent_rejected_result(
+                request_id,
+                reason=exc.reason,
+                code=exc.code,
+                message=str(exc),
+                origin_kind="voice",
+                origin_id=commit.interaction_id,
+            )
+        token = draft.resolution_id[:32]
+        pending = _PendingTaskRevision(
+            token=token,
+            prepared=prepared,
+            commit=commit,
+            session_id=str(clean["session_id"]),
+            correlation_id=str(clean["correlation_id"]),
+            origin_key=commit.interaction_id,
+        )
+        async with self._lock:
+            route_key = (pending.session_id, pending.origin_key)
+            retained_route = self._p2_routes.get(route_key)
+            if (
+                self._stopped
+                or retained_route is None
+                or retained_route.binding.scope != commit.scope
+                or retained_route.binding.correlation_id != pending.correlation_id
+                or self._accepted_turn_commits_by_commit.get(commit.commit_id)
+                is not commit
+                or self._accepted_voice_commit_routes.get(commit.commit_id) != route_key
+            ):
+                self._release_task_intent_commit_locked(commit, "voice")
+                return self._intent_rejected_result(
+                    request_id,
+                    reason="VOICE_TASK_ROUTE_MISMATCH",
+                    code=ErrorCode.PERMISSION_DENIED,
+                    message="revision intent lost its exact live P2 route",
+                    origin_kind="voice",
+                    origin_id=commit.interaction_id,
+                )
+            existing = self._pending_task_revisions.get(token)
+            if existing is not None and existing != pending:
+                # A second request ID may present the same accepted commit.  It
+                # must fail without releasing the origin owned by the first
+                # pending confirmation; only a true digest collision owns a
+                # distinct commit that is safe to retire here.
+                if existing.commit is not commit:
+                    self._release_task_intent_commit_locked(commit, "voice")
+                return self._intent_rejected_result(
+                    request_id,
+                    reason="TASK_REVISION_RESOLUTION_CONFLICT",
+                    code=ErrorCode.CONFLICT,
+                    message="revision confirmation token collided",
+                    origin_kind="voice",
+                    origin_id=commit.interaction_id,
+                )
+            if (
+                existing is None
+                and len(self._pending_task_revisions)
+                >= self._PRODUCT_OPERATION_CAPACITY
+                and not self._evict_oldest_pending_task_revision_locked()
+            ):
+                self._release_task_intent_commit_locked(commit, "voice")
+                return self._intent_rejected_result(
+                    request_id,
+                    reason="TASK_REVISION_CONFIRMATION_CAPACITY_UNAVAILABLE",
+                    code=ErrorCode.UNAVAILABLE,
+                    message="bounded revision confirmation capacity is full",
+                    origin_kind="voice",
+                    origin_id=commit.interaction_id,
+                )
+            self._pending_task_revisions[token] = pending
+        return _success_result(
+            request_id,
+            {
+                "status": TaskIntentDisposition.CLARIFICATION.value,
+                "reason": "TASK_REVISION_CONFIRMATION_REQUIRED",
+                **self._task_revision_facts(prepared),
+                "origin_kind": "voice",
+                "origin_id": commit.interaction_id,
+                "confirmation_token": token,
+                "confirmation_form": f"confirm task request {token}",
+                "confirmation_prompt": prepared.confirmation_prompt,
+                "partial_command_count": 0,
+            },
+            self._p3_control_manifest(),
+        )
+
+    async def _confirm_pending_task_revision(
+        self,
+        *,
+        clean: Mapping[str, object],
+        request_id: str,
+        canonical: ResolvedProductAuthority,
+        commit: TurnCommit,
+        confirmation_token: str,
+    ) -> P3RouteResult:
+        token = confirmation_token.lower()
+        async with self._lock:
+            pending = self._pending_task_revisions.get(token)
+            if (
+                pending is None
+                or pending.session_id != clean["session_id"]
+                or pending.origin_key != commit.interaction_id
+                or pending.commit.commit_id == commit.commit_id
+                or pending.commit.turn_id == commit.turn_id
+                or pending.prepared.command.operation.value != clean["operation_hint"]
+                or pending.prepared.command.task_id != clean.get("task_id_hint")
+                or pending.commit.scope != commit.scope
+                or canonical.scope != pending.prepared.command.scope
+                or canonical.principal_id != pending.prepared.command.scope.subject_id
+            ):
+                self._release_task_intent_commit_locked(commit, "voice")
+                return self._intent_rejected_result(
+                    request_id,
+                    reason="TASK_REVISION_CONFIRMATION_BINDING_MISMATCH",
+                    code=ErrorCode.PERMISSION_DENIED,
+                    message="confirmation does not bind the exact pending revision",
+                    origin_kind="voice",
+                    origin_id=commit.interaction_id,
+                )
+            self._pending_task_revisions.pop(token, None)
+
+        owner = self._p3_confirmation_owner
+        forwarder = self._p3_confirmation_forwarder
+        generation = self._p3_confirmation_generation
+        store = self._task_revision_store
+        fixtures = self._task_revision_fixtures
+        policy = self._task_revision_policy
+        assert owner is not None
+        assert forwarder is not None
+        assert generation is not None
+        assert store is not None
+        assert fixtures is not None
+        assert policy is not None
+        prepared = pending.prepared
+        binding = P3ConfirmationBinding(
+            principal_id=canonical.principal_id,
+            scope=canonical.scope,
+            operation=prepared.command.operation.value,
+            command_id=prepared.command.command_id,
+            target_task_id=prepared.command.task_id,
+            intent_fingerprint=prepared.command_fingerprint_sha256,
+        )
+        owner_context = P3ConfirmationOwnerContext(
+            session_id=pending.session_id,
+            correlation_id=pending.correlation_id,
+            owner_generation=generation,
+        )
+        observed_at = self._clock()
+        observed = datetime.fromisoformat(
+            observed_at.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        authority_expiry = datetime.fromisoformat(
+            canonical.expires_at.replace("Z", "+00:00")
+        ).astimezone(UTC)
+        expires = min(observed + P3_CONFIRMATION_MAX_TTL, authority_expiry)
+        expires_at = expires.isoformat(timespec="microseconds").replace("+00:00", "Z")
+        confirmation_id = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "generation": generation,
+                    "token": token,
+                    "binding": {
+                        "principal_id": binding.principal_id,
+                        "scope": binding.scope.to_dict(),
+                        "operation": binding.operation,
+                        "command_id": binding.command_id,
+                        "task_id": binding.target_task_id,
+                        "intent_fingerprint": binding.intent_fingerprint,
+                    },
+                }
+            )
+        ).hexdigest()
+        try:
+            async with self._p3_operation_lock:
+                await asyncio.to_thread(
+                    owner.issue,
+                    TrustedP3ConfirmationIssue(
+                        binding=binding,
+                        owner=owner_context,
+                        expires_at=expires_at,
+                        confirmation_id=confirmation_id,
+                    ),
+                    now=observed_at,
+                )
+                validated = await asyncio.to_thread(
+                    owner.validate_for_forwarding,
+                    confirmation_id,
+                    binding,
+                    owner_context,
+                    now=observed_at,
+                )
+                with forwarder.permit(validated):
+                    verified = await asyncio.to_thread(
+                        forwarder.verify_and_consume,
+                        confirmation_id,
+                        binding,
+                        now=observed_at,
+                    )
+                grant = TaskRevisionGrant(
+                    principal_id=canonical.principal_id,
+                    scope=canonical.scope,
+                    operation=prepared.command.operation,
+                    command_id=prepared.command.command_id,
+                    task_id=prepared.command.task_id,
+                    expected_task_revision=(prepared.command.expected_task_revision),
+                    expected_attempt_id=prepared.command.expected_attempt_id,
+                    command_fingerprint=prepared.command.fingerprint(),
+                    confirmation_id=verified.confirmation_id,
+                    confirmed=True,
+                    expires_at=verified.expires_at,
+                )
+                command = policy.authorize(prepared, grant, now=observed_at)
+                fixture = fixtures.fixture(canonical.scope.project_id)
+                receipt = await asyncio.to_thread(
+                    store.request_revision,
+                    command,
+                    grant,
+                    initial_constraints=TaskRevisionConstraints(
+                        fixture.write_scope,
+                        regression_verifier_required=True,
+                    ),
+                    observed_at=observed_at,
+                )
+        except Exception as exc:  # noqa: BLE001 - authoritative path fails closed
+            async with self._lock:
+                self._release_task_intent_commit_locked(pending.commit, "voice")
+                self._release_task_intent_commit_locked(commit, "voice")
+            return self._intent_rejected_result(
+                request_id,
+                reason=getattr(exc, "reason", "TASK_REVISION_DISPATCH_REJECTED"),
+                code=getattr(exc, "code", ErrorCode.UNAVAILABLE),
+                message=str(exc),
+                origin_kind="voice",
+                origin_id=pending.origin_key,
+            )
+        async with self._lock:
+            self._release_task_intent_commit_locked(pending.commit, "voice")
+            self._release_task_intent_commit_locked(commit, "voice")
+        self._task_revision_wake.set()
+        return _success_result(
+            request_id,
+            {
+                "status": TaskIntentDisposition.DISPATCHED.value,
+                "reason": "TASK_REVISION_ACCEPTED",
+                **self._task_revision_facts(prepared),
+                "origin_kind": "voice",
+                "origin_id": pending.origin_key,
+                "confirmation_commit_id": commit.commit_id,
+                "confirmation_id": confirmation_id,
+                "formal_task_result": receipt.to_dict(),
+            },
+            self._p3_control_manifest(),
+        )
 
     async def _run_p3_intent(
         self,
@@ -4579,6 +5135,13 @@ class AgentServerProductCompositionRegistry:
                 message="committed task intent origin was rejected",
             )
         assert commit is not None
+        if clean["operation_hint"] in S8_5_TASK_REVISION_OPERATIONS:
+            return await self._run_task_revision_intent(
+                clean=clean,
+                request_id=request_id,
+                canonical=canonical,
+                commit=commit,
+            )
         try:
             resolution = bridge.resolve(commit, canonical.scope)
         except VoiceTaskBridgeViolation as exc:
@@ -5141,10 +5704,7 @@ class AgentServerProductCompositionRegistry:
                     manifest=activation.manifest,
                 )
             payload = envelope.to_dict()
-            if (
-                self._settings.s8_5_task_revision_enabled
-                and operation == "task.status"
-            ):
+            if self._settings.s8_5_task_revision_enabled and operation == "task.status":
                 revision_reader = self._task_revision_truth_reader
                 canonical = state.canonical
                 result_payload = payload.get("result")
@@ -6153,6 +6713,12 @@ class AgentServerProductCompositionRegistry:
 
     async def stop(self) -> None:
         self._stopped = True
+        self._task_revision_wake.set()
+        revision_worker = self._task_revision_worker
+        if revision_worker is not None:
+            revision_worker.cancel()
+            await asyncio.gather(revision_worker, return_exceptions=True)
+            self._task_revision_worker = None
         await self.close_active_routes()
         retained_tasks = tuple(
             entry.task
@@ -6178,6 +6744,9 @@ class AgentServerProductCompositionRegistry:
                         pending.commit, pending.source
                     )
             self._pending_task_intents.clear()
+            for pending in tuple(self._pending_task_revisions.values()):
+                self._release_task_intent_commit_locked(pending.commit, "voice")
+            self._pending_task_revisions.clear()
             self._voice_task_origins.clear()
             retained_voice_origins = (
                 tuple(self._accepted_turn_commits_by_commit.values())
@@ -6210,19 +6779,46 @@ def create_product_composition_registry_from_environment(
             ErrorCode.UNAVAILABLE,
         )
     settings = ProductCompositionSettings.from_environment()
-    if settings.s8_5_task_revision_enabled and not settings.p3_text_enabled:
+    if settings.s8_5_task_revision_enabled and (
+        not settings.p2_enabled or not settings.p3_text_enabled
+    ):
         raise FormalTaskViolation(
             "INVALID_PRODUCT_COMPOSITION_CONFIGURATION",
-            "S8.5 task revision projection requires the authenticated P3 text query route",
+            "S8.5 task revision requires authenticated P2 Voice and P3 text routes",
             ErrorCode.INVALID_ARGUMENT,
         )
     task_revision_truth_reader: (
         Callable[[str, ScopeRef], Mapping[str, object] | None] | None
     ) = None
+    revision_store: SqliteTaskRevisionStore | None = None
+    revision_fixtures: TrustedRevisionFixtureRegistry | None = None
+    revision_coordinator: TaskRevisionExecutionCoordinator | None = None
     if settings.s8_5_task_revision_enabled:
-        from .task_revision_store import SqliteTaskRevisionStore
+        from .task_revision_executor import (
+            load_trusted_revision_fixture_registry,
+        )
 
+        fixture_manifest = str(
+            os.getenv(PRODUCT_S8_5_FIXTURE_MANIFEST_ENV) or ""
+        ).strip()
+        if (
+            not fixture_manifest
+            or p3_confirmation_owner is None
+            or p3_confirmation_forwarder is None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_PRODUCT_COMPOSITION_CONFIGURATION",
+                "S8.5 task revision requires its fixture registry and confirmation owner",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         revision_store = SqliteTaskRevisionStore(p3_composition.task_store)
+        revision_fixtures = load_trusted_revision_fixture_registry(fixture_manifest)
+        revision_coordinator = TaskRevisionExecutionCoordinator(
+            revision_store,
+            p3_composition.task_executor,
+            revision_fixtures,
+            worker_id="agent-server.s8-5",
+        )
 
         def read_task_revision_truth(
             task_id: str, scope: ScopeRef
@@ -6246,6 +6842,9 @@ def create_product_composition_registry_from_environment(
         commit_ledger=commit_ledger,
         critical_token_gate=critical_token_gate,
         task_revision_truth_reader=task_revision_truth_reader,
+        task_revision_store=revision_store,
+        task_revision_fixtures=revision_fixtures,
+        task_revision_coordinator=revision_coordinator,
     )
 
 
@@ -6259,6 +6858,7 @@ __all__ = [
     "PRODUCT_P3_MUTATION_ENABLE_ENV",
     "PRODUCT_P3_TEXT_ENABLE_ENV",
     "PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV",
+    "PRODUCT_S8_5_FIXTURE_MANIFEST_ENV",
     "ProductCompositionSettings",
     "create_product_composition_registry_from_environment",
     "product_composition_enabled_from_environment",

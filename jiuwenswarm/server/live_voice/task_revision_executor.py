@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -419,12 +420,139 @@ class TrustedRevisionFixtureRegistry:
             ) from error
 
 
+def load_trusted_revision_fixture_registry(
+    manifest_path: str | os.PathLike[str],
+) -> TrustedRevisionFixtureRegistry:
+    """Load one exact server-owned fixture registry from machine-private JSON."""
+
+    try:
+        path = Path(manifest_path).expanduser().resolve(strict=True)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise FormalTaskViolation(
+            "TASK_REVISION_FIXTURE_REGISTRY_UNAVAILABLE",
+            "S8.5 fixture registry could not be loaded",
+            ErrorCode.UNAVAILABLE,
+        ) from error
+    if (
+        type(payload) is not dict
+        or set(payload)
+        != {
+            "profile",
+            "fixtures",
+            "verifiers",
+        }
+        or payload.get("profile") != S8_5_FIXTURE_PROFILE
+    ):
+        raise FormalTaskViolation(
+            "INVALID_TASK_REVISION_FIXTURE_REGISTRY",
+            "S8.5 fixture registry has incomplete or unknown fields",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    raw_fixtures = payload.get("fixtures")
+    raw_verifiers = payload.get("verifiers")
+    if type(raw_fixtures) is not list or type(raw_verifiers) is not list:
+        raise FormalTaskViolation(
+            "INVALID_TASK_REVISION_FIXTURE_REGISTRY",
+            "S8.5 fixture and verifier registries must be arrays",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    if not raw_fixtures or not raw_verifiers:
+        raise FormalTaskViolation(
+            "INVALID_TASK_REVISION_FIXTURE_REGISTRY",
+            "S8.5 fixture registry must contain a fixture and verifier",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    fixture_fields = {
+        "fixture_id",
+        "project_id",
+        "fixture_parent",
+        "project_root",
+        "baseline_head",
+        "baseline_tree",
+        "baseline_content",
+        "write_scope",
+        "immutable_paths",
+        "verifier_id",
+    }
+    verifier_fields = {
+        "verifier_id",
+        "argv",
+        "timeout_seconds",
+        "maximum_output_bytes",
+    }
+    if any(
+        type(item) is not dict
+        or set(item) != fixture_fields
+        or type(item["write_scope"]) is not list
+        or not item["write_scope"]
+        or any(type(value) is not str for value in item["write_scope"])
+        or type(item["immutable_paths"]) is not list
+        or any(type(value) is not str for value in item["immutable_paths"])
+        for item in raw_fixtures
+    ) or any(
+        type(item) is not dict
+        or set(item) != verifier_fields
+        or type(item["argv"]) is not list
+        or not item["argv"]
+        or any(type(value) is not str for value in item["argv"])
+        for item in raw_verifiers
+    ):
+        raise FormalTaskViolation(
+            "INVALID_TASK_REVISION_FIXTURE_REGISTRY",
+            "S8.5 fixture registry entries have incomplete or unknown fields",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    try:
+        manifests = tuple(
+            TrustedRevisionFixtureManifest(
+                fixture_id=item["fixture_id"],
+                project_id=item["project_id"],
+                fixture_parent=item["fixture_parent"],
+                project_root=item["project_root"],
+                baseline_head=item["baseline_head"],
+                baseline_tree=item["baseline_tree"],
+                baseline_content=item["baseline_content"],
+                write_scope=tuple(item["write_scope"]),
+                immutable_paths=tuple(item["immutable_paths"]),
+                verifier_id=item["verifier_id"],
+            )
+            for item in raw_fixtures
+        )
+        verifiers = tuple(
+            TrustedVerifierCommand(
+                verifier_id=item["verifier_id"],
+                argv=tuple(item["argv"]),
+                timeout_seconds=item["timeout_seconds"],
+                maximum_output_bytes=item["maximum_output_bytes"],
+            )
+            for item in raw_verifiers
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise FormalTaskViolation(
+            "INVALID_TASK_REVISION_FIXTURE_REGISTRY",
+            "S8.5 fixture registry values are invalid",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from error
+    try:
+        registry = TrustedRevisionFixtureRegistry(manifests, verifiers)
+        for manifest in manifests:
+            manifest.require_original_clean_base()
+        return registry
+    except (OSError, TypeError, ValueError) as error:
+        if isinstance(error, FormalTaskViolation):
+            raise
+        raise FormalTaskViolation(
+            "INVALID_TASK_REVISION_FIXTURE_REGISTRY",
+            "S8.5 fixture registry failed validation",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from error
+
+
 def _sanitized_output(root: Path, payload: bytes, maximum: int) -> tuple[str, str]:
     bounded = payload[:maximum]
     text = bounded.decode("utf-8", errors="replace")
-    text = re.sub(
-        re.escape(str(root)), "<fixture>", text, flags=re.IGNORECASE
-    )
+    text = re.sub(re.escape(str(root)), "<fixture>", text, flags=re.IGNORECASE)
     text = re.sub(
         re.escape(str(root).replace("\\", "/")),
         "<fixture>",
@@ -613,8 +741,7 @@ class TaskRevisionFixtureVerifier:
             result,
             "successor_cleanup_resolved",
             forbidden_count,
-            result_name is TaskRevisionVerifierState.PASSED
-            and forbidden_count == 0,
+            result_name is TaskRevisionVerifierState.PASSED and forbidden_count == 0,
         )
 
 
@@ -645,6 +772,10 @@ class TaskRevisionExecutionCoordinator:
         self._executor = executor
         self._registry = registry
         self._worker_id = _text(worker_id, "worker_id")
+        self._verifier = TaskRevisionFixtureVerifier(
+            registry,
+            cleanup_proof=executor.revision_cleanup_resolved,
+        )
 
     async def fence_once(self) -> TaskRevisionReceipt | None:
         claimed = self._store.claim_fence(self._worker_id)
@@ -727,6 +858,53 @@ class TaskRevisionExecutionCoordinator:
             )
             return None
 
+    async def verify_once(self) -> TaskRevisionExecutionAck | None:
+        """Reconcile and verify one durably dispatched successor, if terminal."""
+
+        pending = self._store.pending_execution_items(limit=1)
+        if not pending:
+            return None
+        item = pending[0]
+        truth = self._store.truth(item.task_id, item.scope)
+        if truth.execution_ack is not None:
+            return truth.execution_ack
+        if truth.current_revision.attempt_id != item.attempt_id:
+            raise FormalTaskViolation(
+                "TASK_REVISION_VERIFICATION_BINDING_MISMATCH",
+                "pending verification is not the current revision attempt",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        delivery = await self._executor.revision_delivery(truth.task, truth.attempt)
+        if not delivery.observations:
+            return None
+        terminal = delivery.observations[-1]
+        if terminal.attempt_state is not FormalAttemptState.TERMINAL:
+            observations = tuple(
+                observation
+                for observation in delivery.observations
+                if observation.source_seq is not None
+                and observation.source_seq > truth.attempt.source_seq
+            )
+            if observations:
+                self._store.task_store.apply_observations(observations)
+            return None
+        observations = tuple(
+            observation
+            for observation in delivery.observations
+            if observation.source_seq is not None
+            and observation.source_seq > truth.attempt.source_seq
+        )
+        if observations:
+            self._store.task_store.apply_observations(observations)
+        refreshed = self._store.truth(item.task_id, item.scope)
+        ack = await self._verifier.verify(
+            item=item,
+            delivery=delivery,
+            task_revision=refreshed.current_revision.task_revision,
+            constraints=refreshed.current_revision.constraints,
+        )
+        return self._store.record_execution_ack(item.scope, ack)
+
 
 __all__ = [
     "S8_5_FIXTURE_MARKER",
@@ -737,4 +915,5 @@ __all__ = [
     "TrustedRevisionFixtureManifest",
     "TrustedRevisionFixtureRegistry",
     "TrustedVerifierCommand",
+    "load_trusted_revision_fixture_registry",
 ]

@@ -1,7 +1,12 @@
 export const PRODUCT_P3_TASK_INTENT_METHOD = 'live_voice.composition.p3.intent' as const;
 export const PRODUCT_P3_TASK_INTENT_STATUS_METHOD = 'live_voice.composition.p3.intent.status' as const;
 
-export type FormalTaskIntentOperation = 'task.create' | 'task.status' | 'task.cancel';
+export type FormalTaskIntentOperation =
+  | 'task.create'
+  | 'task.status'
+  | 'task.cancel'
+  | 'task.provide_input'
+  | 'task.update_constraints';
 export type FormalTaskIntentSource = 'text' | 'voice';
 export type FormalTaskIntentDisposition = 'dispatched' | 'clarification' | 'rejected';
 
@@ -36,7 +41,7 @@ export type FormalTaskIntentOwnerSnapshot = Readonly<{
     session_id: string;
     correlation_id: string;
     interaction_id: string;
-    operation: 'task.create' | 'task.cancel';
+    operation: Exclude<FormalTaskIntentOperation, 'task.status'>;
     task_id: string | null;
     token: string;
     form: string;
@@ -138,7 +143,11 @@ function parseRecoveryCheckpoint(value: unknown): FormalTaskIntentRecoveryCheckp
   const phase = raw.phase;
   if (
     (source !== 'text' && source !== 'voice') ||
-    (operation !== 'task.create' && operation !== 'task.status' && operation !== 'task.cancel') ||
+    (operation !== 'task.create' &&
+      operation !== 'task.status' &&
+      operation !== 'task.cancel' &&
+      operation !== 'task.provide_input' &&
+      operation !== 'task.update_constraints') ||
     (phase !== 'resolving' && phase !== 'clarification' && phase !== 'awaiting_confirmation') ||
     !Number.isSafeInteger(raw.generation) ||
     (raw.generation as number) <= 0
@@ -403,7 +412,14 @@ function parseIntentReceipt(
   if ((token === null) !== (form === null) || (token !== null && (!HEX_32.test(token) || form !== `confirm task request ${token}`))) {
     throw new Error('formal task intent confirmation binding is invalid');
   }
-  if (token !== null && (disposition !== 'clarification' || (operation !== 'task.create' && operation !== 'task.cancel'))) {
+  if (
+    token !== null &&
+    (disposition !== 'clarification' ||
+      (operation !== 'task.create' &&
+        operation !== 'task.cancel' &&
+        operation !== 'task.provide_input' &&
+        operation !== 'task.update_constraints'))
+  ) {
     throw new Error('formal task intent confirmation is not destructive and pending');
   }
   if (disposition === 'dispatched' && operation === null) throw new Error('dispatched task intent has no operation');
@@ -513,17 +529,20 @@ export class ProductFormalTaskIntentOwner {
   #ownedCheckpoint: FormalTaskIntentRecoveryCheckpoint | null = null;
   #recoveryBlocked = false;
   #closed = false;
+  readonly #taskRevisionEnabled: boolean;
 
   constructor(
     input: Readonly<{
       enabled: boolean;
       request: FormalTaskIntentRequest;
       recovery_journal?: FormalTaskIntentRecoveryJournal | null;
+      task_revision_enabled?: boolean;
     }>
   ) {
     this.#enabled = input.enabled;
     this.#request = input.request;
     this.#recoveryJournal = input.recovery_journal ?? null;
+    this.#taskRevisionEnabled = input.task_revision_enabled === true;
     this.#status = input.enabled ? 'idle' : 'disabled';
   }
 
@@ -667,8 +686,26 @@ export class ProductFormalTaskIntentOwner {
     if (!this.#enabled || this.#closed) return Promise.reject(new Error('formal task intent route is disabled'));
     const sessionId = requiredText(input.session_id, 'session_id');
     const correlationId = requiredText(input.correlation_id, 'correlation_id');
-    if (input.operation !== 'task.create' && input.operation !== 'task.status' && input.operation !== 'task.cancel') {
+    if (
+      input.operation !== 'task.create' &&
+      input.operation !== 'task.status' &&
+      input.operation !== 'task.cancel' &&
+      input.operation !== 'task.provide_input' &&
+      input.operation !== 'task.update_constraints'
+    ) {
       return Promise.reject(new Error('formal task intent operation is unsupported'));
+    }
+    const revisionOperation =
+      input.operation === 'task.provide_input' || input.operation === 'task.update_constraints';
+    if (revisionOperation && !this.#taskRevisionEnabled) {
+      this.#status = 'rejected';
+      this.#reason = 'TASK_REVISION_PRODUCT_ROUTE_DISABLED';
+      return Promise.reject(new Error('formal task revision route is disabled'));
+    }
+    if (revisionOperation && input.source !== 'voice') {
+      this.#status = 'rejected';
+      this.#reason = 'TASK_REVISION_VOICE_ORIGIN_REQUIRED';
+      return Promise.reject(new Error('formal task revision requires a committed voice origin'));
     }
     const taskId = input.operation === 'task.create' ? null : optionalTaskId(input.task_id);
     if ((input.operation === 'task.create') !== (taskId === null)) return Promise.reject(new Error('formal task intent target is invalid'));
@@ -843,7 +880,7 @@ export class ProductFormalTaskIntentOwner {
         session_id: binding.session_id,
         correlation_id: binding.correlation_id,
         interaction_id: interactionId,
-        operation: binding.operation as 'task.create' | 'task.cancel',
+        operation: binding.operation as Exclude<FormalTaskIntentOperation, 'task.status'>,
         task_id: binding.task_id,
         token: receipt.confirmation_token,
         form: receipt.confirmation_form,

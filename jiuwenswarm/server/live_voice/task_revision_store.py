@@ -1759,7 +1759,12 @@ class SqliteTaskRevisionStore:
         )
 
     @staticmethod
-    def _dispatch_item(row: sqlite3.Row, *, claim_token: str) -> PersistentOutboxItem:
+    def _dispatch_item(
+        row: sqlite3.Row,
+        *,
+        state: OutboxState = OutboxState.CLAIMED,
+        claim_token: str | None,
+    ) -> PersistentOutboxItem:
         payload = _json_load(row["payload_json"])
         if type(payload) is not dict or set(payload) != {"scope", "spec"}:
             raise FormalTaskViolation(
@@ -1785,7 +1790,7 @@ class SqliteTaskRevisionStore:
             spec=spec,
             executor_ref=None,
             source_seq=-1,
-            state=OutboxState.CLAIMED,
+            state=state,
             delivery_count=int(row["delivery_count"]),
             claim_token=claim_token,
         )
@@ -1953,6 +1958,45 @@ class SqliteTaskRevisionStore:
                 (OutboxState.DELIVERED.value, utc_now(), item.outbox_id),
             )
 
+    def pending_execution_items(
+        self, *, limit: int = 1
+    ) -> tuple[PersistentOutboxItem, ...]:
+        """Read durable dispatched successors that still need verifier ACKs.
+
+        Verification itself is read-only and the resulting ACK insert is
+        idempotent.  Keeping this queue derivable from the delivered dispatch
+        ledger makes a process restart resume verification without another
+        mutable queue or a client-supplied attempt identity.
+        """
+
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("limit must be between 1 and 32")
+        with self.task_store._reader() as connection:
+            connection.execute("BEGIN")
+            self._verify_schema(connection)
+            rows = connection.execute(
+                """
+                SELECT d.*
+                FROM s85_revision_dispatch_outbox AS d
+                JOIN s85_task_revisions AS r
+                  ON r.task_id=d.task_id AND r.attempt_id=d.attempt_id
+                LEFT JOIN s85_revision_execution_acks AS a
+                  ON a.task_id=r.task_id AND a.task_revision=r.task_revision
+                WHERE d.state=? AND a.task_id IS NULL
+                ORDER BY d.created_at, d.outbox_id
+                LIMIT ?
+                """,
+                (OutboxState.DELIVERED.value, limit),
+            ).fetchall()
+            return tuple(
+                self._dispatch_item(
+                    row,
+                    state=OutboxState.DELIVERED,
+                    claim_token=None,
+                )
+                for row in rows
+            )
+
     def record_execution_ack(
         self,
         scope: ScopeRef,
@@ -2068,9 +2112,7 @@ class SqliteTaskRevisionStore:
                     "verifier_id": ack.verifier.verifier_id,
                     "verifier_result": ack.verifier.result.value,
                     "cleanup_state": ack.cleanup_state,
-                    "forbidden_side_effect_count": (
-                        ack.forbidden_side_effect_count
-                    ),
+                    "forbidden_side_effect_count": (ack.forbidden_side_effect_count),
                     "verified_success": ack.verified_success,
                 },
             )

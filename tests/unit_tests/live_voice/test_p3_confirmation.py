@@ -743,3 +743,27 @@ def test_retry_confirmation_owner_requires_an_exact_target_task() -> None:
             owner_context,
         )
     assert unsupported.value.reason == "INVALID_P3_CONFIRMATION_OPERATION"
+
+
+def test_revision_confirmation_is_separately_default_off(tmp_path: Path) -> None:
+    binding = _binding(
+        operation="task.provide_input",
+        target_task_id="task-revision-1",
+    )
+    issue = _issue(binding=binding, confirmation_id="revision-confirmation-1")
+
+    disabled = BoundedP3ConfirmationOwner(
+        tmp_path / "disabled.sqlite3",
+        enabled=True,
+    )
+    with pytest.raises(FormalTaskViolation) as rejected:
+        disabled.issue(issue, now=NOW)
+    assert rejected.value.reason == "INVALID_P3_CONFIRMATION_OPERATION"
+
+    enabled = BoundedP3ConfirmationOwner(
+        tmp_path / "enabled.sqlite3",
+        enabled=True,
+        task_revision_enabled=True,
+    )
+    receipt = enabled.issue(issue, now=NOW)
+    assert receipt.confirmation_id == "revision-confirmation-1"

@@ -3468,6 +3468,60 @@ async def test_product_authority_candidate_requires_exact_cancel_target(
         await harness.composition.stop()
 
 
+@pytest.mark.asyncio
+async def test_product_authority_candidate_separately_gates_revision_capability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = "task.provide_input"
+    harness = _harness(
+        tmp_path,
+        allowed_operations=P3_OPERATIONS | frozenset({operation}),
+    )
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        monkeypatch.delenv(
+            "JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED",
+            raising=False,
+        )
+        with pytest.raises(FormalTaskViolation) as disabled:
+            harness.composition.resolve_product_authority_candidate(
+                bearer_token=TOKEN,
+                operation=operation,
+                session_id="session-1",
+                correlation_id="correlation:revision-disabled",
+                required_capabilities=frozenset({operation}),
+                task_id=task_id,
+            )
+        assert disabled.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
+
+        monkeypatch.setenv(
+            "JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED",
+            "1",
+        )
+        monkeypatch.setenv(
+            "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
+            "1",
+        )
+        monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED", "1")
+        candidate, context = harness.composition.resolve_product_authority_candidate(
+            bearer_token=TOKEN,
+            operation=operation,
+            session_id="session-1",
+            correlation_id="correlation:revision-enabled",
+            required_capabilities=frozenset({operation}),
+            task_id=task_id,
+        )
+        assert candidate.allowed_operations == frozenset({operation})
+        assert candidate.allowed_capabilities == frozenset({operation})
+        assert candidate.resource is not None
+        assert candidate.resource.resource_id == task_id
+        assert context.scope == _scope()
+    finally:
+        await harness.composition.stop()
+
+
 def test_retry_has_no_direct_transport_route_but_stays_a_p3_mutation() -> None:
     """W2 reaches retry only through the product composition mutate route.
 
@@ -3631,7 +3685,10 @@ def test_p3_model_builder_uses_the_shared_module_level_entry_builder() -> None:
 
     assert built is sentinel
     assert seen == [
-        ({"model_name": "probe-model", "client_provider": "probe"}, {"temperature": 0.0})
+        (
+            {"model_name": "probe-model", "client_provider": "probe"},
+            {"temperature": 0.0},
+        )
     ]
 
 

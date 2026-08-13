@@ -1318,7 +1318,18 @@ class AgentWebSocketServer:
                     "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED",
                 )
             )
-            if product_mutation_enabled:
+            task_revision_enabled = all(
+                str(os.getenv(name) or "").strip().lower()
+                in {"1", "true", "yes", "on"}
+                for name in (
+                    "JIUWENSWARM_LIVE_VOICE_P3_ENABLED",
+                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED",
+                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED",
+                    "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED",
+                    "JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED",
+                )
+            )
+            if product_mutation_enabled or task_revision_enabled:
                 from jiuwenswarm.server.live_voice.p3_confirmation import (
                     BoundedP3ConfirmationOwner,
                 )
@@ -1330,6 +1341,7 @@ class AgentWebSocketServer:
                 confirmation_owner = BoundedP3ConfirmationOwner(
                     task_database.with_name("formal_task_confirmations.sqlite3"),
                     enabled=True,
+                    task_revision_enabled=task_revision_enabled,
                 )
                 confirmation_forwarder = ProductP3ConfirmationForwarder(
                     confirmation_owner
@@ -1342,7 +1354,9 @@ class AgentWebSocketServer:
                     catalog_reader=self._live_voice_p3_model_catalog,
                     model_builder=self._build_live_voice_p3_model,
                 ),
-                confirmation_verifier=confirmation_forwarder,
+                confirmation_verifier=(
+                    confirmation_forwarder if product_mutation_enabled else None
+                ),
                 commit_ledger=commit_ledger,
             )
             if composition is None:
@@ -1355,6 +1369,11 @@ class AgentWebSocketServer:
             self._live_voice_turn_commit_ledger = commit_ledger
             if composition.mutation_authority_ready:
                 logger.info("[LiveVoiceP3] authenticated formal route ready")
+            elif task_revision_enabled:
+                logger.info(
+                    "[LiveVoiceP3] authenticated query and S8.5 revision authority "
+                    "ready; legacy mutation route remains closed"
+                )
             else:
                 logger.warning(
                     "[LiveVoiceP3] authenticated query route ready; "
@@ -1433,6 +1452,7 @@ class AgentWebSocketServer:
             if registry is None:
                 logger.info("[LiveVoiceProduct] central composition disabled")
                 return
+            await registry.start()
             from jiuwenswarm.server.live_voice.observability import (
                 LiveVoiceObservabilityCollector,
             )

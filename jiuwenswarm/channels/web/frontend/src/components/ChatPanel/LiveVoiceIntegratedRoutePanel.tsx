@@ -75,6 +75,7 @@ import {
   type FormalTaskIntentOwnerSnapshot,
   type FormalTaskIntentReceipt,
 } from '../../features/live-voice/formal/formalTaskIntentRoute';
+
 import { WebPlatformDiagnosticsMonitor, type WebPlatformDiagnosticsSnapshot } from '../../features/live-voice/formal/webPlatformDiagnostics';
 import {
   BROWSER_AUDIO_SYSTEM_DEFAULT_TOKEN,
@@ -84,6 +85,13 @@ import {
 import { extractWebErrorReason, webClient } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
 import './LiveVoiceIntegratedRoutePanel.css';
+
+const DEFAULT_FORMAL_TASK_INTENT_OPERATION: FormalTaskIntentOperation =
+  FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION
+    ? 'task.create'
+    : FEATURE_LIVE_VOICE_S8_5_TASK_REVISION
+      ? 'task.provide_input'
+      : 'task.status';
 
 export { extractWebErrorReason };
 
@@ -900,11 +908,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p3TaskInstruction, setP3TaskInstruction] = useState('');
   const [p3TargetTaskId, setP3TargetTaskId] = useState('');
   const [p3MutationStatus, setP3MutationStatus] = useState<ProductP3MutationStatus>('idle');
-  const [taskIntentOperation, setTaskIntentOperation] = useState<FormalTaskIntentOperation>('task.create');
+  const [taskIntentOperation, setTaskIntentOperation] = useState<FormalTaskIntentOperation>(
+    DEFAULT_FORMAL_TASK_INTENT_OPERATION
+  );
   const [taskIntentText, setTaskIntentText] = useState('');
   const [taskIntentTaskId, setTaskIntentTaskId] = useState('');
   const [taskIntentSnapshot, setTaskIntentSnapshot] = useState<FormalTaskIntentOwnerSnapshot>({
-    status: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? 'idle' : 'disabled',
+    status:
+      FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION || FEATURE_LIVE_VOICE_S8_5_TASK_REVISION
+        ? 'idle'
+        : 'disabled',
     pending_confirmation: null,
     retained_transport: false,
     receipt: null,
@@ -2208,7 +2221,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   useEffect(() => {
     const sessionId = props.activeSessionId;
     if (
-      !FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ||
+      (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION &&
+        !FEATURE_LIVE_VOICE_S8_5_TASK_REVISION) ||
       !props.isConnected ||
       sessionId === null ||
       p2JournalState?.status !== 'ready' ||
@@ -2284,16 +2298,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   useEffect(() => {
     taskIntentOwnerRef.current?.close();
     taskIntentOwnerRef.current = null;
-    setTaskIntentOperation('task.create');
+    setTaskIntentOperation(DEFAULT_FORMAL_TASK_INTENT_OPERATION);
     setTaskIntentText('');
     setTaskIntentTaskId('');
     if (
-      !FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ||
+      (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION &&
+        !FEATURE_LIVE_VOICE_S8_5_TASK_REVISION) ||
       !props.activeSessionId ||
       !props.isConnected
     ) {
       setTaskIntentSnapshot({
-        status: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? 'idle' : 'disabled',
+        status:
+          FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ||
+          FEATURE_LIVE_VOICE_S8_5_TASK_REVISION
+            ? 'idle'
+            : 'disabled',
         pending_confirmation: null,
         retained_transport: false,
         receipt: null,
@@ -2321,6 +2340,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       enabled: true,
       request: (method, params, requestId) => productRequest(method, { ...params }, { requestId }),
       recovery_journal: recoveryJournal,
+      task_revision_enabled: FEATURE_LIVE_VOICE_S8_5_TASK_REVISION,
     });
     taskIntentOwnerRef.current = owner;
     setTaskIntentSnapshot(owner.snapshot());
@@ -3616,7 +3636,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         updateRecognizedSpeechConfirmation(null);
         updateEditedVoiceDraftConfirmation(null);
       }}
-      taskIntentEnabled={FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && props.isConnected}
+      taskIntentEnabled={
+        (FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ||
+          FEATURE_LIVE_VOICE_S8_5_TASK_REVISION) &&
+        props.isConnected
+      }
       taskIntentOperation={taskIntentOperation}
       taskIntentText={taskIntentText}
       taskIntentTaskId={taskIntentTaskId}
@@ -3916,7 +3940,7 @@ export function LiveVoiceIntegratedRoutePanelView({
   onRecognizedSpeechConfirm,
   onRecognizedSpeechCancel,
   taskIntentEnabled = false,
-  taskIntentOperation = 'task.create',
+  taskIntentOperation = DEFAULT_FORMAL_TASK_INTENT_OPERATION,
   taskIntentText = '',
   taskIntentTaskId = '',
   taskIntentSnapshot = null,
@@ -4178,7 +4202,7 @@ export function LiveVoiceIntegratedRoutePanelView({
             >
               <strong>Bounded natural-language Task route</strong>
               <span className="live-voice-integrated__progress-note">
-                Exact English/Chinese create, status and cancel forms only. Ambiguous language issues no Task command.
+                Exact English/Chinese bounded forms only. S8.5 revision forms are voice-only and permit one Task revision from 1 to 2.
               </span>
               <select
                 aria-label="Task intent operation hint"
@@ -4186,12 +4210,30 @@ export function LiveVoiceIntegratedRoutePanelView({
                 disabled={taskIntentBindingLocked}
                 onChange={event => {
                   const value = event.target.value;
-                  onTaskIntentOperation(value === 'task.status' || value === 'task.cancel' ? value : 'task.create');
+                  onTaskIntentOperation(
+                    value === 'task.status' ||
+                      (FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && value === 'task.create') ||
+                      (FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && value === 'task.cancel') ||
+                      (FEATURE_LIVE_VOICE_S8_5_TASK_REVISION && value === 'task.provide_input') ||
+                      (FEATURE_LIVE_VOICE_S8_5_TASK_REVISION && value === 'task.update_constraints')
+                      ? value
+                      : DEFAULT_FORMAL_TASK_INTENT_OPERATION
+                  );
                 }}
               >
-                <option value="task.create">task.create</option>
+                {FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && (
+                  <option value="task.create">task.create</option>
+                )}
                 <option value="task.status">task.status</option>
-                <option value="task.cancel">task.cancel</option>
+                {FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && (
+                  <option value="task.cancel">task.cancel</option>
+                )}
+                {FEATURE_LIVE_VOICE_S8_5_TASK_REVISION && (
+                  <option value="task.provide_input">task.provide_input</option>
+                )}
+                {FEATURE_LIVE_VOICE_S8_5_TASK_REVISION && (
+                  <option value="task.update_constraints">task.update_constraints</option>
+                )}
               </select>
               {taskIntentOperation !== 'task.create' && (
                 <input
@@ -4213,14 +4255,18 @@ export function LiveVoiceIntegratedRoutePanelView({
                     ? 'create task: inspect the repository'
                     : taskIntentOperation === 'task.status'
                       ? 'task status task-abc_123'
-                      : 'cancel task task-abc_123'
+                      : taskIntentOperation === 'task.cancel'
+                        ? 'cancel task task-abc_123'
+                        : taskIntentOperation === 'task.provide_input'
+                          ? 'provide task input: keep negative inputs unchanged'
+                          : 'limit task write scope to: src, tests'
                 }
                 maxLength={8192}
               />
               {taskIntentSnapshot?.pending_confirmation && (
                 <div role="note" data-testid="live-voice-integrated-task-intent-confirmation">
                   <span className="live-voice-integrated__progress-note">
-                    A destructive request is pending. Type or speak the following as a new committed turn; this notice is not confirmation authority.
+                    A destructive request is pending. Commit the following as a new turn; S8.5 revisions require Live Voice. This notice is not confirmation authority.
                   </span>
                   <code>{taskIntentSnapshot.pending_confirmation.form}</code>
                   {onTaskIntentCancelPending && (

@@ -2747,6 +2747,39 @@ class DirectProjectCodeExecutorAdapter:
             assert record is not None
         return self._delivery(record, after_seq=attempt.source_seq)
 
+    async def revision_delivery(
+        self,
+        task: PersistentTaskRecord,
+        attempt: PersistentAttemptRecord,
+    ) -> ExecutorDeliveryResult:
+        """Return complete durable lifecycle evidence for one revision successor.
+
+        Normal reconciliation is cursor based.  The S8.5 verifier also needs the
+        terminal observation after Task Core may already have advanced that
+        cursor, so this trusted sibling Port returns the journal's complete
+        delivery without accepting an external task or attempt identity.
+        """
+
+        if (
+            attempt.executor_id != self.executor_id
+            or task.attempt_id != attempt.attempt_id
+            or attempt.executor_ref is None
+        ):
+            raise FormalTaskViolation(
+                "EXECUTOR_BINDING_MISMATCH",
+                "revision verification must query the exact current attempt",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        record = await asyncio.to_thread(self._journal.get, attempt.attempt_id)
+        if record is None:
+            raise FormalTaskViolation(
+                "TASK_REVISION_EXECUTOR_RESULT_UNAVAILABLE",
+                "revision successor has no durable Executor result",
+                ErrorCode.RESULT_UNKNOWN,
+            )
+        self._require_record_binding(record, task, attempt)
+        return self._delivery(record, after_seq=-1)
+
     def retained_cleanup_attempt_ids(self) -> tuple[str, ...]:
         """Expose bounded cleanup truth without leaking temporary paths."""
 
