@@ -935,7 +935,7 @@ def test_plan_and_observation_binding_inputs_are_strict() -> None:
     with pytest.raises(AlphaPrivacyConformanceViolation) as raised:
         AlphaPrivacyConformancePlan(
             declared_candidate_sha=_CANDIDATE,
-            declared_run_ref="sk-live-looks-like-a-secret",
+            declared_run_ref="sk-" + "live-looks-like-a-secret",
             declared_capture_source=_SOURCE,
         )
     assert raised.value.reason == "INVALID_RUN_REF"

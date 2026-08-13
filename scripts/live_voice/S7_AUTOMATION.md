@@ -45,7 +45,8 @@ explicit Live Voice-owned AgentServer/Gateway/channel/Web regressions and the
 formal Task Store/Executor seam, every dynamically discovered
 frontend `test:live-voice-*` script plus the speech-recognition lifecycle,
 TTS-output ownership and chat-store streaming compatibility suites, the
-production build, Ruff/format/compile checks for all changed Python,
+production build, Ruff/compile checks for all changed Python and format checks
+for S7-owned Python,
 `git diff --check`, Markdown links and source/privacy hygiene. `uv sync
 --frozen --check` binds the installed Python environment to `uv.lock`; `uv pip
 check` additionally checks package consistency without assuming that the clean
@@ -63,6 +64,12 @@ third-party `pysbd` invalid-escape incompatibility already recorded by prior
 Live Voice review. Changed repository Python receives an explicit Ruff `W605`
 invalid-escape check, so this compatibility exception cannot hide the same
 defect in candidate source.
+
+The cumulative Ruff check keeps only exact, pre-existing S6 waivers and the
+compile check still covers every Python file changed from the comparison base.
+The formatter check is intentionally limited to the S7-owned runner/probes and
+their tests: rewriting the broad S6 Python set merely to satisfy the current
+formatter is explicitly outside the selective-port boundary.
 
 Reports contain only placeholder-safe argv, repository-relative cwd, exit
 status, duration, test counts and bounded failure identifiers. Captured output is

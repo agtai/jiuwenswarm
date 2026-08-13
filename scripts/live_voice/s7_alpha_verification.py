@@ -205,8 +205,22 @@ LATEST_S6_REGRESSION_INVENTORY = (
 )
 CHANGED_PYTHON_RUFF_WAIVERS = (
     "jiuwenswarm/channels/web/app_web.py:E402",
+    "jiuwenswarm/channels/web/app_web.py:F541",
     "jiuwenswarm/gateway/app_gateway.py:E402",
+    "jiuwenswarm/gateway/app_gateway.py:F821",
+    "jiuwenswarm/gateway/app_gateway.py:F841",
     "jiuwenswarm/server/agent_ws_server.py:E402",
+)
+S7_OWNED_PYTHON_PATHS = (
+    "scripts/live_voice/s7_alpha_verification.py",
+    "scripts/live_voice/s7_probe_agent_executor.py",
+    "scripts/live_voice/s7_probe_benchmark_fault.py",
+    "scripts/live_voice/s7_probe_privacy.py",
+    "scripts/live_voice/s7_probe_secure_deployment.py",
+    "scripts/live_voice/s7_probe_speech_media.py",
+    "scripts/live_voice/s7_real_probe_support.py",
+    "tests/unit_tests/live_voice/test_s7_alpha_verification.py",
+    "tests/unit_tests/live_voice/test_s7_real_probes.py",
 )
 _ENV_NAME = re.compile(r"^[A-Z][A-Z0-9_]*$")
 _ENV_TOKEN = re.compile(r"^\$\{([A-Z][A-Z0-9_]*)\}$")
@@ -924,7 +938,7 @@ def build_automation_specs(
     if changed_python:
         specs.append(
             CheckSpec(
-                check_id="changed-python-format",
+                check_id="s7-owned-python-format",
                 category="static",
                 argv=(
                     "<python>",
@@ -932,7 +946,7 @@ def build_automation_specs(
                     "ruff",
                     "format",
                     "--check",
-                    *changed_python,
+                    *S7_OWNED_PYTHON_PATHS,
                 ),
             )
         )

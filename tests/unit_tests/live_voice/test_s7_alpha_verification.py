@@ -222,7 +222,11 @@ def test_automation_plan_discovers_frontend_scripts_and_keeps_asyncio_mode(
     assert "F821" not in ruff.argv
     assert "--ignore" not in ruff.argv
     assert set(s7.CHANGED_PYTHON_RUFF_WAIVERS).issubset(ruff.argv)
-    assert any(spec.check_id == "changed-python-format" for spec in specs)
+    formatting = next(
+        spec for spec in specs if spec.check_id == "s7-owned-python-format"
+    )
+    assert set(s7.S7_OWNED_PYTHON_PATHS).issubset(formatting.argv)
+    assert "jiuwenswarm/channels/web/app_web.py" not in formatting.argv
 
 
 def test_s7_cli_requires_the_frozen_full_comparison_base() -> None:
