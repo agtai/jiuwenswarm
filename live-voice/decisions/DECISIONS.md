@@ -880,3 +880,13 @@
 - 风险与关闭：这是 `P3 / TC+ED+VB+Web` 的 Tier 3 shared authority/mutation boundary。代码前必须有设计 checkpoint；模块收口需要完整 scoped cold review、一次独立 review 或记录的等价替代、适用 D-032 正反例/故障/重启/并发/flag-off/零禁止副作用矩阵；候选集成后需要两次无源码变更的完整 rehearsal，再按 D-071 由用户完成一次独立 S8.5 人工验收。
 - Git 与迁移：孵化提交必须按 `decision/docs → Core/Store → Bridge/Policy → Executor/verifier → Web/UI → integration` 保持可审阅依赖。S8 PASS 后，先把目标分支快进到精确 S8 closeout，再按依赖顺序 cherry-pick/rebase 这些本地提交，解决真实冲突并重跑 Tier 3 累计验证；孵化分支的 `STATUS.md` 只记录隔离事实，不得盲目迁移覆盖 S8 closeout。任何 push 或远端 ref 更新仍需单独精确批准。
 - 重新评估条件：S8 结果要求修复或改变当前 Alpha candidate；现有 Task Core/Store 无法在不引入第二 authority 的情况下表达 revision saga；Executor 不能证明 predecessor 隔离或干净 successor；目标需要任意同 attempt steer、真实用户仓库、依赖/API/config mutation、外部副作用或生产 durability；或迁移时 S8 基线与孵化契约产生语义冲突。
+
+## D-080 S8.5 每个任务只执行一种修订命令并复用现有产品组合边界
+
+- 日期：2026-08-13
+- 状态：Accepted S8.5 product-integration clarification（修正原 showcase 在同一任务上连续演示两种 revision 命令、与 D-079 的单次 `1 -> 2` 约束冲突的问题）
+- 单次修订：一个任务在 S8.5 profile 中只能选择 `task.provide_input` 或 `task.update_constraints` 之一。正式 Task A 只用 exact committed voice 执行一次 `task.provide_input`；`task.update_constraints` 由独立自动化 fixture 覆盖，不在同一 Task A 上发起第二次 revision，也不把两个语义合并为一条命令。
+- 产品组合：写路径复用现有 authenticated Product Composition、P2 committed `TurnCommit`、P3 confirmation owner、Task Store 和 `DirectProjectCodeExecutorAdapter`。不新增 Human-Agent Interaction Plane、第二 Task authority、通用 Agent steering carrier 或客户端可声明的 revision/attempt/fixture/verifier 权威。
+- 激活边界：revision 总开关打开仍不足以单独形成能力；AgentServer 同时要求 P3、Product Composition、Product P2、Product P3 text query、S8.5 revision 和受信 fixture manifest。Web 另需对应 S8.5 build flag。缺少任一前置条件均 fail closed；Alpha/P3alpha 和 feature-off 的既有操作集、DOM、请求与副作用保持不变。
+- 恢复与验证：确认前仅保留有界、内容绑定的 pending origin；确认后先持久化 Store revision/fence truth，再由 AgentServer-owned recovery loop 驱动 fence、successor dispatch、终态 reconcile 和 verifier ACK。进程重启从 durable outbox/Store truth 恢复，不从浏览器或 Agent 文本推断成功。
+- 重新评估条件：正式展示必须在同一任务上覆盖两种 revision；现有 Product Composition 无法保持 committed voice 和 exact confirmation；运行环境需要多进程共享同一 revision database；或 S8 迁移产生新的 authority/生命周期冲突。

@@ -14,11 +14,21 @@ Chrome/OS/origin/device, real Speech/Agent route, isolated runtime data,
 disposable no-remote fixture and verifier manifest. Verify the fixture matches
 its trusted clean base and contains no credentials or user data.
 
-The isolated S8.5 projection requires both explicit default-off gates:
-`JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED=true` on AgentServer and
-`VITE_FEATURE_LIVE_VOICE_S8_5_TASK_REVISION=true` in the Web build. The existing
-master composition and authenticated P3 text-query gates remain prerequisites;
-the Alpha/P3alpha profile keeps both S8.5 gates unset.
+The isolated S8.5 route requires all existing authenticated product gates plus
+its two explicit default-off gates:
+
+- `JIUWENSWARM_LIVE_VOICE_P3_ENABLED=true`;
+- `JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED=true`;
+- `JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED=true`;
+- `JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED=true`;
+- `JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED=true` for Task A creation
+  and Task B cancellation;
+- `JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED=true`;
+- `JIUWENSWARM_LIVE_VOICE_S8_5_FIXTURE_MANIFEST=<absolute private JSON path>`;
+- `VITE_FEATURE_LIVE_VOICE_S8_5_TASK_REVISION=true` in the Web build.
+
+The Alpha/P3alpha profile keeps the S8.5 gates unset. The fixture manifest is a
+machine-private runtime input and is not restored by Git.
 
 ## 2. Task A — revise a running code fix
 
@@ -27,18 +37,20 @@ the Alpha/P3alpha profile keeps both S8.5 gates unset.
    attempt 1 and create command.
 2. While attempt 1 is visibly running, say an ambiguous revision. Confirm that
    the product asks for clarification and causes zero task/project mutation.
-3. Commit: “补充事实：负数输入也必须保持现有行为。” Confirm the exact
+3. Commit: “补充任务输入：负数输入行为保持不变。” Confirm the exact
    `task.provide_input` binding.
-4. Commit: “把修改范围收紧到 src/calculator；必须运行 fixture 回归验证。”
-   Confirm the exact `task.update_constraints` binding.
-5. Observe the Task Truth panel: same task ID; pending revision; predecessor
+4. Observe the Task Truth panel: same task ID; pending revision; predecessor
    attempt fenced; exact cleanup ACK; revision 2 applied; successor attempt 2.
-6. Verify attempt 1 late output cannot update current progress, project diff or
+5. Verify attempt 1 late output cannot update current progress, project diff or
    verifier state. Confirm attempt 2 starts from the trusted clean base.
-7. Observe real Agent/Executor work. Inspect the sanitized changed paths/diff,
+6. Observe real Agent/Executor work. Inspect the sanitized changed paths/diff,
    verifier ID/result, forbidden-side-effect count and final authoritative outcome.
-8. Exercise status/events/reconnect and confirm the same revision/attempt truth
+7. Exercise status/events/reconnect and confirm the same revision/attempt truth
    returns without duplicate execution.
+
+Do not issue `task.update_constraints` for Task A: the profile permits exactly
+one `1 -> 2` revision. Its exact bilingual form, narrowing rules and zero-effect
+negative cases remain required automated acceptance on a separate fixture task.
 
 ## 3. Task B — exact cancellation stays separate
 
