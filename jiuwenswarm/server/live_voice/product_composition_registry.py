@@ -140,6 +140,9 @@ PRODUCT_COMPOSITION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENA
 PRODUCT_P2_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 PRODUCT_P3_TEXT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED"
 PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED"
+PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED"
+)
 PRODUCT_CRITICAL_INPUT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED"
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
 # The only Agent profile whose facade implements the formal Live Voice seam.
@@ -195,6 +198,7 @@ class ProductCompositionSettings:
     p3_text_enabled: bool
     p3_mutation_enabled: bool = False
     critical_input_enabled: bool = False
+    s8_5_task_revision_enabled: bool = False
 
     @classmethod
     def from_environment(cls) -> ProductCompositionSettings:
@@ -204,6 +208,9 @@ class ProductCompositionSettings:
             p3_mutation_enabled=_is_enabled(os.getenv(PRODUCT_P3_MUTATION_ENABLE_ENV)),
             critical_input_enabled=_is_enabled(
                 os.getenv(PRODUCT_CRITICAL_INPUT_ENABLE_ENV)
+            ),
+            s8_5_task_revision_enabled=_is_enabled(
+                os.getenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV)
             ),
         )
 
@@ -569,6 +576,10 @@ class AgentServerProductCompositionRegistry:
         p3_confirmation_forwarder: ProductP3ConfirmationForwarder | None = None,
         commit_ledger: TurnCommitLedger | None = None,
         critical_token_gate: CriticalTokenSafetyGate | None = None,
+        task_revision_truth_reader: Callable[
+            [str, ScopeRef], Mapping[str, object] | None
+        ]
+        | None = None,
     ) -> None:
         if not isinstance(settings, ProductCompositionSettings):
             raise ValueError("product composition settings are required")
@@ -576,6 +587,12 @@ class AgentServerProductCompositionRegistry:
             raise ValueError("authenticated P3 composition is required")
         if not callable(push_text_event):
             raise ValueError("product text event sink is required")
+        if settings.s8_5_task_revision_enabled and not callable(
+            task_revision_truth_reader
+        ):
+            raise ValueError(
+                "enabled S8.5 task revision requires its Store truth reader"
+            )
         self._settings = settings
         self._p3_composition = p3_composition
         self._agent_manager = agent_manager
@@ -588,6 +605,7 @@ class AgentServerProductCompositionRegistry:
         self._critical_token_gate = critical_token_gate or CriticalTokenSafetyGate(
             enabled=settings.critical_input_enabled
         )
+        self._task_revision_truth_reader = task_revision_truth_reader
         self._critical_input_sequence = 0
         self._critical_input_commit_generations: dict[str, tuple[str, int]] = {}
         self._critical_input_guarded_commits: set[str] = set()
@@ -696,6 +714,10 @@ class AgentServerProductCompositionRegistry:
     @property
     def p3_mutation_enabled(self) -> bool:
         return self._settings.p3_mutation_enabled
+
+    @property
+    def s8_5_task_revision_enabled(self) -> bool:
+        return self._settings.s8_5_task_revision_enabled
 
     def _create_p2_runtime(
         self,
@@ -5119,6 +5141,38 @@ class AgentServerProductCompositionRegistry:
                     manifest=activation.manifest,
                 )
             payload = envelope.to_dict()
+            if (
+                self._settings.s8_5_task_revision_enabled
+                and operation == "task.status"
+            ):
+                revision_reader = self._task_revision_truth_reader
+                canonical = state.canonical
+                result_payload = payload.get("result")
+                if (
+                    revision_reader is None
+                    or canonical is None
+                    or task_id is None
+                    or not isinstance(result_payload, Mapping)
+                ):
+                    return _error_result(
+                        request_id,
+                        reason="TASK_REVISION_TRUTH_UNAVAILABLE",
+                        manifest=activation.manifest,
+                    )
+                try:
+                    revision_truth = revision_reader(task_id, canonical.scope)
+                except Exception:  # Store faults cannot become inferred UI truth
+                    logger.exception("[LiveVoiceProduct] task revision truth failed")
+                    return _error_result(
+                        request_id,
+                        reason="TASK_REVISION_TRUTH_UNAVAILABLE",
+                        manifest=activation.manifest,
+                    )
+                enriched_result = dict(result_payload)
+                enriched_result["task_revision"] = (
+                    None if revision_truth is None else dict(revision_truth)
+                )
+                payload["result"] = enriched_result
             payload["product_composition"] = _serialize_manifest(activation.manifest)
             return P3RouteResult(bool(envelope.ok), payload)
         finally:
@@ -6155,8 +6209,35 @@ def create_product_composition_registry_from_environment(
             "enabled product composition requires authenticated P3 authority",
             ErrorCode.UNAVAILABLE,
         )
+    settings = ProductCompositionSettings.from_environment()
+    if settings.s8_5_task_revision_enabled and not settings.p3_text_enabled:
+        raise FormalTaskViolation(
+            "INVALID_PRODUCT_COMPOSITION_CONFIGURATION",
+            "S8.5 task revision projection requires the authenticated P3 text query route",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    task_revision_truth_reader: (
+        Callable[[str, ScopeRef], Mapping[str, object] | None] | None
+    ) = None
+    if settings.s8_5_task_revision_enabled:
+        from .task_revision_store import SqliteTaskRevisionStore
+
+        revision_store = SqliteTaskRevisionStore(p3_composition.task_store)
+
+        def read_task_revision_truth(
+            task_id: str, scope: ScopeRef
+        ) -> Mapping[str, object] | None:
+            try:
+                return revision_store.truth(task_id, scope).to_dict()
+            except FormalTaskViolation as exc:
+                if exc.reason == "TASK_REVISION_TRUTH_UNAVAILABLE":
+                    return None
+                raise
+
+        task_revision_truth_reader = read_task_revision_truth
+
     return AgentServerProductCompositionRegistry(
-        settings=ProductCompositionSettings.from_environment(),
+        settings=settings,
         p3_composition=p3_composition,
         agent_manager=agent_manager,
         push_text_event=push_text_event,
@@ -6164,6 +6245,7 @@ def create_product_composition_registry_from_environment(
         p3_confirmation_forwarder=p3_confirmation_forwarder,
         commit_ledger=commit_ledger,
         critical_token_gate=critical_token_gate,
+        task_revision_truth_reader=task_revision_truth_reader,
     )
 
 
@@ -6176,6 +6258,7 @@ __all__ = [
     "PRODUCT_P3_QUERY_OPERATIONS",
     "PRODUCT_P3_MUTATION_ENABLE_ENV",
     "PRODUCT_P3_TEXT_ENABLE_ENV",
+    "PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV",
     "ProductCompositionSettings",
     "create_product_composition_registry_from_environment",
     "product_composition_enabled_from_environment",

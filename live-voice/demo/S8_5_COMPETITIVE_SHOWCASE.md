@@ -14,6 +14,12 @@ Chrome/OS/origin/device, real Speech/Agent route, isolated runtime data,
 disposable no-remote fixture and verifier manifest. Verify the fixture matches
 its trusted clean base and contains no credentials or user data.
 
+The isolated S8.5 projection requires both explicit default-off gates:
+`JIUWENSWARM_LIVE_VOICE_S8_5_TASK_REVISION_ENABLED=true` on AgentServer and
+`VITE_FEATURE_LIVE_VOICE_S8_5_TASK_REVISION=true` in the Web build. The existing
+master composition and authenticated P3 text-query gates remain prerequisites;
+the Alpha/P3alpha profile keeps both S8.5 gates unset.
+
 ## 2. Task A — revise a running code fix
 
 1. By committed voice, create a bounded background task to fix the fixture's

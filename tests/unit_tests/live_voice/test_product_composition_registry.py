@@ -55,6 +55,7 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     PRODUCT_CRITICAL_INPUT_ENABLE_ENV,
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
+    PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV,
     ProductCompositionSettings,
     _ProgressDelivery,
     _VoiceTaskOrigin,
@@ -502,6 +503,8 @@ def _registry(
     push_success: bool = True,
     commit_ledger: TurnCommitLedger | None = None,
     critical_input: bool = False,
+    s8_5_task_revision: bool = False,
+    task_revision_truth_reader=None,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -516,11 +519,13 @@ def _registry(
             p2_enabled=p2,
             p3_text_enabled=p3,
             critical_input_enabled=critical_input,
+            s8_5_task_revision_enabled=s8_5_task_revision,
         ),
         p3_composition=p3_composition,
         agent_manager=manager,
         push_text_event=push,
         commit_ledger=commit_ledger,
+        task_revision_truth_reader=task_revision_truth_reader,
     )
     return registry, p3_composition, manager, pushed
 
@@ -630,6 +635,45 @@ def test_critical_input_product_composition_flag_is_default_off(
     assert ProductCompositionSettings.from_environment().critical_input_enabled is False
     monkeypatch.setenv(PRODUCT_CRITICAL_INPUT_ENABLE_ENV, "1")
     assert ProductCompositionSettings.from_environment().critical_input_enabled is True
+
+
+def test_s8_5_task_revision_product_flag_is_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, raising=False)
+    assert ProductCompositionSettings.from_environment().s8_5_task_revision_enabled is False
+    monkeypatch.setenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, "true")
+    assert ProductCompositionSettings.from_environment().s8_5_task_revision_enabled is True
+
+
+def test_enabled_s8_5_projection_requires_a_store_truth_reader(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Store truth reader"):
+        AgentServerProductCompositionRegistry(
+            settings=ProductCompositionSettings(
+                p2_enabled=False,
+                p3_text_enabled=True,
+                s8_5_task_revision_enabled=True,
+            ),
+            p3_composition=_P3Composition(tmp_path),
+            agent_manager=_AgentManager(),
+            push_text_event=cast(object, lambda _message: None),
+        )
+
+
+def test_s8_5_projection_requires_authenticated_p3_text_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(PRODUCT_COMPOSITION_ENABLE_ENV, "true")
+    monkeypatch.setenv(PRODUCT_P3_TEXT_ENABLE_ENV, "false")
+    monkeypatch.setenv(PRODUCT_S8_5_TASK_REVISION_ENABLE_ENV, "true")
+    with pytest.raises(FormalTaskViolation) as caught:
+        create_product_composition_registry_from_environment(
+            p3_composition=_P3Composition(tmp_path),
+            agent_manager=_AgentManager(),
+            push_text_event=cast(object, lambda _message: None),
+        )
+    assert caught.value.reason == "INVALID_PRODUCT_COMPOSITION_CONFIGURATION"
 
 
 @pytest.mark.asyncio
@@ -946,6 +990,66 @@ async def test_p3_query_uses_central_authority_and_real_query_owner(
     assert _route(result.payload, "authority")["truth"] == "formal"
     assert _route(result.payload, "p3.query")["truth"] == "formal"
     assert _route(result.payload, "p3.progress")["truth"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_s8_5_status_projects_only_authenticated_store_truth(
+    tmp_path: Path,
+) -> None:
+    reads: list[tuple[str, ScopeRef]] = []
+
+    def read_truth(task_id: str, scope: ScopeRef) -> Mapping[str, object]:
+        reads.append((task_id, scope))
+        return {"task_id": task_id, "current_revision": 2}
+
+    enabled, _p3, _manager, _pushed = _registry(
+        tmp_path,
+        s8_5_task_revision=True,
+        task_revision_truth_reader=read_truth,
+    )
+    projected = await enabled.handle_p3_query(
+        operation="task.status",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "task_id": "task-1",
+        },
+        request_id="request-revision-truth",
+        session_id="session-product",
+    )
+
+    assert projected.ok is True
+    assert reads == [("task-1", SCOPE)]
+    result = cast(dict[str, object], projected.payload["result"])
+    assert result["task_revision"] == {
+        "task_id": "task-1",
+        "current_revision": 2,
+    }
+
+    calls = 0
+
+    def poison(_task_id: str, _scope: ScopeRef) -> Mapping[str, object]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("flag-off inspected revision truth")
+
+    disabled, _p3, _manager, _pushed = _registry(
+        tmp_path / "disabled",
+        task_revision_truth_reader=poison,
+    )
+    unchanged = await disabled.handle_p3_query(
+        operation="task.status",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "task_id": "task-1",
+        },
+        request_id="request-revision-disabled",
+        session_id="session-product",
+    )
+    assert unchanged.ok is True
+    assert calls == 0
+    assert "task_revision" not in cast(dict[str, object], unchanged.payload["result"])
 
 
 @pytest.mark.asyncio

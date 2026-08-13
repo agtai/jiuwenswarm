@@ -1441,9 +1441,10 @@ class AgentWebSocketServer:
             self._live_voice_product_observability = LiveVoiceObservabilityCollector()
             logger.info(
                 "[LiveVoiceProduct] central composition registered; "
-                "p2=%s p3_text=%s",
+                "p2=%s p3_text=%s s8_5_task_revision=%s",
                 registry.p2_enabled,
                 registry.p3_text_enabled,
+                registry.s8_5_task_revision_enabled,
             )
         except Exception as exc:  # noqa: BLE001 -- server and legacy routes survive
             logger.exception(

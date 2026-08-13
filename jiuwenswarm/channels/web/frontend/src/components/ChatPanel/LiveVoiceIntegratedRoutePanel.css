@@ -22,6 +22,7 @@
 
 .live-voice-integrated__body,
 .live-voice-integrated__section,
+.live-voice-integrated__revision-truth,
 .live-voice-integrated__routes,
 .live-voice-integrated__route,
 .live-voice-integrated__facts {
@@ -54,6 +55,7 @@
 }
 
 .live-voice-integrated__section,
+.live-voice-integrated__revision-truth,
 .live-voice-integrated__routes,
 .live-voice-integrated__route,
 .live-voice-integrated__facts {
@@ -61,6 +63,14 @@
 }
 
 .live-voice-integrated__section {
+  font-size: 12px;
+}
+
+.live-voice-integrated__revision-truth {
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
   font-size: 12px;
 }
 

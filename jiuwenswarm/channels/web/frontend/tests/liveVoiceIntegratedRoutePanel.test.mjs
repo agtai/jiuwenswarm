@@ -253,6 +253,7 @@ test('route panel renders three truthful predecessor classes and the non-success
   assert.equal(html.includes('physical audio'), true);
   assert.equal(html.includes('task completion'), true);
   assert.equal(html.includes('Gate acceptance'), true);
+  assert.equal(html.includes('live-voice-integrated-task-revision-truth'), false);
 });
 
 test('route panel renders only a validated authenticated text progress fact', async () => {

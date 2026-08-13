@@ -93,6 +93,7 @@ class _ProductRegistry:
         self.p2_enabled = True
         self.p3_text_enabled = p3_text_enabled
         self.p3_mutation_enabled = True
+        self.s8_5_task_revision_enabled = False
         self.calls: list[tuple[str, dict[str, object]]] = []
         self.stop_calls = 0
         self.stop_failures = stop_failures

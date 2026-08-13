@@ -29,3 +29,6 @@ export const FEATURE_LIVE_VOICE_INTEGRATED_WEB = import.meta.env.VITE_FEATURE_LI
 
 /** Destructive formal task control stays separately default-off. */
 export const FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = import.meta.env.VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION === 'true';
+
+/** Bounded S8.5 task-revision projection; independent from Alpha/P3alpha. */
+export const FEATURE_LIVE_VOICE_S8_5_TASK_REVISION = import.meta.env.VITE_FEATURE_LIVE_VOICE_S8_5_TASK_REVISION === 'true';

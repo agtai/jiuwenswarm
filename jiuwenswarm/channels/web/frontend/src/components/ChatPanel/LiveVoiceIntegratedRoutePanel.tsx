@@ -5,6 +5,7 @@ import {
   FEATURE_LIVE_VOICE_INTEGRATED_WEB,
   FEATURE_LIVE_VOICE_INTEGRATED_P1,
   FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
+  FEATURE_LIVE_VOICE_S8_5_TASK_REVISION,
   FEATURE_LIVE_VOICE_TASK_DEMO,
 } from '../../featureFlags';
 import {
@@ -61,6 +62,13 @@ import {
   type PreparedFormalTaskMutation,
 } from '../../features/live-voice/formal/formalTaskControlLeaf';
 import {
+  TaskRevisionTruthReplica,
+  parseTaskRevisionTruthStatusResponse,
+  taskRevisionApplicationState,
+  taskRevisionWarning,
+  type TaskRevisionTruthSnapshot,
+} from '../../features/live-voice/formal/taskRevisionTruth';
+import {
   ProductFormalTaskIntentOwner,
   createSessionFormalTaskIntentRecoveryJournal,
   type FormalTaskIntentOperation,
@@ -90,6 +98,7 @@ export interface LiveVoiceIntegratedRoutePanelProps {
   p3RetryInspectionWait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
   productVoiceControlRef?: { current: ProductLiveVoiceSurfaceControl | null };
   onProductVoiceStateChange?: (state: Readonly<ProductLiveVoiceSurfaceState>) => void;
+  taskRevisionTruth?: Readonly<TaskRevisionTruthSnapshot> | null;
 }
 
 export type ProductLiveVoiceSurfaceState = Readonly<{
@@ -906,6 +915,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [p3RetryEligibility, setP3RetryEligibility] = useState<Readonly<FormalTaskControlRecord> | null>(null);
   const p3RetryInspectionGenerationRef = useRef(0);
   const p3RetryInspectionAbortRef = useRef<AbortController | null>(null);
+  const [taskRevisionTruth, setTaskRevisionTruth] = useState<Readonly<TaskRevisionTruthSnapshot> | null>(null);
+  const [taskRevisionReadReason, setTaskRevisionReadReason] = useState<string | null>(null);
+  const [taskRevisionRefreshEpoch, setTaskRevisionRefreshEpoch] = useState(0);
+  const taskRevisionReplicaRef = useRef<TaskRevisionTruthReplica | null>(null);
+  const taskRevisionTargetRef = useRef<string | null>(null);
   const [createdProgressRoute, setCreatedProgressRoute] = useState<
     Readonly<{
       task_id: string;
@@ -1202,6 +1216,69 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       monitor.stop();
       if (monitorRef.current === monitor) monitorRef.current = null;
     };
+  }, []);
+
+  useEffect(() => {
+    if (!FEATURE_LIVE_VOICE_S8_5_TASK_REVISION) return;
+    const targetTaskId = createdProgressTaskId ?? p3RetryEligibility?.task_id ?? progress?.task_id ?? null;
+    if (!props.isConnected || props.activeSessionId === null || !targetTaskId) {
+      taskRevisionReplicaRef.current?.disconnect();
+      taskRevisionReplicaRef.current = null;
+      taskRevisionTargetRef.current = null;
+      setTaskRevisionTruth(null);
+      setTaskRevisionReadReason(props.isConnected ? null : 'TASK_REVISION_TRUTH_DISCONNECTED');
+      return;
+    }
+    if (taskRevisionReplicaRef.current === null || taskRevisionTargetRef.current !== targetTaskId) {
+      taskRevisionReplicaRef.current = new TaskRevisionTruthReplica(true);
+      taskRevisionTargetRef.current = targetTaskId;
+      setTaskRevisionTruth(null);
+    } else {
+      taskRevisionReplicaRef.current.reconnect();
+    }
+    const replica = taskRevisionReplicaRef.current;
+    const connectionGeneration = replica.connectionGeneration();
+    let cancelled = false;
+    setTaskRevisionReadReason(null);
+    void productRequest(
+      PRODUCT_P3_TASK_STATUS_METHOD,
+      { session_id: props.activeSessionId, task_id: targetTaskId },
+      { requestId: `web-task-revision-truth-${Date.now()}-${taskRevisionRefreshEpoch}` },
+    )
+      .then(response => {
+        if (cancelled || taskRevisionReplicaRef.current !== replica) return;
+        const parsed = parseTaskRevisionTruthStatusResponse(response, targetTaskId);
+        if (parsed === null) {
+          setTaskRevisionTruth(null);
+          setTaskRevisionReadReason('TASK_REVISION_TRUTH_NOT_INITIALIZED');
+          return;
+        }
+        setTaskRevisionTruth(replica.adopt(parsed, {
+          task_id: targetTaskId,
+          connection_generation: connectionGeneration,
+        }));
+      })
+      .catch(() => {
+        if (cancelled || taskRevisionReplicaRef.current !== replica) return;
+        setTaskRevisionReadReason('TASK_REVISION_TRUTH_UNAVAILABLE');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    createdProgressTaskId,
+    p3RetryEligibility?.task_id,
+    productRequest,
+    progress?.task_id,
+    props.activeSessionId,
+    props.isConnected,
+    taskRevisionRefreshEpoch,
+  ]);
+
+  useEffect(() => () => {
+    taskRevisionReplicaRef.current?.disconnect();
+    taskRevisionReplicaRef.current = null;
+    taskRevisionTargetRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -3603,6 +3680,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p3RetryAttemptNumber={p3RetryEligibility?.attempt_number ?? null}
       p3RetryInspectionStatus={p3RetryInspectionStatus}
       p3RetryInspectionReason={p3RetryInspectionReason}
+      taskRevisionTruth={props.taskRevisionTruth ?? taskRevisionTruth}
+      taskRevisionReadReason={props.taskRevisionTruth === undefined ? taskRevisionReadReason : null}
       onP3MutationOperation={value => {
         updateRecognizedSpeechConfirmation(null);
         cancelP3RetryInspection();
@@ -3653,7 +3732,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       onP3InspectRetry={() => void inspectP3RetryEligibility({ follow_nonterminal: true })}
       onP3Issue={() => void issueP3MutationConfirmation()}
       onP3Execute={() => void executeP3Mutation()}
-      onRefresh={() => void monitorRef.current?.refresh()}
+      onRefresh={() => {
+        void monitorRef.current?.refresh();
+        if (FEATURE_LIVE_VOICE_S8_5_TASK_REVISION) setTaskRevisionRefreshEpoch(value => value + 1);
+      }}
     />
   );
 }
@@ -3741,6 +3823,8 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   p3RetryAttemptNumber?: number | null;
   p3RetryInspectionStatus?: 'idle' | 'checking' | 'eligible' | 'ineligible' | 'failed';
   p3RetryInspectionReason?: string | null;
+  taskRevisionTruth?: Readonly<TaskRevisionTruthSnapshot> | null;
+  taskRevisionReadReason?: string | null;
   onP3MutationOperation?: (value: 'task.create' | 'task.cancel' | 'task.retry') => void;
   onP3TaskName?: (value: string) => void;
   onP3TaskInstruction?: (value: string) => void;
@@ -3749,6 +3833,58 @@ export interface LiveVoiceIntegratedRoutePanelViewProps {
   onP3Issue?: () => void;
   onP3Execute?: () => void;
   onRefresh: () => void;
+}
+
+export function TaskRevisionTruthProjection({ truth }: { truth: Readonly<TaskRevisionTruthSnapshot> }) {
+  const applicationState = taskRevisionApplicationState(truth);
+  const warning = taskRevisionWarning(truth);
+  const lineage = truth.revision_history
+    .map(revision => `r${revision.task_revision}:${revision.attempt_id}`)
+    .join(' -> ');
+  const cleanupState = truth.cleanup !== null
+    ? 'acknowledged'
+    : truth.pending_command?.application_state === 'unknown'
+      ? 'unknown'
+      : truth.current_revision === 1
+        ? 'not_started'
+        : 'unavailable';
+  const successorState = truth.current_revision === 2
+    ? `${truth.task_state}:${truth.current_attempt_id}`
+    : 'not_started';
+  return (
+    <section
+      className="live-voice-integrated__revision-truth"
+      aria-label="Task revision truth"
+      data-testid="live-voice-integrated-task-revision-truth"
+    >
+      <strong>Task revision truth</strong>
+      <span className="live-voice-integrated__progress-note">
+        Store and Executor facts only; command application and task lifecycle are separate.
+      </span>
+      <div className="live-voice-integrated__facts" aria-live="polite">
+        <DiagnosticsFact label="Task" value={truth.task_id} />
+        <DiagnosticsFact label="Current revision" value={String(truth.current_revision)} />
+        <DiagnosticsFact label="Attempt lineage" value={lineage} />
+        <DiagnosticsFact label="Command application" value={applicationState} />
+        <DiagnosticsFact label="Task lifecycle" value={`${truth.task_state}:${truth.outcome ?? 'nonterminal'}`} />
+        <DiagnosticsFact label="Predecessor cleanup" value={cleanupState} />
+        <DiagnosticsFact label="Successor" value={successorState} />
+        <DiagnosticsFact label="Executor ACK" value={truth.execution?.execution_ack === true ? 'acknowledged' : 'not_recorded'} />
+        <DiagnosticsFact label="Changed paths" value={truth.execution?.changed_paths.join(', ') || 'not_recorded'} />
+        <DiagnosticsFact label="Diff" value={truth.execution?.diff_summary ?? 'not_recorded'} />
+        <DiagnosticsFact
+          label="Verifier"
+          value={truth.execution === null ? 'not_recorded' : `${truth.execution.verifier.verifier_id}:${truth.execution.verifier.result}`}
+        />
+        <DiagnosticsFact label="Verified success" value={truth.execution?.verified_success === true ? 'established' : 'not_established'} />
+      </div>
+      {warning !== null && (
+        <span className="live-voice-integrated__diagnostic-error" role="status">
+          {warning}
+        </span>
+      )}
+    </section>
+  );
 }
 
 export function LiveVoiceIntegratedRoutePanelView({
@@ -3800,6 +3936,8 @@ export function LiveVoiceIntegratedRoutePanelView({
   p3RetryAttemptNumber = null,
   p3RetryInspectionStatus = 'idle',
   p3RetryInspectionReason = null,
+  taskRevisionTruth = null,
+  taskRevisionReadReason = null,
   onP3MutationOperation,
   onP3TaskName,
   onP3TaskInstruction,
@@ -4181,6 +4319,21 @@ export function LiveVoiceIntegratedRoutePanelView({
               )}
               <DiagnosticsFact label={t('liveVoice.integrated.taskControl.status')} value={p3MutationStatus} />
             </div>
+          )}
+          {FEATURE_LIVE_VOICE_S8_5_TASK_REVISION && taskRevisionTruth !== null && (
+            <TaskRevisionTruthProjection truth={taskRevisionTruth} />
+          )}
+          {FEATURE_LIVE_VOICE_S8_5_TASK_REVISION && taskRevisionTruth === null && taskRevisionReadReason !== null && (
+            <section
+              className="live-voice-integrated__revision-truth"
+              aria-label="Task revision truth"
+              data-testid="live-voice-integrated-task-revision-truth-unavailable"
+            >
+              <strong>Task revision truth</strong>
+              <span className="live-voice-integrated__diagnostic-error" role="status">
+                {taskRevisionReadReason}
+              </span>
+            </section>
           )}
         </div>
 

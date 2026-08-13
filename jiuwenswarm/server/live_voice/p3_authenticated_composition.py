@@ -938,6 +938,12 @@ class P3AuthenticatedComposition:
     def mutation_authority_ready(self) -> bool:
         return self._confirmation_verifier is not None
 
+    @property
+    def task_store(self) -> SqliteTaskStore:
+        """Expose the existing Task-Core Store for explicit sibling extensions."""
+
+        return self._core.store
+
     def resolve_product_authority_candidate(
         self,
         *,
