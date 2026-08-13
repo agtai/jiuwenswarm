@@ -21,6 +21,7 @@ import subprocess
 import sys
 import wave
 from collections import deque
+from array import array
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
@@ -50,8 +51,10 @@ _MAX_OBSERVATION_BYTES = 4 * 1024 * 1024
 _MAX_PRIVACY_FILE_BYTES = 16 * 1024 * 1024
 _MAX_PRIVACY_TOTAL_BYTES = 128 * 1024 * 1024
 _MAX_PRIVACY_FILES = 512
-_RAW_AUDIO_SENTINEL_BYTES = 480
-_ENCODED_AUDIO_FRAME_BYTES = (960, 1_920)
+_PCM16_RAW_SENTINEL_BYTES = 480
+_PCM16_ENCODED_FRAME_BYTES = (960, 1_920)
+_PCM_F32_RAW_SENTINEL_BYTES = 1_920
+_PCM_F32_ENCODED_FRAME_BYTES = (3_840,)
 _AUDIO_SUFFIXES = frozenset(
     {".wav", ".pcm", ".mp3", ".ogg", ".opus", ".webm", ".m4a", ".flac"}
 )
@@ -714,6 +717,20 @@ def _relative_capture_path(value: object) -> PurePosixPath:
     return path
 
 
+def _pcm16_to_f32le(pcm: bytes) -> bytes:
+    signed = array("h")
+    signed.frombytes(pcm)
+    if sys.byteorder != "little":
+        signed.byteswap()
+    normalized = array(
+        "f",
+        (value / (32_768 if value < 0 else 32_767) for value in signed),
+    )
+    if sys.byteorder != "little":
+        normalized.byteswap()
+    return normalized.tobytes()
+
+
 def _privacy_patterns(audio_fixture: Path) -> tuple[bytes, ...]:
     secrets: list[bytes] = []
     for name in ("LIVE_VOICE_SPEECH_API_KEY", "JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN"):
@@ -736,34 +753,51 @@ def _privacy_patterns(audio_fixture: Path) -> tuple[bytes, ...]:
         raw_audio = audio_fixture.read_bytes()
     except (OSError, EOFError, wave.Error) as error:
         raise ProbeFailure("PRIVACY_AUDIO_FIXTURE_INVALID") from error
-    if len(pcm) < max(_ENCODED_AUDIO_FRAME_BYTES) or len(raw_audio) < 44:
+    if len(pcm) < max(_PCM16_ENCODED_FRAME_BYTES) or len(raw_audio) < 44:
         raise ProbeFailure("PRIVACY_AUDIO_FIXTURE_INVALID")
     audio_sha = hashlib.sha256(raw_audio).hexdigest().encode("ascii")
+    pcm_f32le = _pcm16_to_f32le(pcm)
     # A 480-byte sentinel at every 480-byte corpus boundary guarantees that
     # every persisted raw PCM span of at least 960 bytes contains a complete
     # sentinel, even when the persisted span starts between boundaries.  The
-    # encoded sentinels cover the two bounded frame sizes emitted by the Alpha
-    # media route.  All sentinels derive from the complete tracked corpus, not
-    # only its prefix.
-    raw_audio_sentinels = tuple(
-        pcm[offset : offset + _RAW_AUDIO_SENTINEL_BYTES]
+    # f32le grid applies the same invariant to the authoritative 48 kHz, 20 ms
+    # Browser/Gateway frame (3,840 bytes). Encoded sentinels cover aligned
+    # PCM16 fixture slices and that formal f32le media frame. All sentinels
+    # derive from the complete tracked corpus, not only its prefix.
+    pcm16_raw_sentinels = tuple(
+        pcm[offset : offset + _PCM16_RAW_SENTINEL_BYTES]
         for offset in range(
             0,
-            len(pcm) - _RAW_AUDIO_SENTINEL_BYTES + 1,
-            _RAW_AUDIO_SENTINEL_BYTES,
+            len(pcm) - _PCM16_RAW_SENTINEL_BYTES + 1,
+            _PCM16_RAW_SENTINEL_BYTES,
         )
     )
-    encoded_audio_sentinels = tuple(
+    pcm16_encoded_sentinels = tuple(
         base64.b64encode(pcm[offset : offset + frame_bytes])
-        for frame_bytes in _ENCODED_AUDIO_FRAME_BYTES
+        for frame_bytes in _PCM16_ENCODED_FRAME_BYTES
         for offset in range(0, len(pcm) - frame_bytes + 1, frame_bytes)
+    )
+    pcm_f32_raw_sentinels = tuple(
+        pcm_f32le[offset : offset + _PCM_F32_RAW_SENTINEL_BYTES]
+        for offset in range(
+            0,
+            len(pcm_f32le) - _PCM_F32_RAW_SENTINEL_BYTES + 1,
+            _PCM_F32_RAW_SENTINEL_BYTES,
+        )
+    )
+    pcm_f32_encoded_sentinels = tuple(
+        base64.b64encode(pcm_f32le[offset : offset + frame_bytes])
+        for frame_bytes in _PCM_F32_ENCODED_FRAME_BYTES
+        for offset in range(0, len(pcm_f32le) - frame_bytes + 1, frame_bytes)
     )
     patterns = tuple(
         dict.fromkeys(
             (
                 *secrets,
-                *raw_audio_sentinels,
-                *encoded_audio_sentinels,
+                *pcm16_raw_sentinels,
+                *pcm16_encoded_sentinels,
+                *pcm_f32_raw_sentinels,
+                *pcm_f32_encoded_sentinels,
                 audio_sha,
             )
         )

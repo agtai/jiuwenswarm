@@ -6,6 +6,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import struct
 import subprocess
 import sys
 import wave
@@ -366,9 +367,12 @@ def test_privacy_probe_scans_every_closed_surface_for_real_secrets_and_audio(
     assert result.sample_count == len(s7_probe.ALPHA_PRIVACY_SURFACES)
 
 
-@pytest.mark.parametrize("encoded", [False, True])
-def test_privacy_probe_rejects_later_short_pcm_frame(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoded: bool
+@pytest.mark.parametrize(
+    "representation",
+    ["pcm16_raw", "pcm16_base64", "pcm_f32le_raw", "pcm_f32le_base64"],
+)
+def test_privacy_probe_rejects_later_media_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, representation: str
 ) -> None:
     capture = tmp_path / "capture"
     capture.mkdir()
@@ -383,9 +387,24 @@ def test_privacy_probe_rejects_later_short_pcm_frame(
     )
     with wave.open(str(audio_fixture), "rb") as source:
         pcm = source.readframes(source.getnframes())
-    later_frame = pcm[19_200:20_160]
-    assert len(later_frame) == 960
-    persisted = base64.b64encode(later_frame) if encoded else later_frame
+    if representation.startswith("pcm16"):
+        start = 19_200 if representation.endswith("base64") else 19_202
+        later_frame = pcm[start : start + 960]
+        assert len(later_frame) == 960
+    else:
+        start = 19_200 if representation.endswith("base64") else 19_202
+        later_pcm16_frame = pcm[start : start + 1_920]
+        signed = struct.unpack("<960h", later_pcm16_frame)
+        later_frame = struct.pack(
+            "<960f",
+            *(value / (32_768 if value < 0 else 32_767) for value in signed),
+        )
+        assert len(later_frame) == 3_840
+    persisted = (
+        base64.b64encode(later_frame)
+        if representation.endswith("base64")
+        else later_frame
+    )
     (capture / "surface-0.txt").write_bytes(b"prefix:" + persisted + b":suffix")
     monkeypatch.setenv("S7_PRIVACY_SURFACE_MANIFEST", str(manifest))
     monkeypatch.setenv("S7_PRIVACY_CAPTURE_ROOT", str(capture))

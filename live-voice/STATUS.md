@@ -2,165 +2,85 @@
 
 > Updated: 2026-08-13
 > This is the only mutable source for current branch expectations, stage/task,
-> module closure state, blockers and next actions. Detailed evidence lives in
-> the linked review record; Git remains the implementation fact.
+> blockers and next actions. Git is the implementation fact; detailed S7 facts
+> are in the linked review record.
 
 ## Resume capsule
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
-  `origin/hx/0812_live_voice_w3`. The configured `origin` resolves to the agtai
-  GitHub repository. Verify live Git before trusting prose; no push is
-  authorized.
-- Current stage/node: `S6 - Alpha Module Closure` / `A1`, `CLOSED`; S7/A2 is
-  `PREPARED / NOT_STARTED`.
-- Current task: none. All six S6 module rows are `SATISFIED`. The user completed
-  the remaining breath-pause and O6 return/no-stale observations against
-  deployed source `e6ccb3e9` in the prepared B environment. D116 records the
-  physical closure; it does not claim that Main heard speaker output or handled
-  a browser permission prompt.
-- Post-S6 audit: D117 reviewed all 36 commits after `9b8ede22`, including all 21
-  Claude-co-authored commits. No actionable code finding or missing merge was
-  located. The only relevant unmerged branch, `codex/s7-automation`, must be
-  selectively ported during S7-01 rather than merged wholesale.
-- Next gate: activate `S7-01` from the prepared
-  [S7 execution packet](roadmap/S7_EXECUTION_PACKET_2026-08-13.md) when the user
-  explicitly starts S7.
-- Closed: S0 V0, S1 Shared Foundations, S2 D-031 bounded compatibility,
-  S3 W2 Integrated Demo (`PRODUCT-ACCEPTED`), S4 develop rebaseline, S5 entry
-  audit/ownership activation, and S6/A1 module closure.
-- Not started: S7/A2 candidate assembly/verification/review and S8/A3 product
-  acceptance.
+  `origin/hx/0812_live_voice_w3`. The work is local-only; no push is authorized.
+- `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
+  S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
+  [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
+- Current stage/node: `S7 - Candidate Assembly, Verification and Review` /
+  `A2`, `ENVIRONMENT / NOT CLOSED`.
+- Comparison base: `2a69c2b87d0ee080a4a30421cbcbcdf93183f340`.
+- S7 implementation source through `c2d3b2c49d17042c1828dd951e82e0463f62286b`;
+  the exact clean documentation-handoff HEAD is recorded by the external
+  sanitized `s7-final-automation.json` report generated after the S7-04 commit.
+- Automation and cumulative source review are complete. Five canonical real
+  probes were invoked but each has zero valid samples because the formal S7
+  private runtime/observation inputs are unavailable. Historical S6 evidence
+  has not been relabelled or rebound to the new candidate.
+- `S8/A3` has not started. The Alpha human acceptance result remains unavailable.
 
-Terminology follows D-075. The active execution contract is the
-[S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md); the complete
-S6 implementation and review record is
-[S6 Alpha integration review](S6_ALPHA_INTEGRATION_REVIEW_2026-08-12.md).
+The active execution contract is the
+[S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the S7 packet is
+[S7_EXECUTION_PACKET_2026-08-13.md](roadmap/S7_EXECUTION_PACKET_2026-08-13.md),
+and the detailed result is
+[S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md](S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md).
 
-## S5 entry audit
-
-- `S5-01`: SATISFIED for S6 entry. Git/source and tests were inspected against
-  the Alpha rows; package names or historical completion claims were not used
-  as proof.
-- `S5-02`: D-078 choices are frozen in source. Machine-private/provider facts
-  remain `ENVIRONMENT` and were not invented or committed.
-- `S5-03`: SATISFIED. Main retained integration and semantic ownership; Tier 2/3
-  boundaries received self-review, cumulative cold review and an independent
-  read-only review. Each coherent S6 module group used affected tests before the
-  broad verification pass.
-
-## S6 closure dashboard
+## S7 dashboard
 
 | Task | Status | Current fact |
 |---|---|---|
-| S6-01 critical-input safety | `SATISFIED` | The bounded `CriticalTokenSafetyGate` is on committed text/voice/Task product paths. Partial, stale, low-confidence and wrong-scope cases assert zero Agent, Tool, Task, audio, history and Store effects. |
-| S6-02 P1 speech/browser lifecycle | `SATISFIED` | D112's real streaming route and O1-O4 remain proven. D113 repaired the Provider event timeout. D114 records source `70dcc563` for cold Provider pre-open, recognition lifetime, 180-second playout, deferred successor capture, scheduled-frame ACK and browser scheduling lead. D115 records source `e6ccb3e9`, which preserves `server_vad` while increasing its silence duration from 500 to 1,200 ms. The user physically observed PASS for cold “你好” auto-EOT/recognition, the complete long answer with correct voice/quality, an internal breath pause without false stop, and O6 page-hidden interruption followed by no replay, duplicate or stale tail. D116 closes the row. |
-| S6-03 P2 realtime conversation | `SATISFIED` | The complete real media route is proven on the private origin: first-frame media auth, 227 uplink frames with 227 ACKs, provider-time end of turn, streaming recognition `completed` with no degradation, real Agent final, a real streaming TTS downlink and an accepted playout receipt. Nine real fault/load profiles all fail closed as declared, including sequence gap, duplicate/out-of-order, cursor mismatch, stale generation, one-use ticket replay, audio before authentication, an unpaced burst with no drop, and reconnect after a terminal detach. The route latency report covers thirteen targets with p50/p95/max over 5/5 clean rounds. The slow-round profile and the real cancel fences are proven in one live run: cancelling the Task mid-response left 184 further deltas and a normal final, a barge-in on another response left the Task state and outcome unchanged, and a stale generation and an unknown response target were both refused with no new effect. No fake result stands in for a real path. |
-| S6-04 P3alpha Task vertical | `SATISFIED` | Proven on the real path against the authoritative Store: confirmation issue/consume, command idempotency, TaskEvent-only lifecycle truth, outbox accounting, scope isolation, replay rejection and terminal-cancel rejection. Two Alpha defects blocked every real dispatch; with them fixed a real attempt now completes, the real Code Agent makes exactly the instructed change on the disposable fixture, and cross-project effects are 0. |
-| S6-05 observability/privacy/Web | `SATISFIED` | The private same-origin HTTPS/WSS topology is built and measured: real CA trust, CSP, WSS routing and zero browser-tier credentials. The whole-stack benchmark reports p50/p95/failures/sample for every declared target with 5/5 rounds clean; the raw-audio zero-persistence regression scans 66 configured surfaces and 16.2 MB with zero hits; the degradation matrix proves Streaming -> W2 Batch -> Browser/text with each tier explicitly identified and the text path surviving both Speech-provider and media removal; and the sanitized trace reproduction rebuilds the route, cancel, queue and Task facts from logs and the authoritative Store alone, cross-checking state/outcome/cancel against the live run, with zero credentials and zero raw audio on those surfaces. |
-| S6-06 joint route | `SATISFIED` | The automated joint scenario passes, including a race the real-path repair exposed, and the real joint run has now executed: one detached P3alpha Task on the disposable fixture, one committed voice Turn through the real media route, two slow conversational rounds, a barge-in, a cancel issued while a response was still streaming, and two cancel targets that had to be refused, all in one run with zero cross-domain effect and zero unauthorized fixture mutation. Fake external claims are still not treated as proof of the physical P1 route, which S6-02 owns. |
+| S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. Latest S6 source remains authoritative. |
+| S7-02 automation | `SATISFIED` | The full committed-candidate runner covers backend/regression suites, every tracked Live Voice frontend test, compatibility tests, TypeScript/build, Ruff exact-debt fingerprint, format/compile, diff/link/hygiene and post-run identity. The authoritative final run is the external sanitized report named above. |
+| S7-02 real path | `ENVIRONMENT` | `speech-media`, `agent-executor`, `benchmark-fault`, `secure-deployment` and `privacy` each have 0 valid S7 samples. The first, second, third and fifth lack fresh candidate-bound observations/captures; the current controlled origin is localhost while the formal S7 deployment probe requires a non-loopback private FQDN with trusted TLS. |
+| S7-03 cumulative Tier-3 review | `SATISFIED` | Self-review, cumulative cold review and an independent read-only review found no Critical/High product-source issue. Two P2 automation findings were fixed in `c2d3b2c4`; the stale-status P2 documentation finding is fixed by this S7-04 update. Real-path evidence remains an explicit environment gap, not a source PASS. |
+| S7-04 A3 handoff freeze | `ENVIRONMENT` | The handoff documents and user-run showcase are prepared, but A3 is not ready to execute because A2 real-path verification is incomplete. |
 
-No S6 source or environment gap remains open. Every S6 module row is
-`SATISFIED` and S6/A1 is closed. S7-01 has not started.
+## Active blocker and shortest remaining path
 
-The post-rebaseline commit/content/merge audit is recorded in
-[D117](D117_POST_9B8_COMMIT_AUDIT_2026-08-13.md). The 36 reviewed commits are
-already linear ancestors of HEAD; all Claude-co-authored commits are also in the
-configured upstream. No history rewrite or duplicate merge is required. The
-S7 automation branch has useful owned scripts/tests but also large format-only
-rewrites and predates the final S6-02 repairs, so the S7 packet requires a
-selective current-HEAD port.
+No known product-source or automated-verification defect is open. Closure needs
+one controlled environment on the exact final candidate that provides:
 
-The physical closure is recorded in
-[D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md). Its latest source verification
-is bound to `e6ccb3e9` in
-[D115](D115_S6_02_BREATH_PAUSE_VAD_REPAIR_2026-08-13.md). Its playout/cold-EOT
-predecessor is [D114](D114_S6_02_COLD_EOT_AND_LONG_PLAYOUT_REPAIR_2026-08-13.md). Its timeout
-predecessor is [D113](D113_S6_02_SYNTHESIS_EVENT_TIMEOUT_REPAIR_2026-08-13.md),
-which builds on the real-path record [D112](D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md).
+1. a non-loopback private DNS name resolving only to private addresses, trusted
+   same-origin HTTPS/WSS, and the declared proxy/CSP/CORS/media route;
+2. fresh candidate/runtime-bound Speech/Media, Agent/Executor and
+   Benchmark/Fault observations plus a complete 19-surface privacy capture;
+3. all five canonical probes rerun through `--require-real`, followed by an
+   affected evidence review of the actual producer invocations and sanitized
+   results.
 
-D112 adds four more Alpha real-path defects, all behind declared fail-closed
-gates and all invisible to the suites: P2 activation requested the Agent
-profile that does not own the formal Live Voice seam; the WebChannel dispatcher
-accepted only the legacy media path while activation returns the fixed one; the
-real GA transcription echo drops the two response fields the Adapter compared
-byte for byte, so every `server_vad` open was rejected; and end-of-turn
-arbitration cancelled the Provider open it was waiting for. Each is fixed with
-a regression test proven to fail when the fix is reverted. The dedicated media
-route also requires the deployment to list the private origin host in
-`JIUWENSWARM_WS_ALLOWED_ORIGIN_HOSTS`; that is a deployment prerequisite, not a
-defect, and no source was changed for it.
-
-D110's two external blockers are cleared: the Gateway-only Speech credential and
-a private `https://live-voice.localhost` HTTPS/WSS reverse proxy now exist, with
-an isolated data dir, isolated P3 SQLite Store and a disposable no-remote Git
-fixture. The first real run immediately exposed defects no fake-socket suite
-could reach, which is the point of the real path:
-
-1. the GA transcription session sends `conversation.item.added`/`.done` and no
-   longer sends the beta `conversation.item.created`, so the Adapter aborted
-   every real recognition right after commit;
-2. a transport close slower than the 50 ms attempt budget was cancelled and
-   permanently retained as failed, leaking one cleanup slot per stream and
-   closing the STT route after roughly fifteen recognitions;
-3. `ReasoningToolLoopCompactProcessor`, wired by develop `b06ff06d0`, does not
-   exist in the pinned agent-core, which fails every `chat.send` at runtime;
-4. the P3 model hook called `JiuWenSwarmDeepAdapter._build_model_from_entry`,
-   which does not exist — the runtime exports `build_model_from_entry` as a
-   module-level function — so every real attempt dispatch failed closed with a
-   suppressed outbox and `P3_MODEL_UNAVAILABLE`;
-5. formal dispatch read `get_instance`, a plain accessor that returns None
-   until the chat path builds the root DeepAgent, instead of awaiting
-   `ensure_instance`, so every attempt failed with
-   `EXECUTOR_CAPABILITY_UNAVAILABLE` and zero project effect.
-
-(1), (2), (4) and (5) are Alpha-attributable and fixed in `31ee31abb`,
-`44b275d5d` and `3583c0fe2`, each with a regression test proven to fail when its
-fix is reverted. (3) is
-identical on the `3f3cdbb7f` develop baseline and the `2a69c2b87` comparison base,
-so it is out of scope and unmodified; the isolated run disables it through
-configuration only.
-
-None of the four could be reached by the existing suites: the streaming sockets,
-the P3 model resolver and the executor are all fakes that replay only shapes the
-implementation already knows. A passing suite says nothing about the real path.
-With (4) and (5) fixed, the formal P3alpha vertical now executes for real: a
-task reaches `terminal/completed`, its outbox is `delivered`, and the real
-project Code Agent makes exactly the instructed change on the disposable
-fixture with HEAD unchanged and still no remote.
-
-Verification commands must keep `--asyncio-mode=auto`: `pytest.ini` carries it in
-`addopts`, and the common `-o addopts=''` silently drops it and manufactures
-dozens of false async failures.
-
-S6/A1 is closed. Under
-[ALPHA_ACCEPTANCE.md](validation/ALPHA_ACCEPTANCE.md) §0 and §8, final Alpha PASS
-is not yet available: S7 must compose and verify one exact candidate, and S8
-must run the complete human product journey on that candidate.
+The environment owner must supply or authorize the private DNS/certificate
+trust and observation-producer run. Do not manufacture artifacts, copy old S6
+aggregates, use a real user project, create a Provider key/project, change
+billing, or deploy publicly. After all five results reach `VERIFY` on one exact
+candidate, update this dashboard and only then start the user-owned S8/A3
+journey.
 
 ## Frozen product boundary
 
 - Gateway-only key: `LIVE_VOICE_SPEECH_API_KEY`.
-- Streaming defaults: `gpt-4o-mini-transcribe-2025-12-15`,
-  `gpt-4o-mini-tts-2025-12-15`, voice `marin`, official OpenAI origin only.
+- Speech: official OpenAI origin,
+  `gpt-4o-mini-transcribe-2025-12-15`,
+  `gpt-4o-mini-tts-2025-12-15`, voice `marin`.
 - Degradation: Streaming -> W2 Batch -> Browser/text, explicitly identified.
-- Agent: current JiuwenSwarm Agent Provider. P3alpha: current formal Task Core,
-  `DirectProjectCodeExecutorAdapter` and a disposable local Git fixture.
-- New capabilities remain default-off until their environment is verified.
-
-The branch preserves the D107 develop/W3 migration corrections, including Task
-Store WAL concurrency, Runtime/Executor, agent-core and workspace API behavior.
-It does not restore signed Gate tooling, Replacement Ledger, a fixed manifest,
-old migrated APIs, or `schedule.*` as P3alpha Task authority. Full P3, 3A/3B,
-D1/D2, Production and public deployment remain outside scope.
+- Agent: JiuwenSwarm Agent Provider. P3alpha: formal Task Core,
+  `DirectProjectCodeExecutorAdapter`, disposable no-remote local Git fixtures.
+- Deployment: private same-origin HTTPS/WSS; no public deployment.
+- The D107 migration corrections remain authoritative. Do not restore signed
+  Gate tooling, Replacement Ledger, fixed manifests, migrated APIs or
+  `schedule.*` as P3alpha Task authority.
 
 ## Next actions
 
-1. Wait for an explicit S7 start instruction; preparation does not activate A2.
-2. Then execute the
-   [S7 packet](roadmap/S7_EXECUTION_PACKET_2026-08-13.md) in order: selective
-   automation port and candidate freeze (S7-01), complete candidate verification
-   (S7-02), cumulative/independent review (S7-03), then A3 handoff freeze
-   (S7-04).
-
-No push is authorized. Machine-private credentials, provider configuration,
-browser profiles, raw audio and private run data must stay out of Git.
+1. Environment owner supplies the bounded private DNS/TLS route and runs the
+   four missing observation/capture producers without exposing credentials or
+   private paths.
+2. Main reruns the five canonical probes and the complete `--require-real`
+   candidate verification, then reviews the exact real evidence.
+3. If and only if S7/A2 closes, the user runs
+   [ALPHA_SHOWCASE.md](demo/ALPHA_SHOWCASE.md) for S8/A3. Do not claim
+   `PASS - INTEGRATED WEB ALPHA` before that human journey passes.

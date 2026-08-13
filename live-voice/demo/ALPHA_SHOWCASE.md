@@ -7,6 +7,29 @@
 
 This is the D-075 `A3 Product Acceptance` script. The active S5–S8 task contract is [ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](../roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md). Run this journey once only after its A2 automation and cumulative review pass on one exact clean tested source. W2 observations may guide setup but do not automatically pass any Alpha step.
 
+## S7-04 handoff binding
+
+The current S7 handoff is **not ready for A3**: automation and cumulative source
+review are complete, but all five S7 real probes are `ENVIRONMENT` with zero
+valid samples. Do not start this showcase until [STATUS](../STATUS.md) records
+S7/A2 closed and the external sanitized `s7-final-automation.json` identifies
+the same exact clean candidate as the five `VERIFY` real results. The detailed
+reason and shortest path are in the
+[S7 integration review](../S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md).
+
+The frozen handoff profile is desktop Chrome on Windows; private same-origin
+HTTPS/WSS; system-selected input/output devices recorded by sanitized reference;
+the official OpenAI Speech origin with D-078 STT/TTS models and `marin`;
+JiuwenSwarm Agent Provider; formal Task Core and
+`DirectProjectCodeExecutorAdapter`; disposable no-remote Git fixtures; and
+Streaming -> W2 Batch -> Browser/text explicit fallback. Integrated Web, P1,
+P2, P3 text/mutation, dedicated media, EOT, critical-input, credential and
+formal batch/streaming flags are exactly `true`; the superseded frontend Task
+Demo and Streaming Speech entry flags are unset. Current known non-blocking
+build warnings are limited to a duplicate i18n key, mixed static/dynamic import
+and large chunks. No source repair, hidden route switch, public deployment or
+real-user project is permitted during A3.
+
 ## 1. Preflight and candidate identity
 
 Record without secrets:
