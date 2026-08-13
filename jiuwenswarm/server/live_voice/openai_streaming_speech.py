@@ -101,6 +101,14 @@ MAX_DEGRADATION_SINK_TASKS_PER_OWNER = 4
 MAX_DEGRADATION_SINK_TASKS_GLOBAL = 16
 TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS = 0.05
 TRANSPORT_CLEANUP_CLOSE_BUDGET_SECONDS = 0.1
+# ``websockets`` otherwise inherits the Provider connect budget here (up to
+# five seconds).  That makes an ordinary peer which doesn't acknowledge our
+# close frame outlive both cleanup-owner budgets and turns a successful stream
+# into ``SPEECH_PROVIDER_CLEANUP_INCOMPLETE``.  The frame is sent before this
+# timeout starts; when it expires, websockets aborts the transport.  Reserving
+# half the attempt budget leaves time for connection-lost bookkeeping while
+# keeping the public cleanup call hard-bounded.
+REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS = TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS / 2
 MAX_INCOMPLETE_TRANSPORT_CLEANUPS = 32
 
 _PROVIDER = ProviderRef("openai-streaming-speech", "formal")
@@ -717,7 +725,7 @@ async def _default_socket_factory(
 
     kwargs: dict[str, object] = {
         "open_timeout": timeout_seconds,
-        "close_timeout": min(timeout_seconds, 5.0),
+        "close_timeout": REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS,
         "max_size": MAX_WIRE_MESSAGE_BYTES,
         "compression": None,
     }
@@ -785,7 +793,9 @@ class OpenAIStreamingSpeechProvider:
             type(event_queue_wait_seconds) is not float
             or not 0.0 < event_queue_wait_seconds <= 60.0
         ):
-            raise ValueError("event_queue_wait_seconds must be a bounded positive float")
+            raise ValueError(
+                "event_queue_wait_seconds must be a bounded positive float"
+            )
         self._event_queue_wait_seconds = event_queue_wait_seconds
         self._config = config
         self._socket_factory = socket_factory or _default_socket_factory
@@ -1705,9 +1715,7 @@ class OpenAIStreamingSpeechProvider:
                 line = await anext(iterator)
             except StopAsyncIteration:
                 if data_lines:
-                    return await self._consume_sse_event(
-                        session, "\n".join(data_lines)
-                    )
+                    return await self._consume_sse_event(session, "\n".join(data_lines))
                 return None
             if session.closing:
                 return None
@@ -1718,9 +1726,7 @@ class OpenAIStreamingSpeechProvider:
                 )
             if line == "":
                 if data_lines:
-                    return await self._consume_sse_event(
-                        session, "\n".join(data_lines)
-                    )
+                    return await self._consume_sse_event(session, "\n".join(data_lines))
                 continue
             if line.startswith(":"):
                 continue

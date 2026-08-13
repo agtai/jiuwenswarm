@@ -29,6 +29,8 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     DEFAULT_TTS_VOICE,
     MAX_DEGRADATION_SINK_TASKS_PER_OWNER,
     MAX_INCOMPLETE_TRANSPORT_CLEANUPS,
+    REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS,
+    TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS,
     OpenAIStreamingSpeechError,
     OpenAIStreamingSpeechConfig,
     OpenAIStreamingSpeechProvider,
@@ -40,6 +42,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     _DegradationSinkTaskOwner,
     _StreamingLinearResampler,
     _TransportCleanupOwner,
+    _default_socket_factory,
     _degradation_fact,
     _reason_for_exception,
     select_environment_streaming_speech,
@@ -2287,9 +2290,7 @@ async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot() -> 
     resources = [object() for _ in range(4)]
     for resource in resources:
         assert (
-            await owner.attempt(
-                kind="socket", resource=resource, cleanup=slow_cleanup
-            )
+            await owner.attempt(kind="socket", resource=resource, cleanup=slow_cleanup)
             is False
         )
     pending = owner.snapshot()
@@ -2309,3 +2310,27 @@ async def test_slow_transport_close_finishes_and_releases_its_cleanup_slot() -> 
     assert settled.clean is True
     owner.require_session_capacity(active_sessions=0)
     assert (await owner.close()).clean is True
+
+
+@pytest.mark.asyncio
+async def test_default_socket_close_timeout_fits_cleanup_attempt_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    marker = object()
+
+    async def connect(url: str, **kwargs: object) -> object:
+        captured["url"] = url
+        captured.update(kwargs)
+        return marker
+
+    monkeypatch.setattr("websockets.connect", connect)
+    result = await _default_socket_factory(
+        "wss://speech.invalid/realtime", {"Authorization": "redacted"}, 5.0
+    )
+
+    assert result is marker
+    assert captured["close_timeout"] == REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS
+    assert (
+        REALTIME_SOCKET_CLOSE_TIMEOUT_SECONDS < TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
+    )
