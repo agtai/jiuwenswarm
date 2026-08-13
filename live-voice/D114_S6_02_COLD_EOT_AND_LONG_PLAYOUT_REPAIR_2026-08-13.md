@@ -107,6 +107,7 @@ the fix instead of merely recording a green result after the change.
 | Long answer defers successor capture until final downlink settlement | FAIL: timed out after 10,000 ms waiting for final downlink ACK | PASS: 91.9 ms |
 | Streaming answer renders 1,501 frames beyond the former ceiling | FAIL: timed out after 10,000 ms waiting for final downlink ACK | PASS: 162.9 ms |
 | Browser playout starts with the declared scheduling lead | FAIL: actual starts `[10.00, 10.02]`; expected `[11.00, 11.02]` | PASS in the 102-test browser audio suite |
+| Eight-frame transport window advances while browser render completion is frozen | FAIL: ACK `-1`, only 8 frames received/scheduled, 0 rendered | PASS: ACK `8`, all 9 frames received/scheduled, 0 rendered |
 | Scheduled-frame ACK and rendered receipt remain separate | PASS | PASS |
 
 The last row is a negative control: the counterfactual setup did not make every
@@ -128,7 +129,7 @@ review under D-074.
 
 - Backend streaming recognition, dedicated media, Batch Speech and OpenAI
   streaming suites: `210 passed`.
-- Frontend Integrated Web suite: `317 passed`.
+- Frontend Integrated Web suite: `318 passed`.
 - Frontend browser audio suite: `102 passed`.
 - Frontend Gateway Speech suite: `29 passed`.
 - Ruff on affected Python files and `git diff --check`: PASS.
