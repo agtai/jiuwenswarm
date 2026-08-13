@@ -15,7 +15,7 @@
 - Current stage/node: `S7 - Candidate Assembly, Verification and Review` /
   `A2`, `ENVIRONMENT / NOT CLOSED`.
 - Comparison base: `2a69c2b87d0ee080a4a30421cbcbcdf93183f340`.
-- S7 implementation source through `c2d3b2c49d17042c1828dd951e82e0463f62286b`;
+- S7 implementation source through `4cb834cf969e9b419c72cb75ff108426775dcd08`;
   the exact clean documentation-handoff HEAD is recorded by the external
   sanitized `s7-final-automation.json` report generated after the S7-04 commit.
 - Automation and cumulative source review are complete. Five canonical real
@@ -37,7 +37,7 @@ and the detailed result is
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. Latest S6 source remains authoritative. |
 | S7-02 automation | `SATISFIED` | The full committed-candidate runner covers backend/regression suites, every tracked Live Voice frontend test, compatibility tests, TypeScript/build, Ruff exact-debt fingerprint, format/compile, diff/link/hygiene and post-run identity. The authoritative final run is the external sanitized report named above. |
 | S7-02 real path | `ENVIRONMENT` | `speech-media`, `agent-executor`, `benchmark-fault`, `secure-deployment` and `privacy` each have 0 valid S7 samples. The first, second, third and fifth lack fresh candidate-bound observations/captures; the current controlled origin is localhost while the formal S7 deployment probe requires a non-loopback private FQDN with trusted TLS. |
-| S7-03 cumulative Tier-3 review | `SATISFIED` | Self-review, cumulative cold review and an independent read-only review found no Critical/High product-source issue. Two P2 automation findings were fixed in `c2d3b2c4`; the stale-status P2 documentation finding is fixed by this S7-04 update. Real-path evidence remains an explicit environment gap, not a source PASS. |
+| S7-03 cumulative Tier-3 review | `SATISFIED` | Self-review, cumulative cold review and an independent read-only review found no Critical/High product-source issue. The Ruff and PCM16 privacy P2s were fixed in `c2d3b2c4`; affected review found the formal f32le representation gap, which was fixed in `4cb834cf`. The stale-status P2 documentation finding is also fixed. Real-path evidence remains an explicit environment gap, not a source PASS. |
 | S7-04 A3 handoff freeze | `ENVIRONMENT` | The handoff documents and user-run showcase are prepared, but A3 is not ready to execute because A2 real-path verification is incomplete. |
 
 ## Active blocker and shortest remaining path

@@ -4,7 +4,7 @@
 > Stage/node: S7 / A2
 > Risk: Tier 3 cumulative boundary
 > Comparison base: `2a69c2b87d0ee080a4a30421cbcbcdf93183f340`
-> Source repair candidate: `c2d3b2c49d17042c1828dd951e82e0463f62286b`
+> Source repair candidate: `4cb834cf969e9b419c72cb75ff108426775dcd08`
 > Outcome: automation and source review complete; real path `ENVIRONMENT`;
 > S7/A2 not closed; S8 not started.
 
@@ -50,7 +50,9 @@ The selective port was committed as:
 - `5f154bf912dc681b91277a85416ef84c84400fb9` -
   `fix(live-voice): harden S7 candidate verification`;
 - `c2d3b2c49d17042c1828dd951e82e0463f62286b` -
-  `fix(live-voice): close S7 review evidence gaps`.
+  `fix(live-voice): close S7 review evidence gaps`;
+- `4cb834cf969e9b419c72cb75ff108426775dcd08` -
+  `fix(live-voice): complete S7 privacy and handoff`.
 
 ## 3. Automation evidence
 
@@ -71,13 +73,17 @@ promoted to a candidate failure. The report correctly produced
 `S7_READINESS=PARTIAL_AUTOMATION_ONLY`; its incomplete exit did not masquerade
 as S7 completion.
 
-Independent review then found two valid P2 automation weaknesses. The repairs
-at `c2d3b2c4` passed 57 runner/probe tests, changed-file Ruff, the exact
-21-diagnostic baseline helper and `git diff --check`. A 16 MiB clean privacy
-sample was separately timed; later-corpus raw and base64 PCM16/f32le samples
-were all rejected. The final clean handoff candidate received the full runner
-again after this documentation commit; `s7-final-automation.json` is the
-sanitized authoritative report and remains outside Git.
+Independent review first found two valid P2 automation weaknesses. The Ruff and
+PCM16 repairs at `c2d3b2c4` passed 57 runner/probe tests, changed-file Ruff, the
+exact 21-diagnostic baseline helper and `git diff --check`. Affected re-review
+then demonstrated that the formal `pcm_f32le` representation still evaded the
+privacy scan. `4cb834cf` added complete-corpus f32le sentinels and raw/base64
+regressions; the expanded focused suite passed 59 tests. A 16 MiB clean privacy
+sample scanned in about 1.94 seconds, while later-corpus unaligned raw and
+aligned base64 PCM16/f32le samples were all rejected. The final clean handoff
+candidate received the full runner again after the last documentation commit;
+`s7-final-automation.json` is the sanitized authoritative report and remains
+outside Git.
 
 Generated frontend output is excluded from candidate identity and did not dirty
 the worktree. The local locked environment was reconciled with `uv sync
@@ -117,11 +123,13 @@ Main reviewed `2a69c2b8..candidate` across:
 The independent read-only review found no Critical/High product-source issue.
 It found three P2 items:
 
-1. file-wide Ruff code waivers could hide new debt - valid and fixed by the
-   exact diagnostic fingerprint;
-2. the privacy sentinel could miss later PCM16 and formal `pcm_f32le` raw audio -
-   valid and fixed with complete-corpus representation-specific sentinels,
-   raw/base64 regressions and bounded matching;
+1. file-wide Ruff code waivers could hide new debt - valid and fixed in
+   `c2d3b2c4` by the exact diagnostic fingerprint;
+2. the privacy sentinel could miss later PCM16, and affected review then showed
+   it could also miss the formal `pcm_f32le` representation - valid and fixed
+   across `c2d3b2c4` and `4cb834cf` with complete-corpus
+   representation-specific sentinels, raw/base64 regressions and bounded
+   matching;
 3. STATUS still said S7 had not started - valid and fixed by this documentation
    closure.
 
