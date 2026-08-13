@@ -1,6 +1,6 @@
 # Live Voice current status
 
-> Updated: 2026-08-12
+> Updated: 2026-08-13
 > This is the only mutable source for current branch expectations, stage/task,
 > module closure state, blockers and next actions. Detailed evidence lives in
 > the linked review record; Git remains the implementation fact.
@@ -12,13 +12,16 @@
   ref; an earlier `origin/...` claim here was wrong. Verify live Git before
   trusting prose.
 - Current stage/node: `S6 - Alpha Module Closure` / `A1`, `ENVIRONMENT`.
-- Current task: `S6-02` physical observation, and nothing else. `S6-01`,
-  `S6-03`, `S6-04`, `S6-05` and `S6-06` are `SATISFIED`; every automatable S6
-  measurement has run on the real private topology. What remains cannot be
-  automated: microphone permission grant/deny/revoke, device change/loss and
-  heard playout on real Chrome with a physical microphone and output device.
-  The user executes it from
-  [the S6-02 runbook](S6_02_PHYSICAL_OBSERVATION_RUNBOOK_2026-08-13.md);
+- Current task: `S6-02` defect-11 real-path proof and physical observation, and
+  nothing else. `S6-01`, `S6-03`, `S6-04`, `S6-05` and `S6-06` are
+  `SATISFIED`; the previously declared automated S6 measurements have run on
+  the real private topology. Physical rows O1-O4 (permission grant, deny,
+  revoke and device loss) are also observed PASS. Defect 11 is source-fixed
+  and automated-verified in `10062c3e`, but the private D: run environment was
+  unavailable to this Session, so its real-path rollback proof, the O5
+  greater-than-15-second re-listen and O6 hidden/background/resume have not run.
+  Candidate defect 12 still needs real-path instrumentation before attribution.
+  The user executes physical rows from [the S6-02 runbook](S6_02_PHYSICAL_OBSERVATION_RUNBOOK_2026-08-13.md);
   Main must not claim to have heard speaker output or to have answered a
   browser permission prompt.
 - Next gate: the `S6-02` physical observation is the only row left before
@@ -51,20 +54,21 @@ S6 implementation and review record is
 | Task | Status | Current fact |
 |---|---|---|
 | S6-01 critical-input safety | `SATISFIED` | The bounded `CriticalTokenSafetyGate` is on committed text/voice/Task product paths. Partial, stale, low-confidence and wrong-scope cases assert zero Agent, Tool, Task, audio, history and Store effects. |
-| S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | Real streaming STT/TTS run against the official OpenAI origin with p50/p95 recorded, a real `server_vad` open and provider-time end of turn. The user has now observed four rows on real Chrome 151.0.7922.77 with physical devices: microphone permission grant, deny and revoke (`MICROPHONE_PERMISSION_DENIED`), and capture stopping when the device is unplugged, all PASS, with recognition and the text answer correct. Heard playout exposed a fifth Adapter defect: the Adapter event queue had no backpressure, so playing at real speed exhausted it and cut the answer off after a few seconds. It is fixed and verified on the real path (170 frames truncated before, 930 complete after), and the re-listen then exposed the next layer: the synthesis timeout is a fixed 15 s whole-stream budget declared by the browser client, so any answer longer than 15 s of speech is truncated by design. That one is located but deliberately not fixed in this batch, because it crosses the frontend contract and would leave an unverified change. A separate tearing/clicking symptom is reported and unmeasured. `S6-02` therefore stays `ENVIRONMENT` with heard playout FAILING, and O6 is still unobserved. |
+| S6-02 P1 speech/browser lifecycle | `ENVIRONMENT` | Real streaming STT/TTS and four physical permission/device rows remain proven as recorded in D112. Defect 11, the fixed 15 s whole-stream synthesis budget, is repaired in `10062c3e`: streaming now uses a sliding next-event timeout across browser, Gateway, Adapter and conformance layers while batch keeps its whole-operation budget. Red/green regression, affected suites, production build and an independent Tier 2 review pass. The private D: run root and services were unavailable to this Session, so the required real-path revert-fail/restore-pass proof and physical re-listen of a greater-than-15-second answer remain `ENVIRONMENT`; heard playout therefore remains FAIL from the last observation. Candidate defect 12 (tearing/clicking) is still unmeasured and unchanged, and O6 is unobserved. |
 | S6-03 P2 realtime conversation | `SATISFIED` | The complete real media route is proven on the private origin: first-frame media auth, 227 uplink frames with 227 ACKs, provider-time end of turn, streaming recognition `completed` with no degradation, real Agent final, a real streaming TTS downlink and an accepted playout receipt. Nine real fault/load profiles all fail closed as declared, including sequence gap, duplicate/out-of-order, cursor mismatch, stale generation, one-use ticket replay, audio before authentication, an unpaced burst with no drop, and reconnect after a terminal detach. The route latency report covers thirteen targets with p50/p95/max over 5/5 clean rounds. The slow-round profile and the real cancel fences are proven in one live run: cancelling the Task mid-response left 184 further deltas and a normal final, a barge-in on another response left the Task state and outcome unchanged, and a stale generation and an unknown response target were both refused with no new effect. No fake result stands in for a real path. |
 | S6-04 P3alpha Task vertical | `SATISFIED` | Proven on the real path against the authoritative Store: confirmation issue/consume, command idempotency, TaskEvent-only lifecycle truth, outbox accounting, scope isolation, replay rejection and terminal-cancel rejection. Two Alpha defects blocked every real dispatch; with them fixed a real attempt now completes, the real Code Agent makes exactly the instructed change on the disposable fixture, and cross-project effects are 0. |
 | S6-05 observability/privacy/Web | `SATISFIED` | The private same-origin HTTPS/WSS topology is built and measured: real CA trust, CSP, WSS routing and zero browser-tier credentials. The whole-stack benchmark reports p50/p95/failures/sample for every declared target with 5/5 rounds clean; the raw-audio zero-persistence regression scans 66 configured surfaces and 16.2 MB with zero hits; the degradation matrix proves Streaming -> W2 Batch -> Browser/text with each tier explicitly identified and the text path surviving both Speech-provider and media removal; and the sanitized trace reproduction rebuilds the route, cancel, queue and Task facts from logs and the authoritative Store alone, cross-checking state/outcome/cancel against the live run, with zero credentials and zero raw audio on those surfaces. |
 | S6-06 joint route | `SATISFIED` | The automated joint scenario passes, including a race the real-path repair exposed, and the real joint run has now executed: one detached P3alpha Task on the disposable fixture, one committed voice Turn through the real media route, two slow conversational rounds, a barge-in, a cancel issued while a response was still streaming, and two cancel targets that had to be refused, all in one run with zero cross-domain effect and zero unauthorized fixture mutation. Fake external claims are still not treated as proof of the physical P1 route, which S6-02 owns. |
 
-One known S6 source defect remains: the fixed 15 s whole-stream synthesis
-budget that truncates any spoken answer longer than 15 s (D112 section 7c). It is
-located, attributed to Alpha and not yet repaired. `S6-02` is blocked on it; the
-other five rows do not consume it.
+No located S6 source defect remains open. Defect 11 from D112 section 7c is
+repaired and automated-verified in `10062c3e`; its real-path proof is still an
+environment requirement. Candidate defect 12 remains unmeasured and has not
+been attributed or modified. `S6-02` stays `ENVIRONMENT`; the other five rows do
+not consume either observation.
 
-Latest verification is bound to `974bfb118` plus the closure batch that follows
-it, and is recorded in
-[D112](D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md), which follows
+Latest source verification is bound to `10062c3e` and recorded in
+[D113](D113_S6_02_SYNTHESIS_EVENT_TIMEOUT_REPAIR_2026-08-13.md). Its real-path
+predecessor is [D112](D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md), which follows
 [D111](D111_ALPHA_REAL_PATH_ACTIVATION_2026-08-12.md); the automated baseline
 both build on is [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md).
 
@@ -122,7 +126,8 @@ Verification commands must keep `--asyncio-mode=auto`: `pytest.ini` carries it i
 `addopts`, and the common `-o addopts=''` silently drops it and manufactures
 dozens of false async failures.
 
-S6 remains open on one physical row only. Under
+S6 remains open on defect-11 real-path proof, two physical observations and the
+unmeasured defect-12 symptom. Under
 [ALPHA_ACCEPTANCE.md](validation/ALPHA_ACCEPTANCE.md) §8 the current result is
 still `BLOCKED`: the physical microphone/device/heard-playout observation has not
 run, so S7 has not been entered and S8 has not run. Every other S6 measurement
@@ -146,18 +151,20 @@ D1/D2, Production and public deployment remain outside scope.
 
 ## Next actions
 
-1. With the user on real Chrome at `https://live-voice.localhost`: grant, deny and
-   revoke microphone permission, change/lose a device, confirm heard playout of a
-   complete answer, and exercise hidden/background/resume. This is the only
-   remaining S6 gap; the six observations and their record format are in
+1. Restore the private D: run root, start the isolated services with its
+   `services.py`, deploy source `10062c3e`, and run real-paced
+   `s6_02_realtime_playout.py`; prove defect 11 with revert-fail/restore-pass on
+   that real route.
+2. On real Chrome at `https://live-voice.localhost`, re-listen to one complete
+   answer longer than 15 seconds and exercise O6 hidden/background/resume using
    [the S6-02 runbook](S6_02_PHYSICAL_OBSERVATION_RUNBOOK_2026-08-13.md).
-2. When the S6-02 observations land: repair any defect they expose, rerun the
-   affected checks, mark `S6-02` and then S6 exit, and start `S7-01` candidate
+3. During that run, collect AudioWorklet underrun count, frame interarrival
+   distribution and in-flight watermark before attributing or changing candidate
+   defect 12. If the measurements prove an Alpha defect, repair and rerun only
+   the materially changed review scope.
+4. When those rows pass, mark `S6-02` and S6 exit, then start `S7-01` candidate
    assembly.
-3. If those pass without source repair, mark the environment rows `SATISFIED` and
-   start `S7-01`. If a run exposes a defect, repair it, rerun the affected checks
-   and repeat the materially changed cold-review scope.
-4. `S7-03` still owes the complete 45,044-line cumulative cold review and one
+5. `S7-03` still owes the complete 45,044-line cumulative cold review and one
    independent review; neither has run.
 
 No push is authorized. Machine-private credentials, provider configuration,
