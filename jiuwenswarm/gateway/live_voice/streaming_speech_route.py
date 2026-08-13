@@ -68,9 +68,7 @@ _PRECOMMIT_EVENT_TIMEOUT_SECONDS = 35.0
 # ``_OPEN_TIMEOUT_SECONDS`` below, while granting the Provider enough lifetime
 # for the complete legal capture plus the post-commit final-event window.
 _RECOGNITION_SESSION_TIMEOUT_SECONDS = (
-    _OPEN_TIMEOUT_SECONDS
-    + _PRECOMMIT_EVENT_TIMEOUT_SECONDS
-    + _FINAL_TIMEOUT_SECONDS
+    _OPEN_TIMEOUT_SECONDS + _PRECOMMIT_EVENT_TIMEOUT_SECONDS + _FINAL_TIMEOUT_SECONDS
 )
 _LOCAL_TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _MAX_ACTIVE_STREAMS = 32
@@ -449,12 +447,24 @@ class StreamingRecognitionRouteOwner:
             if handle.failure is None:
                 try:
                     handle.committed = True
-                    disposition = await self._bounded_provider_call(
-                        lambda: handle.provider.commit_recognition(handle.ref),
-                        timeout_seconds=_PROVIDER_COMMIT_TIMEOUT_SECONDS,
-                        task_name=(
-                            f"live-voice-streaming-stt-commit-{handle.ref.session_id}"
-                        ),
+                    event_already_final = bool(
+                        handle.input_fenced
+                        and handle.event_task is not None
+                        and handle.event_task.done()
+                        and not handle.event_task.cancelled()
+                        and handle.event_task.exception() is None
+                    )
+                    disposition = (
+                        RecognitionCommitDisposition.SERVER_VAD_OBSERVED
+                        if event_already_final
+                        else await self._bounded_provider_call(
+                            lambda: handle.provider.commit_recognition(handle.ref),
+                            timeout_seconds=_PROVIDER_COMMIT_TIMEOUT_SECONDS,
+                            task_name=(
+                                "live-voice-streaming-stt-commit-"
+                                f"{handle.ref.session_id}"
+                            ),
+                        )
                     )
                     if disposition not in {
                         RecognitionCommitDisposition.CLIENT_COMMIT_SENT,
@@ -939,7 +949,12 @@ class StreamingRecognitionRouteOwner:
                 del event
                 raise RuntimeError("streaming recognition timing was unproven")
             if event.kind is RecognitionEventKind.FINAL:
-                if not handle.committed:
+                # Provider-native server VAD owns the input fence.  Its final
+                # transcript may race ahead of the browser's follow-up finish
+                # RPC after speech_stopped; that final is already committed by
+                # the authoritative Provider boundary.  Manual streams still
+                # require the explicit client commit below.
+                if not handle.committed and not handle.input_fenced:
                     del event
                     raise RuntimeError("streaming recognition final was not committed")
                 if (

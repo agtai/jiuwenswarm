@@ -914,6 +914,75 @@ async def test_precommit_event_wait_outlives_short_final_deadline(
 
 
 @pytest.mark.asyncio
+async def test_server_vad_final_may_arrive_before_browser_finish() -> None:
+    provider = _ServerVadProvider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+    handle, fallback = await owner.begin(
+        _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
+    )
+    assert handle is not None
+    assert fallback is None
+    owner.offer(handle, _frame(0))
+    for _ in range(20):
+        if provider.frames:
+            break
+        await asyncio.sleep(0)
+    await provider.events.put(
+        RecognitionTurnBoundaryEvent(
+            handle.ref,
+            _PROVIDER_REF,
+            0,
+            RecognitionTurnBoundaryKind.SPEECH_STARTED,
+            "provider-item-early-final",
+            provider_start_ms=100,
+        )
+    )
+    await provider.events.put(
+        RecognitionTurnBoundaryEvent(
+            handle.ref,
+            _PROVIDER_REF,
+            1,
+            RecognitionTurnBoundaryKind.SPEECH_STOPPED,
+            "provider-item-early-final",
+            provider_end_ms=700,
+        )
+    )
+    await provider.events.put(
+        StreamingRecognitionEvent(
+            ref=handle.ref,
+            provider=_PROVIDER_REF,
+            seq=2,
+            audio_cursor=None,
+            kind=RecognitionEventKind.FINAL,
+            hypothesis=RecognitionHypothesis(
+                (RecognitionAlternative("early final", "early final", None),)
+            ),
+            timing_basis=RecognitionTimingBasis.PROVIDER_TIME,
+        )
+    )
+    end_of_turn = await asyncio.wait_for(owner.wait_end_of_turn(handle), timeout=1)
+    assert (end_of_turn.provider_start_ms, end_of_turn.provider_end_ms) == (100, 700)
+    for _ in range(20):
+        if handle.event_task is not None and handle.event_task.done():
+            break
+        await asyncio.sleep(0)
+    assert handle.event_task is not None and handle.event_task.done()
+
+    outcome = await asyncio.wait_for(owner.finish(handle), timeout=1)
+
+    assert outcome.completed is True
+    assert outcome.final_text == "early final"
+    assert provider.commit_count == 0
+    assert provider.cancel_count == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_provider_session_budget_covers_precommit_and_final_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2082,19 +2151,17 @@ async def test_fixed_media_socket_runs_streaming_stt_to_formal_receipt_without_b
 
 
 @pytest.mark.asyncio
-async def test_cold_streaming_open_preserves_short_utterance_until_server_vad_eot() -> None:
+async def test_cold_streaming_open_preserves_short_utterance_until_server_vad_eot() -> (
+    None
+):
     provider = _DelayedOpenProvider()
     owner = StreamingRecognitionRouteOwner(
         lambda: asyncio.sleep(
             0,
-            result=StreamingSpeechSelection(
-                SpeechRouteTier.STREAMING, provider, None
-            ),
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
         )
     )
-    registry = DedicatedMediaProductRegistry(
-        enabled=True, end_of_turn_enabled=True
-    )
+    registry = DedicatedMediaProductRegistry(enabled=True, end_of_turn_enabled=True)
     registry.set_provider_available(True)
     registry.configure_streaming_recognition(
         owner,
@@ -2119,9 +2186,7 @@ async def test_cold_streaming_open_preserves_short_utterance_until_server_vad_eo
 
     registry.start_streaming_recognition(record)
     await asyncio.wait_for(provider.open_started.wait(), timeout=1)
-    end_of_turn_task = asyncio.create_task(
-        registry.wait_streaming_end_of_turn(record)
-    )
+    end_of_turn_task = asyncio.create_task(registry.wait_streaming_end_of_turn(record))
     # 100 x 20 ms reproduces a cold open that exceeded the former 64-frame
     # queue before the user could finish even a short greeting.
     for seq in range(100):
