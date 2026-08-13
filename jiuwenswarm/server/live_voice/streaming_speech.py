@@ -103,7 +103,10 @@ class RecognitionCommitDisposition(StrEnum):
 class ServerVadConfig:
     threshold: float = 0.5
     prefix_padding_ms: int = 300
-    silence_duration_ms: int = 500
+    # The Provider default of 500 ms cuts ordinary breath pauses into separate
+    # turns. Keep server VAD's already-proven event contract, but allow a
+    # natural sentence-internal pause before committing the user's turn.
+    silence_duration_ms: int = 1_200
     create_response: bool = False
     interrupt_response: bool = False
 

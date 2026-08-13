@@ -238,6 +238,17 @@ def test_native_capability_is_truthful_and_polling_cannot_claim_streaming() -> N
     assert_zero_authority_effects(runtime)
 
 
+def test_server_vad_default_tolerates_a_natural_breath_pause() -> None:
+    detection = RecognitionTurnDetection.server_vad_default()
+
+    assert detection.server_vad is not None
+    assert detection.server_vad.threshold == 0.5
+    assert detection.server_vad.prefix_padding_ms == 300
+    assert detection.server_vad.silence_duration_ms == 1_200
+    assert detection.server_vad.create_response is False
+    assert detection.server_vad.interrupt_response is False
+
+
 def test_server_vad_boundaries_require_same_item_and_cursorless_final() -> None:
     capability = replace(
         native_capability(),
