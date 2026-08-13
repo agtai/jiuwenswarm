@@ -22,8 +22,11 @@
 - Current stage/node: `S8 - Product Acceptance` / `A3`, `READY / NOT STARTED`.
   The complete human Alpha journey has not run, so there is no
   `PASS - INTEGRATED WEB ALPHA` result.
-- Incubation task: `S8.5-01 decision and contract`, `IN PROGRESS`. D-079 permits
-  isolated post-Alpha development but does not close, modify or replace S8/A3.
+- Incubation task: `S8.5-07 product write-path integration`, `IN PROGRESS`.
+  D-079 permits isolated post-Alpha development but does not close, modify or
+  replace S8/A3. Design plus the Core/Store, Bridge/Policy, Executor/verifier
+  and authenticated Web read-projection slices are implemented locally through
+  `ab200d2c`; complete product mutation wiring and Tier 3 closure remain open.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -34,6 +37,21 @@ and the detailed result is
 The isolated follow-on contract is the
 [S8.5 execution plan](roadmap/S8_5_COMPETITIVE_SHOWCASE_EXECUTION_PLAN_2026-08-13.md);
 its code may migrate only after S8 PASS and a fresh Tier 3 integration review.
+
+## S8.5 incubation dashboard
+
+| Task | Status | Current fact |
+|---|---|---|
+| S8.5-01 decision and contract | `SATISFIED` | D-079 freezes the narrow post-Alpha boundary; the contract, plan, acceptance, showcase and claim matrix are committed at `bc53e75d`. |
+| S8.5-02 Core and Store | `IMPLEMENTED / REVIEW PARTIAL` | `caed0ff2` adds immutable `1 -> 2` revision authority, atomic sidecar persistence, replay/concurrency/restart behavior and failpoints. |
+| S8.5-03 Bridge and Policy | `IMPLEMENTED / REVIEW PARTIAL` | `f13cfe8d` accepts only committed exact bilingual forms, derives target authority from Store and binds confirmation without generic steering. |
+| S8.5-04/05 Executor and verifier | `IMPLEMENTED / REVIEW PARTIAL` | `0c994b1b` fences the predecessor, requires exact cleanup, uses a trusted clean no-remote fixture and persists a registered verifier ACK. |
+| S8.5-06 Web projection | `IMPLEMENTED / REVIEW PARTIAL` | `ab200d2c` adds default-off backend/frontend gates, authenticated Store-truth read projection, strict replica and non-inferred Task UI. |
+| S8.5-07 product write-path integration | `NOT STARTED` | Bridge/Policy, revision Store and Executor coordinator are not yet composed into the authenticated product mutation path. |
+| S8.5-08 candidate closure | `BLOCKED ON S8 PASS + PRIOR WORK` | Migration, independent Tier 3 review, cumulative candidate verification, two rehearsals and complete human acceptance have not run. |
+
+The grouped primary review and exact limitations are recorded in
+[S8.5 incubation implementation review](S8_5_INCUBATION_IMPLEMENTATION_REVIEW_2026-08-13.md).
 
 ## S7 dashboard
 
@@ -78,10 +96,13 @@ its code may migrate only after S8 PASS and a fresh Tier 3 integration review.
 
 ## Next actions
 
-1. Freeze D-079 and the S8.5 contract, acceptance, showcase and claim matrix.
-2. Implement Core/Store revision authority, then Bridge/Policy confirmation,
-   Executor fence/clean successor/verifier and truthful Web projection in that
-   dependency order with focused tests.
-3. Keep the original S8 worktree unchanged. After S8 PASS, rebase or cherry-pick
-   only reviewed coherent commits onto the exact closeout source; do not migrate
-   this branch-local STATUS text over the S8 closeout.
+1. Wire only the two bounded revision commands through the authenticated product
+   composition path to the existing Store and Executor coordinator; retain
+   default-off and zero-effect behavior.
+2. Add complete integrated positive/negative/race/restart coverage and obtain an
+   independent Tier 3 review; do not claim closure from the current Main-only
+   review.
+3. Keep the original S8 worktree unchanged. After S8 PASS, cherry-pick the five
+   coherent implementation commits in dependency order onto the exact closeout
+   source, then review conflicts and rerun the cumulative checks. Do not migrate
+   this branch-local STATUS/review closeout text as current S8 state.
