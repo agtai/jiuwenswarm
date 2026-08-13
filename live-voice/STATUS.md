@@ -7,8 +7,9 @@
 
 ## Resume capsule
 
-- Expected branch/upstream: `hx/0812_live_voice_w3` /
-  `origin/hx/0812_live_voice_w3`. The work is local-only; no push is authorized.
+- Expected branch/upstream: `codex/live-voice-s8-5-incubator` / none. This
+  isolated worktree was created from clean S8 handoff `a53856de`; all work is
+  local-only and no push is authorized.
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
@@ -21,6 +22,8 @@
 - Current stage/node: `S8 - Product Acceptance` / `A3`, `READY / NOT STARTED`.
   The complete human Alpha journey has not run, so there is no
   `PASS - INTEGRATED WEB ALPHA` result.
+- Incubation task: `S8.5-01 decision and contract`, `IN PROGRESS`. D-079 permits
+  isolated post-Alpha development but does not close, modify or replace S8/A3.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -28,6 +31,9 @@ packet is
 [S7_EXECUTION_PACKET_2026-08-13.md](roadmap/S7_EXECUTION_PACKET_2026-08-13.md),
 and the detailed result is
 [S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md](S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md).
+The isolated follow-on contract is the
+[S8.5 execution plan](roadmap/S8_5_COMPETITIVE_SHOWCASE_EXECUTION_PLAN_2026-08-13.md);
+its code may migrate only after S8 PASS and a fresh Tier 3 integration review.
 
 ## S7 dashboard
 
@@ -72,10 +78,10 @@ and the detailed result is
 
 ## Next actions
 
-1. Keep the S7 source, private profile and flags unchanged and run
-   [ALPHA_SHOWCASE.md](demo/ALPHA_SHOWCASE.md) once for `S8-01/S8-02`.
-2. The user physically verifies microphone capture, heard playout, interruption,
-   device/permission/lifecycle behavior and the complete P1/P2/P3alpha joint
-   journey; automation and fixed-corpus evidence support but do not replace it.
-3. Record the S8 closeout and only then decide `PASS`, `PARTIAL`, `BLOCKED` or
-   `FAIL` under [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).
+1. Freeze D-079 and the S8.5 contract, acceptance, showcase and claim matrix.
+2. Implement Core/Store revision authority, then Bridge/Policy confirmation,
+   Executor fence/clean successor/verifier and truthful Web projection in that
+   dependency order with focused tests.
+3. Keep the original S8 worktree unchanged. After S8 PASS, rebase or cherry-pick
+   only reviewed coherent commits onto the exact closeout source; do not migrate
+   this branch-local STATUS text over the S8 closeout.

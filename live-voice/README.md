@@ -23,6 +23,7 @@ it is not a project summary, document catalog or historical handoff.
 | Architecture, authority, protocol, security or durability change | Read the exact relevant ACG sections and current decisions. Add the complete solution only when the long-term boundary itself is in scope. |
 | S7/A2 candidate verification | Read plan §1–2 and §5, [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), affected module reviews/tests and only the required runbook sections. |
 | S8/A3 product acceptance | Read plan §1–2 and §6, Alpha acceptance, [Alpha showcase](demo/ALPHA_SHOWCASE.md) and the Alpha operating sections of the [runbook](runbooks/E2E_RUNBOOK.md). |
+| Isolated S8.5 task-revision incubation | Read D-079, the [S8.5 execution plan](roadmap/S8_5_COMPETITIVE_SHOWCASE_EXECUTION_PLAN_2026-08-13.md), only its active task, and the affected source/tests. Read the [revision contract](architecture/S8_5_TASK_REVISION_CONTRACT_2026-08-13.md) for Core/Store/Bridge/Executor/Web changes; acceptance and showcase are candidate/runtime material. |
 | Git/review/parallel authority | Read root `AGENTS.md`, D-074 and only an active packet explicitly named by STATUS. Completed W2 lane assignments are not current. |
 | V0, W2, D-031, W3 migration, historical package or forensic work | Use the conditional [reference index](REFERENCE_INDEX.md); it must not be read during ordinary bootstrap. |
 

@@ -199,6 +199,25 @@ P3α operations are `create/get/list/status/cancel/events`. `update`, `provide_i
 
 `task.cancel` targets one exact task. A cancel command result says only accepted/replayed/rejected/unknown. The task becomes terminal `cancelled` only from authoritative Executor/Core evidence. Already completed or irreversible side effects are not retroactively cancelled. D0 means a task may outlive voice/session/media disconnect while the application and Executor remain alive; after process restart, Task Core reconciles and reports truth but does not promise attempt resume.
 
+### 6.4 S8.5 bounded task revision extension
+
+D-079 adds a separately flagged S8.5 profile; it does not expand P3α or change
+the Alpha contract above. Its only additional mutations are
+`task.provide_input` and `task.update_constraints`, governed by the
+[S8.5 revision contract](S8_5_TASK_REVISION_CONTRACT_2026-08-13.md).
+
+Both commands retain the canonical `task_id`, require the exact current
+`task_revision`, and create a new immutable revision plus successor attempt only
+after Executor-owned predecessor fencing is acknowledged. They never steer a
+live attempt in place. Revision-command application state is separate from task
+lifecycle state; an accepted command is not proof that the predecessor stopped,
+the successor started, a patch applied, or verification passed.
+
+`pause`, `resume`, `reprioritize`, arbitrary instruction replacement, decision
+response and constraint relaxation remain unsupported. With the S8.5 feature
+off—or under the Alpha/P3α capability profile—the two extension commands fail
+closed with zero Task, Attempt, Store, Executor, Agent, Tool or project mutation.
+
 ## 7. Cancel, commit, fence, and presented history
 
 The four command types are exact and non-interchangeable:

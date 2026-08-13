@@ -866,3 +866,17 @@
 - 仍待实例化：S5-02 的产品选择和初始 model/voice 默认值已完成；可用 OpenAI Speech API access/受限 key、真实 Provider 探针、Chrome/Windows/实际设备/network 标签、私有 origin/证书和隔离目录仍需在候选机器上准备、记录并实测。完成这些环境事实和探针前，S5/A0 仍为 `IN PROGRESS`，任何模块不得声称真实 Provider、完整 Streaming、secure deployment 或 real Executor 已验收。
 - 非目标与授权边界：本决定不扩大到公开部署、生产鉴权、跨浏览器/OS、真实用户项目 mutation、完整 P3/D1/D2，也不授权外部账户/billing/credential 变更或任何 remote ref 更新。
 - 重新评估条件：OpenAI 官方 API 无法提供所需的 STT/TTS streaming、provenance 或 cancel contract；区域、隐私、成本或延迟不满足 Alpha；声明的 Chrome/Windows/设备/私有 HTTPS 基线无法稳定运行；当前 JiuwenSwarm Agent Provider 不再可用；或 Direct Executor 不能在 disposable fixture 和独立数据目录内证明零跨项目副作用。
+
+## D-079 S8.5 以隔离分支孵化可追溯的语音任务修订
+
+- 日期：2026-08-13
+- 状态：Accepted post-Alpha showcase decision（用户允许在 S8 完成前于干净隔离环境追加决定、更新文档并开发 S8.5，S8 完成后再迁移经审阅的 coherent commits）
+- 里程碑边界：`S8.5 Competitive Showcase` 是 S8/A3 之后的独立产品候选，不新增 D-075 的正式顺序 stage，也不改变当前 S8 candidate。孵化分支必须从已识别的干净 S8 handoff 基线创建，不得修改、合并或重写当前 S8 分支；S8 未获得用户人工 PASS 前，不得把 S8.5 表述为 Alpha 完成、集成完成或可迁移完成。
+- 产品范围：只交付“用户通过 committed Live Voice 修订一个仍在执行的后台代码任务”的可追踪纵向切片。修订保留同一 `task_id`，生成单调递增且不可变的 `task_revision`、新的 `command_id` 和 successor `attempt_id`；UI 必须展示旧 attempt 被隔离、新 revision 被应用、Executor 结果和验证结论。平台级通用交互、任意 Agent steer、审批/decision 回答、pause/resume/reprioritize、持久偏好、D1/D2 和完整 P3 均不进入本候选。
+- 操作边界：S8.5 profile 只增加 `task.provide_input` 和 `task.update_constraints`。前者只能追加事实，不得删除或改写已提交事实；后者只能收紧受信 allowlist 中的约束，不得扩大 write scope、改变依赖、公开 API 或配置策略。两种 mutation 都要求 committed input、authenticated exact scope、exact `task_id`、`expected_task_revision`、不可复用的 confirmation binding 和幂等 command fingerprint。Alpha/P3alpha profile 与 feature-off 路径继续返回 `unsupported` 且副作用为零。
+- 修订协议：Core 接收修订后先持久化 command 和 pending revision/fence intent；旧 attempt 的后续输出、补丁和 verifier 结果立即失去当前权威。只有 Executor 对精确 predecessor 返回 fence/cleanup ACK，Store 才原子创建下一 immutable revision 和 successor attempt 并 dispatch。successor 必须从受信 fixture manifest 指定的原始干净基线开始，不复用 predecessor 未应用 worktree 或 Agent context。超时、崩溃、重复、乱序、stale revision、wrong task/scope、cleanup 不确定或 verifier 不可用一律 fail closed/`unknown`，不得推断成功或静默启动第二次执行。
+- Executor 与验证：`DirectProjectCodeExecutorAdapter` 继续是唯一执行边界。S8.5 不开放任意 shell、Agent 自选验证命令、git commit、git push、remote 或真实用户项目。一个新的 Executor-owned verifier 只从受信 fixture manifest 选择 allowlisted 命令，返回结构化 `execution_ack`、sanitized diff summary、verifier ID/result 和 forbidden-side-effect count；只有 successor attempt 的 authoritative terminal event 可以结束任务。
+- 展示与竞争声明：展示固定使用一个可丢弃、无 remote 的本地代码 fixture，先启动真实后台修复，再用语音追加事实/收紧约束并观察 successor attempt，另用一个短任务展示 exact cancel。竞争结论只描述实际观察到的 task/revision/attempt/ACK/diff/verifier/零副作用事实，不声称行业唯一、生产级任意 steer、通用代码自治或完整 P3。
+- 风险与关闭：这是 `P3 / TC+ED+VB+Web` 的 Tier 3 shared authority/mutation boundary。代码前必须有设计 checkpoint；模块收口需要完整 scoped cold review、一次独立 review 或记录的等价替代、适用 D-032 正反例/故障/重启/并发/flag-off/零禁止副作用矩阵；候选集成后需要两次无源码变更的完整 rehearsal，再按 D-071 由用户完成一次独立 S8.5 人工验收。
+- Git 与迁移：孵化提交必须按 `decision/docs → Core/Store → Bridge/Policy → Executor/verifier → Web/UI → integration` 保持可审阅依赖。S8 PASS 后，先把目标分支快进到精确 S8 closeout，再按依赖顺序 cherry-pick/rebase 这些本地提交，解决真实冲突并重跑 Tier 3 累计验证；孵化分支的 `STATUS.md` 只记录隔离事实，不得盲目迁移覆盖 S8 closeout。任何 push 或远端 ref 更新仍需单独精确批准。
+- 重新评估条件：S8 结果要求修复或改变当前 Alpha candidate；现有 Task Core/Store 无法在不引入第二 authority 的情况下表达 revision saga；Executor 不能证明 predecessor 隔离或干净 successor；目标需要任意同 attempt steer、真实用户仓库、依赖/API/config mutation、外部副作用或生产 durability；或迁移时 S8 基线与孵化契约产生语义冲突。
