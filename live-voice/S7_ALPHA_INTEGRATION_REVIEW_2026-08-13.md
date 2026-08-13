@@ -4,16 +4,16 @@
 > Stage/node: S7 / A2
 > Risk: Tier 3 cumulative boundary
 > Comparison base: `2a69c2b87d0ee080a4a30421cbcbcdf93183f340`
-> Source repair candidate: `4cb834cf969e9b419c72cb75ff108426775dcd08`
-> Outcome: automation and source review complete; real path `ENVIRONMENT`;
-> S7/A2 not closed; S8 not started.
+> Product-source candidate: `c209e4a6cb88779277254751aa52354050a813a2`
+> Outcome: automation, five real probes and cumulative review complete;
+> S7/A2 closed; S8/A3 ready but not started.
 
 This record applies the
 [S7 execution packet](roadmap/S7_EXECUTION_PACKET_2026-08-13.md), complete
 [Alpha acceptance contract](validation/ALPHA_ACCEPTANCE.md), D-074 review
 cadence and D-078 runtime choices. The exact clean handoff HEAD includes this
 record, [STATUS](STATUS.md) and the [Alpha showcase](demo/ALPHA_SHOWCASE.md), and
-is bound by the external sanitized `s7-final-automation.json` generated after
+is bound by the external sanitized `s7-final-report.json` generated after
 that documentation commit. The external report is authoritative for the final
 Git SHA and dependency hashes; private paths, hostnames, credentials, raw media
 and captures are intentionally absent from Git.
@@ -52,7 +52,12 @@ The selective port was committed as:
 - `c2d3b2c49d17042c1828dd951e82e0463f62286b` -
   `fix(live-voice): close S7 review evidence gaps`;
 - `4cb834cf969e9b419c72cb75ff108426775dcd08` -
-  `fix(live-voice): complete S7 privacy and handoff`.
+  `fix(live-voice): complete S7 privacy and handoff`;
+- `75cdafeaae6f393e92681aa3c2c6afe7e8ec7d53` -
+  `docs(live-voice): correct S7 repair provenance`;
+- `50243dec` - `fix(live-voice): bound streaming socket cleanup`;
+- `c209e4a6cb88779277254751aa52354050a813a2` -
+  `fix(live-voice): accept early server-vad final`.
 
 ## 3. Automation evidence
 
@@ -80,10 +85,29 @@ then demonstrated that the formal `pcm_f32le` representation still evaded the
 privacy scan. `4cb834cf` added complete-corpus f32le sentinels and raw/base64
 regressions; the expanded focused suite passed 59 tests. A 16 MiB clean privacy
 sample scanned in about 1.94 seconds, while later-corpus unaligned raw and
-aligned base64 PCM16/f32le samples were all rejected. The final clean handoff
-candidate received the full runner again after the last documentation commit;
-`s7-final-automation.json` is the sanitized authoritative report and remains
-outside Git.
+aligned base64 PCM16/f32le samples were all rejected.
+
+The real Provider route then exposed two bounded cleanup/EOT defects that unit
+fixtures had not reproduced. `50243dec` bounded WebSocket close waiting while
+retaining cleanup ownership, and `c209e4a6` accepted an OpenAI server-VAD final
+that arrives after the input fence but before the Browser finish request,
+without duplicating Provider commit. The affected suites passed 68 Streaming
+Provider tests and 51 route tests; independent rerun passed all 119.
+
+The complete runner on product source `c209e4a6` completed all 45 checks: 40
+automatic `PASS` plus five real `VERIFY`. It recorded:
+
+- backend Alpha matrix: 1,564 passed, 2 skipped;
+- related backend regressions: 788 passed;
+- frozen npm install: 694 packages, PASS;
+- all 27 registered frontend commands: 847/847 tests passed;
+- Vite production build: 4,640 modules, PASS;
+- exact Ruff fingerprint, format, compile, diff/link/source hygiene and
+  post-run identity: PASS.
+
+The exact clean documentation-handoff candidate received the same full runner
+after this record was committed. `s7-final-report.json` is the sanitized
+authoritative report for that final Git SHA and remains outside Git.
 
 Generated frontend output is excluded from candidate identity and did not dirty
 the worktree. The local locked environment was reconciled with `uv sync
@@ -91,23 +115,37 @@ the worktree. The local locked environment was reconciled with `uv sync
 
 ## 4. Canonical real-probe outcome
 
-All five repository entrypoints were invoked on the committed candidate. They
-returned content-free failure identifiers and no sample; no fake observation,
-`VERIFY` or `PASS` was created.
+All five repository entrypoints returned `VERIFY` against product source
+`c209e4a6` and one runtime declaration digest,
+`sha256:05bf19ba821bbffec03143b7d6412ef0ce5aeee383c0edc6b6a251ea130f3fab`.
+Every sanitized observation remains outside Git.
 
-| Probe | Status | Samples | Actual outcome | Cause / shortest path |
+| Probe | Status | Samples | Failure / forbidden effects | Actual outcome |
 |---|---|---:|---|---|
-| Speech/Media | `ENVIRONMENT` | 0 | `REQUIRED_ENV_MISSING` | No fresh S7 speech/media observation exists. Run 5-20 controlled fixed-corpus rounds through the D-078 Streaming route and bind the closed observation to the exact candidate/runtime digest. |
-| Agent/Executor | `ENVIRONMENT` | 0 | `REQUIRED_ENV_MISSING` | No fresh S7 formal-route observation and paired completion/cancellation no-remote fixtures exist. Produce them with the isolated Direct Project Executor route. |
-| Benchmark/Fault | `ENVIRONMENT` | 0 | `REQUIRED_ENV_MISSING` | No fresh 13-target/13-fault S7 observation exists. Run the controlled route/fault producer on the exact candidate. |
-| Secure deployment | `ENVIRONMENT` | 0 | `SECURE_RUNTIME_UNOBSERVED` | The available controlled origin is localhost. The formal S7 probe requires a non-loopback private FQDN resolving only to private addresses, trusted TLS, same-origin HTTPS/WSS and the declared proxy/CSP/CORS route. |
-| Privacy | `ENVIRONMENT` | 0 | `REQUIRED_ENV_MISSING` | No fresh exact-candidate 19-surface manifest/capture root exists. Capture the declared surfaces externally, then scan with Gateway-only secret inputs without printing or copying them. |
+| Speech/Media | `VERIFY` | 5 | 0 / 0 | Five fixed-corpus whole-route rounds passed over private same-origin HTTPS/WSS. p50 was 18,188.395 ms; p95/max was 19,001.572 ms. |
+| Agent/Executor | `VERIFY` | 2 | 0 / 0 | Exact structured completion and cancellation passed through formal Task Core, the real JiuwenSwarm Agent and `DirectProjectCodeExecutorAdapter` in disposable no-remote projects. |
+| Benchmark/Fault | `VERIFY` | 65 | 0 / 0 | The declared latency/route metrics and all 13 media, authorization, reconnect, feature-off, slow-Harness and cancellation-domain fault outcomes passed. |
+| Secure deployment | `VERIFY` | 3 | 0 / 0 | A non-loopback private FQDN resolved only to a private address and served trusted same-origin HTTPS/WSS with the declared proxy/media route. No public deployment was created. |
+| Privacy | `VERIFY` | 19 | 0 / 0 | All supplied capture surfaces scanned clean for the Gateway-only credential and complete-corpus PCM16/f32le raw/base64 sentinels. |
 
-Previously accepted S6 observations were made on earlier source and a different
-acceptance boundary. They remain valid S6 history but cannot be rebound to this
-S7 candidate. Current long-running controlled services were not counted as S7
-proof because they had not been restarted on the final candidate and cannot
-supply the missing formal origin or observation producers.
+The whole-route producer used the fixed corpus plus bounded post-speech silence,
+Provider-time server VAD, formal media ACK/EOT, the real Agent final, successor
+capture overlap, Streaming TTS, downlink ACK and playout receipt. The user also
+confirmed the controlled Chrome microphone, speaker and permission precondition;
+physical spoken/audio-quality judgment remains intentionally owned by S8/A3.
+
+The real P3alpha producer additionally exercised structured completion/cancel,
+committed natural-language create/status/cancel with clarification and exact
+confirmation, cross-scope rejection and duplicate-request replay with zero
+repeated mutation. At the Web unary transport boundary the duplicate request ID
+failed closed as a bounded no-response result rather than an explicit conflict
+envelope; product-layer automated tests retain explicit replay/conflict proof.
+
+The Browser bridge reported origin storage APIs unavailable. The privacy result
+therefore proves the supplied 19-surface external captures and declared
+PCM16/f32le representations, not unrestricted browser forensics. The A3 script
+retains direct user-visible storage/lifecycle inspection. Historical S6 evidence
+was not relabelled or rebound.
 
 ## 5. Cumulative Tier-3 review
 
@@ -121,38 +159,54 @@ Main reviewed `2a69c2b8..candidate` across:
   applicable forbidden side effects.
 
 The independent read-only review found no Critical/High product-source issue.
-It found three P2 items:
+Across the repair and handoff loop it found seven P2 automation/documentation
+items:
 
 1. file-wide Ruff code waivers could hide new debt - valid and fixed in
    `c2d3b2c4` by the exact diagnostic fingerprint;
-2. the privacy sentinel could miss later PCM16, and affected review then showed
-   it could also miss the formal `pcm_f32le` representation - valid and fixed
-   across `c2d3b2c4` and `4cb834cf` with complete-corpus
-   representation-specific sentinels, raw/base64 regressions and bounded
-   matching;
-3. STATUS still said S7 had not started - valid and fixed by this documentation
-   closure.
+2. the prefix-only privacy sentinel could miss later PCM16 - valid and fixed in
+   `c2d3b2c4` with complete-corpus sentinels and bounded matching;
+3. affected review then showed the formal `pcm_f32le` representation could
+   still evade the scanner - valid and fixed in `4cb834cf` with raw/base64 f32le
+   coverage and regressions;
+4. STATUS still said S7 had not started - valid and fixed in the first S7
+   documentation handoff;
+5. STATUS and this record attributed the f32 repair to the prior candidate -
+   valid and fixed in `75cdafea`;
+6. STATUS and this record still reported the pre-environment 0/5 state after the
+   real probes passed - valid and fixed by the S7 closeout documentation;
+7. the closeout documentation declared final-candidate closure while its exact
+   post-commit runner was still in progress - valid, and closed when that runner
+   exited 0 with 40 automatic `PASS`, five real `VERIFY`, a clean post-run
+   identity and the bound external report.
 
-The affected source fixes received an independent re-review. The reviewer used
+The later `50243dec..c209e4a6` affected review found no Critical/High/P2 source
+issue. It verified the bounded `websockets 15.0.1` close/abort behavior and the
+server-VAD early-final fence/commit-owner proof, then independently passed 119
+focused tests, Ruff, format, compile, cumulative diff-check and the exact
+21-diagnostic historical Ruff baseline.
+
+The affected source fixes received independent re-review. The reviewer used
 the same shared worktree in read-only mode rather than a separate worktree;
-fixed SHA boundaries preserved review scope. Real probe absence remains an
-evidence limitation and was not converted into a source finding.
+fixed SHA boundaries preserved review scope. Main produced and inspected the
+real effects; the independent reviewer did not rerun those external effects or
+inspect private artifacts, but the canonical runner verified their sanitized
+candidate/runtime binding, counts and zero-effect fields.
 
 ## 6. Exit and handoff decision
 
 | State | Result |
 |---|---|
 | S7 automation ready | Yes |
-| S7 real-path verified | No - `ENVIRONMENT`, 0/5 verified |
-| S7 cumulative source review complete | Yes - no open Critical/High finding |
-| A3 handoff ready | No - requires S7 real-path completion on the same candidate |
+| S7 real-path verified | Yes - 5/5 `VERIFY`, zero failures/forbidden effects |
+| S7 cumulative source review complete | Yes - no open Critical/High/P2 source finding |
+| A3 handoff ready | Yes - private profile and exact external report bound |
 | Alpha human acceptance complete | No - S8/A3 has not started |
-| S7/A2 exit satisfied | No |
+| S7/A2 exit satisfied | Yes |
 
-There is no known source gap and no remaining automatic-check gap. The shortest
-remaining path is the three-step environment route in [STATUS](STATUS.md):
-establish the formal private DNS/TLS topology, produce the four fresh closed
-observation/capture inputs on the exact candidate, then rerun all five probes
-through `--require-real` and review their actual producer invocations/results.
-Only after S7/A2 closes may the user execute the A3 showcase. This record does
-not claim `PASS - INTEGRATED WEB ALPHA`.
+S7/A2 is closed. The next stage is the user-owned A3 journey in
+[STATUS](STATUS.md) and [ALPHA_SHOWCASE](demo/ALPHA_SHOWCASE.md). It must keep
+the candidate/profile unchanged and physically verify microphone capture,
+heard playout, permission/device/lifecycle behavior and the complete joint
+P1/P2/P3alpha product journey. This record does not claim
+`PASS - INTEGRATED WEB ALPHA`.

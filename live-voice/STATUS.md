@@ -12,20 +12,19 @@
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
-- Current stage/node: `S7 - Candidate Assembly, Verification and Review` /
-  `A2`, `ENVIRONMENT / NOT CLOSED`.
-- Comparison base: `2a69c2b87d0ee080a4a30421cbcbcdf93183f340`.
-- S7 implementation source through `4cb834cf969e9b419c72cb75ff108426775dcd08`;
-  the exact clean documentation-handoff HEAD is recorded by the external
-  sanitized `s7-final-automation.json` report generated after the S7-04 commit.
-- Automation and cumulative source review are complete. Five canonical real
-  probes were invoked but each has zero valid samples because the formal S7
-  private runtime/observation inputs are unavailable. Historical S6 evidence
-  has not been relabelled or rebound to the new candidate.
-- `S8/A3` has not started. The Alpha human acceptance result remains unavailable.
+- `S7 - Candidate Assembly, Verification and Review` / `A2` is `CLOSED`.
+  Product source `c209e4a6cb88779277254751aa52354050a813a2` passed the complete
+  automation, five candidate/runtime-bound real probes and cumulative Tier-3
+  review. The exact clean documentation-handoff HEAD is recorded by the
+  external sanitized `s7-final-report.json` generated after the S7 closeout
+  commit.
+- Current stage/node: `S8 - Product Acceptance` / `A3`, `READY / NOT STARTED`.
+  The complete human Alpha journey has not run, so there is no
+  `PASS - INTEGRATED WEB ALPHA` result.
 
 The active execution contract is the
-[S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the S7 packet is
+[S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
+packet is
 [S7_EXECUTION_PACKET_2026-08-13.md](roadmap/S7_EXECUTION_PACKET_2026-08-13.md),
 and the detailed result is
 [S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md](S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md).
@@ -34,31 +33,28 @@ and the detailed result is
 
 | Task | Status | Current fact |
 |---|---|---|
-| S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. Latest S6 source remains authoritative. |
-| S7-02 automation | `SATISFIED` | The full committed-candidate runner covers backend/regression suites, every tracked Live Voice frontend test, compatibility tests, TypeScript/build, Ruff exact-debt fingerprint, format/compile, diff/link/hygiene and post-run identity. The authoritative final run is the external sanitized report named above. |
-| S7-02 real path | `ENVIRONMENT` | `speech-media`, `agent-executor`, `benchmark-fault`, `secure-deployment` and `privacy` each have 0 valid S7 samples. The first, second, third and fifth lack fresh candidate-bound observations/captures; the current controlled origin is localhost while the formal S7 deployment probe requires a non-loopback private FQDN with trusted TLS. |
-| S7-03 cumulative Tier-3 review | `SATISFIED` | Self-review, cumulative cold review and an independent read-only review found no Critical/High product-source issue. The Ruff and PCM16 privacy P2s were fixed in `c2d3b2c4`; affected review found the formal f32le representation gap, which was fixed in `4cb834cf`. The stale-status P2 documentation finding is also fixed. Real-path evidence remains an explicit environment gap, not a source PASS. |
-| S7-04 A3 handoff freeze | `ENVIRONMENT` | The handoff documents and user-run showcase are prepared, but A3 is not ready to execute because A2 real-path verification is incomplete. |
+| S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
+| S7-02 automation | `SATISFIED` | The final product-source run completed all 40 automatic checks: backend Alpha 1,564 passed / 2 skipped, related regressions 788 passed, 27 frontend commands 847/847 passed, production build 4,640 modules, exact Ruff debt, format/compile, diff/link/hygiene and post-run identity all passed. |
+| S7-02 real path | `SATISFIED` | All five probes returned `VERIFY` on one private-only HTTPS/WSS runtime declaration: Speech/Media 5 samples, Agent/Executor 2, Benchmark/Fault 65, Secure Deployment 3 and Privacy 19; failures and forbidden side effects were zero. Speech/Media p50 was 18,188.395 ms and p95/max 19,001.572 ms. |
+| S7-03 cumulative Tier-3 review | `SATISFIED` | Cumulative main review and independent read-only review found no open Critical/High/P2 source issue. The exact Ruff, PCM16/f32le privacy, bounded socket-close and Provider server-VAD early-final repairs all received affected verification; the final independent affected suite passed 119 tests. |
+| S7-04 A3 handoff freeze | `SATISFIED` | The private-only candidate profile, runtime declaration, Provider/Executor, disposable project, flags, warnings/deviations and sanitized final report are bound to the A3 showcase. No public deployment or real-user project was used. |
 
-## Active blocker and shortest remaining path
+## S7 accepted limitations
 
-No known product-source or automated-verification defect is open. Closure needs
-one controlled environment on the exact final candidate that provides:
-
-1. a non-loopback private DNS name resolving only to private addresses, trusted
-   same-origin HTTPS/WSS, and the declared proxy/CSP/CORS/media route;
-2. fresh candidate/runtime-bound Speech/Media, Agent/Executor and
-   Benchmark/Fault observations plus a complete 19-surface privacy capture;
-3. all five canonical probes rerun through `--require-real`, followed by an
-   affected evidence review of the actual producer invocations and sanitized
-   results.
-
-The environment owner must supply or authorize the private DNS/certificate
-trust and observation-producer run. Do not manufacture artifacts, copy old S6
-aggregates, use a real user project, create a Provider key/project, change
-billing, or deploy publicly. After all five results reach `VERIFY` on one exact
-candidate, update this dashboard and only then start the user-owned S8/A3
-journey.
+- The controlled Browser bridge could not read origin storage APIs. The privacy
+  probe scanned all 19 supplied external capture surfaces against credential,
+  PCM16 and authoritative f32le raw/base64 sentinels and found zero forbidden
+  persistence, but A3 must still inspect the user-visible browser storage and
+  lifecycle behavior rather than treating bridge unavailability as a broad
+  browser-forensics guarantee.
+- A duplicate unary request ID at the Web transport boundary failed closed with
+  a bounded no-response result and zero repeated mutation, rather than returning
+  an explicit conflict envelope. Product-layer automated tests retain explicit
+  replay/conflict coverage. A3 must continue to judge visible product behavior,
+  not transport diagnostic wording.
+- The deployment is a private-address-only FQDN with trusted same-origin
+  HTTPS/WSS. S7 makes no public-deployment, Production-authentication, wider
+  browser/mobile/PWA, RC or audit-grade claim.
 
 ## Frozen product boundary
 
@@ -76,11 +72,10 @@ journey.
 
 ## Next actions
 
-1. Environment owner supplies the bounded private DNS/TLS route and runs the
-   four missing observation/capture producers without exposing credentials or
-   private paths.
-2. Main reruns the five canonical probes and the complete `--require-real`
-   candidate verification, then reviews the exact real evidence.
-3. If and only if S7/A2 closes, the user runs
-   [ALPHA_SHOWCASE.md](demo/ALPHA_SHOWCASE.md) for S8/A3. Do not claim
-   `PASS - INTEGRATED WEB ALPHA` before that human journey passes.
+1. Keep the S7 source, private profile and flags unchanged and run
+   [ALPHA_SHOWCASE.md](demo/ALPHA_SHOWCASE.md) once for `S8-01/S8-02`.
+2. The user physically verifies microphone capture, heard playout, interruption,
+   device/permission/lifecycle behavior and the complete P1/P2/P3alpha joint
+   journey; automation and fixed-corpus evidence support but do not replace it.
+3. Record the S8 closeout and only then decide `PASS`, `PARTIAL`, `BLOCKED` or
+   `FAIL` under [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).

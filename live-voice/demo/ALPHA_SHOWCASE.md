@@ -9,13 +9,13 @@ This is the D-075 `A3 Product Acceptance` script. The active S5–S8 task contra
 
 ## S7-04 handoff binding
 
-The current S7 handoff is **not ready for A3**: automation and cumulative source
-review are complete, but all five S7 real probes are `ENVIRONMENT` with zero
-valid samples. Do not start this showcase until [STATUS](../STATUS.md) records
-S7/A2 closed and the external sanitized `s7-final-automation.json` identifies
-the same exact clean candidate as the five `VERIFY` real results. The detailed
-reason and shortest path are in the
-[S7 integration review](../S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md).
+The S7 handoff is **ready for A3**. [STATUS](../STATUS.md) records S7/A2 closed,
+and the external sanitized `s7-final-report.json` binds the exact clean handoff
+candidate to all 40 automatic `PASS` checks and all five real `VERIFY` results.
+The detailed counts, runtime binding, accepted limitations and review result are
+in the
+[S7 integration review](../S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md). This
+readiness does not replace any physical or human product observation below.
 
 The frozen handoff profile is desktop Chrome on Windows; private same-origin
 HTTPS/WSS; system-selected input/output devices recorded by sanitized reference;
