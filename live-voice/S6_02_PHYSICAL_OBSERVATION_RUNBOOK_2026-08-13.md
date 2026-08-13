@@ -7,6 +7,12 @@
 > `<RUN_ROOT>` 是机器私有的运行根目录，其绝对路径不入 Git；
 > 本轮它位于一个 Git 之外的本地目录，由会话交接文档单独记录。
 
+当前状态只看 [STATUS.md](STATUS.md)。O1–O4 已在同一 Chrome/物理设备基线完成并
+记录为 PASS；若源码、浏览器权限或设备基线没有改变，不重复消费这些人工步骤。
+当前复验只包含：缺陷 11 的真实路径区分、O5 大于 15 秒完整朗读、O6
+隐藏/后台/恢复，以及对候选缺陷 12 的只观测诊断。诊断数据不足时保持
+`UNMEASURED`，不得通过调整缓冲参数“试到听起来正常”。
+
 ## 1. 为什么只能由你做
 
 [S5–S8 执行计划](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md) 的 S6-02 退出条件
@@ -23,7 +29,7 @@ hidden/background/resume 与听感确认。这些都发生在浏览器权限层�
 [D112](D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md) §8/§8b/§8c），所以本手册只做
 物理部分，不重复已测项。
 
-## 2. 执行前提（已全部就绪，不需要你搭）
+## 2. 执行前提（每次复验前重新核对）
 
 | 项 | 状态 |
 |---|---|
@@ -34,6 +40,38 @@ hidden/background/resume 与听感确认。这些都发生在浏览器权限层�
 | 目标项目 | 一次性 fixture `<RUN_ROOT>\fixture-project`（无 remote） |
 
 若有服务 down：`python <RUN_ROOT>\scripts\services.py start`。
+
+### 2a. 候选源码与构建预检（Main 执行）
+
+复验必须绑定一个干净候选，且包含缺陷 11 的修复提交 `10062c3e`。先执行：
+
+```powershell
+Set-Location '<WORKTREE>' -ErrorAction Stop
+git status --short --branch
+$candidate = git rev-parse HEAD
+git merge-base --is-ancestor 10062c3e $candidate
+if ($LASTEXITCODE -ne 0) { throw 'candidate does not contain defect-11 repair 10062c3e' }
+$python = (Resolve-Path -LiteralPath '.\.venv\Scripts\python.exe' -ErrorAction Stop).Path
+& $python '<RUN_ROOT>\scripts\services.py' status
+```
+
+工作树必须干净；记录 `$candidate`、branch/upstream 与 ahead/behind。前端必须由同一
+候选重新构建，不复用修复前的 `dist`：
+
+```powershell
+$env:VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB = 'true'
+$env:VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 = 'true'
+$env:VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = 'true'
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH -ErrorAction SilentlyContinue
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
+Push-Location 'jiuwenswarm\channels\web\frontend'
+try { npm.cmd run build } finally { Pop-Location }
+```
+
+随后按 `<RUN_ROOT>\caddy\Caddyfile` 头部的已冻结部署映射让 Caddy 服务这次构建，
+再运行 `services.py start` / `status`。只有五个服务全部 `LISTENING`、
+`https://live-voice.localhost` 返回 200、页面源码不含 Speech 凭据后才交给人工观察。
+不得通过放宽 CSP、忽略证书错误或改用日常浏览器 profile 来清除预检失败。
 
 ### 2b. 页面预检（已代你跑过，2026-08-13）
 
@@ -144,9 +182,42 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 且与播放重叠期间的采集也计入这 30 秒。说完请及时按 `Stop and recognize`；
 超限的采集会被整段丢弃且不会提交给 Speech 或 Agent，需要刷新重来。
 
-## 3. 需要你完成的六项观察
+### 2d. 缺陷 11 真实路径区分（Main 执行，人工 O5 前完成）
 
-每项都请记下**你实际看到/听到的**，不要写"应该如此"。
+使用 Git 之外的 `s6_02_realtime_playout.py`，保持 downlink ACK 为真实 20 ms/帧
+节奏。控制组必须来自一个一次性 detached worktree，对候选执行
+`git revert --no-commit 10062c3e`；不得改写、切换或污染候选 worktree，也不得把控制组
+推送到远端。候选组恢复为包含 `10062c3e` 的干净源码并重新构建/重启。
+
+两组使用相同 Provider、voice、长文本、服务配置和探针参数：
+
+| 组 | 必须观察到的区分结果 |
+|---|---|
+| 控制组（回退 `10062c3e`） | `first_audio_emitted=true`，约 15,000 ms 出现 `STREAMING_SPEECH_PROVIDER_TIMEOUT`，长回答未完整送完 |
+| 候选组（恢复 `10062c3e`） | 总流持续时间大于 15,000 ms，downlink 完整，`degradation_reason=null`，playout receipt 被接受 |
+
+每组至少一个有效样本。记录候选 SHA、输入文本哈希、总时长、首帧/末帧时刻、帧数、
+最后 ACK 序号、降级原因和 probe 退出码。控制组失败与候选组通过两者缺一不可；只有
+自动化通过或只有候选通过都不能关闭该真实路径证明。
+
+同一候选样本同时采集下列音质诊断；没有某个观测面时明确记为 `UNMEASURED`：
+
+| 观测 | 记录值 |
+|---|---|
+| 浏览器连续播放调度 underrun 次数 | count；当前播放实现是 `AudioBufferSourceNode` 调度，不得误写成输出 AudioWorklet |
+| downlink 帧到达间隔 | sample、p50、p95、max |
+| 浏览器已调度未结束 source 峰值 | peak |
+| 浏览器 playout queue | capacity、peak depth |
+| Gateway sender queue | configured max、peak pending frames |
+| 人耳音质 | 是否仍有撕裂/咔哒/电流感，以及大致发生位置 |
+
+这些值用于归因候选缺陷 12，不构成对其修复的预设。尤其不能仅凭
+`max_pending_frames=8` 就认定 160 ms 缓冲是根因。
+
+## 3. 六项观察定义与本轮复验范围
+
+每项都请记下**你实际看到/听到的**，不要写"应该如此"。O1–O4 保留如下，供环境
+变化时定向复验；当前环境未变化时直接复用已记录 PASS，本轮只执行 O5 和 O6。
 
 ### O1 麦克风权限：授予
 
@@ -191,32 +262,41 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 ### O5 听感确认（本项是 S6-02 的核心）
 
 1. 用 O1 的窗口，`Start formal voice turn`，说一句会让 Agent 给出**较长**回答的话
-   （建议：「请用三句话说明语音链路的三个层次。」），按 `Stop and recognize`。
+   （建议：「请用至少六句话，依次编号一到六，详细说明语音采集、语音识别、Agent
+   推理、语音合成、浏览器播放和失败降级；最后明确说『以上六项已讲完』。」），
+   按 `Stop and recognize`。
 2. 等待答案播放（`P1 status` 会进入 `playing`）。不要提前按 `Stop playback`。
 
 **要记录**：**你是否从扬声器/耳机里听到了完整的一段答案**（不是只听到开头就
-断掉）；听到的内容是否与屏幕上的文字答案一致；播放是否需要你先点一下页面
-（autoplay / user activation）；播放过程中界面状态是否正确。
+断掉）；实际播放是否大于 15 秒；是否听到末尾「以上六项已讲完」；听到的内容是否
+与屏幕上的文字答案一致；播放是否需要你先点一下页面（autoplay / user activation）；
+播放过程中界面状态是否正确；是否仍有撕裂、咔哒或电流感。
 
 ### O6 页面隐藏 / 后台 / 恢复
 
-1. 在答案播放中把标签页切到后台（切到别的标签或最小化窗口），停留数秒，再切回。
+1. 另开一轮同样的长回答；确认开始播放后，把标签页切到后台（切到别的标签或
+   最小化窗口）至少 5 秒，再切回。不要在后台按 `Stop playback`。
 
 **要记录**：切后台时播放与采集的行为；切回后是否出现重复播放、错位播放或
-陈旧音频；界面状态是否与实际一致。
+陈旧音频；界面状态是否与实际一致。持续正确播放或显式 fail closed 都记录原始事实；
+静默卡住、状态与声音不一致、重复或陈旧音频均为 FAIL。
 
 ## 4. 回填格式
 
-把结果按下表回给我（一句话一项即可，写你看到/听到的事实）：
+把结果按下表回给我（一句话一项即可，写你看到/听到的事实）。O1–O4 若未重跑，
+写 `REUSED` 并引用此前 PASS，不得伪装成新观察：
 
 | 观察 | 结果 | 你看到 / 听到的 |
 |---|---|---|
-| O1 授予 | PASS / FAIL | |
-| O2 拒绝 | PASS / FAIL | |
-| O3 撤销 | PASS / FAIL | |
-| O4 设备切换/丢失 | PASS / FAIL | |
+| V11 控制组 | PASS / FAIL | 约 15 s timeout、帧数、退出码 |
+| V11 候选组 | PASS / FAIL | >15 s 完整、帧数、退出码、degradation |
+| O1 授予 | REUSED / PASS / FAIL | |
+| O2 拒绝 | REUSED / PASS / FAIL | |
+| O3 撤销 | REUSED / PASS / FAIL | |
+| O4 设备切换/丢失 | REUSED / PASS / FAIL | |
 | O5 听感确认 | PASS / FAIL | |
 | O6 隐藏/后台/恢复 | PASS / FAIL | |
+| D12 诊断 | MEASURED / UNMEASURED | underrun、interarrival、in-flight/queue peaks、听感 |
 
 任何一项 FAIL 请附上你看到的界面文案或错误提示原文（`设备选择原因` /
 `P1 reason` 这两行的原文最有用；不要截图里的凭据）。我据此定位归属
