@@ -2121,6 +2121,7 @@ test('playout schedules exact current response and acknowledges only contiguous 
   assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
   const context = fake.contexts[0];
   assert.equal(context.bufferSources.length, 2);
+  assert.deepEqual(context.bufferSources.map(source => source.starts), [[11], [11.02]]);
   assert.equal(events.filter(event => event.reason === 'render_completed').length, 0);
 
   context.bufferSources[1].end();

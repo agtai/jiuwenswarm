@@ -355,6 +355,11 @@ interface PlaybackSourceCleanupSummary {
 }
 
 const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
+// OpenAI streaming TTS can emit a short seed chunk and then pause before the
+// first sustained burst.  Schedule the browser graph slightly ahead so that
+// ordered 20 ms sources remain contiguous instead of exposing that Provider
+// interarrival gap as a click or a short dropout.
+const PLAYOUT_STARTUP_LEAD_SECONDS = 1.0;
 
 const DISABLED_BROWSER_AUDIO_ENVIRONMENT: BrowserAudioEnvironment = Object.freeze({
   isSecureContext: false,
@@ -1159,7 +1164,7 @@ export class BrowserAudioIOAdapter {
       completed: new Map(),
       acknowledged: new Map(),
       units: new Set(),
-      nextStartTime: context.currentTime,
+      nextStartTime: context.currentTime + PLAYOUT_STARTUP_LEAD_SECONDS,
       stopped: false,
     };
     this.#playback = playback;

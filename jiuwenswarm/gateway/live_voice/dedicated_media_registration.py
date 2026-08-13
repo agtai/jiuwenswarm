@@ -121,14 +121,22 @@ MEDIA_AUTH_CONTRACT_VERSION = "live-voice.media-auth.v1"
 _MAX_RECORDS = 128
 _MAX_CAPTURE_WAV_BYTES = 4 * 1024 * 1024
 _MAX_DOWNLINK_WAV_BYTES = 8 * 1024 * 1024
-_MAX_DOWNLINK_FRAMES = 1_500
+# 20 ms media frames.  Keep streaming playout bounded while allowing a complete
+# long-form response instead of truncating every route at the former 30 seconds.
+_MAX_DOWNLINK_FRAMES = 9_000
 _PRODUCT_PLAYOUT_QUEUE_CAPACITY = 256
 _DEFAULT_TICKET_TTL_SECONDS = 30.0
 _DEFAULT_AUTHORITY_TTL_SECONDS = 15 * 60.0
 _MEDIA_AUTH_FRAME_MAX_BYTES = 8 * 1024
 _MEDIA_AUTH_TIMEOUT_SECONDS = 2.0
 _MAX_ID_CHARS = 256
-_MAX_STREAMING_PREOPEN_FRAMES = 64
+# Capture frames are fixed at 20 ms. A cold native Provider open can
+# legitimately take several seconds, so the former 64-frame (1.28 s) queue
+# made a first short utterance fail before the Provider became ready while a
+# warm later utterance succeeded. Retain references for the complete bounded
+# 15-second open window plus one second of scheduling margin. The actual PCM
+# remains owned by the existing bounded, memory-only batch capture buffer.
+_MAX_STREAMING_PREOPEN_FRAMES = 800
 # End-of-turn arbitration starts before the Provider open settles, so it waits
 # for that open instead of cancelling it. The route owner already hard-bounds
 # the open; this is the independent local bound.

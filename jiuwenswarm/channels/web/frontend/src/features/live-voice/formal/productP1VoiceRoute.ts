@@ -38,10 +38,16 @@ export const PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON = 'AUDIO_CAPTURE_DURATI
 export const PRODUCT_P1_EMPTY_TRANSCRIPT_REASON = 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT';
 const MAX_CAPTURE_FRAMES = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
 export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
+// Streaming TTS is independently bounded from the 30-second microphone
+// capture. Reusing the capture frame limit here cut every answer at exactly
+// 30 seconds even though the Provider stream and browser playout were healthy.
+export const PRODUCT_P1_STREAMING_PLAYOUT_MAX_DURATION_MS = 180_000;
+const MAX_STREAMING_PLAYOUT_FRAMES = PRODUCT_P1_STREAMING_PLAYOUT_MAX_DURATION_MS / LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
 const ROUTE_READY_TIMEOUT_MS = 3_000;
 const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
 const ROUTE_COMPLETION_TIMEOUT_MS = 3_000;
 const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
+const PRODUCT_P1_OVERLAP_MAX_ESTIMATED_DURATION_MS = 20_000;
 
 export type ProductP1VoiceStatus = 'idle' | 'starting' | 'capturing' | 'recognizing' | 'recognized' | 'playing' | 'cleanup_pending' | 'failed' | 'closed';
 
@@ -137,6 +143,20 @@ function requiredText(value: unknown, field: string): string {
   return value;
 }
 
+function estimatedSpeechDurationMs(text: string, locale: 'zh-CN' | 'en-US'): number {
+  const punctuationCount = Array.from(text).filter(character => /[，。！？；：,.!?;:]/u.test(character)).length;
+  if (locale === 'zh-CN') {
+    const spokenCharacters = Array.from(text).filter(character => !/\s/u.test(character)).length;
+    return spokenCharacters * 260 + punctuationCount * 180;
+  }
+  const wordCount = text.trim().split(/\s+/u).filter(Boolean).length;
+  return wordCount * 400 + punctuationCount * 150;
+}
+
+function permitsConcurrentCapture(text: string, locale: 'zh-CN' | 'en-US'): boolean {
+  return estimatedSpeechDurationMs(text, locale) <= PRODUCT_P1_OVERLAP_MAX_ESTIMATED_DURATION_MS;
+}
+
 function consumePrivateText(record: Record<string, unknown>, key: string, field: string): string {
   const value = requiredText(record[key], field);
   if (!Reflect.deleteProperty(record, key) || Object.prototype.hasOwnProperty.call(record, key)) {
@@ -210,7 +230,10 @@ function routeUnavailable(reason: unknown): Error & { readonly reason_id: string
 }
 
 function waitTurn(): Promise<void> {
-  return new Promise(resolve => globalThis.setTimeout(resolve, 10));
+  // The media sender exposes an eight-frame ACK window. A 10 ms polling turn
+  // can consume almost the entire three-second drain budget for the legal
+  // 1,500-frame capture boundary under ordinary browser scheduling load.
+  return new Promise(resolve => globalThis.setTimeout(resolve, 5));
 }
 
 async function awaitRouteCompletion<T>(operation: Promise<T>): Promise<T> {
@@ -258,7 +281,7 @@ export class ProductP1VoiceRouteOwner {
   #sessionId: string | null = null;
   #interactionId: string | null = null;
   #correlationId: string | null = null;
-  #locale = 'zh-CN';
+  #locale: 'zh-CN' | 'en-US' = 'zh-CN';
   #activationId: string | null = null;
   #activationGeneration = 0;
   #deviceSelection: Readonly<ProductP1AudioDeviceSelection> = Object.freeze({ selection_generation: 1 });
@@ -709,9 +732,12 @@ export class ProductP1VoiceRouteOwner {
       // nullish coalescing here would turn a valid stream into a zero-frame
       // batch and reject its first media frame as stale.
       const frameCount = result.downlink === null ? chunks.length : result.downlink.frame_count;
+      const captureDuringPlayout = result.downlink !== null && permitsConcurrentCapture(text, this.#locale);
       if (result.downlink !== null) {
-        await this.#startConcurrentCapture(operationGeneration);
-        this.#requireCurrent(operationGeneration);
+        if (captureDuringPlayout) {
+          await this.#startConcurrentCapture(operationGeneration);
+          this.#requireCurrent(operationGeneration);
+        }
         downlinkRoute = this.#openDownlinkRoute(
           result.downlink,
           result.provider,
@@ -776,10 +802,19 @@ export class ProductP1VoiceRouteOwner {
           throw new Error('dedicated media downlink did not close after final render ACK');
         }
         await waitTurn();
+        if (!captureDuringPlayout) {
+          // A long response can outlive the bounded 30 second capture material
+          // retained for Batch STT fallback. Starting the successor capture
+          // after the final rendered frame keeps the full answer audible while
+          // preserving the exact bound for the next user utterance.
+          await this.#startConcurrentCapture(operationGeneration);
+          this.#requireCurrent(operationGeneration);
+        }
       }
-      // The successor capture remains live while the final downlink detach is
-      // drained. A duration/device failure in that window synchronously changes
-      // the operation generation; fence it before minting a render receipt.
+      // When overlap is enabled, the successor capture remains live while the
+      // final downlink detach is drained. Any capture startup or device failure
+      // synchronously changes the operation generation; fence it before minting
+      // a render receipt in both the overlapping and deferred cases.
       this.#requireCurrent(operationGeneration);
       await this.#acknowledgePlayout(pendingPlayout);
       this.#requireCurrent(operationGeneration);
@@ -1103,7 +1138,7 @@ export class ProductP1VoiceRouteOwner {
       this.#failureCleanupPromise !== null ||
       this.#pendingPlayout !== pending ||
       frame.seq !== pending.chunks.length ||
-      frame.seq >= (pending.frameCount ?? 1_500)
+      frame.seq >= (pending.frameCount ?? MAX_STREAMING_PLAYOUT_FRAMES)
     )
       throw new Error('dedicated media downlink frame is stale or non-contiguous');
     pending.chunks.push(
@@ -1132,6 +1167,12 @@ export class ProductP1VoiceRouteOwner {
           pending.nextChunkIndex -= 1;
           throw new Error('browser playout rejected a formal chunk');
         }
+        // Media ACK is the bounded transport-pressure signal. The separate
+        // media.playout_receipt below remains the authoritative proof that the
+        // exact chunks actually rendered. Waiting for each 20 ms source to
+        // finish before its ACK forced a network round trip between adjacent
+        // frames and made otherwise clean Provider PCM sound broken.
+        if (pending.downlinkRoute !== null) this.#scheduleDownlinkAck(pending, chunk.seq);
         pending.peakDepth = Math.max(pending.peakDepth, depthAfterEnqueue);
       }
     } finally {
@@ -1214,6 +1255,31 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('media playout receipt binding mismatch');
   }
 
+  #scheduleDownlinkAck(pending: PendingProductPlayout, throughSeq: number): void {
+    // The media receiver publishes its frame callback before it retains the
+    // corresponding deferred ACK. Cross that re-entrant boundary by one
+    // microtask, then acknowledge the exact frame that is already scheduled in
+    // Web Audio. Render completion remains separately observed below.
+    Promise.resolve().then(() => {
+      const route = pending.downlinkRoute;
+      if (
+        route === null ||
+        this.#closed ||
+        this.#failureCleanupPromise !== null ||
+        (this.#pendingPlayout !== pending && this.#settlingPlayout !== pending)
+      )
+        return;
+      try {
+        route.leaf.acknowledgeDownlinkThrough(throughSeq);
+      } catch (error) {
+        if (this.#pendingPlayout === pending) this.#pendingPlayout = null;
+        route.leaf.close('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+        this.#audio.stopPlayout(pending.response, 'formal_downlink_ack_failed');
+        pending.reject(error instanceof Error ? error : new Error('formal downlink ACK failed'));
+      }
+    });
+  }
+
   #observePlayout(event: Readonly<BrowserAudioPlayoutEvent>): void {
     const pending = this.#pendingPlayout;
     const deviceFailure =
@@ -1261,17 +1327,6 @@ export class ProductP1VoiceRouteOwner {
     }
     if (event.state !== 'playing' || event.reason !== 'render_completed' || event.unit_id === null || event.through_seq === null) return;
     pending.observed.set(event.unit_id, Math.max(pending.observed.get(event.unit_id) ?? -1, event.through_seq));
-    if (pending.downlinkRoute !== null) {
-      try {
-        pending.downlinkRoute.leaf.acknowledgeDownlinkThrough(event.through_seq);
-      } catch (error) {
-        this.#pendingPlayout = null;
-        pending.downlinkRoute.leaf.close('MEDIA_TRANSPORT_PROTOCOL_ERROR');
-        this.#audio.stopPlayout(pending.response, 'formal_downlink_ack_failed');
-        pending.reject(error instanceof Error ? error : new Error('formal downlink ACK failed'));
-        return;
-      }
-    }
     pending.renderedChunks = pending.frameCount === null
       ? Math.max(0, (pending.observed.get(pending.unitId) ?? -1) + 1)
       : [...pending.expected].reduce(
@@ -1303,7 +1358,7 @@ export class ProductP1VoiceRouteOwner {
         pending?.downlinkRoute === route
         && pending.frameCount === null
         && pending.chunks.length > 0
-        && pending.chunks.length <= 1_500
+        && pending.chunks.length <= MAX_STREAMING_PLAYOUT_FRAMES
       ) {
         const finalSeq = pending.chunks.length - 1;
         pending.expected.set(pending.unitId, finalSeq);
@@ -1317,8 +1372,11 @@ export class ProductP1VoiceRouteOwner {
             this.#settlingPlayout = pending;
             pending.resolve();
           }
-          return;
         }
+        // Transport completion may precede browser rendering because media ACK
+        // now means safely scheduled, not physically rendered. Keep the exact
+        // final cursor and let onended observations drive the product receipt.
+        return;
       }
       const finalSeq = pending?.expected.get(pending.unitId);
       if (
@@ -1328,8 +1386,7 @@ export class ProductP1VoiceRouteOwner {
         pending.frameCount > 0 &&
         finalSeq === pending.frameCount - 1 &&
         pending.chunks.length === pending.frameCount &&
-        pending.nextChunkIndex === pending.frameCount &&
-        (pending.observed.get(pending.unitId) ?? -1) >= finalSeq
+        pending.nextChunkIndex === pending.frameCount
       )
         return;
       void this.#fail(

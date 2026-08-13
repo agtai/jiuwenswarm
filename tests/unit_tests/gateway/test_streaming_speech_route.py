@@ -698,7 +698,8 @@ async def test_streaming_owner_queue_exhaustion_falls_back_without_dropping_capt
     handle, _ = await owner.begin(_binding())
     assert handle is not None
 
-    for seq in range(66):
+    overflow_frame_count = streaming_speech_route._MAX_PENDING_PROVIDER_FRAMES + 2
+    for seq in range(overflow_frame_count):
         owner.offer(handle, _frame(seq))
     assert handle.failure is StreamingRecognitionFallbackReason.QUEUE_EXHAUSTED
     outcome = await owner.finish(handle)
@@ -909,6 +910,43 @@ async def test_precommit_event_wait_outlives_short_final_deadline(
 
     assert outcome.completed is True
     assert provider.cancel_count == 0
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_provider_session_budget_covers_precommit_and_final_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(streaming_speech_route, "_OPEN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(streaming_speech_route, "_PRECOMMIT_EVENT_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(streaming_speech_route, "_FINAL_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(
+        streaming_speech_route, "_RECOGNITION_SESSION_TIMEOUT_SECONDS", 0.35
+    )
+    provider = _Provider()
+    observed_timeout: float | None = None
+
+    async def open_with_observed_budget(request, *, timeout_seconds: float) -> None:
+        nonlocal observed_timeout
+        observed_timeout = timeout_seconds
+        provider.open_count += 1
+        provider.ref = request.ref
+
+    provider.open_recognition = open_with_observed_budget
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+
+    handle, fallback = await owner.begin(_binding())
+
+    assert handle is not None
+    assert fallback is None
+    assert observed_timeout == pytest.approx(0.35)
+    assert observed_timeout > streaming_speech_route._OPEN_TIMEOUT_SECONDS
+    await owner.abort(handle)
     await owner.close()
 
 
@@ -2044,6 +2082,97 @@ async def test_fixed_media_socket_runs_streaming_stt_to_formal_receipt_without_b
 
 
 @pytest.mark.asyncio
+async def test_cold_streaming_open_preserves_short_utterance_until_server_vad_eot() -> None:
+    provider = _DelayedOpenProvider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(
+                SpeechRouteTier.STREAMING, provider, None
+            ),
+        )
+    )
+    registry = DedicatedMediaProductRegistry(
+        enabled=True, end_of_turn_enabled=True
+    )
+    registry.set_provider_available(True)
+    registry.configure_streaming_recognition(
+        owner,
+        receipt_issuer=lambda **_binding: asyncio.sleep(0, result="unused"),
+    )
+    await registry.prepare_streaming_provider()
+    _trust_activation(registry)
+    activation = registry.activate(
+        params={
+            **_activation_params(),
+            "end_of_turn_capability": MEDIA_END_OF_TURN_CAPABILITY,
+        },
+        request_origin="https://voice.example.test",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    record = registry.consume_ticket(
+        str(activation["media_ticket"]),
+        request_origin="https://voice.example.test",
+    )
+    assert record is not None
+
+    registry.start_streaming_recognition(record)
+    await asyncio.wait_for(provider.open_started.wait(), timeout=1)
+    end_of_turn_task = asyncio.create_task(
+        registry.wait_streaming_end_of_turn(record)
+    )
+    # 100 x 20 ms reproduces a cold open that exceeded the former 64-frame
+    # queue before the user could finish even a short greeting.
+    for seq in range(100):
+        frame = _frame(seq)
+        registry.accept_frame(record, frame)
+        registry.accept_streaming_frame(record, frame)
+    assert len(record.streaming_preopen_frames) == 100
+    assert not end_of_turn_task.done()
+
+    provider.open_release.set()
+    for _ in range(200):
+        if record.streaming_recognition_handle is not None:
+            break
+        await asyncio.sleep(0.001)
+    handle = record.streaming_recognition_handle
+    assert handle is not None
+    for _ in range(200):
+        if len(provider.frames) == 100:
+            break
+        await asyncio.sleep(0.001)
+    assert [frame.seq for frame in provider.frames] == list(range(100))
+    await provider.events.put(
+        RecognitionTurnBoundaryEvent(
+            handle.ref,
+            _PROVIDER_REF,
+            0,
+            RecognitionTurnBoundaryKind.SPEECH_STARTED,
+            "provider-item-cold",
+            provider_start_ms=100,
+        )
+    )
+    await provider.events.put(
+        RecognitionTurnBoundaryEvent(
+            handle.ref,
+            _PROVIDER_REF,
+            1,
+            RecognitionTurnBoundaryKind.SPEECH_STOPPED,
+            "provider-item-cold",
+            provider_end_ms=900,
+        )
+    )
+
+    observed = await asyncio.wait_for(end_of_turn_task, timeout=1)
+    assert (observed.provider_start_ms, observed.provider_end_ms) == (100, 900)
+    assert provider.cancel_count == 0
+    registry.abort_route(record)
+    await registry.abort_streaming_recognition(record)
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_slow_streaming_open_never_delays_media_attach_or_omits_early_audio(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2174,7 +2303,8 @@ async def test_registry_streaming_failure_exposes_one_safe_batch_fallback(
     )
     assert record is not None
     await registry.begin_streaming_recognition(record)
-    for seq in range(66):
+    overflow_frame_count = streaming_speech_route._MAX_PENDING_PROVIDER_FRAMES + 2
+    for seq in range(overflow_frame_count):
         frame = _frame(seq)
         registry.accept_frame(record, frame)
         registry.accept_streaming_frame(record, frame)
@@ -2184,7 +2314,7 @@ async def test_registry_streaming_failure_exposes_one_safe_batch_fallback(
             activated=True,
             socket_touched=True,
             attach_sent=True,
-            accepted_frames=66,
+            accepted_frames=overflow_frame_count,
             close_result=None,
             reason_id=MediaDetachReason.LOCAL_CLOSE,
         ),

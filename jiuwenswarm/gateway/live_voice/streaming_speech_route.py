@@ -46,7 +46,11 @@ from jiuwenswarm.server.live_voice.streaming_speech import (
 
 
 _LOGGER = logging.getLogger(__name__)
-_MAX_PENDING_PROVIDER_FRAMES = 64
+# 20 ms media frames.  A cold Provider connection can accumulate the same
+# bounded pre-open burst that DedicatedMediaProductRegistry retains; the
+# Provider pump must be able to accept that burst without immediately turning
+# a successful open into QUEUE_EXHAUSTED.
+_MAX_PENDING_PROVIDER_FRAMES = 800
 _OPEN_TIMEOUT_SECONDS = 15.0
 _PROVIDER_SEND_TIMEOUT_SECONDS = 5.0
 _PROVIDER_COMMIT_TIMEOUT_SECONDS = 10.0
@@ -59,6 +63,15 @@ _FINAL_TIMEOUT_SECONDS = 20.0
 # must not expire before the user can legally commit the capture.  finish()
 # still applies the shorter final deadline after commit.
 _PRECOMMIT_EVENT_TIMEOUT_SECONDS = 35.0
+# Native recognition Providers own an absolute session deadline, not just a
+# connection deadline.  Keep the outer open call bounded by
+# ``_OPEN_TIMEOUT_SECONDS`` below, while granting the Provider enough lifetime
+# for the complete legal capture plus the post-commit final-event window.
+_RECOGNITION_SESSION_TIMEOUT_SECONDS = (
+    _OPEN_TIMEOUT_SECONDS
+    + _PRECOMMIT_EVENT_TIMEOUT_SECONDS
+    + _FINAL_TIMEOUT_SECONDS
+)
 _LOCAL_TASK_CANCEL_TIMEOUT_SECONDS = 1.0
 _MAX_ACTIVE_STREAMS = 32
 _MAX_RETAINED_PROVIDER_TASKS = 64
@@ -245,7 +258,7 @@ class StreamingRecognitionRouteOwner:
             async def invoke_open() -> None:
                 await provider.open_recognition(
                     RecognitionStreamRequest(ref, detection),
-                    timeout_seconds=_OPEN_TIMEOUT_SECONDS,
+                    timeout_seconds=_RECOGNITION_SESSION_TIMEOUT_SECONDS,
                 )
 
             try:

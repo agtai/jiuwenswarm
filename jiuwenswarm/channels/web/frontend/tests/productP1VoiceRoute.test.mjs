@@ -3495,9 +3495,10 @@ async function runConcurrentCaptureJourney(options = {}) {
   let captureDurationBoundaryRecognition = null;
   let captureDurationLateFrameUplinkCount = null;
   let secondMediaCloseFailures = options.failSecondMediaCloseOnce === true ? 1 : 0;
-  let finalRenderAckResolve;
-  const finalRenderAckObserved = new Promise(resolve => {
-    finalRenderAckResolve = resolve;
+  let activationCountAtFinalDownlinkAck = null;
+  let finalDownlinkAckResolve;
+  const finalDownlinkAckObserved = new Promise(resolve => {
+    finalDownlinkAckResolve = resolve;
   });
   const environment = audioEnvironment(
     (() => {
@@ -3543,6 +3544,27 @@ async function runConcurrentCaptureJourney(options = {}) {
     constructor() {
       super();
       this.serverBinding = null;
+      this.downlinkNextSeq = 0;
+      this.downlinkAckedSeq = -1;
+    }
+    pumpDownlink() {
+      const binding = this.serverBinding;
+      if (binding?.direction !== 'downlink' || this.readyState !== 1) return;
+      const maxPendingFrames = 8;
+      while (
+        this.downlinkNextSeq < downlinkFramesToSend
+        && this.downlinkNextSeq <= this.downlinkAckedSeq + maxPendingFrames
+      ) {
+        const seq = this.downlinkNextSeq;
+        this.downlinkNextSeq += 1;
+        this.onmessage?.({
+          data: encodeAudioFrame(binding, {
+            seq,
+            sample_cursor: seq * 960,
+            samples: new Float32Array(960).fill(0.125),
+          }),
+        });
+      }
     }
     send(value) {
       this.sent.push(value);
@@ -3574,7 +3596,9 @@ async function runConcurrentCaptureJourney(options = {}) {
         }
       } else if (this.serverBinding.direction === 'downlink' && typeof value === 'string') {
         const control = JSON.parse(value);
-        if (control.type === 'media.ack' && control.through_seq === options.earlyDownlinkDetachThroughSeq) {
+        if (control.type !== 'media.ack') return;
+        this.downlinkAckedSeq = Math.max(this.downlinkAckedSeq, control.through_seq);
+        if (control.through_seq === options.earlyDownlinkDetachThroughSeq) {
           this.onmessage?.({
             data: serializeMediaControl({
               type: 'media.detach',
@@ -3585,8 +3609,9 @@ async function runConcurrentCaptureJourney(options = {}) {
               business_cancel_count_delta: 0,
             }),
           });
-        } else if (control.type === 'media.ack' && control.through_seq === downlinkFrameCount - 1) {
-          finalRenderAckResolve();
+        } else if (control.through_seq === downlinkFrameCount - 1) {
+          activationCountAtFinalDownlinkAck = activationCount;
+          finalDownlinkAckResolve();
           if (options.holdDownlinkDetachAfterFinalRender !== true) {
             const completeDownlink = () =>
               this.onmessage?.({
@@ -3602,6 +3627,8 @@ async function runConcurrentCaptureJourney(options = {}) {
             if (options.synchronousDownlinkDetachAfterFinalRender === true) completeDownlink();
             else queueMicrotask(completeDownlink);
           }
+        } else {
+          queueMicrotask(() => this.pumpDownlink());
         }
       }
     }
@@ -3699,15 +3726,7 @@ async function runConcurrentCaptureJourney(options = {}) {
             });
             concurrentFailureSnapshot = owner.status();
           }
-          for (let seq = 0; seq < downlinkFramesToSend; seq += 1) {
-            socket.onmessage?.({
-              data: encodeAudioFrame(binding, {
-                seq,
-                sample_cursor: seq * 960,
-                samples: new Float32Array(960).fill(0.125 + seq * 0.01),
-              }),
-            });
-          }
+          socket.pumpDownlink();
         }
       });
       return socket;
@@ -3851,10 +3870,20 @@ async function runConcurrentCaptureJourney(options = {}) {
   await owner.stopAndRecognize();
   const capturingBeforeConcurrent = statuses.filter(status => status === 'capturing').length;
   const priorWorklet = environment.worklet;
-  const playing = owner.playAgentText({ response, unit_id: 'unit-duplex-1', text: 'duplex Agent response' });
+  const playing = owner.playAgentText({
+    response,
+    unit_id: 'unit-duplex-1',
+    text: options.agentText ?? 'duplex Agent response',
+  });
   void playing.catch(() => undefined);
   if (options.sendSecondFrame !== false) {
-    if (options.useRealProcessorForSecondCapture === true) {
+    if (options.deferSuccessorCaptureUntilAfterPlayout === true) {
+      await finalDownlinkAckObserved;
+      // The browser route closes the downlink on a bounded detach retry before
+      // Product P1 is allowed to create the deferred successor capture.
+      await new Promise(resolve => setTimeout(resolve, 50));
+      await sendFirstFrameToNextWorklet(environment, priorWorklet);
+    } else if (options.useRealProcessorForSecondCapture === true) {
       for (let turn = 0; turn < 100 && (environment.worklet === priorWorklet || typeof environment.worklet?.port.onmessage !== 'function'); turn += 1) {
         await new Promise(resolve => setImmediate(resolve));
       }
@@ -3877,7 +3906,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     }
   }
   if (options.exerciseCaptureDurationBeforeReceipt === true) {
-    await finalRenderAckObserved;
+    await finalDownlinkAckObserved;
     if (options.deferCaptureDurationUntilDetachWait === true) {
       // Let playAgentText consume the rendered Promise and enter its held
       // downlink-detach wait while the settling playout remains authoritative.
@@ -4081,11 +4110,12 @@ async function runConcurrentCaptureJourney(options = {}) {
     captureDurationBoundarySnapshot,
     captureDurationBoundaryRecognition,
     captureDurationLateFrameUplinkCount,
+    activationCountAtFinalDownlinkAck,
     environment,
   };
 }
 
-test('formal P1 dedicated downlink overlaps the next real capture and ACKs only rendered audio', async () => {
+test('formal P1 dedicated downlink ACKs scheduled audio and receipts only rendered audio', async () => {
   const journey = await runConcurrentCaptureJourney({ synchronousDownlinkDetachAfterFinalRender: true });
   const { owner, calls, sockets, activationCount, playError, environment } = journey;
 
@@ -4102,6 +4132,25 @@ test('formal P1 dedicated downlink overlaps the next real capture and ACKs only 
   await owner.close();
   assert.equal(environment.contexts[0].state, 'closed');
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+});
+
+test('formal P1 defers successor capture for a long answer so the 30-second capture bound cannot stop playout', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    agentText:
+      '实时语音系统会依次完成录音采集、前端处理、语音识别、Agent 推理、语音合成和浏览器播放。'.repeat(8),
+    downlinkFrameCount: 3,
+    deferSuccessorCaptureUntilAfterPlayout: true,
+  });
+  const { owner, calls, activationCount, activationCountAtFinalDownlinkAck, playError, environment } = journey;
+
+  assert.equal(playError, null);
+  assert.equal(activationCountAtFinalDownlinkAck, 1);
+  assert.equal(activationCount, 2);
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON), false);
+  assert.equal(environment.contexts[0].sourceEndCount, 3);
+  await owner.close();
 });
 
 test('formal P1 streaming downlink derives its final rendered cursor only from expected completion', async () => {
@@ -4128,6 +4177,24 @@ test('formal P1 streaming downlink derives its final rendered cursor only from e
     calls.some(([method]) => method.includes('agent') || method.includes('task') || method.includes('history')),
     false
   );
+  await owner.close();
+});
+
+test('formal P1 streaming downlink renders beyond the former 30-second frame ceiling', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    streamingDownlink: true,
+    downlinkFrameCount: 1_501,
+    agentText:
+      '实时语音系统需要连续朗读完整的长回复，不应在三十秒边界取消合成与播放。'.repeat(8),
+    deferSuccessorCaptureUntilAfterPlayout: true,
+  });
+  const { owner, calls, playError, environment } = journey;
+
+  assert.equal(playError, null);
+  assert.equal(environment.contexts[0].sourceEndCount, 1_501);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_PLAYOUT_RECEIPT_METHOD).length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD).length, 1);
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
   await owner.close();
 });
 

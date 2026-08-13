@@ -52,6 +52,7 @@ export function normalizeStreamingXObs(
 
 const MAX_BATCH_AUDIO_BYTES = 4 * 1024 * 1024;
 const MAX_SYNTHESIS_AUDIO_BYTES = 8 * 1024 * 1024;
+const MAX_DEDICATED_MEDIA_FRAMES = 9_000;
 const MAX_RECOGNITION_TEXT_CHARS = 16_000;
 const MAX_SYNTHESIS_TEXT_CHARS = 4_000;
 const MAX_BATCH_TIMEOUT_MS = 30_000;
@@ -1145,7 +1146,7 @@ export class GatewayBatchSpeechClient {
         audio.max_pending_bytes,
         'audio.max_pending_bytes',
       );
-      if ((frameCount ?? 0) > 1_500 || maxPendingFrames > 256 || maxPendingBytes > MAX_SYNTHESIS_AUDIO_BYTES) {
+      if ((frameCount ?? 0) > MAX_DEDICATED_MEDIA_FRAMES || maxPendingFrames > 256 || maxPendingBytes > MAX_SYNTHESIS_AUDIO_BYTES) {
         throw new GatewayBatchSpeechError(
           'PROTOCOL_VIOLATION',
           'AUDIO_LIMIT_EXCEEDED',
