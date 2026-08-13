@@ -20,7 +20,8 @@ This implementation was selectively adapted from `d2727f20` onto the final S6
 tree. It accepts only comparison base
 `2a69c2b87d0ee080a4a30421cbcbcdf93183f340`, preserves the repository pytest
 configuration (including `--asyncio-mode=auto`), records the frontend generated-
-artifact exclusion/digest state, and requires the final S6 speech/browser source
+artifact exclusion/digest state, freezes a bounded content manifest for the
+actual ignored production `dist`, and requires the final S6 speech/browser source
 and regression inventory before building the matrix. The frontend registry must
 cover every tracked `tests/liveVoice*.test.mjs`, the three declared compatibility
 tests, and the post-S6 `productP1VoiceRoute.test.mjs` owner.
@@ -55,7 +56,9 @@ Frontend dependencies come from `package-lock.json` through
 `npm ci --ignore-scripts`. Package commands must cover the exact dynamically
 discovered set of tracked `tests/liveVoice*.test.mjs` files. A frontend test
 command must emit at least one passing TAP test and zero failed TAP tests, and
-the production build must report at least one Vite-transformed module; each
+the production build must report at least one Vite-transformed module and create
+a non-empty `index.html` build. The runner records a bounded file count, byte
+count, complete path/size/content manifest digest and entrypoint digest; each
 backend matrix must report at least one passed pytest case and zero
 failures/errors.
 Exit zero or an all-skipped suite is insufficient. Pytest keeps
@@ -80,8 +83,10 @@ bounded to 2 MiB; truncation is explicit, and it invalidates a real-probe
 summary. Automatic output is displayed but not persisted. Real-probe output is
 neither echoed nor persisted. On timeout or interruption the runner terminates
 the spawned process tree. A post-run identity check fails the run if a check
-changes HEAD, a dependency input, the upstream relation or tracked/untracked
-worktree content.
+changes HEAD, a dependency input, the upstream relation, tracked/untracked
+worktree content or the ignored production build after its digest was frozen.
+The build walk rejects links/reparse points and special files and is capped at
+512 files, 512 directories, 64 MiB per file and 128 MiB total.
 
 Automatic commands receive a minimal OS/tool environment plus the declared
 Live Voice feature flags. They never inherit the Speech API key, P3 bearer or

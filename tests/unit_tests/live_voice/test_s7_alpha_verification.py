@@ -67,6 +67,7 @@ def _candidate_repo(tmp_path: Path) -> tuple[Path, str]:
     _git(repo, "config", "user.email", "s7@example.invalid")
     _git(repo, "config", "user.name", "S7 Test")
     inputs = {
+        ".gitignore": "jiuwenswarm/channels/web/frontend/dist/\n",
         "pyproject.toml": "[project]\nname='candidate'\n",
         "uv.lock": "version = 1\n",
         "jiuwenswarm/channels/web/frontend/package.json": json.dumps(
@@ -627,6 +628,100 @@ def test_frontend_build_cannot_pass_without_vite_compilation(tmp_path: Path) -> 
 
     assert result.status is s7.CheckStatus.FAIL
     assert "summary contract" in result.reason
+
+
+def test_frontend_build_pass_freezes_bounded_dist_identity(tmp_path: Path) -> None:
+    repo, head = _candidate_repo(tmp_path)
+    build_code = (
+        "from pathlib import Path; "
+        "root=Path('jiuwenswarm/channels/web/frontend/dist'); "
+        "root.mkdir(parents=True, exist_ok=True); "
+        "(root/'index.html').write_text('<main>S8</main>', encoding='utf-8'); "
+        "(root/'asset.js').write_text('export const ready=true', encoding='utf-8'); "
+        "print('built 2 modules transformed')"
+    )
+    spec = s7.CheckSpec(
+        check_id="frontend-production-build",
+        category="frontend",
+        argv=("<python>", "-c", build_code),
+    )
+
+    result = s7.run_check(
+        spec,
+        repo=repo,
+        env=os.environ,
+        timeout_seconds=5,
+        candidate_head=head,
+    )
+
+    assert result.status is s7.CheckStatus.PASS
+    assert result.details["artifact_schema"] == s7._FRONTEND_BUILD_SCHEMA
+    assert result.details["artifact_file_count"] == 2
+    assert result.details["artifact_total_bytes"] > 0
+    assert re.fullmatch(
+        r"sha256:[0-9a-f]{64}", str(result.details["artifact_manifest_sha256"])
+    )
+    assert "artifact_manifest" not in result.details
+
+
+def test_frontend_build_fails_when_dist_entrypoint_is_missing(tmp_path: Path) -> None:
+    repo, head = _candidate_repo(tmp_path)
+    build_code = (
+        "from pathlib import Path; "
+        "root=Path('jiuwenswarm/channels/web/frontend/dist'); "
+        "root.mkdir(parents=True, exist_ok=True); "
+        "(root/'asset.js').write_text('ready', encoding='utf-8'); "
+        "print('built 1 modules transformed')"
+    )
+    spec = s7.CheckSpec(
+        check_id="frontend-production-build",
+        category="frontend",
+        argv=("<python>", "-c", build_code),
+    )
+
+    result = s7.run_check(
+        spec,
+        repo=repo,
+        env=os.environ,
+        timeout_seconds=5,
+        candidate_head=head,
+    )
+
+    assert result.status is s7.CheckStatus.FAIL
+    assert "summary contract" in str(result.reason)
+
+
+def test_frontend_build_identity_rejects_empty_entrypoint(tmp_path: Path) -> None:
+    repo, _ = _candidate_repo(tmp_path)
+    root = repo / "jiuwenswarm/channels/web/frontend/dist"
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"")
+    (root / "asset.js").write_text("ready", encoding="utf-8")
+
+    with pytest.raises(s7.VerificationError, match="entrypoint"):
+        s7.collect_frontend_build_identity(repo)
+
+
+def test_postrun_identity_detects_ignored_frontend_build_replacement(
+    tmp_path: Path,
+) -> None:
+    repo, head = _candidate_repo(tmp_path)
+    root = repo / "jiuwenswarm/channels/web/frontend/dist"
+    root.mkdir(parents=True)
+    index = root / "index.html"
+    index.write_text("frozen", encoding="utf-8")
+    expected_build = s7.collect_frontend_build_identity(repo)
+    identity = s7.collect_candidate_identity(
+        repo, comparison_base=head, allow_no_upstream=True
+    )
+    index.write_text("replaced", encoding="utf-8")
+
+    result = s7.inspect_candidate_after_run(
+        repo, identity, expected_frontend_build=expected_build
+    )
+
+    assert result.status is s7.CheckStatus.FAIL
+    assert result.details["frontend_build_unchanged"] is False
 
 
 def test_backend_command_cannot_pass_with_all_tests_skipped(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ import os
 import platform
 import re
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -407,6 +408,12 @@ _RAW_MEDIA_SUFFIXES = frozenset(
     {".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".pcm", ".wav", ".webm"}
 )
 _MAX_CAPTURE_BYTES = 2 * 1024 * 1024
+_FRONTEND_BUILD_SCHEMA = "live-voice.frontend-production-build.v1"
+_FRONTEND_DIST_RELATIVE = "jiuwenswarm/channels/web/frontend/dist"
+_MAX_FRONTEND_BUILD_FILES = 512
+_MAX_FRONTEND_BUILD_DIRECTORIES = 512
+_MAX_FRONTEND_BUILD_FILE_BYTES = 64 * 1024 * 1024
+_MAX_FRONTEND_BUILD_TOTAL_BYTES = 128 * 1024 * 1024
 _FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_REF = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -532,6 +539,110 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_reparse_or_symlink(path: Path) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise VerificationError("frontend production build is unavailable") from error
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    )
+
+
+def _canonical_frontend_build_manifest(
+    entries: Sequence[Mapping[str, int | str]],
+) -> str:
+    return json.dumps(entries, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
+def collect_frontend_build_identity(repo: Path) -> dict[str, int | str]:
+    """Return a bounded, content-addressed identity for the generated Vite build."""
+
+    root = (repo / _FRONTEND_DIST_RELATIVE).resolve()
+    expected_root = repo.resolve() / _FRONTEND_DIST_RELATIVE
+    if root != expected_root or not root.is_dir() or _is_reparse_or_symlink(root):
+        raise VerificationError("frontend production build root is unsafe")
+    entries: list[dict[str, int | str]] = []
+    total_bytes = 0
+    directory_count = 0
+    try:
+        walk = os.walk(root, topdown=True, followlinks=False)
+        for current, directories, files in walk:
+            directory_count += 1
+            if directory_count > _MAX_FRONTEND_BUILD_DIRECTORIES:
+                raise VerificationError(
+                    "frontend production build exceeds safety limits"
+                )
+            current_path = Path(current)
+            directories.sort()
+            files.sort()
+            for directory in directories:
+                if _is_reparse_or_symlink(current_path / directory):
+                    raise VerificationError(
+                        "frontend production build contains an unsafe link"
+                    )
+            for filename in files:
+                path = current_path / filename
+                if _is_reparse_or_symlink(path):
+                    raise VerificationError(
+                        "frontend production build contains an unsafe link"
+                    )
+                if not path.is_file():
+                    raise VerificationError(
+                        "frontend production build contains a special file"
+                    )
+                relative = path.relative_to(root).as_posix()
+                if (
+                    not relative
+                    or relative.startswith("/")
+                    or "\\" in relative
+                    or any(part in {"", ".", ".."} for part in relative.split("/"))
+                ):
+                    raise VerificationError("frontend production build path is unsafe")
+                try:
+                    size = path.stat().st_size
+                except OSError as error:
+                    raise VerificationError(
+                        "frontend production build is unavailable"
+                    ) from error
+                total_bytes += size
+                if (
+                    size < 0
+                    or size > _MAX_FRONTEND_BUILD_FILE_BYTES
+                    or total_bytes > _MAX_FRONTEND_BUILD_TOTAL_BYTES
+                    or len(entries) >= _MAX_FRONTEND_BUILD_FILES
+                ):
+                    raise VerificationError(
+                        "frontend production build exceeds safety limits"
+                    )
+                entries.append(
+                    {
+                        "path": relative,
+                        "size": size,
+                        "sha256": f"sha256:{_hash_file(path)}",
+                    }
+                )
+    except OSError as error:
+        raise VerificationError("frontend production build is unavailable") from error
+    entries.sort(key=lambda entry: str(entry["path"]))
+    if not entries or total_bytes <= 0:
+        raise VerificationError("frontend production build entrypoint is missing")
+    manifest = _canonical_frontend_build_manifest(entries)
+    index = next((entry for entry in entries if entry["path"] == "index.html"), None)
+    if index is None or int(index["size"]) <= 0:
+        raise VerificationError("frontend production build entrypoint is missing")
+    return {
+        "artifact_schema": _FRONTEND_BUILD_SCHEMA,
+        "artifact_file_count": len(entries),
+        "artifact_total_bytes": total_bytes,
+        "artifact_manifest_sha256": (
+            "sha256:" + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+        ),
+        "artifact_entrypoint_sha256": str(index["sha256"]),
+    }
 
 
 def _generated_artifact_state(repo: Path) -> dict[str, str]:
@@ -1229,6 +1340,8 @@ def inspect_source_hygiene(repo: Path, comparison_base: str) -> CheckResult:
 def inspect_candidate_after_run(
     repo: Path,
     expected: CandidateIdentity,
+    *,
+    expected_frontend_build: Mapping[str, int | str] | None = None,
 ) -> CheckResult:
     started = time.monotonic()
     try:
@@ -1246,7 +1359,15 @@ def inspect_candidate_after_run(
             reason=f"candidate identity changed during verification: {error}",
             command=("internal:candidate-identity-after-run",),
         )
-    unchanged = observed == expected
+    frontend_build_unchanged = expected_frontend_build is None
+    if expected_frontend_build is not None:
+        try:
+            frontend_build_unchanged = (
+                collect_frontend_build_identity(repo) == expected_frontend_build
+            )
+        except VerificationError:
+            frontend_build_unchanged = False
+    unchanged = observed == expected and frontend_build_unchanged
     return CheckResult(
         check_id="candidate-identity-after-run",
         category="source",
@@ -1259,6 +1380,7 @@ def inspect_candidate_after_run(
             "dependencies_unchanged": (
                 observed.dependency_sha256 == expected.dependency_sha256
             ),
+            "frontend_build_unchanged": frontend_build_unchanged,
             "clean": observed.clean,
         },
         command=("internal:candidate-identity-after-run",),
@@ -1968,6 +2090,15 @@ def run_check(
         runtime_declaration_sha256,
     )
     automatic_valid = _automatic_output_contract_valid(spec, details)
+    if (
+        spec.check_id == "frontend-production-build"
+        and command_passed
+        and automatic_valid
+    ):
+        try:
+            details.update(collect_frontend_build_identity(repo))
+        except VerificationError:
+            automatic_valid = False
     if command_passed and probe_valid and automatic_valid:
         status = CheckStatus.VERIFY if spec.real_path else CheckStatus.PASS
     else:
@@ -2219,7 +2350,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                     runtime_declaration_sha256=runtime_declaration_sha,
                 )
             )
-        results.append(inspect_candidate_after_run(repo, identity))
+        frontend_build = next(
+            (
+                {
+                    name: value
+                    for name, value in result.details.items()
+                    if name.startswith("artifact_")
+                }
+                for result in results
+                if result.check_id == "frontend-production-build"
+                and result.status is CheckStatus.PASS
+            ),
+            None,
+        )
+        results.append(
+            inspect_candidate_after_run(
+                repo,
+                identity,
+                expected_frontend_build=frontend_build,
+            )
+        )
         report = build_report(
             identity=identity,
             results=results,
