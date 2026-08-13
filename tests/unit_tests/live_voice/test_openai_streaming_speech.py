@@ -28,6 +28,7 @@ from jiuwenswarm.server.live_voice.openai_streaming_speech import (
     DEFAULT_TTS_MODEL,
     DEFAULT_TTS_VOICE,
     MAX_DEGRADATION_SINK_TASKS_PER_OWNER,
+    MAX_EVENT_QUEUE,
     MAX_INCOMPLETE_TRANSPORT_CLEANUPS,
     OpenAIStreamingSpeechError,
     OpenAIStreamingSpeechConfig,
@@ -1025,8 +1026,14 @@ async def test_recognition_queue_exhaustion_emits_one_closed_reason() -> None:
     async def socket_factory(*_args) -> FakeSocket:
         return socket
 
+    # A consumer that never drains must still exhaust the stream. The budget is
+    # explicit here so the assertion measures fail-closed behaviour rather than
+    # the production wait that ordinary real-time pacing needs.
     provider = OpenAIStreamingSpeechProvider(
-        config(), socket_factory=socket_factory, degradation_sink=facts.append
+        config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+        event_queue_wait_seconds=0.05,
     )
     ref = recognition_ref()
     await provider.open_recognition(ref, timeout_seconds=2)

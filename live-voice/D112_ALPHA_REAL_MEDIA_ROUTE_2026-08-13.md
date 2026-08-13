@@ -197,6 +197,54 @@ D111 §2 声明的 Chrome 基线是 `151.0.7922.109`，但本机安装目录同�
   并带自己的本地上界（`asyncio.wait` 超时不取消；超时后该 Provider 仍由
   finish/abort 路径拥有）。`_settle_streaming_begin` 继续用于 finish/abort。
 
+## 7b. 缺陷 10（Alpha 引入，已修）：合成事件队列无背压，实时播放几秒后被中止
+
+- **来源**：用户在真实 Chrome + 物理扬声器上做 S6-02 O5 听感确认时报告
+  「有声音，但质量很差，而且没有完整朗读，几秒就结束了」。
+- **取证（去敏日志原文）**：
+  `live_voice_speech_degradation {"operation":"synthesis.stream",
+  "reason":"STREAMING_SPEECH_EVENT_QUEUE_EXHAUSTED","latency_ms":5859,
+  "from_tier":"streaming","to_tier":"text"}`，紧随
+  `live_voice_streaming_synthesis_fallback reason=STREAMING_SPEECH_PROVIDER_UNAVAILABLE
+  action=text_or_retry first_audio_emitted=true`。两次尝试分别在 5,859 ms 与 4,766 ms
+  中止，`first_audio_emitted=true` 说明音频确实开始播了才断。
+- **根因**：合成管线的每一环都有带超时的背压，**只有 Adapter 这一环没有**：
+  `provider socket reader → Adapter 事件队列（MAX_EVENT_QUEUE=64，`put_nowait`，
+  满则抛致命错） → 网关 `_produce` → 网关输出队列（带 `_queue_wait_seconds` 等待）
+  → downlink sender（8 帧）→ 浏览器 playout ACK`。
+  浏览器按**实时**速度播放时，`_produce` 阻塞在网关输出队列上就不再拉 Provider 事件，
+  Provider 几秒内灌满那 64 个槽位，第 65 个 `put_nowait` 直接判定
+  `SPEECH_EVENT_QUEUE_EXHAUSTED` 并中止整条流。
+  即：**产品的正常播放节奏本身触发了这个"耗尽"**。
+- **归属**：`openai_streaming_speech.py` 在 `3f3cdbb7f` 与 `2a69c2b87` 中都不存在，
+  由本批 S6 引入。**Alpha 引入**，与缺陷 1、2、8 同一文件。
+- **修复**：满队列时改为在自己的预算内**持有** Provider reader
+  （`await asyncio.wait_for(queue.put(...), timeout=EVENT_QUEUE_WAIT_SECONDS)`，
+  默认 6.0 s，可由构造参数注入）。硬上界不变：消费者真的停了，预算耗尽后仍然
+  fail closed，且缓冲永不超过 `MAX_EVENT_QUEUE`。持有 reader 会关闭传输接收窗口，
+  这正是 Provider 需要的背压。预算下界的依据是单个 Provider delta 的上界
+  `MAX_PROVIDER_AUDIO_DELTA_BYTES` = 24 kHz pcm_s16le 的两秒，实时排空一块最多约 2 s。
+- **真实路径「回退 → 失败 → 还原 → 通过」**（把 downlink ACK 按 20 ms/帧的真实
+  播放节奏发送，即浏览器的行为；此前的探针是瞬时 ACK，全速排空，所以从未触发）：
+
+| 版本 | downlink 收帧 | 时长 | 结果 |
+|---|---:|---:|---|
+| 回退修复 | **170 帧** | 5,584.9 ms | **约 3.4 s 音频后截断** |
+| 还原修复 | **930 帧** | 29,765.5 ms | 完整，`degradation_reason=null` |
+
+- **为何自动化没发现**：既有套件的 SSE 与 socket 都是 fake，且 fake 生产者与消费者
+  逐事件互让，队列永远填不满。本轮尝试写一个"按播放节奏消费"的单元回归测试，
+  在修复前后**都通过**，即它并不区分该缺陷——**留一个不区分的测试比没有测试更糟**，
+  因此已删除，改以上表的真实路径回退验证作为该缺陷的回归证据，
+  脚本为运行根目录的 `s6_02_realtime_playout.py`（Git 之外）。
+- **附带观察（非本缺陷）**：`live_voice.media.playout_receipt` 在截断版本里**依然**
+  返回 `MEDIA_PLAYOUT_RECEIPT_ACCEPTED`，因为它只校验 `rendered_chunks` 与
+  `acknowledged_through_seq` 自洽，并不校验整段话是否送完。截断对回执不可见。
+  记为观察项：playout 回执不能单独用来证明"完整朗读"。
+- **音质**：Adapter 确实做 24 kHz → 48 kHz 线性重采样（`_StreamingLinearResampler`，
+  四个 provider 样本变八个），所以「质量很差」不是采样率标注错位。截断与线性插值
+  上采样都可能贡献主观音质，需用户在修复后重听一次才能判定是否仍存在独立音质问题。
+
 ## 8. 真实 S6-03 媒体链路结果（修复后一次跑通）
 
 经 `https://live-voice.localhost` 同源、Caddy 本地 CA，固定语料

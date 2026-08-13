@@ -85,6 +85,15 @@ MAX_SSE_EVENT_BYTES = 1_048_576
 MAX_STREAM_AUDIO_BYTES = 8 * 1024 * 1024
 MAX_PROVIDER_AUDIO_DELTA_BYTES = 96_000
 MAX_EVENT_QUEUE = 64
+# How long a full event queue may hold the Provider reader before the stream is
+# declared exhausted. Every other link in the pipeline already waits under a
+# bound; this one refused instantly, so a consumer draining at real playout speed
+# killed the stream a few seconds in. One Provider audio delta is bounded by
+# MAX_PROVIDER_AUDIO_DELTA_BYTES, two seconds of 24 kHz pcm_s16le, so the budget
+# must exceed the real-time drain of a single chunk. Holding the reader also
+# closes the transport receive window, which is the backpressure the Provider
+# needs; it never buffers beyond MAX_EVENT_QUEUE.
+EVENT_QUEUE_WAIT_SECONDS = 6.0
 MAX_SAFE_LABEL_CHARS = 256
 DEGRADATION_SINK_BUDGET_SECONDS = 0.05
 DEGRADATION_SINK_CLOSE_BUDGET_SECONDS = 0.1
@@ -768,9 +777,16 @@ class OpenAIStreamingSpeechProvider:
         degradation_sink: DegradationSink | None = None,
         fallback_tier: SpeechRouteTier = SpeechRouteTier.TEXT,
         monotonic: Callable[[], float] = time.monotonic,
+        event_queue_wait_seconds: float = EVENT_QUEUE_WAIT_SECONDS,
     ) -> None:
         if not isinstance(config, OpenAIStreamingSpeechConfig):
             raise TypeError("config must be OpenAIStreamingSpeechConfig")
+        if (
+            type(event_queue_wait_seconds) is not float
+            or not 0.0 < event_queue_wait_seconds <= 60.0
+        ):
+            raise ValueError("event_queue_wait_seconds must be a bounded positive float")
+        self._event_queue_wait_seconds = event_queue_wait_seconds
         self._config = config
         self._socket_factory = socket_factory or _default_socket_factory
         self._sse_factory = sse_factory or _default_sse_factory
@@ -1780,13 +1796,29 @@ class OpenAIStreamingSpeechProvider:
         session.audio_cursor += sample_count
         await self._put_bounded(session.events, accepted)
 
-    @staticmethod
     async def _put_bounded(
-        queue: asyncio.Queue[_QueueValue], value: _QueueValue
+        self, queue: asyncio.Queue[_QueueValue], value: _QueueValue
     ) -> None:
+        """Hold the Provider reader on a full queue instead of killing the stream.
+
+        A consumer that drains at real playout speed legitimately keeps this
+        queue full for as long as one chunk takes to play. Refusing immediately
+        turned that ordinary pacing into ``SPEECH_EVENT_QUEUE_EXHAUSTED`` and cut
+        the audio off mid-utterance. The bound stays hard: a consumer that stops
+        draining still exhausts the stream once the budget elapses, and nothing
+        is buffered beyond ``MAX_EVENT_QUEUE``.
+        """
+
         try:
             queue.put_nowait(value)
-        except asyncio.QueueFull as exc:
+            return
+        except asyncio.QueueFull:
+            pass
+        try:
+            await asyncio.wait_for(
+                queue.put(value), timeout=self._event_queue_wait_seconds
+            )
+        except (TimeoutError, asyncio.QueueFull) as exc:
             raise OpenAIStreamingSpeechError(
                 "SPEECH_EVENT_QUEUE_EXHAUSTED",
                 "streaming Speech event queue is exhausted",
