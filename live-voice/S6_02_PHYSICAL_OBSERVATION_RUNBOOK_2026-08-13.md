@@ -147,40 +147,42 @@ Live Voice 没有独立路由，它的正式路由面板渲染在 `ChatPanel` �
 （消息区下方、输入框上方），是一个可折叠 `<details>`，标题
 **「Integrated Web 路由事实」**（`data-testid="live-voice-integrated-route"`）。
 
-**「Formal P1 voice」块不是一进页面就有的**，它的渲染条件是
+**正式 P1 语音块不是一进页面就有的**，它的渲染条件是
 `p1VoiceEnabled = FEATURE_LIVE_VOICE_INTEGRATED_P1 && isConnected &&
 p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"按钮），
 但它要求 `mode === 'agent'` 且已有 session。所以按下面三步走：
 
-1. **工作区选中项目 `live-voice-alpha-fixture`**
-   （`proj_43562811`，目录 `<RUN_ROOT>\fixture-project`，
+1. **在新任务输入框下方的项目选择器中选中 `live-voice-alpha-fixture`**
+   （目录 `<RUN_ROOT>\fixture-project`，
    `work_mode=code`，未隐藏，会出现在项目列表里）。
    这一步决定 session 绑定哪个项目 —— 服务端 P2 授权要求所绑项目的
-   `work_mode` 恰为 `code`，绑错项目会直接拒绝。
+   `work_mode` 恰为 `code`，绑错项目会显示 `FORMAL_P1_NOT_ACTIVE`。侧栏里
+   看见项目名不等于新任务已经绑定该项目，必须检查输入框下方的选择器。
 2. **聊天模式选择器保持/切到 `agent`**（这是默认值）。
    注意这与上一步的 `work_mode` 是**两个独立概念**：`work_mode` 属于工作区/项目，
    `mode` 属于聊天回合。P2 的自动激活看的是 `mode === 'agent'`。
    若界面上有待回答的追问或 evolution 状态，激活会被挡住，先把它处理掉。
 3. **先发一条普通文字消息**。session 是首次发送时才创建的；session 建立后
    面板会自动激活 P2，`p2.agent_interaction` 变为 `formal`，
-   「Formal P1 voice」块随即出现。
+   顶部 **`Live Voice`** 按钮随即可以打开正式 P1 语音块。
 
-展开后你会用到两块：
+你会用到两块：
 
-1. **「音频输入与输出」**（`音频设备` fieldset）
-   - 按钮 **「授权并加载设备」** ← **麦克风权限弹窗就是这里触发的**
-   - 下拉 **「麦克风」** / **「扬声器」**（含「系统默认（明确选择）」）
-   - 按钮 **「应用设备」**
-   - 事实行：`设备选择状态`、`设备选择原因`（失败时看这里的原文）
-2. **「Formal P1 voice」**
-   - 按钮 **`Start formal voice turn`**（开始一轮正式语音）
+1. **「Integrated Web 路由事实」**：展开后确认
+   `p2.realtime_conversation` 是 `formal`。P1 在尚未启动麦克风时可以显示
+   `FORMAL_P1_NOT_ACTIVE`；打开顶部 `Live Voice` 后应出现
+   **`P1 · Gateway Speech · formal`**，这才是本轮要测的正式语音路线。
+2. **「Live Voice」正式语音块**
+   - 按钮 **`Start speaking`**（开始一轮正式语音并触发麦克风权限）
    - 采集中变为 **`Stop and recognize`**（说完按它提交识别）
    - 播放中变为 **`Stop playback`**
-   - 事实行：`P1 status`、`P1 reason`
+   - 状态/原因直接显示在块内；失败时记录原文
 
 **单次采集上限 30 秒**（`PRODUCT_P1_CAPTURE_MAX_DURATION_MS = 30_000`），
-且与播放重叠期间的采集也计入这 30 秒。说完请及时按 `Stop and recognize`；
-超限的采集会被整段丢弃且不会提交给 Speech 或 Agent，需要刷新重来。
+但它不是自动 EOT 的等待时间，也不是语音播放上限。短回复允许播放与下一轮采集
+重叠；估算超过 20 秒的长回复会在完整播放后才启动下一轮采集。正式 streaming
+playout 独立硬上限为 180 秒。正常 server VAD 路径中，说完后应自动停止并识别；
+`Stop and recognize` 只用于手动提交/降级路径。
 
 ### 2d. 缺陷 11 真实路径区分（Main 执行，人工 O5 前完成）
 
@@ -223,11 +225,12 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 
 1. Chrome 打开 `https://live-voice.localhost`，按 §2c 三步让语音块出现
    （选 `live-voice-alpha-fixture` → `agent` 模式 → 发一条文字消息）。
-2. 展开 **「Integrated Web 路由事实」**，确认 `p2.agent_interaction` 是 `formal`。
-3. 点 **「授权并加载设备」**，在权限弹窗上点**允许**。
-4. 「麦克风」「扬声器」按需选择，点 **「应用设备」**。
-5. 点 **`Start formal voice turn`**，说一句可核对的话
-   （建议：「请回复：语音联调成功。」），说完点 **`Stop and recognize`**。
+2. 展开 **「Integrated Web 路由事实」**，确认
+   `p2.realtime_conversation` 是 `formal`。
+3. 点顶部 **`Live Voice`**，确认块内出现 **`P1 · Gateway Speech · formal`**。
+4. 点 **`Start speaking`**，在权限弹窗上点**允许**。
+5. 说一句可核对的话（建议：「请回复：语音联调成功。」）。正常 server VAD
+   应自动停止并识别；本步不要提前点 `Stop and recognize`。
 
 **要记录**：是否出现权限弹窗；授予后是否开始采集；界面是否显示识别中间结果；
 最终提交的文字是否与你说的一致。
@@ -236,7 +239,7 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 
 1. 新开一个**无痕窗口**（保证权限状态干净），打开同一地址，同样按 §2c 三步
    把语音块调出来，展开同一区块。
-2. 点 **「授权并加载设备」**，在弹窗上点**阻止**。
+2. 点顶部 **`Live Voice`** → **`Start speaking`**，在弹窗上点**阻止**。
 
 **要记录**：界面是否给出**显式**的不可用原因（而不是静默失败）；是否退回到
 文字输入路径；有没有出现任何"看起来在录音"的假象。
@@ -244,7 +247,7 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 ### O3 麦克风权限：撤销
 
 1. 在 O1 已授权的窗口里，地址栏左侧锁形图标 → 网站设置 → 麦克风改为**阻止**。
-2. 回到页面，再点 **「授权并加载设备」** 或 **`Start formal voice turn`**
+2. 回到页面，再点 **`Live Voice`** → **`Start speaking`**
    （必要时按提示刷新）。
 
 **要记录**：撤销后是否立即停止采集；是否给出显式原因；文字路径是否仍可用。
@@ -261,14 +264,19 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 
 ### O5 听感确认（本项是 S6-02 的核心）
 
-1. 用 O1 的窗口，`Start formal voice turn`，说一句会让 Agent 给出**较长**回答的话
+1. 先点 `Start speaking`，只说「你好」，然后完全不点 `Stop and recognize`。
+   停止说话后应由 server VAD 自动结束 listening、识别并提交；若长时间停在
+   listening，本项直接记 FAIL。这个测试必须作为服务重启后的第一轮语音，才能覆盖
+   cold Provider open。
+2. 再点 `Start speaking`，说一句会让 Agent 给出**较长**回答的话
    （建议：「请用至少六句话，依次编号一到六，详细说明语音采集、语音识别、Agent
    推理、语音合成、浏览器播放和失败降级；最后明确说『以上六项已讲完』。」），
-   按 `Stop and recognize`。
-2. 等待答案播放（`P1 status` 会进入 `playing`）。不要提前按 `Stop playback`。
+   正常路径同样等待自动停止和识别，不要点 `Stop and recognize`。
+3. 等待答案播放。不要提前按 `Stop playback`。
 
-**要记录**：**你是否从扬声器/耳机里听到了完整的一段答案**（不是只听到开头就
-断掉）；实际播放是否大于 15 秒；是否听到末尾「以上六项已讲完」；听到的内容是否
+**要记录**：「你好」是否自动结束 listening 并识别；**你是否从扬声器/耳机里听到了
+完整的一段答案**（不是只听到开头就断掉）；实际播放是否大于 30 秒；是否听到末尾
+「以上六项已讲完」；听到的内容是否
 与屏幕上的文字答案一致；播放是否需要你先点一下页面（autoplay / user activation）；
 播放过程中界面状态是否正确；是否仍有撕裂、咔哒或电流感。
 
@@ -294,7 +302,8 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 | O2 拒绝 | REUSED / PASS / FAIL | |
 | O3 撤销 | REUSED / PASS / FAIL | |
 | O4 设备切换/丢失 | REUSED / PASS / FAIL | |
-| O5 听感确认 | PASS / FAIL | |
+| O5a 冷启动短句自动 EOT | PASS / FAIL | “你好”是否自动结束 listening 并识别 |
+| O5b 长回答听感确认 | PASS / FAIL | 是否越过 30 s、完整到末尾、音色/质量 |
 | O6 隐藏/后台/恢复 | PASS / FAIL | |
 | D12 诊断 | MEASURED / UNMEASURED | underrun、interarrival、in-flight/queue peaks、听感 |
 
