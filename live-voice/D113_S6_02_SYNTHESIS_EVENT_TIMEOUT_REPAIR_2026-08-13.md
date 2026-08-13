@@ -103,11 +103,10 @@ whose internal provider-event upper limit is one second.
 
 ## 6. Real-path and physical status
 
-The requested private run root `D:\lvalpha\run-20260812`, its browser profile
-and the specified `D:\XGG AI\openjiuwen\jiuwenswarm-w3` worktree were not
-mounted in this execution environment. The equivalent clean task branch on
-`C:\Users\admin\Desktop\live voice` was fast-forwarded to the same remote
-candidate before implementation. Ports 443, 18092, 19000 and 19001 were down,
+The requested private run root, its browser profile and the specified worktree
+were not mounted in this execution environment. The equivalent clean
+integration worktree was fast-forwarded to the same remote candidate before
+implementation. Ports 443, 18092, 19000 and 19001 were down,
 and `https://live-voice.localhost` was unreachable. Therefore the mandated
 `services.py` startup, real-paced `s6_02_realtime_playout.py` run and real-path
 revert-fail/restore-pass proof did not run. No new sample, p50, p95 or heard

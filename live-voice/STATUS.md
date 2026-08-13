@@ -12,13 +12,19 @@
   GitHub repository. Verify live Git before trusting prose; no push is
   authorized.
 - Current stage/node: `S6 - Alpha Module Closure` / `A1`, `CLOSED`; S7/A2 is
-  `NOT_STARTED` at the user's instruction.
+  `PREPARED / NOT_STARTED`.
 - Current task: none. All six S6 module rows are `SATISFIED`. The user completed
   the remaining breath-pause and O6 return/no-stale observations against
   deployed source `e6ccb3e9` in the prepared B environment. D116 records the
   physical closure; it does not claim that Main heard speaker output or handled
   a browser permission prompt.
-- Next gate: none active. Start `S7-01` only when the user resumes S7.
+- Post-S6 audit: D117 reviewed all 36 commits after `9b8ede22`, including all 21
+  Claude-co-authored commits. No actionable code finding or missing merge was
+  located. The only relevant unmerged branch, `codex/s7-automation`, must be
+  selectively ported during S7-01 rather than merged wholesale.
+- Next gate: activate `S7-01` from the prepared
+  [S7 execution packet](roadmap/S7_EXECUTION_PACKET_2026-08-13.md) when the user
+  explicitly starts S7.
 - Closed: S0 V0, S1 Shared Foundations, S2 D-031 bounded compatibility,
   S3 W2 Integrated Demo (`PRODUCT-ACCEPTED`), S4 develop rebaseline, S5 entry
   audit/ownership activation, and S6/A1 module closure.
@@ -55,6 +61,14 @@ S6 implementation and review record is
 
 No S6 source or environment gap remains open. Every S6 module row is
 `SATISFIED` and S6/A1 is closed. S7-01 has not started.
+
+The post-rebaseline commit/content/merge audit is recorded in
+[D117](D117_POST_9B8_COMMIT_AUDIT_2026-08-13.md). The 36 reviewed commits are
+already linear ancestors of HEAD; all Claude-co-authored commits are also in the
+configured upstream. No history rewrite or duplicate merge is required. The
+S7 automation branch has useful owned scripts/tests but also large format-only
+rewrites and predates the final S6-02 repairs, so the S7 packet requires a
+selective current-HEAD port.
 
 The physical closure is recorded in
 [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md). Its latest source verification
@@ -141,10 +155,12 @@ D1/D2, Production and public deployment remain outside scope.
 
 ## Next actions
 
-1. Hold at the closed S6/A1 boundary. Do not execute S7 while the user's pause
-   remains in effect.
-2. When the user resumes S7, start at S7-01 candidate assembly and identity;
-   S7-02, S7-03 and S7-04 remain unstarted.
+1. Wait for an explicit S7 start instruction; preparation does not activate A2.
+2. Then execute the
+   [S7 packet](roadmap/S7_EXECUTION_PACKET_2026-08-13.md) in order: selective
+   automation port and candidate freeze (S7-01), complete candidate verification
+   (S7-02), cumulative/independent review (S7-03), then A3 handoff freeze
+   (S7-04).
 
 No push is authorized. Machine-private credentials, provider configuration,
 browser profiles, raw audio and private run data must stay out of Git.
