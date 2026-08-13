@@ -269,8 +269,8 @@ const FAILURE_SEGMENTS = Object.freeze([
 export const EVENT_SEMANTIC_MATRIX: Readonly<Record<LiveVoiceEventName, Readonly<EventSemanticRule>>> = Object.freeze({
   'route.selected': eventRule({
     segments: SEGMENT_NAMES,
-    allowed: ['reason_code'],
-    source_kind: 'none',
+    allowed: ['source_record_id', 'reason_code'],
+    source_kind: 'optional',
     reasons: ['ROUTE_FALLBACK', 'DEMO_SUBSTITUTE', 'UNSUPPORTED_CAPABILITY', 'UNKNOWN_PROVENANCE'],
   }),
   'segment.started': eventRule({ segments: LIFECYCLE_SEGMENTS, allowed: SOURCE_FACTS }),
