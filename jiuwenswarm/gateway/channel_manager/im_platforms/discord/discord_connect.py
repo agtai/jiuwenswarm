@@ -11,6 +11,11 @@ from jiuwenswarm.gateway.channel_manager.sdk.capabilities import ChannelCapabili
 from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 from jiuwenswarm.gateway.routing.keys import DeliveryTarget
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
+from jiuwenswarm.gateway.channel_manager.im_platforms.discord.discord_group_mode import (
+    GROUP_MODE_MENTION,
+    should_handle,
+    strip_bot_mention,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,7 @@ class DiscordChannelConfig:
     guild_id: str = ""
     channel_id: str = ""
     block_dm: bool = False
+    group_chat_mode: str = GROUP_MODE_MENTION
     allow_from: list[str] = field(default_factory=list)
 
 
@@ -180,6 +186,23 @@ class DiscordChannel(BaseChannel):
             return
 
         text = str(getattr(message, "content", "") or "").strip()
+        if not text:
+            return
+
+        bot_user_id = str(getattr(getattr(self._client, "user", None), "id", "") or "")
+        reference = getattr(message, "reference", None)
+        resolved = getattr(reference, "resolved", None) if reference is not None else None
+        ref_author_id = str(getattr(getattr(resolved, "author", None), "id", "") or "")
+        is_reply_to_bot = bool(bot_user_id and ref_author_id == bot_user_id)
+        if not should_handle(
+            text,
+            mode=self.config.group_chat_mode,
+            bot_user_id=bot_user_id,
+            is_direct_message=not guild_id,
+            is_reply_to_bot=is_reply_to_bot,
+        ):
+            return
+        text = strip_bot_mention(text, bot_user_id)
         if not text:
             return
 
