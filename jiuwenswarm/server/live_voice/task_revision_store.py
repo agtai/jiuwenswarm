@@ -45,6 +45,7 @@ from .task_revision import (
     TaskRevisionAuthority,
     TaskRevisionCommand,
     TaskRevisionConstraints,
+    TaskRevisionExecutionAck,
     TaskRevisionGrant,
     TaskRevisionOperation,
     TaskRevisionPlan,
@@ -56,7 +57,7 @@ from .task_revision import (
 from .task_store import SqliteTaskStore, _json_dump, _json_load, _scope_key
 
 
-_EXTENSION_SCHEMA_VERSION = 1
+_EXTENSION_SCHEMA_VERSION = 2
 _EXTENSION_COLUMNS = {
     "s85_revision_metadata": ("key", "value"),
     "s85_task_revisions": (
@@ -127,6 +128,15 @@ _EXTENSION_COLUMNS = {
         "created_at",
         "updated_at",
     ),
+    "s85_revision_execution_acks": (
+        "scope_key",
+        "task_id",
+        "task_revision",
+        "attempt_id",
+        "executor_ref",
+        "ack_json",
+        "created_at",
+    ),
 }
 _EXTENSION_PRIMARY_KEYS = {
     "s85_revision_metadata": ("key",),
@@ -135,6 +145,7 @@ _EXTENSION_PRIMARY_KEYS = {
     "s85_revision_outbox": ("outbox_id",),
     "s85_revision_fence_acks": ("scope_key", "command_id"),
     "s85_revision_dispatch_outbox": ("outbox_id",),
+    "s85_revision_execution_acks": ("task_id", "task_revision"),
 }
 _EXTENSION_NAMED_INDEXES = {
     "idx_s85_one_fence_per_task": (
@@ -296,6 +307,7 @@ class TaskRevisionTruth:
     revisions: tuple[TaskRevisionRecord, ...]
     pending_receipt: TaskRevisionReceipt | None
     cleanup_ack: RevisionFenceAck | None
+    execution_ack: TaskRevisionExecutionAck | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -322,6 +334,9 @@ class TaskRevisionTruth:
                     ),
                     "acknowledged_at": self.cleanup_ack.acknowledged_at,
                 }
+            ),
+            "execution": (
+                None if self.execution_ack is None else self.execution_ack.to_dict()
             ),
         }
 
@@ -360,6 +375,18 @@ class SqliteTaskRevisionStore:
                     """
                     INSERT INTO s85_revision_metadata(key, value)
                     VALUES('schema_version', ?)
+                    """,
+                    (str(_EXTENSION_SCHEMA_VERSION),),
+                )
+            elif version["value"] == "1":
+                # The isolated incubator briefly carried the pre-verifier
+                # schema.  Upgrade only that exact known version in the same
+                # transaction; every unknown/partial shape still fails closed
+                # in the complete schema verification below.
+                connection.execute(
+                    """
+                    UPDATE s85_revision_metadata SET value=?
+                    WHERE key='schema_version' AND value='1'
                     """,
                     (str(_EXTENSION_SCHEMA_VERSION),),
                 )
@@ -474,6 +501,19 @@ class SqliteTaskRevisionStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_s85_dispatch_pending
                 ON s85_revision_dispatch_outbox(state, created_at, outbox_id)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS s85_revision_execution_acks (
+                    scope_key TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    task_revision INTEGER NOT NULL CHECK(task_revision >= 1),
+                    attempt_id TEXT NOT NULL UNIQUE,
+                    executor_ref TEXT NOT NULL,
+                    ack_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(task_id, task_revision))
                 """
             )
             self._verify_schema(connection)
@@ -703,6 +743,17 @@ class SqliteTaskRevisionStore:
             raise FormalTaskViolation(
                 "TASK_REVISION_STORE_CORRUPT",
                 "stored revision cleanup ACK is invalid",
+                ErrorCode.INTERNAL,
+            ) from error
+
+    @staticmethod
+    def _execution_ack_from_json(value: str) -> TaskRevisionExecutionAck:
+        try:
+            return TaskRevisionExecutionAck.from_dict(_json_load(value))
+        except (TaskRevisionViolation, TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "TASK_REVISION_STORE_CORRUPT",
+                "stored revision execution ACK is invalid",
                 ErrorCode.INTERNAL,
             ) from error
 
@@ -1902,6 +1953,129 @@ class SqliteTaskRevisionStore:
                 (OutboxState.DELIVERED.value, utc_now(), item.outbox_id),
             )
 
+    def record_execution_ack(
+        self,
+        scope: ScopeRef,
+        ack: TaskRevisionExecutionAck,
+        *,
+        observed_at: str | None = None,
+    ) -> TaskRevisionExecutionAck:
+        """Persist one exact successor result without rewriting Task outcome."""
+
+        if type(ack) is not TaskRevisionExecutionAck:
+            raise TypeError("ack must be an exact TaskRevisionExecutionAck")
+        now = observed_at or utc_now()
+        scope_key = _scope_key(scope)
+        payload = _json_dump(ack.to_dict())
+        with self.task_store._transaction() as connection:
+            self._verify_schema(connection)
+            task = self.task_store._require_task_row(connection, ack.task_id, scope)
+            self.task_store._verify_durable_lineage(connection, task)
+            revision_row = connection.execute(
+                """
+                SELECT * FROM s85_task_revisions
+                WHERE task_id=? AND task_revision=? AND scope_key=?
+                """,
+                (ack.task_id, ack.task_revision, scope_key),
+            ).fetchone()
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?",
+                (ack.attempt_id,),
+            ).fetchone()
+            cleanup_row = connection.execute(
+                """
+                SELECT ack_json FROM s85_revision_fence_acks
+                WHERE scope_key=? AND command_id=(
+                    SELECT command_id FROM s85_task_revisions
+                    WHERE task_id=? AND task_revision=?)
+                """,
+                (scope_key, ack.task_id, ack.task_revision),
+            ).fetchone()
+            if (
+                revision_row is None
+                or revision_row["attempt_id"] != ack.attempt_id
+                or task["attempt_id"] != ack.attempt_id
+                or attempt is None
+                or attempt["task_id"] != ack.task_id
+                or attempt["executor_ref"] != ack.executor_ref
+                or attempt["state"] != FormalAttemptState.TERMINAL.value
+                or cleanup_row is None
+                or self._ack_from_json(cleanup_row["ack_json"]).checkout_identity
+                != ack.fixture_identity
+                or ack.execution_ack
+                != (attempt["outcome"] == TerminalOutcome.COMPLETED.value)
+                or ack.verified_success
+                and (
+                    task["state"] != FormalTaskState.TERMINAL.value
+                    or task["outcome"] != TerminalOutcome.COMPLETED.value
+                )
+            ):
+                raise FormalTaskViolation(
+                    "TASK_REVISION_EXECUTION_ACK_MISMATCH",
+                    "execution ACK does not bind current terminal revision truth",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            existing = connection.execute(
+                """
+                SELECT ack_json FROM s85_revision_execution_acks
+                WHERE task_id=? AND task_revision=?
+                """,
+                (ack.task_id, ack.task_revision),
+            ).fetchone()
+            if existing is not None:
+                prior = self._execution_ack_from_json(existing["ack_json"])
+                if prior != ack:
+                    raise FormalTaskViolation(
+                        "TASK_REVISION_EXECUTION_ACK_CONFLICT",
+                        "one revision cannot change its execution result",
+                        ErrorCode.CONFLICT,
+                    )
+                return prior
+            connection.execute(
+                """
+                INSERT INTO s85_revision_execution_acks(
+                    scope_key, task_id, task_revision, attempt_id, executor_ref,
+                    ack_json, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scope_key,
+                    ack.task_id,
+                    ack.task_revision,
+                    ack.attempt_id,
+                    ack.executor_ref,
+                    payload,
+                    now,
+                ),
+            )
+            self._hit("revision.execution.after_ack")
+            self.task_store._append_event(
+                connection,
+                task,
+                event_type="task.revision_execution_recorded",
+                state=task["state"],
+                outcome=task["outcome"],
+                producer="task_core.revision_verifier",
+                source_event_id=None,
+                causation_id=ack.attempt_id,
+                occurred_at=now,
+                details={
+                    "task_revision": ack.task_revision,
+                    "attempt_id": ack.attempt_id,
+                    "execution_ack": ack.execution_ack,
+                    "changed_path_count": len(ack.changed_paths),
+                    "diff_summary": ack.diff_summary,
+                    "verifier_id": ack.verifier.verifier_id,
+                    "verifier_result": ack.verifier.result.value,
+                    "cleanup_state": ack.cleanup_state,
+                    "forbidden_side_effect_count": (
+                        ack.forbidden_side_effect_count
+                    ),
+                    "verified_success": ack.verified_success,
+                },
+            )
+            return ack
+
     @staticmethod
     def _require_claimed_command(
         connection: sqlite3.Connection, item: ClaimedRevisionFence
@@ -2008,6 +2182,13 @@ class SqliteTaskRevisionStore:
                 """,
                 (_scope_key(scope), task_id),
             ).fetchone()
+            execution_row = connection.execute(
+                """
+                SELECT ack_json FROM s85_revision_execution_acks
+                WHERE scope_key=? AND task_id=? AND task_revision=?
+                """,
+                (_scope_key(scope), task_id, revisions[-1].task_revision),
+            ).fetchone()
             return TaskRevisionTruth(
                 task=self.task_store._task_from_row(task_row),
                 attempt=self.task_store._attempt_from_row(attempt_row),
@@ -2018,6 +2199,11 @@ class SqliteTaskRevisionStore:
                     None
                     if ack_row is None
                     else self._ack_from_json(ack_row["ack_json"])
+                ),
+                execution_ack=(
+                    None
+                    if execution_row is None
+                    else self._execution_ack_from_json(execution_row["ack_json"])
                 ),
             )
 

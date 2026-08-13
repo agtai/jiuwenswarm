@@ -57,6 +57,7 @@ from .formal_task_models import (
     PersistentTaskRecord,
     utc_now,
 )
+from .task_revision import RevisionFenceAck, RevisionFenceRequest
 
 FORMAL_PROJECT_EXECUTOR_ID = "jiuwenswarm_code_agent.project_code"
 DIRECT_PROJECT_EXECUTOR_REF_PREFIX = "d0-project:"
@@ -1702,6 +1703,265 @@ class DirectProjectCodeExecutorAdapter:
             return _verdict(ready=False, reason="ATTEMPT_LEASE_RETAINED")
         return _verdict(ready=True, reason="PREDECESSOR_QUIESCENT")
 
+    async def fence_revision(
+        self,
+        request: RevisionFenceRequest,
+        *,
+        executor_id: str,
+        executor_ref: str,
+        expected_project_root: str | os.PathLike[str],
+        expected_before_head: str,
+        expected_before_tree: str,
+        expected_before_content: str,
+        checkout_identity: str,
+    ) -> RevisionFenceAck:
+        """Stop one exact predecessor and prove all mutation authority is gone.
+
+        This is deliberately stricter than ``task.cancel``.  A revision ACK is
+        emitted only while the selected disposable fixture still equals the
+        trusted original baseline and the predecessor owns no worker, Agent
+        context, worktree, apply operation, process lease, or OS ownership lock.
+        An attempt that entered the patch-application window is result-unknown:
+        cancellation cannot turn an uncertain project mutation into a clean
+        successor authorization.
+        """
+
+        if type(request) is not RevisionFenceRequest:
+            raise TypeError("request must be an exact RevisionFenceRequest")
+        if executor_id != self.executor_id:
+            raise FormalTaskViolation(
+                "TASK_REVISION_EXECUTOR_MISMATCH",
+                "revision fence must bind the direct project Executor",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        expected_ref = f"{_DIRECT_EXECUTOR_REF_PREFIX}{request.predecessor_attempt_id}"
+        if executor_ref != expected_ref:
+            raise FormalTaskViolation(
+                "TASK_REVISION_EXECUTOR_REFERENCE_MISMATCH",
+                "revision fence must bind the exact predecessor Executor reference",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        for field_name, value in (
+            ("expected_before_head", expected_before_head),
+            ("expected_before_tree", expected_before_tree),
+            ("expected_before_content", expected_before_content),
+            ("checkout_identity", checkout_identity),
+        ):
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"{field_name} must be non-empty")
+        try:
+            expected_root = Path(expected_project_root).resolve(strict=True)
+        except (OSError, TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "TASK_REVISION_FIXTURE_MISMATCH",
+                "revision fixture root is unavailable",
+                ErrorCode.PERMISSION_DENIED,
+            ) from error
+
+        async with self._lifecycle_lock:
+            if self._closed:
+                raise FormalTaskViolation(
+                    "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                    "direct project Executor is closed",
+                    ErrorCode.UNAVAILABLE,
+                )
+            record = await asyncio.to_thread(
+                self._journal.get, request.predecessor_attempt_id
+            )
+            if record is None:
+                raise FormalTaskViolation(
+                    "ATTEMPT_NOT_FOUND",
+                    "revision predecessor is unavailable",
+                    ErrorCode.NOT_FOUND,
+                )
+            if (
+                record.task_id != request.task_id
+                or record.executor_ref != executor_ref
+                or _path_key(record.project_root, strict=False)
+                != _path_key(expected_root, strict=False)
+            ):
+                raise FormalTaskViolation(
+                    "TASK_REVISION_PREDECESSOR_MISMATCH",
+                    "revision fence does not bind the exact predecessor fixture",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            if (
+                record.before_head != expected_before_head
+                or record.before_tree != expected_before_tree
+                or record.before_content != expected_before_content
+            ):
+                raise FormalTaskViolation(
+                    "TASK_REVISION_FIXTURE_BASELINE_MISMATCH",
+                    "predecessor did not start from the trusted fixture baseline",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if (
+                request.predecessor_attempt_id in self._applying
+                or record.raw_status == "applying"
+                or record.outcome
+                in {
+                    TerminalOutcome.COMPLETED,
+                    TerminalOutcome.UNKNOWN,
+                }
+            ):
+                raise FormalTaskViolation(
+                    "TASK_REVISION_PREDECESSOR_RESULT_UNKNOWN",
+                    "predecessor may already have changed the fixture root",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+
+            attempt_id = request.predecessor_attempt_id
+            worker = self._running.get(attempt_id)
+            if worker is not None and not worker.done():
+                self._interruptions.setdefault(
+                    attempt_id,
+                    ("revision_interrupted", "TASK_REVISION_PREDECESSOR_FENCED"),
+                )
+                if worker.cancelling() == 0:
+                    worker.cancel()
+                done, pending = await asyncio.wait(
+                    {worker}, timeout=self._cancel_timeout
+                )
+                if pending:
+                    raise FormalTaskViolation(
+                        "TASK_REVISION_FENCE_PENDING",
+                        "predecessor worker or Agent cleanup has not settled",
+                        ErrorCode.UNAVAILABLE,
+                    )
+                for settled in done:
+                    with contextlib.suppress(asyncio.CancelledError, Exception):
+                        settled.result()
+            elif worker is not None:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    worker.result()
+
+            # A foreign predecessor can be recovered only through its expired
+            # durable lease plus the exact cross-process ownership lock.
+            record = await asyncio.to_thread(self._journal.get, attempt_id)
+            assert record is not None
+            if record.state is not FormalAttemptState.TERMINAL:
+                recovered = await asyncio.to_thread(
+                    self._journal.recover_expired, now=self._clock()
+                )
+                record = await asyncio.to_thread(self._journal.get, attempt_id)
+                assert record is not None
+                if recovered == 0 or record.state is not FormalAttemptState.TERMINAL:
+                    raise FormalTaskViolation(
+                        "TASK_REVISION_FENCE_PENDING",
+                        "predecessor process lease is still active",
+                        ErrorCode.UNAVAILABLE,
+                    )
+
+            # Startup cleanup owns the crash/restart path.  It never deletes a
+            # checkout while another process retains the stable ownership lock.
+            parent, worktree = _attempt_worktree_paths(expected_root, attempt_id)
+            if (
+                worktree.exists()
+                or parent.exists()
+                or await asyncio.to_thread(
+                    _worktree_registered, expected_root, worktree
+                )
+                or attempt_id in self._retained_worktree_cleanups
+            ):
+                await self.prepare_startup()
+
+            worker = self._running.get(attempt_id)
+            if worker is not None and worker.done():
+                self._running.pop(attempt_id, None)
+            self._interruptions.pop(attempt_id, None)
+            record = await asyncio.to_thread(self._journal.get, attempt_id)
+            assert record is not None
+            if (
+                (worker is not None and not worker.done())
+                or attempt_id in self._applying
+                or attempt_id in self._interruptions
+                or attempt_id in self._retained_worktree_cleanups
+                or record.state is not FormalAttemptState.TERMINAL
+                or record.raw_status.endswith("cleanup_pending")
+                or record.owner_id is not None
+                or record.lease_expires_at is not None
+                or worktree.exists()
+                or parent.exists()
+                or await asyncio.to_thread(
+                    _worktree_registered, expected_root, worktree
+                )
+            ):
+                raise FormalTaskViolation(
+                    "TASK_REVISION_FENCE_PENDING",
+                    "predecessor mutation ownership has not been fully released",
+                    ErrorCode.UNAVAILABLE,
+                )
+            if record.outcome in {
+                TerminalOutcome.COMPLETED,
+                TerminalOutcome.UNKNOWN,
+            }:
+                raise FormalTaskViolation(
+                    "TASK_REVISION_PREDECESSOR_RESULT_UNKNOWN",
+                    "predecessor terminal result cannot prove an unapplied baseline",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+
+            ownership = await asyncio.to_thread(
+                _AttemptOwnershipLock.try_acquire, expected_root, attempt_id
+            )
+            if ownership is None:
+                raise FormalTaskViolation(
+                    "TASK_REVISION_FENCE_PENDING",
+                    "predecessor OS ownership lock remains held",
+                    ErrorCode.UNAVAILABLE,
+                )
+            try:
+                before_support = json.loads(record.protected_support_json)
+                exact_baseline = (
+                    await asyncio.to_thread(_git_head, expected_root)
+                    == expected_before_head
+                    and await asyncio.to_thread(
+                        _project_tree_fingerprint, expected_root
+                    )
+                    == expected_before_tree
+                    and await asyncio.to_thread(
+                        _project_content_fingerprint, expected_root
+                    )
+                    == expected_before_content
+                    and await asyncio.to_thread(
+                        _target_support_fingerprints, expected_root
+                    )
+                    == before_support
+                )
+            finally:
+                ownership.release()
+            if not exact_baseline:
+                raise FormalTaskViolation(
+                    "TASK_REVISION_PREDECESSOR_RESULT_UNKNOWN",
+                    "fixture root no longer equals the trusted original baseline",
+                    ErrorCode.RESULT_UNKNOWN,
+                )
+
+            cleanup_payload = "\0".join(
+                (
+                    request.command_id,
+                    request.task_id,
+                    str(request.predecessor_revision),
+                    attempt_id,
+                    executor_ref,
+                    checkout_identity,
+                )
+            ).encode("utf-8")
+            return RevisionFenceAck(
+                command_id=request.command_id,
+                task_id=request.task_id,
+                predecessor_revision=request.predecessor_revision,
+                predecessor_attempt_id=attempt_id,
+                executor_id=self.executor_id,
+                executor_ref=executor_ref,
+                cleanup_id=(
+                    "revision-cleanup-" + hashlib.sha256(cleanup_payload).hexdigest()
+                ),
+                checkout_identity=checkout_identity,
+                unapplied_changes_discarded=True,
+                acknowledged_at=self._clock(),
+            )
+
     async def prepare_startup(self) -> int:
         """Resolve only expired process leases; active foreign work stays pending."""
 
@@ -2491,6 +2751,46 @@ class DirectProjectCodeExecutorAdapter:
         """Expose bounded cleanup truth without leaking temporary paths."""
 
         return tuple(sorted(self._retained_worktree_cleanups))
+
+    def revision_cleanup_resolved(
+        self, task_id: str, attempt_id: str, executor_ref: str
+    ) -> bool:
+        """Prove one terminal successor released every Executor-owned resource."""
+
+        record = self._journal.get(attempt_id)
+        if (
+            self._closed
+            or record is None
+            or record.task_id != task_id
+            or record.executor_ref != executor_ref
+            or record.state is not FormalAttemptState.TERMINAL
+            or record.raw_status.endswith("cleanup_pending")
+            or record.owner_id is not None
+            or record.lease_expires_at is not None
+            or attempt_id in self._applying
+            or attempt_id in self._interruptions
+            or attempt_id in self._retained_worktree_cleanups
+        ):
+            return False
+        worker = self._running.get(attempt_id)
+        if worker is not None and not worker.done():
+            return False
+        root = Path(record.project_root)
+        parent, worktree = _attempt_worktree_paths(root, attempt_id)
+        try:
+            if (
+                parent.exists()
+                or worktree.exists()
+                or _worktree_registered(root, worktree)
+            ):
+                return False
+            ownership = _AttemptOwnershipLock.try_acquire(root, attempt_id)
+        except (OSError, RuntimeError, ValueError):
+            return False
+        if ownership is None:
+            return False
+        ownership.release()
+        return True
 
     @staticmethod
     def _consume_attempt_cleanup_result(task: asyncio.Task[None]) -> None:

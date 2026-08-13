@@ -36,8 +36,11 @@ from jiuwenswarm.server.live_voice.task_revision import (
     RevisionFenceAck,
     TaskRevisionCommand,
     TaskRevisionConstraints,
+    TaskRevisionExecutionAck,
     TaskRevisionGrant,
     TaskRevisionOperation,
+    TaskRevisionVerifierResult,
+    TaskRevisionVerifierState,
 )
 from jiuwenswarm.server.live_voice.task_revision_store import (
     RevisionOutboxState,
@@ -246,6 +249,7 @@ def _revision_rows(
             "s85_revision_outbox",
             "s85_revision_fence_acks",
             "s85_revision_dispatch_outbox",
+            "s85_revision_execution_acks",
         )
         return tuple(
             (
@@ -313,6 +317,29 @@ def test_extension_rejects_weakened_unresolved_ownership_index(
         SqliteTaskRevisionStore(SqliteTaskStore(database))
 
     assert rejected.value.reason == "TASK_REVISION_SCHEMA_UNSUPPORTED"
+
+
+def test_exact_incubator_v1_schema_migrates_to_execution_ack_v2(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "tasks.sqlite3")
+    SqliteTaskRevisionStore(store)
+    with sqlite3.connect(store.database_path) as connection:
+        connection.execute("DROP TABLE s85_revision_execution_acks")
+        connection.execute(
+            "UPDATE s85_revision_metadata SET value='1' WHERE key='schema_version'"
+        )
+
+    reopened = SqliteTaskRevisionStore(SqliteTaskStore(store.database_path))
+
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute(
+            "SELECT value FROM s85_revision_metadata WHERE key='schema_version'"
+        ).fetchone() == ("2",)
+        assert connection.execute(
+            "SELECT COUNT(*) FROM s85_revision_execution_acks"
+        ).fetchone() == (0,)
+    assert reopened.database_path == store.database_path
 
 
 def test_request_is_atomic_and_does_not_start_successor_before_cleanup_ack(
@@ -982,3 +1009,148 @@ def test_concurrent_distinct_revisions_admit_one_fence(tmp_path: Path) -> None:
         assert connection.execute(
             "SELECT COUNT(*) FROM s85_revision_outbox"
         ).fetchone() == (1,)
+
+
+def _execution_ack(
+    task_id: str,
+    attempt_id: str,
+    executor_ref: str,
+    **changes: object,
+) -> TaskRevisionExecutionAck:
+    values: dict[str, object] = {
+        "task_id": task_id,
+        "task_revision": 2,
+        "attempt_id": attempt_id,
+        "executor_ref": executor_ref,
+        "fixture_identity": "fixture-clean-base-1",
+        "execution_ack": True,
+        "changed_paths": ("src/result.py",),
+        "diff_summary": "1 changed path(s)",
+        "verifier": TaskRevisionVerifierResult(
+            "python-check",
+            TaskRevisionVerifierState.PASSED,
+            0,
+            False,
+            "0" * 64,
+            "1 passed",
+        ),
+        "cleanup_state": "successor_cleanup_resolved",
+        "forbidden_side_effect_count": 0,
+        "verified_success": True,
+    }
+    values.update(changes)
+    return TaskRevisionExecutionAck(**values)  # type: ignore[arg-type]
+
+
+def test_execution_ack_is_immutable_store_truth_and_never_inferred(
+    tmp_path: Path,
+) -> None:
+    store, task_id, attempt_id, executor_ref = _running_task(tmp_path)
+    revisions = SqliteTaskRevisionStore(store)
+    command = _command(task_id, attempt_id)
+    revisions.request_revision(
+        command,
+        _grant(command),
+        initial_constraints=TaskRevisionConstraints(("src", "tests")),
+        observed_at=NOW,
+    )
+    fence = revisions.claim_fence("fence-worker")
+    assert fence is not None
+    applied = revisions.complete_fence(fence, _ack(command, executor_ref))
+    dispatch = revisions.claim_successor_dispatch("dispatch-worker")
+    assert dispatch is not None
+    successor_ref = f"executor:{dispatch.item.attempt_id}"
+    revisions.complete_successor_dispatch(
+        dispatch,
+        ExecutorDeliveryResult(
+            successor_ref,
+            _observations(
+                dispatch.item,
+                executor_ref=successor_ref,
+                terminal=TerminalOutcome.COMPLETED,
+            ),
+        ),
+    )
+    assert applied.successor_attempt_id is not None
+    ack = _execution_ack(task_id, applied.successor_attempt_id, successor_ref)
+
+    assert revisions.record_execution_ack(_scope(), ack) == ack
+    assert revisions.record_execution_ack(_scope(), ack) == ack
+    truth = revisions.truth(task_id, _scope())
+    assert truth.execution_ack == ack
+    assert truth.to_dict()["execution"] == ack.to_dict()
+    snapshot = store.event_authority_snapshot(task_id, _scope(), max_events=32)
+    recorded = snapshot.events[-1]
+    assert recorded.event_type == "task.revision_execution_recorded"
+    assert recorded.details["verified_success"] is True
+    assert recorded.details["verifier_result"] == "passed"
+
+    conflicting = _execution_ack(
+        task_id,
+        applied.successor_attempt_id,
+        successor_ref,
+        diff_summary="forged changed summary",
+    )
+    with pytest.raises(FormalTaskViolation) as conflict:
+        revisions.record_execution_ack(_scope(), conflicting)
+    assert conflict.value.reason == "TASK_REVISION_EXECUTION_ACK_CONFLICT"
+    assert revisions.truth(task_id, _scope()).execution_ack == ack
+
+
+def test_execution_ack_failure_rolls_back_without_verified_success(
+    tmp_path: Path,
+) -> None:
+    store, task_id, attempt_id, executor_ref = _running_task(tmp_path)
+    command = _command(task_id, attempt_id)
+    setup = SqliteTaskRevisionStore(store)
+    setup.request_revision(
+        command,
+        _grant(command),
+        initial_constraints=TaskRevisionConstraints(("src",)),
+        observed_at=NOW,
+    )
+    fence = setup.claim_fence("fence-worker")
+    assert fence is not None
+    applied = setup.complete_fence(fence, _ack(command, executor_ref))
+    dispatch = setup.claim_successor_dispatch("dispatch-worker")
+    assert dispatch is not None
+    successor_ref = f"executor:{dispatch.item.attempt_id}"
+    setup.complete_successor_dispatch(
+        dispatch,
+        ExecutorDeliveryResult(
+            successor_ref,
+            _observations(
+                dispatch.item,
+                executor_ref=successor_ref,
+                terminal=TerminalOutcome.COMPLETED,
+            ),
+        ),
+    )
+
+    def failpoint(name: str) -> None:
+        if name == "revision.execution.after_ack":
+            raise RuntimeError(name)
+
+    revisions = SqliteTaskRevisionStore(store, failpoint=failpoint)
+    assert applied.successor_attempt_id is not None
+    failed = _execution_ack(
+        task_id,
+        applied.successor_attempt_id,
+        successor_ref,
+        verifier=TaskRevisionVerifierResult(
+            "python-check",
+            TaskRevisionVerifierState.FAILED,
+            1,
+            False,
+            "1" * 64,
+            "failed",
+        ),
+        verified_success=False,
+    )
+    with pytest.raises(RuntimeError, match="revision.execution.after_ack"):
+        revisions.record_execution_ack(_scope(), failed)
+    assert setup.truth(task_id, _scope()).execution_ack is None
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM s85_revision_execution_acks"
+        ).fetchone() == (0,)

@@ -11,6 +11,7 @@ An accepted plan is not proof that the predecessor stopped or a successor ran.
 from __future__ import annotations
 
 import posixpath
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -1023,6 +1024,238 @@ class RevisionFenceAck:
         _timestamp(self.acknowledged_at, "fence_ack.acknowledged_at")
 
 
+class TaskRevisionVerifierState(StrEnum):
+    NOT_RUN = "not_run"
+    PASSED = "passed"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    MUTATED_FIXTURE = "mutated_fixture"
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRevisionVerifierResult:
+    verifier_id: str
+    result: TaskRevisionVerifierState
+    exit_code: int | None
+    timed_out: bool
+    output_digest: str
+    output_summary: str
+
+    def __post_init__(self) -> None:
+        _text(self.verifier_id, "verifier.verifier_id")
+        if type(self.result) is not TaskRevisionVerifierState:
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier result must be an exact bounded state",
+            )
+        if self.exit_code is not None and (
+            type(self.exit_code) is not int or not -(2**31) <= self.exit_code < 2**31
+        ):
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier exit code is invalid",
+            )
+        if type(self.timed_out) is not bool or self.timed_out != (
+            self.result is TaskRevisionVerifierState.TIMEOUT
+        ):
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier timeout truth is inconsistent",
+            )
+        if (
+            self.result is TaskRevisionVerifierState.PASSED
+            and self.exit_code != 0
+            or self.result is TaskRevisionVerifierState.NOT_RUN
+            and self.exit_code is not None
+        ):
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier result and exit code are inconsistent",
+            )
+        if (
+            type(self.output_digest) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", self.output_digest)
+        ):
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier output digest must be SHA-256",
+            )
+        if type(self.output_summary) is not str or len(self.output_summary) > 2_000:
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier output summary exceeds its bounded shape",
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "verifier_id": self.verifier_id,
+            "result": self.result.value,
+            "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
+            "output_digest": self.output_digest,
+            "output_summary": self.output_summary,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> TaskRevisionVerifierResult:
+        if type(payload) is not dict or set(payload) != {
+            "verifier_id",
+            "result",
+            "exit_code",
+            "timed_out",
+            "output_digest",
+            "output_summary",
+        }:
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier result fields are incomplete or unknown",
+            )
+        try:
+            state = TaskRevisionVerifierState(payload["result"])
+        except (TypeError, ValueError) as error:
+            raise _violation(
+                "INVALID_TASK_REVISION_VERIFIER_RESULT",
+                "verifier state is unsupported",
+            ) from error
+        return cls(
+            verifier_id=payload["verifier_id"],  # type: ignore[arg-type]
+            result=state,
+            exit_code=payload["exit_code"],  # type: ignore[arg-type]
+            timed_out=payload["timed_out"],  # type: ignore[arg-type]
+            output_digest=payload["output_digest"],  # type: ignore[arg-type]
+            output_summary=payload["output_summary"],  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskRevisionExecutionAck:
+    task_id: str
+    task_revision: int
+    attempt_id: str
+    executor_ref: str
+    fixture_identity: str
+    execution_ack: bool
+    changed_paths: tuple[str, ...]
+    diff_summary: str
+    verifier: TaskRevisionVerifierResult
+    cleanup_state: str
+    forbidden_side_effect_count: int
+    verified_success: bool
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("task_id", self.task_id),
+            ("attempt_id", self.attempt_id),
+            ("executor_ref", self.executor_ref),
+            ("fixture_identity", self.fixture_identity),
+        ):
+            _text(value, f"execution_ack.{field_name}")
+        revision = _positive_int(self.task_revision, "execution_ack.task_revision")
+        if revision > MAX_TASK_REVISIONS:
+            raise _violation(
+                "INVALID_TASK_REVISION_EXECUTION_ACK",
+                "execution ACK revision exceeds the bounded profile",
+            )
+        if (
+            type(self.execution_ack) is not bool
+            or type(self.changed_paths) is not tuple
+            or type(self.verifier) is not TaskRevisionVerifierResult
+            or type(self.forbidden_side_effect_count) is not int
+            or self.forbidden_side_effect_count < 0
+            or type(self.verified_success) is not bool
+        ):
+            raise _violation(
+                "INVALID_TASK_REVISION_EXECUTION_ACK",
+                "execution ACK contains invalid typed facts",
+            )
+        paths = tuple(
+            _relative_path(path, f"execution_ack.changed_paths[{index}]")
+            for index, path in enumerate(self.changed_paths)
+        )
+        if paths != tuple(sorted(set(paths))):
+            raise _violation(
+                "INVALID_TASK_REVISION_EXECUTION_ACK",
+                "changed paths must be sorted and unique",
+            )
+        _text(self.diff_summary, "execution_ack.diff_summary", maximum=1_000)
+        if self.cleanup_state != "successor_cleanup_resolved":
+            raise _violation(
+                "INVALID_TASK_REVISION_EXECUTION_ACK",
+                "successor cleanup state is unsupported",
+            )
+        expected_success = (
+            self.execution_ack
+            and bool(paths)
+            and self.verifier.result is TaskRevisionVerifierState.PASSED
+            and self.forbidden_side_effect_count == 0
+        )
+        if self.verified_success != expected_success:
+            raise _violation(
+                "INVALID_TASK_REVISION_EXECUTION_ACK",
+                "verified success disagrees with its authoritative evidence",
+            )
+        object.__setattr__(self, "changed_paths", paths)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "task_revision": self.task_revision,
+            "attempt_id": self.attempt_id,
+            "executor_ref": self.executor_ref,
+            "fixture_identity": self.fixture_identity,
+            "execution_ack": self.execution_ack,
+            "changed_paths": list(self.changed_paths),
+            "diff_summary": self.diff_summary,
+            "verifier": self.verifier.to_dict(),
+            "cleanup_state": self.cleanup_state,
+            "forbidden_side_effect_count": self.forbidden_side_effect_count,
+            "verified_success": self.verified_success,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> TaskRevisionExecutionAck:
+        if type(payload) is not dict or set(payload) != {
+            "task_id",
+            "task_revision",
+            "attempt_id",
+            "executor_ref",
+            "fixture_identity",
+            "execution_ack",
+            "changed_paths",
+            "diff_summary",
+            "verifier",
+            "cleanup_state",
+            "forbidden_side_effect_count",
+            "verified_success",
+        }:
+            raise _violation(
+                "INVALID_TASK_REVISION_EXECUTION_ACK",
+                "execution ACK fields are incomplete or unknown",
+            )
+        paths = payload["changed_paths"]
+        if type(paths) is not list:
+            raise _violation(
+                "INVALID_TASK_REVISION_EXECUTION_ACK",
+                "execution ACK changed paths must be an array",
+            )
+        return cls(
+            task_id=payload["task_id"],  # type: ignore[arg-type]
+            task_revision=payload["task_revision"],  # type: ignore[arg-type]
+            attempt_id=payload["attempt_id"],  # type: ignore[arg-type]
+            executor_ref=payload["executor_ref"],  # type: ignore[arg-type]
+            fixture_identity=payload["fixture_identity"],  # type: ignore[arg-type]
+            execution_ack=payload["execution_ack"],  # type: ignore[arg-type]
+            changed_paths=tuple(paths),
+            diff_summary=payload["diff_summary"],  # type: ignore[arg-type]
+            verifier=TaskRevisionVerifierResult.from_dict(payload["verifier"]),
+            cleanup_state=payload["cleanup_state"],  # type: ignore[arg-type]
+            forbidden_side_effect_count=payload[  # type: ignore[arg-type]
+                "forbidden_side_effect_count"
+            ],
+            verified_success=payload["verified_success"],  # type: ignore[arg-type]
+        )
+
+
 def immutable_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
     """Small helper for downstream truth projections without mutable aliases."""
 
@@ -1042,11 +1275,14 @@ __all__ = [
     "TaskRevisionAuthority",
     "TaskRevisionCommand",
     "TaskRevisionConstraints",
+    "TaskRevisionExecutionAck",
     "TaskRevisionGrant",
     "TaskRevisionOperation",
     "TaskRevisionPlan",
     "TaskRevisionRecord",
     "TaskRevisionTargetSnapshot",
+    "TaskRevisionVerifierResult",
+    "TaskRevisionVerifierState",
     "TaskRevisionViolation",
     "immutable_mapping",
     "plan_task_revision",
