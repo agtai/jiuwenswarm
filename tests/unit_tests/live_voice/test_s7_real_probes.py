@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
 import subprocess
 import sys
+import wave
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -362,6 +364,38 @@ def test_privacy_probe_scans_every_closed_surface_for_real_secrets_and_audio(
     result = s7_probe.evaluate_privacy(Path.cwd(), _CANDIDATE, _RUNTIME)
 
     assert result.sample_count == len(s7_probe.ALPHA_PRIVACY_SURFACES)
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+def test_privacy_probe_rejects_later_short_pcm_frame(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, encoded: bool
+) -> None:
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    manifest = _write_json(tmp_path / "privacy.json", _privacy_manifest(capture))
+    audio_fixture = (
+        Path.cwd()
+        / "scripts"
+        / "live_voice"
+        / "w2_rehearsal"
+        / "assets"
+        / "voice-command-48k-mono-pcm16.wav"
+    )
+    with wave.open(str(audio_fixture), "rb") as source:
+        pcm = source.readframes(source.getnframes())
+    later_frame = pcm[19_200:20_160]
+    assert len(later_frame) == 960
+    persisted = base64.b64encode(later_frame) if encoded else later_frame
+    (capture / "surface-0.txt").write_bytes(b"prefix:" + persisted + b":suffix")
+    monkeypatch.setenv("S7_PRIVACY_SURFACE_MANIFEST", str(manifest))
+    monkeypatch.setenv("S7_PRIVACY_CAPTURE_ROOT", str(capture))
+    monkeypatch.setenv("LIVE_VOICE_SPEECH_API_KEY", "speech-private-token")
+    monkeypatch.setenv("JIUWENSWARM_LIVE_VOICE_P3_AUTH_TOKEN", "p3-private-token")
+
+    with pytest.raises(
+        s7_probe.ProbeFailure, match="PRIVACY_FORBIDDEN_PATTERN_OBSERVED"
+    ):
+        s7_probe.evaluate_privacy(Path.cwd(), _CANDIDATE, _RUNTIME)
 
 
 def test_privacy_probe_rejects_split_boundary_secret(

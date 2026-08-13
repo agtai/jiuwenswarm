@@ -20,6 +20,7 @@ import re
 import subprocess
 import sys
 import wave
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Mapping, Sequence
@@ -49,6 +50,8 @@ _MAX_OBSERVATION_BYTES = 4 * 1024 * 1024
 _MAX_PRIVACY_FILE_BYTES = 16 * 1024 * 1024
 _MAX_PRIVACY_TOTAL_BYTES = 128 * 1024 * 1024
 _MAX_PRIVACY_FILES = 512
+_RAW_AUDIO_SENTINEL_BYTES = 480
+_ENCODED_AUDIO_FRAME_BYTES = (960, 1_920)
 _AUDIO_SUFFIXES = frozenset(
     {".wav", ".pcm", ".mp3", ".ogg", ".opus", ".webm", ".m4a", ".flac"}
 )
@@ -729,19 +732,38 @@ def _privacy_patterns(audio_fixture: Path) -> tuple[bytes, ...]:
         with wave.open(str(audio_fixture), "rb") as source:
             if source.getnchannels() != 1 or source.getsampwidth() != 2:
                 raise ProbeFailure("PRIVACY_AUDIO_FIXTURE_INVALID")
-            pcm = source.readframes(min(source.getnframes(), 2_048))
+            pcm = source.readframes(source.getnframes())
         raw_audio = audio_fixture.read_bytes()
     except (OSError, EOFError, wave.Error) as error:
         raise ProbeFailure("PRIVACY_AUDIO_FIXTURE_INVALID") from error
-    if len(pcm) < 1_024 or len(raw_audio) < 44:
+    if len(pcm) < max(_ENCODED_AUDIO_FRAME_BYTES) or len(raw_audio) < 44:
         raise ProbeFailure("PRIVACY_AUDIO_FIXTURE_INVALID")
     audio_sha = hashlib.sha256(raw_audio).hexdigest().encode("ascii")
+    # A 480-byte sentinel at every 480-byte corpus boundary guarantees that
+    # every persisted raw PCM span of at least 960 bytes contains a complete
+    # sentinel, even when the persisted span starts between boundaries.  The
+    # encoded sentinels cover the two bounded frame sizes emitted by the Alpha
+    # media route.  All sentinels derive from the complete tracked corpus, not
+    # only its prefix.
+    raw_audio_sentinels = tuple(
+        pcm[offset : offset + _RAW_AUDIO_SENTINEL_BYTES]
+        for offset in range(
+            0,
+            len(pcm) - _RAW_AUDIO_SENTINEL_BYTES + 1,
+            _RAW_AUDIO_SENTINEL_BYTES,
+        )
+    )
+    encoded_audio_sentinels = tuple(
+        base64.b64encode(pcm[offset : offset + frame_bytes])
+        for frame_bytes in _ENCODED_AUDIO_FRAME_BYTES
+        for offset in range(0, len(pcm) - frame_bytes + 1, frame_bytes)
+    )
     patterns = tuple(
         dict.fromkeys(
             (
                 *secrets,
-                pcm[:4_096],
-                base64.b64encode(pcm[:1_024]),
+                *raw_audio_sentinels,
+                *encoded_audio_sentinels,
                 audio_sha,
             )
         )
@@ -751,14 +773,63 @@ def _privacy_patterns(audio_fixture: Path) -> tuple[bytes, ...]:
     return patterns
 
 
-def _file_contains_pattern(path: Path, patterns: tuple[bytes, ...]) -> bool:
-    overlap = max(len(pattern) for pattern in patterns) - 1
+class _PatternMatcher:
+    """Bounded Aho-Corasick matcher with full-pattern confirmation."""
+
+    _ANCHOR_BYTES = 16
+
+    def __init__(self, patterns: tuple[bytes, ...]) -> None:
+        self.max_pattern_bytes = max(len(pattern) for pattern in patterns)
+        self._transitions: list[dict[int, int]] = [{}]
+        self._failures = [0]
+        self._outputs: list[list[tuple[bytes, int]]] = [[]]
+        for pattern in patterns:
+            anchor = pattern[: min(self._ANCHOR_BYTES, len(pattern))]
+            state = 0
+            for byte in anchor:
+                next_state = self._transitions[state].get(byte)
+                if next_state is None:
+                    next_state = len(self._transitions)
+                    self._transitions[state][byte] = next_state
+                    self._transitions.append({})
+                    self._failures.append(0)
+                    self._outputs.append([])
+                state = next_state
+            self._outputs[state].append((pattern, len(anchor)))
+        pending: deque[int] = deque(self._transitions[0].values())
+        while pending:
+            state = pending.popleft()
+            for byte, next_state in self._transitions[state].items():
+                pending.append(next_state)
+                failure = self._failures[state]
+                while failure and byte not in self._transitions[failure]:
+                    failure = self._failures[failure]
+                self._failures[next_state] = self._transitions[failure].get(byte, 0)
+                self._outputs[next_state].extend(
+                    self._outputs[self._failures[next_state]]
+                )
+
+    def contains(self, payload: bytes) -> bool:
+        state = 0
+        for index, byte in enumerate(payload):
+            while state and byte not in self._transitions[state]:
+                state = self._failures[state]
+            state = self._transitions[state].get(byte, 0)
+            for pattern, anchor_bytes in self._outputs[state]:
+                start = index - anchor_bytes + 1
+                if payload.startswith(pattern, start):
+                    return True
+        return False
+
+
+def _file_contains_pattern(path: Path, matcher: _PatternMatcher) -> bool:
+    overlap = matcher.max_pattern_bytes - 1
     tail = b""
     try:
         with path.open("rb") as source:
             while chunk := source.read(64 * 1024):
                 window = tail + chunk
-                if any(pattern in window for pattern in patterns):
+                if matcher.contains(window):
                     return True
                 tail = window[-overlap:] if overlap else b""
     except OSError as error:
@@ -819,6 +890,7 @@ def evaluate_privacy(root: Path, candidate: str, runtime_sha: str) -> ProbeResul
     if not audio_fixture.is_file():
         raise ProbeFailure("PRIVACY_AUDIO_FIXTURE_INVALID")
     patterns = _privacy_patterns(audio_fixture)
+    matcher = _PatternMatcher(patterns)
     surfaces = payload["surfaces"]
     if type(surfaces) is not list or len(surfaces) != len(ALPHA_PRIVACY_SURFACES):
         raise ProbeFailure("PRIVACY_SURFACE_SET_INVALID")
@@ -876,7 +948,7 @@ def evaluate_privacy(root: Path, candidate: str, runtime_sha: str) -> ProbeResul
             raise ProbeFailure("PRIVACY_CAPTURE_READ_FAILED") from error
         if len(header) == 12 and header[:4] == b"RIFF" and header[8:] == b"WAVE":
             raise ProbeFailure("PRIVACY_WAVE_PAYLOAD_PERSISTED")
-        if _file_contains_pattern(path, patterns):
+        if _file_contains_pattern(path, matcher):
             raise ProbeFailure("PRIVACY_FORBIDDEN_PATTERN_OBSERVED")
     return ProbeResult(sample_count=len(files))
 

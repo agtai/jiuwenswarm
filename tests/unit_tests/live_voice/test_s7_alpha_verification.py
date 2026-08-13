@@ -218,15 +218,53 @@ def test_automation_plan_discovers_frontend_scripts_and_keeps_asyncio_mode(
     )
     assert consistency.argv == ("uv", "pip", "check")
     ruff = next(spec for spec in specs if spec.check_id == "changed-python-ruff")
-    assert "W605" in ruff.argv
-    assert "F821" not in ruff.argv
-    assert "--ignore" not in ruff.argv
-    assert set(s7.CHANGED_PYTHON_RUFF_WAIVERS).issubset(ruff.argv)
+    assert ruff.argv == (
+        "<python>",
+        "scripts/live_voice/s7_alpha_verification.py",
+        "ruff-baseline",
+        "--comparison-base",
+        base,
+    )
+    assert "--per-file-ignores" not in ruff.argv
     formatting = next(
         spec for spec in specs if spec.check_id == "s7-owned-python-format"
     )
     assert set(s7.S7_OWNED_PYTHON_PATHS).issubset(formatting.argv)
     assert "jiuwenswarm/channels/web/app_web.py" not in formatting.argv
+
+
+def test_ruff_baseline_accepts_only_the_exact_s6_diagnostic_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = [
+        {
+            "filename": str(tmp_path / relative),
+            "code": code,
+            "location": {"row": row, "column": column},
+            "message": message,
+        }
+        for relative, code, row, column, message in sorted(
+            s7.EXPECTED_S6_RUFF_DIAGNOSTICS
+        )
+    ]
+    outputs = [payload, [*payload, {**payload[0], "code": "F401"}]]
+
+    def run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=json.dumps(outputs.pop(0)), stderr=""
+        )
+
+    monkeypatch.setattr(s7, "_changed_files", lambda *_args, **_kwargs: ("one.py",))
+    monkeypatch.setattr(s7.subprocess, "run", run)
+
+    assert s7.verify_changed_python_ruff_baseline(tmp_path, s7.S7_COMPARISON_BASE) == 0
+    assert "S7_RUFF_BASELINE_MATCH diagnostics=21" in capsys.readouterr().out
+    assert s7.verify_changed_python_ruff_baseline(tmp_path, s7.S7_COMPARISON_BASE) == 1
+    assert (
+        "S7_RUFF_BASELINE_MISMATCH expected=21 observed=22" in capsys.readouterr().out
+    )
 
 
 def test_s7_cli_requires_the_frozen_full_comparison_base() -> None:

@@ -65,11 +65,14 @@ Live Voice review. Changed repository Python receives an explicit Ruff `W605`
 invalid-escape check, so this compatibility exception cannot hide the same
 defect in candidate source.
 
-The cumulative Ruff check keeps only exact, pre-existing S6 waivers and the
-compile check still covers every Python file changed from the comparison base.
-The formatter check is intentionally limited to the S7-owned runner/probes and
-their tests: rewriting the broad S6 Python set merely to satisfy the current
-formatter is explicitly outside the selective-port boundary.
+The cumulative Ruff check runs without ignores or per-file waivers and requires
+its unfiltered JSON diagnostic set to equal the exact 21-item pre-existing S6
+fingerprint (path, rule, row, column and message). Any added, removed or moved
+diagnostic fails the candidate. The compile check still covers every Python
+file changed from the comparison base. The formatter check is intentionally
+limited to the S7-owned runner/probes and their tests: rewriting the broad S6
+Python set merely to satisfy the current formatter is explicitly outside the
+selective-port boundary.
 
 Reports contain only placeholder-safe argv, repository-relative cwd, exit
 status, duration, test counts and bounded failure identifiers. Captured output is
@@ -150,7 +153,7 @@ The canonical entrypoints are now implemented:
 | `agent-executor` | `s7_probe_agent_executor.py` | observation plus completion/cancellation fixture roots | Requires formal structured and natural-language facts, then directly verifies two distinct no-remote Git roots: one exact `notes.txt` marker diff for completion and a clean cancellation fixture with zero write. |
 | `benchmark-fault` | `s7_probe_benchmark_fault.py` | `S7_BENCHMARK_FAULT_OBSERVATION` | Requires all 13 declared route targets with at least five raw latency samples and the closed 13-case fault/degradation/cancel set; recomputes route p50/p95/max. |
 | `secure-deployment` | `s7_probe_secure_deployment.py` | `S7_PRIVATE_ORIGIN` | Actively performs the bounded trusted-TLS HEAD, CORS OPTIONS and dedicated-media WebSocket upgrade observation against the hash-bound private FQDN; loopback, public, mixed-address and rebinding targets fail closed. |
-| `privacy` | `s7_probe_privacy.py` | external surface manifest/capture root and the two Gateway-only secret values | Scans all 19 closed Alpha surfaces, bounded to 512 files/128 MiB, for the actual credentials, encoded forms, the tracked corpus PCM/base64/hash, WAVE headers and persisted audio filenames. |
+| `privacy` | `s7_probe_privacy.py` | external surface manifest/capture root and the two Gateway-only secret values | Scans all 19 closed Alpha surfaces, bounded to 512 files/128 MiB, for the actual credentials and encoded forms; complete-corpus raw PCM sentinels plus aligned base64 960/1920-byte frames and the corpus hash; WAVE headers; and persisted audio filenames. |
 
 The three route/task/benchmark observation files use strict versioned schemas,
 must be outside the candidate, bind the candidate and runtime-declaration

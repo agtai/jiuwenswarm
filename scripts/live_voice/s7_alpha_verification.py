@@ -203,13 +203,156 @@ LATEST_S6_REGRESSION_INVENTORY = (
     "tests/unit_tests/live_voice/test_openai_streaming_speech.py",
     "tests/unit_tests/live_voice/test_streaming_speech.py",
 )
-CHANGED_PYTHON_RUFF_WAIVERS = (
-    "jiuwenswarm/channels/web/app_web.py:E402",
-    "jiuwenswarm/channels/web/app_web.py:F541",
-    "jiuwenswarm/gateway/app_gateway.py:E402",
-    "jiuwenswarm/gateway/app_gateway.py:F821",
-    "jiuwenswarm/gateway/app_gateway.py:F841",
-    "jiuwenswarm/server/agent_ws_server.py:E402",
+EXPECTED_S6_RUFF_DIAGNOSTICS = frozenset(
+    {
+        (
+            "jiuwenswarm/channels/web/app_web.py",
+            "E402",
+            34,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/channels/web/app_web.py",
+            "E402",
+            35,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/channels/web/app_web.py",
+            "E402",
+            36,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/channels/web/app_web.py",
+            "E402",
+            37,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/channels/web/app_web.py",
+            "E402",
+            38,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/channels/web/app_web.py",
+            "E402",
+            41,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/channels/web/app_web.py",
+            "F541",
+            996,
+            39,
+            "f-string without any placeholders",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            39,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            40,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            45,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            46,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            47,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            48,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            49,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            50,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            58,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "E402",
+            59,
+            1,
+            "Module level import not at top of file",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "F841",
+            367,
+            5,
+            "Local variable `host` is assigned to but never used",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "F821",
+            974,
+            51,
+            "Undefined name `RoutingTarget`",
+        ),
+        (
+            "jiuwenswarm/gateway/app_gateway.py",
+            "F841",
+            1296,
+            37,
+            "Local variable `e` is assigned to but never used",
+        ),
+        (
+            "jiuwenswarm/server/agent_ws_server.py",
+            "E402",
+            251,
+            1,
+            "Module level import not at top of file",
+        ),
+    }
 )
 S7_OWNED_PYTHON_PATHS = (
     "scripts/live_voice/s7_alpha_verification.py",
@@ -749,6 +892,75 @@ def _python_files(paths: Sequence[str]) -> tuple[str, ...]:
     return tuple(path for path in paths if path.endswith(".py"))
 
 
+def verify_changed_python_ruff_baseline(repo: Path, comparison_base: str) -> int:
+    """Reject any drift from the exact, pre-existing S6 Ruff diagnostic set."""
+
+    changed_python = _python_files(_changed_files(repo, comparison_base))
+    completed = subprocess.run(
+        (
+            sys.executable,
+            "-m",
+            "ruff",
+            "check",
+            "--extend-select",
+            "W605",
+            "--output-format",
+            "json",
+            "--exit-zero",
+            *changed_python,
+        ),
+        cwd=repo,
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        shell=False,
+    )
+    if completed.returncode != 0:
+        print("S7_RUFF_BASELINE_UNAVAILABLE", flush=True)
+        return 1
+    try:
+        payload = json.loads(completed.stdout)
+        if not isinstance(payload, list):
+            raise ValueError("Ruff JSON output is not a list")
+        observed: set[tuple[str, str, int, int, str]] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise ValueError("Ruff diagnostic is not an object")
+            location = item.get("location")
+            if not isinstance(location, dict):
+                raise ValueError("Ruff diagnostic location is missing")
+            relative = (
+                Path(str(item.get("filename"))).resolve().relative_to(repo).as_posix()
+            )
+            observed.add(
+                (
+                    relative,
+                    str(item.get("code")),
+                    int(location["row"]),
+                    int(location["column"]),
+                    str(item.get("message")),
+                )
+            )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        print("S7_RUFF_BASELINE_INVALID_OUTPUT", flush=True)
+        return 1
+    if observed != EXPECTED_S6_RUFF_DIAGNOSTICS:
+        print(
+            "S7_RUFF_BASELINE_MISMATCH "
+            f"expected={len(EXPECTED_S6_RUFF_DIAGNOSTICS)} "
+            f"observed={len(observed)}",
+            flush=True,
+        )
+        return 1
+    print(
+        f"S7_RUFF_BASELINE_MATCH diagnostics={len(observed)}",
+        flush=True,
+    )
+    return 0
+
+
 def _frontend_scripts(repo: Path) -> tuple[str, ...]:
     package_path = repo / "jiuwenswarm/channels/web/frontend/package.json"
     package = json.loads(package_path.read_text(encoding="utf-8"))
@@ -915,17 +1127,10 @@ def build_automation_specs(
                     category="static",
                     argv=(
                         "<python>",
-                        "-m",
-                        "ruff",
-                        "check",
-                        "--extend-select",
-                        "W605",
-                        *tuple(
-                            token
-                            for waiver in CHANGED_PYTHON_RUFF_WAIVERS
-                            for token in ("--per-file-ignores", waiver)
-                        ),
-                        *changed_python,
+                        "scripts/live_voice/s7_alpha_verification.py",
+                        "ruff-baseline",
+                        "--comparison-base",
+                        comparison_base,
                     ),
                 ),
                 CheckSpec(
@@ -1885,7 +2090,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "replace real-path or human acceptance."
         )
     )
-    parser.add_argument("command", choices=("plan", "run"))
+    parser.add_argument("command", choices=("plan", "run", "ruff-baseline"))
     parser.add_argument("--repo", type=Path)
     parser.add_argument("--comparison-base", required=True)
     parser.add_argument("--allow-no-upstream", action="store_true")
@@ -1905,6 +2110,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise VerificationError("--timeout-seconds must be positive")
         require_s7_comparison_base(args.comparison_base)
         repo = resolve_repo(args.repo)
+        if args.command == "ruff-baseline":
+            return verify_changed_python_ruff_baseline(repo, args.comparison_base)
         if args.command == "run":
             require_project_python(repo)
         identity = collect_candidate_identity(
