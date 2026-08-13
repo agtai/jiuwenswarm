@@ -93,6 +93,28 @@ The added regressions distinguish the old failures:
 | Browser source schedule | PASS; sources start at 1.00 s and 1.02 s, contiguously |
 | Early/foreign/malformed media, receipt and business effects | Existing negative suites remain PASS |
 
+### 4a. Counterfactual red/green proof
+
+On 2026-08-13 the new regression files were copied, without the repaired
+implementation, into a disposable detached worktree at base `2e4cfeb0`. The
+same selected tests were then run against the repaired implementation. This
+checks whether the tests can actually distinguish the reported defects from
+the fix instead of merely recording a green result after the change.
+
+| Executable observation | Base `2e4cfeb0` with new test | Repaired implementation |
+|---|---|---|
+| Cold open retains 100 early frames through Provider VAD EOT | FAIL: accepted 100 frames but retained `0`; expected `100` | PASS: `1 passed` |
+| Long answer defers successor capture until final downlink settlement | FAIL: timed out after 10,000 ms waiting for final downlink ACK | PASS: 91.9 ms |
+| Streaming answer renders 1,501 frames beyond the former ceiling | FAIL: timed out after 10,000 ms waiting for final downlink ACK | PASS: 162.9 ms |
+| Browser playout starts with the declared scheduling lead | FAIL: actual starts `[10.00, 10.02]`; expected `[11.00, 11.02]` | PASS in the 102-test browser audio suite |
+| Scheduled-frame ACK and rendered receipt remain separate | PASS | PASS |
+
+The last row is a negative control: the counterfactual setup did not make every
+new test fail indiscriminately. It isolated the missing cold-frame retention,
+long-playout lifetime and browser scheduling lead while preserving the already
+valid receipt semantics. Both disposable proof directories were removed after
+the run; the main worktree remained clean before this record update.
+
 A complete cold self-review covered the scoped diff, queue/lifetime alignment,
 transport-versus-render semantics, long-answer capture ordering and forbidden
 effects. No independent reviewer was invoked because this execution did not
