@@ -1,7 +1,7 @@
 # S8 readiness preparation record
 
-> Status: `S8 READINESS INTEGRATION IN PROGRESS`, not S8 started and not A3
-> entry. The imported helper still requires a new exact-candidate S7 re-freeze.
+> Status: `S8 READINESS INTEGRATED`; S7/A2 re-frozen for exact A3 entry, but S8
+> human acceptance has not started.
 >
 > Authority: current stage remains [STATUS](STATUS.md); S8 requirements remain
 > [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md) and the
@@ -9,21 +9,26 @@
 
 ## 1. Packet identity and boundary
 
-- Stage/node: Pre-S8 preparation for `S7-04 → S8-01`; S8/A3 is not active.
+- Stage/node: `S7-04 → S8-01` entry boundary; S8/A3 human acceptance is
+  ready but not active.
 - Track/module: Shared-X / A3 operator workflow, preflight, cleanup and sanitized
   observation support.
 - Risk: Tier 2/3 because candidate identity, private environment boundaries,
   Task/response identity and final acceptance records are consumed.
-- Integration base: closed S7/A2 documentation-handoff HEAD
+- Integration base: historical S7/A2 documentation-handoff HEAD
   `a53856de0af12e2c1b11e6cc8f2dc0a18150a99a`; reviewed product source remains
-  `c209e4a6cb88779277254751aa52354050a813a2`.
+  `c209e4a6cb88779277254751aa52354050a813a2`, and the reviewed readiness source
+  is `e58df618d3ee00776e004e8dfacd8d4d88b744dc`.
 - Port source: `b7efa14f4c2e9bcefac8e2773867be9b79036b6a` from the local
-  `codex/s8-readiness-prep` branch. That commit was prepared from the earlier S6
-  base and is being adapted onto the current S7 line before a new S7-04 freeze.
+  `codex/s8-readiness-prep` branch. That earlier-S6-base work was audited and
+  adapted rather than replayed, then committed on the current line as
+  `e58df618d3ee00776e004e8dfacd8d4d88b744dc`. The final handoff history also
+  records `b7efa14f` as a formal ancestor through a no-tree-change integration
+  merge, so the packet's ancestry check passes without restoring stale bytes.
 - The previously generated S7 report remains valid history for `a53856de`, but
-  it cannot authorize A3 after this workflow changes candidate bytes. The new
-  exact candidate must receive fresh automation, five real probes, cumulative
-  review and a new external frozen handoff.
+  it cannot authorize A3 after the readiness workflow changed candidate bytes.
+  A3 entry instead consumes the new external report/handoff produced by the
+  complete exact-clean-documentation-HEAD S7 run.
 - Included: the unsigned helper, S7 production-build identity binding, disposable
   fixture ownership, S7 report/handoff binding, preflight, observation/decision
   schema, cleanup validation, runner/readiness tests and operator procedure.
@@ -84,38 +89,38 @@ fact automation must not supply.
 | A3 source repair | Showcase already says mismatch blocks rather than inviting repair. | Helper has no source-repair, flag-write or fallback-switch path. Any mismatch is `BLOCKED`. |
 
 No product-source defect was found during the preparation audit or the read-only
-port audit against the closed S7 line. A mismatch on the future exact candidate
-is a `FINDING_FOR_S7`; the Integration Owner must decide the fix and rerun
-affected A2 checks before a new handoff.
+port audit against the closed S7 line. Any later exact-entry mismatch is a new
+`FINDING_FOR_S7`; the Integration Owner must stop S8, decide the fix and rerun
+affected A2 checks before replacing the handoff.
 
 ## 4. Prepared versus deferred status
 
 | Status | Items |
 |---|---|
-| `INTEGRATED_PENDING_REFREEZE` | S7 report/handoff consumer including generated-artifact state and the S7-frozen production-build manifest, exact candidate checks, disk/private-443 served-content binding, raw flag checks, sanitized route/environment checks, candidate-rooted process and HTTPS/CSP/WSS-ACK diagnostics, fixture ownership/isolation and pre-journey effect plan, product-session/unique-scope-correlation-bound trace capture with per-scope semantics, scoped identity/settlement checks, decision consistency, task/project/process cleanup checks, dry-run and exact delete safety, operator sequence and tests are being integrated into the current S7 line. |
-| `NEEDS_S7_REFREEZE` | Form the coherent local candidate commit; run affected readiness/S7 checks, the complete candidate runner and all five real probes; complete cumulative review; then let the Integration Owner create and freeze the exact external S7 report/handoff. |
+| `INTEGRATED` | S7 report/handoff consumer including generated-artifact state and the S7-frozen production-build manifest, exact candidate checks, disk/private-443 served-content binding, raw flag checks, sanitized route/environment checks, candidate-rooted process and HTTPS/CSP/WSS-ACK diagnostics, fixture ownership/isolation and pre-journey effect plan, product-session/unique-scope-correlation-bound trace capture with per-scope semantics, scoped identity/settlement checks, decision consistency, task/project/process cleanup checks, dry-run and exact delete safety, operator sequence and tests are integrated on the closed S7 line. |
+| `S7_REFREEZE_SATISFIED` | The source candidate received affected tests, all 40 automatic checks, five real `VERIFY` probes and independent cumulative review. The external final report/handoff binds the exact clean documentation-handoff HEAD before S8 entry. |
 | `ENVIRONMENT` | Gateway-only Speech access, Agent model/tool route, private HTTPS/WSS proxy/cert/DNS, exact Chrome/OS/devices/network, isolated runtime/Store, service processes and real observations. |
 | `USER_REQUIRED` | S8-01 text/Tool and physical Provider/device probes; every Showcase §2–8 interaction/usability observation; final Alpha decision. |
-| `FINDING_FOR_S7` | The readiness review found that the prior handoff did not bind Git-ignored `frontend/dist` to the exact frontend served by external private 443. The S7 runner and S8 consumer now close that finding with build/served-content identities and negative tests; it remains pending affected checks, Tier-3 review and the replacement exact-candidate S7 run. |
+| `FINDING_FOR_S7` | `CLOSED`: the prior handoff did not bind Git-ignored `frontend/dist` to the exact frontend served by external private 443. The S7 runner and S8 consumer close it with build/served-content identities, negative tests, complete S7 rerun and independent Tier-3 review. |
 | `OUT_OF_SCOPE` | Formal S8 execution, Alpha PASS, product repairs, full P3, D1/D2, Production auth/public deployment, mobile/PWA/wide browsers, credentials/accounts/billing, remote refs, signed Gate/manifest/score. |
 
 ## 5. Integration and rerun boundary
 
-The helper, S7 runner build-identity extension, tests and documentation are being
-integrated after the prior S7-04
-handoff. This changes candidate HEAD and makes the `a53856de` report/handoff
-historical rather than current A3 authority. After the coherent local commit,
-S7-01 identity, affected automation, complete S7-02, S7-03 and S7-04 must run
-again on the new exact clean candidate.
+The helper, S7 runner build-identity extension, tests and documentation were
+integrated after the prior S7-04 handoff. This changed candidate HEAD and made
+the `a53856de` report/handoff historical rather than current A3 authority. The
+coherent source candidate then received S7-01 identity, affected automation,
+complete S7-02, S7-03 and all five real probes on exact clean `e58df618`.
 
-After combining with the final S7 candidate, rerun at minimum:
+The final documentation-handoff commit must repeat the complete S7 run before
+the external handoff becomes current. The affected check boundary includes:
 
 - `tests/unit_tests/live_voice/test_s7_alpha_verification.py`;
 - `tests/unit_tests/live_voice/test_s7_real_probes.py`;
 - `tests/unit_tests/live_voice/test_s8_readiness.py`;
 - the S7 runner source/privacy and Markdown-link checks;
 - the complete candidate run, all five real probes and cumulative review because
-  the candidate identity has changed.
+  the candidate identity changed.
 
 Only external handoff binding and all runtime/human execution occur after
 S7-04. The shortest command sequence is maintained in

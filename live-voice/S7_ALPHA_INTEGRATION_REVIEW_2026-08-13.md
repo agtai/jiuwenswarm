@@ -5,6 +5,7 @@
 > Risk: Tier 3 cumulative boundary
 > Comparison base: `2a69c2b87d0ee080a4a30421cbcbcdf93183f340`
 > Product-source candidate: `c209e4a6cb88779277254751aa52354050a813a2`
+> S8-readiness source candidate: `e58df618d3ee00776e004e8dfacd8d4d88b744dc`
 > Outcome: automation, five real probes and cumulative review complete;
 > S7/A2 closed; S8/A3 ready but not started.
 
@@ -210,3 +211,45 @@ the candidate/profile unchanged and physically verify microphone capture,
 heard playout, permission/device/lifecycle behavior and the complete joint
 P1/P2/P3alpha product journey. This record does not claim
 `PASS - INTEGRATED WEB ALPHA`.
+
+## 7. S8-readiness re-freeze addendum
+
+The local `codex/s8-readiness-prep` work was audited rather than replayed as an
+unreviewed branch. Its coherent helper/test/operator boundary was adapted onto
+the closed S7 line and committed as:
+
+- `e58df618d3ee00776e004e8dfacd8d4d88b744dc` -
+  `feat(live-voice): integrate S8 readiness safeguards`.
+
+The formal S8 packet also requires the original `b7efa14f` port commit to be an
+ancestor of the frozen HEAD. The final documentation-handoff history records
+that already-adapted lineage with a no-tree-change integration merge; the
+reviewed `e58df618` tree remains authoritative rather than reintroducing the
+older S6-base implementation.
+
+No product implementation changed after `c209e4a6`. The readiness integration
+strictly re-derives the 40 automatic and five real S7 result rows, binds the
+product-authoritative SQLite Task Store to complete task/attempt/outbox/Direct
+settlement, requires exact trace and USER-observer consistency, fixes the
+18092/19000/19001 plus external-private-443 topology, and retains destructive
+fixture locks through exact deletion. The S7 runner now freezes a bounded
+complete path/size/content identity for the ignored production `dist` and
+rechecks it after every later check. S8 recomputes that disk identity and reads
+every canonical file from private 443 with exact 200, identity encoding, length
+and content hash under one deadline.
+
+Affected Main verification passed 112 readiness/runner/CLI tests and 18 real
+probe contract tests. Independent affected review passed the same exact source
+candidate with 112 tests and found no open Critical, High or P2 issue. The
+complete source-candidate runner then returned 40 automatic `PASS` plus five
+real `VERIFY`: backend Alpha 1,635 passed / 2 skipped, related regressions 788
+passed, 27 frontend commands 847/847 passed and Vite transformed 4,640 modules.
+The frozen build contained 180 files / 16,275,167 bytes; its post-run identity
+and all 180 private-443 response contents matched. S7-03 independently approved
+the exact clean `e58df618` candidate.
+
+The external sanitized final report and `live-voice.s7-a3-handoff.v1` bind the
+exact clean documentation-handoff HEAD containing this addendum and current
+STATUS. That post-documentation runner repeats the same 40 automatic and five
+real checks before the handoff is `FROZEN_FOR_A3`. This addendum extends the S7
+record; it does not claim S8/A3 human acceptance.

@@ -9,25 +9,22 @@
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
   `origin/hx/0812_live_voice_w3`. The branch was pushed through `a53856de`; the
-  current S8-readiness integration is local and no additional push is authorized.
+  S8-readiness integration and S7 re-freeze are local and no additional push is
+  authorized.
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
-- The prior `S7 - Candidate Assembly, Verification and Review` / `A2` product
-  closure remains valid at product source
-  `c209e4a6cb88779277254751aa52354050a813a2` and documentation-handoff HEAD
-  `a53856de0af12e2c1b11e6cc8f2dc0a18150a99a`.
-- Current stage/node: `S7-04` / `A2`, `REFREEZE IN PROGRESS`. The S8 readiness
-  workflow from `b7efa14f` is being integrated without product-source changes.
-  Review found that the external proxy's Git-ignored `frontend/dist` also needs
-  an exact S7 build digest plus S8 disk/served-content binding; that runner and
-  readiness automation repair is in the current candidate scope.
-  Because this changes candidate bytes, the previous S7 report is historical
-  until a new exact clean HEAD receives complete automation, five real probes,
-  cumulative review and a frozen A3 handoff.
-- `S8 - Product Acceptance` / `A3` is `BLOCKED / NOT STARTED` during the
-  re-freeze. The complete human Alpha journey has not run, so there is no
-  `PASS - INTEGRATED WEB ALPHA` result.
+- `S7 - Candidate Assembly, Verification and Review` / `A2` is `CLOSED` on the
+  S8-readiness line. Product source remains
+  `c209e4a6cb88779277254751aa52354050a813a2`; readiness/build-identity source is
+  `e58df618d3ee00776e004e8dfacd8d4d88b744dc`. The external final report and
+  `live-voice.s7-a3-handoff.v1` bind the exact clean documentation-handoff HEAD
+  that contains this closeout and the formally required `b7efa14f` readiness
+  lineage without replacing the reviewed adapted tree.
+- Current stage/node: `S8` / `A3`, `READY / NOT STARTED`. Automated entry may
+  now validate the frozen runtime, isolated resources, services and exact
+  private-443 frontend before any user action. The complete human Alpha journey
+  has not run, so there is no `PASS - INTEGRATED WEB ALPHA` result.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -41,10 +38,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `SATISFIED` | The final product-source run completed all 40 automatic checks: backend Alpha 1,564 passed / 2 skipped, related regressions 788 passed, 27 frontend commands 847/847 passed, production build 4,640 modules, exact Ruff debt, format/compile, diff/link/hygiene and post-run identity all passed. |
+| S7-02 automation | `SATISFIED` | The readiness candidate and exact documentation handoff each receive all 40 automatic checks. The source-candidate run completed backend Alpha 1,635 passed / 2 skipped, related regressions 788 passed, 27 frontend commands 847/847 passed and production build 4,640 modules; exact Ruff debt, format/compile, diff/link/hygiene and post-run identity passed. The ignored build froze 180 files / 16,275,167 bytes and private 443 served all 180 exact contents. |
 | S7-02 real path | `SATISFIED` | All five probes returned `VERIFY` on one private-only HTTPS/WSS runtime declaration: Speech/Media 5 samples, Agent/Executor 2, Benchmark/Fault 65, Secure Deployment 3 and Privacy 19; failures and forbidden side effects were zero. Speech/Media p50 was 18,188.395 ms and p95/max 19,001.572 ms. |
-| S7-03 cumulative Tier-3 review | `SATISFIED` | Cumulative main review and independent read-only review found no open Critical/High/P2 source issue. The exact Ruff, PCM16/f32le privacy, bounded socket-close and Provider server-VAD early-final repairs all received affected verification; the final independent affected suite passed 119 tests. |
-| S7-04 A3 handoff freeze | `IN PROGRESS` | The `a53856de` handoff is preserved as completed history. S8 readiness tooling plus exact ignored-`dist`/private-443 content binding is being integrated onto that line; a new exact-candidate report and external `live-voice.s7-a3-handoff.v1` must be frozen before S8 entry. No public deployment or real-user project is permitted. |
+| S7-03 cumulative Tier-3 review | `SATISFIED` | Cumulative main review and independent read-only review found no open Critical/High/P2 source issue. The S8 readiness boundary closed strict topology/port, S7 report, Task Store/Direct settlement, trace, human-observer and ignored-build/served-content findings; independent exact-`e58df618` verification passed 112 tests. |
+| S7-04 A3 handoff freeze | `SATISFIED` | The `a53856de` handoff remains history. A new external report/handoff binds the exact clean documentation-handoff HEAD, runtime digest, 40 automatic PASS, five real VERIFY and S7-03 PASS. No public deployment or real-user project is permitted. |
 
 ## S7 accepted limitations
 
@@ -79,11 +76,11 @@ and the detailed result is
 
 ## Next actions
 
-1. Finish the S8 readiness and S7 production-build identity integration plus
-   affected checks without changing the reviewed product source, private
-   profile, flags or runtime topology.
-2. Commit one coherent local candidate, rerun the complete S7 runner and five
-   real probes, complete cumulative review and freeze a new external A3 handoff.
+1. Run the read-only S8 preflight on the exact frozen handoff and stop on any
+   mismatch; do not change the reviewed product source, private profile, flags
+   or runtime topology.
+2. Create the isolated S8 runtime/Task Store, disposable no-remote fixture,
+   effect plan and product-session/scope-correlation binding outside Git.
 3. Only after the exact S8 entry audit passes, run
    [ALPHA_SHOWCASE.md](demo/ALPHA_SHOWCASE.md) once. The user physically verifies
    microphone capture, heard playout, interruption, device/permission/lifecycle
