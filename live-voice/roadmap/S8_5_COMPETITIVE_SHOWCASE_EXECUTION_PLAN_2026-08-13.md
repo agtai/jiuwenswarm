@@ -9,11 +9,13 @@
 - Milestone/target: post-Alpha S8.5 candidate; target node `S8.5-C` is local to
   this plan and does not alter D-075 A0–A3.
 - Track/modules: `P3 / TC, Store, ED, VB, Web`; Risk Tier 3.
-- Included: two bounded revision commands, immutable revision ledger, exact
+- Included: two bounded revision command types, one revision `1 -> 2`, immutable revision ledger, exact
   predecessor fence, clean successor, trusted verifier, truthful Task UI.
 - Excluded: generic live steer, same-attempt mutation, decision response,
   pause/resume/reprioritize, preferences, real user projects, arbitrary shell,
   dependency/API/config changes, D1/D2, public deployment and full P3.
+- Compatibility bound: revision applies only to original attempt 1 and cannot be
+  mixed with `task.retry`; this incubator does not change Alpha retry semantics.
 - Development order is dependency order. Feature-off and Alpha profile preserve
   the current behavior with zero new mutation, allocation or dispatch.
 - Each module closes with affected tests and cold scoped review. The complete

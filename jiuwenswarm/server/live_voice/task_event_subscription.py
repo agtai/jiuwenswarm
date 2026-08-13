@@ -42,6 +42,7 @@ _EVENTS_CAPABILITY = frozenset({"task.events"})
 _TASK_LIFECYCLE_EVENT_STATES = {
     "task.accepted": FormalTaskState.ACCEPTED,
     "task.retry_accepted": FormalTaskState.ACCEPTED,
+    "task.revision_applied": FormalTaskState.ACCEPTED,
     "task.running": FormalTaskState.RUNNING,
     "task.blocked": FormalTaskState.BLOCKED,
     "task.decision_required": FormalTaskState.DECISION_REQUIRED,
@@ -96,11 +97,12 @@ _ATTEMPT_TRANSITIONS = {
     FormalAttemptState.TERMINAL: frozenset(),
 }
 _INTERNAL_ATTEMPT_TERMINAL_PRODUCERS = frozenset(
-    {"task_core.delivery", "task_core.reconciliation"}
+    {"task_core.delivery", "task_core.reconciliation", "task_core.revision"}
 )
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
     "task.retry_accepted": frozenset({"task_core"}),
+    "task.revision_applied": frozenset({"task_core"}),
     "task.running": frozenset({"task_core"}),
     "task.blocked": frozenset({"task_core"}),
     "task.decision_required": frozenset({"task_core"}),
@@ -108,6 +110,7 @@ _TASK_EVENT_PRODUCERS = {
         {"task_core", "task_core.delivery", "task_core.reconciliation"}
     ),
     "task.cancel_requested": frozenset({"task_core.control"}),
+    "task.revision_requested": frozenset({"task_core.revision"}),
 }
 _CANONICAL_EVENT_TYPES = frozenset(_TASK_EVENT_PRODUCERS) | frozenset(
     _ATTEMPT_LIFECYCLE_EVENT_STATES
@@ -402,8 +405,10 @@ class TaskEventSubscription:
             )
 
         genesis = events[0]
-        expected_boundary_type = (
-            "task.accepted" if attempt.attempt_number == 1 else "task.retry_accepted"
+        expected_boundary_types = (
+            {"task.accepted"}
+            if attempt.attempt_number == 1
+            else {"task.retry_accepted", "task.revision_applied"}
         )
         expected_details = (
             {"command_id": genesis.causation_id}
@@ -412,7 +417,7 @@ class TaskEventSubscription:
         )
         if (
             genesis.seq != snapshot.start_seq
-            or genesis.event_type != expected_boundary_type
+            or genesis.event_type not in expected_boundary_types
             or genesis.state != FormalTaskState.ACCEPTED.value
             or genesis.outcome is not None
             or genesis.producer != "task_core"
@@ -426,6 +431,7 @@ class TaskEventSubscription:
             )
             or (
                 attempt.attempt_number > 1
+                and genesis.event_type == "task.retry_accepted"
                 and (
                     snapshot.start_seq <= 0
                     or set(genesis.details)
@@ -445,6 +451,42 @@ class TaskEventSubscription:
                         TerminalOutcome.CANCELLED.value,
                         TerminalOutcome.COMPLETED.value,
                     }
+                )
+            )
+            or (
+                attempt.attempt_number > 1
+                and genesis.event_type == "task.revision_applied"
+                and (
+                    snapshot.start_seq <= 0
+                    or set(genesis.details)
+                    != {
+                        "command_id",
+                        "predecessor_attempt_id",
+                        "predecessor_revision",
+                        "previous_outcome",
+                        "task_revision",
+                        "attempt_number",
+                        "cleanup_id",
+                    }
+                    or genesis.details.get("attempt_number") != attempt.attempt_number
+                    or genesis.details.get("command_id") != genesis.causation_id
+                    or type(genesis.details.get("predecessor_attempt_id")) is not str
+                    or not str(genesis.details.get("predecessor_attempt_id")).strip()
+                    or genesis.details.get("predecessor_attempt_id")
+                    == attempt.attempt_id
+                    or type(genesis.details.get("predecessor_revision")) is not int
+                    or type(genesis.details.get("task_revision")) is not int
+                    or genesis.details.get("predecessor_revision") != 1
+                    or genesis.details.get("task_revision") != 2
+                    or genesis.details.get("attempt_number") != 2
+                    or genesis.details.get("previous_outcome")
+                    not in {
+                        TerminalOutcome.INTERRUPTED.value,
+                        TerminalOutcome.CANCELLED.value,
+                        TerminalOutcome.COMPLETED.value,
+                    }
+                    or type(genesis.details.get("cleanup_id")) is not str
+                    or not str(genesis.details.get("cleanup_id")).strip()
                 )
             )
         ):
@@ -479,7 +521,13 @@ class TaskEventSubscription:
             self._previous_attempt_id = (
                 None
                 if attempt.attempt_number == 1
-                else str(genesis.details["retry_of_attempt_id"])
+                else str(
+                    genesis.details[
+                        "retry_of_attempt_id"
+                        if genesis.event_type == "task.retry_accepted"
+                        else "predecessor_attempt_id"
+                    ]
+                )
             )
             self._attempt_number = attempt.attempt_number
             self._segment_start_seq = snapshot.start_seq
@@ -1193,7 +1241,10 @@ class TaskEventSubscription:
                     expected_task_source = None
                     expected_task_cause = None
                     expected_task_outcome = None
-                elif event.event_type == "task.cancel_requested":
+                elif event.event_type in {
+                    "task.cancel_requested",
+                    "task.revision_requested",
+                }:
                     if event.producer not in _TASK_EVENT_PRODUCERS[event.event_type]:
                         raise _violation(
                             "TASK_EVENT_PRODUCER_MISMATCH",
@@ -1210,6 +1261,30 @@ class TaskEventSubscription:
                         raise _violation(
                             "TASK_EVENT_CONTROL_STATE_CONFLICT",
                             "Task control event disagrees with the canonical task state",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    if event.event_type == "task.revision_requested" and (
+                        set(event.details)
+                        != {
+                            "command_id",
+                            "operation",
+                            "predecessor_revision",
+                            "successor_revision",
+                            "predecessor_attempt_id",
+                        }
+                        or event.details.get("command_id") != event.causation_id
+                        or event.details.get("operation")
+                        not in {"task.provide_input", "task.update_constraints"}
+                        or type(event.details.get("predecessor_revision")) is not int
+                        or event.details.get("predecessor_revision") != 1
+                        or type(event.details.get("successor_revision")) is not int
+                        or event.details.get("successor_revision") != 2
+                        or event.details.get("predecessor_attempt_id")
+                        != self._attempt_id
+                    ):
+                        raise _violation(
+                            "TASK_EVENT_CONTROL_BINDING_MISMATCH",
+                            "task revision request does not bind the current attempt",
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
                 attempt_lifecycle_state = _ATTEMPT_LIFECYCLE_EVENT_STATES.get(

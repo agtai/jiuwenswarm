@@ -1109,6 +1109,8 @@ _COMMAND_TARGETS: Final = MappingProxyType(
     {
         "task.create": IdentityKind.TASK,
         "task.retry": IdentityKind.TASK,
+        "task.provide_input": IdentityKind.TASK,
+        "task.update_constraints": IdentityKind.TASK,
         CancelScope.PLAYBACK_STOP.value: IdentityKind.RESPONSE,
         CancelScope.RESPONSE_CANCEL.value: IdentityKind.RESPONSE,
         CancelScope.ROUND_CANCEL.value: IdentityKind.ROUND,
@@ -1223,6 +1225,96 @@ def _command_payload(command_type: str, value: object) -> _FrozenObject:
             raise _violation(
                 "TASK_RETRY_ATTEMPT_NUMBER_INVALID",
                 "task.retry attempt_number must be 2 or 3",
+            )
+    elif command_type == "task.provide_input":
+        _require_exact_keys(
+            data,
+            required={"expected_task_revision", "expected_attempt_id", "facts"},
+            field_name="command.payload",
+        )
+        revision = _uint(
+            data["expected_task_revision"],
+            "command.payload.expected_task_revision",
+        )
+        if revision == 0:
+            raise _violation(
+                "INVALID_TASK_REVISION_NUMBER",
+                "expected_task_revision must be positive",
+            )
+        _required_text(
+            data["expected_attempt_id"], "command.payload.expected_attempt_id"
+        )
+        facts = _strict_array(data["facts"], field_name="command.payload.facts")
+        if not facts or len(facts) > 16:
+            raise _violation(
+                "INVALID_TASK_REVISION_FACTS",
+                "task.provide_input facts must contain one to sixteen items",
+            )
+        normalized_facts = tuple(
+            _required_text(fact, f"command.payload.facts[{index}]")
+            for index, fact in enumerate(facts)
+        )
+        if any(len(fact) > 2_000 for fact in normalized_facts) or len(
+            set(normalized_facts)
+        ) != len(normalized_facts):
+            raise _violation(
+                "INVALID_TASK_REVISION_FACTS",
+                "task.provide_input facts must be bounded and unique",
+            )
+    elif command_type == "task.update_constraints":
+        _require_exact_keys(
+            data,
+            required={
+                "expected_task_revision",
+                "expected_attempt_id",
+                "constraints",
+            },
+            field_name="command.payload",
+        )
+        revision = _uint(
+            data["expected_task_revision"],
+            "command.payload.expected_task_revision",
+        )
+        if revision == 0:
+            raise _violation(
+                "INVALID_TASK_REVISION_NUMBER",
+                "expected_task_revision must be positive",
+            )
+        _required_text(
+            data["expected_attempt_id"], "command.payload.expected_attempt_id"
+        )
+        constraints = _strict_object(
+            data["constraints"], field_name="command.payload.constraints"
+        )
+        allowed = {"write_scope", "regression_verifier_required"}
+        if not constraints or not set(constraints).issubset(allowed):
+            raise _violation(
+                "TASK_REVISION_CONSTRAINT_NOT_ALLOWLISTED",
+                "task.update_constraints contains an unsupported constraint",
+                code=ErrorCode.PERMISSION_DENIED,
+            )
+        if "write_scope" in constraints:
+            paths = _strict_array(
+                constraints["write_scope"],
+                field_name="command.payload.constraints.write_scope",
+            )
+            if not paths or len(paths) > 16:
+                raise _violation(
+                    "INVALID_TASK_REVISION_WRITE_SCOPE",
+                    "write_scope must contain one to sixteen paths",
+                )
+            for index, path in enumerate(paths):
+                _required_text(
+                    path,
+                    f"command.payload.constraints.write_scope[{index}]",
+                )
+        if (
+            "regression_verifier_required" in constraints
+            and type(constraints["regression_verifier_required"]) is not bool
+        ):
+            raise _violation(
+                "INVALID_TASK_REVISION_CONSTRAINT_PATCH",
+                "regression_verifier_required must be boolean",
             )
     return _freeze_object(data, "command.payload")
 
@@ -1940,6 +2032,7 @@ _EVENT_RULES: Final = MappingProxyType(
         ),
         "task.accepted": _EventRule(IdentityKind.TASK, "task_core", "accepted"),
         "task.retry_accepted": _EventRule(IdentityKind.TASK, "task_core", "accepted"),
+        "task.revision_applied": _EventRule(IdentityKind.TASK, "task_core", "accepted"),
         "task.running": _EventRule(IdentityKind.TASK, "task_core", "running"),
         "task.blocked": _EventRule(IdentityKind.TASK, "task_core", "blocked"),
         "task.decision_required": _EventRule(
@@ -1988,6 +2081,17 @@ def _validate_event_payload(
             "previous_outcome",
             "attempt_number",
         }
+    elif event_type == "task.revision_applied":
+        required = {
+            "state",
+            "command_id",
+            "predecessor_attempt_id",
+            "predecessor_revision",
+            "previous_outcome",
+            "task_revision",
+            "attempt_number",
+            "cleanup_id",
+        }
     _require_exact_keys(data, required=required, field_name="event.payload")
     if data["state"] != rule.state:
         raise _violation(
@@ -2017,6 +2121,45 @@ def _validate_event_payload(
                 "task.retry_accepted attempt_number must be 2 or 3",
                 code=ErrorCode.PROTOCOL_VIOLATION,
             )
+    elif event_type == "task.revision_applied":
+        _required_text(data["command_id"], "event.payload.command_id")
+        _required_text(
+            data["predecessor_attempt_id"],
+            "event.payload.predecessor_attempt_id",
+        )
+        predecessor_revision = _uint(
+            data["predecessor_revision"], "event.payload.predecessor_revision"
+        )
+        task_revision = _uint(data["task_revision"], "event.payload.task_revision")
+        if predecessor_revision != 1 or task_revision != 2:
+            raise _violation(
+                "TASK_REVISION_LINEAGE_INVALID",
+                "task.revision_applied must advance revision 1 to revision 2",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+        outcome = _enum(
+            TerminalOutcome,
+            data["previous_outcome"],
+            "event.payload.previous_outcome",
+        )
+        if outcome not in {
+            TerminalOutcome.INTERRUPTED,
+            TerminalOutcome.CANCELLED,
+            TerminalOutcome.COMPLETED,
+        }:
+            raise _violation(
+                "TASK_REVISION_PREDECESSOR_OUTCOME_INVALID",
+                "task.revision_applied requires a closed predecessor",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+        attempt_number = _uint(data["attempt_number"], "event.payload.attempt_number")
+        if attempt_number != 2:
+            raise _violation(
+                "TASK_REVISION_ATTEMPT_NUMBER_INVALID",
+                "task.revision_applied requires successor attempt 2",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+        _required_text(data["cleanup_id"], "event.payload.cleanup_id")
     return _freeze_object(dict(data), "event.payload")
 
 
@@ -2151,6 +2294,14 @@ class EventEnvelope:
             raise _violation(
                 "TASK_RETRY_CAUSATION_MISMATCH",
                 "task.retry_accepted command_id must equal its causation_id",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if event_type == "task.revision_applied" and (
+            causation_id is None or result.payload["command_id"] != causation_id
+        ):
+            raise _violation(
+                "TASK_REVISION_CAUSATION_MISMATCH",
+                "task.revision_applied command_id must equal its causation_id",
                 code=ErrorCode.PROTOCOL_VIOLATION,
             )
         if rule.progress:
@@ -3092,6 +3243,23 @@ class EventSequenceTracker:
                     "task.retry_accepted must bind the exact applied retry command",
                     True,
                 )
+            if event.event_type == "task.revision_applied" and (
+                external.command_type
+                not in {"task.provide_input", "task.update_constraints"}
+                or event.payload.get("command_id") != external.command_id
+                or external.target_ref != event.stream_ref
+                or event.payload.get("predecessor_attempt_id")
+                != external.payload.get("expected_attempt_id")
+                or event.payload.get("predecessor_revision")
+                != external.payload.get("expected_task_revision")
+                or event.payload.get("task_revision")
+                != int(external.payload.get("expected_task_revision", -1)) + 1
+            ):
+                return (
+                    "TASK_REVISION_CAUSATION_MISMATCH",
+                    "task.revision_applied must bind the exact revision command",
+                    True,
+                )
             return None
         if source is None or source.event_id not in self._applied_ids:
             return (
@@ -3226,7 +3394,10 @@ class EventSequenceTracker:
         assert outcome is None or isinstance(outcome, str)
         current_state = self._lifecycle_by_object.get(object_key)
         if current_state is None:
-            if state == initial and event.event_type != "task.retry_accepted":
+            if state == initial and event.event_type not in {
+                "task.retry_accepted",
+                "task.revision_applied",
+            }:
                 return None
             return _violation(
                 "INVALID_INITIAL_LIFECYCLE_STATE",
@@ -3246,6 +3417,19 @@ class EventSequenceTracker:
                 return _violation(
                     "TASK_RETRY_PRECONDITION_STALE",
                     "task.retry_accepted does not continue the exact terminal epoch",
+                    code=ErrorCode.PROTOCOL_VIOLATION,
+                ).error
+            return None
+        if event.event_type == "task.revision_applied":
+            attempt_number = event.payload.get("attempt_number")
+            if (
+                current_state not in {"running", "blocked", "decision_required"}
+                or attempt_number
+                != self._task_attempt_number_by_object.get(object_key, 1) + 1
+            ):
+                return _violation(
+                    "TASK_REVISION_PRECONDITION_STALE",
+                    "task.revision_applied does not replace the current live epoch",
                     code=ErrorCode.PROTOCOL_VIOLATION,
                 ).error
             return None
@@ -3323,6 +3507,13 @@ class EventSequenceTracker:
                             assert isinstance(retry_number, int)
                             self._task_attempt_number_by_object[object_key] = (
                                 retry_number
+                            )
+                            self._task_terminal_outcome_by_object.pop(object_key, None)
+                        elif candidate.event_type == "task.revision_applied":
+                            revision_attempt = candidate.payload.get("attempt_number")
+                            assert isinstance(revision_attempt, int)
+                            self._task_attempt_number_by_object[object_key] = (
+                                revision_attempt
                             )
                             self._task_terminal_outcome_by_object.pop(object_key, None)
                         elif candidate.event_type == "task.terminal":

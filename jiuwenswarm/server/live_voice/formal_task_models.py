@@ -1095,12 +1095,12 @@ class TaskEventAuthoritySnapshot:
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
         boundary = self.events[0]
-        expected_boundary = (
-            "task.accepted"
+        expected_boundaries = (
+            {"task.accepted"}
             if self.attempt.attempt_number == 1
-            else "task.retry_accepted"
+            else {"task.retry_accepted", "task.revision_applied"}
         )
-        if boundary.event_type != expected_boundary:
+        if boundary.event_type not in expected_boundaries:
             raise FormalTaskViolation(
                 "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
                 "TaskEvent authority segment lacks its canonical attempt boundary",
@@ -1113,7 +1113,7 @@ class TaskEventAuthoritySnapshot:
                     "initial attempt segment must begin at global sequence zero",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
-        else:
+        elif boundary.event_type == "task.retry_accepted":
             details = boundary.details
             retry_of_attempt_id = details.get("retry_of_attempt_id")
             if (
@@ -1138,6 +1138,46 @@ class TaskEventAuthoritySnapshot:
                 raise FormalTaskViolation(
                     "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
                     "retry segment boundary does not bind exact predecessor lineage",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            details = boundary.details
+            predecessor_attempt_id = details.get("predecessor_attempt_id")
+            predecessor_revision = details.get("predecessor_revision")
+            task_revision = details.get("task_revision")
+            if (
+                set(details)
+                != {
+                    "command_id",
+                    "predecessor_attempt_id",
+                    "predecessor_revision",
+                    "previous_outcome",
+                    "task_revision",
+                    "attempt_number",
+                    "cleanup_id",
+                }
+                or details.get("command_id") != boundary.causation_id
+                or details.get("attempt_number") != self.attempt.attempt_number
+                or type(predecessor_attempt_id) is not str
+                or not predecessor_attempt_id.strip()
+                or predecessor_attempt_id == self.attempt.attempt_id
+                or type(predecessor_revision) is not int
+                or type(task_revision) is not int
+                or predecessor_revision != 1
+                or task_revision != 2
+                or details.get("attempt_number") != 2
+                or details.get("previous_outcome")
+                not in {
+                    TerminalOutcome.INTERRUPTED.value,
+                    TerminalOutcome.CANCELLED.value,
+                    TerminalOutcome.COMPLETED.value,
+                }
+                or type(details.get("cleanup_id")) is not str
+                or not str(details.get("cleanup_id")).strip()
+            ):
+                raise FormalTaskViolation(
+                    "TASK_EVENT_AUTHORITY_SEGMENT_BOUNDARY_MISMATCH",
+                    "revision segment boundary does not bind exact predecessor lineage",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
 

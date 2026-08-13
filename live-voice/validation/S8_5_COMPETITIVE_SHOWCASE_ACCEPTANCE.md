@@ -23,6 +23,8 @@ One running Task A is revised through committed voice input. Pass requires:
 
 - same `task_id`; monotonic immutable revision; distinct predecessor/successor
   attempts and command IDs;
+- exactly one revision `1 -> 2`, originating from attempt 1; retry/revision
+  mixing rejects with zero side effects;
 - exact confirmation and visible `accepted -> fencing -> applied` command truth;
 - predecessor cleanup ACK before successor dispatch;
 - predecessor late output/patch/verifier has zero current effect;
@@ -43,6 +45,7 @@ Pass all applicable cases:
   zero Agent/Tool/Task/project mutation;
 - replay: same result/no duplicate; fingerprint conflict: reject;
 - concurrent revisions: at most one winner; loser stale; no double successor;
+- cancel/revision race: cancel or terminal truth supersedes revision; no successor;
 - Store failure at command/fence/revision/attempt/outbox boundaries: atomic recovery;
 - Executor cleanup timeout/crash/mismatch: application unknown, no successor;
 - restart in requested/fencing/applied/running/verifying states: truthful reconcile,

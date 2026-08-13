@@ -262,6 +262,7 @@ _NO_PROJECTION_EVENT_TYPES = frozenset(
         "attempt.running",
         "attempt.terminal",
         "task.cancel_requested",
+        "task.revision_requested",
     }
 )
 _NO_PROJECTION_SOURCE_DOMAIN = b"live-voice.no-projection.source.v1\0"
@@ -328,7 +329,7 @@ class ProgressNotificationArbiter:
         self._attempt_epochs: dict[_WorkKey, tuple[str, int, int]] = {}
 
     def _begin_attempt_epoch(self, baseline: object) -> None:
-        """Reset one task stream only from a verified retry boundary capability."""
+        """Reset one task stream only from a verified successor boundary."""
 
         if not self._enabled:
             return
@@ -343,7 +344,7 @@ class ProgressNotificationArbiter:
         if (
             type(event) is not PersistentTaskEvent
             or type(binding) is not ProgressNotificationBinding
-            or event.event_type != "task.retry_accepted"
+            or event.event_type not in {"task.retry_accepted", "task.revision_applied"}
             or event.state != WorkState.ACCEPTED.value
             or event.outcome is not None
             or event.task_id != binding.work_ref.id
@@ -351,24 +352,65 @@ class ProgressNotificationArbiter:
             or event.correlation_id != binding.correlation_id
             or event.producer != "task_core"
             or event.source_event_id is not None
-            or set(event.details)
-            != {
-                "command_id",
-                "retry_of_attempt_id",
-                "previous_outcome",
-                "attempt_number",
-            }
             or event.details.get("command_id") != event.causation_id
-            or type(event.details.get("retry_of_attempt_id")) is not str
-            or not str(event.details.get("retry_of_attempt_id")).strip()
-            or event.details.get("retry_of_attempt_id") == event.attempt_id
-            or event.details.get("attempt_number") not in {2, 3}
-            or event.details.get("previous_outcome")
-            not in {TerminalOutcome.CANCELLED.value, TerminalOutcome.COMPLETED.value}
+            or type(event.details.get("attempt_number")) is not int
+            or event.details.get("attempt_number") < 2
+            or (
+                event.event_type == "task.retry_accepted"
+                and (
+                    set(event.details)
+                    != {
+                        "command_id",
+                        "retry_of_attempt_id",
+                        "previous_outcome",
+                        "attempt_number",
+                    }
+                    or type(event.details.get("retry_of_attempt_id")) is not str
+                    or not str(event.details.get("retry_of_attempt_id")).strip()
+                    or event.details.get("retry_of_attempt_id") == event.attempt_id
+                    or event.details.get("attempt_number") not in {2, 3}
+                    or event.details.get("previous_outcome")
+                    not in {
+                        TerminalOutcome.CANCELLED.value,
+                        TerminalOutcome.COMPLETED.value,
+                    }
+                )
+            )
+            or (
+                event.event_type == "task.revision_applied"
+                and (
+                    set(event.details)
+                    != {
+                        "command_id",
+                        "predecessor_attempt_id",
+                        "predecessor_revision",
+                        "previous_outcome",
+                        "task_revision",
+                        "attempt_number",
+                        "cleanup_id",
+                    }
+                    or type(event.details.get("predecessor_attempt_id")) is not str
+                    or not str(event.details.get("predecessor_attempt_id")).strip()
+                    or event.details.get("predecessor_attempt_id") == event.attempt_id
+                    or type(event.details.get("predecessor_revision")) is not int
+                    or type(event.details.get("task_revision")) is not int
+                    or event.details.get("predecessor_revision") != 1
+                    or event.details.get("task_revision") != 2
+                    or event.details.get("attempt_number") != 2
+                    or event.details.get("previous_outcome")
+                    not in {
+                        TerminalOutcome.INTERRUPTED.value,
+                        TerminalOutcome.CANCELLED.value,
+                        TerminalOutcome.COMPLETED.value,
+                    }
+                    or type(event.details.get("cleanup_id")) is not str
+                    or not str(event.details.get("cleanup_id")).strip()
+                )
+            )
         ):
             raise ProgressNotificationArbiterViolation(
                 "INVALID_ATTEMPT_EPOCH_BASELINE",
-                "attempt epoch boundary is not canonical retry authority evidence",
+                "attempt epoch boundary is not canonical successor authority evidence",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         source_key = (
@@ -1057,13 +1099,40 @@ class ProgressNotificationArbiter:
                 "source event is not in the canonical no-projection set",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        if event.event_type == "task.cancel_requested":
+        if event.event_type in {"task.cancel_requested", "task.revision_requested"}:
             valid_lifecycle = (
-                event.producer == "task_core.control"
+                event.producer
+                == (
+                    "task_core.control"
+                    if event.event_type == "task.cancel_requested"
+                    else "task_core.revision"
+                )
                 and event.state
                 in {"accepted", "running", "blocked", "decision_required"}
                 and event.outcome is None
                 and event.source_event_id is None
+                and (
+                    event.event_type == "task.cancel_requested"
+                    or (
+                        set(event.details)
+                        == {
+                            "command_id",
+                            "operation",
+                            "predecessor_revision",
+                            "successor_revision",
+                            "predecessor_attempt_id",
+                        }
+                        and event.details.get("command_id") == event.causation_id
+                        and event.details.get("operation")
+                        in {"task.provide_input", "task.update_constraints"}
+                        and type(event.details.get("predecessor_revision")) is int
+                        and type(event.details.get("successor_revision")) is int
+                        and event.details.get("predecessor_revision") == 1
+                        and event.details.get("successor_revision") == 2
+                        and event.details.get("predecessor_attempt_id")
+                        == event.attempt_id
+                    )
+                )
             )
         else:
             expected_state = event.event_type.removeprefix("attempt.")
@@ -1332,12 +1401,13 @@ class ProgressNotificationArbiter:
             f"{source_event.stream_ref.kind.value}.{progress.state.value}"
         )
         payload = source_event.payload
-        retry_boundary = (
+        successor_boundary = (
             source_event.stream_ref.kind is IdentityKind.TASK
             and progress.state is WorkState.ACCEPTED
-            and source_event.event_type == "task.retry_accepted"
+            and source_event.event_type
+            in {"task.retry_accepted", "task.revision_applied"}
         )
-        if source_event.event_type != expected_event_type and not retry_boundary:
+        if source_event.event_type != expected_event_type and not successor_boundary:
             raise _InputRejected(
                 "PROGRESS_SOURCE_STATE_MISMATCH",
                 "source event type must match projected state",

@@ -66,6 +66,7 @@ _EVENTS_CAPABILITY = frozenset({"task.events"})
 _PROJECTABLE_EVENTS = {
     "task.accepted": "accepted",
     "task.retry_accepted": "accepted",
+    "task.revision_applied": "accepted",
     "task.running": "running",
     "task.blocked": "blocked",
     "task.decision_required": "decision_required",
@@ -77,11 +78,13 @@ _NO_PROJECTION_EVENTS = frozenset(
         "attempt.running",
         "attempt.terminal",
         "task.cancel_requested",
+        "task.revision_requested",
     }
 )
 _TASK_EVENT_PRODUCERS = {
     "task.accepted": frozenset({"task_core"}),
     "task.retry_accepted": frozenset({"task_core"}),
+    "task.revision_applied": frozenset({"task_core"}),
     "task.running": frozenset({"task_core"}),
     "task.blocked": frozenset({"task_core"}),
     "task.decision_required": frozenset({"task_core"}),
@@ -460,9 +463,10 @@ def _evidence_id(
             else {"seq": event.seq, "event_id": event.event_id}
         ),
     }
-    return _PROGRESS_EVENT_PREFIX + hashlib.sha256(
-        canonical_json_bytes(identity)
-    ).hexdigest()
+    return (
+        _PROGRESS_EVENT_PREFIX
+        + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+    )
 
 
 def project_task_progress_event(
@@ -520,6 +524,38 @@ def project_task_progress_event(
                 }
             )
         )
+        or (
+            event.event_type == "task.revision_applied"
+            and (
+                set(event.details)
+                != {
+                    "command_id",
+                    "predecessor_attempt_id",
+                    "predecessor_revision",
+                    "previous_outcome",
+                    "task_revision",
+                    "attempt_number",
+                    "cleanup_id",
+                }
+                or event.details.get("command_id") != event.causation_id
+                or type(event.details.get("predecessor_attempt_id")) is not str
+                or not str(event.details.get("predecessor_attempt_id")).strip()
+                or event.details.get("predecessor_attempt_id") == event.attempt_id
+                or type(event.details.get("predecessor_revision")) is not int
+                or type(event.details.get("task_revision")) is not int
+                or event.details.get("predecessor_revision") != 1
+                or event.details.get("task_revision") != 2
+                or event.details.get("attempt_number") != 2
+                or event.details.get("previous_outcome")
+                not in {
+                    TerminalOutcome.INTERRUPTED.value,
+                    TerminalOutcome.CANCELLED.value,
+                    TerminalOutcome.COMPLETED.value,
+                }
+                or type(event.details.get("cleanup_id")) is not str
+                or not str(event.details.get("cleanup_id")).strip()
+            )
+        )
     ):
         raise _violation(
             "INVALID_TASK_PROGRESS_SOURCE",
@@ -552,6 +588,8 @@ def project_task_progress_event(
                 "attempt_number": event.details.get("attempt_number"),
             }
         )
+    elif event.event_type == "task.revision_applied":
+        source_payload.update(event.details)
     try:
         source_event = EventEnvelope.from_dict(
             {
@@ -1144,7 +1182,7 @@ class TaskProgressReturnBridge:
         if (
             binding.origin_kind is TaskProgressOriginKind.VOICE
             and self._uses_exact_authority_source()
-            and event.event_type == "task.retry_accepted"
+            and event.event_type in {"task.retry_accepted", "task.revision_applied"}
             and event.details.get("attempt_number") != self._authority_attempt_number
         ):
             self._last_source_decision = TaskProgressSourceDecision.INVALID_EVENT
@@ -1333,7 +1371,10 @@ class TaskProgressReturnBridge:
                 self._reject(TaskProgressReturnReason.AUTHORIZATION_REJECTED)
                 return False
             try:
-                if projection.task_event.event_type == "task.retry_accepted":
+                if projection.task_event.event_type in {
+                    "task.retry_accepted",
+                    "task.revision_applied",
+                }:
                     baseline = _mint_verified_attempt_epoch_baseline(
                         projection.task_event,
                         projection.notification_binding,

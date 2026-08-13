@@ -46,6 +46,13 @@ from .formal_task_models import (
     TaskRetryProductRequestFingerprint,
     utc_now,
 )
+from .task_revision import (
+    RevisionApplicationState,
+    RevisionFenceAck,
+    TaskRevisionCommand,
+    TaskRevisionConstraints,
+    TaskRevisionRecord,
+)
 
 _SCHEMA_VERSION = 2
 _JOURNAL_MODE_RETRY_SECONDS = 10.0
@@ -421,7 +428,17 @@ class SqliteTaskStore:
         self.database_path = Path(database_path)
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._failpoint = failpoint
+        self._s8_5_revision_enabled = False
         self._initialize()
+
+    def register_s8_5_revision_extension(self) -> None:
+        """Enable old-attempt quarantine after the sidecar schema is verified.
+
+        Registration is deliberately explicit.  Constructing the Alpha/P3alpha
+        Store alone creates no S8.5 table and adds no observation-path behavior.
+        """
+
+        self._s8_5_revision_enabled = True
 
     def _connect(self, *, foreign_keys: bool = True) -> sqlite3.Connection:
         connection: sqlite3.Connection | None = None
@@ -1583,6 +1600,20 @@ class SqliteTaskStore:
     ) -> tuple[PersistentTaskRecord, PersistentAttemptRecord]:
         task_row = self._require_task_row(connection, task_id, scope)
         self._verify_durable_lineage(connection, task_row)
+        if self._s8_5_revision_enabled:
+            applied_revision = connection.execute(
+                """
+                SELECT 1 FROM s85_task_revisions
+                WHERE task_id=? AND task_revision>1 LIMIT 1
+                """,
+                (task_id,),
+            ).fetchone()
+            if applied_revision is not None:
+                raise FormalTaskViolation(
+                    "TASK_RETRY_REVISION_MIXING_UNSUPPORTED",
+                    "task.retry is unavailable after an S8.5 task revision",
+                    ErrorCode.UNSUPPORTED,
+                )
         task = self._task_from_row(task_row)
         attempt_row = connection.execute(
             "SELECT * FROM attempts WHERE attempt_id=?", (task.attempt_id,)
@@ -1759,6 +1790,239 @@ class SqliteTaskStore:
         return _stored_record("outbox", load)
 
     @classmethod
+    def _verify_s8_5_revision_admission(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        task: PersistentTaskRecord,
+        attempt: PersistentAttemptRecord,
+        predecessor: PersistentAttemptRecord,
+        boundary: PersistentTaskEvent,
+        prior_spec: FormalTaskSpec,
+    ) -> FormalTaskSpec:
+        """Verify one applied sidecar revision as part of base Task authority."""
+
+        command_id = boundary.details.get("command_id")
+        scope_key = _scope_key(task.scope)
+        command_rows = connection.execute(
+            """
+            SELECT * FROM s85_revision_commands
+            WHERE scope_key=? AND command_id=?
+            """,
+            (scope_key, command_id),
+        ).fetchall()
+        dispatch_rows = connection.execute(
+            """
+            SELECT * FROM s85_revision_dispatch_outbox
+            WHERE task_id=? AND attempt_id=?
+            """,
+            (task.task_id, attempt.attempt_id),
+        ).fetchall()
+        revision_rows = connection.execute(
+            """
+            SELECT * FROM s85_task_revisions
+            WHERE task_id=? AND task_revision=? AND attempt_id=?
+            """,
+            (
+                task.task_id,
+                boundary.details.get("task_revision"),
+                attempt.attempt_id,
+            ),
+        ).fetchall()
+        ack_rows = connection.execute(
+            """
+            SELECT * FROM s85_revision_fence_acks
+            WHERE scope_key=? AND command_id=?
+            """,
+            (scope_key, command_id),
+        ).fetchall()
+        fence_rows = connection.execute(
+            """
+            SELECT * FROM s85_revision_outbox
+            WHERE scope_key=? AND command_id=?
+            """,
+            (scope_key, command_id),
+        ).fetchall()
+        if any(
+            len(rows) != 1
+            for rows in (
+                command_rows,
+                dispatch_rows,
+                revision_rows,
+                ack_rows,
+                fence_rows,
+            )
+        ):
+            raise cls._corrupt(
+                "formal Task revision admission lacks one exact ledger, cleanup, and dispatch"
+            )
+        command_row = command_rows[0]
+        dispatch_row = dispatch_rows[0]
+        revision_row = revision_rows[0]
+        fence_row = fence_rows[0]
+        command = TaskRevisionCommand.from_dict(_json_load(command_row["command_json"]))
+        ack_payload = _json_load(ack_rows[0]["ack_json"])
+        if type(ack_payload) is not dict:
+            raise cls._corrupt("formal Task revision cleanup ACK is malformed")
+        ack = RevisionFenceAck(**ack_payload)  # type: ignore[arg-type]
+        receipt_payload = _json_load(command_row["receipt_json"])
+        if type(receipt_payload) is not dict:
+            raise cls._corrupt("formal Task revision receipt is malformed")
+        facts = _json_load(revision_row["additive_facts_json"])
+        if type(facts) is not list:
+            raise cls._corrupt("formal Task revision facts are malformed")
+        revision = TaskRevisionRecord(
+            task_id=revision_row["task_id"],
+            task_revision=int(revision_row["task_revision"]),
+            predecessor_revision=int(revision_row["predecessor_revision"]),
+            attempt_id=revision_row["attempt_id"],
+            base_instruction=revision_row["base_instruction"],
+            additive_facts=tuple(facts),
+            constraints=TaskRevisionConstraints.from_dict(
+                _json_load(revision_row["constraints_json"])
+            ),
+            origin_commit_id=revision_row["origin_commit_id"],
+            created_by_command_id=revision_row["command_id"],
+        )
+        dispatch_payload = _json_load(dispatch_row["payload_json"])
+        if type(dispatch_payload) is not dict or set(dispatch_payload) != {
+            "scope",
+            "spec",
+        }:
+            raise cls._corrupt("formal Task revision dispatch payload is malformed")
+        dispatch_scope = ScopeRef.from_dict(dispatch_payload["scope"])
+        dispatch_spec = FormalTaskSpec.from_dict(dispatch_payload["spec"])
+        try:
+            dispatch_state = OutboxState(dispatch_row["state"])
+            delivery_count = int(dispatch_row["delivery_count"])
+        except (TypeError, ValueError) as error:
+            raise cls._corrupt(
+                "formal Task revision dispatch lifecycle is invalid"
+            ) from error
+        details = boundary.details
+        expected_details = {
+            "command_id",
+            "predecessor_attempt_id",
+            "predecessor_revision",
+            "previous_outcome",
+            "task_revision",
+            "attempt_number",
+            "cleanup_id",
+        }
+        stable_spec = (
+            dispatch_spec.name,
+            dispatch_spec.origin,
+            dispatch_spec.executor_id,
+            dispatch_spec.required_capabilities,
+            dispatch_spec.side_effect_class,
+            dispatch_spec.attributes,
+            dispatch_spec.context.source,
+            dispatch_spec.context.stable_id,
+            dispatch_spec.context.uri,
+            dispatch_spec.context.scope,
+        )
+        prior_stable_spec = (
+            prior_spec.name,
+            prior_spec.origin,
+            prior_spec.executor_id,
+            prior_spec.required_capabilities,
+            prior_spec.side_effect_class,
+            prior_spec.attributes,
+            prior_spec.context.source,
+            prior_spec.context.stable_id,
+            prior_spec.context.uri,
+            prior_spec.context.scope,
+        )
+        if (
+            set(details) != expected_details
+            or command_row["fingerprint"] != command.fingerprint()
+            or command_row["operation"] != command.operation.value
+            or command_row["task_id"] != task.task_id
+            or int(command_row["predecessor_revision"])
+            != command.expected_task_revision
+            or int(command_row["successor_revision"])
+            != command.expected_task_revision + 1
+            or command_row["predecessor_attempt_id"] != command.expected_attempt_id
+            or command_row["application_state"]
+            != RevisionApplicationState.APPLIED.value
+            or command.scope != task.scope
+            or command.task_id != task.task_id
+            or details.get("predecessor_attempt_id") != predecessor.attempt_id
+            or details.get("predecessor_revision") != command.expected_task_revision
+            or details.get("task_revision") != command.expected_task_revision + 1
+            or details.get("attempt_number") != attempt.attempt_number
+            or details.get("previous_outcome")
+            != (None if predecessor.outcome is None else predecessor.outcome.value)
+            or predecessor.state is not FormalAttemptState.TERMINAL
+            or predecessor.outcome
+            not in {
+                TerminalOutcome.INTERRUPTED,
+                TerminalOutcome.CANCELLED,
+                TerminalOutcome.COMPLETED,
+            }
+            or ack.command_id != command.command_id
+            or ack.task_id != task.task_id
+            or ack.predecessor_revision != command.expected_task_revision
+            or ack.predecessor_attempt_id != predecessor.attempt_id
+            or ack.cleanup_id != details.get("cleanup_id")
+            or not ack.unapplied_changes_discarded
+            or fence_row["outbox_id"] != command_row["fence_outbox_id"]
+            or fence_row["state"] != "delivered"
+            or fence_row["executor_id"] != predecessor.executor_id
+            or fence_row["executor_ref"] != predecessor.executor_ref
+            or dispatch_scope != task.scope
+            or dispatch_row["command_id"] != command.command_id
+            or dispatch_row["outbox_id"] != receipt_payload.get("dispatch_outbox_id")
+            or dispatch_spec.executor_id != attempt.executor_id
+            or delivery_count < 0
+            or (
+                dispatch_state is OutboxState.CLAIMED
+                and (
+                    dispatch_row["claimed_by"] is None
+                    or dispatch_row["claim_token"] is None
+                )
+            )
+            or (
+                dispatch_state is not OutboxState.CLAIMED
+                and (
+                    dispatch_row["claimed_by"] is not None
+                    or dispatch_row["claim_token"] is not None
+                )
+            )
+            or revision.task_id != task.task_id
+            or revision.task_revision != details.get("task_revision")
+            or revision.predecessor_revision != details.get("predecessor_revision")
+            or revision.attempt_id != attempt.attempt_id
+            or revision.created_by_command_id != command.command_id
+            or revision.origin_commit_id != command.origin_commit_id
+            or revision.effective_instruction != dispatch_spec.instruction
+            or stable_spec != prior_stable_spec
+        ):
+            raise cls._corrupt(
+                "formal Task revision admission does not bind its predecessor and successor"
+            )
+        predecessor_events = connection.execute(
+            """
+            SELECT * FROM task_events
+            WHERE task_id=? AND attempt_id=? AND event_type='attempt.terminal'
+            """,
+            (task.task_id, predecessor.attempt_id),
+        ).fetchall()
+        if len(predecessor_events) != 1:
+            raise cls._corrupt(
+                "formal Task revision predecessor lacks exact terminal attempt truth"
+            )
+        terminal = cls._event_from_row(predecessor_events[0])
+        if (
+            terminal.state != FormalAttemptState.TERMINAL.value
+            or terminal.outcome != predecessor.outcome.value
+        ):
+            raise cls._corrupt(
+                "formal Task revision predecessor terminal truth is inconsistent"
+            )
+        return dispatch_spec
+
+    @classmethod
     def _verify_durable_lineage(
         cls, connection: sqlite3.Connection, task_row: sqlite3.Row
     ) -> None:
@@ -1774,6 +2038,15 @@ class SqliteTaskStore:
                 (task.task_id,),
             ).fetchall()
             attempts = tuple(cls._attempt_from_row(row) for row in attempt_rows)
+            has_revision_schema = (
+                connection.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type='table' AND name='s85_task_revisions'
+                    """
+                ).fetchone()
+                is not None
+            )
             if (
                 not attempts
                 or tuple(item.attempt_number for item in attempts)
@@ -1823,7 +2096,13 @@ class SqliteTaskStore:
             retry_events = tuple(
                 event for event in events if event.event_type == "task.retry_accepted"
             )
-            if len(accepted_events) != 1 or len(retry_events) != len(attempts) - 1:
+            revision_events = tuple(
+                event for event in events if event.event_type == "task.revision_applied"
+            )
+            if (
+                len(accepted_events) != 1
+                or len(retry_events) + len(revision_events) != len(attempts) - 1
+            ):
                 raise cls._corrupt(
                     "formal Task admission boundaries are incomplete or duplicated"
                 )
@@ -1838,15 +2117,22 @@ class SqliteTaskStore:
                         "formal Task attempt has no durable event segment"
                     )
                 boundary = segment[0]
-                expected_boundary = (
-                    "task.accepted" if ordinal == 1 else "task.retry_accepted"
+                expected_boundaries = (
+                    {"task.accepted"}
+                    if ordinal == 1
+                    else {"task.retry_accepted", "task.revision_applied"}
                 )
-                if boundary.event_type != expected_boundary:
+                if boundary.event_type not in expected_boundaries:
                     raise cls._corrupt(
                         "formal Task attempt segment lacks its admission boundary"
                     )
                 if any(
-                    event.event_type in {"task.accepted", "task.retry_accepted"}
+                    event.event_type
+                    in {
+                        "task.accepted",
+                        "task.retry_accepted",
+                        "task.revision_applied",
+                    }
                     for event in segment[1:]
                 ):
                     raise cls._corrupt(
@@ -1864,6 +2150,33 @@ class SqliteTaskStore:
                     raise cls._corrupt(
                         "formal Task admission boundary is not canonical"
                     )
+                if boundary.event_type == "task.revision_applied":
+                    if ordinal == 1 or not has_revision_schema:
+                        raise cls._corrupt(
+                            "formal Task revision boundary lacks its extension schema"
+                        )
+                    dispatch_specs[ordinal] = cls._verify_s8_5_revision_admission(
+                        connection,
+                        task=task,
+                        attempt=attempt,
+                        predecessor=attempts[ordinal - 2],
+                        boundary=boundary,
+                        prior_spec=dispatch_specs[ordinal - 1],
+                    )
+                    attempt_events = tuple(
+                        event
+                        for event in segment
+                        if event.event_type.startswith("attempt.")
+                    )
+                    if attempt_events and (
+                        attempt_events[-1].state != attempt.state.value
+                        or attempt_events[-1].outcome
+                        != (None if attempt.outcome is None else attempt.outcome.value)
+                    ):
+                        raise cls._corrupt(
+                            "formal Task attempt row disagrees with its event history"
+                        )
+                    continue
                 command_rows = connection.execute(
                     """
                     SELECT * FROM commands WHERE scope_key=? AND command_id=?
@@ -2112,6 +2425,7 @@ class SqliteTaskStore:
                 in {
                     "task.accepted",
                     "task.retry_accepted",
+                    "task.revision_applied",
                     "task.running",
                     "task.blocked",
                     "task.decision_required",
@@ -2145,6 +2459,20 @@ class SqliteTaskStore:
         command: CommandEnvelope,
         fingerprint: bytes,
     ) -> ResultEnvelope | None:
+        if self._s8_5_revision_enabled:
+            reserved = connection.execute(
+                """
+                SELECT 1 FROM s85_revision_commands
+                WHERE scope_key=? AND command_id=?
+                """,
+                (_scope_key(command.scope), command.command_id),
+            ).fetchone()
+            if reserved is not None:
+                raise FormalTaskViolation(
+                    "IDEMPOTENCY_CONFLICT",
+                    "command_id is already bound to an S8.5 task revision",
+                    ErrorCode.CONFLICT,
+                )
         row = connection.execute(
             """
             SELECT fingerprint, result_json FROM commands
@@ -2226,6 +2554,28 @@ class SqliteTaskStore:
                 _json_dump(result.to_dict()),
                 created_at,
             ),
+        )
+
+    def _s8_5_attempt_is_fenced(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task_id: str,
+        attempt_id: str,
+    ) -> bool:
+        if not self._s8_5_revision_enabled:
+            return False
+        return (
+            connection.execute(
+                """
+                SELECT 1 FROM s85_revision_commands
+                WHERE task_id=? AND predecessor_attempt_id=?
+                  AND application_state IN (?, ?)
+                LIMIT 1
+                """,
+                (task_id, attempt_id, "fencing", "unknown"),
+            ).fetchone()
+            is not None
         )
 
     @staticmethod
@@ -2841,6 +3191,27 @@ class SqliteTaskStore:
                 "nonterminal Executor observation cannot carry an outcome",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
+        fenced = self._s8_5_attempt_is_fenced(
+            connection,
+            task_id=observation.task_id,
+            attempt_id=observation.attempt_id,
+        )
+        if fenced:
+            # The Executor fact remains durable for fence reconciliation, but a
+            # predecessor under an accepted S8.5 revision command no longer owns
+            # current attempt/Task/UI/project truth. The cleanup ACK atomically
+            # materializes the diagnostic terminal state with any successor.
+            connection.execute(
+                """
+                UPDATE attempts SET source_seq=?, updated_at=? WHERE attempt_id=?
+                """,
+                (
+                    observation.source_seq,
+                    observation.occurred_at,
+                    observation.attempt_id,
+                ),
+            )
+            return ()
         connection.execute(
             """
             UPDATE attempts SET state=?, outcome=?, source_seq=?, updated_at=?
@@ -3373,14 +3744,22 @@ class SqliteTaskStore:
             ).fetchall()
             events = tuple(self._event_from_row(row) for row in event_rows)
             if attempt.attempt_number > 1:
-                if not events or events[0].event_type != "task.retry_accepted":
+                if not events or events[0].event_type not in {
+                    "task.retry_accepted",
+                    "task.revision_applied",
+                }:
                     raise FormalTaskViolation(
                         "TASK_STORE_CORRUPT",
-                        "current retry segment lacks its durable authority boundary",
+                        "current successor segment lacks its durable authority boundary",
                         ErrorCode.INTERNAL,
                     )
                 boundary = events[0]
-                retry_of_attempt_id = boundary.details.get("retry_of_attempt_id")
+                predecessor_key = (
+                    "retry_of_attempt_id"
+                    if boundary.event_type == "task.retry_accepted"
+                    else "predecessor_attempt_id"
+                )
+                retry_of_attempt_id = boundary.details.get(predecessor_key)
                 previous_outcome = boundary.details.get("previous_outcome")
                 predecessor_row = connection.execute(
                     "SELECT * FROM attempts WHERE attempt_id=?",
@@ -3394,14 +3773,22 @@ class SqliteTaskStore:
                     or predecessor_row["state"] != FormalAttemptState.TERMINAL.value
                     or predecessor_row["outcome"] != previous_outcome
                     or previous_outcome
-                    not in {
-                        TerminalOutcome.CANCELLED.value,
-                        TerminalOutcome.COMPLETED.value,
-                    }
+                    not in (
+                        {
+                            TerminalOutcome.CANCELLED.value,
+                            TerminalOutcome.COMPLETED.value,
+                        }
+                        if boundary.event_type == "task.retry_accepted"
+                        else {
+                            TerminalOutcome.INTERRUPTED.value,
+                            TerminalOutcome.CANCELLED.value,
+                            TerminalOutcome.COMPLETED.value,
+                        }
+                    )
                 ):
                     raise FormalTaskViolation(
                         "TASK_STORE_CORRUPT",
-                        "retry authority boundary does not match its durable predecessor",
+                        "successor authority boundary does not match its durable predecessor",
                         ErrorCode.INTERNAL,
                     )
             return TaskEventAuthoritySnapshot(

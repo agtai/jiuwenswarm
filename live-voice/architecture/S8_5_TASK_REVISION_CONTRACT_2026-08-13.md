@@ -21,6 +21,12 @@ effective instruction, additive facts, effective constraints, origin commit and
 the command that created it. `attempt_id` identifies exactly one execution of
 exactly one revision; it is never reused.
 
+The competitive-showcase profile permits exactly one change: revision `1` to
+revision `2`. It applies only to the original live attempt (`attempt_number=1`).
+It cannot be combined with `task.retry`, and `task.retry` is unavailable after
+revision `2` is applied. This is a deliberate S8.5 scope bound, not a claim of a
+general multi-revision task platform.
+
 ```text
 TaskRevision {
   task_id, task_revision, predecessor_revision,
@@ -102,9 +108,12 @@ outputs from becoming current. The canonical task revision remains unchanged
 until exact Executor cleanup ACK.
 
 Executor ACK must bind task, predecessor revision/attempt, fence command,
-checkout/worktree identity and `unapplied_changes_discarded=true`. Store then
-atomically marks the predecessor `interrupted`, appends revision `N+1`, creates
-one successor attempt and one dispatch outbox row, advances current revision and
+checkout/worktree identity and `unapplied_changes_discarded=true`. A still-live
+predecessor becomes `interrupted`; if a late terminal Executor fact already
+closed it, that diagnostic outcome is preserved rather than rewritten. In both
+cases the predecessor is superseded and cannot affect current Task or project
+truth. In the same transaction Store appends revision `N+1`, creates one
+successor attempt and one dispatch outbox row, advances current revision and
 emits `task.revision_applied`. No ACK means no successor.
 
 Only authoritative successor attempt events may produce running/terminal task

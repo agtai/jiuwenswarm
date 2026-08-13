@@ -48,6 +48,7 @@ _PROJECTABLE_TASK_EVENTS = frozenset(
     {
         "task.accepted",
         "task.retry_accepted",
+        "task.revision_applied",
         "task.running",
         "task.blocked",
         "task.decision_required",
