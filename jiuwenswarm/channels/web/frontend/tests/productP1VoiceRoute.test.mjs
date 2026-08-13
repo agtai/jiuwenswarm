@@ -113,7 +113,13 @@ class FakeAudioContext {
   sourceStartCount = 0;
   sourceEndCount = 0;
   onSourceEnded = null;
+  deferSourceEnds = false;
+  pendingSourceEnds = [];
   sinkIds = [];
+
+  releaseSourceEnds() {
+    for (const finish of this.pendingSourceEnds.splice(0)) finish();
+  }
 
   async resume() {
     this.state = 'running';
@@ -141,7 +147,7 @@ class FakeAudioContext {
         context.activeSources += 1;
         context.sourceStartCount += 1;
         context.peakSources = Math.max(context.peakSources, context.activeSources);
-        queueMicrotask(() => {
+        const finish = () => {
           context.activeSources -= 1;
           context.sourceEndCount += 1;
           context.onSourceEnded?.({
@@ -149,7 +155,9 @@ class FakeAudioContext {
             sourceEndCount: context.sourceEndCount,
           });
           source.onended?.();
-        });
+        };
+        if (context.deferSourceEnds) context.pendingSourceEnds.push(finish);
+        else queueMicrotask(finish);
       },
       stop() {
         if (context.activeSources > 0) context.activeSources -= 1;
@@ -283,6 +291,7 @@ function audioEnvironment(createId = () => 'capture-1') {
     permissions: null,
     createAudioContext: () => {
       const context = new FakeAudioContext();
+      context.deferSourceEnds = environment.deferSourceEnds;
       environment.contexts.push(context);
       return context;
     },
@@ -301,6 +310,7 @@ function audioEnvironment(createId = () => 'capture-1') {
     contexts: [],
     devices: [{ kind: 'audioinput' }],
     initialTrackMuted: false,
+    deferSourceEnds: false,
   };
   return environment;
 }
@@ -3494,6 +3504,7 @@ async function runConcurrentCaptureJourney(options = {}) {
   let captureDurationBoundarySnapshot = null;
   let captureDurationBoundaryRecognition = null;
   let captureDurationLateFrameUplinkCount = null;
+  let transportAckBeforeRenderSnapshot = null;
   let secondMediaCloseFailures = options.failSecondMediaCloseOnce === true ? 1 : 0;
   let activationCountAtFinalDownlinkAck = null;
   let finalDownlinkAckResolve;
@@ -3506,6 +3517,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       return () => `capture-${++value}`;
     })()
   );
+  environment.deferSourceEnds = options.deferSourceEndsUntilTransportAck === true;
   const response = {
     interaction_id: 'interaction-1',
     response_id: 'response-duplex-1',
@@ -3905,6 +3917,23 @@ async function runConcurrentCaptureJourney(options = {}) {
       await sendFirstFrameToNextWorklet(environment, priorWorklet);
     }
   }
+  if (options.deferSourceEndsUntilTransportAck === true) {
+    let downlinkSocket = null;
+    for (let turn = 0; turn < 200; turn += 1) {
+      downlinkSocket = sockets.find(socket => socket.serverBinding?.direction === 'downlink') ?? null;
+      if ((downlinkSocket?.downlinkNextSeq ?? 0) >= Math.min(downlinkFrameCount, 8)) break;
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    await new Promise(resolve => setTimeout(resolve, 20));
+    transportAckBeforeRenderSnapshot = {
+      downlinkAckedSeq: downlinkSocket?.downlinkAckedSeq ?? null,
+      downlinkNextSeq: downlinkSocket?.downlinkNextSeq ?? null,
+      sourceStartCount: environment.contexts[0].sourceStartCount,
+      sourceEndCount: environment.contexts[0].sourceEndCount,
+    };
+    environment.contexts[0].deferSourceEnds = false;
+    environment.contexts[0].releaseSourceEnds();
+  }
   if (options.exerciseCaptureDurationBeforeReceipt === true) {
     await finalDownlinkAckObserved;
     if (options.deferCaptureDurationUntilDetachWait === true) {
@@ -4111,6 +4140,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     captureDurationBoundaryRecognition,
     captureDurationLateFrameUplinkCount,
     activationCountAtFinalDownlinkAck,
+    transportAckBeforeRenderSnapshot,
     environment,
   };
 }
@@ -4132,6 +4162,23 @@ test('formal P1 dedicated downlink ACKs scheduled audio and receipts only render
   await owner.close();
   assert.equal(environment.contexts[0].state, 'closed');
   assert.ok(calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2'));
+});
+
+test('formal P1 advances the eight-frame downlink window before browser render completion', async () => {
+  const journey = await runConcurrentCaptureJourney({
+    downlinkFrameCount: 9,
+    deferSourceEndsUntilTransportAck: true,
+  });
+  const { owner, playError, transportAckBeforeRenderSnapshot } = journey;
+
+  assert.equal(playError, null);
+  assert.deepEqual(transportAckBeforeRenderSnapshot, {
+    downlinkAckedSeq: 8,
+    downlinkNextSeq: 9,
+    sourceStartCount: 9,
+    sourceEndCount: 0,
+  });
+  await owner.close();
 });
 
 test('formal P1 defers successor capture for a long answer so the 30-second capture bound cannot stop playout', async () => {
