@@ -1,7 +1,7 @@
 # S8 readiness preparation record
 
-> Status: `S8 READINESS INTEGRATED`; S7/A2 re-frozen for exact A3 entry, but S8
-> human acceptance has not started.
+> Status: `S8 READINESS INTEGRATED`; exact A3 entry is fail-closed on the final
+> external S7 report/handoff. S8 human acceptance has not started.
 >
 > Authority: current stage remains [STATUS](STATUS.md); S8 requirements remain
 > [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md) and the
@@ -9,8 +9,8 @@
 
 ## 1. Packet identity and boundary
 
-- Stage/node: `S7-04 → S8-01` entry boundary; S8/A3 human acceptance is
-  ready but not active.
+- Stage/node: `S7-04 → S8-01` entry boundary; S8/A3 human acceptance is not
+  active and remains blocked unless the exact current handoff validates.
 - Track/module: Shared-X / A3 operator workflow, preflight, cleanup and sanitized
   observation support.
 - Risk: Tier 2/3 because candidate identity, private environment boundaries,
@@ -98,7 +98,7 @@ affected A2 checks before replacing the handoff.
 | Status | Items |
 |---|---|
 | `INTEGRATED` | S7 report/handoff consumer including generated-artifact state and the S7-frozen production-build manifest, exact candidate checks, disk/private-443 served-content binding, raw flag checks, sanitized route/environment checks, candidate-rooted process and HTTPS/CSP/WSS-ACK diagnostics, fixture ownership/isolation and pre-journey effect plan, product-session/unique-scope-correlation-bound trace capture with per-scope semantics, scoped identity/settlement checks, decision consistency, task/project/process cleanup checks, dry-run and exact delete safety, operator sequence and tests are integrated on the closed S7 line. |
-| `S7_REFREEZE_SATISFIED` | The source candidate received affected tests, all 40 automatic checks, five real `VERIFY` probes and independent cumulative review. The external final report/handoff binds the exact clean documentation-handoff HEAD before S8 entry. |
+| `S7_REFREEZE_CONDITIONAL` | The source candidate received affected tests, all 40 automatic checks, five real `VERIFY` probes and independent cumulative review. The final test-only candidate removes a reproduced wall-clock-sensitive deadline assertion. Re-freeze is satisfied only when the complete post-commit runner, clean identity, independent review and external report/handoff all validate the exact current HEAD; otherwise S8 entry remains blocked. |
 | `ENVIRONMENT` | Gateway-only Speech access, Agent model/tool route, private HTTPS/WSS proxy/cert/DNS, exact Chrome/OS/devices/network, isolated runtime/Store, service processes and real observations. |
 | `USER_REQUIRED` | S8-01 text/Tool and physical Provider/device probes; every Showcase §2–8 interaction/usability observation; final Alpha decision. |
 | `FINDING_FOR_S7` | `CLOSED`: the prior handoff did not bind Git-ignored `frontend/dist` to the exact frontend served by external private 443. The S7 runner and S8 consumer close it with build/served-content identities, negative tests, complete S7 rerun and independent Tier-3 review. |
@@ -111,9 +111,13 @@ integrated after the prior S7-04 handoff. This changed candidate HEAD and made
 the `a53856de` report/handoff historical rather than current A3 authority. The
 coherent source candidate then received S7-01 identity, affected automation,
 complete S7-02, S7-03 and all five real probes on exact clean `e58df618`.
+The first exact lineage-merge run then exposed one low-frequency test-only 20 ms
+wall-clock race; the deterministic clock repair received affected verification
+without changing product implementation.
 
-The final documentation-handoff commit must repeat the complete S7 run before
-the external handoff becomes current. The affected check boundary includes:
+The final test/documentation-handoff commit must repeat the complete S7 run
+before the external handoff becomes current. The affected check boundary
+includes:
 
 - `tests/unit_tests/live_voice/test_s7_alpha_verification.py`;
 - `tests/unit_tests/live_voice/test_s7_real_probes.py`;

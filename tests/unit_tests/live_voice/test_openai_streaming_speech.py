@@ -1195,16 +1195,26 @@ async def test_audio_transport_failure_fences_and_emits_safe_fallback() -> None:
 async def test_recognition_deadline_closes_transport_and_retains_cancel_truth() -> None:
     facts: list[SpeechDegradationFact] = []
     socket = FakeSocket((session_updated_event(),))
+    clock = [0.0]
 
     async def socket_factory(*_args) -> FakeSocket:
         return socket
 
     provider = OpenAIStreamingSpeechProvider(
-        config(), socket_factory=socket_factory, degradation_sink=facts.append
+        config(),
+        socket_factory=socket_factory,
+        degradation_sink=facts.append,
+        monotonic=lambda: clock[0],
     )
     ref = recognition_ref()
-    await provider.open_recognition(ref, timeout_seconds=0.02)
+    await provider.open_recognition(ref, timeout_seconds=2.0)
+    session = provider._require_recognition(ref)
+    assert session.receive_task is not None
+    receive_task = session.receive_task
+    clock[0] = 3.0
+    socket.push(session_updated_event())
     await asyncio.wait_for(socket.closed_event.wait(), timeout=1)
+    await asyncio.wait_for(receive_task, timeout=1)
     assert socket.closed is True
     assert facts[-1].reason is SpeechDegradationReason.PROVIDER_TIMEOUT
     snapshot = provider.conformance.snapshot()

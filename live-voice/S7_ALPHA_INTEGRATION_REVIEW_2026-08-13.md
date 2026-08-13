@@ -248,8 +248,21 @@ The frozen build contained 180 files / 16,275,167 bytes; its post-run identity
 and all 180 private-443 response contents matched. S7-03 independently approved
 the exact clean `e58df618` candidate.
 
-The external sanitized final report and `live-voice.s7-a3-handoff.v1` bind the
-exact clean documentation-handoff HEAD containing this addendum and current
-STATUS. That post-documentation runner repeats the same 40 automatic and five
-real checks before the handoff is `FROZEN_FOR_A3`. This addendum extends the S7
-record; it does not claim S8/A3 human acceptance.
+The first exact lineage-merge-HEAD run correctly remained non-authoritative: it
+returned the five real `VERIFY` probes and every other automatic check, but one
+backend test exposed that its 20 ms wall-clock budget could expire during
+`open_recognition()` before the stream-deadline behavior under test began. The
+failure reproduced independently at low frequency. The final candidate changes
+only that test to complete open under a reasonable budget, advance an injected
+monotonic clock beyond the deadline, wake the receiver with a valid nonterminal
+Provider event and await the exact worker cleanup. The affected file passed 68
+tests and the deterministic deadline path passed 1,000 direct repetitions.
+
+S7/A2 closure is intentionally conditional rather than claimed in advance. The
+external sanitized final report and `live-voice.s7-a3-handoff.v1` must validate
+the exact clean current HEAD containing this addendum, current STATUS, the
+test-only stabilization and the no-tree-change `b7efa14f` lineage. Only a
+post-commit runner with the same 40 automatic `PASS` plus five real `VERIFY`, a
+clean final identity, S7-03 `PASS` and handoff `FROZEN_FOR_A3` closes S7-04 and
+makes S8 ready. Otherwise S7-04 remains in progress and S8 is blocked. This
+addendum does not claim S8/A3 human acceptance.
