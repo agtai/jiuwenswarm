@@ -4,6 +4,8 @@
 > Chrome 上用真实麦克风与真实输出设备**完成权限、设备与听感确认。本文是为此
 > 准备的一次性执行手册；执行结果回填后 S6-02 才能判定。
 > AI 不得声称自己听到了扬声器输出，也不得代替浏览器权限弹窗做选择。
+> `<RUN_ROOT>` 是机器私有的运行根目录，其绝对路径不入 Git；
+> 本轮它位于一个 Git 之外的本地目录，由会话交接文档单独记录。
 
 ## 1. 为什么只能由你做
 
@@ -26,12 +28,12 @@ hidden/background/resume 与听感确认。这些都发生在浏览器权限层�
 | 项 | 状态 |
 |---|---|
 | 私有 origin | `https://live-voice.localhost`（Caddy 本地 CA 已装，浏览器直接可信） |
-| 五个服务 | `python D:\lvalpha\run-20260812\scripts\services.py status` 应全部 LISTENING |
+| 五个服务 | `python <RUN_ROOT>\scripts\services.py status` 应全部 LISTENING |
 | 前端 flags | `INTEGRATED_WEB` / `INTEGRATED_P1` / `PRODUCT_P3_MUTATION` = true |
 | Speech 凭据 | Gateway 侧用户级环境变量，浏览器层不下发（已实测 0 泄漏） |
-| 目标项目 | 一次性 fixture `D:\lvalpha\run-20260812\fixture-project`（无 remote） |
+| 目标项目 | 一次性 fixture `<RUN_ROOT>\fixture-project`（无 remote） |
 
-若有服务 down：`python D:\lvalpha\run-20260812\scripts\services.py start`。
+若有服务 down：`python <RUN_ROOT>\scripts\services.py start`。
 
 ### 2b. 页面预检（已代你跑过，2026-08-13）
 
@@ -56,7 +58,7 @@ hidden/background/resume 与听感确认。这些都发生在浏览器权限层�
 完整取证见 [D112](D112_ALPHA_REAL_MEDIA_ROUTE_2026-08-13.md) §3b。
 
 **由此带来的一个操作差异**：前端 flags 现在是**构建期**烘焙的。如果之后改了前端源码，
-必须按 `D:\lvalpha\run-20260812\caddy\Caddyfile` 头部记录的命令带同一组 flags
+必须按 `<RUN_ROOT>\caddy\Caddyfile` 头部记录的命令带同一组 flags
 重新 `npm run build`，否则你看到的还是旧构建。
 
 ### 2b2. 用哪个浏览器：普通 Chrome 的**专用 profile**
@@ -82,7 +84,7 @@ Caddy 的本地 CA `CN=Caddy Local Authority - 2026 ECC Root` 已在**当前 Win
 **启动命令**（profile 落在 Git 之外的运行根目录）
 
 ```bash
-"C:\Program Files\Google\Chrome\Application\chrome.exe" --user-data-dir="D:\lvalpha\run-20260812\browser-profile" https://live-voice.localhost
+"<CHROME>" --user-data-dir="<RUN_ROOT>/browser-profile" https://live-voice.localhost
 ```
 
 它会启动一个与你日常 Chrome 并存的独立实例。第一次启动是全新 profile：没有扩展、
@@ -113,7 +115,7 @@ p2Activation.status === 'active'`。P2 激活是**自动**的（没有"激活"�
 但它要求 `mode === 'agent'` 且已有 session。所以按下面三步走：
 
 1. **工作区选中项目 `live-voice-alpha-fixture`**
-   （`proj_43562811`，目录 `D:\lvalpha\run-20260812\fixture-project`，
+   （`proj_43562811`，目录 `<RUN_ROOT>\fixture-project`，
    `work_mode=code`，未隐藏，会出现在项目列表里）。
    这一步决定 session 绑定哪个项目 —— 服务端 P2 授权要求所绑项目的
    `work_mode` 恰为 `code`，绑错项目会直接拒绝。

@@ -5,6 +5,8 @@
 > downlink + playout ACK）在私有 origin 上跑通的结果。当前可变状态仍只由
 > [STATUS.md](STATUS.md) 拥有。本文**不产生**新的 Alpha 验收结论，S6 未关闭。
 > 前序记录：[D111](D111_ALPHA_REAL_PATH_ACTIVATION_2026-08-12.md)。
+> `<RUN_ROOT>` 是机器私有的运行根目录，其绝对路径不入 Git；
+> 本轮它位于一个 Git 之外的本地目录，由会话交接文档单独记录。
 
 ## 1. 结论
 
@@ -116,7 +118,7 @@ D111 §2 声明的 Chrome 基线是 `151.0.7922.109`，但本机安装目录同�
   `p2.agent_interaction -> unavailable | P2_RUNTIME_UNAVAILABLE`，
   `authority` 段却是 `formal`。
 - **排除法**：先前假设的两个分支都不是原因。进程内探针实测
-  `resolved_context.file_path = D:/lvalpha/run-20260812/fixture-project`（非空），
+  `resolved_context.file_path = <RUN_ROOT>/fixture-project`（非空），
   `agent_manager.get_agent("web","code",<fixture>,"normal")` 返回 `JiuWenSwarm`（非 None），
   AgentServer 日志也有 `web agent created cache_key=code:normal:...`。
 - **根因**：真实原因在下游。`AgentConversationRuntime.start()` 因 `_facade_available()`
@@ -516,4 +518,4 @@ fake facade 对任何侧写都声明能力、fake socket 回显与请求逐字�
 本批次已就该处补上闭合枚举的诊断日志。
 
 原始运行数据（隔离数据目录、fixture、日志、报告）保留在 Git 之外的
-`D:\lvalpha\run-20260812`。
+`<RUN_ROOT>`。

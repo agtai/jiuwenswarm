@@ -4,6 +4,8 @@
 > （Speech 凭据 + 私有 HTTPS/WSS + 隔离运行时 + 一次性 Git fixture）全部装配起来
 > 并跑通真实链路的结果。当前可变状态仍只由 [STATUS.md](STATUS.md) 拥有。
 > 本文**不产生**新的 Alpha 验收结论，S6 未关闭。
+> `<RUN_ROOT>` 是机器私有的运行根目录，其绝对路径不入 Git；
+> 本轮它位于一个 Git 之外的本地目录，由会话交接文档单独记录。
 
 ## 1. 结论
 
@@ -287,4 +289,4 @@ socket、P3 的 model resolver 与 executor 都是 fake，只回放实现已知�
 并优先以权威 Store（SQLite）与去敏日志作为事实来源，而不是产品响应信封的字段。
 
 任一缺失都不得关闭 S6，也不得据此给出 Alpha PASS。原始运行数据（隔离数据目录、
-fixture、日志、报告）保留在 Git 之外的 `D:\lvalpha\run-20260812`。
+fixture、日志、报告）保留在 Git 之外的 `<RUN_ROOT>`。
