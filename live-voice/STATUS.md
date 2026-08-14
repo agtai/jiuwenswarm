@@ -1,6 +1,6 @@
 # Live Voice current status
 
-> Updated: 2026-08-13
+> Updated: 2026-08-14
 > This is the only mutable source for current branch expectations, stage/task,
 > blockers and next actions. Git is the implementation fact; detailed S7 facts
 > are in the linked review record.
@@ -14,18 +14,28 @@
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
-- `S7 - Candidate Assembly, Verification and Review` / `A2` uses a fail-closed
-  exact-handoff rule on the S8-readiness line. Product source remains
-  `c209e4a6cb88779277254751aa52354050a813a2`; readiness/build-identity source is
-  `e58df618d3ee00776e004e8dfacd8d4d88b744dc`; the final test-only candidate also
-  removes a wall-clock-sensitive recognition-deadline assertion. S7/A2 is
-  `CLOSED` and S8/A3 is `READY / NOT STARTED` only when the external sanitized
-  report and `live-voice.s7-a3-handoff.v1` both validate the exact clean current
-  HEAD, the required `b7efa14f` lineage, 40 automatic `PASS`, five real
-  `VERIFY`, S7-03 `PASS` and `FROZEN_FOR_A3`. If any validation is absent or
-  fails, S7-04 remains `REFREEZE IN PROGRESS` and S8 is `BLOCKED / NOT STARTED`.
-- No S8 human journey has run under either branch of that rule, so there is no
-  `PASS - INTEGRATED WEB ALPHA` result.
+- `S7 - Candidate Assembly, Verification and Review` / `A2` closed for exact
+  candidate `500700501f06dec9a27fda99fdaf73d5ac123d2c`: the external sanitized
+  report and `live-voice.s7-a3-handoff.v1` validated the clean HEAD, required
+  lineage, 40 automatic `PASS`, five real `VERIFY`, S7-03 `PASS` and
+  `FROZEN_FOR_A3`.
+- Formal S8 began on that frozen candidate. The human journey produced useful
+  product truth but is now `PAUSED / SOURCE REPAIR`: normal speech playout was
+  rejected after a same-interaction activation successor because its canonical
+  response generation restarted at zero, and explicit Start after a long-lived
+  background/foreground lifecycle could use an expired Gateway media-activation
+  authority until a page refresh renewed it.
+- The current repair keeps the Gateway stale-response fence intact, moves the
+  response-generation high-water to the stable AgentServer product interaction,
+  and revalidates the exact active P2 binding before each explicit media Start.
+  Focused Python/Gateway coverage passed 326 tests and the integrated Web suite
+  passed 328 tests. This changed source is not the frozen `50070050` candidate:
+  final S7 re-verification/re-freeze and a fresh formal S8 closeout remain
+  mandatory before any `PASS - INTEGRATED WEB ALPHA` result.
+- By explicit user direction, the already observed scope-correlation mismatch
+  is retained as a non-blocking provisional S8 deviation for final human
+  judgment. Continued S8 work before re-freeze is discovery only; its events
+  cannot be relabeled as exact-candidate formal acceptance evidence.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -42,7 +52,12 @@ and the detailed result is
 | S7-02 automation | `SATISFIED` | The readiness candidate and exact documentation handoff each receive all 40 automatic checks. The source-candidate run completed backend Alpha 1,635 passed / 2 skipped, related regressions 788 passed, 27 frontend commands 847/847 passed and production build 4,640 modules; exact Ruff debt, format/compile, diff/link/hygiene and post-run identity passed. The ignored build froze 180 files / 16,275,167 bytes and private 443 served all 180 exact contents. |
 | S7-02 real path | `SATISFIED` | All five probes returned `VERIFY` on one private-only HTTPS/WSS runtime declaration: Speech/Media 5 samples, Agent/Executor 2, Benchmark/Fault 65, Secure Deployment 3 and Privacy 19; failures and forbidden side effects were zero. Speech/Media p50 was 18,188.395 ms and p95/max 19,001.572 ms. |
 | S7-03 cumulative Tier-3 review | `SATISFIED` | Cumulative main review and independent read-only review found no open Critical/High/P2 source issue. The S8 readiness boundary closed strict topology/port, S7 report, Task Store/Direct settlement, trace, human-observer and ignored-build/served-content findings; independent exact-`e58df618` verification passed 112 tests. |
-| S7-04 A3 handoff freeze | `CONDITIONAL` | The `a53856de` handoff remains history. This row is `SATISFIED` only when a new external report/handoff validates the exact clean current HEAD, runtime digest, 40 automatic PASS, five real VERIFY, S7-03 PASS and `FROZEN_FOR_A3`; otherwise it is `IN PROGRESS` and S8 entry is blocked. No public deployment or real-user project is permitted. |
+| S7-04 A3 handoff freeze | `REFREEZE REQUIRED` | Exact `50070050` was frozen and admitted S8. The current lifecycle repairs change source, so that handoff is now historical and a final exact-clean-HEAD report/handoff must be regenerated after provisional discovery. No public deployment or real-user project is permitted. |
+
+The table records the last closed S7 line. The current source-repair tree
+supersedes that candidate for further product work and therefore returns S7-04
+to `REFREEZE REQUIRED` until the final batched S8 findings are repaired and the
+complete S7 verification/handoff is regenerated.
 
 ## S7 accepted limitations
 
@@ -77,15 +92,15 @@ and the detailed result is
 
 ## Next actions
 
-1. Complete the exact-clean-current-HEAD S7 runner, five real probes and final
-   independent identity/provenance review, then freeze the external report and
-   handoff. Any failure keeps S8 blocked.
-2. Only if the fail-closed S7-04 rule validates, run the read-only S8 preflight
-   and create the isolated S8 runtime/Task Store, disposable no-remote fixture,
-   effect plan and product-session/scope-correlation binding outside Git.
-3. Only after the exact S8 entry audit passes, run
-   [ALPHA_SHOWCASE.md](demo/ALPHA_SHOWCASE.md) once. The user physically verifies
-   microphone capture, heard playout, interruption, device/permission/lifecycle
-   behavior and the complete P1/P2/P3alpha joint journey.
-4. Record S8 closeout and only then decide `PASS`, `PARTIAL`, `BLOCKED` or `FAIL`
-   under [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).
+1. Finish cold review/static verification of the two lifecycle repairs, commit
+   one coherent local candidate, rebuild the private served frontend and restart
+   only the affected private runtime services.
+2. Continue the user-directed provisional S8 discovery from the remaining
+   showcase rows. Record new findings against the repair candidate, but do not
+   claim formal A3 closure or reuse old exact-candidate events as formal proof.
+3. Batch any remaining accepted source fixes, then run one complete S7 runner,
+   five real probes, cumulative Tier-3 review and external handoff freeze on the
+   final exact clean HEAD.
+4. Run a fresh exact-candidate S8 entry audit and formal human closeout, then
+   decide `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` under
+   [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).

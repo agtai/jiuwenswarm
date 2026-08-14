@@ -760,7 +760,10 @@ export class ProductWebP2ActivationOwner {
   private activationAttempted = false;
   private activationReplayed: boolean | null = null;
   private cleanupRequired = false;
+  private closing = false;
   private activationPromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
+  private mediaAuthorityRefreshPromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
+  private mediaStartReservation: Readonly<{ cancel: () => Promise<void> }> | null = null;
   private closePromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
   private closeRetryPromise: Promise<ProductWebP2ActivationSnapshot> | null = null;
   private readonly closeRetryObservers = new Set<ProductWebCloseRetryObserver<ProductWebP2ActivationSnapshot>>();
@@ -794,7 +797,12 @@ export class ProductWebP2ActivationOwner {
   }
 
   needsCleanup(): boolean {
-    return this.activationPromise !== null || this.cleanupRequired;
+    return (
+      this.activationPromise !== null ||
+      this.mediaAuthorityRefreshPromise !== null ||
+      this.mediaStartReservation !== null ||
+      this.cleanupRequired
+    );
   }
 
   activationWasReplayed(): boolean | null {
@@ -803,6 +811,7 @@ export class ProductWebP2ActivationOwner {
 
   start(input: Readonly<ProductWebP2ActivationBinding>): Promise<ProductWebP2ActivationSnapshot> {
     if (!this.enabled) return Promise.resolve(this.snapshot());
+    if (this.closing || this.closePromise) return Promise.reject(new Error('product P2 activation is closing'));
     const binding = freezeBinding(input);
     if (this.binding && !sameBinding(this.binding, binding)) {
       return Promise.reject(new Error('a different product P2 activation is already owned'));
@@ -840,6 +849,95 @@ export class ProductWebP2ActivationOwner {
         this.activationPromise = null;
       });
     return this.activationPromise;
+  }
+
+  /**
+   * Revalidate the exact active P2 lease before an explicit media start.
+   *
+   * Gateway media authority is intentionally short-lived. The browser owner
+   * can outlive that TTL, so an `active` client snapshot alone is not proof
+   * that a new microphone route is still trusted. Replaying the exact P2
+   * activation renews server-observed authority without auto-starting capture.
+   */
+  refreshMediaAuthority(): Promise<ProductWebP2ActivationSnapshot> {
+    if (!this.enabled) return Promise.resolve(this.snapshot());
+    if (this.closing || this.closePromise) return Promise.reject(new Error('product P2 activation is closing'));
+    if (this.mediaAuthorityRefreshPromise) return this.mediaAuthorityRefreshPromise;
+    let binding: ProductWebP2ActivationBinding;
+    try {
+      binding = this.requireActiveBinding();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    let retained: Promise<ProductWebP2ActivationSnapshot>;
+    retained = this.request(PRODUCT_P2_ACTIVATE_METHOD, { ...binding })
+      .then(value => {
+        let result: JsonObject;
+        try {
+          result = requireResult(value, 'active', binding);
+        } catch (error) {
+          throw ambiguousActivationResponse(error);
+        }
+        if (result.replayed !== true) {
+          throw new Error('product P2 media authority refresh did not replay the active binding');
+        }
+        if (this.closing || this.binding === null || !sameBinding(this.binding, binding)) {
+          throw new Error('product P2 activation changed during media authority refresh');
+        }
+        this.activationReplayed = true;
+        this.cleanupRequired = true;
+        this.status = 'active';
+        this.reason = null;
+        return this.publish();
+      })
+      .catch(error => {
+        this.cleanupRequired = true;
+        this.status = 'unavailable';
+        this.reason = error instanceof Error ? error.message : 'product P2 media authority unavailable';
+        this.publish();
+        throw error;
+      })
+      .finally(() => {
+        if (this.mediaAuthorityRefreshPromise === retained) this.mediaAuthorityRefreshPromise = null;
+      });
+    this.mediaAuthorityRefreshPromise = retained;
+    return retained;
+  }
+
+  /** Synchronous final fence immediately before an explicit media effect. */
+  authorizesMediaStart(input: Readonly<ProductWebP2ActivationBinding>): boolean {
+    return !this.closing && this.status === 'active' && this.binding !== null && sameBinding(this.binding, input);
+  }
+
+  /**
+   * Atomically order one explicit media start before or after P2 teardown.
+   *
+   * Start is invoked synchronously after the reservation is published. A
+   * later close fences new reservations and awaits the caller-owned local
+   * cancellation before revoking remote authority; it does not wait forever
+   * on a browser permission promise that may remain pending.
+   */
+  runAuthorizedMediaStart<T>(
+    input: Readonly<ProductWebP2ActivationBinding>,
+    operation: Readonly<{ start: () => Promise<T>; cancel: () => Promise<void> }>
+  ): Promise<T> {
+    if (typeof operation.start !== 'function' || typeof operation.cancel !== 'function') {
+      return Promise.reject(new Error('product P2 media start operation is invalid'));
+    }
+    if (!this.authorizesMediaStart(input)) return Promise.reject(new Error('product P2 media authority is not current'));
+    if (this.mediaStartReservation !== null) return Promise.reject(new Error('a product P2 media start is already pending'));
+    const reservation = Object.freeze({ cancel: operation.cancel });
+    this.mediaStartReservation = reservation;
+    let pending: Promise<T>;
+    try {
+      pending = Promise.resolve(operation.start());
+    } catch (error) {
+      if (this.mediaStartReservation === reservation) this.mediaStartReservation = null;
+      return Promise.reject(error);
+    }
+    return pending.finally(() => {
+      if (this.mediaStartReservation === reservation) this.mediaStartReservation = null;
+    });
   }
 
   hasPendingSubmission(): boolean {
@@ -1088,7 +1186,21 @@ export class ProductWebP2ActivationOwner {
       return Promise.resolve(this.publish());
     }
     if (this.closePromise) return this.closePromise;
-    const waitForActivation = this.activationPromise ? this.activationPromise.catch(() => this.snapshot()) : Promise.resolve(this.snapshot());
+    // Publish the lifecycle fence synchronously. Awaited activation/authority
+    // work may settle later, but no continuation may start a new media effect.
+    this.closing = true;
+    const pendingActivation = this.activationPromise ? this.activationPromise.catch(() => this.snapshot()) : Promise.resolve(this.snapshot());
+    const pendingMediaAuthority = this.mediaAuthorityRefreshPromise
+      ? this.mediaAuthorityRefreshPromise.catch(() => this.snapshot())
+      : Promise.resolve(this.snapshot());
+    const mediaStartReservation = this.mediaStartReservation;
+    let pendingMediaStart: Promise<void>;
+    try {
+      pendingMediaStart = mediaStartReservation ? Promise.resolve(mediaStartReservation.cancel()) : Promise.resolve();
+    } catch (error) {
+      pendingMediaStart = Promise.reject(error);
+    }
+    const waitForActivation = Promise.all([pendingActivation, pendingMediaAuthority, pendingMediaStart]).then(() => this.snapshot());
     this.closePromise = waitForActivation
       .then(async () => {
         const binding = this.binding;
@@ -1166,7 +1278,7 @@ export class ProductWebP2ActivationOwner {
   }
 
   private requireActiveBinding(): ProductWebP2ActivationBinding {
-    if (this.status !== 'active' || this.binding === null) {
+    if (this.closing || this.status !== 'active' || this.binding === null) {
       throw new Error('product P2 activation is not active');
     }
     return this.binding;

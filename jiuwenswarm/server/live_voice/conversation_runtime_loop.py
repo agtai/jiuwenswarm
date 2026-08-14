@@ -142,6 +142,7 @@ class ConversationRuntimeLoop:
         enabled: bool = True,
         normal_capacity: int = 64,
         control_capacity: int = 16,
+        response_generation_owner: Callable[[str, int], int] | None = None,
     ) -> None:
         if type(enabled) is not bool:
             raise ConversationRuntimeLoopViolation(
@@ -155,7 +156,11 @@ class ConversationRuntimeLoop:
         self._enabled = enabled
         self._normal_capacity = normal_capacity
         self._control_capacity = control_capacity
-        self._runtime = ConversationRuntime(scope, enabled=enabled)
+        self._runtime = ConversationRuntime(
+            scope,
+            enabled=enabled,
+            response_generation_owner=response_generation_owner,
+        )
         self._presentation = PresentationLedger()
         self._normal: deque[_QueuedOperation] = deque()
         self._observation: deque[_QueuedOperation] = deque()

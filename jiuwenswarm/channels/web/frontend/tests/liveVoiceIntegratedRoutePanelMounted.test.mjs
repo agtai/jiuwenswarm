@@ -29,6 +29,22 @@ function mountedProgressActivation(params, overrides = {}) {
   };
 }
 
+function createMountedP2ActivationResponder() {
+  const activeBindings = new Set();
+  return params => {
+    const key = JSON.stringify([
+      params.session_id,
+      params.correlation_id,
+      params.interaction_id,
+      params.activation_id,
+      params.activation_generation,
+    ]);
+    const replayed = activeBindings.has(key);
+    activeBindings.add(key);
+    return { ok: true, result: { status: 'active', ...params, replayed } };
+  };
+}
+
 const mountedBundleDirectory = await mkdtemp(fileURLToPath(new URL('../node_modules/.cache/jiuwenswarm-live-voice-mounted-', import.meta.url)));
 after(async () => {
   await rm(mountedBundleDirectory, { recursive: true, force: true });
@@ -192,7 +208,7 @@ function pendingP2Journal(binding, operation) {
   };
 }
 
-function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
+function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUserMediaOverride = null } = {}) {
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
   const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
@@ -200,7 +216,7 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
   const audioWorkletNodeDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'AudioWorkletNode');
   const webSocketDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
   const values = new Map();
-  const counts = { getUserMedia: 0, enumerateDevices: 0, constraints: [], sinkIds: [] };
+  const counts = { getUserMedia: 0, stoppedTracks: 0, enumerateDevices: 0, constraints: [], sinkIds: [] };
   let latestWorklet = null;
 
   class FakeAudioTrack {
@@ -213,6 +229,7 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
     }
 
     stop() {
+      if (this.readyState !== 'ended') counts.stoppedTracks += 1;
       this.readyState = 'ended';
     }
 
@@ -364,11 +381,14 @@ function installP1BrowserEnvironment({ mediaBinding = null } = {}) {
     async getUserMedia(constraints) {
       counts.getUserMedia += 1;
       counts.constraints.push(constraints);
-      const track = new FakeAudioTrack(`mounted-p1-track-${counts.getUserMedia}`);
-      return {
-        getAudioTracks: () => [track],
-        getTracks: () => [track],
+      const createStream = () => {
+        const track = new FakeAudioTrack(`mounted-p1-track-${counts.getUserMedia}`);
+        return {
+          getAudioTracks: () => [track],
+          getTracks: () => [track],
+        };
       };
+      return getUserMediaOverride === null ? createStream() : getUserMediaOverride({ constraints, createStream });
     },
     enumerateDevices: async () => {
       counts.enumerateDevices += 1;
@@ -1238,11 +1258,12 @@ test('mounted recognized speech requires an exact in-page second action and fenc
   let resolveTaskSubmit = null;
   let renderer;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
 
   const request = async (method, params, options) => {
     calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
     if (method === 'live_voice.composition.p2.activate') {
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       return { ok: true, result: { status: 'closed', ...params } };
@@ -1599,12 +1620,13 @@ test('mounted recognized speech cannot cross a same-Session P2 activation rollov
   let rejectFirstNotification = null;
   let renderer;
   const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
 
   const request = async (method, params) => {
     calls.push({ method, params: { ...params } });
     if (method === 'live_voice.composition.p2.activate') {
       p2Activations.push({ ...params });
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       return { ok: true, result: { status: 'closed', ...params } };
@@ -1676,14 +1698,16 @@ test('mounted recognized speech cannot cross a same-Session P2 activation rollov
       );
     });
     assert.equal(typeof rejectFirstNotification, 'function');
+    assert.equal(p2Activations.length, 2, 'explicit media start must revalidate the exact active P2 binding');
+    assert.deepEqual(p2Activations[1], p2Activations[0]);
     const firstBinding = p2Activations[0];
     await act(async () => {
       rejectFirstNotification();
-      await waitForMounted(() => p2Activations.length === 2, 'closed notification did not activate one exact P2 successor');
+      await waitForMounted(() => p2Activations.length === 3, 'closed notification did not activate one exact P2 successor');
     });
-    assert.equal(p2Activations[1].session_id, firstBinding.session_id);
-    assert.equal(p2Activations[1].activation_generation, firstBinding.activation_generation + 1);
-    assert.notEqual(p2Activations[1].activation_id, firstBinding.activation_id);
+    assert.equal(p2Activations[2].session_id, firstBinding.session_id);
+    assert.equal(p2Activations[2].activation_generation, firstBinding.activation_generation + 1);
+    assert.notEqual(p2Activations[2].activation_id, firstBinding.activation_id);
 
     const productForm = renderer.root.findByProps({ 'data-testid': 'live-voice-integrated-product-text' });
     await act(async () => {
@@ -2523,9 +2547,10 @@ test('mounted P1 applies opaque UI device choices to exact local browser routes 
   const originalWarn = console.warn;
   console.warn = value => warnings.push(String(value));
   let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
   const request = async (method, params) => {
     if (method === 'live_voice.composition.p2.activate') {
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       return { ok: true, result: { status: 'closed', ...params } };
@@ -2592,6 +2617,291 @@ test('mounted P1 applies opaque UI device choices to exact local browser routes 
   }
 });
 
+test('mounted explicit P1 Start fails before media when exact P2 authority refresh is rejected', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const calls = [];
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = value => warnings.push(String(value));
+  let activationCalls = 0;
+  let renderer;
+  const request = async (method, params) => {
+    calls.push({ method, params: { ...params } });
+    if (method === 'live_voice.composition.p2.activate') {
+      activationCalls += 1;
+      if (activationCalls === 1) {
+        return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      }
+      if (activationCalls === 2) {
+        throw Object.assign(new Error('media activation trust expired'), {
+          code: 'PERMISSION_DENIED',
+          reason: 'MEDIA_PRODUCT_ACTIVATION_UNTRUSTED',
+        });
+      }
+      throw new Error('failed refresh must not allocate a successor P2 route');
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    throw new Error(`authority refresh failure must not call ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-p1-authority-refresh-session', request));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'P2 did not expose formal P1');
+    });
+    await act(async () => {
+      formalVoiceStartButton(renderer).props.onClick();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p2.close'),
+        'failed authority refresh did not enter exact cleanup'
+      );
+    });
+
+    assert.equal(activationCalls, 2, 'failed refresh must not allocate a successor P2 route');
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
+    assert.equal(browser.counts.getUserMedia, 0);
+    const refreshIndex = calls.findIndex((call, index) => call.method === 'live_voice.composition.p2.activate' && index > 0);
+    const closeIndex = calls.findIndex(call => call.method === 'live_voice.composition.p2.close');
+    assert.equal(refreshIndex < closeIndex, true);
+    assert.equal(
+      warnings.some(value => value.includes('MEDIA_PRODUCT_ACTIVATION_UNTRUSTED') && value.includes('fallback=text visible=true')),
+      true
+    );
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    console.warn = originalWarn;
+    browser.restore();
+  }
+});
+
+for (const refreshFailure of ['new-route', 'ambiguous-transport']) {
+  test(`mounted ${refreshFailure} authority refresh closes exact P2 before route recovery and opens no media`, async () => {
+    const i18n = await createI18n();
+    const browser = installP1BrowserEnvironment();
+    const calls = [];
+    let activationCalls = 0;
+    let renderer;
+    const request = async (method, params) => {
+      calls.push({ method, params: { ...params } });
+      if (method === 'live_voice.composition.p2.activate') {
+        activationCalls += 1;
+        if (activationCalls === 2 && refreshFailure === 'ambiguous-transport') {
+          throw Object.assign(new Error('refresh response was lost'), { code: 'WS_NOT_READY' });
+        }
+        if (activationCalls > 2) throw new Error('failed refresh must not allocate a successor P2 route');
+        return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      }
+      if (method === 'live_voice.composition.p2.close') {
+        return { ok: true, result: { status: 'closed', ...params } };
+      }
+      if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+        return new Promise(() => {});
+      }
+      if (method === 'live_voice.media.activate') {
+        throw new Error('failed authority refresh must not activate media');
+      }
+      throw new Error(`unexpected authority recovery request: ${method}`);
+    };
+
+    try {
+      await act(async () => {
+        renderer = create(mountedP1Element(i18n, `mounted-p1-${refreshFailure}-session`, request));
+        await Promise.resolve();
+      });
+      await act(async () => {
+        await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'P2 did not expose formal P1');
+        formalVoiceStartButton(renderer).props.onClick();
+        await waitForMounted(
+          () => calls.some(call => call.method === 'live_voice.composition.p2.close'),
+          'failed authority refresh did not close its exact P2 owner'
+        );
+      });
+
+      const activateIndices = calls
+        .map((call, index) => (call.method === 'live_voice.composition.p2.activate' ? index : -1))
+        .filter(index => index >= 0);
+      const closeIndex = calls.findIndex(call => call.method === 'live_voice.composition.p2.close');
+      assert.equal(activateIndices.length, 2, 'failed refresh must not allocate a successor P2 route');
+      assert.equal(activateIndices[1] < closeIndex, true);
+      assert.equal(browser.counts.getUserMedia, 0);
+      assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
+
+      await act(async () => {
+        renderer.unmount();
+        renderer = null;
+        await Promise.resolve();
+      });
+      await act(async () => {
+        renderer = create(mountedP1Element(i18n, `mounted-p1-${refreshFailure}-session`, request));
+        await new Promise(resolve => setTimeout(resolve, 50));
+      });
+      assert.equal(activationCalls, 2, 'durable state-loss barrier must block every successor after reload');
+      assert.equal(browser.counts.getUserMedia, 0);
+      assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
+    } finally {
+      if (renderer) {
+        await act(async () => {
+          renderer.unmount();
+          await Promise.resolve();
+        });
+      }
+      browser.restore();
+    }
+  });
+}
+
+test('mounted P2 close fences a successful in-flight authority refresh before microphone acquisition', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const calls = [];
+  let activationCalls = 0;
+  let resolveRefresh;
+  let refreshParams = null;
+  const refresh = new Promise(resolve => {
+    resolveRefresh = resolve;
+  });
+  let renderer;
+  const request = async (method, params) => {
+    calls.push({ method, params: { ...params } });
+    if (method === 'live_voice.composition.p2.activate') {
+      activationCalls += 1;
+      if (activationCalls === 1) {
+        return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      }
+      refreshParams = { ...params };
+      return refresh;
+    }
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    throw new Error(`close-fenced authority refresh must not call ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-p1-refresh-close-session', request));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'P2 did not expose formal P1');
+      formalVoiceStartButton(renderer).props.onClick();
+      await waitForMounted(() => activationCalls === 2, 'explicit Start did not enter authority refresh');
+    });
+    await act(async () => {
+      renderer.unmount();
+      renderer = null;
+      assert.notEqual(refreshParams, null);
+      resolveRefresh({
+        ok: true,
+        result: {
+          status: 'active',
+          ...refreshParams,
+          replayed: true,
+        },
+      });
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+
+    assert.equal(browser.counts.getUserMedia, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.close').length, 1);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    browser.restore();
+  }
+});
+
+test('mounted P2 close cancels pending getUserMedia and stops its late stream before any media activation', async () => {
+  const i18n = await createI18n();
+  let resolveUserMedia;
+  const userMedia = new Promise(resolve => {
+    resolveUserMedia = resolve;
+  });
+  let createLateStream = null;
+  const browser = installP1BrowserEnvironment({
+    getUserMedia: ({ createStream }) => {
+      createLateStream = createStream;
+      return userMedia;
+    },
+  });
+  const calls = [];
+  const activateP2 = createMountedP2ActivationResponder();
+  let renderer;
+  const request = async (method, params) => {
+    calls.push({ method, params: { ...params } });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next' || method === 'live_voice.task.list') {
+      return new Promise(() => {});
+    }
+    if (method === 'live_voice.media.activate') {
+      throw new Error('cancelled pending microphone acquisition must not activate media');
+    }
+    throw new Error(`unexpected pending-microphone request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP1Element(i18n, 'mounted-p1-pending-microphone-session', request));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(() => formalVoiceStartButton(renderer).props.disabled === false, 'P2 did not expose formal P1');
+      formalVoiceStartButton(renderer).props.onClick();
+      await waitForMounted(() => browser.counts.getUserMedia === 1, 'explicit Start did not enter microphone acquisition');
+    });
+    await act(async () => {
+      renderer.unmount();
+      renderer = null;
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.close').length === 1,
+        'P2 close did not settle after cancelling pending microphone acquisition'
+      );
+    });
+
+    assert.notEqual(createLateStream, null);
+    resolveUserMedia(createLateStream());
+    await new Promise(resolve => setTimeout(resolve, 20));
+    assert.equal(browser.counts.getUserMedia, 1);
+    assert.equal(browser.counts.stoppedTracks, 1, 'the fenced late microphone stream must be physically stopped');
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.activate').length, 2);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.close').length, 1);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    browser.restore();
+  }
+});
+
 test('mounted Product start fails closed while devicechange verification owns the selected route', async () => {
   const i18n = await createI18n();
   const browser = installP1BrowserEnvironment();
@@ -2609,9 +2919,10 @@ test('mounted Product start fails closed while devicechange verification owns th
     { kind: 'audioinput', deviceId: 'mounted-private-input', label: 'Mounted microphone' },
     { kind: 'audiooutput', deviceId: 'mounted-private-output', label: 'Mounted speaker' },
   ];
+  const activateP2 = createMountedP2ActivationResponder();
   const request = async (method, params) => {
     if (method === 'live_voice.composition.p2.activate') {
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       return { ok: true, result: { status: 'closed', ...params } };
@@ -2703,9 +3014,10 @@ test('mounted P1 cleanup singleflight fences two retained Start attempts until e
   const mediaCloses = [];
   let resolveFirstClose = null;
   let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
   const request = async (method, params) => {
     if (method === 'live_voice.composition.p2.activate') {
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       return { ok: true, result: { status: 'closed', ...params } };
@@ -2816,10 +3128,11 @@ test('mounted P1 retained Start cannot allocate an old-binding successor after S
   const mediaCloses = [];
   let resolveRetainedClose = null;
   let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
   const request = async (method, params) => {
     if (method === 'live_voice.composition.p2.activate') {
       p2Activations.push({ ...params });
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       p2Closes.push({ ...params });
@@ -2931,9 +3244,10 @@ test('mounted P1 retained Start cannot allocate a successor after unmount wins d
   let resolveRetainedClose = null;
   let resolveP2Close = null;
   let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
   const request = async (method, params) => {
     if (method === 'live_voice.composition.p2.activate') {
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       p2Closes.push({ ...params });
@@ -3039,9 +3353,10 @@ test('mounted P1 retains failed exact authority and blocks two user Start attemp
   const mediaActivations = [];
   const mediaCloses = [];
   let renderer;
+  const activateP2 = createMountedP2ActivationResponder();
   const request = async (method, params) => {
     if (method === 'live_voice.composition.p2.activate') {
-      return { ok: true, result: { status: 'active', ...params, replayed: false } };
+      return activateP2(params);
     }
     if (method === 'live_voice.composition.p2.close') {
       return { ok: true, result: { status: 'closed', ...params } };

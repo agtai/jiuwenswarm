@@ -503,6 +503,7 @@ class AgentConversationRuntime:
         history_writer: FormalHistoryWriter | None = None,
         harness: JiuWenSwarmRoundHarness | None = None,
         bridge: AgentBridgeRuntime | None = None,
+        response_generation_owner: Callable[[str, int], int] | None = None,
     ) -> None:
         if not isinstance(scope, ScopeRef):
             raise AgentConversationRuntimeViolation(
@@ -536,7 +537,11 @@ class AgentConversationRuntime:
         self._instance_id = instance_id
         self._facade = facade
         self._enabled = enabled
-        self._cr = ConversationRuntimeLoop(scope, enabled=enabled)
+        self._cr = ConversationRuntimeLoop(
+            scope,
+            enabled=enabled,
+            response_generation_owner=response_generation_owner,
+        )
         self._bridge = bridge or AgentBridgeRuntime(
             instance_id=f"{instance_id}.bridge",
             enabled=enabled,

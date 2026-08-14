@@ -330,6 +330,172 @@ test('stock Web exposes authoritative activation replay truth for refresh recove
   await owner.close();
 });
 
+test('explicit media start refreshes one exact active P2 authority with singleflight', async () => {
+  const calls = [];
+  let resolveRefresh;
+  const refresh = new Promise(resolve => {
+    resolveRefresh = resolve;
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD && calls.length === 2) return refresh;
+      return response(method === PRODUCT_P2_CLOSE_METHOD ? 'closed' : 'active', {
+        ...(method === PRODUCT_P2_ACTIVATE_METHOD ? { replayed: false } : {}),
+      });
+    },
+  });
+
+  await owner.start(binding);
+  const first = owner.refreshMediaAuthority();
+  const second = owner.refreshMediaAuthority();
+  assert.equal(first, second);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1], [PRODUCT_P2_ACTIVATE_METHOD, binding]);
+  resolveRefresh(response('active', { replayed: true }));
+
+  assert.equal((await first).status, 'active');
+  assert.equal(owner.activationWasReplayed(), true);
+  await owner.close();
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+  );
+});
+
+test('media authority refresh fails closed on a mismatched response and retains cleanup', async () => {
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD && calls.length === 2) {
+        return response('active', { interaction_id: 'other-interaction', replayed: true });
+      }
+      return response(method === PRODUCT_P2_CLOSE_METHOD ? 'closed' : 'active');
+    },
+  });
+
+  await owner.start(binding);
+  await assert.rejects(owner.refreshMediaAuthority(), /binding mismatch/);
+  assert.equal(owner.snapshot().status, 'unavailable');
+  assert.equal(owner.needsCleanup(), true);
+  assert.equal((await owner.close()).status, 'closed');
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+  );
+});
+
+test('media authority refresh rejects a newly allocated route instead of accepting it as a replay', async () => {
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) {
+        return response('active', { replayed: false });
+      }
+      return response('closed');
+    },
+  });
+
+  await owner.start(binding);
+  await assert.rejects(owner.refreshMediaAuthority(), /did not replay/);
+  assert.equal(owner.snapshot().status, 'unavailable');
+  assert.equal(owner.authorizesMediaStart(binding), false);
+  assert.equal((await owner.close()).status, 'closed');
+});
+
+test('P2 close synchronously fences an in-flight media authority refresh before exact cleanup', async () => {
+  const calls = [];
+  let resolveRefresh;
+  const refresh = new Promise(resolve => {
+    resolveRefresh = resolve;
+  });
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD && calls.length === 2) return refresh;
+      return response(method === PRODUCT_P2_CLOSE_METHOD ? 'closed' : 'active');
+    },
+  });
+
+  await owner.start(binding);
+  const refreshing = owner.refreshMediaAuthority();
+  const closing = owner.close();
+  assert.equal(owner.authorizesMediaStart(binding), false);
+  await Promise.resolve();
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD]
+  );
+
+  resolveRefresh(response('active', { replayed: true }));
+  await assert.rejects(refreshing, /changed during media authority refresh/);
+  assert.equal((await closing).status, 'closed');
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+  );
+});
+
+test('P2 close cancels an atomically reserved media start before revoking exact authority', async () => {
+  const calls = [];
+  let rejectMediaStart;
+  const mediaStart = new Promise((_resolve, reject) => {
+    rejectMediaStart = reject;
+  });
+  let resolveCancellation;
+  const cancellation = new Promise(resolve => {
+    resolveCancellation = resolve;
+  });
+  let cancellationCalls = 0;
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      return response(method === PRODUCT_P2_CLOSE_METHOD ? 'closed' : 'active', {
+        ...(method === PRODUCT_P2_ACTIVATE_METHOD ? { replayed: calls.length > 1 } : {}),
+      });
+    },
+  });
+
+  await owner.start(binding);
+  await owner.refreshMediaAuthority();
+  const starting = owner.runAuthorizedMediaStart(binding, {
+    start: () => mediaStart,
+    cancel: async () => {
+      cancellationCalls += 1;
+      rejectMediaStart(new Error('local media start cancelled'));
+      await cancellation;
+    },
+  });
+  const startOutcome = starting.catch(error => error);
+  const closing = owner.close();
+  assert.equal(cancellationCalls, 1);
+  assert.equal(owner.authorizesMediaStart(binding), false);
+  await assert.rejects(
+    owner.runAuthorizedMediaStart(binding, { start: async () => undefined, cancel: async () => undefined }),
+    /not current/
+  );
+  await Promise.resolve();
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD]
+  );
+
+  resolveCancellation();
+  assert.match((await startOutcome).message, /local media start cancelled/);
+  assert.equal((await closing).status, 'closed');
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+  );
+});
+
 test('P2 owner publishes its construction snapshot without route allocation', () => {
   const snapshots = [];
   const owner = new ProductWebP2ActivationOwner({

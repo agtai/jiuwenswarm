@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     LifecycleKind,
+    MAX_SAFE_INTEGER,
     ResponseFence,
     ResponseRef,
     ScopeRef,
@@ -127,9 +129,24 @@ class ConversationSnapshot:
 class ConversationRuntime:
     _OUTPUT_EFFECTS = frozenset({"ui.render", "history.append", "audio.enqueue"})
 
-    def __init__(self, scope: ScopeRef, *, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        scope: ScopeRef,
+        *,
+        enabled: bool = True,
+        response_generation_owner: Callable[[str, int], int] | None = None,
+    ) -> None:
+        if response_generation_owner is not None and not callable(
+            response_generation_owner
+        ):
+            raise ConversationRuntimeViolation(
+                "INVALID_RESPONSE_GENERATION_OWNER",
+                "response generation owner must be callable",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         self._scope = scope
         self._enabled = enabled
+        self._response_generation_owner = response_generation_owner
         self._lock = threading.RLock()
         self._interactions: dict[str, InteractionRecord] = {}
         self._turns: dict[str, TurnRecord] = {}
@@ -337,7 +354,22 @@ class ConversationRuntime:
                     ErrorCode.CONFLICT,
                 )
             interaction_id = turn.interaction_id
-            generation = self._last_generation.get(interaction_id, -1) + 1
+            prior_generation = self._last_generation.get(interaction_id, -1)
+            generation = (
+                prior_generation + 1
+                if self._response_generation_owner is None
+                else self._response_generation_owner(interaction_id, prior_generation)
+            )
+            if (
+                type(generation) is not int
+                or generation <= prior_generation
+                or generation > MAX_SAFE_INTEGER
+            ):
+                raise ConversationRuntimeViolation(
+                    "INVALID_RESPONSE_GENERATION",
+                    "response generation owner must return a strictly newer safe integer",
+                    ErrorCode.CONFLICT,
+                )
             prior_id = self._active_response.get(interaction_id)
             if prior_id is not None:
                 prior = self._responses[prior_id]

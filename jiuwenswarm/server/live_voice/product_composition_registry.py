@@ -15,6 +15,7 @@ import hashlib
 import logging
 import os
 import secrets
+import threading
 from array import array
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -554,6 +555,7 @@ class AgentServerProductCompositionRegistry:
     _CLOSED_ROUTE_CAPACITY = 128
     _PROGRESS_DELIVERY_CAPACITY = 128
     _PROGRESS_GENERATION_CAPACITY = 128
+    _P2_RESPONSE_GENERATION_CAPACITY = 128
     _PRODUCT_OPERATION_CAPACITY = 128
     _TURN_COMMIT_CAPACITY = 128
     _TURN_COMMIT_CAPACITY_PER_ROUTE = 32
@@ -650,6 +652,15 @@ class AgentServerProductCompositionRegistry:
         self._closed_p2_generation_fence = tuple(
             array("Q", [0]) * (1 << 15) for _ in range(4)
         )
+        # Response generations belong to the stable product interaction, not
+        # to one browser activation runtime. Exact high-water values cover the
+        # active working set; the conservative max sketch prevents an evicted
+        # interaction from ever resetting to a stale generation.
+        self._p2_response_generations: dict[tuple[str, str], int] = {}
+        self._p2_response_generation_fence = tuple(
+            array("Q", [0]) * (1 << 15) for _ in range(4)
+        )
+        self._p2_response_generation_lock = threading.RLock()
 
         disabled_service = ProductAuthorityService(enabled=False, resolver=None)
         self._p2_adapter = ProductP2InteractionAdapter(
@@ -721,12 +732,99 @@ class AgentServerProductCompositionRegistry:
                 }
             )
         ).hexdigest()
+
+        def next_response_generation(
+            interaction_id: str,
+            local_prior: int,
+        ) -> int:
+            if interaction_id != binding.interaction_id:
+                raise FormalTaskViolation(
+                    "P2_RESPONSE_INTERACTION_MISMATCH",
+                    "response generation must match the exact product interaction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            return self._next_p2_response_generation(
+                (binding.session_id, interaction_id), local_prior
+            )
+
         return AgentConversationRuntime(
             context.scope,
             instance_id=f"product-p2:{instance_fingerprint}",
             facade=facade,
             enabled=True,
+            response_generation_owner=next_response_generation,
         )
+
+    def _p2_response_generation_indices(
+        self,
+        key: tuple[str, str],
+    ) -> tuple[int, int, int, int]:
+        digest = hashlib.sha256(f"{key[0]}\0{key[1]}".encode("utf-8")).digest()
+        capacity = len(self._p2_response_generation_fence[0])
+        return (
+            int.from_bytes(digest[0:4], "big") % capacity,
+            int.from_bytes(digest[4:8], "big") % capacity,
+            int.from_bytes(digest[8:12], "big") % capacity,
+            int.from_bytes(digest[12:16], "big") % capacity,
+        )
+
+    def _record_p2_response_generation(
+        self,
+        key: tuple[str, str],
+        generation: int,
+    ) -> None:
+        encoded = generation + 1
+        for row, index in zip(
+            self._p2_response_generation_fence,
+            self._p2_response_generation_indices(key),
+            strict=True,
+        ):
+            if encoded > row[index]:
+                row[index] = encoded
+
+    def _p2_response_generation_high_water(
+        self,
+        key: tuple[str, str],
+    ) -> int:
+        encoded = min(
+            row[index]
+            for row, index in zip(
+                self._p2_response_generation_fence,
+                self._p2_response_generation_indices(key),
+                strict=True,
+            )
+        )
+        return int(encoded) - 1
+
+    def _next_p2_response_generation(
+        self,
+        key: tuple[str, str],
+        local_prior: int,
+    ) -> int:
+        with self._p2_response_generation_lock:
+            high_water = max(
+                local_prior,
+                self._p2_response_generations.get(key, -1),
+                self._p2_response_generation_high_water(key),
+            )
+            if high_water >= MAX_SAFE_INTEGER:
+                raise FormalTaskViolation(
+                    "RESPONSE_GENERATION_EXHAUSTED",
+                    "product response generation is exhausted",
+                    ErrorCode.UNAVAILABLE,
+                )
+            generation = high_water + 1
+            if key in self._p2_response_generations:
+                self._p2_response_generations.pop(key)
+            elif (
+                len(self._p2_response_generations)
+                >= self._P2_RESPONSE_GENERATION_CAPACITY
+            ):
+                evicted_key = next(iter(self._p2_response_generations))
+                evicted_generation = self._p2_response_generations.pop(evicted_key)
+                self._record_p2_response_generation(evicted_key, evicted_generation)
+            self._p2_response_generations[key] = generation
+            return generation
 
     def _generation_is_current(self, binding: TaskProgressOriginBinding) -> bool:
         key = (

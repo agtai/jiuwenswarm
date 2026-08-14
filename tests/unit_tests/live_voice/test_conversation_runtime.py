@@ -119,6 +119,46 @@ def test_replacement_fences_old_output_and_generation_increases() -> None:
     assert runtime.apply_output(second, "ui.render").response_id == "response-2"
 
 
+def test_external_response_generation_owner_continues_stable_high_water() -> None:
+    owned_generations = iter((7, 8))
+    runtime = ConversationRuntime(
+        scope(),
+        response_generation_owner=lambda _interaction_id, _prior: next(
+            owned_generations
+        ),
+    )
+    runtime.open_interaction("interaction-1")
+    runtime.start_turn("interaction-1", "turn-1")
+    accepted, _ = runtime.commit_turn(commit())
+    assert accepted is True
+
+    first, _ = runtime.accept_response("turn-1", "response-1")
+    second, _ = runtime.accept_response("turn-1", "response-2")
+
+    assert first.response_generation == 7
+    assert second.response_generation == 8
+
+
+@pytest.mark.parametrize("owned_generation", [True, -1, 0.0])
+def test_external_response_generation_owner_fails_closed_on_invalid_value(
+    owned_generation: object,
+) -> None:
+    runtime = ConversationRuntime(
+        scope(),
+        response_generation_owner=lambda _interaction_id, _prior: owned_generation,  # type: ignore[return-value]
+    )
+    runtime.open_interaction("interaction-1")
+    runtime.start_turn("interaction-1", "turn-1")
+    accepted, _ = runtime.commit_turn(commit())
+    assert accepted is True
+
+    with pytest.raises(ConversationRuntimeViolation) as raised:
+        runtime.accept_response("turn-1", "response-1")
+
+    assert raised.value.reason == "INVALID_RESPONSE_GENERATION"
+    assert runtime.snapshot().responses == ()
+
+
 def test_cancel_acknowledgement_is_not_terminal_and_has_no_task_effect() -> None:
     runtime = prepared()
     ref, _ = runtime.accept_response("turn-1", "response-1")

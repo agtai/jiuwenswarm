@@ -674,6 +674,42 @@ def test_expired_product_activation_cannot_be_revived_by_late_notification() -> 
     assert rejected.value.reason_id == "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED"
 
 
+def test_exact_p2_activation_replay_reestablishes_expired_media_trust() -> None:
+    now = 0.0
+    registry = DedicatedMediaProductRegistry(
+        enabled=True,
+        monotonic=lambda: now,
+        authority_ttl_seconds=10,
+    )
+    registry.set_provider_available(True)
+    params = _params()
+    _trust_product_activation(registry, params, connection_id="connection-1")
+
+    now = 11.0
+    with pytest.raises(MediaTransportViolation) as expired:
+        registry.activate(
+            params=params,
+            request_origin=ORIGIN,
+            connection_id="connection-1",
+            user_id="user-1",
+        )
+    assert expired.value.reason_id == "MEDIA_PRODUCT_ACTIVATION_UNTRUSTED"
+
+    # The browser's explicit Start first replays this exact authoritative P2
+    # activation. The observed AgentServer response may establish a new short-
+    # lived media authority; no client-only binding can do so.
+    _trust_product_activation(registry, params, connection_id="connection-1")
+    activated = registry.activate(
+        params=params,
+        request_origin=ORIGIN,
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+
+    assert activated["status"] == "active"
+    assert activated["binding"]["interaction_id"] == "interaction-1"
+
+
 def test_cross_session_route_notification_cannot_renew_product_activation() -> None:
     now = 0.0
     registry = DedicatedMediaProductRegistry(
@@ -1120,9 +1156,7 @@ async def test_dispatcher_routes_every_accepted_media_path_to_the_media_leaf(
 
     socket = SimpleNamespace(close=record_close, path=request_path)
 
-    assert (
-        await channel._process_request(request_path, {"Origin": ORIGIN})
-    ) is None
+    assert (await channel._process_request(request_path, {"Origin": ORIGIN})) is None
     await channel._connection_handler(socket, request_path)
 
     assert routed == [request_path]

@@ -47,6 +47,7 @@ import {
 } from '../../features/live-voice/formal/productP1VoiceRoute';
 import {
   PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
+  PRODUCT_P2_REFRESH_SERVER_STATE_LOST,
   ProductP2ActivationJournal,
   reconcileProductP2Predecessor,
 } from '../../features/live-voice/formal/productP2ActivationJournal';
@@ -2446,6 +2447,75 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       owner = null;
     }
     if (!isCurrentBinding()) return;
+    const activationOwner = activationOwnerRef.current;
+    if (activationOwner === null) return;
+    try {
+      await activationOwner.refreshMediaAuthority();
+    } catch (error) {
+      const reason = extractWebErrorReason(error) ?? 'MEDIA_PRODUCT_ACTIVATION_UNTRUSTED';
+      console.warn(`live_voice_media_authority_refresh_failure reason=${reason} fallback=text visible=true`);
+      if (
+        activationOwnerRef.current === activationOwner &&
+        mountedRef.current &&
+        activeSessionRef.current === binding.session_id
+      ) {
+        // Persist the state-loss barrier before cleanup so a reload cannot
+        // reinterpret a later stale/closed tombstone as permission to prepare
+        // a successor after the stable response-generation owner was lost.
+        let barrierPersisted = false;
+        const journal = p2ActivationJournalRef.current;
+        if (journal !== null) {
+          try {
+            const journalSnapshot = journal.refresh();
+            const journalBinding = journalSnapshot.binding;
+            const bindingMatches =
+              journalBinding !== null &&
+              journalBinding.session_id === binding.session_id &&
+              journalBinding.correlation_id === binding.correlation_id &&
+              journalBinding.interaction_id === binding.interaction_id &&
+              journalBinding.activation_id === binding.activation_id &&
+              journalBinding.activation_generation === binding.activation_generation;
+            if (journalSnapshot.phase === 'result_unknown' && bindingMatches) {
+              barrierPersisted = true;
+            }
+            if (
+              journalSnapshot.phase === 'active' &&
+              journalSnapshot.pending_operation === null &&
+              journalSnapshot.recovery_token === null &&
+              bindingMatches
+            ) {
+              journal.markResultUnknown(binding);
+              barrierPersisted = true;
+            }
+          } catch {
+            // Journal ownership/storage failure remains a local hard barrier;
+            // exact server cleanup is still attempted below.
+          }
+        }
+        // Close the possibly renewed/new server route now, but never mark the
+        // predecessor closed or prepare a successor from unknown continuity.
+        try {
+          await activationOwner.closeWithRetry();
+          if (
+            activationOwnerRef.current === activationOwner &&
+            mountedRef.current &&
+            activeSessionRef.current === binding.session_id
+          ) {
+            if (barrierPersisted) activationOwnerRef.current = null;
+            setP2Activation({
+              status: 'unavailable',
+              binding: null,
+              reason: PRODUCT_P2_REFRESH_SERVER_STATE_LOST,
+            });
+          }
+        } catch {
+          // The exact cleanup_pending owner remains retained for teardown; no
+          // successor or media effect may be allocated on unknown close truth.
+        }
+      }
+      return;
+    }
+    if (activationOwnerRef.current !== activationOwner || !isCurrentBinding()) return;
     let appliedDeviceRoute: ReturnType<BrowserAudioDeviceSelectionOwner['appliedRoute']>;
     try {
       const selectionOwner = deviceSelectionOwnerRef.current;
@@ -2475,15 +2545,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       });
       p1VoiceOwnerRef.current = owner;
     }
+    const startingOwner = owner;
     try {
-      await owner.startCapture({
-        session_id: binding.session_id,
-        interaction_id: binding.interaction_id,
-        correlation_id: binding.correlation_id,
-        activation_id: binding.activation_id,
-        activation_generation: binding.activation_generation,
-        locale: 'zh-CN',
-        device_selection: appliedDeviceRoute,
+      await activationOwner.runAuthorizedMediaStart(binding, {
+        start: () =>
+          startingOwner.startCapture({
+            session_id: binding.session_id,
+            interaction_id: binding.interaction_id,
+            correlation_id: binding.correlation_id,
+            activation_id: binding.activation_id,
+            activation_generation: binding.activation_generation,
+            locale: 'zh-CN',
+            device_selection: appliedDeviceRoute,
+          }),
+        cancel: () => startingOwner.close(),
       });
       if (isCurrentBinding() && owner.status().status === 'capturing') {
         p1VoiceCaptureBindingRef.current = binding;

@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sqlite3
+import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -2461,6 +2463,144 @@ async def test_p2_accepts_voice_origin_only_after_exact_success(tmp_path: Path) 
             SCOPE,
         )
     await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_response_generation_continues_across_activation_successor(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    first_binding = _p2_params()
+    first_activation = await registry.handle_p2_activate(
+        params=first_binding,
+        request_id="request-response-generation-activate-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first_activation.ok is True
+    first_submit = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-response-generation-1",
+            turn_id="turn-response-generation-1",
+            response_id="response-generation-1",
+            committed_at=NOW,
+            text="first activation response",
+            dispatch_target="agent",
+        ),
+        request_id="request-response-generation-submit-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first_submit.ok is True
+    first_response = cast(dict, first_submit.payload["result"])["response"]
+    assert first_response["response_generation"] == 0
+
+    first_close = await registry.handle_p2_close(
+        params=first_binding,
+        request_id="request-response-generation-close-1",
+        session_id="session-product",
+    )
+    assert first_close.ok is True
+
+    successor_binding = _p2_params(
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    successor_activation = await registry.handle_p2_activate(
+        params=successor_binding,
+        request_id="request-response-generation-activate-2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor_activation.ok is True
+    successor_submit_params = {
+        **successor_binding,
+        "commit_id": "commit-response-generation-2",
+        "turn_id": "turn-response-generation-2",
+        "response_id": "response-generation-2",
+        "committed_at": NOW,
+        "text": "successor activation response",
+        "dispatch_target": "agent",
+    }
+    successor_submit = await registry.handle_p2_submit(
+        params=successor_submit_params,
+        request_id="request-response-generation-submit-2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor_submit.ok is True
+    successor_response = cast(dict, successor_submit.payload["result"])["response"]
+    assert successor_response["response_generation"] == 1
+
+    replayed = await registry.handle_p2_submit(
+        params=successor_submit_params,
+        request_id="request-response-generation-submit-2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert replayed.payload == successor_submit.payload
+    assert manager.agent.calls == 2
+    assert registry._p2_response_generations[("session-product", "interaction-1")] == 1
+    await registry.close_active_routes()
+
+
+def test_p2_response_generation_fence_survives_exact_high_water_eviction(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    first_key = ("session-product", "interaction-generation-0")
+    assert registry._next_p2_response_generation(first_key, -1) == 0
+    for index in range(1, registry._P2_RESPONSE_GENERATION_CAPACITY + 1):
+        assert (
+            registry._next_p2_response_generation(
+                ("session-product", f"interaction-generation-{index}"), -1
+            )
+            == 0
+        )
+
+    assert first_key not in registry._p2_response_generations
+    assert registry._next_p2_response_generation(first_key, -1) >= 1
+
+
+def test_p2_response_generation_owner_serializes_concurrent_allocations(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    key = ("session-product", "interaction-concurrent-generation")
+    worker_count = 32
+    barrier = threading.Barrier(worker_count)
+
+    def allocate() -> int:
+        barrier.wait(timeout=5)
+        return registry._next_p2_response_generation(key, -1)
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        generations = list(executor.map(lambda _index: allocate(), range(worker_count)))
+
+    assert sorted(generations) == list(range(worker_count))
+    assert registry._p2_response_generations[key] == worker_count - 1
+
+
+def test_p2_response_generation_exhaustion_preserves_owner_state(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, _manager, _pushed = _registry(tmp_path)
+    key = ("session-product", "interaction-exhausted-generation")
+    registry._p2_response_generations[key] = MAX_SAFE_INTEGER
+    exact_before = dict(registry._p2_response_generations)
+    fence_before = tuple(
+        row.tobytes() for row in registry._p2_response_generation_fence
+    )
+
+    with pytest.raises(FormalTaskViolation, match="generation is exhausted") as caught:
+        registry._next_p2_response_generation(key, MAX_SAFE_INTEGER - 1)
+
+    assert caught.value.reason == "RESPONSE_GENERATION_EXHAUSTED"
+    assert registry._p2_response_generations == exact_before
+    assert (
+        tuple(row.tobytes() for row in registry._p2_response_generation_fence)
+        == fence_before
+    )
 
 
 @pytest.mark.asyncio
