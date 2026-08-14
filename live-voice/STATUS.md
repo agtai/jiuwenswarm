@@ -21,14 +21,15 @@
   `FROZEN_FOR_A3`.
 - Formal S8 began on that frozen candidate. The human journey produced useful
   product truth but is now `PAUSED / SOURCE REPAIR`. Provisional discovery found
-  the two earlier lifecycle defects plus eight additional product defects: ASR
+  the two earlier lifecycle defects plus nine additional product defects: ASR
   correction was locked during confirmation; ordinary text/Tool work serialized
   formal voice; P3 mutation failures hid their stable reason; a definitive
   natural-language intent rejection retained the form until reload; status did
   not project terminal task truth; retry eligibility ignored current checkout
-  and Executor cleanup truth; Web reconnect could sleep too long after runtime
-  recovery; and a complete AgentServer restart reset one interaction's response
-  generation.
+  and Executor cleanup truth; the product P3 query Adapter dropped that
+  authoritative retry admission; Web reconnect could sleep too long after
+  runtime recovery; and a complete AgentServer restart reset one interaction's
+  response generation.
 - The cumulative repair keeps the Gateway stale-response fence intact,
   revalidates the exact active P2 binding before explicit media Start, separates
   the formal P2 Agent facade from ordinary Web work, and owns response generation
@@ -37,11 +38,13 @@
   recognized text editable before commit, consumes authoritative retry admission
   and stable failure reasons, projects terminal Task truth, unlocks after an
   exact server rejection, and bounds reconnect delay to two seconds. The exact
-  affected suites currently pass 332 integrated Web tests and 182 backend
+  affected suites currently pass 332 integrated Web tests and 184 backend
   product/Task/durability tests; Python Ruff, format and diff checks pass, and
-  the production frontend build completes 4,640 modules. The affected Tier-3
-  cold review returned `APPROVE` with no open Critical, High or P2 finding. This
-  working tree is not a frozen candidate: coherent commit, complete S7
+  the production frontend build completes 4,640 modules. The committed 16-path
+  repair and the subsequent product-status Adapter and real-resolver
+  stable-reason corrections each received affected Tier-3 `APPROVE`, with no
+  open Critical, High or P2 finding. This working tree is not a frozen candidate:
+  coherent commit, complete S7
   re-verification/re-freeze and a fresh formal S8 closeout remain mandatory
   before any `PASS - INTEGRATED WEB ALPHA` result.
 - By explicit user direction, the already observed scope-correlation mismatch

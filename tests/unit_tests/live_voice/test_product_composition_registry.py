@@ -229,6 +229,8 @@ class _P3Composition(P3AuthenticatedComposition):
         self.project_dir = project_dir
         self.authority_calls: list[dict[str, object]] = []
         self.query_calls: list[ProductP3AuthorizedQuery] = []
+        self.retry_admission_calls: list[dict[str, object]] = []
+        self.retry_admission_failure: FormalTaskViolation | None = None
         self.subscription_calls: list[TaskProgressOriginBinding] = []
         self.fail_authority: FormalTaskViolation | None = None
         self.correlation_override: str | None = None
@@ -292,6 +294,36 @@ class _P3Composition(P3AuthenticatedComposition):
             result={"query_type": query.envelope.query_type},
             observed_at=now or NOW,
         )
+
+    async def read_product_status_retry_admission(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+        task_id: str,
+    ) -> dict[str, object]:
+        self.retry_admission_calls.append(
+            {
+                "bearer_token": bearer_token,
+                "session_id": session_id,
+                "task_id": task_id,
+            }
+        )
+        if self.retry_admission_failure is not None:
+            raise self.retry_admission_failure
+        if bearer_token != "trusted-token" or session_id != SCOPE.session_id:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task authentication is required",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        return {
+            "eligible": False,
+            "reason": "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+            "task_id": task_id,
+            "attempt_id": None,
+            "attempt_number": None,
+        }
 
     def create_product_subscription(
         self,
@@ -955,6 +987,78 @@ async def test_p3_query_uses_central_authority_and_real_query_owner(
     assert _route(result.payload, "authority")["truth"] == "formal"
     assert _route(result.payload, "p3.query")["truth"] == "formal"
     assert _route(result.payload, "p3.progress")["truth"] == "unavailable"
+    assert p3.retry_admission_calls == []
+
+
+@pytest.mark.asyncio
+async def test_p3_status_preserves_authoritative_retry_admission(
+    tmp_path: Path,
+) -> None:
+    registry, p3, manager, _pushed = _registry(tmp_path)
+
+    result = await registry.handle_p3_query(
+        operation="task.status",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "task_id": "task-1",
+        },
+        request_id="request-status-1",
+        session_id="session-product",
+    )
+
+    assert result.ok is True
+    assert result.payload["result"]["retry_admission"] == {
+        "eligible": False,
+        "reason": "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+        "task_id": "task-1",
+        "attempt_id": None,
+        "attempt_number": None,
+    }
+    assert p3.retry_admission_calls == [
+        {
+            "bearer_token": "trusted-token",
+            "session_id": "session-product",
+            "task_id": "task-1",
+        }
+    ]
+    assert len(p3.authority_calls) == 1
+    assert len(p3.query_calls) == 1
+    assert manager.get_calls == []
+
+
+@pytest.mark.asyncio
+async def test_p3_status_retry_admission_failure_is_stable_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    registry, p3, manager, _pushed = _registry(tmp_path)
+    p3.retry_admission_failure = FormalTaskViolation(
+        "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+        "executor cleanup is pending",
+        ErrorCode.CONFLICT,
+    )
+
+    result = await registry.handle_p3_query(
+        operation="task.status",
+        params={
+            "auth_token": "trusted-token",
+            "session_id": "session-product",
+            "task_id": "task-1",
+        },
+        request_id="request-status-admission-failed",
+        session_id="session-product",
+    )
+
+    assert result.ok is False
+    assert result.payload["error"] == {
+        "reason": "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+        "code": "CONFLICT",
+        "message": "executor cleanup is pending",
+    }
+    assert len(p3.authority_calls) == 1
+    assert len(p3.query_calls) == 1
+    assert len(p3.retry_admission_calls) == 1
+    assert manager.get_calls == []
 
 
 @pytest.mark.asyncio

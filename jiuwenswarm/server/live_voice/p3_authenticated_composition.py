@@ -407,6 +407,14 @@ class ServerSessionProjectAuthorityResolver:
                     "formal task project must have a clean worktree",
                     ErrorCode.PERMISSION_DENIED,
                 )
+        except FormalTaskViolation:
+            # The authenticated caller already passed the exact project
+            # allow-list before any project storage was consulted. Preserve
+            # negotiated Context/revision reasons such as
+            # TASK_CONTEXT_WORKTREE_DIRTY instead of folding them into a
+            # generic scope denial; D-069 makes those stable reasons part of
+            # retry admission and mutation recovery.
+            raise
         except (OSError, RuntimeError, ValueError) as exc:
             raise self._deny_scope() from exc
         if selected_key != session_key or selected_key != root_key or not revision:
@@ -1636,6 +1644,44 @@ class P3AuthenticatedComposition:
                 "attempt_id": None,
                 "attempt_number": None,
             }
+
+    async def read_product_status_retry_admission(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+        task_id: str,
+    ) -> dict[str, object]:
+        """Re-derive retry admission for the authenticated product status path.
+
+        Product P3 queries intentionally enter Task Core through the injected
+        query-owner seam instead of :meth:`handle`.  Keep the retry decision on
+        that real product path without trusting the narrowed query authority:
+        authenticate the original bearer again, then re-read clean Context,
+        Store lineage and Executor readiness through the same helper used by
+        the direct route.  This method is read-only and owns shutdown exactly
+        like the other public composition operations.
+        """
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            now = self._clock()
+            principal = self._authenticator.authenticate(
+                bearer_token,
+                operation="task.status",
+                now=now,
+            )
+            return await self._read_status_retry_admission(
+                principal=principal,
+                session_id=session_id,
+                task_id=task_id,
+                now=now,
+            )
+        finally:
+            if entered:
+                await self._leave_operation()
 
     async def _verify_confirmation(
         self,

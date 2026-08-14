@@ -5257,6 +5257,43 @@ class AgentServerProductCompositionRegistry:
                     manifest=activation.manifest,
                 )
             payload = envelope.to_dict()
+            if operation == "task.status" and envelope.ok:
+                result_payload = payload.get("result")
+                if not isinstance(result_payload, dict):
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P3_QUERY_FAILED",
+                        code=ErrorCode.INTERNAL,
+                        manifest=activation.manifest,
+                    )
+                try:
+                    retry_admission = (
+                        await self._p3_composition.read_product_status_retry_admission(
+                            bearer_token=params.get("auth_token"),
+                            session_id=routed_session,
+                            task_id=str(task_id or ""),
+                        )
+                    )
+                except FormalTaskViolation as exc:
+                    return _error_result(
+                        request_id,
+                        reason=exc.reason,
+                        code=exc.code,
+                        message=str(exc),
+                        manifest=activation.manifest,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[LiveVoiceProduct] P3 retry admission failed closed"
+                    )
+                    return _error_result(
+                        request_id,
+                        reason="PRODUCT_P3_QUERY_FAILED",
+                        manifest=activation.manifest,
+                    )
+                result_payload = dict(result_payload)
+                result_payload["retry_admission"] = retry_admission
+                payload["result"] = result_payload
             payload["product_composition"] = _serialize_manifest(activation.manifest)
             return P3RouteResult(bool(envelope.ok), payload)
         finally:

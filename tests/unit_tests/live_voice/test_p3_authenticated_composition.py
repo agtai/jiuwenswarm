@@ -2036,7 +2036,7 @@ def test_server_resolver_rejects_false_clean_reader_result(tmp_path: Path) -> No
             _principal(), session_id="session-1", now=NOW, require_clean=True
         )
 
-    assert raised.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
+    assert raised.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
 
 
 def test_persisted_context_revalidation_uses_current_grant_expiry_and_redaction(
@@ -2104,7 +2104,9 @@ def test_persisted_context_revalidation_uses_current_grant_expiry_and_redaction(
     assert hidden.value.reason == "TASK_CONTEXT_REDACTED"
 
 
-def test_default_server_revision_rejects_dirty_worktree(tmp_path: Path) -> None:
+def test_default_server_revision_preserves_dirty_worktree_reason(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=project, check=True)
@@ -2146,8 +2148,9 @@ def test_default_server_revision_rejects_dirty_worktree(tmp_path: Path) -> None:
             _principal(), session_id="session-1", now=NOW, require_clean=True
         )
 
-    # Source-specific Git state remains existence-hidden at the route boundary.
-    assert raised.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
+    # Authentication and the exact project allow-list were already verified,
+    # so the D-069 retry contract keeps the server-derived Context reason.
+    assert raised.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
     assert (
         resolver.revalidate(
             clean_context,
@@ -2164,7 +2167,7 @@ def test_default_server_revision_rejects_dirty_worktree(tmp_path: Path) -> None:
             now=NOW,
             for_dispatch=True,
         )
-    assert dispatch.value.reason == "FORMAL_TASK_AUTHORIZATION_DENIED"
+    assert dispatch.value.reason == "TASK_CONTEXT_WORKTREE_DIRTY"
 
 
 @pytest.mark.asyncio
@@ -2759,6 +2762,14 @@ async def test_status_retry_admission_rejects_dirty_context_without_mutation(
             "attempt_id": attempt["attempt_id"],
             "attempt_number": attempt["attempt_number"] + 1,
         }
+        assert (
+            await harness.composition.read_product_status_retry_admission(
+                bearer_token=TOKEN,
+                session_id="session-1",
+                task_id=task_id,
+            )
+            == clean.payload["result"]["retry_admission"]
+        )
 
         counts = _store_counts(harness.database)
         dispatches = list(harness.executor.dispatches)
@@ -2779,6 +2790,21 @@ async def test_status_retry_admission_rejects_dirty_context_without_mutation(
             "attempt_id": None,
             "attempt_number": None,
         }
+        assert (
+            await harness.composition.read_product_status_retry_admission(
+                bearer_token=TOKEN,
+                session_id="session-1",
+                task_id=task_id,
+            )
+            == dirty.payload["result"]["retry_admission"]
+        )
+        with pytest.raises(FormalTaskViolation) as invalid_bearer:
+            await harness.composition.read_product_status_retry_admission(
+                bearer_token="wrong-token",
+                session_id="session-1",
+                task_id=task_id,
+            )
+        assert invalid_bearer.value.reason == "FORMAL_TASK_AUTHENTICATION_REQUIRED"
         assert _store_counts(harness.database) == counts
         assert harness.executor.dispatches == dispatches
         assert _confirmation_count(harness.database) == confirmations
