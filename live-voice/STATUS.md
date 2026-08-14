@@ -64,10 +64,28 @@
   120 backend product/intent tests and the broader 87-test authenticated P3
   composition suite; Ruff, Prettier, Python format and diff checks pass. The
   independent reviewer found the post-receipt handoff P2 in the earlier delta;
-  affected re-review of this repair and a coherent local commit remain pending.
-  Complete S7 re-verification/re-freeze and a fresh
+  the repaired ten-path boundary then received affected Tier-3 `APPROVE` with
+  no open Critical, High or P2 finding and was committed as exact
+  `005814b7f6e430dacc83ecd3c5291aea719f067d`. That commit is a diagnostic S8
+  source candidate, not a frozen S7 handoff. Complete S7
+  re-verification/re-freeze and a fresh
   formal S8 closeout remain mandatory before any
   `PASS - INTEGRATED WEB ALPHA` result.
+- Automated diagnostic S8 on `005814b7` rebuilt and served the 180-file
+  frontend with the reviewed Integrated P1/P2/P3 flags, restarted the private
+  AgentServer/Gateway/WebChannel/Caddy topology and found no new product-source
+  blocker. Real browser checks passed P2 text/Agent response, P2 independence
+  from a concurrent 15-second ordinary Web Tool call, explicit ambiguous and
+  unsupported natural-Task rejection, exact status projection, two-turn cancel
+  confirmation with zero Task effect, and visible structured-P3 dirty-worktree
+  rejection without a stuck form. A controlled service restart failed the old
+  authorities closed; refresh restored P1/P2/P3 with the same interaction's
+  response generation increasing from 1 to 2, and a following P2 turn passed.
+  The isolated Store remained at eight terminal tasks/eight attempts/nine
+  delivered outbox rows with no new Task mutation. A diagnostic S8 entry audit
+  against the historical `8c2dccc8` handoff returned the required
+  `CANDIDATE_IDENTITY_MISMATCH`; none of these discovery events are formal A3
+  evidence.
 - By explicit user direction, the already observed scope-correlation mismatch
   is retained as a non-blocking provisional S8 deviation for final human
   judgment. Continued S8 work before re-freeze is discovery only; its events
