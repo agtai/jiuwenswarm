@@ -98,8 +98,9 @@
   P3 create through accepted, running and terminal UI truth: only the authorized
   `notes.txt` line changed, while Task, attempt, outbox and Direct Executor state
   all settled without a retained owner or lease. Affected independent review
-  approved the six-path boundary with no open Critical, High or P2 finding. One
-  coherent local commit remains required before diagnostic S8 resumes.
+  approved the six-path boundary with no open Critical, High or P2 finding. The
+  repair is committed as exact `d057b2d1fee1371bc4ed070caf36a7b6125b0eda`;
+  it is a diagnostic source candidate, not a frozen S7 handoff.
 - By explicit user direction, the already observed scope-correlation mismatch
   is retained as a non-blocking provisional S8 deviation for final human
   judgment. Continued S8 work before re-freeze is discovery only; its events
@@ -160,10 +161,9 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Commit the independently approved SDK compatibility repair. Its
-   rebuilt-runtime P3 rerun has passed; after clean commit identity, resume
-   user-directed S8 discovery using Chrome, Computer Use, sanitized logs,
-   Store/Executor inspection and other automated observers.
+1. Resume user-directed S8 discovery on the independently approved and committed
+   repair using Chrome, Computer Use, sanitized logs, Store/Executor inspection
+   and other automated observers. The rebuilt-runtime P3 rerun has passed.
 2. Record non-blocking findings through the pass,
    batch-fix them, and repeat until only physical audio/device and final human
    judgment remain; provisional events are never relabeled as formal proof.
