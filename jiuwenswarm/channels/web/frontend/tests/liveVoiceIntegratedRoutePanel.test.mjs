@@ -14,6 +14,7 @@ import {
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
   extractWebErrorReason,
+  formalTaskIntentResultSummary,
   inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
@@ -25,6 +26,7 @@ import {
   progressMatchesOwnedBinding,
   resolveProductTaskCreateOrigin,
   retainBoundedPresentedProductResponse,
+  webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import {
   FormalTaskControlLeaf,
@@ -55,7 +57,16 @@ const retryScope = Object.freeze({
   assurance: 'authenticated',
 });
 
-function retryStatus({ taskId = 'task-1', attemptId = 'attempt-b', attemptNumber = 2, state = 'terminal', outcome = 'completed', eventHead = 3 } = {}) {
+function retryStatus({
+  taskId = 'task-1',
+  attemptId = 'attempt-b',
+  attemptNumber = 2,
+  state = 'terminal',
+  outcome = 'completed',
+  eventHead = 3,
+  retryAdmission = undefined,
+} = {}) {
+  const eligible = state === 'terminal' && attemptNumber < 3;
   return {
     ok: true,
     result: {
@@ -69,6 +80,14 @@ function retryStatus({ taskId = 'task-1', attemptId = 'attempt-b', attemptNumber
         event_head: eventHead,
       },
       attempt: { task_id: taskId, attempt_id: attemptId, attempt_number: attemptNumber },
+      retry_admission:
+        retryAdmission ?? {
+          eligible,
+          reason: eligible ? 'TASK_RETRY_ELIGIBLE' : 'TASK_RETRY_PRECONDITION_STALE',
+          task_id: taskId,
+          attempt_id: eligible ? attemptId : null,
+          attempt_number: eligible ? attemptNumber + 1 : null,
+        },
     },
   };
 }
@@ -448,7 +467,7 @@ test('devicechange verification is visible and locks apply plus Product start un
   assert.match(html, /<button type="button" disabled="">Start formal voice turn<\/button>/);
 });
 
-test('recognized Speech confirmation is an explicit in-page second action that locks dispatch inputs', async () => {
+test('recognized Speech confirmation keeps correction editable while locking dispatch', async () => {
   const html = await renderPanel({
     viewProps: {
       p2Activation: { status: 'active', binding: null, reason: null },
@@ -470,11 +489,34 @@ test('recognized Speech confirmation is an explicit in-page second action that l
   assert.match(html, /Review recognized speech/);
   assert.match(html, /Confirm and dispatch/);
   assert.match(html, /Cancel/);
-  assert.match(html, /<textarea[^>]*disabled=""[^>]*>Confirm this exact recognized text\.<\/textarea>/);
+  assert.match(html, /<textarea(?![^>]*disabled="")[^>]*>Confirm this exact recognized text\.<\/textarea>/);
   assert.match(html, /<button type="submit" disabled="">Submit committed turn<\/button>/);
 
   const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
   assert.doesNotMatch(source, /window\.confirm\('Confirm that the recognized speech/);
+});
+
+test('natural-language task status projects the authoritative terminal result', () => {
+  assert.equal(
+    formalTaskIntentResultSummary({
+      disposition: 'dispatched',
+      reason: 'TASK_INTENT_DISPATCHED',
+      source: 'text',
+      operation: 'task.status',
+      task_id: 'task-status-1',
+      resolver_provider: 'local.closed_schema',
+      resolver_implementation_class: 'bounded_deterministic_alpha_v1',
+      resolution_id: 'a'.repeat(64),
+      commit_sha256: 'b'.repeat(64),
+      confirmation_token: null,
+      confirmation_form: null,
+      origin_id: 'intent-origin-1',
+      formal_task_result: {
+        task: { task_id: 'task-status-1', state: 'terminal', outcome: 'completed' },
+      },
+    }),
+    'task-status-1 | terminal/completed'
+  );
 });
 
 test('recognized Speech confirmation is fenced to its exact Session and displayed text', () => {
@@ -580,6 +622,15 @@ test('Web response error extraction preserves nested product reason', () => {
   assert.equal(extractWebErrorReason({ error: 'legacy error' }), undefined);
 });
 
+test('Web reconnect remains continuously bounded after a private runtime restart', () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5, 20].map(webReconnectDelayMs),
+    [1000, 2000, 2000, 2000, 2000, 2000]
+  );
+  assert.equal(webReconnectDelayMs(0), 1000);
+  assert.equal(webReconnectDelayMs(Number.NaN), 1000);
+});
+
 test('P2 notification polling outlives the retained Gateway unary owner', () => {
   assert.deepEqual(productP2WebRequestOptions(PRODUCT_P2_NOTIFICATION_NEXT_METHOD, 'notification-request-1'), {
     requestId: 'notification-request-1',
@@ -672,6 +723,7 @@ test('route panel renders authoritative completed and failed P3 terminal truth',
         p3MutationOperation: 'task.cancel',
         p3TargetTaskId: 'task-1',
         p3MutationStatus: status,
+        p3MutationReason: status === 'failed' ? 'TASK_ALREADY_TERMINAL' : null,
         onP3MutationOperation: () => {},
         onP3TaskName: () => {},
         onP3TaskInstruction: () => {},
@@ -682,6 +734,7 @@ test('route panel renders authoritative completed and failed P3 terminal truth',
       },
     });
     assert.match(html, new RegExp(`<code>${status}</code>`));
+    if (status === 'failed') assert.match(html, /<code>TASK_ALREADY_TERMINAL<\/code>/);
     assert.equal(html.includes('Acceptance is not task completion.'), true);
   }
 });
@@ -776,7 +829,7 @@ test('an authenticated historical status bootstraps a query-only P3 leaf and sti
 test('retry candidate inspection binds exact status and full A/B history before exposing eligibility', async () => {
   const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
   const calls = [];
-  const record = await inspectProductP3RetryCandidate({
+  const { record, admission } = await inspectProductP3RetryCandidate({
     leaf,
     session_id: 'session-1',
     task_id: 'task-1',
@@ -803,6 +856,13 @@ test('retry candidate inspection binds exact status and full A/B history before 
     },
   ]);
   assert.equal(isFormalTaskRetryEligible(record), true);
+  assert.deepEqual(admission, {
+    eligible: true,
+    reason: 'TASK_RETRY_ELIGIBLE',
+    task_id: 'task-1',
+    attempt_id: 'attempt-b',
+    attempt_number: 3,
+  });
   assert.deepEqual(
     {
       task_id: record.task_id,
@@ -822,6 +882,38 @@ test('retry candidate inspection binds exact status and full A/B history before 
     }
   );
   assert.deepEqual(leaf.snapshot().tasks, [record]);
+});
+
+test('retry candidate inspection preserves a stable server-side dirty-worktree rejection', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const inspection = await inspectProductP3RetryCandidate({
+    leaf,
+    session_id: 'session-1',
+    task_id: 'task-1',
+    request_nonce: 'dirty-context',
+    is_current: () => true,
+    request: async method =>
+      method === 'live_voice.task.status'
+        ? retryStatus({
+            retryAdmission: {
+              eligible: false,
+              reason: 'TASK_CONTEXT_WORKTREE_DIRTY',
+              task_id: 'task-1',
+              attempt_id: null,
+              attempt_number: null,
+            },
+          })
+        : retryEvents(),
+  });
+
+  assert.equal(isFormalTaskRetryEligible(inspection.record), true);
+  assert.deepEqual(inspection.admission, {
+    eligible: false,
+    reason: 'TASK_CONTEXT_WORKTREE_DIRTY',
+    task_id: 'task-1',
+    attempt_id: null,
+    attempt_number: null,
+  });
 });
 
 test('retry candidate inspection rejects a foreign status before events with zero live-replica effect', async () => {
@@ -934,7 +1026,7 @@ test('overlapping retry inspections let only the current generation perform even
   });
 
   currentGeneration = 2;
-  const currentRecord = await inspectProductP3RetryCandidate({
+  const currentInspection = await inspectProductP3RetryCandidate({
     leaf,
     session_id: 'session-1',
     task_id: 'task-1',
@@ -946,8 +1038,8 @@ test('overlapping retry inspections let only the current generation perform even
 
   await assert.rejects(oldInspection, /became stale/);
   assert.deepEqual(oldCalls, ['live_voice.task.status']);
-  assert.equal(currentRecord.attempt_id, 'attempt-b');
-  assert.equal(isFormalTaskRetryEligible(currentRecord), true);
+  assert.equal(currentInspection.record.attempt_id, 'attempt-b');
+  assert.equal(isFormalTaskRetryEligible(currentInspection.record), true);
   assert.equal(leaf.snapshot().tasks[0].attempt_id, 'attempt-b');
   assert.equal(leaf.snapshot().tasks[0].attempt_number, 2);
 });

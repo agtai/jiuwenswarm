@@ -51,6 +51,7 @@ from .critical_token_safety import (
 )
 from .formal_task_models import FormalTaskViolation, ResolvedTaskContext
 from .interaction_engine import InteractionEnginePort
+from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_authenticated_composition import (
     P3_MUTATIONS,
     P3AuthenticatedComposition,
@@ -145,6 +146,7 @@ PRODUCT_CRITICAL_INPUT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABL
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
 # The only Agent profile whose facade implements the formal Live Voice seam.
 _FORMAL_LIVE_VOICE_AGENT_MODE = "agent"
+_FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -802,6 +804,41 @@ class AgentServerProductCompositionRegistry:
         local_prior: int,
     ) -> int:
         with self._p2_response_generation_lock:
+            durable_owner = getattr(
+                self._p3_composition,
+                "_p2_response_generation_owner",
+                None,
+            )
+            durable_database = getattr(
+                self._p3_composition,
+                "_p2_response_generation_database",
+                None,
+            )
+            if isinstance(durable_owner, SqliteP2ResponseGenerationOwner):
+                durable_generation = durable_owner.next_generation(
+                    key[0], key[1], local_prior
+                )
+            elif durable_database is not None:
+                durable_generation = (
+                    self._p3_composition.next_product_p2_response_generation(
+                        key[0], key[1], local_prior
+                    )
+                )
+            else:
+                durable_generation = None
+            if durable_generation is not None:
+                self._record_p2_response_generation(key, durable_generation)
+                if key in self._p2_response_generations:
+                    self._p2_response_generations.pop(key)
+                elif (
+                    len(self._p2_response_generations)
+                    >= self._P2_RESPONSE_GENERATION_CAPACITY
+                ):
+                    evicted_key = next(iter(self._p2_response_generations))
+                    evicted_generation = self._p2_response_generations.pop(evicted_key)
+                    self._record_p2_response_generation(evicted_key, evicted_generation)
+                self._p2_response_generations[key] = durable_generation
+                return durable_generation
             high_water = max(
                 local_prior,
                 self._p2_response_generations.get(key, -1),
@@ -1664,7 +1701,10 @@ class AgentServerProductCompositionRegistry:
                 # This route owns no Chat history and always runs an
                 # Agent-profile turn, so the session work mode is not its input.
                 agent = await self._agent_manager.get_agent(
-                    "web",
+                    # Formal P2 owns an independent Agent facade.  Reusing the
+                    # ordinary Web channel serializes a voice turn behind a
+                    # long-running text/Tool turn in the Agent facade cache.
+                    _FORMAL_LIVE_VOICE_AGENT_CHANNEL,
                     _FORMAL_LIVE_VOICE_AGENT_MODE,
                     project_dir,
                     None,

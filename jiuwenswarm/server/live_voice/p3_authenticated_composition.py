@@ -17,6 +17,7 @@ import logging
 import math
 import os
 import subprocess
+import threading
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ from .formal_task_models import (
     utc_now,
 )
 from .persistent_task_core import PersistentTaskCore, ReconciliationEventSink
+from .p2_response_generation_store import SqliteP2ResponseGenerationOwner
 from .p3_confirmation import (
     P3ConfirmationBinding,
     P3ConfirmationVerifier,
@@ -913,6 +915,19 @@ class P3AuthenticatedComposition:
         self._authenticator = authenticator
         self._authority_resolver = authority_resolver
         self._core = core
+        task_store = getattr(core, "store", None)
+        task_database = getattr(task_store, "database_path", None)
+        self._p2_response_generation_database = (
+            Path(task_database).with_name(
+                f"{Path(task_database).name}.p2-response-generations.sqlite3"
+            )
+            if task_database is not None
+            else None
+        )
+        self._p2_response_generation_owner: SqliteP2ResponseGenerationOwner | None = (
+            None
+        )
+        self._p2_response_generation_owner_lock = threading.Lock()
         self._confirmation_verifier = confirmation_verifier
         self._model_resolver = model_resolver
         self._binding_resolver = binding_resolver
@@ -937,6 +952,28 @@ class P3AuthenticatedComposition:
     @property
     def mutation_authority_ready(self) -> bool:
         return self._confirmation_verifier is not None
+
+    def next_product_p2_response_generation(
+        self,
+        session_id: str,
+        interaction_id: str,
+        local_prior: int,
+    ) -> int:
+        """Allocate a restart-stable response generation for formal P2."""
+
+        with self._p2_response_generation_owner_lock:
+            owner = self._p2_response_generation_owner
+            if owner is None:
+                database = self._p2_response_generation_database
+                if database is None:
+                    raise FormalTaskViolation(
+                        "P2_RESPONSE_GENERATION_OWNER_UNAVAILABLE",
+                        "durable product response generation owner is unavailable",
+                        ErrorCode.UNAVAILABLE,
+                    )
+                owner = SqliteP2ResponseGenerationOwner(database)
+                self._p2_response_generation_owner = owner
+            return owner.next_generation(session_id, interaction_id, local_prior)
 
     def resolve_product_authority_candidate(
         self,
@@ -1542,6 +1579,64 @@ class P3AuthenticatedComposition:
             replayed=False,
         )
 
+    async def _read_status_retry_admission(
+        self,
+        *,
+        principal: AuthenticatedPrincipal,
+        session_id: str,
+        task_id: str,
+        now: str,
+    ) -> dict[str, object]:
+        """Return one authoritative, read-only retry decision for task.status."""
+
+        try:
+            if "task.retry" not in principal.allowed_operations:
+                raise FormalTaskViolation(
+                    "FORMAL_TASK_AUTHORIZATION_DENIED",
+                    "task.retry is unavailable to the authenticated principal",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            authority = await self._run_blocking(
+                self._authority_resolver.resolve,
+                principal,
+                session_id=session_id,
+                now=now,
+                require_clean=True,
+            )
+            authority.context.require_usable(
+                scope=authority.scope,
+                required_permissions=frozenset({"task.execute", "project.write"}),
+                destructive=True,
+                now=now,
+            )
+            snapshot = await self._run_blocking(
+                self._core.read_current_retry_admission,
+                scope=authority.scope,
+                task_id=task_id,
+            )
+            spec = snapshot.task.spec
+            self._require_retry_executor(spec)
+            self._require_retry_task_identity(
+                authority=authority,
+                context=spec.context,
+                now=now,
+            )
+            return {
+                "eligible": True,
+                "reason": "TASK_RETRY_ELIGIBLE",
+                "task_id": snapshot.task.task_id,
+                "attempt_id": snapshot.attempt.attempt_id,
+                "attempt_number": snapshot.precondition.attempt_number,
+            }
+        except FormalTaskViolation as exc:
+            return {
+                "eligible": False,
+                "reason": exc.reason,
+                "task_id": task_id,
+                "attempt_id": None,
+                "attempt_number": None,
+            }
+
     async def _verify_confirmation(
         self,
         *,
@@ -2024,7 +2119,26 @@ class P3AuthenticatedComposition:
                 self._wake.set()
             outcome = "accepted" if result.ok else "rejected"
             reason = None if result.error is None else result.error.reason
-            return P3RouteResult(result.ok, result.to_dict())
+            route_payload = result.to_dict()
+            if result.ok and operation == "task.status":
+                result_payload = route_payload.get("result")
+                if not isinstance(result_payload, dict):
+                    raise FormalTaskViolation(
+                        "FORMAL_TASK_STATUS_RESULT_INVALID",
+                        "formal task status result is malformed",
+                        ErrorCode.INTERNAL,
+                    )
+                result_payload = dict(result_payload)
+                result_payload[
+                    "retry_admission"
+                ] = await self._read_status_retry_admission(
+                    principal=principal,
+                    session_id=str(clean["session_id"]),
+                    task_id=str(clean["task_id"]),
+                    now=now,
+                )
+                route_payload["result"] = result_payload
+            return P3RouteResult(result.ok, route_payload)
         except FormalTaskViolation as exc:
             reason = exc.reason
             return P3RouteResult(

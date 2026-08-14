@@ -450,6 +450,37 @@ def _store_counts(database: Path) -> tuple[int, ...]:
         )
 
 
+def test_p2_response_generation_owner_is_lazy_and_bound_to_the_task_store(
+    tmp_path: Path,
+) -> None:
+    first = _harness(tmp_path)
+    sidecar = tmp_path / "formal-tasks.sqlite3.p2-response-generations.sqlite3"
+
+    assert first.composition._p2_response_generation_database == sidecar
+    assert first.composition._p2_response_generation_owner is None
+    assert sidecar.exists() is False
+    assert (
+        first.composition.next_product_p2_response_generation(
+            "session-generation",
+            "interaction-generation",
+            -1,
+        )
+        == 0
+    )
+    assert sidecar.is_file()
+
+    restarted = _harness(tmp_path)
+    assert restarted.composition._p2_response_generation_owner is None
+    assert (
+        restarted.composition.next_product_p2_response_generation(
+            "session-generation",
+            "interaction-generation",
+            -1,
+        )
+        == 1
+    )
+
+
 async def _wait_until(predicate, *, attempts: int = 100) -> None:
     for _ in range(attempts):
         if predicate():
@@ -933,10 +964,18 @@ async def test_task_dirty_worktree_allows_reads_and_exact_cancel_but_blocks_new_
         assert len(harness.executor.dispatches) == 1
         assert len(harness.executor.cancels) == 1
         assert harness.authority.calls[0] == ("session-1", True)
-        assert all(
-            require_clean is False
-            for _session, require_clean in harness.authority.calls[1:-1]
-        )
+        assert [
+            require_clean for _session, require_clean in harness.authority.calls
+        ] == [
+            True,
+            False,
+            False,
+            False,
+            True,
+            False,
+            False,
+            True,
+        ]
         assert harness.authority.calls[-1] == ("session-1", True)
     finally:
         await harness.composition.stop()
@@ -2697,6 +2736,56 @@ async def _terminal_task(
     return task_id
 
 
+@pytest.mark.asyncio
+async def test_status_retry_admission_rejects_dirty_context_without_mutation(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_id = await _terminal_task(harness)
+        clean = await harness.composition.handle(
+            operation="task.status",
+            params={**_base(), "task_id": task_id},
+            request_id="request-retry-admission-clean",
+            session_id="session-1",
+        )
+        assert clean.ok is True, clean.payload
+        attempt = clean.payload["result"]["attempt"]
+        assert clean.payload["result"]["retry_admission"] == {
+            "eligible": True,
+            "reason": "TASK_RETRY_ELIGIBLE",
+            "task_id": task_id,
+            "attempt_id": attempt["attempt_id"],
+            "attempt_number": attempt["attempt_number"] + 1,
+        }
+
+        counts = _store_counts(harness.database)
+        dispatches = list(harness.executor.dispatches)
+        confirmations = _confirmation_count(harness.database)
+        harness.authority.dirty = True
+        dirty = await harness.composition.handle(
+            operation="task.status",
+            params={**_base(), "task_id": task_id},
+            request_id="request-retry-admission-dirty",
+            session_id="session-1",
+        )
+
+        assert dirty.ok is True, dirty.payload
+        assert dirty.payload["result"]["retry_admission"] == {
+            "eligible": False,
+            "reason": "TASK_CONTEXT_WORKTREE_DIRTY",
+            "task_id": task_id,
+            "attempt_id": None,
+            "attempt_number": None,
+        }
+        assert _store_counts(harness.database) == counts
+        assert harness.executor.dispatches == dispatches
+        assert _confirmation_count(harness.database) == confirmations
+    finally:
+        await harness.composition.stop()
+
+
 async def _apply_retry(
     harness: _Harness, task_id: str, *, command_id: str
 ) -> dict[str, object]:
@@ -2744,7 +2833,7 @@ async def test_retry_creates_one_successor_attempt_from_server_derived_lineage(
         assert after[3] == before[3] + 1
         assert after[4] == before[4] + 1
 
-        # Executor readiness was proved against the exact predecessor only.
+        # Executor readiness is proved only at Store apply, after confirmation.
         assert harness.executor.readiness == [(task_id, attempt_a)]
 
         current = harness.composition._core.store.get_task(task_id, _scope())
@@ -3575,7 +3664,7 @@ async def test_cancel_before_dispatch_predecessor_admits_exactly_one_successor(
         assert result["previous_attempt_id"] == attempt_a
         assert result["attempt_number"] == 2
         assert result["applied"] is True
-        # Readiness was proved from Store facts alone, against exactly A.
+        # Readiness is proved at Store apply from Store facts against exactly A.
         assert harness.executor.readiness == [(task_id, attempt_a)]
 
         after = _store_counts(harness.database)
@@ -3631,7 +3720,10 @@ def test_p3_model_builder_uses_the_shared_module_level_entry_builder() -> None:
 
     assert built is sentinel
     assert seen == [
-        ({"model_name": "probe-model", "client_provider": "probe"}, {"temperature": 0.0})
+        (
+            {"model_name": "probe-model", "client_provider": "probe"},
+            {"temperature": 0.0},
+        )
     ]
 
 

@@ -39,6 +39,9 @@ from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     P3RouteResult,
     PreparedP3MutationConfirmation,
 )
+from jiuwenswarm.server.live_voice.p2_response_generation_store import (
+    SqliteP2ResponseGenerationOwner,
+)
 from jiuwenswarm.server.live_voice.p3_confirmation import (
     BoundedP3ConfirmationOwner,
     P3ConfirmationBinding,
@@ -745,7 +748,11 @@ async def test_p2_activation_requests_the_formal_live_voice_agent_profile(
     assert _route(activated.payload, "p2.agent_interaction")["truth"] == "formal"
     assert len(manager.get_calls) == 1
     channel_id, mode, project_dir, sub_mode = manager.get_calls[0]
-    assert (channel_id, mode, sub_mode) == ("web", "agent", None)
+    assert (channel_id, mode, sub_mode) == (
+        "live_voice_formal_p2",
+        "agent",
+        None,
+    )
     assert Path(str(project_dir)) == tmp_path
     assert manager.pins == 1
 
@@ -2542,6 +2549,103 @@ async def test_p2_response_generation_continues_across_activation_successor(
     assert manager.agent.calls == 2
     assert registry._p2_response_generations[("session-product", "interaction-1")] == 1
     await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_response_generation_continues_across_registry_restart(
+    tmp_path: Path,
+) -> None:
+    generation_database = tmp_path / "durable-response-generations.sqlite3"
+    first, first_p3, _manager, _pushed = _registry(tmp_path)
+    first_p3._p2_response_generation_owner = SqliteP2ResponseGenerationOwner(
+        generation_database
+    )
+    first_binding = _p2_params()
+    assert (
+        await first.handle_p2_activate(
+            params=first_binding,
+            request_id="request-restart-generation-activate-1",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    first_submit = await first.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-restart-generation-1",
+            turn_id="turn-restart-generation-1",
+            response_id="response-restart-generation-1",
+            committed_at=NOW,
+            text="response before restart",
+            dispatch_target="agent",
+        ),
+        request_id="request-restart-generation-submit-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first_submit.ok is True
+    assert (
+        cast(dict, first_submit.payload["result"])["response"]["response_generation"]
+        == 0
+    )
+    await first.close_active_routes()
+
+    restarted, restarted_p3, _manager, _pushed = _registry(tmp_path)
+    restarted_p3._p2_response_generation_owner = SqliteP2ResponseGenerationOwner(
+        generation_database
+    )
+    successor_binding = _p2_params(
+        activation_id="activation-after-restart",
+        activation_generation=2,
+    )
+    assert (
+        await restarted.handle_p2_activate(
+            params=successor_binding,
+            request_id="request-restart-generation-activate-2",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok is True
+    successor = await restarted.handle_p2_submit(
+        params={
+            **successor_binding,
+            "commit_id": "commit-restart-generation-2",
+            "turn_id": "turn-restart-generation-2",
+            "response_id": "response-restart-generation-2",
+            "committed_at": NOW,
+            "text": "response after restart",
+            "dispatch_target": "agent",
+        },
+        request_id="request-restart-generation-submit-2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor.ok is True
+    assert (
+        cast(dict, successor.payload["result"])["response"]["response_generation"] == 1
+    )
+    await restarted.close_active_routes()
+
+
+def test_durable_p2_response_generation_owner_keeps_memory_exact_set_bounded(
+    tmp_path: Path,
+) -> None:
+    registry, p3, _manager, _pushed = _registry(tmp_path)
+    p3._p2_response_generation_owner = SqliteP2ResponseGenerationOwner(
+        tmp_path / "bounded-durable-response-generations.sqlite3"
+    )
+    first_key = ("session-product", "interaction-durable-0")
+    assert registry._next_p2_response_generation(first_key, -1) == 0
+    for index in range(1, registry._P2_RESPONSE_GENERATION_CAPACITY + 1):
+        registry._next_p2_response_generation(
+            ("session-product", f"interaction-durable-{index}"),
+            -1,
+        )
+
+    assert len(registry._p2_response_generations) == (
+        registry._P2_RESPONSE_GENERATION_CAPACITY
+    )
+    assert first_key not in registry._p2_response_generations
+    assert registry._next_p2_response_generation(first_key, -1) >= 1
 
 
 def test_p2_response_generation_fence_survives_exact_high_water_eviction(

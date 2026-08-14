@@ -2222,7 +2222,8 @@
         "taskId": "精确任务 ID",
         "confirm": "签发确认",
         "execute": "执行已确认变更",
-        "status": "P3 确认 / 变更"
+        "status": "P3 确认 / 变更",
+        "reason": "P3 变更原因"
       },
       "composition": {
         "flag_off": "flag 已关闭",

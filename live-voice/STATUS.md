@@ -20,18 +20,30 @@
   lineage, 40 automatic `PASS`, five real `VERIFY`, S7-03 `PASS` and
   `FROZEN_FOR_A3`.
 - Formal S8 began on that frozen candidate. The human journey produced useful
-  product truth but is now `PAUSED / SOURCE REPAIR`: normal speech playout was
-  rejected after a same-interaction activation successor because its canonical
-  response generation restarted at zero, and explicit Start after a long-lived
-  background/foreground lifecycle could use an expired Gateway media-activation
-  authority until a page refresh renewed it.
-- The current repair keeps the Gateway stale-response fence intact, moves the
-  response-generation high-water to the stable AgentServer product interaction,
-  and revalidates the exact active P2 binding before each explicit media Start.
-  Focused Python/Gateway coverage passed 326 tests and the integrated Web suite
-  passed 328 tests. This changed source is not the frozen `50070050` candidate:
-  final S7 re-verification/re-freeze and a fresh formal S8 closeout remain
-  mandatory before any `PASS - INTEGRATED WEB ALPHA` result.
+  product truth but is now `PAUSED / SOURCE REPAIR`. Provisional discovery found
+  the two earlier lifecycle defects plus eight additional product defects: ASR
+  correction was locked during confirmation; ordinary text/Tool work serialized
+  formal voice; P3 mutation failures hid their stable reason; a definitive
+  natural-language intent rejection retained the form until reload; status did
+  not project terminal task truth; retry eligibility ignored current checkout
+  and Executor cleanup truth; Web reconnect could sleep too long after runtime
+  recovery; and a complete AgentServer restart reset one interaction's response
+  generation.
+- The cumulative repair keeps the Gateway stale-response fence intact,
+  revalidates the exact active P2 binding before explicit media Start, separates
+  the formal P2 Agent facade from ordinary Web work, and owns response generation
+  in a bounded SQLite sidecar derived from the authoritative Task Store so it
+  survives AgentServer restart without retaining raw product IDs. The UI keeps
+  recognized text editable before commit, consumes authoritative retry admission
+  and stable failure reasons, projects terminal Task truth, unlocks after an
+  exact server rejection, and bounds reconnect delay to two seconds. The exact
+  affected suites currently pass 332 integrated Web tests and 182 backend
+  product/Task/durability tests; Python Ruff, format and diff checks pass, and
+  the production frontend build completes 4,640 modules. The affected Tier-3
+  cold review returned `APPROVE` with no open Critical, High or P2 finding. This
+  working tree is not a frozen candidate: coherent commit, complete S7
+  re-verification/re-freeze and a fresh formal S8 closeout remain mandatory
+  before any `PASS - INTEGRATED WEB ALPHA` result.
 - By explicit user direction, the already observed scope-correlation mismatch
   is retained as a non-blocking provisional S8 deviation for final human
   judgment. Continued S8 work before re-freeze is discovery only; its events
@@ -92,15 +104,17 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Finish cold review/static verification of the two lifecycle repairs, commit
-   one coherent local candidate, rebuild the private served frontend and restart
-   only the affected private runtime services.
-2. Continue the user-directed provisional S8 discovery from the remaining
-   showcase rows. Record new findings against the repair candidate, but do not
-   claim formal A3 closure or reuse old exact-candidate events as formal proof.
-3. Batch any remaining accepted source fixes, then run one complete S7 runner,
-   five real probes, cumulative Tier-3 review and external handoff freeze on the
-   final exact clean HEAD.
-4. Run a fresh exact-candidate S8 entry audit and formal human closeout, then
-   decide `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` under
+1. Commit the independently approved and broadly verified cumulative repair as
+   one coherent local candidate.
+2. Rebuild/restart the private runtime and continue user-directed S8 discovery
+   with Chrome, Computer Use, sanitized logs, Store/Executor inspection and
+   other automated observers. Record non-blocking findings through the pass,
+   batch-fix them, and repeat until only physical audio/device and final human
+   judgment remain; provisional events are never relabeled as formal proof.
+3. Run the complete S7 runner, five real probes, cumulative Tier-3 review and
+   external handoff freeze on the final exact clean HEAD after the last source
+   repair.
+4. Run a fresh exact-candidate S8 entry audit and all automated acceptance, then
+   hand the remaining physical product journey to the user for the final
+   `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
    [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).

@@ -2224,7 +2224,8 @@
         "taskId": "Exact task ID",
         "confirm": "Issue confirmation",
         "execute": "Execute confirmed mutation",
-        "status": "P3 confirmation / mutation"
+        "status": "P3 confirmation / mutation",
+        "reason": "P3 mutation reason"
       },
       "composition": {
         "flag_off": "flag off",

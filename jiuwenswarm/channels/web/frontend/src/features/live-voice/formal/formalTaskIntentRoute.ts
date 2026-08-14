@@ -796,6 +796,25 @@ export class ProductFormalTaskIntentOwner {
       })
       .catch(error => {
         if (this.#retained === retained) {
+          const errorRecord = objectValue(error);
+          try {
+            const rejected = parseIntentReceipt(errorRecord?.payload, {
+              request_id: retained.request_id,
+              source,
+              operation,
+              task_id: taskId,
+            });
+            if (rejected.disposition === 'rejected') {
+              this.#clearOwnedCheckpoint(false);
+              this.#retained = null;
+              this.#adoptReceipt(rejected, retained.checkpoint, ownedInteraction);
+              return rejected;
+            }
+          } catch {
+            // A transport failure or malformed error payload remains retained
+            // for exact status reconciliation. Only a fully parsed server-owned
+            // rejected receipt can unlock the current form without a reload.
+          }
           retained.promise = null;
           this.#status = 'failed';
           this.#reason = 'FORMAL_TASK_INTENT_REQUEST_FAILED';

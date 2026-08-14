@@ -192,6 +192,34 @@ class PersistentTaskCore:
 
         return self.store.read_current_retry_authority(scope=scope, task_id=task_id)
 
+    def read_current_retry_admission(
+        self,
+        *,
+        scope: ScopeRef,
+        task_id: str,
+    ) -> TaskRetryAuthoritySnapshot:
+        """Read the exact retry lineage and re-prove Executor quiescence.
+
+        This is a side-effect-free admission preview.  ``execute`` repeats the
+        same proof when it applies a retry, so a UI indication can never replace
+        the authoritative mutation-time fence.
+        """
+
+        authority = self.read_current_retry_authority(scope=scope, task_id=task_id)
+        try:
+            readiness_method = getattr(self.executor, "retry_readiness", None)
+            if not callable(readiness_method):
+                raise AttributeError("retry_readiness is unavailable")
+            readiness = readiness_method(authority.task, authority.attempt)
+        except Exception as error:  # noqa: BLE001 -- fail closed at seam
+            raise FormalTaskViolation(
+                "TASK_RETRY_EXECUTOR_CLEANUP_PENDING",
+                "Executor retry-readiness is unavailable",
+                ErrorCode.UNAVAILABLE,
+            ) from error
+        self._require_retry_readiness(authority, readiness)
+        return authority
+
     def read_applied_retry_replay(
         self,
         *,

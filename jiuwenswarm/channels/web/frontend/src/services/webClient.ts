@@ -23,8 +23,13 @@ interface PendingRequest {
   timeoutId: number;
 }
 
-const MAX_RECONNECT_ATTEMPTS = 5;
 const DEFAULT_TIMEOUT_MS = 15000;
+
+/** Keep recovery observable without leaving a live tab asleep for 8-16s. */
+export function webReconnectDelayMs(attempt: number): number {
+  if (!Number.isInteger(attempt) || attempt < 1) return 1000;
+  return Math.min(1000 * 2 ** Math.min(attempt - 1, 1), 2000);
+}
 
 export function extractWebErrorReason(payload: unknown): string | undefined {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
@@ -492,11 +497,9 @@ class WebClient {
     this.reconnectAttempts += 1;
     this.updateState('reconnecting');
 
-    // 前 N 次使用指数退避，超过后改为固定间隔持续重试，后端恢复后能自动检测并恢复连接
-    const delay =
-      this.reconnectAttempts <= MAX_RECONNECT_ATTEMPTS
-        ? Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000)
-        : 2000; // 每 2 秒持续尝试
+    // Continue retrying, but never leave an already-open product tab waiting
+    // through a long exponential backoff after the private runtime recovers.
+    const delay = webReconnectDelayMs(this.reconnectAttempts);
 
     this.reconnectTimer = window.setTimeout(() => {
       void this.connect(this.lastConnectOptions);

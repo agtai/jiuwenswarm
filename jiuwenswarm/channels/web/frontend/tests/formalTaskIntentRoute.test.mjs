@@ -691,6 +691,55 @@ test('transport exception content is never retained in the UI-facing owner snaps
   assert.equal(JSON.stringify(snapshot).includes(sentinel), false);
 });
 
+test('a definitive server rejection unlocks the owner without a page reload', async () => {
+  let calls = 0;
+  const owner = new ProductFormalTaskIntentOwner({
+    enabled: true,
+    request: async (_method, params, requestId) => {
+      calls += 1;
+      if (calls === 1) {
+        const error = new Error('request rejected');
+        error.payload = envelope(
+          requestId,
+          {
+            status: 'rejected',
+            reason: 'UNSUPPORTED_TASK_INTENT',
+            operation: null,
+            task_id: null,
+            source_span: null,
+            target_span: null,
+            formal_task_result: null,
+          },
+          false
+        );
+        throw error;
+      }
+      return envelope(requestId, dispatched('task.status', 'task-abc_123', params.interaction_id));
+    },
+  });
+
+  const rejected = await owner.submitText({
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    operation: 'task.create',
+    text: 'help me with this task',
+  });
+  assert.equal(rejected.disposition, 'rejected');
+  assert.equal(owner.snapshot().status, 'rejected');
+  assert.equal(owner.snapshot().reason, 'UNSUPPORTED_TASK_INTENT');
+  assert.equal(owner.snapshot().retained_transport, false);
+
+  const recoveredWithoutReload = await owner.submitText({
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    operation: 'task.status',
+    task_id: 'task-abc_123',
+    text: 'task status task-abc_123',
+  });
+  assert.equal(recoveredWithoutReload.disposition, 'dispatched');
+  assert.equal(calls, 2);
+});
+
 test('forged target response and flag-off both fail closed', async () => {
   let calls = 0;
   const owner = new ProductFormalTaskIntentOwner({

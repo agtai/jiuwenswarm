@@ -544,7 +544,11 @@ function mountedTaskIntentControls(renderer) {
   };
 }
 
-function mountedP3Status(binding, { attemptId = 'attempt-a', attemptNumber = 1, state = 'running', outcome = null, eventHead = 1 } = {}) {
+function mountedP3Status(
+  binding,
+  { attemptId = 'attempt-a', attemptNumber = 1, state = 'running', outcome = null, eventHead = 1, retryAdmission = undefined } = {}
+) {
+  const eligible = state === 'terminal' && attemptNumber < 3;
   return {
     ok: true,
     result: {
@@ -563,6 +567,14 @@ function mountedP3Status(binding, { attemptId = 'attempt-a', attemptNumber = 1, 
         event_head: eventHead,
       },
       attempt: { task_id: 'task-a', attempt_id: attemptId, attempt_number: attemptNumber },
+      retry_admission:
+        retryAdmission ?? {
+          eligible,
+          reason: eligible ? 'TASK_RETRY_ELIGIBLE' : 'TASK_RETRY_PRECONDITION_STALE',
+          task_id: 'task-a',
+          attempt_id: eligible ? attemptId : null,
+          attempt_number: eligible ? attemptNumber + 1 : null,
+        },
     },
   };
 }
@@ -1401,24 +1413,20 @@ test('mounted recognized speech requires an exact in-page second action and fenc
       await waitForMounted(() => productVoiceStates.at(-1)?.confirmation_phase === 'confirming', 'formal product Live Voice did not publish confirmation');
     });
     assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0);
-    assert.equal(productForm().findByType('textarea').props.disabled, true);
+    assert.equal(productForm().findByType('textarea').props.disabled, false, 'recognized speech must remain editable before commit');
     assert.equal(mountedP3Controls(renderer).button('Issue confirmation').props.disabled, true);
-
-    await act(async () => {
-      productVoiceControlRef.current.cancelConfirmation();
-      await waitForMounted(
-        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length === 0,
-        'cancel did not close the in-page confirmation'
-      );
-    });
-    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0, 'cancel must have zero Agent transport effect');
 
     await act(async () => {
       productForm()
         .findByType('textarea')
         .props.onChange({ target: { value: 'Edited Agent speech' } });
+      await waitForMounted(
+        () => renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length === 0,
+        'editing did not close the raw-recognition confirmation'
+      );
       await waitForMounted(() => productForm().findByType('textarea').props.value === 'Edited Agent speech', 'speech edit did not settle');
     });
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.submit').length, 0, 'editing must have zero Agent transport effect');
     await act(async () => {
       productVoiceControlRef.current.submit();
       await waitForMounted(
@@ -2009,6 +2017,7 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
   let terminalA = false;
   let terminalB = false;
   let failNextStatusReason = null;
+  let rejectNextRetryAdmissionReason = null;
   let deferNextStatus = false;
   let releaseDeferredStatus = null;
   let renderer;
@@ -2146,6 +2155,24 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
                 eventHead: 6,
               })
             );
+        });
+      }
+      if (rejectNextRetryAdmissionReason !== null) {
+        const reason = rejectNextRetryAdmissionReason;
+        rejectNextRetryAdmissionReason = null;
+        return mountedP3Status(binding, {
+          attemptId: 'attempt-b',
+          attemptNumber: 2,
+          state: 'terminal',
+          outcome: 'completed',
+          eventHead: 5,
+          retryAdmission: {
+            eligible: false,
+            reason,
+            task_id: 'task-a',
+            attempt_id: null,
+            attempt_number: null,
+          },
         });
       }
       if (authoritativeAttempt === 2 && terminalB) {
@@ -2309,6 +2336,66 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       );
     });
     assert.equal(JSON.stringify(renderer.toJSON()).includes('EXECUTION_CONTEXT_REVISION_MISMATCH'), false);
+
+    const mutationsBeforeUnknownRefresh = calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length;
+    failNextStatusReason = 'FORMAL_TASK_STATUS_TRANSPORT_UNAVAILABLE';
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('FORMAL_TASK_STATUS_TRANSPORT_UNAVAILABLE'),
+        'ambiguous post-confirmation status failure did not remain visible'
+      );
+    });
+    assert.equal(mountedP3Controls(renderer).button('Check retry eligibility').props.disabled, true);
+    assert.equal(mountedP3Controls(renderer).button('Issue confirmation').props.disabled, true);
+    assert.equal(mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), false);
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length,
+      mutationsBeforeUnknownRefresh,
+      'ambiguous status failure must have zero mutation effect'
+    );
+
+    await act(async () => {
+      renderer.unmount();
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    renderer = null;
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, 'mounted-p3-session', request, p3RetryInspectionWait));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry',
+        'remount did not recover the exact retry candidate after ambiguous status'
+      );
+    });
+
+    const mutationsBeforeDefinitiveRejection = calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length;
+    rejectNextRetryAdmissionReason = 'TASK_CONTEXT_WORKTREE_DIRTY';
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('TASK_CONTEXT_WORKTREE_DIRTY'),
+        'definitive post-confirmation admission rejection did not expose its reason'
+      );
+    });
+    assert.equal(mountedP3Controls(renderer).button('Check retry eligibility').props.disabled, false);
+    assert.equal(mountedP3Controls(renderer).button('Issue confirmation').props.disabled, true);
+    assert.equal(mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), false);
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length,
+      mutationsBeforeDefinitiveRejection,
+      'definitive retry ineligibility must have zero mutation effect'
+    );
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry',
+        'definitive ineligibility did not release the owner for reinspection'
+      );
+    });
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('TASK_CONTEXT_WORKTREE_DIRTY'), false);
     await act(async () => {
       mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
       await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.retry C confirmation did not settle');
@@ -2333,6 +2420,8 @@ test('mounted P3 reconciles create A through cancel and authoritative A/B termin
       [
         ['task.create', null],
         ['task.cancel', 'task-a'],
+        ['task.retry', 'task-a'],
+        ['task.retry', 'task-a'],
         ['task.retry', 'task-a'],
         ['task.retry', 'task-a'],
       ]
