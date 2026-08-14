@@ -43,10 +43,10 @@
   the production frontend build completes 4,640 modules. The committed 16-path
   repair and the subsequent product-status Adapter and real-resolver
   stable-reason corrections each received affected Tier-3 `APPROVE`, with no
-  open Critical, High or P2 finding. This working tree is not a frozen candidate:
-  coherent commit, complete S7
-  re-verification/re-freeze and a fresh formal S8 closeout remain mandatory
-  before any `PASS - INTEGRATED WEB ALPHA` result.
+  open Critical, High or P2 finding. The product repair is committed through
+  exact `5d79f47bd915f24f9948593ff6fd9ec392dc1bdd`; it is not a frozen candidate.
+  Complete S7 re-verification/re-freeze and a fresh formal S8 closeout remain
+  mandatory before any `PASS - INTEGRATED WEB ALPHA` result.
 - By explicit user direction, the already observed scope-correlation mismatch
   is retained as a non-blocking provisional S8 deviation for final human
   judgment. Continued S8 work before re-freeze is discovery only; its events
@@ -107,11 +107,10 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Commit the independently approved and broadly verified cumulative repair as
-   one coherent local candidate.
-2. Rebuild/restart the private runtime and continue user-directed S8 discovery
-   with Chrome, Computer Use, sanitized logs, Store/Executor inspection and
-   other automated observers. Record non-blocking findings through the pass,
+1. Continue user-directed S8 discovery on the independently approved committed
+   repairs with the rebuilt private runtime, using Chrome, Computer Use,
+   sanitized logs, Store/Executor inspection and other automated observers.
+2. Record non-blocking findings through the pass,
    batch-fix them, and repeat until only physical audio/device and final human
    judgment remain; provisional events are never relabeled as formal proof.
 3. Run the complete S7 runner, five real probes, cumulative Tier-3 review and
