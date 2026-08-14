@@ -132,9 +132,12 @@
   Ruff and formatting, all changed-Python Ruff plus W605, compileall and the
   exact 21-diagnostic S7 baseline pass. The already changed legacy Agent Adapter
   now carries exact per-import E402 suppressions rather than a file-wide waiver,
-  so future diagnostics remain visible. Affected Tier-3 independent review, a
-  coherent commit, rebuilt-runtime positive natural-create rerun and remaining
-  diagnostic S8 discovery are still pending; S7-04 remains `REFREEZE REQUIRED`.
+  so future diagnostics remain visible. Affected Tier-3 independent review
+  approved the four-path boundary with no open Critical, High or P2 finding,
+  and the repair is committed as exact
+  `35346ac598efe4a848f6530c58eb50f7efc1ec35`. The rebuilt-runtime positive
+  natural-create rerun and remaining diagnostic S8 discovery are still pending;
+  S7-04 remains `REFREEZE REQUIRED`.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -191,9 +194,8 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Finish affected Tier-3 review of the clean-baseline patch-attribution repair,
-   commit it as one coherent local candidate, rebuild the private runtime and
-   repeat exact natural create plus receipt-time refresh against that source.
+1. Rebuild the private runtime from exact `35346ac5` and repeat exact natural
+   create plus receipt-time refresh against that clean source.
 2. If the real rerun passes, resume user-directed S8 discovery using Chrome,
    Computer Use, sanitized logs, Store/Executor inspection and other automated
    observers. Record non-blocking findings through the pass,
