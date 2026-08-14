@@ -136,8 +136,21 @@
   approved the four-path boundary with no open Critical, High or P2 finding,
   and the repair is committed as exact
   `35346ac598efe4a848f6530c58eb50f7efc1ec35`. The rebuilt-runtime positive
-  natural-create rerun and remaining diagnostic S8 discovery are still pending;
-  S7-04 remains `REFREEZE REQUIRED`.
+  natural-create rerun then passed: receipt-time refresh recovered one exact
+  task/attempt/progress route, the task completed once, Store/outbox/Direct
+  state settled, and the authorized `notes.txt` Git patch matched the persisted
+  `content-v2` attribution before the disposable fixture was restored clean.
+- A later P1 retry exposed a private-runtime configuration mismatch rather than
+  a product media defect. The launch environment named the private FQDN, but
+  the isolated data-root `config/.env` reloaded the older localhost-only Origin
+  allowlist and strict media activation returned `MEDIA_ORIGIN_REJECTED` while
+  P2/P3 and ordinary text remained usable. The private user/data-root
+  allowlists were corrected, all four services restarted healthy, and Chrome
+  then entered `Listening through formal P1`; the Gateway accepted the exact
+  same-origin fixed media path and non-legacy route. The diagnostic capture was
+  exited without committing speech. Final runtime preparation must preserve
+  and verify this authoritative data-root Origin binding. No product source
+  change was needed; S7-04 remains `REFREEZE REQUIRED`.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -194,13 +207,13 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Rebuild the private runtime from exact `35346ac5` and repeat exact natural
-   create plus receipt-time refresh against that clean source.
-2. If the real rerun passes, resume user-directed S8 discovery using Chrome,
-   Computer Use, sanitized logs, Store/Executor inspection and other automated
-   observers. Record non-blocking findings through the pass,
-   batch-fix them, and repeat until only physical audio/device and final human
-   judgment remain; provisional events are never relabeled as formal proof.
+1. Continue user-directed S8 discovery using Chrome, Computer Use, sanitized
+   logs, Store/Executor inspection and other automated observers. Preserve the
+   corrected private FQDN in the authoritative data-root Origin allowlist and
+   fail closed if the active media route does not reproduce it.
+2. Record non-blocking findings through the pass, batch-fix them, and repeat
+   until only physical audio/device and final human judgment remain;
+   provisional events are never relabeled as formal proof.
 3. Run the complete S7 runner, five real probes, cumulative Tier-3 review and
    external handoff freeze on the final exact clean HEAD after the last source
    repair.
