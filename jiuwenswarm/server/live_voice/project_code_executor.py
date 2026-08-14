@@ -78,6 +78,8 @@ FORMAL_RUNTIME_SUPPORT_POLICY = MappingProxyType(
     }
 )
 _DIRECT_EXECUTOR_TABLE = "live_voice_formal_project_attempts_v1"
+_EXPECTED_PROJECT_STATE_PREFIX = "content-v2"
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _DIRECT_EXECUTOR_LEASE = timedelta(minutes=5)
 _DIRECT_EXECUTOR_REF_PREFIX = DIRECT_PROJECT_EXECUTOR_REF_PREFIX
 _MAX_DIRECT_CLEANUP_TIMEOUT_SECONDS = 5.0
@@ -475,6 +477,76 @@ def _project_content_fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
+def _git_visible_patch(root: Path) -> bytes:
+    """Capture the exact HEAD-relative patch without mutating the real index."""
+
+    descriptor, raw_temporary_index = tempfile.mkstemp(
+        prefix="jiuwenswarm-live-voice-index-",
+        suffix=".tmp",
+    )
+    os.close(descriptor)
+    temporary_index = Path(raw_temporary_index)
+    temporary_index.unlink()
+    environment = dict(os.environ)
+    environment["GIT_INDEX_FILE"] = str(temporary_index)
+    try:
+        for arguments in (
+            ("read-tree", "HEAD"),
+            ("add", "-N", "-A", "--"),
+            (
+                "diff",
+                "--binary",
+                "--full-index",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--",
+            ),
+        ):
+            completed = subprocess.run(
+                ["git", "-C", str(root), *arguments],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                env=environment,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED")
+        return completed.stdout
+    finally:
+        with contextlib.suppress(OSError):
+            temporary_index.unlink()
+
+
+def _encode_expected_project_state(
+    content_fingerprint: str,
+    *,
+    patch: bytes | None,
+) -> str:
+    if not _SHA256_PATTERN.fullmatch(content_fingerprint):
+        raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED")
+    if patch is None:
+        return content_fingerprint
+    patch_fingerprint = hashlib.sha256(patch).hexdigest()
+    return f"{_EXPECTED_PROJECT_STATE_PREFIX}:{content_fingerprint}:{patch_fingerprint}"
+
+
+def _expected_project_state_matches(root: Path, expected_state: str) -> bool:
+    if _SHA256_PATTERN.fullmatch(expected_state):
+        return _project_content_fingerprint(root) == expected_state
+    parts = expected_state.split(":")
+    if (
+        len(parts) != 3
+        or parts[0] != _EXPECTED_PROJECT_STATE_PREFIX
+        or not _SHA256_PATTERN.fullmatch(parts[1])
+        or not _SHA256_PATTERN.fullmatch(parts[2])
+    ):
+        return False
+    if _project_content_fingerprint(root) == parts[1]:
+        return True
+    return hashlib.sha256(_git_visible_patch(root)).hexdigest() == parts[2]
+
+
 def _path_fingerprint(path: Path) -> str:
     digest = hashlib.sha256()
     if not path.exists() and not path.is_symlink():
@@ -599,8 +671,7 @@ def _create_attempt_worktree(
 
 def _attempt_worktree_paths(root: Path, attempt_id: str) -> tuple[Path, Path]:
     base = (
-        Path(tempfile.gettempdir()).resolve(strict=True)
-        / "jiuwenswarm-live-voice-d0"
+        Path(tempfile.gettempdir()).resolve(strict=True) / "jiuwenswarm-live-voice-d0"
     )
     namespace = f"{_path_key(root, strict=False)}\0{attempt_id}".encode("utf-8")
     parent = base / f"attempt-{hashlib.sha256(namespace).hexdigest()}"
@@ -611,12 +682,13 @@ def _attempt_ownership_lock_path(root: Path, attempt_id: str) -> Path:
     """Return a stable lock path that survives removal of an attempt checkout."""
 
     base = (
-        Path(tempfile.gettempdir()).resolve(strict=True)
-        / "jiuwenswarm-live-voice-d0"
+        Path(tempfile.gettempdir()).resolve(strict=True) / "jiuwenswarm-live-voice-d0"
     )
     namespace = f"{_path_key(root, strict=False)}\0{attempt_id}".encode("utf-8")
-    return base / "ownership-locks" / (
-        f"attempt-{hashlib.sha256(namespace).hexdigest()}.lock"
+    return (
+        base
+        / "ownership-locks"
+        / (f"attempt-{hashlib.sha256(namespace).hexdigest()}.lock")
     )
 
 
@@ -634,9 +706,7 @@ class _AttemptOwnershipLock:
         self._released = False
 
     @classmethod
-    def try_acquire(
-        cls, root: Path, attempt_id: str
-    ) -> _AttemptOwnershipLock | None:
+    def try_acquire(cls, root: Path, attempt_id: str) -> _AttemptOwnershipLock | None:
         path = _attempt_ownership_lock_path(root, attempt_id)
         base = path.parent.parent
         lock_dir = path.parent
@@ -721,17 +791,17 @@ def _worktree_registered(root: Path, worktree: Path) -> bool:
         raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING")
     expected = _path_key(worktree, strict=False)
     for line in completed.stdout.decode("utf-8", errors="strict").splitlines():
-        if line.startswith("worktree ") and _path_key(
-            line.removeprefix("worktree "), strict=False
-        ) == expected:
+        if (
+            line.startswith("worktree ")
+            and _path_key(line.removeprefix("worktree "), strict=False) == expected
+        ):
             return True
     return False
 
 
 def _remove_attempt_worktree(root: Path, parent: Path, worktree: Path) -> None:
     safe_temp_root = (
-        Path(tempfile.gettempdir()).resolve(strict=True)
-        / "jiuwenswarm-live-voice-d0"
+        Path(tempfile.gettempdir()).resolve(strict=True) / "jiuwenswarm-live-voice-d0"
     )
     resolved_parent = parent.resolve(strict=False)
     resolved_worktree = worktree.resolve(strict=False)
@@ -809,7 +879,7 @@ def _seed_attempt_worktree(root: Path, worktree: Path, expected_tree: str) -> No
 
 
 def _attempt_patch(worktree: Path) -> tuple[bytes, str]:
-    expected_tree = _project_content_fingerprint(worktree)
+    expected_content = _project_content_fingerprint(worktree)
     raw_untracked = _git_output(
         worktree,
         "ls-files",
@@ -829,10 +899,19 @@ def _attempt_patch(worktree: Path) -> tuple[bytes, str]:
         )
         if completed.returncode != 0:
             raise RuntimeError("PROJECT_CHANGE_CAPTURE_FAILED")
-    patch = _git_output(worktree, "diff", "--binary", "--full-index", "--")
+    patch = _git_output(
+        worktree,
+        "diff",
+        "--binary",
+        "--full-index",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--no-renames",
+        "--",
+    )
     if not patch:
         raise RuntimeError("NO_EFFECTIVE_TARGET_CHANGE")
-    return patch, expected_tree
+    return patch, expected_content
 
 
 def _apply_attempt_patch(
@@ -852,7 +931,7 @@ def _apply_attempt_patch(
         raise RuntimeError("EXECUTION_TARGET_CHANGED_DURING_ATTEMPT")
     _git_run_with_input(root, ("apply", "--check", "--binary", "-"), patch)
     _git_run_with_input(root, ("apply", "--binary", "-"), patch)
-    if _project_content_fingerprint(root) == expected_tree:
+    if _expected_project_state_matches(root, expected_tree):
         return
     with contextlib.suppress(Exception):
         _git_run_with_input(root, ("apply", "--reverse", "--binary", "-"), patch)
@@ -878,10 +957,12 @@ def _runtime_support_governance(root: Path) -> dict[str, object]:
                 project_dir=root,
             )
         ).resolve(strict=False),
-        "prompt_attachment": (agent_workspace / "prompt_attachment").resolve(strict=False),
-        ".agent_history": (
-            Path(get_agent_history_root()) / ".agent_history"
-        ).resolve(strict=False),
+        "prompt_attachment": (agent_workspace / "prompt_attachment").resolve(
+            strict=False
+        ),
+        ".agent_history": (Path(get_agent_history_root()) / ".agent_history").resolve(
+            strict=False
+        ),
     }
     if any(_is_within(path, root) for path in application_paths.values()):
         raise FormalTaskViolation(
@@ -1449,19 +1530,22 @@ class _DirectProjectAttemptJournal:
                         try:
                             root = Path(record.project_root).resolve(strict=True)
                             current_content = _project_content_fingerprint(root)
-                            unchanged_authority = (
-                                _git_head(root) == record.before_head
-                                and _target_support_fingerprints(root)
-                                == json.loads(record.protected_support_json)
+                            unchanged_authority = _git_head(
+                                root
+                            ) == record.before_head and _target_support_fingerprints(
+                                root
+                            ) == json.loads(record.protected_support_json)
+                            expected_state_matches = (
+                                record.expected_tree is not None
+                                and _expected_project_state_matches(
+                                    root, record.expected_tree
+                                )
                             )
                         except Exception:
                             unchanged_authority = False
                             current_content = None
-                        if (
-                            unchanged_authority
-                            and record.expected_tree is not None
-                            and current_content == record.expected_tree
-                        ):
+                            expected_state_matches = False
+                        if unchanged_authority and expected_state_matches:
                             outcome = TerminalOutcome.COMPLETED
                             raw_status = "restart_apply_completed"
                             summary = (
@@ -1735,13 +1819,8 @@ class DirectProjectCodeExecutorAdapter:
                 continue
             retained = False
             try:
-                current = await asyncio.to_thread(
-                    self._journal.get, record.attempt_id
-                )
-                if (
-                    current is None
-                    or current.state is not FormalAttemptState.TERMINAL
-                ):
+                current = await asyncio.to_thread(self._journal.get, record.attempt_id)
+                if current is None or current.state is not FormalAttemptState.TERMINAL:
                     continue
                 registered = await asyncio.to_thread(
                     _worktree_registered, root, worktree
@@ -2018,9 +2097,7 @@ class DirectProjectCodeExecutorAdapter:
                 created_worktree,
                 record.before_tree,
             )
-            await asyncio.to_thread(
-                _reject_git_visible_symlinks, created_worktree
-            )
+            await asyncio.to_thread(_reject_git_visible_symlinks, created_worktree)
             if await asyncio.to_thread(
                 _git_head, created_worktree
             ) != record.before_head or await asyncio.to_thread(
@@ -2101,9 +2178,7 @@ class DirectProjectCodeExecutorAdapter:
                         "attempt Code Agent initialization changed the isolated checkout",
                         ErrorCode.PERMISSION_DENIED,
                     )
-                await asyncio.to_thread(
-                    _reject_git_visible_symlinks, created_worktree
-                )
+                await asyncio.to_thread(_reject_git_visible_symlinks, created_worktree)
             request = AgentRequest(
                 request_id=f"{_DIRECT_EXECUTOR_REF_PREFIX}{item.attempt_id}",
                 channel_id="formal-task-core",
@@ -2135,9 +2210,7 @@ class DirectProjectCodeExecutorAdapter:
             agent_error = False
             started.set()
             with forbid_background_project_shell_commands():
-                async for (
-                    chunk
-                ) in project_executor.process_background_code_task_stream(
+                async for chunk in project_executor.process_background_code_task_stream(
                     request
                 ):
                     terminal = terminal or chunk.is_complete
@@ -2163,7 +2236,7 @@ class DirectProjectCodeExecutorAdapter:
                 != before_support
             ):
                 raise RuntimeError("RUNTIME_SUPPORT_PATH_MUTATED")
-            patch, expected_tree = await asyncio.to_thread(
+            patch, expected_content = await asyncio.to_thread(
                 _attempt_patch, created_worktree
             )
             interruption = self._interruptions.get(item.attempt_id)
@@ -2184,6 +2257,18 @@ class DirectProjectCodeExecutorAdapter:
                     now=self._clock(),
                 )
                 return
+            target_status = await asyncio.to_thread(
+                _git_output,
+                target_root,
+                "status",
+                "--porcelain=v2",
+                "-z",
+                "--untracked-files=all",
+            )
+            expected_tree = _encode_expected_project_state(
+                expected_content,
+                patch=patch if not target_status else None,
+            )
             reserved, completion_record = await asyncio.to_thread(
                 self._journal.reserve_completion,
                 item.attempt_id,
@@ -2245,9 +2330,7 @@ class DirectProjectCodeExecutorAdapter:
             raise
         except Exception as error:  # noqa: BLE001 -- persist stable terminal truth
             code = (
-                error.reason
-                if isinstance(error, FormalTaskViolation)
-                else str(error)
+                error.reason if isinstance(error, FormalTaskViolation) else str(error)
             )
             if code.startswith("EXECUTION_TARGET_NOT_BOUND:"):
                 code = "EXECUTION_TARGET_NOT_BOUND"

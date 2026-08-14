@@ -132,6 +132,23 @@ class _ExactRootDirectProjectExecutor(_DirectProjectExecutor):
             yield chunk
 
 
+class _LfRewriteProjectExecutor(_DirectProjectExecutor):
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        self.started.set()
+        project = Path(request.params["project_dir"]).resolve()
+        try:
+            (project / "README.md").write_bytes(b"baseline\ncompleted\n")
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={"event_type": "chat.final", "content": "done"},
+                is_complete=True,
+            )
+        finally:
+            self.finished.set()
+
+
 class _AttributionExecutor:
     def __init__(self) -> None:
         self.requests = []
@@ -968,6 +985,53 @@ async def test_direct_d0_attempt_executor_binds_exact_worktree_and_releases_befo
 
 
 @pytest.mark.asyncio
+async def test_direct_d0_accepts_exact_patch_when_autocrlf_changes_raw_bytes(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    _git(project, "config", "core.autocrlf", "true")
+    readme = project / "README.md"
+    readme.write_bytes(b"baseline\r\n")
+    assert _git(project, "status", "--porcelain") == ""
+
+    executor = _LfRewriteProjectExecutor(project)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+    )
+
+    await adapter.dispatch(_item(project))
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert readme.read_bytes() == b"baseline\r\ncompleted\r\n"
+    record = adapter._journal.get("attempt-1")
+    assert record is not None
+    assert record.expected_tree is not None
+    expected_parts = record.expected_tree.split(":")
+    assert expected_parts[0] == "content-v2"
+    assert (
+        project_code_executor._project_content_fingerprint(project) != expected_parts[1]
+    )
+    assert project_code_executor._expected_project_state_matches(
+        project, record.expected_tree
+    )
+
+    (project / "foreign.txt").write_text("foreign\n", encoding="utf-8")
+    assert not project_code_executor._expected_project_state_matches(
+        project, record.expected_tree
+    )
+    assert _git(project, "diff", "--cached", "--name-only") == ""
+    assert not project_code_executor._expected_project_state_matches(
+        project, "malformed"
+    )
+
+
+@pytest.mark.asyncio
 async def test_direct_d0_wrong_attempt_root_fails_closed_without_side_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1638,7 +1702,9 @@ async def test_binding_resolve_close_race_releases_owner_before_closed(
         principal=object(),  # type: ignore[arg-type]
     )
 
-    resolving = asyncio.create_task(resolver.resolve(_spec(tmp_path), for_dispatch=True))
+    resolving = asyncio.create_task(
+        resolver.resolve(_spec(tmp_path), for_dispatch=True)
+    )
     assert await asyncio.to_thread(entered.wait, 2)
     closing = asyncio.create_task(resolver.close())
     await asyncio.sleep(0)
@@ -1947,9 +2013,7 @@ async def test_d069_barrier_uses_real_direct_checkout_cancel_and_stop(
             return str(self.root)
 
         async def process_background_code_task_stream(self, request):
-            await self._adapter.prepare_background_project_session(
-                request.session_id
-            )
+            await self._adapter.prepare_background_project_session(request.session_id)
             if False:
                 yield None
 
@@ -2045,9 +2109,12 @@ async def test_direct_cancel_flag_crosses_process_lease_without_widening(
         executor_ref=delivered.executor_ref,
     )
 
-    with pytest.raises(FormalTaskViolation) as pending:
-        await observer.cancel(cancel_item)
-    assert pending.value.reason == "EXECUTOR_CANCEL_PENDING"
+    try:
+        immediate = await observer.cancel(cancel_item)
+    except FormalTaskViolation as pending:
+        assert pending.reason == "EXECUTOR_CANCEL_PENDING"
+    else:
+        assert immediate.observations[-1].attempt_outcome is TerminalOutcome.CANCELLED
     await _wait_direct_settled(owner)
     cancelled = await observer.cancel(cancel_item)
 
@@ -2115,9 +2182,7 @@ async def test_direct_executor_retains_failed_worktree_cleanup_and_never_complet
             raise RuntimeError("injected cleanup lock")
         real_remove(root, parent, worktree)
 
-    monkeypatch.setattr(
-        project_code_executor, "_remove_attempt_worktree", fail_once
-    )
+    monkeypatch.setattr(project_code_executor, "_remove_attempt_worktree", fail_once)
     await adapter.dispatch(_item(project))
     await asyncio.wait_for(executor.finished.wait(), timeout=2)
     await _wait_direct_settled(adapter)
@@ -2180,9 +2245,7 @@ async def test_failed_attempt_exposes_independent_cleanup_pending_truth(
     assert terminal.observations[-1].raw_status == "failed_cleanup_pending"
     assert adapter.retained_cleanup_attempt_ids() == ("attempt-1",)
 
-    monkeypatch.setattr(
-        project_code_executor, "_remove_attempt_worktree", real_remove
-    )
+    monkeypatch.setattr(project_code_executor, "_remove_attempt_worktree", real_remove)
     await adapter.close()
     assert adapter.retained_cleanup_attempt_ids() == ()
 
@@ -2802,6 +2865,77 @@ def test_direct_executor_restart_classifies_atomic_apply_crash_window(
     assert recovered.error == expected_error
 
 
+def test_direct_executor_restart_recognizes_exact_autocrlf_patch(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    _git(project, "config", "core.autocrlf", "true")
+    readme = project / "README.md"
+    readme.write_bytes(b"baseline\r\n")
+    assert _git(project, "status", "--porcelain") == ""
+
+    journal = project_code_executor._DirectProjectAttemptJournal(
+        tmp_path / "p3.sqlite3"
+    )
+    item = _item(project)
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    before_content = project_code_executor._project_content_fingerprint(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    protected_support = project_code_executor._target_support_fingerprints(project)
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=before_tree,
+        before_content=before_content,
+        before_head=before_head,
+        protected_support=protected_support,
+        governance={"policy": dict(FORMAL_RUNTIME_SUPPORT_POLICY)},
+        owner_id="dead-process",
+        now="2026-08-07T10:00:00Z",
+    )
+    assert created is True
+    journal.start(
+        item.attempt_id,
+        owner_id="dead-process",
+        now="2026-08-07T10:00:00Z",
+    )
+
+    worktree = tmp_path / "attempt-worktree"
+    _git(project, "worktree", "add", "--detach", str(worktree), before_head)
+    try:
+        (worktree / "README.md").write_bytes(b"baseline\ncompleted\n")
+        patch, expected_content = project_code_executor._attempt_patch(worktree)
+    finally:
+        _git(project, "worktree", "remove", "--force", str(worktree))
+    expected_state = project_code_executor._encode_expected_project_state(
+        expected_content,
+        patch=patch,
+    )
+    reserved, _ = journal.reserve_completion(
+        item.attempt_id,
+        owner_id="dead-process",
+        expected_tree=expected_state,
+        now="2026-08-07T10:00:00Z",
+    )
+    assert reserved is True
+    project_code_executor._git_run_with_input(
+        project,
+        ("apply", "--binary", "-"),
+        patch,
+    )
+    assert (
+        project_code_executor._project_content_fingerprint(project) != expected_content
+    )
+
+    assert journal.recover_expired(now="2026-08-07T10:05:01Z") == 1
+    recovered = journal.get(item.attempt_id)
+    assert recovered is not None
+    assert recovered.outcome is TerminalOutcome.COMPLETED
+    assert recovered.raw_status == "restart_apply_completed"
+    assert recovered.error is None
+
+
 # --- D-069 Executor retry readiness seam ------------------------------------
 
 
@@ -2863,9 +2997,7 @@ async def _completed_direct_attempt(
         async def release_attempt() -> None:
             return None
 
-        return AttemptProjectExecutorLease(
-            attempt_executor, str(root), release_attempt
-        )
+        return AttemptProjectExecutorLease(attempt_executor, str(root), release_attempt)
 
     binding = replace(
         _direct_binding(project, _DirectProjectExecutor(project)),

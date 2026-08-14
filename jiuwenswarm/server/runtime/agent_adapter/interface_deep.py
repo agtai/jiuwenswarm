@@ -150,30 +150,30 @@ except ImportError:  # Compatibility with older agent-core versions.
             return False
 
 
-from openjiuwen.harness.schema.task import TodoStatus
-from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+from openjiuwen.harness.schema.task import TodoStatus  # noqa: E402
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode  # noqa: E402
 
-from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
+from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (  # noqa: E402
     init_a2x_client,
     register_blank_agent_if_teammate,
     resolve_a2x_config,
 )
-from jiuwenswarm.agents.harness.common.browser_defaults import (
+from jiuwenswarm.agents.harness.common.browser_defaults import (  # noqa: E402
     DEFAULT_BROWSER_AGENT_MAX_ITERATIONS,
 )
-from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
-from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
-from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
+from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge  # noqa: E402
+from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService  # noqa: E402
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (  # noqa: E402
     SKILL_EVOLUTION_APPROVAL_SCHEMA,
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
-from jiuwenswarm.agents.harness.common.tools.todo_compat import (
+from jiuwenswarm.agents.harness.common.tools.todo_compat import (  # noqa: E402
     CompatibleTodoModifyTool,
     install_todo_modify_compat_patch,
 )
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
-from jiuwenswarm.agents.harness.common.rails import (
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt  # noqa: E402
+from jiuwenswarm.agents.harness.common.rails import (  # noqa: E402
     BrowserTaskPromptRail,
     JiuSwarmStreamEventRail,
     MultimodalImageRail,
@@ -182,32 +182,32 @@ from jiuwenswarm.agents.harness.common.rails import (
     StructuredAskUserRail,
     SymphonyOrchestrationRail,
 )
-from jiuwenswarm.agents.harness.common.rails.execution_guard import (
+from jiuwenswarm.agents.harness.common.rails.execution_guard import (  # noqa: E402
     CircuitBreakerRail,
     CircuitBreakerConfig,
 )
-from jiuwenswarm.common.config import get_model_names
-from jiuwenswarm.common.hooks_config import load_hooks_config
-from jiuwenswarm.common.log_preview import preview_text
-from jiuwenswarm.common.stage_timer import StageTimer
-from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool
-from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail
-from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
+from jiuwenswarm.common.config import get_model_names  # noqa: E402
+from jiuwenswarm.common.hooks_config import load_hooks_config  # noqa: E402
+from jiuwenswarm.common.log_preview import preview_text  # noqa: E402
+from jiuwenswarm.common.stage_timer import StageTimer  # noqa: E402
+from jiuwenswarm.common.tool_ownership import mark_stateless, register_tool, unregister_tool  # noqa: E402
+from jiuwenswarm.server.hooks.user_hook_rail import UserHookRail  # noqa: E402
+from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (  # noqa: E402
     TOOL_PERMISSION_CONTEXT,
     setup_permission_context,
     cleanup_permission_context,
 )
-from jiuwenswarm.agents.harness.common.memory.config import (
+from jiuwenswarm.agents.harness.common.memory.config import (  # noqa: E402
     clear_config_cache,
     get_memory_mode,
     is_memory_enabled,
     is_proactive_memory,
 )
-from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
-from jiuwenswarm.common.model_config_validation import is_placeholder_api_base
-from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
-from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message
-from jiuwenswarm.server.runtime.session.session_history import (
+from jiuwenswarm.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed  # noqa: E402
+from jiuwenswarm.common.model_config_validation import is_placeholder_api_base  # noqa: E402
+from jiuwenswarm.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID  # noqa: E402
+from jiuwenswarm.server.runtime.session.session_metadata import build_server_push_message  # noqa: E402
+from jiuwenswarm.server.runtime.session.session_history import (  # noqa: E402
     append_history_record,
     load_history_records,
     register_formal_no_history_session,
@@ -217,8 +217,8 @@ from jiuwenswarm.server.runtime.session.session_history import (
 # Goal 用户历史：忙碌插队时先挂起，等上一轮→goal 边界（或流结束）再落盘，
 # 时间戳与 live「答完再入列」对齐。按 session 暂存，跨同 session 的并发 stream 共享。
 _pending_goal_objective_history: dict[str, dict[str, Any]] = {}
-from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
-from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
+from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager  # noqa: E402
+from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (  # noqa: E402
     EVOLUTION_ACCEPT_LABELS,
     EVOLUTION_EXECUTE_LABELS,
     EvolutionPushContext,
@@ -248,12 +248,12 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     visible_evolution_progress_from_events,
     visible_regular_evolution_start_progress,
 )
-from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (
+from jiuwenswarm.server.runtime.agent_adapter.evolution_slash import (  # noqa: E402
     EvolutionSlashContext,
     handle_evolution_slash_command,
 )
-from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload
-from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
+from jiuwenswarm.server.utils.stream_utils import parse_ask_user_question_payload  # noqa: E402
+from jiuwenswarm.agents.harness.common.tools.multimodal_config import (  # noqa: E402
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
     apply_video_model_config_from_yaml,
@@ -261,24 +261,24 @@ from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     dedicated_multimodal_model_configured,
     complete_multimodal_model_configured,
 )
-from jiuwenswarm.agents.harness.common.tools.video_tools import video_understanding
-from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image
+from jiuwenswarm.agents.harness.common.tools.video_tools import video_understanding  # noqa: E402
+from jiuwenswarm.agents.harness.common.tools.image_tools import generate_image  # noqa: E402
 
-from jiuwenswarm.agents.harness.common.tools import (
+from jiuwenswarm.agents.harness.common.tools import (  # noqa: E402
     SendFileToolkit,
     SkillRetrievalToolkit,
     SkillToolkit,
     is_skill_retrieval_enabled,
     SymphonyToolkit,
 )
-from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (
+from jiuwenswarm.agents.harness.common.rails.skill_retrieval_prompt_rail import (  # noqa: E402
     SkillRetrievalPromptRail,
 )
-from jiuwenswarm.symphony.config import load_symphony_config
-from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf
-from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
-from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
-from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
+from jiuwenswarm.symphony.config import load_symphony_config  # noqa: E402
+from jiuwenswarm.agents.harness.common.tools.pdf_tools import read_pdf  # noqa: E402
+from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools  # noqa: E402
+from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat  # noqa: E402
+from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (  # noqa: E402
     get_user_location,
     create_note,
     search_notes,
@@ -307,7 +307,7 @@ from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     xiaoyi_gui_agent,
     image_reading,
 )
-from jiuwenswarm.common.config import (
+from jiuwenswarm.common.config import (  # noqa: E402
     get_config,
     get_default_models,
     get_evolution_auto_save_enabled,
@@ -317,29 +317,29 @@ from jiuwenswarm.common.config import (
     get_sandbox_startup_mode,
     resolve_env_vars,
 )
-from jiuwenswarm.common.context_processor_compat import (
+from jiuwenswarm.common.context_processor_compat import (  # noqa: E402
     REASONING_TOOL_LOOP_COMPACT_PROCESSOR,
     context_processor_preset_supports,
 )
-from jiuwenswarm.common.mcp_config import (
+from jiuwenswarm.common.mcp_config import (  # noqa: E402
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
     preflight_mcp_server_reachable,
 )
-from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch
-from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
-from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
+from jiuwenswarm.common.mcp_call_timeout_patch import apply_mcp_call_timeout_patch  # noqa: E402
+from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs  # noqa: E402
+from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (  # noqa: E402
     build_filesystem_policy,
     create_local_sysop_card,
     create_sandbox_sysop_card,
 )
-from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn
-from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
-from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
-from jiuwenswarm.gateway.cron import CronTargetChannel
-from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenswarm.common.schema.message import ReqMethod
-from jiuwenswarm.common.utils import (
+from jiuwenswarm.server.runtime.agent_adapter.user_turn import TEAM_USER_TURN_KEY, UserTurn  # noqa: E402
+from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE  # noqa: E402
+from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager  # noqa: E402
+from jiuwenswarm.gateway.cron import CronTargetChannel  # noqa: E402
+from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk  # noqa: E402
+from jiuwenswarm.common.schema.message import ReqMethod  # noqa: E402
+from jiuwenswarm.common.utils import (  # noqa: E402
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_checkpoint_dir,
@@ -348,8 +348,8 @@ from jiuwenswarm.common.utils import (
     get_runtime_state_path,
     reset_free_search_runtime_flags,
 )
-from jiuwenswarm.dotenv_early import load_dotenv_runtime
-from jiuwenswarm.common.mode_matrix import is_team_mode
+from jiuwenswarm.dotenv_early import load_dotenv_runtime  # noqa: E402
+from jiuwenswarm.common.mode_matrix import is_team_mode  # noqa: E402
 
 load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
 reset_free_search_runtime_flags()

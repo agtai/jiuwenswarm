@@ -1,6 +1,6 @@
 # Live Voice current status
 
-> Updated: 2026-08-14
+> Updated: 2026-08-15
 > This is the only mutable source for current branch expectations, stage/task,
 > blockers and next actions. Git is the implementation fact; detailed S7 facts
 > are in the linked review record.
@@ -105,6 +105,36 @@
   is retained as a non-blocking provisional S8 deviation for final human
   judgment. Continued S8 work before re-freeze is discovery only; its events
   cannot be relabeled as exact-candidate formal acceptance evidence.
+- Further automated diagnostic S8 on the rebuilt runtime verified that a
+  controlled service restart left one exact P3 attempt `terminal/interrupted`,
+  released its owner and lease, made no fixture change and recovered the same
+  task in the refreshed UI without duplicate dispatch. A P2 turn returned and
+  remained visible while an independent P3 attempt was running; a structured
+  retry then created exactly attempt 2, completed the authorized `notes.txt`
+  change, exposed `TASK_CONTEXT_WORKTREE_DIRTY` before another retry and was
+  restored to the exact CRLF fixture baseline.
+- The next exact natural-language create used the required second committed
+  confirmation, survived a receipt-time page refresh and recovered the same
+  single task/attempt/progress route with no duplicate create. Its positive
+  Executor result nevertheless failed closed as
+  `PROJECT_CHANGE_ATTRIBUTION_FAILED`: the installed Windows Git has
+  `core.autocrlf=true`, the Agent's `write_file` produced LF in the isolated
+  checkout, and application to the real project restored CRLF, so the former
+  raw-byte-only attribution proof rejected the semantically exact Git patch.
+  The current Direct Executor source/test repair keeps raw-content equality as the first
+  proof and, only for an exact clean target baseline, also persists the complete
+  HEAD-relative binary patch fingerprint using a temporary index that never
+  mutates the real index. Extra or foreign content, malformed evidence and
+  restart ambiguity still fail closed. The two focused CRLF/application and
+  restart tests pass; the complete Direct Executor file plus Agent/Team
+  compatibility regressions pass 171 tests with two Windows-platform skips, and
+  all 87 authenticated P3 composition tests pass. Direct Executor source/test
+  Ruff and formatting, all changed-Python Ruff plus W605, compileall and the
+  exact 21-diagnostic S7 baseline pass. The already changed legacy Agent Adapter
+  now carries exact per-import E402 suppressions rather than a file-wide waiver,
+  so future diagnostics remain visible. Affected Tier-3 independent review, a
+  coherent commit, rebuilt-runtime positive natural-create rerun and remaining
+  diagnostic S8 discovery are still pending; S7-04 remains `REFREEZE REQUIRED`.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -161,10 +191,12 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Resume user-directed S8 discovery on the independently approved and committed
-   repair using Chrome, Computer Use, sanitized logs, Store/Executor inspection
-   and other automated observers. The rebuilt-runtime P3 rerun has passed.
-2. Record non-blocking findings through the pass,
+1. Finish affected Tier-3 review of the clean-baseline patch-attribution repair,
+   commit it as one coherent local candidate, rebuild the private runtime and
+   repeat exact natural create plus receipt-time refresh against that source.
+2. If the real rerun passes, resume user-directed S8 discovery using Chrome,
+   Computer Use, sanitized logs, Store/Executor inspection and other automated
+   observers. Record non-blocking findings through the pass,
    batch-fix them, and repeat until only physical audio/device and final human
    judgment remain; provisional events are never relabeled as formal proof.
 3. Run the complete S7 runner, five real probes, cumulative Tier-3 review and
