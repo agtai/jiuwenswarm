@@ -173,6 +173,10 @@ class BoundedAlphaTaskIntentResolver:
         r"(?:\btask\b|\bcreate\b|\bcancel\b|\bstatus\b|任务|创建|取消|状态|确认)",
         re.I,
     )
+    _KNOWN_UNSUPPORTED_FULL_P3 = re.compile(
+        rf"^\s*(?:(?:pause|resume)\s+task\s+{_TASK_ID}|(?:暂停|恢复)任务\s+{_TASK_ID})\s*$",
+        re.I,
+    )
 
     def resolve(self, commit: TurnCommit) -> ResolvedTaskIntent:
         if not isinstance(commit, TurnCommit):
@@ -252,6 +256,13 @@ class BoundedAlphaTaskIntentResolver:
                     source_span=span,
                     requires_confirmation=True,
                 )
+
+        if self._KNOWN_UNSUPPORTED_FULL_P3.fullmatch(text) is not None:
+            return self._result(
+                commit,
+                TaskIntentDisposition.REJECTED,
+                "UNSUPPORTED_TASK_INTENT",
+            )
 
         return self._result(
             commit,
@@ -333,9 +344,7 @@ class TaskIntent:
 
 
 class VoiceTaskBridge:
-    def __init__(
-        self, resolver: CommittedTaskIntentResolverPort | None = None
-    ) -> None:
+    def __init__(self, resolver: CommittedTaskIntentResolverPort | None = None) -> None:
         candidate = resolver or BoundedAlphaTaskIntentResolver()
         if not isinstance(candidate, CommittedTaskIntentResolverPort):
             raise VoiceTaskBridgeViolation(
@@ -410,9 +419,7 @@ class VoiceTaskBridge:
             )
             or (
                 result.confirmation_token is not None
-                and re.fullmatch(
-                    _CONFIRMATION_TOKEN, result.confirmation_token, re.I
-                )
+                and re.fullmatch(_CONFIRMATION_TOKEN, result.confirmation_token, re.I)
                 is None
             )
         ):
@@ -452,11 +459,7 @@ class VoiceTaskBridge:
                 "task intent resolution changed its content-bound identity",
                 ErrorCode.PERMISSION_DENIED,
             )
-        source_value = (
-            result.instruction
-            or result.confirmation_token
-            or result.task_id
-        )
+        source_value = result.instruction or result.confirmation_token or result.task_id
         self._verify_span(commit.text, result.source_span, source_value)
         self._verify_span(commit.text, result.target_span, result.task_id)
         if result.operation == "task.create":

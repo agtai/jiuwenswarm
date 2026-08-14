@@ -3766,6 +3766,13 @@ async def test_voice_intent_create_uses_two_exact_p2_commits_and_retains_live_pr
     assert result["origin_kind"] == "voice"
     assert result["origin_id"] == "interaction-1"
     assert result["confirmation_commit_id"] == "commit-natural-voice-confirm"
+    assert result["task_control_binding"] == {
+        "subject_id": SCOPE.subject_id,
+        "session_id": SCOPE.session_id,
+        "project_id": SCOPE.project_id,
+        "correlation_id": "correlation-p2",
+        "generation": registry._p3_confirmation_generation,
+    }
     assert len(composition.mutation_calls) == 1
     assert registry._voice_task_origins["task-created-natural-1"].interaction_id == (
         "interaction-1"
@@ -3974,6 +3981,13 @@ async def test_text_intent_create_requires_later_exact_committed_confirmation(
     result = cast(dict[str, object], confirmed.payload["result"])
     assert result["status"] == "dispatched"
     assert result["confirmation_commit_id"] == "commit-natural-create-confirm"
+    assert result["task_control_binding"] == {
+        "subject_id": SCOPE.subject_id,
+        "session_id": SCOPE.session_id,
+        "project_id": SCOPE.project_id,
+        "correlation_id": "correlation-natural-create",
+        "generation": registry._p3_confirmation_generation,
+    }
     assert len(composition.mutation_calls) == 1
     operation, forwarded = composition.mutation_calls[0]
     assert operation == "task.create"
@@ -4841,6 +4855,58 @@ async def test_notification_polls_require_exact_serial_sequence(
 
     await registry.close_active_routes()
     await asyncio.wait_for(first_waiter, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_idle_notification_poll_returns_effect_free_keepalive_before_gateway_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.product_composition_registry._P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS",
+        0.001,
+    )
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-notification-keepalive",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+
+    keepalive = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=1),
+        request_id="request-notification-keepalive-1",
+        session_id="session-product",
+    )
+
+    assert keepalive.ok is True
+    result = cast(dict[str, object], keepalive.payload["result"])
+    assert result["status"] == "notification"
+    assert result["kind"] == "transport.keepalive"
+    assert result["response"] is None
+    assert result["agent_event"] is None
+    assert result["progress_event"] is None
+    assert result["presentation_unit"] is None
+    assert result["session_id"] == "session-product"
+    assert result["activation_generation"] == 1
+    assert (
+        registry._p2_routes[("session-product", "interaction-1")].lease.closed is False
+    )
+    assert manager.agent.calls == 0
+
+    second = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=2),
+        request_id="request-notification-keepalive-2",
+        session_id="session-product",
+    )
+    assert second.ok is True
+    assert (
+        cast(dict[str, object], second.payload["result"])["kind"]
+        == "transport.keepalive"
+    )
+    await registry.close_active_routes()
 
 
 @pytest.mark.asyncio

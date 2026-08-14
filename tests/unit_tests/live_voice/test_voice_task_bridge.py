@@ -208,6 +208,27 @@ def test_open_or_ambiguous_task_language_never_guesses_a_command(text: str) -> N
     assert result.instruction is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pause task task-abc_123",
+        "resume task task-abc_123",
+        "暂停任务 task-abc_123",
+        "恢复任务 task-abc_123",
+    ],
+)
+def test_known_full_p3_only_operations_are_definitively_unsupported(
+    text: str,
+) -> None:
+    result = VoiceTaskBridge().resolve(committed(text), SCOPE)
+
+    assert result.disposition is TaskIntentDisposition.REJECTED
+    assert result.reason == "UNSUPPORTED_TASK_INTENT"
+    assert result.operation is None
+    assert result.task_id is None
+    assert result.requires_confirmation is False
+
+
 def test_confirmation_is_a_separate_content_bound_commit() -> None:
     token = "a" * 32
     result = VoiceTaskBridge().resolve(

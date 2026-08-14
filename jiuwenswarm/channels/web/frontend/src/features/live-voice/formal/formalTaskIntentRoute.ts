@@ -5,6 +5,14 @@ export type FormalTaskIntentOperation = 'task.create' | 'task.status' | 'task.ca
 export type FormalTaskIntentSource = 'text' | 'voice';
 export type FormalTaskIntentDisposition = 'dispatched' | 'clarification' | 'rejected';
 
+export type FormalTaskIntentTaskControlBinding = Readonly<{
+  subject_id: string;
+  session_id: string;
+  project_id: string;
+  correlation_id: string;
+  generation: number;
+}>;
+
 export type FormalTaskIntentVoiceOrigin = Readonly<{
   session_id: string;
   correlation_id: string;
@@ -26,6 +34,7 @@ export type FormalTaskIntentReceipt = Readonly<{
   confirmation_token: string | null;
   confirmation_form: string | null;
   origin_id: string | null;
+  task_control_binding: FormalTaskIntentTaskControlBinding | null;
   formal_task_result: Readonly<Record<string, unknown>> | null;
 }>;
 
@@ -49,7 +58,7 @@ export type FormalTaskIntentOwnerSnapshot = Readonly<{
 export type FormalTaskIntentRequest = (
   method: typeof PRODUCT_P3_TASK_INTENT_METHOD | typeof PRODUCT_P3_TASK_INTENT_STATUS_METHOD,
   params: Readonly<Record<string, unknown>>,
-  requestId: string
+  requestId: string,
 ) => Promise<unknown>;
 
 type SubmitInput = Readonly<{
@@ -67,7 +76,7 @@ type PendingConfirmation = NonNullable<FormalTaskIntentOwnerSnapshot['pending_co
 export type FormalTaskIntentRecoveryCheckpoint = Readonly<{
   schema: 'live-voice.formal-task-intent-recovery.v2';
   revision: 2;
-  phase: 'resolving' | 'clarification' | 'awaiting_confirmation';
+  phase: 'resolving' | 'clarification' | 'awaiting_confirmation' | 'post_create_binding';
   owner_id: string;
   generation: number;
   request_id: string;
@@ -77,6 +86,9 @@ export type FormalTaskIntentRecoveryCheckpoint = Readonly<{
   source: FormalTaskIntentSource;
   operation: FormalTaskIntentOperation;
   task_id: string | null;
+  origin_id: string | null;
+  result_reason: string | null;
+  task_control_binding: FormalTaskIntentTaskControlBinding | null;
 }>;
 
 export interface FormalTaskIntentRecoveryJournal {
@@ -122,12 +134,40 @@ function optionalTaskId(value: unknown): string | null {
   return value;
 }
 
-function parseRecoveryCheckpoint(value: unknown): FormalTaskIntentRecoveryCheckpoint {
+function parseTaskControlBinding(value: unknown, expected: Readonly<{ session_id: unknown; correlation_id: unknown }>): FormalTaskIntentTaskControlBinding {
   const raw = objectValue(value);
   if (
     raw === null ||
-    Object.keys(raw).sort().join(',') !==
-      'correlation_id,generation,interaction_id,operation,owner_id,phase,request_id,revision,schema,session_id,source,task_id' ||
+    Object.keys(raw).sort().join(',') !== 'correlation_id,generation,project_id,session_id,subject_id' ||
+    !Number.isSafeInteger(raw.generation) ||
+    (raw.generation as number) <= 0
+  ) {
+    throw new Error('formal task intent task-control binding is invalid');
+  }
+  const binding = Object.freeze({
+    subject_id: requiredText(raw.subject_id, 'task-control subject_id'),
+    session_id: requiredText(raw.session_id, 'task-control session_id'),
+    project_id: requiredText(raw.project_id, 'task-control project_id'),
+    correlation_id: requiredText(raw.correlation_id, 'task-control correlation_id'),
+    generation: raw.generation as number,
+  });
+  if (
+    binding.session_id !== requiredText(expected.session_id, 'expected task-control session_id') ||
+    binding.correlation_id !== requiredText(expected.correlation_id, 'expected task-control correlation_id')
+  ) {
+    throw new Error('formal task intent task-control binding mismatch');
+  }
+  return binding;
+}
+
+function parseRecoveryCheckpoint(value: unknown): FormalTaskIntentRecoveryCheckpoint {
+  const raw = objectValue(value);
+  const keys = raw === null ? '' : Object.keys(raw).sort().join(',');
+  if (
+    raw === null ||
+    (keys !== 'correlation_id,generation,interaction_id,operation,owner_id,phase,request_id,revision,schema,session_id,source,task_id' &&
+      keys !==
+        'correlation_id,generation,interaction_id,operation,origin_id,owner_id,phase,request_id,result_reason,revision,schema,session_id,source,task_control_binding,task_id') ||
     raw.schema !== RECOVERY_SCHEMA ||
     raw.revision !== 2
   ) {
@@ -139,14 +179,28 @@ function parseRecoveryCheckpoint(value: unknown): FormalTaskIntentRecoveryCheckp
   if (
     (source !== 'text' && source !== 'voice') ||
     (operation !== 'task.create' && operation !== 'task.status' && operation !== 'task.cancel') ||
-    (phase !== 'resolving' && phase !== 'clarification' && phase !== 'awaiting_confirmation') ||
+    (phase !== 'resolving' && phase !== 'clarification' && phase !== 'awaiting_confirmation' && phase !== 'post_create_binding') ||
     !Number.isSafeInteger(raw.generation) ||
     (raw.generation as number) <= 0
   ) {
     throw new Error('formal task intent recovery checkpoint is invalid');
   }
   const taskId = optionalTaskId(raw.task_id);
-  if ((operation === 'task.create') !== (taskId === null)) {
+  const originId = raw.origin_id === undefined || raw.origin_id === null ? null : requiredText(raw.origin_id, 'recovery origin_id');
+  const resultReason = raw.result_reason === undefined || raw.result_reason === null ? null : requiredText(raw.result_reason, 'recovery result_reason');
+  const taskControlBinding =
+    raw.task_control_binding === undefined || raw.task_control_binding === null
+      ? null
+      : parseTaskControlBinding(raw.task_control_binding, {
+          session_id: raw.session_id,
+          correlation_id: raw.correlation_id,
+        });
+  if (
+    (phase === 'post_create_binding' &&
+      (operation !== 'task.create' || taskId === null || originId === null || resultReason === null || taskControlBinding === null)) ||
+    (phase !== 'post_create_binding' &&
+      ((operation === 'task.create') !== (taskId === null) || originId !== null || resultReason !== null || taskControlBinding !== null))
+  ) {
     throw new Error('formal task intent recovery target is invalid');
   }
   return Object.freeze({
@@ -162,6 +216,9 @@ function parseRecoveryCheckpoint(value: unknown): FormalTaskIntentRecoveryCheckp
     source,
     operation,
     task_id: taskId,
+    origin_id: originId,
+    result_reason: resultReason,
+    task_control_binding: taskControlBinding,
   });
 }
 
@@ -171,19 +228,13 @@ type RecoveryBucket = Readonly<{
   entries: readonly FormalTaskIntentRecoveryCheckpoint[];
 }>;
 
-function sameRecoveryCheckpoint(
-  left: FormalTaskIntentRecoveryCheckpoint,
-  right: FormalTaskIntentRecoveryCheckpoint
-): boolean {
+function sameRecoveryCheckpoint(left: FormalTaskIntentRecoveryCheckpoint, right: FormalTaskIntentRecoveryCheckpoint): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function parseRecoveryBucket(encoded: string | null): RecoveryBucket {
   if (encoded === null) return Object.freeze({ schema: RECOVERY_BUCKET_SCHEMA, revision: 2, entries: Object.freeze([]) });
-  if (
-    encoded.length > RECOVERY_BUCKET_MAX_BYTES ||
-    new TextEncoder().encode(encoded).byteLength > RECOVERY_BUCKET_MAX_BYTES
-  ) {
+  if (encoded.length > RECOVERY_BUCKET_MAX_BYTES || new TextEncoder().encode(encoded).byteLength > RECOVERY_BUCKET_MAX_BYTES) {
     throw new Error('formal task intent recovery bucket is oversized');
   }
   let value: unknown;
@@ -210,9 +261,7 @@ function parseRecoveryBucket(encoded: string | null): RecoveryBucket {
   return Object.freeze({ schema: RECOVERY_BUCKET_SCHEMA, revision: 2, entries: Object.freeze(entries) });
 }
 
-export function createSessionFormalTaskIntentRecoveryJournal(
-  storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
-): FormalTaskIntentRecoveryJournal {
+export function createSessionFormalTaskIntentRecoveryJournal(storage: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>): FormalTaskIntentRecoveryJournal {
   if (!storage || typeof storage.getItem !== 'function' || typeof storage.setItem !== 'function' || typeof storage.removeItem !== 'function') {
     throw new Error('formal task intent recovery storage is unavailable');
   }
@@ -222,20 +271,14 @@ export function createSessionFormalTaskIntentRecoveryJournal(
     if (
       entries.some(entry => {
         const encodedEntry = JSON.stringify(entry);
-        return (
-          encodedEntry.length > RECOVERY_CHECKPOINT_MAX_BYTES ||
-          new TextEncoder().encode(encodedEntry).byteLength > RECOVERY_CHECKPOINT_MAX_BYTES
-        );
+        return encodedEntry.length > RECOVERY_CHECKPOINT_MAX_BYTES || new TextEncoder().encode(encodedEntry).byteLength > RECOVERY_CHECKPOINT_MAX_BYTES;
       })
     ) {
       throw new Error('formal task intent recovery checkpoint is oversized');
     }
     const bucket = { schema: RECOVERY_BUCKET_SCHEMA, revision: 2, entries };
     const encoded = JSON.stringify(bucket);
-    if (
-      encoded.length > RECOVERY_BUCKET_MAX_BYTES ||
-      new TextEncoder().encode(encoded).byteLength > RECOVERY_BUCKET_MAX_BYTES
-    ) {
+    if (encoded.length > RECOVERY_BUCKET_MAX_BYTES || new TextEncoder().encode(encoded).byteLength > RECOVERY_BUCKET_MAX_BYTES) {
       throw new Error('formal task intent recovery bucket is oversized');
     }
     storage.setItem(RECOVERY_STORAGE_KEY, encoded);
@@ -249,10 +292,7 @@ export function createSessionFormalTaskIntentRecoveryJournal(
     save(checkpoint: FormalTaskIntentRecoveryCheckpoint) {
       const clean = parseRecoveryCheckpoint(checkpoint);
       const encoded = JSON.stringify(clean);
-      if (
-        encoded.length > RECOVERY_CHECKPOINT_MAX_BYTES ||
-        new TextEncoder().encode(encoded).byteLength > RECOVERY_CHECKPOINT_MAX_BYTES
-      ) {
+      if (encoded.length > RECOVERY_CHECKPOINT_MAX_BYTES || new TextEncoder().encode(encoded).byteLength > RECOVERY_CHECKPOINT_MAX_BYTES) {
         throw new Error('formal task intent recovery checkpoint is oversized');
       }
       const bucket = read();
@@ -283,11 +323,7 @@ export function createSessionFormalTaskIntentRecoveryJournal(
     replace(checkpoint: FormalTaskIntentRecoveryCheckpoint, next: FormalTaskIntentRecoveryCheckpoint) {
       const expected = parseRecoveryCheckpoint(checkpoint);
       const clean = parseRecoveryCheckpoint(next);
-      if (
-        clean.session_id !== expected.session_id ||
-        clean.owner_id !== expected.owner_id ||
-        clean.generation !== expected.generation + 1
-      ) {
+      if (clean.session_id !== expected.session_id || clean.owner_id !== expected.owner_id || clean.generation !== expected.generation + 1) {
         throw new Error('formal task intent recovery successor is invalid');
       }
       const bucket = read();
@@ -324,7 +360,7 @@ function canonicalSemanticInput(input: SubmitInput, pending: PendingConfirmation
     source: input.source,
     session_id: input.session_id,
     correlation_id: input.correlation_id,
-    interaction_id: input.source === 'voice' ? input.voice_origin?.interaction_id : pending?.interaction_id ?? null,
+    interaction_id: input.source === 'voice' ? input.voice_origin?.interaction_id : (pending?.interaction_id ?? null),
     turn_id: input.source === 'voice' ? input.voice_origin?.turn_id : null,
     commit_id: input.source === 'voice' ? input.voice_origin?.commit_id : null,
     operation: input.operation,
@@ -356,7 +392,9 @@ function parseIntentReceipt(
     source: FormalTaskIntentSource;
     operation: FormalTaskIntentOperation;
     task_id: string | null;
-  }>
+    session_id: string;
+    correlation_id: string;
+  }>,
 ): FormalTaskIntentReceipt {
   const payload = objectValue(value);
   const result = objectValue(payload?.result);
@@ -380,13 +418,8 @@ function parseIntentReceipt(
   }
   const provider = result.resolver_provider === undefined ? null : requiredText(result.resolver_provider, 'resolver_provider');
   const implementation =
-    result.resolver_implementation_class === undefined
-      ? null
-      : requiredText(result.resolver_implementation_class, 'resolver_implementation_class');
-  if (
-    disposition !== 'rejected' &&
-    (resolutionId === null || commitSha256 === null || provider === null || implementation === null)
-  ) {
+    result.resolver_implementation_class === undefined ? null : requiredText(result.resolver_implementation_class, 'resolver_implementation_class');
+  if (disposition !== 'rejected' && (resolutionId === null || commitSha256 === null || provider === null || implementation === null)) {
     throw new Error('successful task intent omitted its content-bound resolver identity');
   }
   const sourceSpan = result.source_span === undefined ? null : parseSpan(result.source_span);
@@ -398,7 +431,8 @@ function parseIntentReceipt(
   ) {
     throw new Error('formal task intent span binding is invalid');
   }
-  const token = result.confirmation_token === undefined || result.confirmation_token === null ? null : requiredText(result.confirmation_token, 'confirmation_token', 32);
+  const token =
+    result.confirmation_token === undefined || result.confirmation_token === null ? null : requiredText(result.confirmation_token, 'confirmation_token', 32);
   const form = result.confirmation_form === undefined || result.confirmation_form === null ? null : requiredText(result.confirmation_form, 'confirmation_form');
   if ((token === null) !== (form === null) || (token !== null && (!HEX_32.test(token) || form !== `confirm task request ${token}`))) {
     throw new Error('formal task intent confirmation binding is invalid');
@@ -409,6 +443,8 @@ function parseIntentReceipt(
   if (disposition === 'dispatched' && operation === null) throw new Error('dispatched task intent has no operation');
   if (disposition === 'clarification' && result.partial_command_count !== 0) throw new Error('clarification reported a partial command');
   const originId = result.origin_id === undefined || result.origin_id === null ? null : requiredText(result.origin_id, 'origin_id');
+  const taskControlBinding =
+    result.task_control_binding === undefined || result.task_control_binding === null ? null : parseTaskControlBinding(result.task_control_binding, expected);
   const formalResult = result.formal_task_result === undefined || result.formal_task_result === null ? null : objectValue(result.formal_task_result);
   if (result.formal_task_result !== undefined && result.formal_task_result !== null && formalResult === null) {
     throw new Error('formal task result is invalid');
@@ -418,7 +454,7 @@ function parseIntentReceipt(
     (result.origin_kind !== expected.source ||
       originId === null ||
       formalResult === null ||
-      (operation === 'task.create' && taskId === null))
+      (operation === 'task.create' && (taskId === null || taskControlBinding === null)))
   ) {
     throw new Error('dispatched task intent omitted its exact origin or formal result');
   }
@@ -435,6 +471,7 @@ function parseIntentReceipt(
     confirmation_token: token,
     confirmation_form: form,
     origin_id: originId,
+    task_control_binding: taskControlBinding,
     formal_task_result: formalResult === null ? null : Object.freeze({ ...formalResult }),
   });
 }
@@ -442,7 +479,7 @@ function parseIntentReceipt(
 function parseRecoveredIntentReceipt(
   value: unknown,
   statusRequestId: string,
-  checkpoint: FormalTaskIntentRecoveryCheckpoint
+  checkpoint: FormalTaskIntentRecoveryCheckpoint,
 ): Readonly<{
   status: 'pending' | 'settled' | 'expired';
   phase: 'clarification' | 'awaiting_confirmation' | 'final' | 'expired';
@@ -455,10 +492,7 @@ function parseRecoveredIntentReceipt(
     payload?.request_id !== statusRequestId ||
     payload.ok !== true ||
     (result?.status !== 'pending' && result?.status !== 'settled' && result?.status !== 'expired') ||
-    (result.phase !== 'clarification' &&
-      result.phase !== 'awaiting_confirmation' &&
-      result.phase !== 'final' &&
-      result.phase !== 'expired') ||
+    (result.phase !== 'clarification' && result.phase !== 'awaiting_confirmation' && result.phase !== 'final' && result.phase !== 'expired') ||
     result.intent_request_id !== checkpoint.request_id ||
     result.source !== checkpoint.source
   ) {
@@ -486,7 +520,9 @@ function parseRecoveredIntentReceipt(
       source: checkpoint.source,
       operation: checkpoint.operation,
       task_id: checkpoint.task_id,
-    }
+      session_id: checkpoint.session_id,
+      correlation_id: checkpoint.correlation_id,
+    },
   );
   if (
     (result.status === 'pending' && receipt.disposition !== 'clarification') ||
@@ -519,7 +555,7 @@ export class ProductFormalTaskIntentOwner {
       enabled: boolean;
       request: FormalTaskIntentRequest;
       recovery_journal?: FormalTaskIntentRecoveryJournal | null;
-    }>
+    }>,
   ) {
     this.#enabled = input.enabled;
     this.#request = input.request;
@@ -531,7 +567,7 @@ export class ProductFormalTaskIntentOwner {
     return Object.freeze({
       status: this.#status,
       pending_confirmation: this.#pending,
-      retained_transport: this.#retained !== null || this.#recovery !== null || this.#recoveryBlocked,
+      retained_transport: this.#retained !== null || this.#recovery !== null || this.#recoveryBlocked || this.#ownedCheckpoint?.phase === 'post_create_binding',
       receipt: this.#receipt,
       reason: this.#reason,
     });
@@ -563,11 +599,34 @@ export class ProductFormalTaskIntentOwner {
     return this.snapshot();
   }
 
-  submitText(input: Readonly<{ session_id: string; correlation_id: string; text: string; operation: FormalTaskIntentOperation; task_id?: string | null }>): Promise<FormalTaskIntentReceipt> {
+  completePostCreateBinding(
+    input: Readonly<{ session_id: string; correlation_id: string; task_id: string; origin_id: string }>,
+  ): FormalTaskIntentOwnerSnapshot {
+    if (!this.#enabled || this.#closed) throw new Error('formal task intent route is disabled');
+    const checkpoint = this.#ownedCheckpoint;
+    if (
+      checkpoint === null ||
+      checkpoint.phase !== 'post_create_binding' ||
+      checkpoint.session_id !== requiredText(input.session_id, 'session_id') ||
+      checkpoint.correlation_id !== requiredText(input.correlation_id, 'correlation_id') ||
+      checkpoint.task_id !== optionalTaskId(input.task_id) ||
+      checkpoint.origin_id !== requiredText(input.origin_id, 'origin_id')
+    ) {
+      throw new Error('formal task post-create binding ownership changed');
+    }
+    this.#clearOwnedCheckpoint(true);
+    return this.snapshot();
+  }
+
+  submitText(
+    input: Readonly<{ session_id: string; correlation_id: string; text: string; operation: FormalTaskIntentOperation; task_id?: string | null }>,
+  ): Promise<FormalTaskIntentReceipt> {
     return this.#submit({ ...input, source: 'text', task_id: input.task_id ?? null });
   }
 
-  submitVoice(input: Readonly<{ origin: FormalTaskIntentVoiceOrigin; operation: FormalTaskIntentOperation; task_id?: string | null }>): Promise<FormalTaskIntentReceipt> {
+  submitVoice(
+    input: Readonly<{ origin: FormalTaskIntentVoiceOrigin; operation: FormalTaskIntentOperation; task_id?: string | null }>,
+  ): Promise<FormalTaskIntentReceipt> {
     return this.#submit({
       source: 'voice',
       session_id: input.origin.session_id,
@@ -613,6 +672,26 @@ export class ProductFormalTaskIntentOwner {
     }
     this.#ownedCheckpoint = checkpoint;
     this.#recoveryBlocked = false;
+    if (checkpoint.phase === 'post_create_binding') {
+      const receipt: FormalTaskIntentReceipt = Object.freeze({
+        disposition: 'dispatched',
+        reason: requiredText(checkpoint.result_reason, 'recovery result_reason'),
+        source: checkpoint.source,
+        operation: 'task.create',
+        task_id: optionalTaskId(checkpoint.task_id),
+        resolver_provider: null,
+        resolver_implementation_class: null,
+        resolution_id: null,
+        commit_sha256: null,
+        confirmation_token: null,
+        confirmation_form: null,
+        origin_id: requiredText(checkpoint.origin_id, 'recovery origin_id'),
+        task_control_binding: checkpoint.task_control_binding,
+        formal_task_result: null,
+      });
+      this.#adoptReceipt(receipt, checkpoint, checkpoint.interaction_id);
+      return Promise.resolve(receipt);
+    }
     const statusRequestId = identifier('web-task-intent-status');
     this.#status = 'submitting';
     this.#reason = null;
@@ -623,7 +702,7 @@ export class ProductFormalTaskIntentOwner {
         correlation_id: correlationId,
         intent_request_id: checkpoint.request_id,
       },
-      statusRequestId
+      statusRequestId,
     )
       .then(value => {
         if (this.#recovery !== recovery || this.#closed) throw new Error('formal task intent recovery response is stale');
@@ -641,10 +720,12 @@ export class ProductFormalTaskIntentOwner {
         if (receipt === null) throw new Error('formal task intent recovery receipt is unavailable');
         if (recovered.status === 'pending') {
           this.#advanceOwnedCheckpoint(recovered.phase as 'clarification' | 'awaiting_confirmation');
+        } else if (receipt.disposition === 'dispatched' && receipt.operation === 'task.create') {
+          this.#promotePostCreateBinding(receipt);
         } else {
           this.#clearOwnedCheckpoint(false);
         }
-        this.#adoptReceipt(receipt, checkpoint, checkpoint.interaction_id);
+        this.#adoptReceipt(receipt, this.#ownedCheckpoint ?? checkpoint, checkpoint.interaction_id);
         this.#recoveryBlocked = false;
         return receipt;
       })
@@ -687,6 +768,9 @@ export class ProductFormalTaskIntentOwner {
     const semantic = canonicalSemanticInput({ ...input, session_id: sessionId, correlation_id: correlationId, task_id: taskId }, pending);
     if (this.#recovery !== null || this.#recoveryBlocked) {
       return Promise.reject(new Error('formal task intent recovery is active'));
+    }
+    if (this.#ownedCheckpoint?.phase === 'post_create_binding') {
+      return Promise.reject(new Error('formal task post-create binding is unresolved'));
     }
     if (this.#retained !== null) {
       if (this.#retained.fingerprint !== semantic) return Promise.reject(new Error('another formal task intent outcome is unresolved'));
@@ -752,6 +836,9 @@ export class ProductFormalTaskIntentOwner {
         source: input.source,
         operation: input.operation,
         task_id: taskId,
+        origin_id: null,
+        result_reason: null,
+        task_control_binding: null,
       }),
       promise: null,
     };
@@ -773,7 +860,7 @@ export class ProductFormalTaskIntentOwner {
     source: FormalTaskIntentSource,
     operation: FormalTaskIntentOperation,
     taskId: string | null,
-    interactionId?: string
+    interactionId?: string,
   ): Promise<FormalTaskIntentReceipt> {
     const ownedInteraction = interactionId ?? requiredText(retained.params.interaction_id, 'interaction_id');
     const promise = this.#request(PRODUCT_P3_TASK_INTENT_METHOD, retained.params, retained.request_id)
@@ -784,9 +871,13 @@ export class ProductFormalTaskIntentOwner {
           source,
           operation,
           task_id: taskId,
+          session_id: retained.checkpoint.session_id,
+          correlation_id: retained.checkpoint.correlation_id,
         });
         if (receipt.disposition === 'clarification') {
           this.#advanceOwnedCheckpoint(receipt.confirmation_token === null ? 'clarification' : 'awaiting_confirmation');
+        } else if (receipt.disposition === 'dispatched' && receipt.operation === 'task.create') {
+          this.#promotePostCreateBinding(receipt);
         } else {
           this.#clearOwnedCheckpoint(false);
         }
@@ -803,6 +894,8 @@ export class ProductFormalTaskIntentOwner {
               source,
               operation,
               task_id: taskId,
+              session_id: retained.checkpoint.session_id,
+              correlation_id: retained.checkpoint.correlation_id,
             });
             if (rejected.disposition === 'rejected') {
               this.#clearOwnedCheckpoint(false);
@@ -833,6 +926,33 @@ export class ProductFormalTaskIntentOwner {
     this.#ownedCheckpoint = next;
   }
 
+  #promotePostCreateBinding(receipt: FormalTaskIntentReceipt): void {
+    const current = this.#ownedCheckpoint;
+    if (
+      current === null ||
+      current.operation !== 'task.create' ||
+      receipt.disposition !== 'dispatched' ||
+      receipt.operation !== 'task.create' ||
+      receipt.source !== current.source ||
+      receipt.task_id === null ||
+      receipt.origin_id === null ||
+      receipt.task_control_binding === null
+    ) {
+      throw new Error('formal task post-create binding receipt is invalid');
+    }
+    const next = parseRecoveryCheckpoint({
+      ...current,
+      phase: 'post_create_binding',
+      generation: current.generation + 1,
+      task_id: receipt.task_id,
+      origin_id: receipt.origin_id,
+      result_reason: receipt.reason,
+      task_control_binding: receipt.task_control_binding,
+    });
+    this.#recoveryJournal?.replace(current, next);
+    this.#ownedCheckpoint = next;
+  }
+
   #clearOwnedCheckpoint(required: boolean): void {
     const current = this.#ownedCheckpoint;
     if (current === null) return;
@@ -852,7 +972,7 @@ export class ProductFormalTaskIntentOwner {
   #adoptReceipt(
     receipt: FormalTaskIntentReceipt,
     binding: Pick<FormalTaskIntentRecoveryCheckpoint, 'source' | 'session_id' | 'correlation_id' | 'operation' | 'task_id'>,
-    interactionId: string
+    interactionId: string,
   ): void {
     this.#receipt = receipt;
     this.#reason = receipt.reason;

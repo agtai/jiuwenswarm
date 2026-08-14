@@ -147,6 +147,11 @@ _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation
 # The only Agent profile whose facade implements the formal Live Voice seam.
 _FORMAL_LIVE_VOICE_AGENT_MODE = "agent"
 _FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
+# Complete an otherwise-idle long poll well before the Gateway's 600-second
+# retained-unary ceiling.  The transport keepalive owns no conversation fact or
+# product effect; it only lets the browser advance its exact poll sequence
+# without turning an idle, healthy P2 route into a visible timeout failure.
+_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS = 30.0
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -2723,8 +2728,9 @@ class AgentServerProductCompositionRegistry:
         request_id: str,
     ) -> P3RouteResult:
         try:
-            notification = await retained.activation_lease.next_notification(
-                retained.binding
+            notification = await asyncio.wait_for(
+                retained.activation_lease.next_notification(retained.binding),
+                timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
             )
             return _success_result(
                 request_id,
@@ -2735,6 +2741,29 @@ class AgentServerProductCompositionRegistry:
                     "interaction_id": retained.binding.interaction_id,
                     "activation_id": retained.binding.activation_id,
                     "activation_generation": (retained.binding.activation_generation),
+                },
+                retained.manifest,
+            )
+        except TimeoutError:
+            return _success_result(
+                request_id,
+                {
+                    "status": "notification",
+                    "kind": "transport.keepalive",
+                    "request_id": request_id,
+                    "round_id": None,
+                    "response": None,
+                    "agent_event": None,
+                    "source_event": None,
+                    "progress_event": None,
+                    "presentation_unit": None,
+                    "error_reason": None,
+                    "publish_seq": None,
+                    "session_id": retained.binding.session_id,
+                    "correlation_id": retained.binding.correlation_id,
+                    "interaction_id": retained.binding.interaction_id,
+                    "activation_id": retained.binding.activation_id,
+                    "activation_generation": retained.binding.activation_generation,
                 },
                 retained.manifest,
             )
@@ -5030,6 +5059,25 @@ class AgentServerProductCompositionRegistry:
         confirmation_id = (
             receipt.get("confirmation_id") if isinstance(receipt, Mapping) else None
         )
+        task_control_binding = (
+            receipt.get("task_control_binding")
+            if isinstance(receipt, Mapping)
+            else None
+        )
+        if not isinstance(task_control_binding, Mapping):
+            async with self._lock:
+                self._release_task_intent_commit_locked(original, pending.source)
+                self._release_task_intent_commit_locked(commit, source)
+            return self._intent_rejected_result(
+                request_id,
+                reason="TASK_CONTROL_BINDING_UNAVAILABLE",
+                code=ErrorCode.UNAVAILABLE,
+                message="formal task-control binding was unavailable",
+                resolution=intent,
+                formal_task_result=issued.payload,
+                origin_kind=pending.source,
+                origin_id=original.interaction_id,
+            )
         mutation_params = {**forwarded, "confirmation_id": confirmation_id}
         mutated = await self.handle_p3_mutation(
             params=mutation_params,
@@ -5084,6 +5132,7 @@ class AgentServerProductCompositionRegistry:
                 "origin_kind": pending.source,
                 "origin_id": pending.origin_key,
                 "confirmation_commit_id": commit.commit_id,
+                "task_control_binding": dict(task_control_binding),
                 "formal_task_result": formal_result,
             },
             self._p3_control_manifest(),

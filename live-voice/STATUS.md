@@ -29,7 +29,12 @@
   and Executor cleanup truth; the product P3 query Adapter dropped that
   authoritative retry admission; Web reconnect could sleep too long after
   runtime recovery; and a complete AgentServer restart reset one interaction's
-  response generation.
+  response generation. Continued automated discovery added three more findings:
+  an idle P2 notification poll crossed the Gateway's ten-minute unary ceiling
+  and surfaced a false product failure; natural-language task creation activated
+  progress before establishing an exact Task leaf, so authenticated progress was
+  dropped; and exact full-P3 `pause` / `resume` forms were misclassified as open
+  clarification instead of a definitive unsupported result.
 - The cumulative repair keeps the Gateway stale-response fence intact,
   revalidates the exact active P2 binding before explicit media Start, separates
   the formal P2 Agent facade from ordinary Web work, and owns response generation
@@ -44,9 +49,25 @@
   repair and the subsequent product-status Adapter and real-resolver
   stable-reason corrections each received affected Tier-3 `APPROVE`, with no
   open Critical, High or P2 finding. The product repair is committed through
-  exact `5d79f47bd915f24f9948593ff6fd9ec392dc1bdd`; it is not a frozen candidate.
-  Complete S7 re-verification/re-freeze and a fresh formal S8 closeout remain
-  mandatory before any `PASS - INTEGRATED WEB ALPHA` result.
+  exact `5d79f47bd915f24f9948593ff6fd9ec392dc1bdd`, with current-state documentation
+  through `8c2dccc82a2845653ccc0aaab77f972b4296fe29`; neither is the final frozen
+  candidate. The newest ten-path working delta returns effect-free P2 keepalives,
+  rejects the known full-P3-only forms explicitly, and gives natural create a
+  content-free post-receipt checkpoint. A replacement progress owner is now
+  published only after exact Task status, complete event history, authoritative
+  retry admission and durable task-target storage all validate; reload recovers
+  by query and never resends create, the receipt's real task-control generation
+  is preserved, generic target recovery yields to the richer post-create CAS,
+  and structured mutation stays locked while that handoff is unresolved. A
+  failed replacement preserves the previous exact Task leaf. Its affected
+  suites pass 335 integrated Web tests,
+  120 backend product/intent tests and the broader 87-test authenticated P3
+  composition suite; Ruff, Prettier, Python format and diff checks pass. The
+  independent reviewer found the post-receipt handoff P2 in the earlier delta;
+  affected re-review of this repair and a coherent local commit remain pending.
+  Complete S7 re-verification/re-freeze and a fresh
+  formal S8 closeout remain mandatory before any
+  `PASS - INTEGRATED WEB ALPHA` result.
 - By explicit user direction, the already observed scope-correlation mismatch
   is retained as a non-blocking provisional S8 deviation for final human
   judgment. Continued S8 work before re-freeze is discovery only; its events

@@ -50,7 +50,19 @@ function clarification(operation, taskId = null) {
   };
 }
 
-function dispatched(operation, taskId, originId, originKind = 'text') {
+function dispatched(
+  operation,
+  taskId,
+  originId,
+  originKind = 'text',
+  taskControlBinding = {
+    subject_id: 'subject-1',
+    session_id: 'session-1',
+    project_id: 'project-1',
+    correlation_id: 'correlation-1',
+    generation: 1,
+  },
+) {
   return {
     status: 'dispatched',
     reason: 'TASK_INTENT_DISPATCHED',
@@ -64,6 +76,7 @@ function dispatched(operation, taskId, originId, originKind = 'text') {
     target_span: operation === 'task.cancel' || operation === 'task.status' ? { start: 13, end: 24 } : null,
     origin_kind: originKind,
     origin_id: originId,
+    ...(operation === 'task.create' ? { task_control_binding: taskControlBinding } : {}),
     confirmation_commit_id: 'confirm-commit',
     formal_task_result: { task_id: taskId, state: 'accepted' },
   };
@@ -189,7 +202,7 @@ test('pending confirmation cannot change task, operation, source or scope and se
       task_id: 'task-other',
       text: `confirm task request ${token}`,
     }),
-    /cannot change/
+    /cannot change/,
   );
   assert.equal(calls, 1);
 });
@@ -278,7 +291,7 @@ test('response loss reconnect recovers one exact side effect from a content-free
       operation: 'task.create',
       text: 'create task: SENTINEL_PRIVATE_INSTRUCTION',
     }),
-    /response lost/
+    /response lost/,
   );
   const encoded = [...storage.values.values()][0];
   assert.equal(typeof encoded, 'string');
@@ -296,6 +309,14 @@ test('response loss reconnect recovers one exact side effect from a content-free
   assert.equal(sideEffects, 1);
   assert.equal(calls.length, 2);
   assert.deepEqual(Object.keys(calls[1].params).sort(), ['correlation_id', 'intent_request_id', 'session_id']);
+  assert.equal(successor.snapshot().retained_transport, true);
+  assert.equal(storage.values.size, 1);
+  successor.completePostCreateBinding({
+    session_id: 'session-1',
+    correlation_id: 'correlation-1',
+    task_id: recovered.task_id,
+    origin_id: recovered.origin_id,
+  });
   assert.equal(storage.values.size, 0);
 });
 
@@ -319,7 +340,16 @@ test('response-lost clarification remounts as the same pending confirmation with
       throw new Error('clarification response lost');
     }
     mutations += 1;
-    return envelope(requestId, dispatched('task.create', 'task-confirmed-1', params.interaction_id));
+    return envelope(
+      requestId,
+      dispatched('task.create', 'task-confirmed-1', params.interaction_id, 'text', {
+        subject_id: 'subject-pending',
+        session_id: 'session-pending',
+        project_id: 'project-pending',
+        correlation_id: 'correlation-pending',
+        generation: 1,
+      }),
+    );
   };
   const first = new ProductFormalTaskIntentOwner({ enabled: true, request, recovery_journal: journal });
   await assert.rejects(
@@ -329,7 +359,7 @@ test('response-lost clarification remounts as the same pending confirmation with
       operation: 'task.create',
       text: 'create task: SENTINEL_PENDING_INSTRUCTION',
     }),
-    /response lost/
+    /response lost/,
   );
   first.close();
 
@@ -354,8 +384,89 @@ test('response-lost clarification remounts as the same pending confirmation with
   });
   assert.equal(final.disposition, 'dispatched');
   assert.equal(mutations, 1);
+  assert.equal(successor.snapshot().retained_transport, true);
+  successor.completePostCreateBinding({
+    session_id: 'session-pending',
+    correlation_id: 'correlation-pending',
+    task_id: final.task_id,
+    origin_id: final.origin_id,
+  });
   assert.equal(storage.values.size, 0);
   assert.equal(calls.filter(call => call.method === PRODUCT_P3_TASK_INTENT_STATUS_METHOD).length, 1);
+});
+
+test('a successful create receipt survives reload as a query-only post-create binding checkpoint', async () => {
+  const storage = memoryStorage();
+  const journal = createSessionFormalTaskIntentRecoveryJournal(storage);
+  let mutationCalls = 0;
+  const first = new ProductFormalTaskIntentOwner({
+    enabled: true,
+    recovery_journal: journal,
+    request: async (method, params, requestId) => {
+      assert.equal(method, PRODUCT_P3_TASK_INTENT_METHOD);
+      mutationCalls += 1;
+      return envelope(
+        requestId,
+        dispatched('task.create', 'task-post-create-1', params.interaction_id, 'text', {
+          subject_id: 'subject-post-create',
+          session_id: 'session-post-create',
+          project_id: 'project-post-create',
+          correlation_id: 'correlation-post-create',
+          generation: 1,
+        }),
+      );
+    },
+  });
+  const receipt = await first.submitText({
+    session_id: 'session-post-create',
+    correlation_id: 'correlation-post-create',
+    operation: 'task.create',
+    text: 'create task: SENTINEL_POST_CREATE_PRIVATE_TEXT',
+  });
+  assert.equal(first.snapshot().retained_transport, true);
+  const encoded = [...storage.values.values()][0];
+  assert.equal(encoded.includes('post_create_binding'), true);
+  assert.equal(encoded.includes('SENTINEL_POST_CREATE_PRIVATE_TEXT'), false);
+  assert.equal(encoded.includes('task-post-create-1'), true);
+  first.close();
+
+  let recoveryCalls = 0;
+  const successor = new ProductFormalTaskIntentOwner({
+    enabled: true,
+    recovery_journal: journal,
+    request: async () => {
+      recoveryCalls += 1;
+      throw new Error('post-create recovery must not resend or query intent');
+    },
+  });
+  const recovered = await successor.recoverPending({
+    session_id: 'session-post-create',
+    correlation_id: 'correlation-post-create',
+  });
+  assert.equal(recovered?.disposition, 'dispatched');
+  assert.equal(recovered?.task_id, receipt.task_id);
+  assert.equal(recovered?.origin_id, receipt.origin_id);
+  assert.equal(mutationCalls, 1);
+  assert.equal(recoveryCalls, 0);
+  assert.throws(
+    () =>
+      successor.completePostCreateBinding({
+        session_id: 'session-post-create',
+        correlation_id: 'correlation-post-create',
+        task_id: 'task-foreign',
+        origin_id: recovered.origin_id,
+      }),
+    /ownership changed/,
+  );
+  assert.equal(storage.values.size, 1);
+  successor.completePostCreateBinding({
+    session_id: 'session-post-create',
+    correlation_id: 'correlation-post-create',
+    task_id: recovered.task_id,
+    origin_id: recovered.origin_id,
+  });
+  assert.equal(successor.snapshot().retained_transport, false);
+  assert.equal(storage.values.size, 0);
 });
 
 test('content-free clarification without a destructive token survives remount until explicit scope abandonment', async () => {
@@ -391,7 +502,7 @@ test('content-free clarification without a destructive token survives remount un
       task_id: 'task-abc_123',
       text: 'what is its task status',
     }),
-    /response lost/
+    /response lost/,
   );
   first.close();
 
@@ -429,7 +540,7 @@ test('expired confirmation recovery clears the exact CAS-owned checkpoint withou
       operation: 'task.create',
       text: 'create task: bounded expiry proof',
     }),
-    /response lost/
+    /response lost/,
   );
   first.close();
 
@@ -447,10 +558,7 @@ test('expired confirmation recovery clears the exact CAS-owned checkpoint withou
       });
     },
   });
-  assert.equal(
-    await successor.recoverPending({ session_id: 'session-expired', correlation_id: 'correlation-expired' }),
-    null
-  );
+  assert.equal(await successor.recoverPending({ session_id: 'session-expired', correlation_id: 'correlation-expired' }), null);
   assert.equal(successor.snapshot().status, 'rejected');
   assert.equal(successor.snapshot().reason, 'TASK_INTENT_CONFIRMATION_EXPIRED');
   assert.equal(mutationCalls, 1);
@@ -483,7 +591,7 @@ test('clarification phase CAS failure is a stable failed state and never creates
       operation: 'task.create',
       text: 'create task: bounded CAS proof',
     }),
-    /stale owner/
+    /stale owner/,
   );
   assert.equal(owner.snapshot().status, 'failed');
   assert.equal(owner.snapshot().reason, 'FORMAL_TASK_INTENT_REQUEST_FAILED');
@@ -512,7 +620,10 @@ test('content-free recovery journals isolate sessions and use a distinct product
 
   assert.equal(storage.values.size, 1);
   assert.deepEqual([...storage.values.keys()], ['jiuwenswarm.liveVoice.formalTaskIntentRecovery.v2']);
-  assert.equal([...storage.values.keys()].some(key => key.includes('productP2ActivationJournal')), false);
+  assert.equal(
+    [...storage.values.keys()].some(key => key.includes('productP2ActivationJournal')),
+    false,
+  );
   assert.equal(journal.load('session-1').request_id, 'request-session-1');
   assert.equal(journal.load('session-2').request_id, 'request-session-2');
   journal.clear(journal.load('session-1'));
@@ -559,7 +670,7 @@ test('recovery journal uses exact owner CAS and a fixed bounded key capacity', (
         correlation_id: '界'.repeat(256),
         interaction_id: '界'.repeat(256),
       }),
-    /checkpoint is oversized/
+    /checkpoint is oversized/,
   );
   assert.equal(unicodeStorage.values.size, 0);
 });
@@ -590,17 +701,14 @@ test('checkpoint failure blocks the committed intent before network effects', as
       task_id: 'task-abc_123',
       text: 'task status task-abc_123',
     }),
-    /checkpoint failed/
+    /checkpoint failed/,
   );
   assert.equal(calls, 0);
 });
 
 test('corrupt recovery checkpoint fails closed before status transport', async () => {
   const storage = memoryStorage();
-  storage.values.set(
-    'jiuwenswarm.liveVoice.formalTaskIntentRecovery.v2',
-    '{"instruction":"SENTINEL_CORRUPT_CHECKPOINT"}'
-  );
+  storage.values.set('jiuwenswarm.liveVoice.formalTaskIntentRecovery.v2', '{"instruction":"SENTINEL_CORRUPT_CHECKPOINT"}');
   let calls = 0;
   const owner = new ProductFormalTaskIntentOwner({
     enabled: true,
@@ -611,10 +719,7 @@ test('corrupt recovery checkpoint fails closed before status transport', async (
     },
   });
 
-  await assert.rejects(
-    owner.recoverPending({ session_id: 'session-1', correlation_id: 'correlation-1' }),
-    /checkpoint is invalid/
-  );
+  await assert.rejects(owner.recoverPending({ session_id: 'session-1', correlation_id: 'correlation-1' }), /checkpoint is invalid/);
   assert.equal(calls, 0);
   assert.equal(owner.snapshot().reason, 'FORMAL_TASK_INTENT_RECOVERY_CHECKPOINT_INVALID');
   assert.equal(owner.snapshot().retained_transport, true);
@@ -626,7 +731,7 @@ test('corrupt recovery checkpoint fails closed before status transport', async (
       operation: 'task.create',
       text: 'create task: must stay blocked',
     }),
-    /recovery is active/
+    /recovery is active/,
   );
   assert.equal(calls, 0);
 });
@@ -658,10 +763,7 @@ test('recovery binding mismatch is a retained zero-network barrier', async () =>
     },
   });
 
-  await assert.rejects(
-    owner.recoverPending({ session_id: 'session-1', correlation_id: 'correlation-successor' }),
-    /binding mismatch/
-  );
+  await assert.rejects(owner.recoverPending({ session_id: 'session-1', correlation_id: 'correlation-successor' }), /binding mismatch/);
   assert.equal(calls, 0);
   assert.equal(owner.snapshot().retained_transport, true);
   assert.equal(owner.snapshot().reason, 'FORMAL_TASK_INTENT_RECOVERY_BINDING_MISMATCH');
@@ -683,7 +785,7 @@ test('transport exception content is never retained in the UI-facing owner snaps
       operation: 'task.create',
       text: 'create task: bounded request',
     }),
-    new RegExp(sentinel)
+    new RegExp(sentinel),
   );
   const snapshot = owner.snapshot();
   assert.equal(snapshot.status, 'failed');
@@ -710,7 +812,7 @@ test('a definitive server rejection unlocks the owner without a page reload', as
             target_span: null,
             formal_task_result: null,
           },
-          false
+          false,
         );
         throw error;
       }
@@ -757,7 +859,7 @@ test('forged target response and flag-off both fail closed', async () => {
       task_id: 'task-abc_123',
       text: 'task status task-abc_123',
     }),
-    /target binding mismatch/
+    /target binding mismatch/,
   );
   assert.equal(calls, 1);
 
@@ -775,7 +877,7 @@ test('forged target response and flag-off both fail closed', async () => {
       operation: 'task.create',
       text: 'create task: inspect the repository',
     }),
-    /disabled/
+    /disabled/,
   );
   assert.equal(calls, 1);
 });

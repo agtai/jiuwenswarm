@@ -80,14 +80,13 @@ function retryStatus({
         event_head: eventHead,
       },
       attempt: { task_id: taskId, attempt_id: attemptId, attempt_number: attemptNumber },
-      retry_admission:
-        retryAdmission ?? {
-          eligible,
-          reason: eligible ? 'TASK_RETRY_ELIGIBLE' : 'TASK_RETRY_PRECONDITION_STALE',
-          task_id: taskId,
-          attempt_id: eligible ? attemptId : null,
-          attempt_number: eligible ? attemptNumber + 1 : null,
-        },
+      retry_admission: retryAdmission ?? {
+        eligible,
+        reason: eligible ? 'TASK_RETRY_ELIGIBLE' : 'TASK_RETRY_PRECONDITION_STALE',
+        task_id: taskId,
+        attempt_id: eligible ? attemptId : null,
+        attempt_number: eligible ? attemptNumber + 1 : null,
+      },
     },
   };
 }
@@ -250,8 +249,8 @@ async function renderPanel({ sessionId = 'persisted-session', platform = null, p
         progress,
         onRefresh: () => {},
         ...viewProps,
-      })
-    )
+      }),
+    ),
   );
 }
 
@@ -515,7 +514,7 @@ test('natural-language task status projects the authoritative terminal result', 
         task: { task_id: 'task-status-1', state: 'terminal', outcome: 'completed' },
       },
     }),
-    'task-status-1 | terminal/completed'
+    'task-status-1 | terminal/completed',
   );
 });
 
@@ -574,13 +573,23 @@ test('edited voice draft confirmation remains fenced to the exact P2 activation'
   assert.equal(productVoiceDraftMatchesBinding(draft, 'session-1', null), false);
 });
 
-test('P2 notification classification surfaces errors and terminal-without-final', () => {
+test('P2 notification classification surfaces failures and treats transport keepalive as effect-free continuation', () => {
+  assert.deepEqual(
+    classifyProductP2Notification({
+      kind: 'transport.keepalive',
+      response: null,
+      agent_event: null,
+      progress_event: null,
+      presentation_unit: null,
+    }),
+    { kind: 'continue' },
+  );
   assert.deepEqual(
     classifyProductP2Notification({
       kind: 'agent.error',
       error_reason: 'HARNESS_FAILED',
     }),
-    { kind: 'failed', reason: 'HARNESS_FAILED' }
+    { kind: 'failed', reason: 'HARNESS_FAILED' },
   );
   assert.deepEqual(
     classifyProductP2Notification({
@@ -593,7 +602,7 @@ test('P2 notification classification surfaces errors and terminal-without-final'
     {
       kind: 'failed',
       reason: 'PRODUCT_AGENT_TERMINAL_WITHOUT_FINAL:completed',
-    }
+    },
   );
   assert.deepEqual(
     classifyProductP2Notification(
@@ -601,9 +610,9 @@ test('P2 notification classification surfaces errors and terminal-without-final'
         kind: 'work.progress',
         progress_event: { payload: { state: 'terminal', outcome: 'completed' } },
       },
-      true
+      true,
     ),
-    { kind: 'continue' }
+    { kind: 'continue' },
   );
 });
 
@@ -616,17 +625,14 @@ test('Web response error extraction preserves nested product reason', () => {
         message: 'revoked',
       },
     }),
-    'TASK_CONTEXT_PERMISSION_MISSING'
+    'TASK_CONTEXT_PERMISSION_MISSING',
   );
   assert.equal(extractWebErrorReason({ reason: ' TOP_LEVEL_REASON ' }), 'TOP_LEVEL_REASON');
   assert.equal(extractWebErrorReason({ error: 'legacy error' }), undefined);
 });
 
 test('Web reconnect remains continuously bounded after a private runtime restart', () => {
-  assert.deepEqual(
-    [1, 2, 3, 4, 5, 20].map(webReconnectDelayMs),
-    [1000, 2000, 2000, 2000, 2000, 2000]
-  );
+  assert.deepEqual([1, 2, 3, 4, 5, 20].map(webReconnectDelayMs), [1000, 2000, 2000, 2000, 2000, 2000]);
   assert.equal(webReconnectDelayMs(0), 1000);
   assert.equal(webReconnectDelayMs(Number.NaN), 1000);
 });
@@ -780,13 +786,10 @@ test('route panel exposes task.retry only for an inspected eligible terminal att
 });
 
 test('route panel exposes only a stable retry inspection failure reason', async () => {
-  assert.equal(
-    productP3RetryInspectionFailureReason({ reason: 'EXECUTION_CONTEXT_REVISION_MISMATCH' }),
-    'EXECUTION_CONTEXT_REVISION_MISMATCH'
-  );
+  assert.equal(productP3RetryInspectionFailureReason({ reason: 'EXECUTION_CONTEXT_REVISION_MISMATCH' }), 'EXECUTION_CONTEXT_REVISION_MISMATCH');
   assert.equal(
     productP3RetryInspectionFailureReason({ reason: 'private path: C:\\fixture\\secret', message: 'credential=value' }),
-    'PRODUCT_P3_RETRY_INSPECTION_FAILED'
+    'PRODUCT_P3_RETRY_INSPECTION_FAILED',
   );
 
   const html = await renderPanel({
@@ -818,12 +821,9 @@ test('an authenticated historical status bootstraps a query-only P3 leaf and sti
   assert.deepEqual(leaf.snapshot().binding, { ...retryBinding, generation: 1 });
   assert.deepEqual(
     leaf.snapshot().tasks.map(task => [task.task_id, task.attempt_id, task.attempt_number, task.state, task.outcome]),
-    [['task-1', 'attempt-b', 2, 'terminal', 'completed']]
+    [['task-1', 'attempt-b', 2, 'terminal', 'completed']],
   );
-  assert.throws(
-    () => bootstrapProductP3TaskInspectionLeaf(response, { session_id: 'session-foreign', task_id: 'task-1' }),
-    /Session binding mismatch/
-  );
+  assert.throws(() => bootstrapProductP3TaskInspectionLeaf(response, { session_id: 'session-foreign', task_id: 'task-1' }), /Session binding mismatch/);
 });
 
 test('retry candidate inspection binds exact status and full A/B history before exposing eligibility', async () => {
@@ -879,7 +879,7 @@ test('retry candidate inspection binds exact status and full A/B history before 
       state: 'terminal',
       outcome: 'completed',
       event_head: 3,
-    }
+    },
   );
   assert.deepEqual(leaf.snapshot().tasks, [record]);
 });
@@ -932,7 +932,7 @@ test('retry candidate inspection rejects a foreign status before events with zer
         return retryStatus({ taskId: 'task-foreign', attemptId: 'attempt-foreign', attemptNumber: 1 });
       },
     }),
-    /binding mismatch/
+    /binding mismatch/,
   );
   assert.equal(calls, 1);
   assert.deepEqual(leaf.snapshot().tasks, []);
@@ -959,7 +959,7 @@ test('retry candidate inspection rejects a stale Session binding before any netw
           throw new Error('network must not be reached');
         },
       }),
-      /Session binding/
+      /Session binding/,
     );
     assert.equal(calls, 0);
     assert.deepEqual(leaf.snapshot().tasks, []);
@@ -999,7 +999,7 @@ test('retry candidate inspection rejects same-head status/events disagreement wi
           ? retryStatus({ attemptId: 'attempt-c', attemptNumber: 3, state: 'accepted', outcome: null, eventHead: 4 })
           : retryEvents(staleBAtHeadFour, 4),
     }),
-    /replay conflicts/
+    /replay conflicts/,
   );
   assert.deepEqual(leaf.snapshot().tasks, []);
 });
@@ -1130,7 +1130,7 @@ test('P3 progress reconciliation fails closed on outcome disagreement without li
       request_nonce: 'outcome-conflict',
       is_current: () => true,
     }),
-    /source, state, outcome, or producer mismatch/
+    /source, state, outcome, or producer mismatch/,
   );
   assert.equal(leaf.snapshot().tasks[0].state, 'accepted');
   assert.deepEqual(leaf.snapshot().progress_receipts, []);
@@ -1201,7 +1201,7 @@ test('foreign-task progress is rejected before any reconciliation request', asyn
       request_nonce: 'foreign-task',
       is_current: () => true,
     }),
-    /exact Session\/task\/attempt binding/
+    /exact Session\/task\/attempt binding/,
   );
   assert.equal(calls, 0);
 });
@@ -1354,7 +1354,7 @@ test('voice Task origin adopts only the canonical CR response returned by the se
       },
     },
     'session-voice',
-    'interaction-voice'
+    'interaction-voice',
   );
 
   assert.equal(origin.response_id, 'response-server-voice');
