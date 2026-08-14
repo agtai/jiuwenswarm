@@ -122,3 +122,9 @@ class EmailChannel(BaseChannel):
     def session_id_for(self, sender: str, subject: str) -> str:
         """Session id of an inbound mail - one session per mail thread."""
         return thread_key(sender, subject)
+    
+    async def deliver_inbound(
+        self, session_id: str, content: str, metadata: dict | None = None
+    ) -> None:
+        """Public entry point for the poller to hand an inbound mail over."""
+        await self._handle_message(session_id, content, metadata=metadata)

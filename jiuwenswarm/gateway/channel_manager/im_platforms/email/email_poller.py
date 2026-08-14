@@ -59,7 +59,7 @@ async def poll_once(channel: Any, fetcher: MailFetcher) -> int:
             logger.info("EmailChannel rejected mail from %s", parsed["sender"])
             continue
         channel.remember_thread(parsed["session_id"], parsed["sender"], parsed["subject"])
-        await channel._handle_message(
+        await channel.deliver_inbound(
             parsed["session_id"],
             parsed["content"],
             metadata={
@@ -80,4 +80,3 @@ async def poll_forever(
     while channel.is_running:
         await poll_once(channel, fetcher)
         await asyncio.sleep(interval)
-        
