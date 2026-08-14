@@ -9,6 +9,7 @@ import pytest
 
 from openjiuwen.core.foundation.tool import ToolCard
 
+from jiuwenswarm.agents.harness.team import team_runtime_inheritance as team_runtime_module
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     MemberInfo,
     RuntimeInfo,
@@ -50,6 +51,33 @@ def _make_tool_card(name: str) -> ToolCard:
         description=f"{name} description",
         input_params={"type": "object"},
     )
+
+
+def test_team_context_processor_skips_reasoning_override_when_sdk_lacks_processor(
+    monkeypatch,
+):
+    class _UnsupportedContextProcessorRail:
+        def __init__(self, *, processors=None, preset=None):
+            self.processors = processors
+            self.preset = preset
+
+    monkeypatch.setattr(
+        team_runtime_module,
+        "ContextProcessorRail",
+        _UnsupportedContextProcessorRail,
+    )
+
+    rail = team_runtime_module._build_context_processor_rail(
+        {
+            "context_engine_config": {
+                "reasoning_tool_loop_compact_config": {"tokens_threshold": 1000},
+            }
+        }
+    )
+
+    assert isinstance(rail, _UnsupportedContextProcessorRail)
+    assert rail.preset is True
+    assert rail.processors is None
 
 
 def test_filter_inheritable_ability_cards_includes_extended_swarm_tools():

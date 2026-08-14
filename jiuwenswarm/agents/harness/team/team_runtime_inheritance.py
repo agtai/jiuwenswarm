@@ -39,6 +39,10 @@ from jiuwenswarm.common.config import (
     get_evolution_auto_save_enabled,
     get_skill_evolution_enabled,
 )
+from jiuwenswarm.common.context_processor_compat import (
+    REASONING_TOOL_LOOP_COMPACT_PROCESSOR,
+    context_processor_preset_supports,
+)
 from jiuwenswarm.common.reasoning_injector import build_reasoning_model_request_kwargs
 from jiuwenswarm.common.utils import get_agent_skills_dir
 from jiuwenswarm.server.runtime.skill import load_execution_disabled_skills
@@ -611,13 +615,25 @@ def _build_context_processor_rail(config: dict[str, Any] | None) -> ContextProce
 
         reasoning_loop_cfg = ctx_cfg.get("reasoning_tool_loop_compact_config", {})
         if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
-            reasoning_loop_cfg = {
-                **reasoning_loop_cfg,
-                "language": resolve_language(
-                    str(get_config().get("preferred_language", "zh")).strip().lower()
-                ),
-            }
-            user_processors.append(("ReasoningToolLoopCompactProcessor", reasoning_loop_cfg))
+            if context_processor_preset_supports(
+                ContextProcessorRail,
+                REASONING_TOOL_LOOP_COMPACT_PROCESSOR,
+            ):
+                reasoning_loop_cfg = {
+                    **reasoning_loop_cfg,
+                    "language": resolve_language(
+                        str(get_config().get("preferred_language", "zh")).strip().lower()
+                    ),
+                }
+                user_processors.append(
+                    (REASONING_TOOL_LOOP_COMPACT_PROCESSOR, reasoning_loop_cfg)
+                )
+            else:
+                logger.warning(
+                    "[TeamRuntime] installed ContextProcessorRail preset does not expose "
+                    "optional processor %s; override skipped",
+                    REASONING_TOOL_LOOP_COMPACT_PROCESSOR,
+                )
 
         rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,

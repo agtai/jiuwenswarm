@@ -317,6 +317,10 @@ from jiuwenswarm.common.config import (
     get_sandbox_startup_mode,
     resolve_env_vars,
 )
+from jiuwenswarm.common.context_processor_compat import (
+    REASONING_TOOL_LOOP_COMPACT_PROCESSOR,
+    context_processor_preset_supports,
+)
 from jiuwenswarm.common.mcp_config import (
     build_mcp_server_config,
     extract_enabled_mcp_server_entries,
@@ -941,13 +945,25 @@ def _build_context_processor_rail(config: dict[str, Any]) -> ContextProcessorRai
 
         reasoning_loop_cfg = context_engine_cfg.get("reasoning_tool_loop_compact_config", {})
         if isinstance(reasoning_loop_cfg, dict) and reasoning_loop_cfg:
-            reasoning_loop_cfg = {
-                **reasoning_loop_cfg,
-                "language": resolve_language(
-                    str(config.get("preferred_language", "zh")).strip().lower()
-                ),
-            }
-            user_processors.append(("ReasoningToolLoopCompactProcessor", reasoning_loop_cfg))
+            if context_processor_preset_supports(
+                ContextProcessorRail,
+                REASONING_TOOL_LOOP_COMPACT_PROCESSOR,
+            ):
+                reasoning_loop_cfg = {
+                    **reasoning_loop_cfg,
+                    "language": resolve_language(
+                        str(config.get("preferred_language", "zh")).strip().lower()
+                    ),
+                }
+                user_processors.append(
+                    (REASONING_TOOL_LOOP_COMPACT_PROCESSOR, reasoning_loop_cfg)
+                )
+            else:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] installed ContextProcessorRail preset "
+                    "does not expose optional processor %s; override skipped",
+                    REASONING_TOOL_LOOP_COMPACT_PROCESSOR,
+                )
 
         context_rail = ContextProcessorRail(
             processors=user_processors if user_processors else None,

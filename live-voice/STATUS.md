@@ -73,8 +73,7 @@
   `PASS - INTEGRATED WEB ALPHA` result.
 - Automated diagnostic S8 on `005814b7` rebuilt and served the 180-file
   frontend with the reviewed Integrated P1/P2/P3 flags, restarted the private
-  AgentServer/Gateway/WebChannel/Caddy topology and found no new product-source
-  blocker. Real browser checks passed P2 text/Agent response, P2 independence
+  AgentServer/Gateway/WebChannel/Caddy topology. Real browser checks passed P2 text/Agent response, P2 independence
   from a concurrent 15-second ordinary Web Tool call, explicit ambiguous and
   unsupported natural-Task rejection, exact status projection, two-turn cancel
   confirmation with zero Task effect, and visible structured-P3 dirty-worktree
@@ -86,6 +85,21 @@
   against the historical `8c2dccc8` handoff returned the required
   `CANDIDATE_IDENTITY_MISMATCH`; none of these discovery events are formal A3
   evidence.
+- The first real structured-P3 Executor attempt then exposed an OpenJiuwen SDK
+  compatibility defect before any model or fixture effect: JiuwenSwarm passed
+  the optional `ReasoningToolLoopCompactProcessor` override even though the
+  installed preset does not provide that processor, so Code Agent construction
+  failed closed. The working repair capability-checks the installed preset in
+  both single-agent and Team builders, skips only the unsupported optional
+  override, and keeps the override when a supporting SDK is present. Focused
+  compatibility tests pass 6/6, the complete affected Agent/Team files pass
+  91/91, and the P3/Task/Executor regression set passes 253 with two existing
+  platform skips. The rebuilt private runtime then completed one real structured
+  P3 create through accepted, running and terminal UI truth: only the authorized
+  `notes.txt` line changed, while Task, attempt, outbox and Direct Executor state
+  all settled without a retained owner or lease. Affected independent review
+  approved the six-path boundary with no open Critical, High or P2 finding. One
+  coherent local commit remains required before diagnostic S8 resumes.
 - By explicit user direction, the already observed scope-correlation mismatch
   is retained as a non-blocking provisional S8 deviation for final human
   judgment. Continued S8 work before re-freeze is discovery only; its events
@@ -146,9 +160,10 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Continue user-directed S8 discovery on the independently approved committed
-   repairs with the rebuilt private runtime, using Chrome, Computer Use,
-   sanitized logs, Store/Executor inspection and other automated observers.
+1. Commit the independently approved SDK compatibility repair. Its
+   rebuilt-runtime P3 rerun has passed; after clean commit identity, resume
+   user-directed S8 discovery using Chrome, Computer Use, sanitized logs,
+   Store/Executor inspection and other automated observers.
 2. Record non-blocking findings through the pass,
    batch-fix them, and repeat until only physical audio/device and final human
    judgment remain; provisional events are never relabeled as formal proof.

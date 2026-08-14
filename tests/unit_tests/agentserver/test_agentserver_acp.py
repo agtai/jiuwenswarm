@@ -108,6 +108,11 @@ class FakeContextProcessorRail:
         self.session_memory = session_memory
 
 
+class FakeReasoningContextProcessorRail(FakeContextProcessorRail):
+    def _build_preset_processors(self):
+        return [("ReasoningToolLoopCompactProcessor", object())]
+
+
 class FakeContextAssembleRail:
     def __init__(self):
         pass
@@ -3090,6 +3095,58 @@ def test_build_context_processor_rail_passes_session_memory_config(monkeypatch):
         "trigger_tokens": 12000,
         "update_mode": "direct_replace",
     }
+
+
+def test_build_context_processor_rail_skips_reasoning_override_when_sdk_lacks_processor(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        interface_deep_module,
+        "ContextProcessorRail",
+        FakeContextProcessorRail,
+    )
+    adapter = DeepAdapterHarness()
+
+    rail = adapter.build_context_processor_rail_for_test(
+        {
+            "preferred_language": "en",
+            "context_engine_config": {
+                "reasoning_tool_loop_compact_config": {"tokens_threshold": 1000},
+            },
+        }
+    )
+
+    assert isinstance(rail, FakeContextProcessorRail)
+    assert rail.preset is True
+    assert rail.processors is None
+
+
+def test_build_context_processor_rail_keeps_reasoning_override_when_sdk_supports_processor(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        interface_deep_module,
+        "ContextProcessorRail",
+        FakeReasoningContextProcessorRail,
+    )
+    adapter = DeepAdapterHarness()
+
+    rail = adapter.build_context_processor_rail_for_test(
+        {
+            "preferred_language": "en",
+            "context_engine_config": {
+                "reasoning_tool_loop_compact_config": {"tokens_threshold": 1000},
+            },
+        }
+    )
+
+    assert isinstance(rail, FakeReasoningContextProcessorRail)
+    assert rail.processors == [
+        (
+            "ReasoningToolLoopCompactProcessor",
+            {"tokens_threshold": 1000, "language": "en"},
+        )
+    ]
 
 
 def test_build_context_assemble_rail_returns_context_assemble_rail_instance(monkeypatch):
