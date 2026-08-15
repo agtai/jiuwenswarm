@@ -184,16 +184,23 @@
 - Fresh S8 automation then found one further product defect while inspecting a
   historical interrupted Task: the UI reused the currently selected Task leaf,
   so a valid historical Task with a different correlation failed generically
-  before authoritative event inspection. The working two-path repair creates
+  before authoritative event inspection. The repaired two-path boundary creates
   and fully validates a candidate leaf, then atomically replaces the old leaf;
   it performs no Task mutation during inspection. An injected replacement
   failure preserves the old leaf and journal, while a deferred competing
-  inspection cannot publish after a newer generation wins. Integrated Web
-  passes 337/337, the production build completes 4,640 modules, Prettier and
-  diff checks pass.
-  This working tree is `PAUSED / SOURCE REPAIR`, has not been independently
-  approved or committed, and invalidates reuse of the historical `9697e592`
-  freeze for formal acceptance.
+  inspection cannot publish after a newer generation wins. The repair was
+  independently approved and committed as exact
+  `00584736030e5c2e91ae69d07a7b27207eb2a12b`. On that clean exact candidate,
+  Integrated Web passed 337/337, the production build completed 4,640 modules,
+  the complete S7 runner exited zero, all 40 automatic checks passed, and the
+  five real probes returned `VERIFY` with `5 / 2 / 65 / 3 / 19` samples and zero
+  failures or forbidden effects. Its affected and cumulative Tier-3 reviews
+  found no open Critical, High or source/test P2 issue. The stale wording in
+  this paragraph was the sole remaining documentation P2. This documentation
+  correction changes the exact Git identity, so only the resulting clean
+  docs-only successor may receive the final runner, review confirmation and
+  external `FROZEN_FOR_A3` handoff; the historical `9697e592` freeze cannot be
+  reused for formal acceptance.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -216,10 +223,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `REFREEZE REQUIRED` | Exact `9697e592` historically passed the complete runner. The working historical-Task inspection repair passes 337/337 Integrated Web tests and the 4,640-module production build, but a committed successor must rerun the complete S7 automation before formal S8 resumes. |
-| S7-02 real path | `REFREEZE REQUIRED` | Exact `9697e592` historically returned all five `VERIFY` results with `5 / 2 / 65 / 3 / 19` samples and zero failures or forbidden effects. A committed successor receives no credit until a new external report binds fresh real probes to its exact clean identity. |
-| S7-03 cumulative Tier-3 review | `IN PROGRESS` | Exact `9697e592` historically passed cumulative review. The current two-path source/test repair still requires affected independent Tier-3 review, coherent commit and exact-successor cumulative review. |
-| S7-04 A3 handoff freeze | `REFREEZE REQUIRED` | Exact `9697e592` is the last historical `FROZEN_FOR_A3` candidate. The dirty working repair is not frozen; only a new exact clean successor with a valid bound report and handoff may reopen formal S8. No public deployment or real-user project is permitted. |
+| S7-02 automation | `FINAL DOC HEAD RERUN REQUIRED` | Exact `00584736` passed the complete runner with 40/40 automatic checks. This current-authority documentation correction creates one final docs-only successor, which must repeat the complete runner before formal S8 resumes. |
+| S7-02 real path | `FINAL DOC HEAD RERUN REQUIRED` | Exact `00584736` returned all five `VERIFY` results with `5 / 2 / 65 / 3 / 19` samples and zero failures or forbidden effects. The final docs-only successor receives no credit until a new external report binds fresh real probes to its own exact clean identity. |
+| S7-03 cumulative Tier-3 review | `DOC-ONLY CONFIRMATION REQUIRED` | Exact `00584736` passed affected and cumulative independent review with no open Critical, High or source/test P2. The resulting docs-only successor still requires exact-HEAD review confirmation after its complete runner. |
+| S7-04 A3 handoff freeze | `REFREEZE REQUIRED` | Exact `9697e592` is the last historical `FROZEN_FOR_A3` candidate. Exact `00584736` is a reviewed and fully verified source candidate, but this documentation correction changes HEAD; only the resulting exact clean docs-only successor with a valid bound report and handoff may reopen formal S8. No public deployment or real-user project is permitted. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is
@@ -258,12 +265,11 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Complete affected independent Tier-3 review of the two-path historical-Task
-   inspection repair, commit the coherent candidate, and verify an exact clean
-   successor identity.
-2. On that exact successor, run the complete S7 runner, five real probes and
-   cumulative Tier-3 review, then generate and validate a new external
-   `FROZEN_FOR_A3` handoff without another tracked edit.
+1. Commit this fail-closed current-authority correction as the final docs-only
+   successor and verify its exact clean identity.
+2. On that exact docs-only successor, run the complete S7 runner, five real
+   probes and cumulative review confirmation, then generate and validate a new
+   external `FROZEN_FOR_A3` handoff without another tracked edit.
 3. Only after that exact-current freeze, run a fresh S8 entry audit and all
    automated acceptance with
    Chrome, Computer Use, sanitized logs and Store/Executor inspection. Record
