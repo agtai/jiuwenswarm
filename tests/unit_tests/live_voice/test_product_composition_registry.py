@@ -107,19 +107,26 @@ class _Facade:
         self.calls = 0
         self.executions: list[object] = []
         self._formal_live_voice = formal_live_voice
+        self._calls_changed = asyncio.Condition()
 
     def supports_formal_live_voice(self) -> bool:
         return self._formal_live_voice
 
     async def process_formal_live_voice_stream(self, execution):
-        self.calls += 1
-        self.executions.append(execution)
+        async with self._calls_changed:
+            self.calls += 1
+            self.executions.append(execution)
+            self._calls_changed.notify_all()
         yield AgentResponseChunk(
             request_id=execution.request_id,
             channel_id=execution.channel_id,
             payload={"event_type": "chat.final", "content": "formal result"},
             is_complete=True,
         )
+
+    async def wait_for_calls(self, expected: int) -> None:
+        async with self._calls_changed:
+            await self._calls_changed.wait_for(lambda: self.calls >= expected)
 
 
 class _BlockingFacade(_Facade):
@@ -129,7 +136,9 @@ class _BlockingFacade(_Facade):
         self.release = asyncio.Event()
 
     async def process_formal_live_voice_stream(self, execution):
-        self.calls += 1
+        async with self._calls_changed:
+            self.calls += 1
+            self._calls_changed.notify_all()
         self.started.set()
         await self.release.wait()
         yield AgentResponseChunk(
@@ -2445,10 +2454,7 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
         channel_id="web",
     )
     assert second_submit.ok is True
-    for _ in range(20):
-        if manager.agent.calls == 2:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(manager.agent.wait_for_calls(2), timeout=1)
     assert manager.agent.calls == 2
     second_execution = manager.agent.executions[1]
     assert [entry.content for entry in second_execution.context.entries] == [
@@ -2555,10 +2561,7 @@ async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -
         channel_id="web",
     )
     assert first.ok is True
-    for _ in range(20):
-        if manager.agent.calls == 1:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(manager.agent.wait_for_calls(1), timeout=1)
     assert manager.agent.calls == 1
 
     second = await registry.handle_p2_submit(
@@ -2574,10 +2577,7 @@ async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -
         channel_id="web",
     )
     assert second.ok is True
-    for _ in range(20):
-        if manager.agent.calls == 2:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(manager.agent.wait_for_calls(2), timeout=1)
     assert manager.agent.calls == 2
     assert manager.agent.executions[1].context.entries == ()
     assert manager.agent.executions[1].commit.context_refs == ()
@@ -2668,10 +2668,7 @@ async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
     acknowledged, submitted = await asyncio.gather(ack_task, submit_task)
     assert acknowledged.ok is True
     assert submitted.ok is True
-    for _ in range(20):
-        if manager.agent.calls == 2:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(manager.agent.wait_for_calls(2), timeout=1)
     assert manager.agent.calls == 2
     assert [entry.content for entry in manager.agent.executions[1].context.entries] == [
         "context becomes visible atomically",
@@ -2807,10 +2804,7 @@ async def test_p2_context_keeps_only_four_latest_acknowledged_pairs(
         channel_id="web",
     )
     assert final.ok is True
-    for _ in range(20):
-        if manager.agent.calls == 6:
-            break
-        await asyncio.sleep(0)
+    await asyncio.wait_for(manager.agent.wait_for_calls(6), timeout=1)
     assert manager.agent.calls == 6
     assert [
         entry.content for entry in manager.agent.executions[-1].context.entries

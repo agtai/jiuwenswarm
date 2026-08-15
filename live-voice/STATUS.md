@@ -305,6 +305,18 @@
   identity, so the `8ce8e0c4` current-host freeze remains historical after the
   resulting documentation commit; the conditional closure rule below applies
   to the exact transfer commit.
+- The first complete post-documentation runner on exact
+  `84d43727fb104ae70e2666c6f96c244a42db492d` preserved all five real `VERIFY`
+  results but correctly refused S7 closure because one of 1,673 backend Alpha
+  cases failed. The named P2 context case passed immediately in isolation and
+  500 same-process repetitions, while its implementation used fixed groups of
+  20 event-loop yields to observe asynchronous Agent starts. The transfer
+  successor replaces those fixed-yield observations with a condition-backed,
+  one-second bounded wait; the complete 95-case Registry file passes and the
+  product source is unchanged. This test-evidence repair receives credit only
+  when the exact committed successor has affected and cumulative review credit
+  and satisfies the external closure rule below; the failed `84d43727` report
+  is diagnostic history and cannot authorize S8.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -369,11 +381,12 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Select the destination-server transfer commit only after its exact clean
-   tree has affected and cumulative review credit. Check out that exact commit
-   on the private destination server without a later tracked edit, recreate the
-   isolated runtime and run the complete S7 runner plus all five real probes.
-   Generate and validate a destination-owned external `FROZEN_FOR_A3` handoff.
+1. Select a destination-server transfer commit that includes the deterministic
+   P2 context-test synchronization and has exact-clean-tree affected and
+   cumulative review credit. Check out that exact commit on the private
+   destination server without a later tracked edit, recreate the isolated
+   runtime and run the complete S7 runner plus all five real probes. Generate
+   and validate a destination-owned external `FROZEN_FOR_A3` handoff.
 2. Using only that destination report/runtime/handoff, create a new fixture,
    product Session, scope correlations and S8 record. Run a fresh S8 entry audit
    and all automated acceptance with Chrome, Computer Use, sanitized logs and
