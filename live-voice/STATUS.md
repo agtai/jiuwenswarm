@@ -228,6 +228,27 @@
   run is intermediate evidence only; the resulting exact clean candidate must
   receive the final report, brief identity/review confirmation and external
   re-freeze. The exact `83660aef` freeze also remains historical.
+- Exact clean `9a6715da48a5b0ef51ff46dcb82a07f9478bebb3` subsequently
+  completed the full runner, cumulative review and external-only
+  `FROZEN_FOR_A3` handoff and became the latest historical frozen candidate.
+  Fresh automated S8 discovery then reproduced one additional UI recovery
+  defect: after a definitive structured-P3 rejection such as
+  `TASK_ALREADY_TERMINAL`, the visible controls unlocked but a stale local
+  pending-mutation reference silently suppressed the next natural-language Task
+  submission until page reload. The current two-path source/test repair clears
+  both pending references only when the product owner proves that no mutation
+  remains pending; transport-unknown outcomes stay retained and locked. The
+  mounted regression and the complete Integrated Web suite pass `349 / 349`,
+  Prettier and diff checks pass, and the Integrated-Web production build
+  completes `4,641` modules. In the real private Chrome surface the same
+  terminal cancel failed with the truthful stable reason, and without reload an
+  ambiguous natural request immediately reached
+  `TASK_INTENT_EXACT_FORM_REQUIRED`; the isolated Store remained at one Task,
+  one attempt, one command and one delivered outbox row. The repair receives
+  current-candidate credit only when an exact clean HEAD containing it has
+  affected and cumulative review credit plus a valid report and frozen handoff;
+  until then formal S8 is paused and exact `9a6715da` remains historical
+  evidence only.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -250,10 +271,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | Satisfied only when the external report validates the exact current clean HEAD and all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED` and S8 remains blocked. Pre-documentation identity `e41e856b` completed an intermediate 40-check runner; exact `83660aef` remains the latest historical frozen candidate. |
-| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | Satisfied only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. Pre-documentation identity `e41e856b` returned `5 / 2 / 65 / 3 / 19` intermediate samples with zero failure/forbidden effects. |
-| S7-03 cumulative Tier-3 review | `CONDITIONAL ON EXTERNAL BINDING` | Satisfied only when the exact-current handoff binds the valid report and records `s7_03_review=PASS`; otherwise it is still in progress. The `e41e856b` source/test boundary passed affected and cumulative independent review with no open Critical, High or P2. The exact-current documentation identity receives review credit only when its bound handoff records `s7_03_review=PASS`; otherwise it remains in progress. |
-| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds that report/runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and S8 is blocked. Historical freezes cannot provide current credit. No public deployment or real-user project is permitted. |
+| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean HEAD containing the reviewed repair with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Exact `9a6715da` remains historical. |
+| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. The `9a6715da` samples remain historical. |
+| S7-03 cumulative Tier-3 review | `CONDITIONAL ON EXACT CANDIDATE` | The exact-current handoff must bind affected review of the product repair, cumulative review of the resulting candidate and `s7_03_review=PASS`; otherwise it remains in progress. |
+| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the repaired candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. The `9a6715da` handoff is historical. No public deployment or real-user project is permitted. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is
@@ -292,12 +313,11 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. If the external report and handoff do not validate the exact current clean
-   HEAD under the closure rule above, run the complete S7 runner and five real
-   probes once, complete the brief affected identity/review confirmation, and
-   generate and validate the external `FROZEN_FOR_A3` handoff without another
-   tracked edit. Do not repeat these steps when the exact-current binding
-   already validates.
+1. If the exact-current binding is absent, ensure the product repair has
+   affected review credit and is included in one coherent clean candidate; then
+   run the complete S7 runner and five real probes on that exact HEAD. Complete
+   cumulative review and generate and validate the external `FROZEN_FOR_A3`
+   handoff without another tracked edit.
 2. Only after that exact-current freeze, run a fresh S8 entry audit and all
    automated acceptance with
    Chrome, Computer Use, sanitized logs and Store/Executor inspection. Record

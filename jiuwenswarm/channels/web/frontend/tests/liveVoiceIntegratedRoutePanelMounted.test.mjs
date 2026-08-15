@@ -1263,6 +1263,291 @@ test('mounted Task intent failure renders only the stable content-free reason', 
   }
 });
 
+test('mounted definitive structured mutation failure releases the natural Task route without reload', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const calls = [];
+  const activateP2 = createMountedP2ActivationResponder();
+  let binding = null;
+  let renderer;
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.task.status') return mountedP3Status(binding, { taskId: 'task-terminal' });
+    if (method === 'live_voice.task.events') return mountedP3Events(binding, { taskId: 'task-terminal' });
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      binding ??= {
+        subject_id: 'mounted-terminal-subject',
+        session_id: params.session_id,
+        project_id: 'mounted-terminal-project',
+        correlation_id: params.correlation_id,
+        generation: 41,
+      };
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: params.operation,
+          command_id: params.command_id,
+          target_task_id: params.operation === 'task.create' ? null : params.task_id,
+          confirmation_id: `confirmation-${params.command_id}`,
+          expires_at: '2999-08-10T10:00:00Z',
+          task_control_binding: binding,
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.mutate') {
+      if (params.operation === 'task.cancel') {
+        throw Object.assign(new Error('terminal task cannot be cancelled'), {
+          code: 'CONFLICT',
+          reason: 'TASK_ALREADY_TERMINAL',
+        });
+      }
+      return {
+        ok: true,
+        result: {
+          status: 'mutation_processed',
+          operation: 'task.create',
+          command_id: params.command_id,
+          target_task_id: null,
+          formal_task_result: {
+            task_id: 'task-terminal',
+            attempt_id: 'attempt-a',
+            attempt_number: 1,
+            state: 'accepted',
+            outbox_id: 'outbox-terminal',
+          },
+        },
+      };
+    }
+    if (method === 'live_voice.composition.p3.intent') {
+      const result = {
+        status: 'rejected',
+        reason: 'UNSUPPORTED_TASK_INTENT',
+        operation: null,
+        task_id: null,
+        source_span: null,
+        target_span: null,
+        formal_task_result: null,
+      };
+      const error = new Error('bounded request rejected');
+      error.payload = {
+        request_id: options?.requestId ?? null,
+        ok: false,
+        result,
+        error: { code: 'INVALID_ARGUMENT', reason: result.reason, message: 'rejected' },
+        product_composition: {},
+      };
+      throw error;
+    }
+    throw new Error(`unexpected mounted request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, 'session-terminal-recovery', request));
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'formal P3 controls did not mount');
+    });
+    await act(async () => {
+      const controls = mountedP3Controls(renderer).root;
+      controls.findByType('input').props.onChange({ target: { value: 'Terminal recovery task' } });
+      controls.findByType('textarea').props.onChange({ target: { value: 'Edit only the disposable fixture.' } });
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.create confirmation did not settle');
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'task.create did not settle');
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.cancel confirmation did not settle');
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('TASK_ALREADY_TERMINAL'), 'definitive task.cancel failure did not settle');
+    });
+
+    const taskIntent = mountedTaskIntentControls(renderer);
+    await act(async () => {
+      taskIntent.textarea.props.onChange({ target: { value: 'help me with this task' } });
+      await new Promise(resolve => setImmediate(resolve));
+    });
+    assert.equal(mountedTaskIntentControls(renderer).submit.props.disabled, false);
+    await act(async () => {
+      mountedTaskIntentControls(renderer).root.props.onSubmit({ preventDefault() {} });
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p3.intent').length === 1,
+        'definitive structured failure did not release the natural Task route',
+      );
+    });
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('UNSUPPORTED_TASK_INTENT'), true);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 2);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+for (const failureMode of ['malformed-inner', 'transport-unknown', 'stale-disconnect']) {
+  test(`mounted ${failureMode} structured mutation failure retains the natural Task barrier`, async () => {
+    const i18n = await createI18n();
+    const browser = installP1BrowserEnvironment();
+    const calls = [];
+    const activateP2 = createMountedP2ActivationResponder();
+    let binding = null;
+    let releaseDeferredMutation = null;
+    let renderer;
+    const processedMutation = params => ({
+      ok: true,
+      result: {
+        status: 'mutation_processed',
+        operation: params.operation,
+        command_id: params.command_id,
+        target_task_id: null,
+        formal_task_result: {
+          task_id: 'task-retained',
+          attempt_id: 'attempt-retained',
+          attempt_number: 1,
+          state: 'accepted',
+          ...(failureMode === 'malformed-inner' ? {} : { outbox_id: 'outbox-retained' }),
+        },
+      },
+    });
+    const request = async (method, params, options) => {
+      calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+      if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+      if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+      if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+      if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+      if (method === 'live_voice.composition.p3.progress.activate') {
+        return { ok: true, result: mountedProgressActivation(params) };
+      }
+      if (method === 'live_voice.composition.p3.progress.close') {
+        return { ok: true, result: { status: 'closed', ...params } };
+      }
+      if (method === 'live_voice.composition.p3.confirmation.issue') {
+        binding ??= {
+          subject_id: `mounted-${failureMode}-subject`,
+          session_id: params.session_id,
+          project_id: `mounted-${failureMode}-project`,
+          correlation_id: params.correlation_id,
+          generation: 42,
+        };
+        return {
+          ok: true,
+          result: {
+            status: 'confirmation_issued',
+            operation: params.operation,
+            command_id: params.command_id,
+            target_task_id: null,
+            confirmation_id: `confirmation-${params.command_id}`,
+            expires_at: '2999-08-10T10:00:00Z',
+            task_control_binding: binding,
+          },
+        };
+      }
+      if (method === 'live_voice.composition.p3.mutate') {
+        if (failureMode === 'transport-unknown') {
+          throw Object.assign(new Error('mutation transport outcome is unknown'), {
+            code: 'UNAVAILABLE',
+            reason: 'PRODUCT_P3_MUTATION_OUTCOME_UNKNOWN',
+            retriable: true,
+          });
+        }
+        if (failureMode === 'stale-disconnect') {
+          return new Promise(resolve => {
+            releaseDeferredMutation = () => resolve(processedMutation(params));
+          });
+        }
+        return processedMutation(params);
+      }
+      if (method === 'live_voice.composition.p3.intent') {
+        throw new Error('natural Task intent must remain fenced');
+      }
+      throw new Error(`unexpected mounted retained-barrier request: ${method}`);
+    };
+    const sessionId = `session-${failureMode}`;
+
+    try {
+      await act(async () => {
+        renderer = create(mountedP3Element(i18n, sessionId, request));
+        await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'formal P3 controls did not mount');
+      });
+      await act(async () => {
+        const controls = mountedP3Controls(renderer).root;
+        controls.findByType('input').props.onChange({ target: { value: `Retained ${failureMode} task` } });
+        controls.findByType('textarea').props.onChange({ target: { value: 'Edit only the disposable fixture.' } });
+      });
+      await act(async () => {
+        mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+        await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'task.create confirmation did not settle');
+      });
+      if (failureMode === 'stale-disconnect') {
+        await act(async () => {
+          mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+          await waitForMounted(() => releaseDeferredMutation !== null, 'stale mutation did not reach the deferred transport');
+        });
+        await act(async () => {
+          renderer.update(mountedP3Element(i18n, sessionId, request, undefined, false));
+          await new Promise(resolve => setImmediate(resolve));
+        });
+        await act(async () => {
+          releaseDeferredMutation();
+          await new Promise(resolve => setTimeout(resolve, 20));
+        });
+        await act(async () => {
+          renderer.update(mountedP3Element(i18n, sessionId, request));
+          await waitForMounted(
+            () =>
+              JSON.stringify(renderer.toJSON()).includes('PRODUCT_P3_MUTATION_FAILED') && mountedTaskIntentControls(renderer).textarea.props.disabled === true,
+            'reconnect released the stale mutation barrier',
+          );
+        });
+      } else {
+        await act(async () => {
+          mountedP3Controls(renderer).button('Execute confirmed mutation').props.onClick();
+          await waitForMounted(
+            () =>
+              JSON.stringify(renderer.toJSON()).includes(
+                failureMode === 'transport-unknown' ? 'PRODUCT_P3_MUTATION_OUTCOME_UNKNOWN' : 'PRODUCT_P3_MUTATION_FAILED',
+              ),
+            `${failureMode} mutation did not fail closed`,
+          );
+        });
+      }
+
+      const taskIntent = mountedTaskIntentControls(renderer);
+      assert.equal(taskIntent.textarea.props.disabled, true, `${failureMode} must retain the visible natural Task barrier`);
+      const intentCallsBefore = calls.filter(call => call.method === 'live_voice.composition.p3.intent').length;
+      await act(async () => {
+        taskIntent.root.props.onSubmit({ preventDefault() {} });
+        await new Promise(resolve => setImmediate(resolve));
+      });
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p3.intent').length,
+        intentCallsBefore,
+        `${failureMode} must allocate zero natural Task intent effects`,
+      );
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 1);
+    } finally {
+      if (renderer) await act(async () => renderer.unmount());
+      browser.restore();
+    }
+  });
+}
+
 test('mounted natural Task create rejects a same-Session foreign project and correlation before progress or acknowledgement', async () => {
   const i18n = await createI18n();
   const calls = [];

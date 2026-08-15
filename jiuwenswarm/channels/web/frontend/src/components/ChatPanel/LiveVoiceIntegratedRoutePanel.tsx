@@ -29,6 +29,7 @@ import {
   ProductWebP2ActivationOwner,
   ProductWebP3MutationOwner,
   ProductWebP3ProgressOwner,
+  isDefinitiveProductOperationError,
   isRetriableProductOperationError,
   pollProductP2RouteWithRecovery,
   replayProductP2DurableOperation,
@@ -3404,7 +3405,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
     } catch (error) {
       if (p3MutationOwnerRef.current === owner) {
-        if (!owner.hasPendingMutation()) pendingP3MutationRef.current = null;
+        if (isDefinitiveProductOperationError(error) && !owner.hasPendingMutation()) {
+          pendingP3MutationRef.current = null;
+          pendingFormalP3MutationRef.current = null;
+        }
         setP3MutationStatus('failed');
         setP3MutationReason(extractWebErrorReason(error) ?? 'PRODUCT_P3_MUTATION_FAILED');
       }
@@ -3869,7 +3873,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p3TargetTaskId={p3TargetTaskId}
       p3MutationStatus={p3MutationStatus}
       p3MutationReason={p3MutationReason}
-      p3MutationRetained={p3MutationOwnerRef.current?.hasPendingMutation() ?? false}
+      p3MutationRetained={
+        p3MutationOwnerRef.current?.hasPendingMutation() === true || pendingP3MutationRef.current !== null || pendingFormalP3MutationRef.current !== null
+      }
       p3RetryEligible={isFormalTaskRetryEligible(p3RetryEligibility)}
       p3RetryAttemptNumber={p3RetryEligibility?.attempt_number ?? null}
       p3RetryInspectionStatus={p3RetryInspectionStatus}
