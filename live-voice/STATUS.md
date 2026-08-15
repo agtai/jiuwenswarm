@@ -280,6 +280,31 @@
   historical. Formal S8 remains paused unless the exact-current candidate also
   satisfies the report/review/handoff conditions below; otherwise full S7
   re-verification/re-freeze remains mandatory.
+- Exact clean `8ce8e0c4b1191efc4306f3493dd3d9943abd99ba` commits that
+  acknowledged-context repair. Its complete S7 runner returned all 40 automatic
+  checks as `PASS` and all five real probes as `VERIFY` with `5 / 2 / 65 / 3 /
+  19` samples, zero failures and zero forbidden effects; its affected and
+  cumulative Tier-3 reviews found no open Critical, High or P2 issue, and the
+  external handoff recorded S7-03 `PASS` plus S7-04 `FROZEN_FOR_A3`. Fresh
+  current-host diagnostic S8 then passed real Chrome P2 multi-turn context and
+  Tool work, P2/P3 concurrency, P3 create/status/cancel and failure truth,
+  refresh and complete service-restart reconciliation, exact fixture effect,
+  Store/Executor settlement, privacy and sanitized-log checks. These machine
+  observations are diagnostic rather than USER acceptance, and the known
+  product-generated scope-correlation deviation remains explicitly accepted by
+  the user as non-blocking for final judgment rather than relabeled as strict
+  validator `PASS`.
+- The user will perform the final A3 physical/human acceptance on a different
+  private server and in a new Session. Source commits may transfer, but the
+  current host's report/runtime digest, resource references, fixture, product
+  Session, scope correlations and human observations may not. The destination
+  must check out one exact clean reviewed commit, recreate its private runtime,
+  rerun the complete S7 runner and five real probes there, freeze a new external
+  handoff for that exact candidate/runtime, and create a fresh S8 entry/session
+  before any final user action. This tracked handoff update advances Git
+  identity, so the `8ce8e0c4` current-host freeze remains historical after the
+  resulting documentation commit; the conditional closure rule below applies
+  to the exact transfer commit.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -302,10 +327,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean HEAD containing the reviewed repair with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Exact `d31cc7bb` remains historical. |
-| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. The `d31cc7bb` samples remain historical. |
+| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean HEAD containing the reviewed repair with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Exact `8ce8e0c4` is current-host historical evidence after this tracked handoff update. |
+| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. The `8ce8e0c4` samples are current-host historical evidence only. |
 | S7-03 cumulative Tier-3 review | `CONDITIONAL ON EXACT CANDIDATE` | The exact-current handoff must bind affected review of the product repair, cumulative review of the resulting candidate and `s7_03_review=PASS`; otherwise it remains in progress. |
-| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the repaired candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. The `d31cc7bb` handoff is historical. No public deployment or real-user project is permitted. |
+| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the repaired candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. The `8ce8e0c4` current-host handoff is historical after this tracked update and cannot authorize the destination-host run. No public deployment or real-user project is permitted. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is
@@ -344,17 +369,21 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. If the exact-current binding is absent, ensure the product repair has
-   affected review credit and is included in one coherent clean candidate; then
-   run the complete S7 runner and five real probes on that exact HEAD. Complete
-   cumulative review and generate and validate the external `FROZEN_FOR_A3`
-   handoff without another tracked edit.
-2. Only after that exact-current freeze, run a fresh S8 entry audit and all
-   automated acceptance with
-   Chrome, Computer Use, sanitized logs and Store/Executor inspection. Record
-   and batch-fix any new non-blocking finding; provisional diagnostic events are
-   never relabeled as formal proof.
-3. When only physical audio/device and final human judgment remain,
-   hand the remaining physical product journey to the user for the final
-   `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
-   [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).
+1. Select the destination-server transfer commit only after its exact clean
+   tree has affected and cumulative review credit. Check out that exact commit
+   on the private destination server without a later tracked edit, recreate the
+   isolated runtime and run the complete S7 runner plus all five real probes.
+   Generate and validate a destination-owned external `FROZEN_FOR_A3` handoff.
+2. Using only that destination report/runtime/handoff, create a new fixture,
+   product Session, scope correlations and S8 record. Run a fresh S8 entry audit
+   and all automated acceptance with Chrome, Computer Use, sanitized logs and
+   Store/Executor inspection. Do not copy or relabel the current host's S8
+   product events or human observations.
+3. When the destination automated scope leaves only physical audio/device and
+   final human judgment, the user performs the complete physical product
+   journey and records the final `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision
+   under [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).
+4. Validate the destination S8 record, run cleanup dry-run, preserve or remove
+   only the destination-owned disposable artifacts as directed, and stop the
+   private services. Any new source fix restarts exact-candidate review and S7
+   freeze; environment-only corrections rerun the affected destination gates.

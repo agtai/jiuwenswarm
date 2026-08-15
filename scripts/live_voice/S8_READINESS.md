@@ -41,6 +41,26 @@ The helper consumes these S7-owned inputs:
 Integration Owner reviews the candidate, then explicitly records `PASS` and
 `FROZEN_FOR_A3` in the external file, along with stable deviation/reuse IDs.
 
+### Transfer to another server or Session
+
+Git source commits are transferable; machine-private acceptance state is not.
+When final S8 runs on another server, browser profile or operator Session, do
+not copy the previous host's S7 report/handoff as acceptance authority. Those
+files are diagnostic, no-credit history on the destination even if its declared
+labels look identical. Check out one exact clean reviewed commit on the
+destination and run S7 automation plus all five real probes there. Freeze a new
+destination-owned report/handoff before S8 entry.
+
+Always create new destination-owned values for the isolated data root, Task
+Store, no-remote fixture, effect plan, product Session, scope correlations, S8
+record, trace and cleanup report. Browser permissions, selected audio devices,
+certificates, private DNS/hosts/firewall state, Provider reachability and
+secrets-by-presence must be established and verified on that destination; Git
+does not transfer them. Previous-host product events and human observations are
+diagnostic history only and must never be relabeled or copied into the new S8
+record. A different host or Session therefore starts again at preparation,
+preflight and `init-session`, not at the first remaining human row.
+
 ## Preparation before candidate freeze
 
 Choose one safe session ID and create new isolated resources. The fixture name
