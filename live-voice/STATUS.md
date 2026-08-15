@@ -223,10 +223,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `FINAL DOC HEAD RERUN REQUIRED` | Exact `00584736` passed the complete runner with 40/40 automatic checks. This current-authority documentation correction creates one final docs-only successor, which must repeat the complete runner before formal S8 resumes. |
-| S7-02 real path | `FINAL DOC HEAD RERUN REQUIRED` | Exact `00584736` returned all five `VERIFY` results with `5 / 2 / 65 / 3 / 19` samples and zero failures or forbidden effects. The final docs-only successor receives no credit until a new external report binds fresh real probes to its own exact clean identity. |
-| S7-03 cumulative Tier-3 review | `DOC-ONLY CONFIRMATION REQUIRED` | Exact `00584736` passed affected and cumulative independent review with no open Critical, High or source/test P2. The resulting docs-only successor still requires exact-HEAD review confirmation after its complete runner. |
-| S7-04 A3 handoff freeze | `REFREEZE REQUIRED` | Exact `9697e592` is the last historical `FROZEN_FOR_A3` candidate. Exact `00584736` is a reviewed and fully verified source candidate, but this documentation correction changes HEAD; only the resulting exact clean docs-only successor with a valid bound report and handoff may reopen formal S8. No public deployment or real-user project is permitted. |
+| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | Satisfied only when the external report validates the exact current clean HEAD and all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED` and S8 remains blocked. Exact `00584736` is the latest completed historical source-candidate run. |
+| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | Satisfied only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. Exact `00584736` returned `5 / 2 / 65 / 3 / 19` samples as historical source-candidate evidence. |
+| S7-03 cumulative Tier-3 review | `CONDITIONAL ON EXTERNAL BINDING` | Satisfied only when the exact-current handoff binds the valid report and records `s7_03_review=PASS`; otherwise it is still in progress. Exact `00584736` passed affected and cumulative independent source/test review with no open Critical, High or source/test P2. |
+| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds that report/runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and S8 is blocked. Historical freezes cannot provide current credit. No public deployment or real-user project is permitted. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is
@@ -265,17 +265,16 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Commit this fail-closed current-authority correction as the final docs-only
-   successor and verify its exact clean identity.
-2. On that exact docs-only successor, run the complete S7 runner, five real
-   probes and cumulative review confirmation, then generate and validate a new
-   external `FROZEN_FOR_A3` handoff without another tracked edit.
-3. Only after that exact-current freeze, run a fresh S8 entry audit and all
+1. If the exact current clean HEAD lacks a valid bound external report/handoff,
+   run the complete S7 runner, five real probes and cumulative review, then
+   generate and validate the external `FROZEN_FOR_A3` handoff without another
+   tracked edit. If that exact binding already validates, do not repeat S7.
+2. Only after that exact-current freeze, run a fresh S8 entry audit and all
    automated acceptance with
    Chrome, Computer Use, sanitized logs and Store/Executor inspection. Record
    and batch-fix any new non-blocking finding; provisional diagnostic events are
    never relabeled as formal proof.
-4. When only physical audio/device and final human judgment remain,
+3. When only physical audio/device and final human judgment remain,
    hand the remaining physical product journey to the user for the final
    `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
    [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).
