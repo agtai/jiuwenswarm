@@ -8,8 +8,9 @@
 ## Resume capsule
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
-  `agtai/hx/0812_live_voice_w3`. The branch is pushed through `370ee9b8`; the
-  D-079 fast-closeout documentation commit is local-only and any further push
+  `agtai/hx/0812_live_voice_w3`. The upstream already contains docs-only tip
+  `bb11530ce`, the successor of `370ee9b8`. This C1 ledger/STATUS/packet
+  settlement advances the local branch beyond that tip; any remote update
   remains separately approved for the exact remote/ref/commits/update mode.
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
@@ -294,17 +295,15 @@
   product-generated scope-correlation deviation remains explicitly accepted by
   the user as non-blocking for final judgment rather than relabeled as strict
   validator `PASS`.
-- The user will perform the final A3 physical/human acceptance on a different
-  private server and in a new Session. Source commits may transfer, but the
-  current host's report/runtime digest, resource references, fixture, product
-  Session, scope correlations and human observations may not. The destination
-  must check out one exact clean reviewed commit, recreate its private runtime,
-  rerun the complete S7 runner and five real probes there, freeze a new external
-  handoff for that exact candidate/runtime, and create a fresh S8 entry/session
-  before any final user action. This tracked handoff update advances Git
-  identity, so the `8ce8e0c4` current-host freeze remains historical after the
-  resulting documentation commit; the conditional closure rule below applies
-  to the exact transfer commit.
+- The user will perform the final A3 physical/human acceptance on this current
+  host in a fresh exact-candidate Session. Phase D′ destination transfer is
+  skipped. Existing source commits and current-host runtime are reusable only
+  where the C1 checks confirmed the exact active environment; historical
+  reports, runtime digests, resource references, fixtures, Sessions, scope
+  correlations and observations are not relabeled as the new freeze. The C2/C3
+  run must produce a fresh report and handoff for the exact C1 commit/runtime,
+  followed by a fresh S8 entry/session before any final user action. Existing
+  freezes, including `8ce8e0c4`, remain historical.
 - The first complete post-documentation runner on exact
   `84d43727fb104ae70e2666c6f96c244a42db492d` preserved all five real `VERIFY`
   results but correctly refused S7 closure because one of 1,673 backend Alpha
@@ -330,6 +329,28 @@
   commit containing it has affected and cumulative review credit and satisfies
   the external closure rule below; both failed formal reports remain diagnostic
   history and cannot authorize S8.
+
+- D-079 fast closeout started from exact docs-only tip `bb11530ce`. Phase A
+  approved the final test-oracle boundary with the target regression, complete
+  95-case Registry file, Ruff, format and dependency checks passing; the local
+  independent-review CLI could not run the current model, so the recorded Main
+  cold-review equivalent and that limitation are explicit in the
+  [closeout ledger](S8_FAST_CLOSEOUT_LEDGER_2026-08-15.md). Phase B then
+  completed one breadth-first sweep before classification: backend Alpha passed
+  1,671 with two platform skips, related regressions passed 789, all 27 formal
+  frontend scripts passed 878 executed assertions, the production build
+  completed 4,641 modules, and a fresh fixed-corpus product round completed
+  STT, committed P2, real Agent, streaming TTS and playout with zero credential
+  hit or forbidden effect. The real Store/Executor was fully settled and the
+  privacy scan found no secret or raw-audio persistence. It found zero D-079
+  blocker and consumed zero repair batch. The new-Session P2 activation retry
+  storm and one retained-socket cleanup log are F-003/F-004 non-blocking ledger
+  deviations and were not repaired. The user selected this current host for
+  final acceptance, so Phase D′ is skipped; active services, private
+  HTTPS/WSS, isolated data root, Origin binding and no-remote fixture boundary
+  were checked rather than assumed. C1 now settles all tracked documentation;
+  only the resulting exact clean commit may receive the single C2 runner/probes
+  and C3 external freeze, and formal S8 remains paused until that succeeds.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -362,10 +383,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean HEAD containing the reviewed repair with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Exact `8ce8e0c4` is current-host historical evidence after this tracked handoff update. |
-| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. The `8ce8e0c4` samples are current-host historical evidence only. |
+| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean C1 HEAD with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Every existing frozen candidate is historical evidence after this tracked settlement. |
+| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. Prior probe samples are current-host historical evidence only. |
 | S7-03 cumulative Tier-3 review | `CONDITIONAL ON EXACT CANDIDATE` | The exact-current handoff must bind affected review of the product repair, cumulative review of the resulting candidate and `s7_03_review=PASS`; otherwise it remains in progress. |
-| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the repaired candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. The `8ce8e0c4` current-host handoff is historical after this tracked update and cannot authorize the destination-host run. No public deployment or real-user project is permitted. |
+| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the C1 candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. Historical handoffs cannot authorize the fresh current-host S8 run. No public deployment or real-user project is permitted. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is
@@ -404,21 +425,19 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Execute the
-   [S8 fast closeout packet](roadmap/S8_FAST_CLOSEOUT_PACKET_2026-08-15.md)
-   Phase A/B: settle review credit for the final test-oracle boundary, then run
-   one breadth-first automated S8 sweep and fix only D-079 blocking findings,
-   in at most three batches, with affected-scope verification and the ledger.
-2. Phase C: confirm the final acceptance host with the user once, settle all
-   documentation first, then run the single complete S7 runner plus five real
-   probes on the exact clean HEAD and freeze the external report and
-   `FROZEN_FOR_A3` handoff. The known load-flaky P2 context case is an accepted
-   test-evidence deviation per D-079 if it trips once; any other failure is a
-   blocking finding that returns to Phase B.
-3. Phase D (run Phase D' destination transfer first only if the destination
-   server was chosen): fresh S8 entry audit, fixture, product Session and scope
-   correlations, then record every machine-eligible showcase section as
-   `machine-verified` evidence.
+1. Commit this C1 STATUS/packet/ledger settlement as one coherent docs-only
+   candidate and verify the resulting exact HEAD is clean. Phase A/B and the C0
+   current-host decision are complete; Phase D′ is skipped.
+2. Run C2 once on that exact clean HEAD: the complete S7 runner plus all five
+   real probes. The known load-flaky P2 context case is an accepted
+   test-evidence deviation per D-079 if it trips once; record it and proceed
+   without returning to Phase B. Any other failure is a blocking finding that
+   returns to Phase B.
+3. Produce the C3 external sanitized report and `FROZEN_FOR_A3` handoff binding
+   the exact C1 HEAD/runtime. Make no tracked edit after that freeze. Then run
+   the fresh current-host S8 entry audit, create the fixture, product Session
+   and scope correlations, and record every machine-eligible showcase section
+   as `machine-verified` evidence.
 4. Phase E: the user performs the short physical journey and records the final
    `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
    [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), followed by cleanup and

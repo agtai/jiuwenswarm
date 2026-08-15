@@ -25,12 +25,13 @@ Read this section and §1 first; they are sufficient to begin Phase A.
   machine-eligible S8 evidence, then hand the short physical acceptance and the
   final decision to the user.
 - **Starting source:** branch `hx/0812_live_voice_w3` at exact
-  `370ee9b89` (`test(live-voice): bind unacknowledged context oracle`); verify
-  with `git log -1` and a clean worktree. All fourteen S8-discovered product
-  repairs and the P2 context test-oracle rework are already committed. The tip
-  has NOT yet received: review credit for the final test-oracle boundary, the
-  final complete runner, or an external `FROZEN_FOR_A3` handoff. Formal S8 is
-  paused until Phase C completes.
+  `bb11530ce` (`docs(live-voice): freeze D-079 fast S8 closeout mode`), the
+  docs-only successor of `370ee9b89`; verify with `git log -1` and a clean
+  worktree. All fourteen S8-discovered product repairs and the P2 context
+  test-oracle rework are already committed. The tip has NOT yet received:
+  review credit for the final test-oracle boundary, the final complete runner,
+  or an external `FROZEN_FOR_A3` handoff. Formal S8 is paused until Phase C
+  completes.
 - **Why this packet exists:** the prior cadence (each repair → complete S7
   re-verification → re-freeze → fresh diagnostic → next repair) consumed ~25 h
   and six freeze cycles without reaching the human journey. D-079 replaces it
