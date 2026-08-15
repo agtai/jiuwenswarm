@@ -151,6 +151,23 @@
   exited without committing speech. Final runtime preparation must preserve
   and verify this authoritative data-root Origin binding. No product source
   change was needed; S7-04 remains `REFREEZE REQUIRED`.
+- Final candidate assembly then advanced to exact clean source candidate
+  `2b8f19146cb1c0d979c602afb3a8f445d71cbd4d`. A fresh isolated private runtime
+  passed HTTPS/WSS, real Agent, formal Speech/Media, Task/Executor, fault,
+  deployment and privacy preparation. The five real probes independently
+  returned `VERIFY` with `5 / 2 / 65 / 3 / 19` samples and zero failures or
+  forbidden effects. The first complete runner passed all automatic checks but
+  rejected a BOM-prefixed external privacy manifest; the corrected no-BOM
+  capture then passed privacy without a product-source change. A second complete
+  runner passed all five real probes and every automatic check except one
+  Observability cleanup timing test: under the full 1,663-test backend load its
+  second 20 ms close attempt raced the already released worker. The exact test
+  passed 40 isolated repetitions, and the one-test working repair now waits on
+  the public worker-terminal snapshot with a one-second test oracle before
+  retrying retained root cleanup; product timeouts and source behavior are
+  unchanged. The complete affected file passes 27/27 with Ruff, format and diff
+  checks clean. This test repair still requires affected Tier-3 review, a local
+  commit and a complete exact-new-HEAD S7 run; no current handoff is frozen.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -207,17 +224,18 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Continue user-directed S8 discovery using Chrome, Computer Use, sanitized
-   logs, Store/Executor inspection and other automated observers. Preserve the
-   corrected private FQDN in the authoritative data-root Origin allowlist and
-   fail closed if the active media route does not reproduce it.
-2. Record non-blocking findings through the pass, batch-fix them, and repeat
-   until only physical audio/device and final human judgment remain;
-   provisional events are never relabeled as formal proof.
-3. Run the complete S7 runner, five real probes, cumulative Tier-3 review and
-   external handoff freeze on the final exact clean HEAD after the last source
-   repair.
-4. Run a fresh exact-candidate S8 entry audit and all automated acceptance, then
+1. Complete affected Tier-3 review of the deterministic Observability cleanup
+   test, commit the coherent test/status repair, and update the private runtime
+   binding to that exact clean HEAD.
+2. Run the complete S7 runner, five real probes and cumulative Tier-3 review on
+   the new exact candidate; generate and validate the external
+   `FROZEN_FOR_A3` handoff only after all 40 automatic checks and five real
+   probes pass together.
+3. Run a fresh exact-candidate S8 entry audit and all automated acceptance with
+   Chrome, Computer Use, sanitized logs and Store/Executor inspection. Record
+   and batch-fix any new non-blocking finding; provisional diagnostic events are
+   never relabeled as formal proof.
+4. When only physical audio/device and final human judgment remain,
    hand the remaining physical product journey to the user for the final
    `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
    [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).

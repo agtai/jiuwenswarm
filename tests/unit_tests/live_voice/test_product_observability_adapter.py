@@ -1069,6 +1069,12 @@ async def test_root_retains_xobs_lease_until_worker_retry_reaches_closed() -> No
 
     assert composition.lease.pending_adapter_ids == ("adapter.observability.test",)
     release.set()
+
+    async def wait_for_exporter_worker_to_finish() -> None:
+        while activation.adapter.snapshot().exporter.worker_running:
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(wait_for_exporter_worker_to_finish(), timeout=1)
     await composition.lease.close()
     assert composition.lease.closed is True
     assert (
