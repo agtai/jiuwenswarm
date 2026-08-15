@@ -2547,6 +2547,9 @@ async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -
         channel_id="web",
     )
     assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _HistoryWriter()
+    route.activation_lease._runtime._history_writer = history
 
     first = await registry.handle_p2_submit(
         params=_p2_params(
@@ -2561,8 +2564,24 @@ async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -
         channel_id="web",
     )
     assert first.ok is True
-    await asyncio.wait_for(manager.agent.wait_for_calls(1), timeout=1)
+    presentation = None
+    for sequence in range(1, 5):
+        polled = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"request-unacked-context-notification-{sequence}",
+                session_id="session-product",
+            ),
+            timeout=1,
+        )
+        assert polled.ok is True
+        notification = cast(dict[str, object], polled.payload["result"])
+        if isinstance(notification["presentation_unit"], dict):
+            presentation = cast(dict[str, object], notification["presentation_unit"])
+            break
+    assert presentation is not None
     assert manager.agent.calls == 1
+    assert history.assistants == []
 
     second = await registry.handle_p2_submit(
         params=_p2_params(

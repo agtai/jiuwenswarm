@@ -317,6 +317,19 @@
   when the exact committed successor has affected and cumulative review credit
   and satisfies the external closure rule below; the failed `84d43727` report
   is diagnostic history and cannot authorize S8.
+- The condition-backed successor
+  `52aaa5ece83b7089df31869ebe8d65a14998edb8` still failed the same named case
+  once under the formal 1,673-case runner while passing the complete 95-case
+  Registry file, 500 focused repetitions and a compact same-order full backend
+  matrix with 1,671 passes and two skips. Agent-call start was therefore still
+  an insufficient oracle for the test's declared unacknowledged-output state.
+  The current test boundary waits until the formal presentation unit exists,
+  deliberately leaves that unit unacknowledged, proves zero assistant-history
+  persistence and only then submits the next turn. Product source remains
+  unchanged. This boundary receives candidate credit only when an exact clean
+  commit containing it has affected and cumulative review credit and satisfies
+  the external closure rule below; both failed formal reports remain diagnostic
+  history and cannot authorize S8.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -381,9 +394,9 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Select a destination-server transfer commit that includes the deterministic
-   P2 context-test synchronization and has exact-clean-tree affected and
-   cumulative review credit. Check out that exact commit on the private
+1. Select a destination-server transfer commit that includes the formal
+   presentation-based P2 context-test oracle and has exact-clean-tree affected
+   and cumulative review credit. Check out that exact commit on the private
    destination server without a later tracked edit, recreate the isolated
    runtime and run the complete S7 runner plus all five real probes. Generate
    and validate a destination-owned external `FROZEN_FOR_A3` handoff.
