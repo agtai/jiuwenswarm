@@ -90,7 +90,7 @@ class ProductReplayFence {
 
 function evictCompletedProductOperation<T>(
   ledger: Map<string, { requestId: string; result?: T; promise?: Promise<T> }>,
-  replayFence: ProductReplayFence
+  replayFence: ProductReplayFence,
 ): boolean {
   for (const [fingerprint, entry] of ledger) {
     if (entry.result === undefined) continue;
@@ -242,7 +242,7 @@ export function isRetriableProductOperationError(error: unknown): boolean {
   return Boolean(
     candidate?.retriable === true ||
     (typeof candidate?.code === 'string' &&
-      (AMBIGUOUS_ACTIVATION_TRANSPORT_CODES.has(candidate.code) || candidate.code === 'WS_NOT_READY' || candidate.code === 'UNAVAILABLE'))
+      (AMBIGUOUS_ACTIVATION_TRANSPORT_CODES.has(candidate.code) || candidate.code === 'WS_NOT_READY' || candidate.code === 'UNAVAILABLE')),
   );
 }
 
@@ -267,7 +267,7 @@ export function isDefinitiveProductOperationError(error: unknown): boolean {
   const candidate = objectValue(error);
   return Boolean(
     (typeof candidate?.code === 'string' && DEFINITIVE_PRODUCT_FAILURE_CODES.has(candidate.code)) ||
-    (typeof candidate?.reason === 'string' && DEFINITIVE_PRODUCT_FAILURE_REASONS.has(candidate.reason))
+    (typeof candidate?.reason === 'string' && DEFINITIVE_PRODUCT_FAILURE_REASONS.has(candidate.reason)),
   );
 }
 
@@ -376,7 +376,7 @@ function freezeBinding(input: Readonly<ProductWebP2ActivationBinding>): ProductW
 function freezeDurableOperation(
   method: ProductP2DurableOperationMethod,
   requestId: string,
-  params: Readonly<Record<string, unknown>>
+  params: Readonly<Record<string, unknown>>,
 ): ProductP2DurableOperation {
   return validateProductP2DurableOperation({ method, request_id: requestId, params });
 }
@@ -422,7 +422,7 @@ function requireResult(value: unknown, expectedStatus: 'active' | 'closed', bind
 function requireP2BoundOperationResult(
   value: unknown,
   expectedStatus: 'round_accepted' | 'task_origin_accepted' | 'notification' | 'presentation_acknowledged' | 'barge_in_applied',
-  binding: Readonly<ProductWebP2ActivationBinding>
+  binding: Readonly<ProductWebP2ActivationBinding>,
 ): JsonObject {
   const payload = objectValue(value);
   const result = objectValue(payload?.result);
@@ -662,10 +662,9 @@ function requireP3Result(value: unknown, expectedStatus: 'active' | 'closed', bi
   return Object.freeze({ ...result });
 }
 
-function parseP3ActivationDelivery(result: JsonObject): Pick<
-  ProductWebP3ProgressSnapshot,
-  'requested_origin_kind' | 'effective_origin_kind' | 'voice_progress' | 'voice_reason' | 'fallback_reason'
-> {
+function parseP3ActivationDelivery(
+  result: JsonObject,
+): Pick<ProductWebP3ProgressSnapshot, 'requested_origin_kind' | 'effective_origin_kind' | 'voice_progress' | 'voice_reason' | 'fallback_reason'> {
   const requested = result.requested_origin_kind;
   const effective = result.origin_kind;
   const voiceProgress = result.voice_progress;
@@ -797,12 +796,7 @@ export class ProductWebP2ActivationOwner {
   }
 
   needsCleanup(): boolean {
-    return (
-      this.activationPromise !== null ||
-      this.mediaAuthorityRefreshPromise !== null ||
-      this.mediaStartReservation !== null ||
-      this.cleanupRequired
-    );
+    return this.activationPromise !== null || this.mediaAuthorityRefreshPromise !== null || this.mediaStartReservation !== null || this.cleanupRequired;
   }
 
   activationWasReplayed(): boolean | null {
@@ -919,7 +913,7 @@ export class ProductWebP2ActivationOwner {
    */
   runAuthorizedMediaStart<T>(
     input: Readonly<ProductWebP2ActivationBinding>,
-    operation: Readonly<{ start: () => Promise<T>; cancel: () => Promise<void> }>
+    operation: Readonly<{ start: () => Promise<T>; cancel: () => Promise<void> }>,
   ): Promise<T> {
     if (typeof operation.start !== 'function' || typeof operation.cancel !== 'function') {
       return Promise.reject(new Error('product P2 media start operation is invalid'));
@@ -1286,8 +1280,7 @@ export class ProductWebP2ActivationOwner {
 }
 
 export type ProductP2PollRecoveryResult<TSuccessor> =
-  | { readonly kind: 'notification'; readonly notification: JsonObject }
-  | { readonly kind: 'recovered'; readonly successor: TSuccessor | null };
+  { readonly kind: 'notification'; readonly notification: JsonObject } | { readonly kind: 'recovered'; readonly successor: TSuccessor | null };
 
 /**
  * Poll one retained P2 notification and own the exact closed-route handoff.
@@ -1427,7 +1420,7 @@ export class ProductWebP3MutationOwner {
         ...frozen,
         confirmation_id: pending.receipt.confirmation_id,
       },
-      pending.mutationRequestId
+      pending.mutationRequestId,
     )
       .then(value => {
         const payload = objectValue(value);
@@ -1514,7 +1507,7 @@ export class ProductWebP3ProgressOwner {
     correlation_id: string;
     origin_id: string;
     generation_id: string;
-    generation: number;
+    generation: number | ((task_id: string) => Promise<number>);
     task_id?: string;
   }): Promise<ProductWebP3ProgressSnapshot> {
     if (!this.enabled) return Promise.resolve(this.snapshot());
@@ -1526,9 +1519,8 @@ export class ProductWebP3ProgressOwner {
       correlation_id: requiredText(input.correlation_id, 'correlation_id'),
       origin_id: requiredText(input.origin_id, 'origin_id'),
       generation_id: requiredText(input.generation_id, 'generation_id'),
-      generation: input.generation,
     };
-    if (!Number.isSafeInteger(base.generation) || base.generation <= 0) {
+    if (typeof input.generation !== 'function' && (!Number.isSafeInteger(input.generation) || input.generation <= 0)) {
       return Promise.reject(new Error('generation is invalid'));
     }
     const exactTaskId = input.task_id === undefined ? null : requiredText(input.task_id, 'task_id');
@@ -1544,8 +1536,9 @@ export class ProductWebP3ProgressOwner {
     const selectedTask =
       exactTaskId === null ? this.request(PRODUCT_P3_TASK_LIST_METHOD, { session_id: sessionId }).then(selectSingleActiveTask) : Promise.resolve(exactTaskId);
     this.startPromise = selectedTask
-      .then(taskId => {
-        const binding = freezeP3Binding({ ...base, task_id: taskId });
+      .then(async taskId => {
+        const generation = typeof input.generation === 'function' ? await input.generation(taskId) : input.generation;
+        const binding = freezeP3Binding({ ...base, task_id: taskId, generation });
         this.binding = binding;
         this.activationAttempted = true;
         return this.request(PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, { ...binding }).then(response => {

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  inspectProductP3TaskTarget,
   persistProductP3TaskTarget,
   readProductP3TaskTarget,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP3TaskTargetJournal.js';
@@ -33,11 +34,13 @@ function target(overrides = {}) {
 
 test('P3 task target journal round-trips one exact credential-free Session binding', () => {
   const storage = memoryStorage();
+  assert.deepEqual(inspectProductP3TaskTarget({ session_id: 'session-a' }, storage), { status: 'absent', record: null });
   assert.equal(persistProductP3TaskTarget(target(), storage), true);
-  assert.deepEqual(
-    readProductP3TaskTarget({ session_id: 'session-a' }, storage),
-    { contract_version: 'live-voice.product-p3-task-target.v1', ...target() }
-  );
+  assert.deepEqual(inspectProductP3TaskTarget({ session_id: 'session-a' }, storage), {
+    status: 'valid',
+    record: { contract_version: 'live-voice.product-p3-task-target.v1', ...target() },
+  });
+  assert.deepEqual(readProductP3TaskTarget({ session_id: 'session-a' }, storage), { contract_version: 'live-voice.product-p3-task-target.v1', ...target() });
 });
 
 test('P3 task target journal retains its exact task correlation across P2 successors', () => {
@@ -55,24 +58,16 @@ test('P3 task target journal retains its exact task correlation across P2 succes
 
 test('P3 task target journal rejects cross-correlation, cross-scope, malformed and extra authority', () => {
   const storage = memoryStorage();
-  assert.equal(
-    persistProductP3TaskTarget(
-      target({ task_control_binding: { ...target().task_control_binding, session_id: 'session-b' } }),
-      storage
-    ),
-    false
-  );
+  assert.equal(persistProductP3TaskTarget(target({ task_control_binding: { ...target().task_control_binding, session_id: 'session-b' } }), storage), false);
 
   assert.equal(persistProductP3TaskTarget(target(), storage), true);
   const [key] = storage.values.keys();
-  storage.values.set(
-    key,
-    JSON.stringify({ ...target(), contract_version: 'live-voice.product-p3-task-target.v1', correlation_id: 'correlation-b' })
-  );
+  storage.values.set(key, JSON.stringify({ ...target(), contract_version: 'live-voice.product-p3-task-target.v1', correlation_id: 'correlation-b' }));
   assert.equal(readProductP3TaskTarget({ session_id: 'session-a' }, storage), null);
   storage.values.set(key, JSON.stringify({ ...target(), contract_version: 'live-voice.product-p3-task-target.v1', credential: 'forbidden' }));
   assert.equal(readProductP3TaskTarget({ session_id: 'session-a' }, storage), null);
   storage.values.set(key, '{');
+  assert.deepEqual(inspectProductP3TaskTarget({ session_id: 'session-a' }, storage), { status: 'invalid', record: null });
   assert.equal(readProductP3TaskTarget({ session_id: 'session-a' }, storage), null);
   storage.values.set(key, 'x'.repeat(32_769));
   assert.equal(readProductP3TaskTarget({ session_id: 'session-a' }, storage), null);
@@ -89,5 +84,6 @@ test('P3 task target journal degrades without turning a completed mutation into 
     },
   };
   assert.equal(persistProductP3TaskTarget(target(), unavailable), false);
+  assert.deepEqual(inspectProductP3TaskTarget({ session_id: 'session-a' }, unavailable), { status: 'invalid', record: null });
   assert.equal(readProductP3TaskTarget({ session_id: 'session-a' }, unavailable), null);
 });

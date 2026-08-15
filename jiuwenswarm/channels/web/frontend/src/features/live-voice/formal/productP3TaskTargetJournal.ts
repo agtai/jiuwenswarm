@@ -15,6 +15,11 @@ export type ProductP3TaskTargetJournalRecord = Readonly<{
   task_control_binding: FormalTaskControlBinding;
 }>;
 
+export type ProductP3TaskTargetJournalInspection =
+  | Readonly<{ status: 'absent'; record: null }>
+  | Readonly<{ status: 'valid'; record: ProductP3TaskTargetJournalRecord }>
+  | Readonly<{ status: 'invalid'; record: null }>;
+
 function requiredText(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || value.length > PRODUCT_P3_TASK_TARGET_MAX_TEXT_CHARS) {
     throw new Error('product P3 task target text is invalid');
@@ -82,7 +87,7 @@ function freezeRecord(input: {
  */
 export function persistProductP3TaskTarget(
   input: Omit<ProductP3TaskTargetJournalRecord, 'contract_version'>,
-  storage?: ProductP3TaskTargetJournalStore
+  storage?: ProductP3TaskTargetJournalStore,
 ): boolean {
   try {
     const record = freezeRecord(input);
@@ -100,17 +105,17 @@ export function persistProductP3TaskTarget(
  * successor allocates a new P2 correlation. The caller must still revalidate
  * status and complete history before publishing this hint.
  */
-export function readProductP3TaskTarget(
+export function inspectProductP3TaskTarget(
   input: Readonly<{ session_id: string }>,
-  storage?: ProductP3TaskTargetJournalStore
-): ProductP3TaskTargetJournalRecord | null {
+  storage?: ProductP3TaskTargetJournalStore,
+): ProductP3TaskTargetJournalInspection {
   try {
     const sessionId = requiredText(input.session_id);
     const serialized = (storage ?? browserStorage()).getItem(storageKey(sessionId));
-    if (serialized === null) return null;
-    if (serialized.length > PRODUCT_P3_TASK_TARGET_MAX_SERIALIZED_CHARS) return null;
+    if (serialized === null) return Object.freeze({ status: 'absent', record: null });
+    if (serialized.length > PRODUCT_P3_TASK_TARGET_MAX_SERIALIZED_CHARS) return Object.freeze({ status: 'invalid', record: null });
     const raw: unknown = JSON.parse(serialized);
-    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return Object.freeze({ status: 'invalid', record: null });
     const record = raw as Record<string, unknown>;
     const keys = Object.keys(record).sort();
     const expectedKeys = ['contract_version', 'correlation_id', 'session_id', 'task_control_binding', 'task_id'];
@@ -119,7 +124,7 @@ export function readProductP3TaskTarget(
       keys.some((key, index) => key !== expectedKeys[index]) ||
       record.contract_version !== PRODUCT_P3_TASK_TARGET_CONTRACT
     ) {
-      return null;
+      return Object.freeze({ status: 'invalid', record: null });
     }
     const frozen = freezeRecord({
       session_id: record.session_id,
@@ -127,9 +132,17 @@ export function readProductP3TaskTarget(
       task_id: record.task_id,
       task_control_binding: record.task_control_binding,
     });
-    if (frozen.session_id !== sessionId) return null;
-    return frozen;
+    if (frozen.session_id !== sessionId) return Object.freeze({ status: 'invalid', record: null });
+    return Object.freeze({ status: 'valid', record: frozen });
   } catch {
-    return null;
+    return Object.freeze({ status: 'invalid', record: null });
   }
+}
+
+export function readProductP3TaskTarget(
+  input: Readonly<{ session_id: string }>,
+  storage?: ProductP3TaskTargetJournalStore,
+): ProductP3TaskTargetJournalRecord | null {
+  const inspected = inspectProductP3TaskTarget(input, storage);
+  return inspected.status === 'valid' ? inspected.record : null;
 }

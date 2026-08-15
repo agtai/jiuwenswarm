@@ -3419,6 +3419,172 @@ test('mounted P3 atomically switches from the current task leaf to a historical 
   }
 });
 
+test('mounted P3 restores the historical task correlation and advances progress generation after a full remount', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const activateP2 = createMountedP2ActivationResponder();
+  const sessionId = 'mounted-historical-progress-remount-session';
+  const historicalBinding = {
+    subject_id: 'mounted-historical-progress-subject',
+    session_id: sessionId,
+    project_id: 'mounted-historical-progress-project',
+    correlation_id: 'mounted-historical-progress-correlation',
+    generation: 11,
+  };
+  globalThis.window.sessionStorage.setItem(
+    `jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`,
+    JSON.stringify({
+      contract_version: 'live-voice.product-p3-task-target.v1',
+      session_id: sessionId,
+      correlation_id: historicalBinding.correlation_id,
+      task_id: 'task-historical-progress',
+      task_control_binding: historicalBinding,
+    }),
+  );
+  const calls = [];
+  const progressHighWater = new Map();
+  let renderer;
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.task.status') {
+      assert.equal(params.task_id, 'task-historical-progress');
+      return mountedP3Status(historicalBinding, {
+        taskId: 'task-historical-progress',
+        state: 'terminal',
+        outcome: 'cancelled',
+        eventHead: 2,
+      });
+    }
+    if (method === 'live_voice.task.events') {
+      assert.equal(params.task_id, 'task-historical-progress');
+      return mountedP3Events(historicalBinding, { taskId: 'task-historical-progress', terminalA: true });
+    }
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      assert.equal(params.task_id, 'task-historical-progress');
+      assert.equal(params.correlation_id, historicalBinding.correlation_id);
+      const key = JSON.stringify([params.session_id, params.task_id, params.origin_id, params.generation_id]);
+      const previous = progressHighWater.get(key) ?? 0;
+      assert.equal(params.generation, previous + 1);
+      progressHighWater.set(key, params.generation);
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    throw new Error(`unexpected historical progress remount request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, sessionId, request));
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length === 1,
+        'historical task progress did not activate on the first mount',
+      );
+    });
+    await act(async () => {
+      renderer.unmount();
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    renderer = null;
+
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, sessionId, request));
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length === 2,
+        'historical task progress did not reactivate after a full remount',
+      );
+    });
+
+    const activations = calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate');
+    assert.deepEqual(
+      activations.map(call => [call.params.correlation_id, call.params.generation_id, call.params.generation]),
+      [
+        [historicalBinding.correlation_id, historicalBinding.correlation_id, 1],
+        [historicalBinding.correlation_id, historicalBinding.correlation_id, 2],
+      ],
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.list').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
+    assert.equal(
+      renderer.root
+        .findByProps({ 'data-testid': 'live-voice-integrated-p3-activation' })
+        .findAllByType('code')
+        .some(node => node.children.some(child => child === 'p3:active')),
+      true,
+    );
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    browser.restore();
+  }
+});
+
+for (const targetFault of ['malformed', 'unavailable']) {
+  test(`mounted P3 treats an ${targetFault} persisted task target as a zero-effect authority barrier`, async () => {
+    const i18n = await createI18n();
+    const browser = installP1BrowserEnvironment();
+    const activateP2 = createMountedP2ActivationResponder();
+    const sessionId = `mounted-task-target-${targetFault}-session`;
+    const targetKey = `jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`;
+    const storage = globalThis.window.sessionStorage;
+    if (targetFault === 'malformed') {
+      storage.setItem(targetKey, '{');
+    } else {
+      const read = storage.getItem.bind(storage);
+      storage.getItem = key => {
+        if (key === targetKey) throw new Error('injected target storage failure');
+        return read(key);
+      };
+    }
+    const calls = [];
+    let renderer;
+    const request = async (method, params, options) => {
+      calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+      if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+      if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+      if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+      if (method === 'live_voice.task.list') {
+        return { ok: true, result: { tasks: [{ task_id: 'task-forbidden-generic', state: 'running' }] } };
+      }
+      if (method === 'live_voice.composition.p3.progress.activate') {
+        return { ok: true, result: mountedProgressActivation(params) };
+      }
+      throw new Error(`unexpected task-target barrier request: ${method}`);
+    };
+
+    try {
+      await act(async () => {
+        renderer = create(mountedP3Element(i18n, sessionId, request));
+        await waitForMounted(
+          () => JSON.stringify(renderer.toJSON()).includes('PRODUCT_P3_TASK_TARGET_RECOVERY_REQUIRED'),
+          `${targetFault} task target did not publish its stable recovery barrier`,
+        );
+      });
+      assert.equal(calls.filter(call => call.method === 'live_voice.task.list').length, 0);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.activate').length, 0);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
+    } finally {
+      if (renderer) {
+        await act(async () => {
+          renderer.unmount();
+          await Promise.resolve();
+        });
+      }
+      browser.restore();
+    }
+  });
+}
+
 test('mounted P3 lets only the current historical-task inspection publish after a deferred predecessor', async () => {
   const i18n = await createI18n();
   const browser = installP1BrowserEnvironment();

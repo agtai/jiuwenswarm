@@ -51,7 +51,8 @@ import {
   ProductP2ActivationJournal,
   reconcileProductP2Predecessor,
 } from '../../features/live-voice/formal/productP2ActivationJournal';
-import { persistProductP3TaskTarget, readProductP3TaskTarget } from '../../features/live-voice/formal/productP3TaskTargetJournal';
+import { inspectProductP3TaskTarget, persistProductP3TaskTarget } from '../../features/live-voice/formal/productP3TaskTargetJournal';
+import { claimProductP3ProgressGeneration } from '../../features/live-voice/formal/productP3ProgressGenerationJournal';
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,
@@ -991,12 +992,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const p3RetryInspectionAbortRef = useRef<AbortController | null>(null);
   const [createdProgressRoute, setCreatedProgressRoute] = useState<Readonly<{
     task_id: string;
+    correlation_id: string;
     origin: Readonly<{ kind: 'text' | 'voice'; id: string }> | null;
   }> | null>(null);
   useEffect(() => {
     if (p3MutationStatus !== 'failed') setP3MutationReason(null);
   }, [p3MutationStatus]);
   const createdProgressTaskId = createdProgressRoute?.task_id ?? null;
+  const createdProgressCorrelationId = createdProgressRoute?.correlation_id ?? null;
   const createdProgressOrigin = createdProgressRoute?.origin ?? null;
   const progressTaskTargetRef = useRef<string | null>(null);
   const recoveredP3TaskTargetRef = useRef<string | null>(null);
@@ -1063,7 +1066,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const progressOwnerEpochRef = useRef(0);
   const p3ProgressReconciliationGenerationRef = useRef(0);
   const activationGenerationRef = useRef(0);
-  const progressGenerationRef = useRef(0);
   const productTurnSequenceRef = useRef(0);
   const bargeInSequenceRef = useRef(0);
   const p3MutationSequenceRef = useRef(0);
@@ -2228,8 +2230,16 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         return;
       }
     }
-    const recovered = readProductP3TaskTarget({ session_id: sessionId });
-    if (recovered === null) return;
+    const targetInspection = inspectProductP3TaskTarget({ session_id: sessionId });
+    if (targetInspection.status === 'absent') return;
+    if (targetInspection.status === 'invalid') {
+      recoveredP3TaskTargetRef.current = `${sessionId}\u0000invalid`;
+      setP3RetryEligibility(null);
+      setP3RetryInspectionStatus('failed');
+      setP3RetryInspectionReason('PRODUCT_P3_TASK_TARGET_RECOVERY_REQUIRED');
+      return;
+    }
+    const recovered = targetInspection.record;
     const recoveryIdentity = `${sessionId}\u0000${recovered.task_control_binding.correlation_id}\u0000${recovered.task_id}`;
     if (recoveredP3TaskTargetRef.current === recoveryIdentity) return;
     recoveredP3TaskTargetRef.current = recoveryIdentity;
@@ -2260,7 +2270,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         formalTaskControlLeafRef.current?.disconnect();
         formalTaskControlLeafRef.current = leaf;
         progressTaskTargetRef.current = recovered.task_id;
-        setCreatedProgressRoute(Object.freeze({ task_id: recovered.task_id, origin: null }));
+        setCreatedProgressRoute(Object.freeze({ task_id: recovered.task_id, correlation_id: recovered.correlation_id, origin: null }));
         setP3TargetTaskId(recovered.task_id);
         const terminalStatus = productP3TerminalStatus(record);
         setP3MutationStatus(terminalStatus ?? 'accepted');
@@ -3001,7 +3011,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           setProgressAck('idle');
         }
         progressTaskTargetRef.current = taskId;
-        setCreatedProgressRoute(Object.freeze({ task_id: taskId, origin: input.progress_origin ?? null }));
+        setCreatedProgressRoute(Object.freeze({ task_id: taskId, correlation_id: taskControlBinding.correlation_id, origin: input.progress_origin ?? null }));
         setP3TargetTaskId(taskId);
         const terminalStatus = productP3TerminalStatus(selected);
         if (replaceLeaf) {
@@ -3365,6 +3375,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           setCreatedProgressRoute(
             Object.freeze({
               task_id: createdTaskId,
+              correlation_id: taskControlBinding.correlation_id,
               origin: progressOrigin,
             }),
           );
@@ -3410,6 +3421,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     let cancelled = false;
     let owner: ProductWebP3ProgressOwner | null = null;
     const ownedSessionId = props.activeSessionId;
+    const ownedProgressCorrelationId = createdProgressCorrelationId ?? correlationId;
     const ownedProgressOrigin = createdProgressOrigin;
     const ownerEpoch = progressOwnerEpochRef.current + 1;
     progressOwnerEpochRef.current = ownerEpoch;
@@ -3448,9 +3460,33 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         return;
       }
-      progressGenerationRef.current += 1;
-      const generation = progressGenerationRef.current;
-      const routeId = correlationId.replace(/[^A-Za-z0-9_-]/g, '') || 'route';
+      const taskTargetInspection = createdProgressRoute === null ? inspectProductP3TaskTarget({ session_id: props.activeSessionId }) : null;
+      const hasPendingExactTaskRecovery =
+        createdProgressRoute === null &&
+        (recoveredP3TaskTargetRef.current !== null || (taskTargetInspection !== null && taskTargetInspection.status !== 'absent'));
+      if (hasPendingExactTaskRecovery) {
+        setP3Activation({
+          status: taskTargetInspection?.status === 'invalid' ? 'unavailable' : 'idle',
+          binding: null,
+          reason: taskTargetInspection?.status === 'invalid' ? 'PRODUCT_P3_TASK_TARGET_RECOVERY_REQUIRED' : null,
+          requested_origin_kind: null,
+          effective_origin_kind: null,
+          voice_progress: null,
+          voice_reason: null,
+          fallback_reason: null,
+        });
+        return;
+      }
+      let progressOriginId: string;
+      let progressGenerationId: string;
+      if (createdProgressTaskId === null) {
+        const routeId = correlationId.replace(/[^A-Za-z0-9_-]/g, '') || 'route';
+        progressOriginId = ownedProgressOrigin?.id ?? `web-progress-${routeId}`;
+        progressGenerationId = `web-progress-generation-${routeId}`;
+      } else {
+        progressOriginId = ownedProgressOrigin?.id ?? ownedProgressCorrelationId;
+        progressGenerationId = ownedProgressCorrelationId;
+      }
       owner = new ProductWebP3ProgressOwner({
         enabled: true,
         request: (method, params) =>
@@ -3484,10 +3520,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       try {
         const activationSnapshot = await owner.start({
           session_id: props.activeSessionId,
-          correlation_id: correlationId,
-          origin_id: ownedProgressOrigin?.id ?? `web-progress-${routeId}`,
-          generation_id: `web-progress-generation-${routeId}`,
-          generation,
+          correlation_id: ownedProgressCorrelationId,
+          origin_id: progressOriginId,
+          generation_id: progressGenerationId,
+          generation: taskId =>
+            claimProductP3ProgressGeneration({
+              session_id: props.activeSessionId!,
+              task_id: taskId,
+              correlation_id: ownedProgressCorrelationId,
+              origin_id: progressOriginId,
+              generation_id: progressGenerationId,
+            }),
           ...(createdProgressTaskId === null ? {} : { task_id: createdProgressTaskId }),
         });
         const handoff = pendingNaturalCreateHandoffRef.current;

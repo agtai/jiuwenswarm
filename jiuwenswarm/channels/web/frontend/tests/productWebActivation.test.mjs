@@ -109,7 +109,7 @@ test('retained product retries stop on authoritative failure or stale ownership'
       is_current: () => true,
       retry_delays_ms: [0, 0],
     }),
-    /denied/
+    /denied/,
   );
 
   let current = true;
@@ -127,7 +127,7 @@ test('retained product retries stop on authoritative failure or stale ownership'
       is_current: () => current,
       retry_delays_ms: [0, 0],
     }),
-    /response lost/
+    /response lost/,
   );
 
   assert.equal(authoritativeCalls, 1);
@@ -154,7 +154,7 @@ test('closed P2 notification settles definitively so reconnect can reactivate', 
       is_current: () => true,
       retry_delays_ms: [0, 0],
     }),
-    /notification stream closed/
+    /notification stream closed/,
   );
 
   assert.equal(calls, 1);
@@ -204,7 +204,7 @@ test('panel recovery coordinator closes an idle poll before activating the next 
       [PRODUCT_P2_NOTIFICATION_NEXT_METHOD, 1],
       [PRODUCT_P2_CLOSE_METHOD, 1],
       [PRODUCT_P2_ACTIVATE_METHOD, 2],
-    ]
+    ],
   );
   const notificationCalls = calls.filter(([method]) => method === PRODUCT_P2_NOTIFICATION_NEXT_METHOD);
   assert.equal(notificationCalls.length, 1);
@@ -309,7 +309,7 @@ test('stock Web activates and closes one exact credential-free binding', async (
   assert.equal((await owner.close()).status, 'closed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD],
   );
   for (const [, params] of calls) {
     assert.deepEqual(params, binding);
@@ -360,7 +360,7 @@ test('explicit media start refreshes one exact active P2 authority with singlefl
   await owner.close();
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD],
   );
 });
 
@@ -384,7 +384,7 @@ test('media authority refresh fails closed on a mismatched response and retains 
   assert.equal((await owner.close()).status, 'closed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD],
   );
 });
 
@@ -430,7 +430,7 @@ test('P2 close synchronously fences an in-flight media authority refresh before 
   await Promise.resolve();
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD],
   );
 
   resolveRefresh(response('active', { replayed: true }));
@@ -438,7 +438,7 @@ test('P2 close synchronously fences an in-flight media authority refresh before 
   assert.equal((await closing).status, 'closed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD],
   );
 });
 
@@ -477,14 +477,11 @@ test('P2 close cancels an atomically reserved media start before revoking exact 
   const closing = owner.close();
   assert.equal(cancellationCalls, 1);
   assert.equal(owner.authorizesMediaStart(binding), false);
-  await assert.rejects(
-    owner.runAuthorizedMediaStart(binding, { start: async () => undefined, cancel: async () => undefined }),
-    /not current/
-  );
+  await assert.rejects(owner.runAuthorizedMediaStart(binding, { start: async () => undefined, cancel: async () => undefined }), /not current/);
   await Promise.resolve();
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD],
   );
 
   resolveCancellation();
@@ -492,7 +489,7 @@ test('P2 close cancels an atomically reserved media start before revoking exact 
   assert.equal((await closing).status, 'closed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD],
   );
 });
 
@@ -509,7 +506,7 @@ test('P2 owner publishes its construction snapshot without route allocation', ()
   assert.equal(owner.snapshot().status, 'idle');
   assert.deepEqual(
     snapshots.map(snapshot => snapshot.status),
-    ['idle']
+    ['idle'],
   );
 });
 
@@ -548,7 +545,7 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
         text: '  preserve exact text  ',
       })
     ).status,
-    'round_accepted'
+    'round_accepted',
   );
   assert.equal((await owner.nextNotification()).kind, 'agent.output');
   assert.equal(
@@ -562,12 +559,12 @@ test('active stock Web owner submits text, polls output, and ACKs exact presenta
         presented_at: '2026-08-07T10:00:01Z',
       })
     ).accepted,
-    true
+    true,
   );
 
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_SUBMIT_METHOD, PRODUCT_P2_NOTIFICATION_NEXT_METHOD, PRODUCT_P2_PRESENTATION_ACK_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_SUBMIT_METHOD, PRODUCT_P2_NOTIFICATION_NEXT_METHOD, PRODUCT_P2_PRESENTATION_ACK_METHOD],
   );
   assert.equal(calls[1][1].text, '  preserve exact text  ');
   assert.equal(calls[2][1].notification_sequence, 1);
@@ -638,7 +635,7 @@ test('durable submit ACK and barge-in checkpoint before transport and settle onl
       ['checkpoint', PRODUCT_P2_BARGE_IN_METHOD],
       ['request', PRODUCT_P2_BARGE_IN_METHOD],
       ['settle', PRODUCT_P2_BARGE_IN_METHOD],
-    ]
+    ],
   );
   for (let index = 0; index < effects.length; index += 3) {
     assert.deepEqual(effects[index][1], effects[index + 1][1]);
@@ -767,7 +764,7 @@ test('direct durable replay rejects malformed or secret-bearing envelopes before
           throw new Error('transport must not run');
         },
       }),
-      /durable product|activation_generation|session_id/
+      /durable product|activation_generation|session_id/,
     );
   }
 
@@ -816,7 +813,7 @@ test('direct durable replay rejects foreign envelopes and forged canonical opera
         operation: agentOperation,
         request: async () => envelope,
       }),
-      /request|response|binding|unavailable/
+      /request|response|binding|unavailable/,
     );
   }
 
@@ -845,7 +842,7 @@ test('direct durable replay rejects foreign envelopes and forged canonical opera
         operation: ackOperation,
         request: async () => durableResponse(ackOperation.request_id, 'presentation_acknowledged', changes),
       }),
-      /ACK|binding/
+      /ACK|binding/,
     );
   }
 });
@@ -886,7 +883,7 @@ test('task submit rejects a client response id and UTF-8 overflow before transpo
           });
         },
       }),
-      /unexpected fields|bound/
+      /unexpected fields|bound/,
     );
   }
   assert.equal(calls, 0);
@@ -962,7 +959,7 @@ test('agent submit still requires a client response id before transport', async 
       committed_at: '2026-08-10T00:00:00Z',
       text: 'agent submission',
     }),
-    /response_id is required/
+    /response_id is required/,
   );
   assert.equal(submitCalls, 0);
 });
@@ -1143,7 +1140,7 @@ test('unresolved presentation ACK blocks a second turn and preserves exact retry
       committed_at: '2026-08-07T10:00:02Z',
       text: 'must wait for ACK',
     }),
-    /previous product turn is still unresolved/
+    /previous product turn is still unresolved/,
   );
   ackUnavailable = false;
   await owner.acknowledgePresentation(ack);
@@ -1202,7 +1199,7 @@ test('P2 operations fail before transport unless the exact activation is active'
       committed_at: '2026-08-07T10:00:00Z',
       text: 'hello',
     }),
-    /not active/
+    /not active/,
   );
   await assert.rejects(owner.nextNotification(), /not active/);
   assert.deepEqual(calls, []);
@@ -1241,7 +1238,7 @@ test('stock Web P3 owner forwards one exact credential-free confirmed mutation',
   assert.equal((await owner.mutate(mutation)).status, 'mutation_processed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P3_CONFIRMATION_ISSUE_METHOD, PRODUCT_P3_MUTATE_METHOD]
+    [PRODUCT_P3_CONFIRMATION_ISSUE_METHOD, PRODUCT_P3_MUTATE_METHOD],
   );
   assert.equal(calls[1][1].confirmation_id, 'confirmation-1');
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
@@ -1295,7 +1292,7 @@ test('stock Web task.retry sends only the exact task target through two-step con
   assert.deepEqual(calls[1][1], { ...retry, confirmation_id: 'confirmation-retry' });
   assert.equal(
     calls.some(([, params]) => 'previous_attempt_id' in params || 'attempt_number' in params || 'context' in params),
-    false
+    false,
   );
   assert.notEqual(calls[0][2], calls[1][2]);
 });
@@ -1511,7 +1508,7 @@ test('stock Web P3 owner rejects forged confirmation echoes and closed bindings'
     await assert.rejects(owner.mutate(mutation), /confirmation/);
     assert.deepEqual(
       calls.map(([method]) => method),
-      [PRODUCT_P3_CONFIRMATION_ISSUE_METHOD]
+      [PRODUCT_P3_CONFIRMATION_ISSUE_METHOD],
     );
   }
 });
@@ -1700,7 +1697,7 @@ test('close waits for an in-flight activation and still performs retained cleanu
   const closed = owner.close();
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD],
   );
   release(response('active'));
 
@@ -1708,7 +1705,7 @@ test('close waits for an in-flight activation and still performs retained cleanu
   assert.equal((await closed).status, 'closed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD],
   );
 });
 
@@ -1727,7 +1724,7 @@ test('binding mismatch fails closed and cleanup remains attempted', async () => 
   assert.equal((await owner.close()).status, 'closed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD],
   );
 });
 
@@ -1775,7 +1772,7 @@ test('P2 pending activation disconnect cleans the exact route before reconnect r
   assert.equal((await reconnectedOwner.start(binding)).status, 'active');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD, PRODUCT_P2_ACTIVATE_METHOD]
+    [PRODUCT_P2_ACTIVATE_METHOD, PRODUCT_P2_CLOSE_METHOD, PRODUCT_P2_ACTIVATE_METHOD],
   );
   assert.deepEqual(calls[1][1], binding);
   await reconnectedOwner.close();
@@ -1851,7 +1848,7 @@ test('P2 cleanup and next-session reconciliation share one bounded close retry',
   assert.equal(closeCalls, 2);
   assert.equal(
     reconciliationSnapshots.some(snapshot => snapshot.status === 'cleanup_pending'),
-    true
+    true,
   );
 });
 
@@ -1898,6 +1895,7 @@ test('close response binding mismatch stays cleanup_pending and retryable', asyn
 
 test('stock Web queries one formal task then owns exact P3 progress activate and close', async () => {
   const calls = [];
+  const generationClaims = [];
   const owner = new ProductWebP3ProgressOwner({
     enabled: true,
     request: async (method, params) => {
@@ -1907,14 +1905,7 @@ test('stock Web queries one formal task then owns exact P3 progress activate and
       }
       return {
         ok: true,
-        result: p3ProgressResult(method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed', {
-          session_id: 'session-1',
-          task_id: 'task-1',
-          correlation_id: 'correlation-1',
-          origin_id: 'origin-1',
-          generation_id: 'generation-1',
-          generation: 1,
-        }),
+        result: p3ProgressResult(method === PRODUCT_P3_PROGRESS_ACTIVATE_METHOD ? 'active' : 'closed', params),
       };
     },
   });
@@ -1924,16 +1915,56 @@ test('stock Web queries one formal task then owns exact P3 progress activate and
     correlation_id: 'correlation-1',
     origin_id: 'origin-1',
     generation_id: 'generation-1',
-    generation: 1,
+    generation: async taskId => {
+      generationClaims.push(taskId);
+      return 7;
+    },
   });
   assert.equal(active.status, 'active');
   assert.equal(active.binding?.task_id, 'task-1');
+  assert.equal(active.binding?.generation, 7);
   assert.equal((await owner.close()).status, 'closed');
+  assert.deepEqual(generationClaims, ['task-1']);
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD]
+    [PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD],
   );
   for (const [, params] of calls) assert.equal('auth_token' in params, false);
+});
+
+test('P3 progress generation claim failure occurs after exact task selection but before activation', async () => {
+  const calls = [];
+  const owner = new ProductWebP3ProgressOwner({
+    enabled: true,
+    request: async (method, params) => {
+      calls.push([method, params]);
+      if (method === PRODUCT_P3_TASK_LIST_METHOD) {
+        return { ok: true, result: { tasks: [{ task_id: 'task-claim-failure', state: 'running' }] } };
+      }
+      throw new Error('progress activation must not be called');
+    },
+  });
+
+  await assert.rejects(
+    owner.start({
+      session_id: 'session-1',
+      correlation_id: 'correlation-1',
+      origin_id: 'origin-1',
+      generation_id: 'generation-1',
+      generation: async taskId => {
+        assert.equal(taskId, 'task-claim-failure');
+        throw new Error('generation journal unavailable');
+      },
+    }),
+    /generation journal unavailable/,
+  );
+  assert.deepEqual(
+    calls.map(([method]) => method),
+    [PRODUCT_P3_TASK_LIST_METHOD],
+  );
+  assert.equal(owner.snapshot().status, 'unavailable');
+  assert.equal(owner.snapshot().binding, null);
+  assert.equal(owner.needsCleanup(), false);
 });
 
 test('P3 progress snapshot publishes the server-declared voice to text fallback before any event', async () => {
@@ -1998,7 +2029,7 @@ test('fresh task.create binds progress directly to the exact accepted task', asy
 
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD]
+    [PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD],
   );
   assert.equal(calls[0][1].task_id, 'task-created-1');
 });
@@ -2038,7 +2069,7 @@ test('P3 close waits for in-flight task selection and cleans the resulting activ
   const closed = owner.close();
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P3_TASK_LIST_METHOD]
+    [PRODUCT_P3_TASK_LIST_METHOD],
   );
   releaseTaskList({
     ok: true,
@@ -2049,7 +2080,7 @@ test('P3 close waits for in-flight task selection and cleans the resulting activ
   assert.equal((await closed).status, 'closed');
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD]
+    [PRODUCT_P3_TASK_LIST_METHOD, PRODUCT_P3_PROGRESS_ACTIVATE_METHOD, PRODUCT_P3_PROGRESS_CLOSE_METHOD],
   );
 });
 
@@ -2079,11 +2110,11 @@ test('P3 progress refuses ambiguous active task selection without activation', a
       generation_id: 'generation-1',
       generation: 1,
     }),
-    /exactly one active task/
+    /exactly one active task/,
   );
   assert.deepEqual(
     calls.map(([method]) => method),
-    [PRODUCT_P3_TASK_LIST_METHOD]
+    [PRODUCT_P3_TASK_LIST_METHOD],
   );
   assert.equal(owner.snapshot().binding, null);
   assert.equal((await owner.close()).status, 'closed');
@@ -2219,7 +2250,7 @@ test('P3 cleanup and next-session reconciliation share one bounded close retry',
   assert.equal(closeCalls, 2);
   assert.equal(
     reconciliationSnapshots.some(snapshot => snapshot.status === 'cleanup_pending'),
-    true
+    true,
   );
 });
 
