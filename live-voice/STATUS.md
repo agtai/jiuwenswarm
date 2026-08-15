@@ -8,9 +8,9 @@
 ## Resume capsule
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
-  `origin/hx/0812_live_voice_w3`. The branch was pushed through `a53856de`; the
-  S8-readiness integration and S7 re-freeze are local and no additional push is
-  authorized.
+  `agtai/hx/0812_live_voice_w3`. The branch is pushed through `370ee9b8`; the
+  D-079 fast-closeout documentation commit is local-only and any further push
+  remains separately approved for the exact remote/ref/commits/update mode.
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
@@ -340,8 +340,18 @@
   blocked. This rule remains authoritative after an external-only freeze and
   does not require a post-freeze Git edit.
 
-The active execution contract is the
-[S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
+- The remaining S7/S8 window runs under the user-approved D-079 fast-closeout
+  mode: batch repairs with affected-scope verification and blocking-only
+  triage, one contract-grade freeze (documentation first, then the single
+  complete runner plus five real probes, then the external handoff),
+  machine-eligible S8 evidence, and a short physical human acceptance. The
+  per-repair re-freeze cadence is superseded for this window; the external
+  fail-closed binding rule above is unchanged.
+
+The active execution contract for this window is
+[S8_FAST_CLOSEOUT_PACKET_2026-08-15.md](roadmap/S8_FAST_CLOSEOUT_PACKET_2026-08-15.md)
+under the
+[S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md); the completed S7
 packet is
 [S7_EXECUTION_PACKET_2026-08-13.md](roadmap/S7_EXECUTION_PACKET_2026-08-13.md),
 and the detailed result is
@@ -394,22 +404,23 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Select a destination-server transfer commit that includes the formal
-   presentation-based P2 context-test oracle and has exact-clean-tree affected
-   and cumulative review credit. Check out that exact commit on the private
-   destination server without a later tracked edit, recreate the isolated
-   runtime and run the complete S7 runner plus all five real probes. Generate
-   and validate a destination-owned external `FROZEN_FOR_A3` handoff.
-2. Using only that destination report/runtime/handoff, create a new fixture,
-   product Session, scope correlations and S8 record. Run a fresh S8 entry audit
-   and all automated acceptance with Chrome, Computer Use, sanitized logs and
-   Store/Executor inspection. Do not copy or relabel the current host's S8
-   product events or human observations.
-3. When the destination automated scope leaves only physical audio/device and
-   final human judgment, the user performs the complete physical product
-   journey and records the final `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision
-   under [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).
-4. Validate the destination S8 record, run cleanup dry-run, preserve or remove
-   only the destination-owned disposable artifacts as directed, and stop the
-   private services. Any new source fix restarts exact-candidate review and S7
-   freeze; environment-only corrections rerun the affected destination gates.
+1. Execute the
+   [S8 fast closeout packet](roadmap/S8_FAST_CLOSEOUT_PACKET_2026-08-15.md)
+   Phase A/B: settle review credit for the final test-oracle boundary, then run
+   one breadth-first automated S8 sweep and fix only D-079 blocking findings,
+   in at most three batches, with affected-scope verification and the ledger.
+2. Phase C: confirm the final acceptance host with the user once, settle all
+   documentation first, then run the single complete S7 runner plus five real
+   probes on the exact clean HEAD and freeze the external report and
+   `FROZEN_FOR_A3` handoff. The known load-flaky P2 context case is an accepted
+   test-evidence deviation per D-079 if it trips once; any other failure is a
+   blocking finding that returns to Phase B.
+3. Phase D (run Phase D' destination transfer first only if the destination
+   server was chosen): fresh S8 entry audit, fixture, product Session and scope
+   correlations, then record every machine-eligible showcase section as
+   `machine-verified` evidence.
+4. Phase E: the user performs the short physical journey and records the final
+   `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
+   [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), followed by cleanup and
+   one final STATUS update. Non-blocking findings stay in the ledger as
+   recorded deviations instead of restarting repair.

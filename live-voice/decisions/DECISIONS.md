@@ -866,3 +866,19 @@
 - 仍待实例化：S5-02 的产品选择和初始 model/voice 默认值已完成；可用 OpenAI Speech API access/受限 key、真实 Provider 探针、Chrome/Windows/实际设备/network 标签、私有 origin/证书和隔离目录仍需在候选机器上准备、记录并实测。完成这些环境事实和探针前，S5/A0 仍为 `IN PROGRESS`，任何模块不得声称真实 Provider、完整 Streaming、secure deployment 或 real Executor 已验收。
 - 非目标与授权边界：本决定不扩大到公开部署、生产鉴权、跨浏览器/OS、真实用户项目 mutation、完整 P3/D1/D2，也不授权外部账户/billing/credential 变更或任何 remote ref 更新。
 - 重新评估条件：OpenAI 官方 API 无法提供所需的 STT/TTS streaming、provenance 或 cancel contract；区域、隐私、成本或延迟不满足 Alpha；声明的 Chrome/Windows/设备/私有 HTTPS 基线无法稳定运行；当前 JiuwenSwarm Agent Provider 不再可用；或 Direct Executor 不能在 disposable fixture 和独立数据目录内证明零跨项目副作用。
+
+## D-079 剩余 S7/S8 窗口采用快速收口模式：批量修复 + 单次契约级冻结 + 人工只做物理部分
+
+- 日期：2026-08-15
+- 状态：Accepted execution-mode decision（用户在复盘"每修复一个缺陷即完整重验再冻结"消耗约 25 小时、六轮冻结循环仍未进入人工旅程后明确要求：先自动跑 S7/S8 集中发现并修复明确问题，过程不逐修复冻结、不反复跑不受影响的全量测试；最后按契约执行一次冻结、累积评审与全量验证；人工只承担必须物理在场的部分）
+- 适用窗口：自本决定起至 S8-03 记录 Alpha 结论为止；操作合同为 `roadmap/S8_FAST_CLOSEOUT_PACKET_2026-08-15.md`，当前进度仍只由 STATUS 维护。
+- 快速阶段：修复以 affected diff 自查 + affected tests + 一行台账落地；不逐修复运行完整 runner、不逐修复重建候选冻结、不逐修复生成外部 report/handoff。
+- 分诊门槛：本窗口只修阻塞级发现——不安全/部分/重复 mutation 或数据丢失；隐私/凭据/raw-audio 暴露；核心旅程无 reload/restart 即无法继续的死路 UX；必需 showcase 节完全无法执行。其余（措辞、诊断文案、打磨、罕见路径恢复）一律进偏差台账，不在本窗口修复。
+- 收敛判据：扫描必须广度优先、先扫完再报告全部发现；一轮完整扫描零新增阻塞级即停止修复进入冻结。硬上限：三个修复批次后仍出现新阻塞级，停止迭代并连同台账升级用户决策。
+- flaky 规则：孤立重复 ≥100 次通过、所属完整测试文件通过、产品源码未变、仅在全量负载下偶发失败的用例，记为 accepted test-evidence deviation，不阻塞最终 runner，本窗口内不再重写。
+- 终态收口顺序：先在最终源码上一次性完成全部文档/台账提交，再对该精确干净 HEAD 运行唯一一次完整 runner + 五类真实探针，再产出外部 report 与 `live-voice.s7-a3-handoff.v1`（S7-03 `PASS`、S7-04 `FROZEN_FOR_A3`）；冻结后零 tracked 编辑。外部 fail-closed 绑定规则不变。
+- 人机分工：可由机器执行并记录的点击、查询、刷新/重连、重启对账、降级、隐私/日志扫描、Store/Executor 结算按 showcase 分节记为 `machine-verified` 证据；用户只做物理麦克风说话、亲耳听感、语音打断、设备/权限物理行为、一次连贯联合旅程与最终 `PASS/PARTIAL/BLOCKED/FAIL` 判定。机器事件不得改标为人工观察。
+- 主机边界：Phase C 入口向用户一次性确认最终验收主机（当前主机或既定目的地服务器）；确认后不再迁移。选择目的地时按包 §6 执行目的地重验，源主机的 report/runtime/fixture/Session/人工观察一概不迁移。
+- 不降低底线：D-032 正例/负例/零禁止副作用矩阵、Tier-3 独立评审（聚合到批次收口与终态累积层级执行）、真实 Provider/设备/Executor 不得造假、D-074 审查语义全部保持；本决定只取消重复时点，与 D-074"修复只重跑受影响层级，不因无关调整重跑未受影响阶段"的既有效率条款一致。
+- 取代关系：本窗口内取代 STATUS 旧 Next actions 中"任何新源码修复即重启精确候选评审与 S7 冻结"的操作性节奏，以及实践中形成的"每修复即全量 runner + 再冻结"惯例；不取代 Alpha acceptance 内容、外部冻结绑定规则或 S5–S8 计划 §7 排除项。
+- 重新评估条件：阻塞级发现在三批次上限内无法收敛；最终 runner 因非 flaky 原因反复失败；机器证据与人工观察边界发生争议；或用户收回快速模式、恢复逐修复冻结节奏。
