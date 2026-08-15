@@ -7,6 +7,42 @@
 
 ## Resume capsule
 
+- **Current result:** `PASS — INTEGRATED WEB ALPHA`. On 2026-08-15 the user
+  completed the current-host physical microphone, heard playout, voice
+  barge-in, device/permission and continuous joint journey and explicitly
+  returned `PASS` for S8-03.
+- **Exact tested source:** `d33b520e0d21ae0829d30814d77a01cc18256f09`
+  on `hx/0812_live_voice_w3`. Phase D′ destination transfer was not used. The
+  exact S7 report SHA-256 is
+  `3f4b0e348152a56bb9accb82c00ff47392bd8ccdb0212f06f3ac80d397f4ee2b`;
+  the runtime declaration SHA-256 is
+  `9aaa37fe01dd6c4cd7b664d9416f3c000767c96f89ad6904a9c34f70ebc0bbe2`.
+- **Accepted deviations:** F-001 through F-005 remain recorded in the
+  [fast-closeout ledger](S8_FAST_CLOSEOUT_LEDGER_2026-08-15.md). They are not
+  repaired or silently relabeled. F-001 prevents the strict S8 helper from
+  crediting the product-generated correlation as the pre-generated
+  correlation; the fail-closed template is preserved and no validator PASS is
+  claimed. The user's final decision consumes that explicit accepted deviation
+  plus the separately bound machine and physical observations.
+- **Cleanup:** five product-session Tasks/Attempts/Direct Executor rows are
+  terminal, seven outbox rows are settled, and all owner/lease state is
+  released. Dedicated AgentServer, WebChannel, Gateway and private proxy
+  services are stopped; ports `18092`, `19000`, `19001` and `443` are released.
+  The no-remote fixture contained only the planned `notes.txt` effect and was
+  moved to the Windows Recycle Bin. Private external acceptance artifacts are
+  retained. The tested source worktree did not change during A3. The external
+  user-decision record SHA-256 is
+  `e34dea559c3829f7624b3c340fdeab83f1f6a744ae118ca9bf1dd5f45f90ac16`;
+  the final cleanup record SHA-256 is
+  `e79c130a4b145ccbb0f21a04cf6ce78c85bd2a7c297789368e156f11297aee03`.
+- **Branch/remote:** the upstream remains at `bb11530ce`; the C1/C2 and this
+  final closeout documentation are local until an exact remote update is
+  separately approved. No remote ref was updated by this packet.
+- **Non-claims:** this PASS does not claim full P3, Production authentication,
+  broad browser/mobile support, public deployment, or RC/Production readiness.
+
+## Historical execution capsule
+
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
   `agtai/hx/0812_live_voice_w3`. The upstream already contains docs-only tip
   `bb11530ce`, the successor of `370ee9b8`. The first C1 settlement is local
@@ -393,10 +429,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean C1 HEAD with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Every existing frozen candidate is historical evidence after this tracked settlement. |
-| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. Prior probe samples are current-host historical evidence only. |
-| S7-03 cumulative Tier-3 review | `CONDITIONAL ON EXACT CANDIDATE` | The exact-current handoff must bind affected review of the product repair, cumulative review of the resulting candidate and `s7_03_review=PASS`; otherwise it remains in progress. |
-| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the C1 candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. Historical handoffs cannot authorize the fresh current-host S8 run. No public deployment or real-user project is permitted. |
+| S7-02 automation | `SATISFIED` | The external report binds exact tested source `d33b520e`, the accepted D-079 test-evidence deviation and the complete automatic result. |
+| S7-02 real path | `SATISFIED` | All five current-host real probes reached `VERIFY` with nonzero samples, zero probe failure and zero forbidden effect. |
+| S7-03 cumulative Tier-3 review | `SATISFIED` | The exact-current handoff records `s7_03_review=PASS`; the unavailable independent CLI and Main cold-review substitute remain explicit in the ledger. |
+| S7-04 A3 handoff freeze | `SATISFIED` | The exact-current handoff binds `d33b520e`, the valid report/runtime and `s7_04_status=FROZEN_FOR_A3`; the user then completed S8 and returned `PASS`. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is
@@ -435,23 +471,9 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Commit the F-005 ledger/STATUS re-settlement as one coherent docs-only C1
-   candidate and verify the resulting exact HEAD is clean. Phase A/B, the
-   affected F-005 Phase B re-entry and the C0 current-host decision are
-   complete; Phase D′ is skipped.
-2. Rebind the fresh current-host C2 observations to that exact docs-only HEAD
-   and run the complete S7 runner plus all five real probes. The first failed
-   `c04033380` report remains diagnostic. The known load-flaky P2 context case
-   is an accepted test-evidence deviation per D-079 if it trips once; record it
-   and proceed without returning to Phase B. Any other failure is a blocking
-   finding that returns to Phase B.
-3. Produce the C3 external sanitized report and `FROZEN_FOR_A3` handoff binding
-   the exact C1 HEAD/runtime. Make no tracked edit after that freeze. Then run
-   the fresh current-host S8 entry audit, create the fixture, product Session
-   and scope correlations, and record every machine-eligible showcase section
-   as `machine-verified` evidence.
-4. Phase E: the user performs the short physical journey and records the final
-   `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
-   [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), followed by cleanup and
-   one final STATUS update. Non-blocking findings stay in the ledger as
-   recorded deviations instead of restarting repair.
+1. No remaining S7/S8 fast-closeout action. The D-079 packet is closed with
+   `PASS — INTEGRATED WEB ALPHA`; retained deviations move to post-Alpha
+   prioritization only if a later packet selects them.
+2. Any push of the local closeout commits requires separate approval naming the
+   exact remote, branch, commits and update mode. Do not infer push authority
+   from the Alpha PASS.

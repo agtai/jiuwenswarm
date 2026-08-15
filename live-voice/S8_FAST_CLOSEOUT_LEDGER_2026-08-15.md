@@ -58,3 +58,28 @@ load-flaky conditions recorded above. F-005 is non-blocking, consumes no repair
 batch, and is ledger-only; the failed report remains diagnostic and cannot
 authorize S8. A docs-only C1 re-settlement precedes the next exact-candidate
 runner.
+
+## Final Alpha decision
+
+| Item | Result | Record |
+|---|---|---|
+| Exact tested source | `d33b520e0d21ae0829d30814d77a01cc18256f09` | Current-host C2/C3 handoff and fresh S8 session |
+| Machine-eligible S8 scope | `PASS` | P2 real route and joint run; structured/natural P3alpha; restart/fail-closed/settlement; expected fixture effect; privacy and log checks |
+| Physical human scope | `PASS` | User confirmation on 2026-08-15 covers physical microphone/critical committed text, heard playout, voice barge-in, device/permission behavior and one continuous joint journey |
+| Accepted deviations | Retained | F-001 through F-005 remain non-blocking and are not repaired or relabeled |
+| Strict S8 helper | No PASS claimed | F-001 prevents truthful pre-generated product-correlation binding; the fail-closed template remains preserved, while the explicit user decision and separately hashed machine evidence form the decision record |
+| S8-03 decision | `PASS — INTEGRATED WEB ALPHA` | Explicit user decision, 2026-08-15; external decision record SHA-256 `e34dea559c3829f7624b3c340fdeab83f1f6a744ae118ca9bf1dd5f45f90ac16` |
+
+## Cleanup
+
+- Five product-session Tasks, Attempts and Direct Executor rows were terminal;
+  seven outbox rows were settled; owner and lease state were released.
+- Dedicated AgentServer, WebChannel, Gateway and private proxy processes were
+  stopped. Ports `18092`, `19000`, `19001` and `443` were released.
+- The no-remote disposable fixture contained only the predeclared `notes.txt`
+  effect and was moved to the Windows Recycle Bin. Private external evidence is
+  preserved.
+- The tested source remained clean at exact `d33b520e` through A3 and cleanup.
+  This final tracked documentation update is a post-A3 closeout record, not a
+  new tested product candidate. The final external cleanup record SHA-256 is
+  `e79c130a4b145ccbb0f21a04cf6ce78c85bd2a7c297789368e156f11297aee03`.
