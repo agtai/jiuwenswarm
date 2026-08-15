@@ -9,9 +9,10 @@
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
   `agtai/hx/0812_live_voice_w3`. The upstream already contains docs-only tip
-  `bb11530ce`, the successor of `370ee9b8`. This C1 ledger/STATUS/packet
-  settlement advances the local branch beyond that tip; any remote update
-  remains separately approved for the exact remote/ref/commits/update mode.
+  `bb11530ce`, the successor of `370ee9b8`. The first C1 settlement is local
+  commit `c04033380`; the F-005 docs-only re-settlement advances the local
+  branch beyond it. Any remote update remains separately approved for the
+  exact remote/ref/commits/update mode.
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
@@ -348,9 +349,18 @@
   deviations and were not repaired. The user selected this current host for
   final acceptance, so Phase D′ is skipped; active services, private
   HTTPS/WSS, isolated data root, Origin binding and no-remote fixture boundary
-  were checked rather than assumed. C1 now settles all tracked documentation;
-  only the resulting exact clean commit may receive the single C2 runner/probes
-  and C3 external freeze, and formal S8 remains paused until that succeeds.
+  were checked rather than assumed. The first C2 attempt on exact `c04033380`
+  completed 39 automatic `PASS`, all five real `VERIFY`, the 4,641-module
+  production build and the post-run identity check, but the backend Alpha
+  matrix reported one failure in the P2 partial-activation open-failure
+  rollback case. Because it was not the pre-authorized F-002 context case, C2
+  returned to Phase B. The exact case then passed, its complete 45-case owner
+  file passed, and the unchanged original test function passed 100/100 focused
+  repetitions; product source remained unchanged, so F-005 is an accepted
+  D-079 load-flaky test-evidence deviation and is not repaired. The failed
+  external report remains diagnostic and cannot freeze S8. This docs-only C1
+  re-settlement must commit before the next exact clean runner/probes and C3
+  external freeze; formal S8 remains paused until that succeeds.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -425,14 +435,16 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Commit this C1 STATUS/packet/ledger settlement as one coherent docs-only
-   candidate and verify the resulting exact HEAD is clean. Phase A/B and the C0
-   current-host decision are complete; Phase D′ is skipped.
-2. Run C2 once on that exact clean HEAD: the complete S7 runner plus all five
-   real probes. The known load-flaky P2 context case is an accepted
-   test-evidence deviation per D-079 if it trips once; record it and proceed
-   without returning to Phase B. Any other failure is a blocking finding that
-   returns to Phase B.
+1. Commit the F-005 ledger/STATUS re-settlement as one coherent docs-only C1
+   candidate and verify the resulting exact HEAD is clean. Phase A/B, the
+   affected F-005 Phase B re-entry and the C0 current-host decision are
+   complete; Phase D′ is skipped.
+2. Rebind the fresh current-host C2 observations to that exact docs-only HEAD
+   and run the complete S7 runner plus all five real probes. The first failed
+   `c04033380` report remains diagnostic. The known load-flaky P2 context case
+   is an accepted test-evidence deviation per D-079 if it trips once; record it
+   and proceed without returning to Phase B. Any other failure is a blocking
+   finding that returns to Phase B.
 3. Produce the C3 external sanitized report and `FROZEN_FOR_A3` handoff binding
    the exact C1 HEAD/runtime. Make no tracked edit after that freeze. Then run
    the fresh current-host S8 entry audit, create the fixture, product Session

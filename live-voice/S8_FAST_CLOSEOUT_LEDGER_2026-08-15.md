@@ -24,6 +24,7 @@ report, `live-voice.s7-a3-handoff.v1` or the S8 observation record.
 | F-002 | Known P2 context test may fail intermittently only under the complete backend load | D-079 test-evidence deviation | If it fails once during C2 after the accepted isolated/file-level proof remains valid and product source is unchanged, record the occurrence and proceed; do not return to Phase B. | D-079 flaky rule; fast-closeout packet §1.4 and §4 C2 |
 | F-003 | Integrated Web mounted on a not-yet-persisted `new` Session retried P2 activation 718 times, received fail-closed errors and showed `Request timed out` | Non-blocking product finding | Ledger only; do not repair in this closeout window. No Task or fixture mutation occurred, the persisted-Session P2/Tool path passed, and the exact S8 journey binds a real product Session before its first action. | Phase B private runtime delta and browser observation |
 | F-004 | One fixed-corpus whole-route round completed while the streaming Speech transport logged one retained-socket cleanup-incomplete event | Non-blocking runtime finding | Ledger only; do not repair in this closeout window. The round completed with all 302 media frames acknowledged, STT/Agent/TTS/playout success, zero credential hit and zero forbidden effect; services remained healthy and Store/Executor settlement was clean. | Phase B private whole-route result and runtime log delta |
+| F-005 | P2 partial-activation open-failure rollback test failed once only inside the 1,673-case C2 backend load | D-079 test-evidence deviation | Accepted deviation; do not repair. The exact case passed in isolation, its complete 45-case owner file passed, and a wrapper invoking the unchanged original test function passed 100/100 repetitions. Product source did not change, the other 1,670 backend cases passed with two platform skips, the related 789-case regression matrix passed, and all five real probes reached `VERIFY`. | Failed external C2 report for `c04033380`; affected Phase B re-entry checks |
 
 ## Phase A review
 
@@ -47,3 +48,13 @@ the only new non-blocking findings; they remain ledger-only and were not fixed.
 | P2 slow/interruption and joint P2/P3 | `PASS` | The exact automated slow-conversation/detached-task/cancel-domain integration and response-interruption fences passed. No synchronous slow-Harness wait or cross-domain cancellation was observed. |
 | P3 structured/natural/restart | `PASS` | Structured confirmation, committed natural-language authority, negative zero-mutation cases, restart reconciliation and joint-domain matrices passed. The reused real Store contained three terminal Tasks/Attempts (one completed, two cancelled), five delivered outbox rows and zero active Executor owner/lease. |
 | Degradation, privacy and cleanup | `PASS` with F-004 retained | Feature-off, permission/device/media/provider/degradation and cleanup matrices passed; scan found zero secret literal, zero raw audio file/header, zero traceback and zero unhandled exception in the Phase B delta. Historical reused-runtime errors remained outside the current delta and were classified separately. |
+
+The first C2 freeze attempt on exact `c04033380` completed the full runner but
+did not freeze: 39 automatic checks passed, all five real probes reached
+`VERIFY`, and the backend Alpha matrix alone reported F-005. Per the packet, C2
+returned to Phase B rather than treating that new case as the pre-authorized
+F-002 exception. The affected re-entry checks then established the D-079
+load-flaky conditions recorded above. F-005 is non-blocking, consumes no repair
+batch, and is ledger-only; the failed report remains diagnostic and cannot
+authorize S8. A docs-only C1 re-settlement precedes the next exact-candidate
+runner.
