@@ -107,19 +107,19 @@
     'task actions';
 }
 
-.live-voice-demo--with-confirmation .live-voice-demo__panel {
+.live-voice-demo--with-command-center .live-voice-demo__panel {
   grid-template-areas:
     'meta actions'
-    'transcript actions'
-    'confirmation actions';
+    'command actions'
+    'transcript actions';
 }
 
-.live-voice-demo--with-task.live-voice-demo--with-confirmation .live-voice-demo__panel {
+.live-voice-demo--with-command-center.live-voice-demo--with-task .live-voice-demo__panel {
   grid-template-areas:
     'meta actions'
+    'command actions'
     'transcript actions'
-    'task actions'
-    'confirmation actions';
+    'task actions';
 }
 
 .live-voice-demo--listening .live-voice-demo__panel,
@@ -225,50 +225,145 @@
   box-shadow: var(--effect-focus-ring);
 }
 
-.live-voice-demo__confirmation {
-  grid-area: confirmation;
+.live-voice-demo__command-center {
+  grid-area: command;
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px 10px;
-  padding-top: 6px;
-  border-top: 1px solid var(--color-border-default);
+  padding: 6px 0;
+  border-block: 1px solid var(--color-border-default);
   color: var(--color-text-secondary);
   font-size: var(--font-size-2xs);
-  line-height: 1.4;
 }
 
-.live-voice-demo__confirmation > span:first-child {
-  min-width: min(100%, 260px);
-  flex: 1 1 260px;
-}
-
-.live-voice-demo__confirmation-actions {
+.live-voice-demo__route-switch {
   display: inline-flex;
-  gap: 6px;
-}
-
-.live-voice-demo__confirmation button {
-  min-height: 28px;
-  padding: 0 9px;
+  padding: 2px;
   border: 1px solid var(--color-border-default);
   border-radius: var(--radius-full);
   background: var(--color-surface-card);
-  color: var(--color-text-primary);
-  cursor: pointer;
-  font: inherit;
 }
 
-.live-voice-demo__confirmation button:first-child {
-  border-color: var(--color-action-primary);
+.live-voice-demo__route-switch button,
+.live-voice-demo__task-confirmation button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+}
+
+.live-voice-demo__route-switch button.is-active {
   background: var(--color-action-primary);
   color: var(--color-text-inverse);
 }
 
-.live-voice-demo__confirmation button:focus-visible {
+.live-voice-demo__route-switch button:disabled,
+.live-voice-demo__task-confirmation button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.live-voice-demo__route-switch button:focus-visible,
+.live-voice-demo__task-command select:focus-visible,
+.live-voice-demo__task-command input:focus-visible,
+.live-voice-demo__task-confirmation button:focus-visible {
   outline: none;
   box-shadow: var(--effect-focus-ring);
+}
+
+.live-voice-demo__route-summary {
+  min-width: min(100%, 220px);
+  flex: 1 1 220px;
+}
+
+.live-voice-demo__task-command {
+  display: flex;
+  flex: 1 0 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 6px 10px;
+}
+
+.live-voice-demo__task-command label {
+  display: grid;
+  gap: 3px;
+  color: var(--color-text-tertiary);
+}
+
+.live-voice-demo__task-command select,
+.live-voice-demo__task-command input {
+  min-height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-default);
+  border-radius: 8px;
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
+  font: inherit;
+}
+
+.live-voice-demo__task-id {
+  min-width: min(100%, 240px);
+  flex: 1 1 240px;
+}
+
+.live-voice-demo__task-command-status,
+.live-voice-demo__task-command-result,
+.live-voice-demo__task-command-error,
+.live-voice-demo__task-command-progress {
+  align-self: center;
+}
+
+.live-voice-demo__task-command code,
+.live-voice-demo__task-confirmation code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.live-voice-demo__task-command-error {
+  color: var(--color-feedback-danger);
+}
+
+.live-voice-demo__task-command-progress {
+  flex: 1 0 100%;
+  color: var(--color-feedback-info);
+}
+
+.live-voice-demo__task-confirmation {
+  display: flex;
+  flex: 1 0 100%;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 7px 9px;
+  border: 1px solid var(--color-feedback-warning);
+  border-radius: 10px;
+  background: var(--color-feedback-warning-subtle);
+  color: var(--color-feedback-warning);
+}
+
+.live-voice-demo__task-confirmation span {
+  flex: 1 1 280px;
+}
+
+.live-voice-demo__task-confirmation code {
+  flex: 1 0 100%;
+  color: var(--color-text-primary);
+}
+
+.live-voice-demo__task-confirmation button {
+  margin-left: auto;
+  border: 1px solid var(--color-border-default);
+  background: var(--color-surface-card);
+  color: var(--color-text-primary);
 }
 
 .live-voice-demo__task {

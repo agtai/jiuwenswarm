@@ -2162,6 +2162,27 @@
         "working": "处理中"
       }
     },
+    "commandCenter": {
+      "routeLabel": "Live Voice 命令中心",
+      "agent": "Agent",
+      "task": "Task",
+      "agentRouteSummary": "语音将发送给 JiuwenSwarm Agent，并可调用工具。",
+      "taskRouteSummary": "语音将进入正式 P3alpha Task Core。创建和取消仍需语音业务确认。",
+      "operation": "Task 操作",
+      "create": "创建",
+      "status": "查询状态",
+      "cancel": "取消",
+      "taskId": "Task ID",
+      "routeStatus": "Task 路由",
+      "progress": "Task 进度",
+      "confirmationPrompt": "请再次点击麦克风并原样说出下面的确认语。识别结果将以一个新的语音轮次提交：",
+      "abandon": "放弃此操作",
+      "confirmationStatus": "等待 Task 语音确认",
+      "taskWorking": "Task 命令处理中",
+      "submitTask": "提交 Task 命令",
+      "sendAgent": "发送给 Agent",
+      "speakConfirmation": "说出确认语"
+    },
     "integrated": {
       "title": "Integrated Web 路由事实",
       "shellOnly": "下方 P2 文本路线仅在 activation 生效时属于正式路径。语音、物理音频、任务完成和 Integrated Demo/Web Alpha Gate 验收仍未证明。",

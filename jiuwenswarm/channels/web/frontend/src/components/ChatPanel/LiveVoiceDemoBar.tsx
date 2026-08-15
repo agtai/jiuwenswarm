@@ -8,6 +8,29 @@ export type { LiveVoiceTaskActivity } from '../../features/live-voice/liveVoiceT
 
 export type LiveVoiceVisualState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted' | 'error';
 
+export type LiveVoiceCommandRoute = 'agent' | 'task';
+export type LiveVoiceTaskOperation = 'task.create' | 'task.status' | 'task.cancel';
+
+export interface LiveVoiceCommandCenterProps {
+  route: LiveVoiceCommandRoute;
+  taskAvailable: boolean;
+  taskOperation: LiveVoiceTaskOperation;
+  taskId: string;
+  taskStatus: string;
+  taskReason?: string | null;
+  taskResult?: string | null;
+  taskConfirmationForm?: string | null;
+  taskProgressTaskId?: string | null;
+  taskProgressState?: string | null;
+  taskProgressDeliveryMode?: string | null;
+  controlsDisabled?: boolean;
+  taskControlsLocked?: boolean;
+  onRouteChange: (route: LiveVoiceCommandRoute) => void;
+  onTaskOperationChange: (operation: LiveVoiceTaskOperation) => void;
+  onTaskIdChange: (taskId: string) => void;
+  onCancelTaskConfirmation: () => void;
+}
+
 export interface LiveVoiceDemoBarProps {
   active: boolean;
   available: boolean;
@@ -25,9 +48,7 @@ export interface LiveVoiceDemoBarProps {
   primaryActionDisabled?: boolean;
   editableTranscript?: string;
   onTranscriptChange?: (value: string) => void;
-  recognizedConfirmation?: boolean;
-  onRecognizedConfirm?: () => void;
-  onRecognizedCancel?: () => void;
+  commandCenter?: LiveVoiceCommandCenterProps;
   onEnable: () => void;
   onExit: () => void;
   onPrimaryAction: () => void;
@@ -147,6 +168,92 @@ function TaskActivityPanel({ taskSafetyDisclosure, taskActivity }: { taskSafetyD
   );
 }
 
+function CommandCenter({ commandCenter }: { commandCenter: LiveVoiceCommandCenterProps }) {
+  const { t } = useTranslation();
+  const taskMode = commandCenter.route === 'task';
+  const taskTargetRequired = commandCenter.taskOperation !== 'task.create';
+  const routeDisabled = commandCenter.controlsDisabled || commandCenter.taskControlsLocked;
+  const taskControlsDisabled = commandCenter.controlsDisabled || commandCenter.taskControlsLocked;
+  return (
+    <div className="live-voice-demo__command-center" data-testid="live-voice-command-center">
+      <div className="live-voice-demo__route-switch" role="group" aria-label={t('liveVoice.commandCenter.routeLabel')}>
+        <button
+          type="button"
+          className={commandCenter.route === 'agent' ? 'is-active' : undefined}
+          aria-pressed={commandCenter.route === 'agent'}
+          disabled={routeDisabled}
+          onClick={() => commandCenter.onRouteChange('agent')}
+        >
+          {t('liveVoice.commandCenter.agent')}
+        </button>
+        <button
+          type="button"
+          className={taskMode ? 'is-active' : undefined}
+          aria-pressed={taskMode}
+          disabled={routeDisabled || !commandCenter.taskAvailable}
+          onClick={() => commandCenter.onRouteChange('task')}
+        >
+          {t('liveVoice.commandCenter.task')}
+        </button>
+      </div>
+      <span className="live-voice-demo__route-summary">
+        {taskMode ? t('liveVoice.commandCenter.taskRouteSummary') : t('liveVoice.commandCenter.agentRouteSummary')}
+      </span>
+      {taskMode && (
+        <div className="live-voice-demo__task-command" data-testid="live-voice-task-command">
+          <label>
+            <span>{t('liveVoice.commandCenter.operation')}</span>
+            <select
+              aria-label={t('liveVoice.commandCenter.operation')}
+              value={commandCenter.taskOperation}
+              disabled={taskControlsDisabled}
+              onChange={event => commandCenter.onTaskOperationChange(event.target.value as LiveVoiceTaskOperation)}
+            >
+              <option value="task.create">{t('liveVoice.commandCenter.create')}</option>
+              <option value="task.status">{t('liveVoice.commandCenter.status')}</option>
+              <option value="task.cancel">{t('liveVoice.commandCenter.cancel')}</option>
+            </select>
+          </label>
+          {taskTargetRequired && (
+            <label className="live-voice-demo__task-id">
+              <span>{t('liveVoice.commandCenter.taskId')}</span>
+              <input
+                aria-label={t('liveVoice.commandCenter.taskId')}
+                value={commandCenter.taskId}
+                disabled={taskControlsDisabled}
+                placeholder="task-abc_123"
+                maxLength={128}
+                onChange={event => commandCenter.onTaskIdChange(event.target.value)}
+              />
+            </label>
+          )}
+          <span className="live-voice-demo__task-command-status">
+            {t('liveVoice.commandCenter.routeStatus')}: <code>{commandCenter.taskStatus}</code>
+          </span>
+          {commandCenter.taskResult && <span className="live-voice-demo__task-command-result">{commandCenter.taskResult}</span>}
+          {commandCenter.taskReason && <span className="live-voice-demo__task-command-error">{commandCenter.taskReason}</span>}
+          {commandCenter.taskProgressTaskId && (
+            <span className="live-voice-demo__task-command-progress" data-testid="live-voice-command-progress">
+              {t('liveVoice.commandCenter.progress')}: <code>{commandCenter.taskProgressTaskId}</code>
+              {commandCenter.taskProgressState ? ` · ${commandCenter.taskProgressState}` : ''}
+              {commandCenter.taskProgressDeliveryMode ? ` · ${commandCenter.taskProgressDeliveryMode}` : ''}
+            </span>
+          )}
+        </div>
+      )}
+      {taskMode && commandCenter.taskConfirmationForm && (
+        <div className="live-voice-demo__task-confirmation" data-testid="live-voice-command-task-confirmation" role="note">
+          <span>{t('liveVoice.commandCenter.confirmationPrompt')}</span>
+          <code>{commandCenter.taskConfirmationForm}</code>
+          <button type="button" disabled={commandCenter.controlsDisabled} onClick={commandCenter.onCancelTaskConfirmation}>
+            {t('liveVoice.commandCenter.abandon')}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function LiveVoiceDemoBar({
   active,
   available,
@@ -163,9 +270,7 @@ export function LiveVoiceDemoBar({
   primaryActionDisabled = false,
   editableTranscript,
   onTranscriptChange,
-  recognizedConfirmation = false,
-  onRecognizedConfirm,
-  onRecognizedCancel,
+  commandCenter,
   onEnable,
   onExit,
   onPrimaryAction,
@@ -213,11 +318,11 @@ export function LiveVoiceDemoBar({
   const primaryActionLabel = primaryActionLabelOverride || t(`liveVoice.actions.${status}`);
   const hasTaskPanel = Boolean(taskSafetyDisclosure || taskActivity);
   const hasEditableTranscript = editableTranscript !== undefined && onTranscriptChange !== undefined;
-  const hasRecognizedConfirmation = recognizedConfirmation && onRecognizedConfirm !== undefined && onRecognizedCancel !== undefined;
+  const hasCommandCenter = commandCenter !== undefined;
 
   return (
     <section
-      className={`live-voice-demo live-voice-demo--active live-voice-demo--${status}${hasTaskPanel ? ' live-voice-demo--with-task' : ''}${hasRecognizedConfirmation ? ' live-voice-demo--with-confirmation' : ''}`}
+      className={`live-voice-demo live-voice-demo--active live-voice-demo--${status}${hasTaskPanel ? ' live-voice-demo--with-task' : ''}${hasCommandCenter ? ' live-voice-demo--with-command-center' : ''}`}
       aria-label={t('liveVoice.label')}
       data-state={status}
       data-testid="live-voice-demo"
@@ -239,12 +344,14 @@ export function LiveVoiceDemoBar({
           )}
         </div>
 
+        {commandCenter && <CommandCenter commandCenter={commandCenter} />}
+
         {hasEditableTranscript ? (
           <textarea
             className="live-voice-demo__transcript live-voice-demo__transcript--editor"
             aria-label={t('liveVoice.formal.editorLabel')}
             value={editableTranscript}
-            disabled={hasRecognizedConfirmation || primaryActionDisabled}
+            disabled={primaryActionDisabled}
             maxLength={100000}
             onChange={event => onTranscriptChange(event.target.value)}
           />
@@ -260,20 +367,6 @@ export function LiveVoiceDemoBar({
         )}
 
         <TaskActivityPanel taskSafetyDisclosure={taskSafetyDisclosure} taskActivity={taskActivity} />
-
-        {hasRecognizedConfirmation && (
-          <div className="live-voice-demo__confirmation" data-testid="live-voice-product-confirmation" role="note">
-            <span>{t('liveVoice.integrated.recognizedConfirmation.agent')}</span>
-            <span className="live-voice-demo__confirmation-actions">
-              <button type="button" onClick={onRecognizedConfirm}>
-                {t('liveVoice.integrated.recognizedConfirmation.confirm')}
-              </button>
-              <button type="button" onClick={onRecognizedCancel}>
-                {t('liveVoice.integrated.recognizedConfirmation.cancel')}
-              </button>
-            </span>
-          </div>
-        )}
 
         <div className="live-voice-demo__actions">
           <button

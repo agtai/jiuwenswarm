@@ -107,6 +107,18 @@ await build({
 });
 const { LiveVoiceIntegratedRoutePanel: FullyEnabledLiveVoiceIntegratedRoutePanel } = await import(`${fullyEnabledBundleUrl.href}?enabled=${Date.now()}`);
 
+const commandBarBundleUrl = pathToFileURL(join(mountedBundleDirectory, 'LiveVoiceCommandBar.mjs'));
+await build({
+  entryPoints: [fileURLToPath(new URL('../src/components/ChatPanel/LiveVoiceDemoBar.tsx', import.meta.url))],
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  packages: 'external',
+  loader: { '.css': 'empty' },
+  outfile: fileURLToPath(commandBarBundleUrl),
+});
+const { LiveVoiceDemoBar: MountedLiveVoiceDemoBar } = await import(`${commandBarBundleUrl.href}?commandBar=${Date.now()}`);
+
 async function createI18n() {
   const translations = JSON.parse(await readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8'));
   const i18n = i18next.createInstance();
@@ -951,6 +963,79 @@ async function waitForMounted(predicate, message, timeoutMs = 1_000) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
 }
+
+test('mounted Live Voice bar exposes Agent and formal Task commands without a raw-ASR confirmation card', async () => {
+  const i18n = await createI18n();
+  const routeChanges = [];
+  const operationChanges = [];
+  const taskIdChanges = [];
+  let abandoned = 0;
+  let renderer;
+  const renderBar = (route, taskAvailable = true) =>
+    React.createElement(
+      I18nextProvider,
+      { i18n },
+      React.createElement(MountedLiveVoiceDemoBar, {
+        active: true,
+        available: true,
+        status: 'idle',
+        interimTranscript: '',
+        committedTranscript: 'Create the demo task',
+        editableTranscript: 'Create the demo task',
+        onTranscriptChange() {},
+        onEnable() {},
+        onExit() {},
+        onPrimaryAction() {},
+        commandCenter: {
+          route,
+          taskAvailable,
+          taskOperation: 'task.cancel',
+          taskId: 'task-command-center-1',
+          taskStatus: 'clarification',
+          taskConfirmationForm: route === 'task' ? 'confirm task request cccccccccccccccccccccccccccccccc' : null,
+          taskProgressTaskId: 'task-command-center-1',
+          taskProgressState: 'running',
+          taskProgressDeliveryMode: 'text_fallback',
+          onRouteChange: value => routeChanges.push(value),
+          onTaskOperationChange: value => operationChanges.push(value),
+          onTaskIdChange: value => taskIdChanges.push(value),
+          onCancelTaskConfirmation: () => {
+            abandoned += 1;
+          },
+        },
+      }),
+    );
+  try {
+    await act(async () => {
+      renderer = create(renderBar('agent', false));
+    });
+    const center = renderer.root.findByProps({ 'data-testid': 'live-voice-command-center' });
+    assert.equal(center.findAllByProps({ 'data-testid': 'live-voice-task-command' }).length, 0);
+    assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-product-confirmation' }).length, 0);
+    const taskRouteButton = center.findAllByType('button').find(button => button.children.includes('Task'));
+    assert.equal(taskRouteButton.props.disabled, true, 'flag-off Task route must be unavailable');
+    await act(async () => renderer.update(renderBar('agent')));
+    const enabledTaskRouteButton = renderer.root
+      .findByProps({ 'data-testid': 'live-voice-command-center' })
+      .findAllByType('button')
+      .find(button => button.children.includes('Task'));
+    await act(async () => enabledTaskRouteButton.props.onClick());
+    assert.deepEqual(routeChanges, ['task']);
+
+    await act(async () => renderer.update(renderBar('task')));
+    const taskCommand = renderer.root.findByProps({ 'data-testid': 'live-voice-task-command' });
+    taskCommand.findByType('select').props.onChange({ target: { value: 'task.status' } });
+    taskCommand.findByType('input').props.onChange({ target: { value: 'task-command-center-2' } });
+    assert.deepEqual(operationChanges, ['task.status']);
+    assert.deepEqual(taskIdChanges, ['task-command-center-2']);
+    assert.equal(renderer.root.findByProps({ 'data-testid': 'live-voice-command-progress' }).children.includes(' · running'), true);
+    const confirmation = renderer.root.findByProps({ 'data-testid': 'live-voice-command-task-confirmation' });
+    await act(async () => confirmation.findByType('button').props.onClick());
+    assert.equal(abandoned, 1);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+  }
+});
 
 test('mounted bounded text Task route requires a later committed confirmation and activates exact origin progress', async () => {
   const i18n = await createI18n();
@@ -2513,6 +2598,189 @@ test('mounted recognized speech requires an exact in-page second action and fenc
         await new Promise(resolve => setImmediate(resolve));
       });
     }
+    browser.restore();
+  }
+});
+
+test('mounted product command surface dispatches Agent once and routes voice Task create without raw-ASR confirmation', async () => {
+  const i18n = await createI18n();
+  const calls = [];
+  const productVoiceControlRef = { current: null };
+  const productVoiceStates = [];
+  const confirmationToken = 'c'.repeat(32);
+  const taskId = 'task-command-center-1';
+  let activeMediaBinding = null;
+  let recognitionIndex = 0;
+  let taskIntentCalls = 0;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  let taskBinding = null;
+
+  const request = async (method, params, options) => {
+    const requestId = options?.requestId ?? null;
+    calls.push({ method, params: { ...params }, requestId });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(params, calls.filter(call => call.method === method).length);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'mounted-media-subject',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'S'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'fallback',
+          requested_capability: 'media.end_of_turn.v1',
+          reason_id: 'MEDIA_END_OF_TURN_FEATURE_OFF',
+          fallback: 'manual',
+          visible: true,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.speech.recognize_batch') {
+      recognitionIndex += 1;
+      const text =
+        recognitionIndex === 1 ? 'Agent command center speech' : recognitionIndex === 2 ? 'Create the demo task' : `confirm task request ${confirmationToken}`;
+      return mountedRecognition(params, text, recognitionIndex);
+    }
+    if (method === 'live_voice.composition.p2.submit') return mountedP2SubmitResult(params, requestId);
+    if (method === 'live_voice.composition.p3.intent') {
+      taskIntentCalls += 1;
+      const base = {
+        resolver_provider: 'local.closed_schema',
+        resolver_implementation_class: 'bounded_deterministic_alpha_v1',
+        resolution_id: 'd'.repeat(64),
+        commit_sha256: 'e'.repeat(64),
+        operation: 'task.create',
+        source_span: { start: 0, end: 20 },
+        target_span: null,
+      };
+      if (taskIntentCalls === 1) {
+        return {
+          request_id: requestId,
+          ok: true,
+          error: null,
+          result: {
+            status: 'clarification',
+            reason: 'TASK_CONFIRMATION_REQUIRED',
+            ...base,
+            task_id: null,
+            confirmation_token: confirmationToken,
+            confirmation_form: `confirm task request ${confirmationToken}`,
+            partial_command_count: 0,
+          },
+        };
+      }
+      taskBinding = {
+        subject_id: 'command-center-subject',
+        session_id: params.session_id,
+        project_id: 'command-center-project',
+        correlation_id: params.correlation_id,
+        generation: 1,
+      };
+      return {
+        request_id: requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'dispatched',
+          reason: 'TASK_INTENT_DISPATCHED',
+          ...base,
+          task_id: taskId,
+          origin_kind: 'voice',
+          origin_id: params.interaction_id,
+          task_control_binding: taskBinding,
+          confirmation_commit_id: params.commit_id,
+          formal_task_result: { task_id: taskId, state: 'accepted' },
+        },
+      };
+    }
+    if (method === 'live_voice.task.status') return mountedP3Status(taskBinding, { taskId });
+    if (method === 'live_voice.task.events') return mountedP3Events(taskBinding, { taskId });
+    if (method === 'live_voice.composition.p3.progress.activate') return { ok: true, result: mountedProgressActivation(params) };
+    if (method === 'live_voice.composition.p3.progress.close') return { ok: true, result: { status: 'closed', ...params } };
+    throw new Error(`unexpected command-center request: ${method}`);
+  };
+
+  const capture = async expectedText => {
+    await act(async () => {
+      void productVoiceControlRef.current.start();
+      await browser.emitFirstFrame();
+      await waitForMounted(() => productVoiceStates.at(-1)?.p1_status === 'capturing', 'command center did not start capture');
+    });
+    await act(async () => {
+      await productVoiceControlRef.current.stop();
+      await waitForMounted(() => productVoiceStates.at(-1)?.input === expectedText, 'command center did not publish recognized text');
+    });
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, 'mounted-command-center-session', request, true, {
+          productVoiceControlRef,
+          onProductVoiceStateChange: state => productVoiceStates.push(state),
+        }),
+      );
+      await waitForMounted(() => productVoiceControlRef.current !== null, 'command center control was not published');
+      await waitForMounted(() => productVoiceStates.at(-1)?.available === true, 'command center did not become available');
+    });
+
+    await capture('Agent command center speech');
+    await act(async () => {
+      productVoiceControlRef.current.submitCommand();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.submit' && call.params.dispatch_target === 'agent').length === 1,
+        'single Agent command action did not dispatch',
+      );
+    });
+    assert.equal(
+      productVoiceStates.some(state => state.confirmation_phase === 'confirming'),
+      false,
+      'command surface must not publish raw-ASR confirmation',
+    );
+
+    await act(async () => {
+      productVoiceControlRef.current.setCommandRoute('task');
+      productVoiceControlRef.current.setTaskOperation('task.create');
+      await waitForMounted(() => productVoiceStates.at(-1)?.command_route === 'task', 'command center did not select Task route');
+    });
+    await capture('Create the demo task');
+    await act(async () => {
+      productVoiceControlRef.current.submitCommand();
+      await waitForMounted(
+        () => productVoiceStates.at(-1)?.task_confirmation_form === `confirm task request ${confirmationToken}`,
+        'Task route did not expose the backend-owned spoken confirmation',
+      );
+    });
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.intent').length, 1);
+    assert.equal(productVoiceStates.at(-1).task_controls_locked, true);
+
+    await capture(`confirm task request ${confirmationToken}`);
+    await act(async () => {
+      productVoiceControlRef.current.submitCommand();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p3.progress.activate' && call.params.task_id === taskId),
+        'spoken Task confirmation did not dispatch and activate exact progress',
+      );
+    });
+    const taskSubmits = calls.filter(call => call.method === 'live_voice.composition.p2.submit' && call.params.dispatch_target === 'task');
+    assert.equal(taskSubmits.length, 2);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.intent').length, 2);
+    assert.equal(productVoiceStates.at(-1).task_id, taskId);
+    assert.equal(productVoiceStates.at(-1).task_result, `${taskId} | accepted`);
+    assert.equal(renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-recognized-confirmation' }).length, 0);
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
     browser.restore();
   }
 });

@@ -1256,7 +1256,19 @@ export function ChatPanel({
         previous.output === next.output &&
         previous.text_status === next.text_status &&
         previous.confirmation_phase === next.confirmation_phase &&
-        previous.operation_retained === next.operation_retained
+        previous.operation_retained === next.operation_retained &&
+        previous.command_route === next.command_route &&
+        previous.task_available === next.task_available &&
+        previous.task_operation === next.task_operation &&
+        previous.task_id === next.task_id &&
+        previous.task_status === next.task_status &&
+        previous.task_reason === next.task_reason &&
+        previous.task_confirmation_form === next.task_confirmation_form &&
+        previous.task_result === next.task_result &&
+        previous.task_progress_task_id === next.task_progress_task_id &&
+        previous.task_progress_state === next.task_progress_state &&
+        previous.task_progress_delivery_mode === next.task_progress_delivery_mode &&
+        previous.task_controls_locked === next.task_controls_locked
       ) {
         return previous;
       }
@@ -1293,28 +1305,42 @@ export function ChatPanel({
   }
   const formalP1Status = productVoiceState?.p1_status ?? 'idle';
   const formalVoiceCanStop = formalP1Status === 'capturing' || formalP1Status === 'playing';
+  const formalTaskTransportBusy = Boolean(productVoiceState?.task_controls_locked && !productVoiceState.task_confirmation_form);
   const formalVoiceBusy =
     formalP1Status === 'starting' ||
     formalP1Status === 'recognizing' ||
     productVoiceState?.confirmation_phase != null ||
     ['submitting', 'waiting', 'presented'].includes(productVoiceState?.text_status ?? 'idle') ||
-    Boolean(productVoiceState?.operation_retained);
+    Boolean(productVoiceState?.operation_retained) ||
+    formalTaskTransportBusy;
   const formalStatusLabel =
-    productVoiceState?.confirmation_phase === 'confirming'
-      ? t('liveVoice.formal.status.confirming')
+    productVoiceState?.task_confirmation_form
+      ? t('liveVoice.commandCenter.confirmationStatus')
       : productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting'
         ? t('liveVoice.formal.status.waiting')
-        : t(`liveVoice.formal.status.${formalP1Status}`);
+        : productVoiceState?.task_status === 'submitting'
+          ? t('liveVoice.commandCenter.taskWorking')
+          : t(`liveVoice.formal.status.${formalP1Status}`);
   const formalPrimaryActionLabel =
     formalP1Status === 'capturing'
       ? t('liveVoice.formal.actions.stopRecognize')
       : formalP1Status === 'playing'
         ? t('liveVoice.formal.actions.stopPlayback')
         : formalP1Status === 'recognized' && Boolean(productVoiceState?.input.trim())
-          ? t('liveVoice.formal.actions.reviewSend')
+          ? productVoiceState?.command_route === 'task'
+            ? t('liveVoice.commandCenter.submitTask')
+            : t('liveVoice.commandCenter.sendAgent')
+          : productVoiceState?.task_confirmation_form
+            ? t('liveVoice.commandCenter.speakConfirmation')
           : formalVoiceBusy
             ? t('liveVoice.formal.actions.working')
             : t('liveVoice.formal.actions.start');
+  const formalTaskTargetMissing =
+    productVoiceState?.command_route === 'task' &&
+    productVoiceState.task_operation !== 'task.create' &&
+    !productVoiceState.task_id.trim() &&
+    formalP1Status === 'recognized';
+  const formalCommandControlsDisabled = formalVoiceCanStop || formalVoiceBusy;
   const formalLiveVoiceDemoProps: LiveVoiceDemoBarProps = {
     active: productVoiceActive,
     available: Boolean(productVoiceState?.available),
@@ -1322,19 +1348,37 @@ export function ChatPanel({
     interimTranscript: '',
     committedTranscript: productVoiceState?.input || productVoiceState?.output || '',
     errorMessage: formalVoiceVisualState === 'error' ? (productVoiceState?.p1_reason ?? '') : '',
-    routeLabel: t('liveVoice.formal.routeLabel'),
+    routeLabel: t('liveVoice.commandCenter.routeLabel'),
     statusLabel: formalStatusLabel,
     primaryActionLabel: formalPrimaryActionLabel,
-    primaryActionDisabled: !formalVoiceCanStop && formalVoiceBusy,
+    primaryActionDisabled: (!formalVoiceCanStop && formalVoiceBusy) || formalTaskTargetMissing,
     ...(formalP1Status === 'recognized' && productVoiceState?.text_status === 'idle' && Boolean(productVoiceState.input.trim())
       ? {
           editableTranscript: productVoiceState?.input ?? '',
           onTranscriptChange: (value: string) => productVoiceControlRef.current?.updateInput(value),
         }
       : {}),
-    recognizedConfirmation: productVoiceState?.confirmation_phase === 'confirming',
-    onRecognizedConfirm: () => void productVoiceControlRef.current?.confirm(),
-    onRecognizedCancel: () => productVoiceControlRef.current?.cancelConfirmation(),
+    commandCenter: productVoiceState
+      ? {
+          route: productVoiceState.command_route,
+          taskAvailable: productVoiceState.task_available,
+          taskOperation: productVoiceState.task_operation,
+          taskId: productVoiceState.task_id,
+          taskStatus: productVoiceState.task_status,
+          taskReason: productVoiceState.task_reason,
+          taskResult: productVoiceState.task_result,
+          taskConfirmationForm: productVoiceState.task_confirmation_form,
+          taskProgressTaskId: productVoiceState.task_progress_task_id,
+          taskProgressState: productVoiceState.task_progress_state,
+          taskProgressDeliveryMode: productVoiceState.task_progress_delivery_mode,
+          controlsDisabled: formalCommandControlsDisabled,
+          taskControlsLocked: productVoiceState.task_controls_locked,
+          onRouteChange: route => productVoiceControlRef.current?.setCommandRoute(route),
+          onTaskOperationChange: operation => productVoiceControlRef.current?.setTaskOperation(operation),
+          onTaskIdChange: taskId => productVoiceControlRef.current?.setTaskId(taskId),
+          onCancelTaskConfirmation: () => productVoiceControlRef.current?.cancelTaskConfirmation(),
+        }
+      : undefined,
     onEnable: () => {
       setProductVoiceActive(true);
       void productVoiceControlRef.current?.start();
@@ -1347,7 +1391,7 @@ export function ChatPanel({
       if (formalVoiceCanStop) {
         void productVoiceControlRef.current?.stop();
       } else if (formalP1Status === 'recognized' && productVoiceState?.input.trim()) {
-        productVoiceControlRef.current?.submit();
+        productVoiceControlRef.current?.submitCommand();
       } else {
         void productVoiceControlRef.current?.start();
       }

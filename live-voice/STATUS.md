@@ -7,10 +7,38 @@
 
 ## Resume capsule
 
-- **Current result:** `PASS — INTEGRATED WEB ALPHA`. On 2026-08-15 the user
-  completed the current-host physical microphone, heard playout, voice
+- **Current result:** `IN PROGRESS — POST-ALPHA DEMO COMMAND CENTER DELTA` on
+  clean base `ff2c3b746`. The uncommitted product delta moves formal
+  Agent/Tool and P3alpha `task.create` / `task.status` / `task.cancel` controls
+  into the bottom Live Voice surface. Recognized speech remains editable but
+  now dispatches with one explicit Send action; the redundant raw-ASR
+  confirmation card is not used by this product entry. Backend-owned spoken
+  confirmation for Task create/cancel remains mandatory and visible.
+- **Delta verification:** the affected Integrated Web suite passes `351 / 351`,
+  including mounted single-action Agent dispatch, formal voice Task create,
+  spoken Task confirmation, exact progress activation and command-center UI
+  coverage. The production frontend build completes `4,641` modules both with
+  defaults and with the formal `INTEGRATED_WEB` / `INTEGRATED_P1` /
+  `PRODUCT_P3_MUTATION` flags enabled while compatibility flags remain off. A
+  fresh physical browser/microphone demo acceptance has not yet run on this
+  dirty source, so the delta is not accepted or committed.
+- **Delta review:** implementation self-review and a cold complete-diff review
+  found no remaining blocking issue after the raw-ASR confirmation UI was
+  removed from the bottom bar. An independent `/review` entry is unavailable
+  in this session; the substitute is a second complete-diff inspection plus
+  affected tests/build, and is not represented as an independent review.
+- **Current-host launch boundary:** the repaired `.venv` imports
+  `openjiuwen.symphony` successfully, but the previously private ephemeral
+  `LIVE_VOICE_SPEECH_*` provider settings are not present in the current
+  process or the user runtime `.env`. Full microphone/STT/TTS launch therefore
+  still requires the user to re-enter the Speech credential through a
+  protected terminal; it must not be requested in chat or inferred from the
+  Agent provider configuration.
+- **Prior accepted result:** `PASS — INTEGRATED WEB ALPHA`. On 2026-08-15 the
+  user completed the current-host physical microphone, heard playout, voice
   barge-in, device/permission and continuous joint journey and explicitly
-  returned `PASS` for S8-03.
+  returned `PASS` for S8-03. That acceptance applies only to the tested source
+  below and does not pre-credit this post-Alpha UI delta.
 - **Exact tested source:** `d33b520e0d21ae0829d30814d77a01cc18256f09`
   on `hx/0812_live_voice_w3`. Phase D′ destination transfer was not used. The
   exact S7 report SHA-256 is
@@ -35,20 +63,21 @@
   `e34dea559c3829f7624b3c340fdeab83f1f6a744ae118ca9bf1dd5f45f90ac16`;
   the final cleanup record SHA-256 is
   `e79c130a4b145ccbb0f21a04cf6ce78c85bd2a7c297789368e156f11297aee03`.
-- **Branch/remote:** the upstream remains at `bb11530ce`; the C1/C2 and this
-  final closeout documentation are local until an exact remote update is
-  separately approved. No remote ref was updated by this packet.
+- **Branch/remote:** local `hx/0812_live_voice_w3` and its upstream
+  `agtai/hx/0812_live_voice_w3` are synchronized at exact `ff2c3b746`. The
+  remote already contains the C1/C2 and final closeout documentation; this
+  resume operation fetched and fast-forwarded the existing W3 worktree and did
+  not push or otherwise update a remote ref.
 - **Non-claims:** this PASS does not claim full P3, Production authentication,
   broad browser/mobile support, public deployment, or RC/Production readiness.
 
 ## Historical execution capsule
 
 - Expected branch/upstream: `hx/0812_live_voice_w3` /
-  `agtai/hx/0812_live_voice_w3`. The upstream already contains docs-only tip
-  `bb11530ce`, the successor of `370ee9b8`. The first C1 settlement is local
-  commit `c04033380`; the F-005 docs-only re-settlement advances the local
-  branch beyond it. Any remote update remains separately approved for the
-  exact remote/ref/commits/update mode.
+  `agtai/hx/0812_live_voice_w3`. Both refs resolve to final docs-only closeout
+  tip `ff2c3b746`, which follows C1 settlement `c04033380`, F-005 re-settlement
+  `d33b520e0` and the final closeout record. The remote advance was observed by
+  fetch; this resume operation did not perform it.
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
@@ -471,9 +500,12 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. No remaining S7/S8 fast-closeout action. The D-079 packet is closed with
-   `PASS — INTEGRATED WEB ALPHA`; retained deviations move to post-Alpha
-   prioritization only if a later packet selects them.
-2. Any push of the local closeout commits requires separate approval naming the
-   exact remote, branch, commits and update mode. Do not infer push authority
-   from the Alpha PASS.
+1. Run one fresh browser/microphone demo from the bottom Live Voice command
+   center: Agent/Tool, Task create plus spoken confirmation, status, cancel and
+   visible progress. Do not use Route Facts as a product control surface.
+2. Obtain the remaining independent review entry (or explicitly accept the
+   recorded substitute limitation) before treating this Tier-2 delta as
+   closed. The historical D-079 Alpha packet remains closed.
+3. The local branch ref and its upstream remain synchronized at `ff2c3b746`;
+   the current delta is uncommitted. Any future remote-ref update still
+   requires separate exact approval.

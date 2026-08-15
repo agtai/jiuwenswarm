@@ -2164,6 +2164,27 @@
         "working": "Working"
       }
     },
+    "commandCenter": {
+      "routeLabel": "Live Voice command center",
+      "agent": "Agent",
+      "task": "Task",
+      "agentRouteSummary": "Speech goes to the JiuwenSwarm Agent and may use tools.",
+      "taskRouteSummary": "Speech goes to the formal P3alpha Task Core. Create and cancel still require spoken business confirmation.",
+      "operation": "Task operation",
+      "create": "Create",
+      "status": "Get status",
+      "cancel": "Cancel",
+      "taskId": "Task ID",
+      "routeStatus": "Task route",
+      "progress": "Task progress",
+      "confirmationPrompt": "Start the microphone again and say this confirmation exactly. The recognized result will be submitted as a new voice turn:",
+      "abandon": "Abandon operation",
+      "confirmationStatus": "Waiting for spoken Task confirmation",
+      "taskWorking": "Task command in progress",
+      "submitTask": "Submit Task command",
+      "sendAgent": "Send to Agent",
+      "speakConfirmation": "Speak confirmation"
+    },
     "integrated": {
       "title": "Integrated Web route facts",
       "shellOnly": "The P2 text route below is formal only while its activation is active. Speech, physical audio, task completion, and Integrated Demo/Web Alpha Gate acceptance remain unproven.",

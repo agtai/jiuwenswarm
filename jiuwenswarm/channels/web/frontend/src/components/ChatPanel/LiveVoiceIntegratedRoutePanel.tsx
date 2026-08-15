@@ -105,6 +105,18 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   text_status: 'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed';
   confirmation_phase: 'confirming' | 'dispatching' | null;
   operation_retained: boolean;
+  command_route: 'agent' | 'task';
+  task_available: boolean;
+  task_operation: FormalTaskIntentOperation;
+  task_id: string;
+  task_status: FormalTaskIntentOwnerSnapshot['status'];
+  task_reason: string | null;
+  task_confirmation_form: string | null;
+  task_result: string | null;
+  task_progress_task_id: string | null;
+  task_progress_state: string | null;
+  task_progress_delivery_mode: ProductTextProgressEvent['delivery_mode'] | null;
+  task_controls_locked: boolean;
 }>;
 
 export interface ProductLiveVoiceSurfaceControl {
@@ -112,6 +124,11 @@ export interface ProductLiveVoiceSurfaceControl {
   stop(): Promise<void>;
   updateInput(value: string): void;
   submit(): void;
+  submitCommand(): void;
+  setCommandRoute(route: 'agent' | 'task'): void;
+  setTaskOperation(operation: FormalTaskIntentOperation): void;
+  setTaskId(taskId: string): void;
+  cancelTaskConfirmation(): void;
   confirm(): Promise<void>;
   cancelConfirmation(): void;
   close(): Promise<void>;
@@ -979,6 +996,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [taskIntentOperation, setTaskIntentOperation] = useState<FormalTaskIntentOperation>('task.create');
   const [taskIntentText, setTaskIntentText] = useState('');
   const [taskIntentTaskId, setTaskIntentTaskId] = useState('');
+  const [productCommandRoute, setProductCommandRoute] = useState<'agent' | 'task'>('agent');
   const [taskIntentSnapshot, setTaskIntentSnapshot] = useState<FormalTaskIntentOwnerSnapshot>({
     status: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION ? 'idle' : 'disabled',
     pending_confirmation: null,
@@ -2307,6 +2325,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     taskIntentOwnerRef.current?.close();
     taskIntentOwnerRef.current = null;
     pendingNaturalCreateHandoffRef.current = null;
+    setProductCommandRoute('agent');
     setTaskIntentOperation('task.create');
     setTaskIntentText('');
     setTaskIntentTaskId('');
@@ -3636,6 +3655,87 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setProductInput(value);
   };
 
+  const handleProductCommandInput = (value: string) => {
+    const owner = activationOwnerRef.current;
+    if (
+      pendingProductTurnRef.current ||
+      pendingPresentationAttemptRef.current ||
+      pendingBargeInRef.current ||
+      owner?.hasPendingSubmission() ||
+      owner?.hasPendingPresentationAck() ||
+      owner?.hasPendingBargeIn() ||
+      taskIntentSnapshot.retained_transport
+    )
+      return;
+    updateRecognizedSpeechConfirmation(null);
+    updateEditedVoiceDraftConfirmation(null);
+    setProductTextStatus('idle');
+    if (value !== recognizedVoiceRef.current?.text) {
+      recognizedVoiceRef.current = null;
+      voiceDraftBindingRef.current = null;
+      p3VoiceDraftBindingRef.current = null;
+      voiceTaskOriginRef.current = null;
+    }
+    setProductInput(value);
+    setTaskIntentText(value);
+    setP3TaskInstruction(value);
+  };
+
+  const setProductCommandRouteSafely = (route: 'agent' | 'task') => {
+    if (
+      (route === 'task' && !FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION) ||
+      taskIntentSnapshot.pending_confirmation !== null ||
+      taskIntentSnapshot.retained_transport ||
+      pendingNaturalCreateHandoffRef.current !== null ||
+      productOperationRetained
+    )
+      return;
+    setProductCommandRoute(route);
+  };
+
+  const setProductTaskOperationSafely = (operation: FormalTaskIntentOperation) => {
+    if (taskIntentSnapshot.pending_confirmation !== null || taskIntentSnapshot.retained_transport || pendingNaturalCreateHandoffRef.current !== null) return;
+    setTaskIntentOperation(operation);
+    setTaskIntentSnapshot(taskIntentOwnerRef.current?.cancelPendingConfirmation() ?? taskIntentSnapshot);
+    if (operation !== 'task.create' && !taskIntentTaskId.trim()) {
+      const latestTaskId = progress?.task_id ?? taskIntentSnapshot.receipt?.task_id ?? p3TargetTaskId.trim();
+      if (latestTaskId) setTaskIntentTaskId(latestTaskId);
+    }
+  };
+
+  const setProductTaskIdSafely = (taskId: string) => {
+    if (taskIntentSnapshot.pending_confirmation !== null || taskIntentSnapshot.retained_transport || pendingNaturalCreateHandoffRef.current !== null) return;
+    setTaskIntentTaskId(taskId);
+  };
+
+  const cancelProductTaskConfirmation = () => {
+    const owner = taskIntentOwnerRef.current;
+    if (owner === null || taskIntentSnapshot.retained_transport) return;
+    setTaskIntentSnapshot(owner.cancelPendingConfirmation());
+    setProductInput('');
+    setTaskIntentText('');
+  };
+
+  const submitProductCommand = async () => {
+    const recognized = recognizedVoiceRef.current;
+    const binding = currentProductP2Binding();
+    const exactVoiceDraft =
+      recognized !== null &&
+      recognized.session_id === props.activeSessionId &&
+      recognized.text === productInput &&
+      recognizedVoiceMatchesProductBinding(recognized, binding);
+    if (productCommandRoute === 'agent') {
+      await submitProductText(undefined, exactVoiceDraft ? 'voice' : 'structured');
+      return;
+    }
+    if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION || taskIntentSnapshot.retained_transport || !taskIntentText.trim()) return;
+    const receipt = await submitFormalTaskIntent(exactVoiceDraft ? 'voice' : 'text');
+    if (receipt !== null) {
+      setProductInput('');
+      setTaskIntentText('');
+    }
+  };
+
   const handleProductSubmit = () => {
     const recognized = recognizedVoiceRef.current;
     if (recognized !== null && recognized.session_id === props.activeSessionId && recognized.text === productInput) {
@@ -3729,6 +3829,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
 
   useEffect(() => {
+    const taskControlsLocked =
+      taskIntentSnapshot.pending_confirmation !== null || taskIntentSnapshot.retained_transport || pendingNaturalCreateHandoffRef.current !== null;
     props.onProductVoiceStateChange?.(
       Object.freeze({
         available: productVoiceAvailable,
@@ -3739,6 +3841,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         text_status: productTextStatus,
         confirmation_phase: recognizedSpeechConfirmation?.phase ?? editedVoiceDraftConfirmation?.phase ?? null,
         operation_retained: productOperationRetained,
+        command_route: productCommandRoute,
+        task_available: FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION && props.isConnected,
+        task_operation: taskIntentOperation,
+        task_id: taskIntentTaskId,
+        task_status: taskIntentSnapshot.status,
+        task_reason: taskIntentSnapshot.reason,
+        task_confirmation_form: taskIntentSnapshot.pending_confirmation?.form ?? null,
+        task_result: formalTaskIntentResultSummary(taskIntentSnapshot.receipt),
+        task_progress_task_id: progress?.task_id ?? null,
+        task_progress_state: progress?.state ?? null,
+        task_progress_delivery_mode: progress?.delivery_mode ?? null,
+        task_controls_locked: taskControlsLocked,
       }),
     );
   }, [
@@ -3749,17 +3863,30 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     productOutput,
     productTextStatus,
     productVoiceAvailable,
+    productCommandRoute,
+    progress?.delivery_mode,
+    progress?.state,
+    progress?.task_id,
     props.onProductVoiceStateChange,
+    props.isConnected,
     editedVoiceDraftConfirmation?.phase,
     recognizedSpeechConfirmation?.phase,
+    taskIntentOperation,
+    taskIntentSnapshot,
+    taskIntentTaskId,
   ]);
 
   useEffect(() => {
     const control = Object.freeze<ProductLiveVoiceSurfaceControl>({
       start: startProductVoiceCapture,
       stop: () => (p1VoiceOwnerRef.current?.status().status === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture()),
-      updateInput: handleProductInput,
+      updateInput: handleProductCommandInput,
       submit: handleProductSubmit,
+      submitCommand: () => void submitProductCommand(),
+      setCommandRoute: setProductCommandRouteSafely,
+      setTaskOperation: setProductTaskOperationSafely,
+      setTaskId: setProductTaskIdSafely,
+      cancelTaskConfirmation: cancelProductTaskConfirmation,
       confirm: acceptRecognizedSpeechConfirmation,
       cancelConfirmation: () => {
         updateRecognizedSpeechConfirmation(null);

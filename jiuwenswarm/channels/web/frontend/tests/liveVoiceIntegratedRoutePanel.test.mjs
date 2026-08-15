@@ -1278,10 +1278,13 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(source, /const liveVoiceDemoProps = formalProductVoiceEnabled \? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps/);
   assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
   assert.match(source, /productVoiceControlRef\.current\?\.stop\(\)/);
-  assert.match(source, /productVoiceControlRef\.current\?\.confirm\(\)/);
+  assert.match(source, /productVoiceControlRef\.current\?\.submitCommand\(\)/);
+  assert.match(source, /onRouteChange:\s*route\s*=>\s*productVoiceControlRef\.current\?\.setCommandRoute\(route\)/);
+  assert.match(source, /onTaskOperationChange:\s*operation\s*=>\s*productVoiceControlRef\.current\?\.setTaskOperation\(operation\)/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
-  assert.match(source, /liveVoice\.formal\.routeLabel/);
-  assert.match(barSource, /data-testid="live-voice-product-confirmation"/);
+  assert.match(source, /liveVoice\.commandCenter\.routeLabel/);
+  assert.match(barSource, /data-testid="live-voice-command-center"/);
+  assert.match(barSource, /data-testid="live-voice-command-task-confirmation"/);
   assert.match(barSource, /editableTranscript/);
 });
 
