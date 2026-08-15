@@ -8,13 +8,14 @@ import asyncio
 import hashlib
 import math
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
+    ContextRef,
     ErrorCode,
     EventEnvelope,
     ResponseRef,
@@ -78,6 +79,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressOriginKind,
 )
 from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
+    FormalContextEntry,
     FormalContextSnapshot,
 )
 
@@ -87,6 +89,8 @@ _MAX_NOTIFICATION_CONSUMER_ID_UTF8_BYTES = 1024
 _MAX_EFFECT_ID_CHARS = 256
 _MAX_EFFECT_ID_UTF8_BYTES = 512
 _MAX_EFFECTS_PER_REQUEST = 3
+_MAX_FORMAL_CONTEXT_ENTRIES = 8
+_MAX_FORMAL_CONTEXT_UTF8_BYTES = 32 * 1024
 
 
 class AgentConversationRuntimeViolation(ValueError):
@@ -671,6 +675,156 @@ class AgentConversationRuntime:
     async def open_interaction(self, interaction_id: str) -> None:
         self._require_admission()
         await self._cr.open_interaction(interaction_id)
+
+    def select_formal_context(self, interaction_id: str) -> FormalContextSnapshot:
+        """Select bounded, acknowledged CR text facts for the next formal turn.
+
+        The formal Agent route deliberately has no implicit Session History.  This
+        selector therefore exposes only prior committed user text paired with an
+        assistant TEXT span that CR has actually marked presented.  Tool events,
+        reasoning, raw audio and unacknowledged output never enter the snapshot.
+        """
+
+        self._require_admission()
+        if not isinstance(interaction_id, str) or not interaction_id.strip():
+            raise AgentConversationRuntimeViolation(
+                "INVALID_FORMAL_CONTEXT",
+                "formal context selection requires an exact interaction_id",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        snapshot = self._cr.snapshot()
+        interaction = next(
+            (
+                item
+                for item in snapshot.conversation.interactions
+                if item.interaction_id == interaction_id
+            ),
+            None,
+        )
+        if interaction is None or interaction.state is not InteractionState.OPEN:
+            raise AgentConversationRuntimeViolation(
+                "FORMAL_CONTEXT_INTERACTION_UNAVAILABLE",
+                "formal context requires the exact open interaction",
+                ErrorCode.UNAVAILABLE,
+            )
+
+        presented_by_ref: dict[ResponseRef, list[PresentationUnit]] = {}
+        for record in snapshot.presentation.records:
+            unit = record.unit
+            if (
+                record.state is PresentationState.PRESENTED
+                and unit.surface is PresentationSurface.TEXT
+                and unit.ref.interaction_id == interaction_id
+            ):
+                presented_by_ref.setdefault(unit.ref, []).append(unit)
+
+        selected_reversed: list[tuple[FormalContextEntry, FormalContextEntry]] = []
+        selected_bytes = 0
+        for response_ref, state in sorted(
+            self._outputs.items(),
+            key=lambda item: (
+                item[0].response_generation,
+                item[0].response_id,
+            ),
+            reverse=True,
+        ):
+            if len(selected_reversed) * 2 + 2 > _MAX_FORMAL_CONTEXT_ENTRIES:
+                break
+            if (
+                response_ref.interaction_id != interaction_id
+                or state.commit.interaction_id != interaction_id
+                or state.commit.scope != self._scope
+            ):
+                continue
+            units = sorted(
+                presented_by_ref.get(response_ref, ()), key=lambda unit: unit.seq
+            )
+            if not units:
+                continue
+            assistant_parts: list[bytes] = []
+            for unit in units:
+                content = state.unit_contents.get(unit.unit_id)
+                if (
+                    content is None
+                    or f"sha256:{hashlib.sha256(content).hexdigest()}"
+                    != unit.content_ref
+                ):
+                    raise AgentConversationRuntimeViolation(
+                        "FORMAL_CONTEXT_CONTENT_MISMATCH",
+                        "presented CR context lost its exact retained content",
+                        ErrorCode.RESULT_UNKNOWN,
+                    )
+                assistant_parts.append(content)
+            assistant_bytes = b"".join(assistant_parts)
+            pair_bytes = len(state.commit.text.encode("utf-8")) + len(assistant_bytes)
+            if selected_bytes + pair_bytes > _MAX_FORMAL_CONTEXT_UTF8_BYTES:
+                break
+            try:
+                assistant_text = assistant_bytes.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise AgentConversationRuntimeViolation(
+                    "FORMAL_CONTEXT_CONTENT_MISMATCH",
+                    "presented CR context is not valid UTF-8",
+                    ErrorCode.RESULT_UNKNOWN,
+                ) from error
+            user_entry = FormalContextEntry(
+                ref=self._formal_context_ref(
+                    source="live_voice.cr_committed_user",
+                    identity={
+                        "interaction_id": interaction_id,
+                        "turn_id": state.commit.turn_id,
+                        "commit_id": state.commit.commit_id,
+                        "role": "user",
+                    },
+                    content=state.commit.text,
+                ),
+                content=state.commit.text,
+            )
+            assistant_entry = FormalContextEntry(
+                ref=self._formal_context_ref(
+                    source="live_voice.cr_presented_assistant",
+                    identity={
+                        "interaction_id": interaction_id,
+                        "response_id": response_ref.response_id,
+                        "response_generation": response_ref.response_generation,
+                        "role": "assistant",
+                    },
+                    content=assistant_text,
+                ),
+                content=assistant_text,
+            )
+            selected_reversed.append((user_entry, assistant_entry))
+            selected_bytes += pair_bytes
+        entries = tuple(entry for pair in reversed(selected_reversed) for entry in pair)
+        return FormalContextSnapshot(self._scope, entries)
+
+    def _formal_context_ref(
+        self, *, source: str, identity: Mapping[str, object], content: str
+    ) -> ContextRef:
+        identity_digest = hashlib.sha256(
+            canonical_json_bytes({"source": source, "identity": dict(identity)})
+        ).hexdigest()
+        content_digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        return ContextRef.from_dict(
+            {
+                "source": source,
+                "stable_id": f"formal-context:{identity_digest}",
+                "uri": f"live-voice-cr://context/{identity_digest}",
+                "revision": {
+                    "kind": "snapshot",
+                    "value": f"sha256:{content_digest}",
+                },
+                "scope": self._scope.to_dict(),
+                "permissions": ["agent.context.read"],
+                "expires_at": None,
+                "redaction": {
+                    "policy_id": "live_voice.presented_text.v1",
+                    "redacted": False,
+                    "fields": [],
+                },
+                "extensions": {},
+            }
+        )
 
     async def start_turn(self, interaction_id: str, turn_id: str) -> None:
         self._require_admission()

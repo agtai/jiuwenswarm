@@ -2000,6 +2000,7 @@ class AgentServerProductCompositionRegistry:
         response_id: str,
         correlation_id: str,
         commit: TurnCommit,
+        context: FormalContextSnapshot,
         channel_id: str,
         dispatch_target: str,
         route_key: tuple[str, str],
@@ -2093,7 +2094,7 @@ class AgentServerProductCompositionRegistry:
                 response_id=response_id,
                 correlation_id=correlation_id,
                 commit=commit,
-                context=FormalContextSnapshot(retained.binding.scope),
+                context=context,
                 channel_id=channel_id,
             )
             return _success_result(
@@ -2596,6 +2597,13 @@ class AgentServerProductCompositionRegistry:
                             interaction_id=interaction_id,
                         )
                     )
+                    context = (
+                        await retained.activation_lease.select_formal_context(
+                            retained.binding
+                        )
+                        if dispatch_target == "agent"
+                        else FormalContextSnapshot(retained.binding.scope)
+                    )
                     commit = TurnCommit.from_dict(
                         {
                             "contract_version": CONTRACT_VERSION,
@@ -2605,7 +2613,9 @@ class AgentServerProductCompositionRegistry:
                             "text": text_value,
                             "hypothesis_provenance": guarded_provenance,
                             "scope": retained.binding.scope.to_dict(),
-                            "context_refs": [],
+                            "context_refs": [
+                                entry.ref.to_dict() for entry in context.entries
+                            ],
                             "committed_at": committed_at,
                         }
                     )
@@ -2622,6 +2632,7 @@ class AgentServerProductCompositionRegistry:
                                 response_id=response_id,
                                 correlation_id=correlation_id,
                                 commit=commit,
+                                context=context,
                                 channel_id=channel_id,
                                 dispatch_target=dispatch_target,
                                 route_key=(routed_session, interaction_id),

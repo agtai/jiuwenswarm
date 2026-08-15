@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections.abc import AsyncIterator, Callable
 from dataclasses import replace
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TurnCommit,
     WorkProgressEventV2,
+    canonical_json_bytes,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationNotification,
@@ -318,7 +320,41 @@ async def dispatch(
     )
 
 
-def task_progress_intent(*, origin_id: str = "interaction-1") -> TaskProgressNotificationIntent:
+async def acknowledge_formal_round(
+    current: AgentConversationRuntime,
+    selected: TurnCommit,
+    *,
+    request_id: str,
+    response_id: str,
+) -> None:
+    handle = await dispatch(
+        current,
+        selected,
+        request_id=request_id,
+        response_id=response_id,
+    )
+    final = None
+    for _ in range(4):
+        notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+        if notification.presentation_unit is not None:
+            final = notification
+    assert final is not None
+    assert final.presentation_unit is not None
+    acknowledged = await current.acknowledge_presentation(
+        PresentationAck(
+            ref=handle.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=final.presentation_unit.unit_id,
+            contiguous_cursor=final.presentation_unit.seq,
+            presented_at="2026-08-05T08:00:02Z",
+        )
+    )
+    assert acknowledged.accepted is True
+
+
+def task_progress_intent(
+    *, origin_id: str = "interaction-1"
+) -> TaskProgressNotificationIntent:
     current_scope = scope()
     binding = TaskProgressOriginBinding(
         scope=current_scope,
@@ -378,7 +414,9 @@ def task_progress_intent(*, origin_id: str = "interaction-1") -> TaskProgressNot
 
 
 @pytest.mark.asyncio
-async def test_voice_task_progress_enters_cr_notification_without_business_or_presentation_effects() -> None:
+async def test_voice_task_progress_enters_cr_notification_without_business_or_presentation_effects() -> (
+    None
+):
     lower = LowerFormalAdapter()
     history = RecordingHistoryWriter()
     current = runtime(lower, history)
@@ -860,6 +898,7 @@ async def test_real_facade_round_truth_reaches_cr_and_text_ack_history() -> None
     )
     assert response.state.value == "generating"
     assert not history.assistant_intents
+    assert current.select_formal_context(selected.interaction_id).entries == ()
 
     ack = PresentationAck(
         ref=handle.response_ref,
@@ -872,6 +911,46 @@ async def test_real_facade_round_truth_reaches_cr_and_text_ack_history() -> None
     assert result.accepted is True
     assert result.history_records_written == 1
     assert history.assistant_intents[0][0].contents[0].content_utf8 == b"formal answer"
+    selected_context = current.select_formal_context(selected.interaction_id)
+    assert [entry.content for entry in selected_context.entries] == [
+        "hello",
+        "formal answer",
+    ]
+    assert all(entry.ref.scope == selected.scope for entry in selected_context.entries)
+    assert [entry.ref.source for entry in selected_context.entries] == [
+        "live_voice.cr_committed_user",
+        "live_voice.cr_presented_assistant",
+    ]
+    expected_identities = (
+        {
+            "source": "live_voice.cr_committed_user",
+            "identity": {
+                "interaction_id": "interaction-1",
+                "turn_id": "turn-1",
+                "commit_id": "commit-1",
+                "role": "user",
+            },
+        },
+        {
+            "source": "live_voice.cr_presented_assistant",
+            "identity": {
+                "interaction_id": "interaction-1",
+                "response_id": "response-1",
+                "response_generation": 0,
+                "role": "assistant",
+            },
+        },
+    )
+    for entry, identity in zip(
+        selected_context.entries, expected_identities, strict=True
+    ):
+        identity_digest = hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+        assert entry.ref.stable_id == f"formal-context:{identity_digest}"
+        assert entry.ref.uri == f"live-voice-cr://context/{identity_digest}"
+    assert all(
+        entry.ref.permissions == ("agent.context.read",)
+        for entry in selected_context.entries
+    )
     replay = await current.acknowledge_presentation(ack)
     assert replay.replayed is True
     assert len(history.assistant_intents) == 1
@@ -890,6 +969,130 @@ async def test_real_facade_round_truth_reaches_cr_and_text_ack_history() -> None
     assert response.outcome.value == "completed"
     await asyncio.wait_for(history_wait(history), timeout=1)
     assert len(history.users) == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_formal_context_content_mismatch_fails_closed() -> None:
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    notifications = [
+        await asyncio.wait_for(current.next_notification(), timeout=1) for _ in range(4)
+    ]
+    final = next(item for item in notifications if item.presentation_unit is not None)
+    assert final.presentation_unit is not None
+    await current.acknowledge_presentation(
+        PresentationAck(
+            ref=handle.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=final.presentation_unit.unit_id,
+            contiguous_cursor=0,
+            presented_at="2026-08-05T08:00:02Z",
+        )
+    )
+    current._outputs[handle.response_ref].unit_contents[  # noqa: SLF001
+        final.presentation_unit.unit_id
+    ] = b"tampered"
+
+    with pytest.raises(AgentConversationRuntimeViolation) as error:
+        current.select_formal_context(selected.interaction_id)
+    assert error.value.reason == "FORMAL_CONTEXT_CONTENT_MISMATCH"
+    assert len(history.assistant_intents) == 1
+    assert lower.calls == 1
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pair_utf8_bytes", "expected_entry_count"),
+    ((32 * 1024, 2), (32 * 1024 + 1, 0)),
+)
+async def test_formal_context_enforces_exact_utf8_budget(
+    pair_utf8_bytes: int,
+    expected_entry_count: int,
+) -> None:
+    lower = LowerFormalAdapter(final="r")
+    current = runtime(lower, RecordingHistoryWriter())
+    selected = await prepare(
+        current,
+        commit(text="u" * (pair_utf8_bytes - len("r".encode("utf-8")))),
+    )
+
+    await acknowledge_formal_round(
+        current,
+        selected,
+        request_id=f"request-budget-{pair_utf8_bytes}",
+        response_id=f"response-budget-{pair_utf8_bytes}",
+    )
+
+    context = current.select_formal_context(selected.interaction_id)
+    assert len(context.entries) == expected_entry_count
+    if expected_entry_count:
+        assert sum(len(entry.content.encode("utf-8")) for entry in context.entries) == (
+            32 * 1024
+        )
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
+@pytest.mark.asyncio
+async def test_formal_context_identity_separates_same_content_across_interactions() -> (
+    None
+):
+    current = runtime(LowerFormalAdapter(final="same answer"), RecordingHistoryWriter())
+    first = await prepare(
+        current,
+        commit(
+            turn_id="turn-context-a",
+            commit_id="commit-context-a",
+            interaction_id="interaction-context-a",
+            text="same question",
+        ),
+    )
+    await acknowledge_formal_round(
+        current,
+        first,
+        request_id="request-context-a",
+        response_id="response-context-a",
+    )
+    second = commit(
+        turn_id="turn-context-b",
+        commit_id="commit-context-b",
+        interaction_id="interaction-context-b",
+        text="same question",
+    )
+    await current.open_interaction(second.interaction_id)
+    await current.start_turn(second.interaction_id, second.turn_id)
+    await current.commit_turn(second)
+    await acknowledge_formal_round(
+        current,
+        second,
+        request_id="request-context-b",
+        response_id="response-context-b",
+    )
+
+    first_context = current.select_formal_context(first.interaction_id)
+    second_context = current.select_formal_context(second.interaction_id)
+    assert [entry.content for entry in first_context.entries] == [
+        entry.content for entry in second_context.entries
+    ]
+    assert [entry.ref.revision for entry in first_context.entries] == [
+        entry.ref.revision for entry in second_context.entries
+    ]
+    assert {entry.ref.stable_id for entry in first_context.entries}.isdisjoint(
+        entry.ref.stable_id for entry in second_context.entries
+    )
+    assert {entry.ref.uri for entry in first_context.entries}.isdisjoint(
+        entry.ref.uri for entry in second_context.entries
+    )
     assert (await current.close(timeout_seconds=1)).status is (
         AgentConversationShutdownStatus.CLOSED
     )

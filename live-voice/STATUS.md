@@ -249,6 +249,37 @@
   affected and cumulative review credit plus a valid report and frozen handoff;
   until then formal S8 is paused and exact `9a6715da` remains historical
   evidence only.
+- Exact clean `d31cc7bb00e3357db32d0a5cd864680d35330003` contains that
+  definitive-rejection repair and subsequently completed the full S7 runner,
+  cumulative review and external-only `FROZEN_FOR_A3` handoff. Its report bound
+  all 40 automatic `PASS`, five real `VERIFY`, the exact runtime digest and a
+  clean candidate; affected and cumulative review found no open Critical, High
+  or P2 issue. Fresh diagnostic S8 on `d31cc7bb` exercised real formal P1/P2/P3,
+  Task create/status/cancel/retry, concurrent ordinary Tool work, restart
+  reconciliation, Store/Executor settlement and privacy/log inspection. It
+  exposed one remaining blocking product gap: a second formal P2 turn could see
+  the prior response in the page but the real isolated Agent received an empty
+  CR context snapshot and therefore could not answer a simple follow-up. The
+  current source/test repair keeps the no-history Agent seam and instead selects
+  at most four recent same-interaction pairs consisting only of committed user
+  text plus assistant TEXT spans that CR actually marked presented. It binds
+  each immutable entry into the next `TurnCommit`, excludes Tool/reasoning/raw
+  audio/unacknowledged output, caps selected content at 32 KiB and fails closed
+  on retained-content mismatch. A canonical typed identity digest includes the
+  exact interaction plus turn/commit or response generation and drives both the
+  stable ID and logical URI; the content digest remains the immutable snapshot
+  revision. The complete
+  affected Runtime, P2 Adapter, product Registry, Bridge, formal Agent facade
+  and D90 vertical suites pass `257 / 257`. The earlier complete Live Voice
+  unit run passed `1,649` tests with two existing Windows-platform skips; the
+  five added authority/boundary cases also pass in the current affected run.
+  The source/test boundary has independent affected Tier-3 approval with no
+  open Critical, High or P2 finding; that credit applies to an exact clean
+  committed candidate only when its committed diff matches the reviewed
+  boundary. Because this repair changes source, the `d31cc7bb` freeze is
+  historical. Formal S8 remains paused unless the exact-current candidate also
+  satisfies the report/review/handoff conditions below; otherwise full S7
+  re-verification/re-freeze remains mandatory.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -271,10 +302,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean HEAD containing the reviewed repair with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Exact `9a6715da` remains historical. |
-| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. The `9a6715da` samples remain historical. |
+| S7-02 automation | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when the external report validates the exact current clean HEAD containing the reviewed repair with all 40 automatic checks as `PASS`; otherwise it is `REFREEZE REQUIRED`. Exact `d31cc7bb` remains historical. |
+| S7-02 real path | `CONDITIONAL ON EXTERNAL BINDING` | `SATISFIED` only when that exact-current report validates all five real probes as `VERIFY` with nonzero samples, zero failures and zero forbidden effects; otherwise it is `REFREEZE REQUIRED`. The `d31cc7bb` samples remain historical. |
 | S7-03 cumulative Tier-3 review | `CONDITIONAL ON EXACT CANDIDATE` | The exact-current handoff must bind affected review of the product repair, cumulative review of the resulting candidate and `s7_03_review=PASS`; otherwise it remains in progress. |
-| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the repaired candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. The `9a6715da` handoff is historical. No public deployment or real-user project is permitted. |
+| S7-04 A3 handoff freeze | `CONDITIONAL ON EXTERNAL BINDING` | `FROZEN_FOR_A3` only when the exact-current handoff binds the repaired candidate, valid report and runtime and records `s7_04_status=FROZEN_FOR_A3`; otherwise it is `REFREEZE REQUIRED` and formal S8 remains paused. The `d31cc7bb` handoff is historical. No public deployment or real-user project is permitted. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is

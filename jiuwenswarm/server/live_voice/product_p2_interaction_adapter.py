@@ -637,6 +637,33 @@ class P2ActivationLease:
                 )
             return outcome
 
+    async def select_formal_context(
+        self, binding: P2InteractionBinding
+    ) -> FormalContextSnapshot:
+        """Read one immutable CR-selected context snapshot under lease authority."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            select = getattr(self._runtime, "select_formal_context", None)
+            if not callable(select):
+                raise _violation(
+                    "PRODUCT_FORMAL_CONTEXT_UNAVAILABLE",
+                    "retained runtime has no formal context selector",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = select(binding.interaction_id)
+            if (
+                not isinstance(outcome, FormalContextSnapshot)
+                or outcome.scope != binding.scope
+            ):
+                raise _violation(
+                    "PRODUCT_FORMAL_CONTEXT_UNAVAILABLE",
+                    "retained runtime returned no exact formal context snapshot",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
     async def accept_task_origin(
         self,
         binding: P2InteractionBinding,
@@ -696,9 +723,7 @@ class P2ActivationLease:
                     "progress intent does not bind the exact active P2 route",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            deliver = getattr(
-                self._runtime, "accept_task_progress_notification", None
-            )
+            deliver = getattr(self._runtime, "accept_task_progress_notification", None)
             if not callable(deliver):
                 raise _violation(
                     "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE",

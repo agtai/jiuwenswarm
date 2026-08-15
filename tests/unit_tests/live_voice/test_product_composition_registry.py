@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import sqlite3
 import threading
 from collections import deque
@@ -104,6 +105,7 @@ def _resource(task_id: str) -> AuthorityResourceBinding:
 class _Facade:
     def __init__(self, *, formal_live_voice: bool = True) -> None:
         self.calls = 0
+        self.executions: list[object] = []
         self._formal_live_voice = formal_live_voice
 
     def supports_formal_live_voice(self) -> bool:
@@ -111,6 +113,7 @@ class _Facade:
 
     async def process_formal_live_voice_stream(self, execution):
         self.calls += 1
+        self.executions.append(execution)
         yield AgentResponseChunk(
             request_id=execution.request_id,
             channel_id=execution.channel_id,
@@ -151,6 +154,22 @@ class _HistoryWriter:
     ) -> tuple[bool, ...]:
         self.assistants.append((intent, session_id, channel_id))
         return tuple(True for _ in intent.contents)
+
+
+class _BlockingHistoryWriter(_HistoryWriter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.assistant_started = asyncio.Event()
+        self.assistant_release = asyncio.Event()
+
+    async def persist_assistant(
+        self, intent, *, session_id: str, channel_id: str
+    ) -> tuple[bool, ...]:
+        self.assistant_started.set()
+        await self.assistant_release.wait()
+        return await super().persist_assistant(
+            intent, session_id=session_id, channel_id=channel_id
+        )
 
 
 class _AgentManager:
@@ -2413,6 +2432,54 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     assert ack_replay.payload == acknowledged.payload
     assert cast(dict, acknowledged.payload["result"])["accepted"] is True
     assert len(history.assistants) == 1
+    second_submit = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-2",
+            turn_id="turn-2",
+            response_id="response-2",
+            committed_at="2030-01-01T00:00:01Z",
+            text="use the previous answer",
+        ),
+        request_id="request-submit-2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert second_submit.ok is True
+    for _ in range(20):
+        if manager.agent.calls == 2:
+            break
+        await asyncio.sleep(0)
+    assert manager.agent.calls == 2
+    second_execution = manager.agent.executions[1]
+    assert [entry.content for entry in second_execution.context.entries] == [
+        "hello product agent",
+        "formal result",
+    ]
+    assert second_execution.commit.context_refs == tuple(
+        entry.ref for entry in second_execution.context.entries
+    )
+    assert json.loads(second_execution.prompt_content())["selected_context"] == [
+        {
+            "context_ref": entry.ref.to_dict(),
+            "content": entry.content,
+        }
+        for entry in second_execution.context.entries
+    ]
+    task_origin = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="task-with-acknowledged-agent-context",
+            text="create a task without Agent context",
+        ),
+        request_id="request-task-with-acknowledged-agent-context",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert task_origin.ok is True
+    assert manager.agent.calls == 2
+    task_commit = registry._accepted_turn_commits_by_commit[
+        "commit-task-with-acknowledged-agent-context"
+    ]
+    assert task_commit.context_refs == ()
     await registry.close_active_routes()
     submit_after_disconnect = await registry.handle_p2_submit(
         params=submit_params,
@@ -2460,8 +2527,308 @@ async def test_p2_text_submit_notification_and_exact_presentation_ack(
     assert cast(dict, new_submit_after_disconnect.payload["error"])["reason"] == (
         "PRODUCT_P2_ROUTE_NOT_FOUND"
     )
-    assert manager.agent.calls == 1
+    assert manager.agent.calls == 2
     assert len(history.assistants) == 1
+
+
+@pytest.mark.asyncio
+async def test_p2_context_excludes_unacknowledged_agent_output(tmp_path: Path) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate-unacked-context",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+
+    first = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-unacked-1",
+            turn_id="turn-unacked-1",
+            response_id="response-unacked-1",
+            committed_at=NOW,
+            text="unacknowledged user turn",
+        ),
+        request_id="request-submit-unacked-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first.ok is True
+    for _ in range(20):
+        if manager.agent.calls == 1:
+            break
+        await asyncio.sleep(0)
+    assert manager.agent.calls == 1
+
+    second = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-unacked-2",
+            turn_id="turn-unacked-2",
+            response_id="response-unacked-2",
+            committed_at="2030-01-01T00:00:01Z",
+            text="must not see the first output",
+        ),
+        request_id="request-submit-unacked-2",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert second.ok is True
+    for _ in range(20):
+        if manager.agent.calls == 2:
+            break
+        await asyncio.sleep(0)
+    assert manager.agent.calls == 2
+    assert manager.agent.executions[1].context.entries == ()
+    assert manager.agent.executions[1].commit.context_refs == ()
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_ack_and_next_submit_linearize_one_complete_context_snapshot(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate-ack-submit-race",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    history = _BlockingHistoryWriter()
+    route.activation_lease._runtime._history_writer = history
+    first = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-ack-submit-race-1",
+            turn_id="turn-ack-submit-race-1",
+            response_id="response-ack-submit-race-1",
+            committed_at=NOW,
+            text="context becomes visible atomically",
+        ),
+        request_id="request-ack-submit-race-1",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert first.ok is True
+    presentation = None
+    response = None
+    for sequence in range(1, 5):
+        polled = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"request-ack-submit-race-notification-{sequence}",
+                session_id="session-product",
+            ),
+            timeout=1,
+        )
+        assert polled.ok is True
+        notification = cast(dict[str, object], polled.payload["result"])
+        if isinstance(notification["presentation_unit"], dict):
+            presentation = cast(dict[str, object], notification["presentation_unit"])
+            response = cast(dict[str, object], notification["response"])
+            break
+    assert presentation is not None
+    assert response is not None
+
+    ack_task = asyncio.create_task(
+        registry.handle_p2_presentation_ack(
+            params=_p2_params(
+                response_id=response["response_id"],
+                response_generation=response["response_generation"],
+                surface=presentation["surface"],
+                unit_id=presentation["unit_id"],
+                contiguous_cursor=presentation["seq"],
+                presented_at=NOW,
+            ),
+            request_id="request-ack-submit-race-ack",
+            session_id="session-product",
+        )
+    )
+    await asyncio.wait_for(history.assistant_started.wait(), timeout=1)
+    submit_task = asyncio.create_task(
+        registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id="commit-ack-submit-race-2",
+                turn_id="turn-ack-submit-race-2",
+                response_id="response-ack-submit-race-2",
+                committed_at="2030-01-01T00:00:01Z",
+                text="read only the complete prior pair",
+            ),
+            request_id="request-ack-submit-race-2",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.sleep(0)
+    assert manager.agent.calls == 1
+
+    history.assistant_release.set()
+    acknowledged, submitted = await asyncio.gather(ack_task, submit_task)
+    assert acknowledged.ok is True
+    assert submitted.ok is True
+    for _ in range(20):
+        if manager.agent.calls == 2:
+            break
+        await asyncio.sleep(0)
+    assert manager.agent.calls == 2
+    assert [entry.content for entry in manager.agent.executions[1].context.entries] == [
+        "context becomes visible atomically",
+        "formal result",
+    ]
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_close_fences_a_concurrent_next_submit_before_agent_effect(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate-close-submit-race",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    route = registry._p2_routes[("session-product", "interaction-1")]
+    await route.activation_lease._operation_lock.acquire()
+    close_task = asyncio.create_task(
+        route.activation_lease.close(route.binding, timeout_seconds=1)
+    )
+    for _ in range(20):
+        if route.activation_lease.snapshot().state.value == "closing":
+            break
+        await asyncio.sleep(0)
+    assert route.activation_lease.snapshot().state.value == "closing"
+    submit_task = asyncio.create_task(
+        registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id="commit-close-submit-race",
+                turn_id="turn-close-submit-race",
+                response_id="response-close-submit-race",
+                committed_at=NOW,
+                text="must never reach the Agent",
+            ),
+            request_id="request-close-submit-race",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await asyncio.sleep(0)
+    assert manager.agent.calls == 0
+    route.activation_lease._operation_lock.release()
+
+    closed, submitted = await asyncio.gather(close_task, submit_task)
+    assert closed.status.value == "closed"
+    assert submitted.ok is False
+    assert cast(dict, submitted.payload["error"])["reason"] == (
+        "ACTIVATION_LEASE_NOT_OPEN"
+    )
+    assert manager.agent.calls == 0
+    assert registry._p2_submit_operations == {}
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_p2_context_keeps_only_four_latest_acknowledged_pairs(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-p2-activate-context-bound",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    notification_sequence = 0
+
+    for index in range(5):
+        submitted = await registry.handle_p2_submit(
+            params=_p2_params(
+                commit_id=f"commit-context-{index}",
+                turn_id=f"turn-context-{index}",
+                response_id=f"response-context-{index}",
+                committed_at=f"2030-01-01T00:00:0{index}Z",
+                text=f"user context {index}",
+            ),
+            request_id=f"request-submit-context-{index}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        assert submitted.ok is True
+        presentation = None
+        response = None
+        for _ in range(4):
+            notification_sequence += 1
+            polled = await asyncio.wait_for(
+                registry.handle_p2_notification_next(
+                    params=_p2_params(notification_sequence=notification_sequence),
+                    request_id=f"request-context-notification-{notification_sequence}",
+                    session_id="session-product",
+                ),
+                timeout=1,
+            )
+            assert polled.ok is True
+            notification = cast(dict[str, object], polled.payload["result"])
+            candidate = notification["presentation_unit"]
+            if isinstance(candidate, dict):
+                presentation = cast(dict[str, object], candidate)
+                response = cast(dict[str, object], notification["response"])
+                break
+        assert presentation is not None
+        assert response is not None
+        acknowledged = await registry.handle_p2_presentation_ack(
+            params=_p2_params(
+                response_id=response["response_id"],
+                response_generation=response["response_generation"],
+                surface=presentation["surface"],
+                unit_id=presentation["unit_id"],
+                contiguous_cursor=presentation["seq"],
+                presented_at=f"2030-01-01T00:01:0{index}Z",
+            ),
+            request_id=f"request-context-ack-{index}",
+            session_id="session-product",
+        )
+        assert acknowledged.ok is True
+
+    final = await registry.handle_p2_submit(
+        params=_p2_params(
+            commit_id="commit-context-final",
+            turn_id="turn-context-final",
+            response_id="response-context-final",
+            committed_at="2030-01-01T00:00:10Z",
+            text="use bounded context",
+        ),
+        request_id="request-submit-context-final",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert final.ok is True
+    for _ in range(20):
+        if manager.agent.calls == 6:
+            break
+        await asyncio.sleep(0)
+    assert manager.agent.calls == 6
+    assert [
+        entry.content for entry in manager.agent.executions[-1].context.entries
+    ] == [
+        "user context 1",
+        "formal result",
+        "user context 2",
+        "formal result",
+        "user context 3",
+        "formal result",
+        "user context 4",
+        "formal result",
+    ]
+    assistant_refs = manager.agent.executions[-1].context.entries[1::2]
+    assert len({entry.ref.stable_id for entry in assistant_refs}) == 4
+    assert len({entry.ref.uri for entry in assistant_refs}) == 4
+    assert len({entry.ref.revision.value for entry in assistant_refs}) == 1
+    await registry.close_active_routes()
 
 
 @pytest.mark.asyncio
