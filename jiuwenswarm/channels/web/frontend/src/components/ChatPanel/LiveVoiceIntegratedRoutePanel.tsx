@@ -2917,7 +2917,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     p3RetryInspectionAbortRef.current = abortController;
     const waitForRetry = props.p3RetryInspectionWait ?? defaultP3RetryInspectionWait;
     const previousLeaf = formalTaskControlLeafRef.current;
-    let leaf = input.replace_leaf === true ? null : previousLeaf;
+    const previousSnapshot = previousLeaf?.snapshot() ?? null;
+    const replaceLeaf =
+      input.replace_leaf === true || previousSnapshot === null || !previousSnapshot.connected || !previousSnapshot.tasks.some(task => task.task_id === taskId);
+    let leaf = replaceLeaf ? null : previousLeaf;
     let replacementAdopted = false;
     const requestIsCurrent = () =>
       !abortController.signal.aborted &&
@@ -2927,7 +2930,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       p3RetryInspectionAbortRef.current === abortController;
     const isCurrent = () =>
       requestIsCurrent() &&
-      (input.replace_leaf === true
+      (replaceLeaf
         ? formalTaskControlLeafRef.current === previousLeaf || formalTaskControlLeafRef.current === leaf
         : formalTaskControlLeafRef.current === leaf);
     setP3RetryEligibility(null);
@@ -2946,7 +2949,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           task_id: taskId,
           expected_binding: input.expected_task_control_binding,
         });
-        if (input.replace_leaf !== true) formalTaskControlLeafRef.current = leaf;
+        if (!replaceLeaf) formalTaskControlLeafRef.current = leaf;
       }
       for (let attempt = 0; ; attempt += 1) {
         let inspection: ProductP3RetryInspection;
@@ -2981,11 +2984,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           task_id: taskId,
           task_control_binding: taskControlBinding,
         });
-        if (input.replace_leaf === true && !taskTargetPersisted) {
+        if (replaceLeaf && !taskTargetPersisted) {
           throw new Error('formal task target persistence failed');
         }
         if (!isCurrent()) return null;
-        if (input.replace_leaf === true) {
+        if (replaceLeaf) {
           formalTaskControlLeafRef.current = leaf;
           replacementAdopted = true;
           previousLeaf?.disconnect();
@@ -3001,7 +3004,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setCreatedProgressRoute(Object.freeze({ task_id: taskId, origin: input.progress_origin ?? null }));
         setP3TargetTaskId(taskId);
         const terminalStatus = productP3TerminalStatus(selected);
-        if (input.replace_leaf === true) {
+        if (replaceLeaf) {
           setP3MutationStatus(terminalStatus ?? 'accepted');
           setP3MutationReason(null);
         }
@@ -3039,7 +3042,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       if (p3RetryInspectionAbortRef.current === abortController) {
         p3RetryInspectionAbortRef.current = null;
       }
-      if (input.replace_leaf === true && leaf !== null && !replacementAdopted) leaf.disconnect();
+      if (replaceLeaf && leaf !== null && !replacementAdopted) leaf.disconnect();
     }
   }
 

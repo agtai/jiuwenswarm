@@ -176,6 +176,24 @@
   clean. This current-authority documentation commit changes the exact Git
   identity once more, so it must receive one final exact-current-HEAD runner,
   cumulative review and external handoff without another tracked edit.
+- Exact clean `9697e5929e3beb3eb18044f522eff30ac6b53387` subsequently
+  completed that final runner and external-only freeze. Its sanitized report
+  bound 40 automatic `PASS`, five real `VERIFY`, the runtime digest and clean
+  candidate identity; the handoff bound that report and recorded S7-03 `PASS`
+  plus S7-04 `FROZEN_FOR_A3`. S7/A2 is therefore complete for exact `9697e592`.
+- Fresh S8 automation then found one further product defect while inspecting a
+  historical interrupted Task: the UI reused the currently selected Task leaf,
+  so a valid historical Task with a different correlation failed generically
+  before authoritative event inspection. The working two-path repair creates
+  and fully validates a candidate leaf, then atomically replaces the old leaf;
+  it performs no Task mutation during inspection. An injected replacement
+  failure preserves the old leaf and journal, while a deferred competing
+  inspection cannot publish after a newer generation wins. Integrated Web
+  passes 337/337, the production build completes 4,640 modules, Prettier and
+  diff checks pass.
+  This working tree is `PAUSED / SOURCE REPAIR`, has not been independently
+  approved or committed, and invalidates reuse of the historical `9697e592`
+  freeze for formal acceptance.
 
 - Current closure is deliberately external and fail closed rather than claimed
   in advance. The external report must validate the exact current clean HEAD,
@@ -198,10 +216,10 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `EXTERNAL CURRENT-HEAD CONDITION` | Exact `5ee3cb29` passed backend Alpha 1,663 / 2 skipped, related regressions 789, Integrated Web 335/335, production build 4,640 modules, exact Ruff debt, format/compile, diff/link/hygiene and post-run identity. Any later documentation-only HEAD receives credit only through a new exact-current report satisfying the closure rule above. |
-| S7-02 real path | `EXTERNAL CURRENT-HEAD CONDITION` | Exact `5ee3cb29` returned all five `VERIFY` results on one private HTTPS/WSS runtime: Speech/Media 5, Agent/Executor 2, Benchmark/Fault 65, Secure Deployment 3 and Privacy 19, with zero failures or forbidden effects. A later HEAD receives credit only when the external report binds those results to it. |
-| S7-03 cumulative Tier-3 review | `EXTERNAL CURRENT-HEAD CONDITION` | Source/test reviews through `5ee3cb29` found no open Critical/High/P2 source or test issue; its stale STATUS wording is repaired by this current-authority change. The exact current candidate is `PASS` only when its cumulative independent disposition and bound external handoff satisfy the closure rule above; otherwise review remains in progress. |
-| S7-04 A3 handoff freeze | `EXTERNAL CURRENT-HEAD CONDITION` | Exact `50070050` is historical. The current state is `FROZEN_FOR_A3` only when the external handoff validates the exact current clean HEAD and every closure field above; otherwise it is `REFREEZE REQUIRED` and S8 is blocked. No public deployment or real-user project is permitted. |
+| S7-02 automation | `REFREEZE REQUIRED` | Exact `9697e592` historically passed the complete runner. The working historical-Task inspection repair passes 337/337 Integrated Web tests and the 4,640-module production build, but a committed successor must rerun the complete S7 automation before formal S8 resumes. |
+| S7-02 real path | `REFREEZE REQUIRED` | Exact `9697e592` historically returned all five `VERIFY` results with `5 / 2 / 65 / 3 / 19` samples and zero failures or forbidden effects. A committed successor receives no credit until a new external report binds fresh real probes to its exact clean identity. |
+| S7-03 cumulative Tier-3 review | `IN PROGRESS` | Exact `9697e592` historically passed cumulative review. The current two-path source/test repair still requires affected independent Tier-3 review, coherent commit and exact-successor cumulative review. |
+| S7-04 A3 handoff freeze | `REFREEZE REQUIRED` | Exact `9697e592` is the last historical `FROZEN_FOR_A3` candidate. The dirty working repair is not frozen; only a new exact clean successor with a valid bound report and handoff may reopen formal S8. No public deployment or real-user project is permitted. |
 
 The table preserves historical closure while making the external exact-current
 binding the sole authority for the new candidate. Provisional S8 discovery is
@@ -240,16 +258,18 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. If the external report/handoff does not validate the exact current clean
-   HEAD, run the complete S7 runner, five real probes and cumulative Tier-3
-   review, then generate and validate `FROZEN_FOR_A3` without another tracked
-   edit. If that exact external freeze already validates, do not repeat S7.
-2. Only after that exact-current freeze, run a fresh S8 entry audit and all
+1. Complete affected independent Tier-3 review of the two-path historical-Task
+   inspection repair, commit the coherent candidate, and verify an exact clean
+   successor identity.
+2. On that exact successor, run the complete S7 runner, five real probes and
+   cumulative Tier-3 review, then generate and validate a new external
+   `FROZEN_FOR_A3` handoff without another tracked edit.
+3. Only after that exact-current freeze, run a fresh S8 entry audit and all
    automated acceptance with
    Chrome, Computer Use, sanitized logs and Store/Executor inspection. Record
    and batch-fix any new non-blocking finding; provisional diagnostic events are
    never relabeled as formal proof.
-3. When only physical audio/device and final human judgment remain,
+4. When only physical audio/device and final human judgment remain,
    hand the remaining physical product journey to the user for the final
    `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
    [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).

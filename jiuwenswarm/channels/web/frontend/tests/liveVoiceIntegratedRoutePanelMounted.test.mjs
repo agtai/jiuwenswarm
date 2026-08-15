@@ -541,14 +541,14 @@ function mountedTaskIntentControls(renderer) {
 
 function mountedP3Status(
   binding,
-  { attemptId = 'attempt-a', attemptNumber = 1, state = 'running', outcome = null, eventHead = 1, retryAdmission = undefined } = {},
+  { taskId = 'task-a', attemptId = 'attempt-a', attemptNumber = 1, state = 'running', outcome = null, eventHead = 1, retryAdmission = undefined } = {},
 ) {
   const eligible = state === 'terminal' && attemptNumber < 3;
   return {
     ok: true,
     result: {
       task: {
-        task_id: 'task-a',
+        task_id: taskId,
         scope: {
           subject_id: binding.subject_id,
           session_id: binding.session_id,
@@ -561,11 +561,11 @@ function mountedP3Status(
         outcome,
         event_head: eventHead,
       },
-      attempt: { task_id: 'task-a', attempt_id: attemptId, attempt_number: attemptNumber },
+      attempt: { task_id: taskId, attempt_id: attemptId, attempt_number: attemptNumber },
       retry_admission: retryAdmission ?? {
         eligible,
         reason: eligible ? 'TASK_RETRY_ELIGIBLE' : 'TASK_RETRY_PRECONDITION_STALE',
-        task_id: 'task-a',
+        task_id: taskId,
         attempt_id: eligible ? attemptId : null,
         attempt_number: eligible ? attemptNumber + 1 : null,
       },
@@ -573,7 +573,7 @@ function mountedP3Status(
   };
 }
 
-function mountedP3Events(binding, { terminalA = false, terminalB = false, terminalC = false } = {}) {
+function mountedP3Events(binding, { taskId = 'task-a', terminalA = false, terminalB = false, terminalC = false } = {}) {
   const scope = {
     subject_id: binding.subject_id,
     session_id: binding.session_id,
@@ -582,8 +582,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
   };
   const events = [
     {
-      event_id: 'task-a:event:0',
-      task_id: 'task-a',
+      event_id: `${taskId}:event:0`,
+      task_id: taskId,
       attempt_id: 'attempt-a',
       scope,
       seq: 0,
@@ -598,8 +598,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
       details: {},
     },
     {
-      event_id: 'task-a:event:1',
-      task_id: 'task-a',
+      event_id: `${taskId}:event:1`,
+      task_id: taskId,
       attempt_id: 'attempt-a',
       scope,
       seq: 1,
@@ -616,8 +616,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
   ];
   if (terminalA || terminalB || terminalC) {
     events.push({
-      event_id: 'task-a:event:2',
-      task_id: 'task-a',
+      event_id: `${taskId}:event:2`,
+      task_id: taskId,
       attempt_id: 'attempt-a',
       scope,
       seq: 2,
@@ -635,8 +635,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
   if (terminalB || terminalC) {
     events.push(
       {
-        event_id: 'task-a:event:3',
-        task_id: 'task-a',
+        event_id: `${taskId}:event:3`,
+        task_id: taskId,
         attempt_id: 'attempt-b',
         scope,
         seq: 3,
@@ -656,8 +656,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
         },
       },
       {
-        event_id: 'task-a:event:4',
-        task_id: 'task-a',
+        event_id: `${taskId}:event:4`,
+        task_id: taskId,
         attempt_id: 'attempt-b',
         scope,
         seq: 4,
@@ -672,8 +672,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
         details: {},
       },
       {
-        event_id: 'task-a:event:5',
-        task_id: 'task-a',
+        event_id: `${taskId}:event:5`,
+        task_id: taskId,
         attempt_id: 'attempt-b',
         scope,
         seq: 5,
@@ -692,8 +692,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
   if (terminalC) {
     events.push(
       {
-        event_id: 'task-a:event:6',
-        task_id: 'task-a',
+        event_id: `${taskId}:event:6`,
+        task_id: taskId,
         attempt_id: 'attempt-c',
         scope,
         seq: 6,
@@ -713,8 +713,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
         },
       },
       {
-        event_id: 'task-a:event:7',
-        task_id: 'task-a',
+        event_id: `${taskId}:event:7`,
+        task_id: taskId,
         attempt_id: 'attempt-c',
         scope,
         seq: 7,
@@ -729,8 +729,8 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
         details: {},
       },
       {
-        event_id: 'task-a:event:8',
-        task_id: 'task-a',
+        event_id: `${taskId}:event:8`,
+        task_id: taskId,
         attempt_id: 'attempt-c',
         scope,
         seq: 8,
@@ -749,7 +749,7 @@ function mountedP3Events(binding, { terminalA = false, terminalB = false, termin
   return {
     ok: true,
     result: {
-      task_id: 'task-a',
+      task_id: taskId,
       after_seq: -1,
       head_seq: terminalC ? 8 : terminalB ? 5 : terminalA ? 2 : 1,
       events,
@@ -3240,6 +3240,295 @@ test('mounted P3 recovers an eligible historical task without a browser task-tar
       mutationsBeforeRefresh,
       'historical task-target recovery must perform zero mutation effects',
     );
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    browser.restore();
+  }
+});
+
+test('mounted P3 atomically switches from the current task leaf to a historical task with a different correlation', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const activateP2 = createMountedP2ActivationResponder();
+  const sessionId = 'mounted-task-switch-session';
+  const currentBinding = {
+    subject_id: 'mounted-task-switch-subject',
+    session_id: sessionId,
+    project_id: 'mounted-task-switch-project',
+    correlation_id: 'mounted-current-task-correlation',
+    generation: 7,
+  };
+  const historicalBinding = {
+    ...currentBinding,
+    correlation_id: 'mounted-historical-task-correlation',
+    generation: 1,
+  };
+  globalThis.window.sessionStorage.setItem(
+    `jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`,
+    JSON.stringify({
+      contract_version: 'live-voice.product-p3-task-target.v1',
+      session_id: sessionId,
+      correlation_id: currentBinding.correlation_id,
+      task_id: 'task-current',
+      task_control_binding: currentBinding,
+    }),
+  );
+  const calls = [];
+  let failHistoricalEvents = true;
+  let issuedCorrelation = null;
+  let renderer;
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.task.status') {
+      if (params.task_id === 'task-current') {
+        return mountedP3Status(currentBinding, {
+          taskId: 'task-current',
+          state: 'terminal',
+          outcome: 'cancelled',
+          eventHead: 2,
+        });
+      }
+      assert.equal(params.task_id, 'task-a');
+      return mountedP3Status(historicalBinding, {
+        attemptId: 'attempt-b',
+        attemptNumber: 2,
+        state: 'terminal',
+        outcome: 'completed',
+        eventHead: 5,
+      });
+    }
+    if (method === 'live_voice.task.events') {
+      if (params.task_id === 'task-current') {
+        return mountedP3Events(currentBinding, { taskId: 'task-current', terminalA: true });
+      }
+      assert.equal(params.task_id, 'task-a');
+      if (failHistoricalEvents) throw new Error('injected historical events failure');
+      return mountedP3Events(historicalBinding, { terminalB: true });
+    }
+    if (method === 'live_voice.composition.p3.confirmation.issue') {
+      issuedCorrelation = params.correlation_id;
+      return {
+        ok: true,
+        result: {
+          status: 'confirmation_issued',
+          operation: params.operation,
+          command_id: params.command_id,
+          target_task_id: params.task_id,
+          confirmation_id: `confirmation-${params.command_id}`,
+          expires_at: '2999-08-10T10:00:00Z',
+          task_control_binding: historicalBinding,
+        },
+      };
+    }
+    throw new Error(`unexpected switched-task P3 request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, sessionId, request));
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'switched-task P3 controls did not mount');
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry',
+        'persisted current task did not recover its exact non-1 generation leaf',
+      );
+      await waitForMounted(
+        () =>
+          renderer.root
+            .findByProps({ 'data-testid': 'live-voice-integrated-p3-activation' })
+            .findAllByType('code')
+            .some(node => node.children.some(child => child === 'p3:active')),
+        'current task progress owner did not settle before target switch',
+      );
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.cancel' } });
+      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'task.cancel did not become selectable');
+    });
+
+    await act(async () => {
+      mountedP3Controls(renderer)
+        .root.findByType('input')
+        .props.onChange({ target: { value: 'task-a' } });
+      await waitForMounted(
+        () =>
+          mountedP3Controls(renderer).root.findByType('input').props.value === 'task-a' &&
+          mountedP3Controls(renderer).button('Check retry eligibility').props.disabled === false,
+        'historical task inspection did not become available',
+      );
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => JSON.stringify(renderer.toJSON()).includes('PRODUCT_P3_RETRY_INSPECTION_FAILED'),
+        'failed historical candidate did not publish its stable inspection failure',
+      );
+    });
+    const retainedTarget = JSON.parse(
+      globalThis.window.sessionStorage.getItem(`jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`),
+    );
+    assert.equal(retainedTarget.task_id, 'task-current');
+    assert.equal(retainedTarget.correlation_id, currentBinding.correlation_id);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
+
+    failHistoricalEvents = false;
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry' && JSON.stringify(renderer.toJSON()).includes('eligible:2/3'),
+        'historical task with a different correlation did not replace the current leaf',
+      );
+    });
+    assert.equal(JSON.stringify(renderer.toJSON()).includes('PRODUCT_P3_RETRY_INSPECTION_FAILED'), false);
+    assert.equal(calls.filter(call => call.method === 'live_voice.task.status' && call.params.task_id === 'task-a').length, 4);
+    assert.ok(calls.some(call => call.method === 'live_voice.task.status' && call.params.task_id === 'task-current'));
+    assert.deepEqual(
+      calls.filter(call => call.method === 'live_voice.task.events').map(call => call.params.task_id),
+      ['task-current', 'task-a', 'task-a'],
+    );
+
+    await act(async () => {
+      mountedP3Controls(renderer).button('Issue confirmation').props.onClick();
+      await waitForMounted(() => mountedP3Controls(renderer).hasButton('Execute confirmed mutation'), 'historical task confirmation did not settle');
+    });
+    assert.equal(issuedCorrelation, historicalBinding.correlation_id);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
+  } finally {
+    if (renderer) {
+      await act(async () => {
+        renderer.unmount();
+        await Promise.resolve();
+      });
+    }
+    browser.restore();
+  }
+});
+
+test('mounted P3 lets only the current historical-task inspection publish after a deferred predecessor', async () => {
+  const i18n = await createI18n();
+  const browser = installP1BrowserEnvironment();
+  const activateP2 = createMountedP2ActivationResponder();
+  const sessionId = 'mounted-task-switch-generation-session';
+  const commonBinding = {
+    subject_id: 'mounted-task-switch-generation-subject',
+    session_id: sessionId,
+    project_id: 'mounted-task-switch-generation-project',
+  };
+  const bindings = {
+    'task-b': { ...commonBinding, correlation_id: 'mounted-task-b-correlation', generation: 5 },
+    'task-c': { ...commonBinding, correlation_id: 'mounted-task-c-correlation', generation: 9 },
+  };
+  const calls = [];
+  let releaseTaskBStatus = null;
+  let renderer;
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.task.status') {
+      const taskId = params.task_id;
+      assert.ok(taskId === 'task-b' || taskId === 'task-c');
+      if (taskId === 'task-b') {
+        return new Promise(resolve => {
+          releaseTaskBStatus = () =>
+            resolve(
+              mountedP3Status(bindings[taskId], {
+                taskId,
+                attemptId: 'attempt-b',
+                attemptNumber: 2,
+                state: 'terminal',
+                outcome: 'completed',
+                eventHead: 5,
+              }),
+            );
+        });
+      }
+      return mountedP3Status(bindings[taskId], {
+        taskId,
+        attemptId: 'attempt-b',
+        attemptNumber: 2,
+        state: 'terminal',
+        outcome: 'completed',
+        eventHead: 5,
+      });
+    }
+    if (method === 'live_voice.task.events') {
+      assert.equal(params.task_id, 'task-c');
+      return mountedP3Events(bindings['task-c'], { taskId: 'task-c', terminalB: true });
+    }
+    throw new Error(`unexpected overlapping switched-task request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(mountedP3Element(i18n, sessionId, request));
+      await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'overlapping task-switch controls did not mount');
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.cancel' } });
+      await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.cancel', 'task.cancel did not become selectable');
+      mountedP3Controls(renderer)
+        .root.findByType('input')
+        .props.onChange({ target: { value: 'task-b' } });
+      await waitForMounted(() => mountedP3Controls(renderer).root.findByType('input').props.value === 'task-b', 'task-b did not become the target');
+    });
+    await act(async () => {
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(() => typeof releaseTaskBStatus === 'function', 'task-b inspection did not reach deferred status');
+    });
+
+    await act(async () => {
+      mountedP3Controls(renderer)
+        .root.findByType('input')
+        .props.onChange({ target: { value: 'task-c' } });
+      await waitForMounted(() => mountedP3Controls(renderer).root.findByType('input').props.value === 'task-c', 'task-c did not supersede task-b input');
+      mountedP3Controls(renderer).button('Check retry eligibility').props.onClick();
+      await waitForMounted(
+        () => mountedP3Controls(renderer).select.props.value === 'task.retry' && JSON.stringify(renderer.toJSON()).includes('eligible:2/3'),
+        'task-c did not win the overlapping inspection generation',
+      );
+    });
+    releaseTaskBStatus();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    assert.deepEqual(
+      calls.filter(call => call.method === 'live_voice.task.events').map(call => call.params.task_id),
+      ['task-c'],
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.confirmation.issue').length, 0);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.mutate').length, 0);
+    const retainedTarget = JSON.parse(
+      globalThis.window.sessionStorage.getItem(`jiuwenswarm.live_voice.product_p3_task_target.v1:${encodeURIComponent(sessionId)}`),
+    );
+    assert.equal(retainedTarget.task_id, 'task-c');
+    assert.equal(retainedTarget.correlation_id, bindings['task-c'].correlation_id);
+    assert.equal(retainedTarget.task_control_binding.generation, 1);
   } finally {
     if (renderer) {
       await act(async () => {
