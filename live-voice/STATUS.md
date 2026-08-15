@@ -150,7 +150,7 @@
   same-origin fixed media path and non-legacy route. The diagnostic capture was
   exited without committing speech. Final runtime preparation must preserve
   and verify this authoritative data-root Origin binding. No product source
-  change was needed; S7-04 remains `REFREEZE REQUIRED`.
+  change was needed.
 - Final candidate assembly then advanced to exact clean source candidate
   `2b8f19146cb1c0d979c602afb3a8f445d71cbd4d`. A fresh isolated private runtime
   passed HTTPS/WSS, real Agent, formal Speech/Media, Task/Executor, fault,
@@ -166,8 +166,25 @@
   the public worker-terminal snapshot with a one-second test oracle before
   retrying retained root cleanup; product timeouts and source behavior are
   unchanged. The complete affected file passes 27/27 with Ruff, format and diff
-  checks clean. This test repair still requires affected Tier-3 review, a local
-  commit and a complete exact-new-HEAD S7 run; no current handoff is frozen.
+  checks clean. The repair received affected Tier-3 `APPROVE` and was committed
+  as exact `5ee3cb29748f93db437574e4e9256628e09a9892`. A fresh exact-`5ee3cb29`
+  full runner then exited zero: backend Alpha passed 1,663 tests with two skips,
+  related regressions passed 789 tests, Integrated Web passed 335/335, the
+  production build completed 4,640 modules, and the exact 40 automatic checks
+  plus five real probes returned `PASS` / `VERIFY` with `5 / 2 / 65 / 3 / 19`
+  samples and zero failures or forbidden effects. The post-run candidate was
+  clean. This current-authority documentation commit changes the exact Git
+  identity once more, so it must receive one final exact-current-HEAD runner,
+  cumulative review and external handoff without another tracked edit.
+
+- Current closure is deliberately external and fail closed rather than claimed
+  in advance. The external report must validate the exact current clean HEAD,
+  runtime digest, 40 automatic `PASS` and five real `VERIFY`; the
+  `live-voice.s7-a3-handoff.v1` must bind that exact report/runtime and separately
+  record S7-03 `PASS` plus S7-04 `FROZEN_FOR_A3`. If any binding is absent or
+  fails, S7-03 is still in progress, S7-04 is `REFREEZE REQUIRED`, and S8 remains
+  blocked. This rule remains authoritative after an external-only freeze and
+  does not require a post-freeze Git edit.
 
 The active execution contract is the
 [S5-S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), the completed S7
@@ -181,15 +198,14 @@ and the detailed result is
 | Task | Status | Current fact |
 |---|---|---|
 | S7-01 selective port and candidate freeze | `SATISFIED` | The S7-owned runner, five probes, tests, documentation and frontend script registrations were selectively adapted from `d2727f20`; broad formatting, stale D113 and stale Streaming Speech copies were dropped. The repaired product source is `c209e4a6`. |
-| S7-02 automation | `SATISFIED` | The readiness candidate and exact documentation handoff each receive all 40 automatic checks. The source-candidate run completed backend Alpha 1,635 passed / 2 skipped, related regressions 788 passed, 27 frontend commands 847/847 passed and production build 4,640 modules; exact Ruff debt, format/compile, diff/link/hygiene and post-run identity passed. The ignored build froze 180 files / 16,275,167 bytes and private 443 served all 180 exact contents. |
-| S7-02 real path | `SATISFIED` | All five probes returned `VERIFY` on one private-only HTTPS/WSS runtime declaration: Speech/Media 5 samples, Agent/Executor 2, Benchmark/Fault 65, Secure Deployment 3 and Privacy 19; failures and forbidden side effects were zero. Speech/Media p50 was 18,188.395 ms and p95/max 19,001.572 ms. |
-| S7-03 cumulative Tier-3 review | `SATISFIED` | Cumulative main review and independent read-only review found no open Critical/High/P2 source issue. The S8 readiness boundary closed strict topology/port, S7 report, Task Store/Direct settlement, trace, human-observer and ignored-build/served-content findings; independent exact-`e58df618` verification passed 112 tests. |
-| S7-04 A3 handoff freeze | `REFREEZE REQUIRED` | Exact `50070050` was frozen and admitted S8. The current lifecycle repairs change source, so that handoff is now historical and a final exact-clean-HEAD report/handoff must be regenerated after provisional discovery. No public deployment or real-user project is permitted. |
+| S7-02 automation | `EXTERNAL CURRENT-HEAD CONDITION` | Exact `5ee3cb29` passed backend Alpha 1,663 / 2 skipped, related regressions 789, Integrated Web 335/335, production build 4,640 modules, exact Ruff debt, format/compile, diff/link/hygiene and post-run identity. Any later documentation-only HEAD receives credit only through a new exact-current report satisfying the closure rule above. |
+| S7-02 real path | `EXTERNAL CURRENT-HEAD CONDITION` | Exact `5ee3cb29` returned all five `VERIFY` results on one private HTTPS/WSS runtime: Speech/Media 5, Agent/Executor 2, Benchmark/Fault 65, Secure Deployment 3 and Privacy 19, with zero failures or forbidden effects. A later HEAD receives credit only when the external report binds those results to it. |
+| S7-03 cumulative Tier-3 review | `EXTERNAL CURRENT-HEAD CONDITION` | Source/test reviews through `5ee3cb29` found no open Critical/High/P2 source or test issue; its stale STATUS wording is repaired by this current-authority change. The exact current candidate is `PASS` only when its cumulative independent disposition and bound external handoff satisfy the closure rule above; otherwise review remains in progress. |
+| S7-04 A3 handoff freeze | `EXTERNAL CURRENT-HEAD CONDITION` | Exact `50070050` is historical. The current state is `FROZEN_FOR_A3` only when the external handoff validates the exact current clean HEAD and every closure field above; otherwise it is `REFREEZE REQUIRED` and S8 is blocked. No public deployment or real-user project is permitted. |
 
-The table records the last closed S7 line. The current source-repair tree
-supersedes that candidate for further product work and therefore returns S7-04
-to `REFREEZE REQUIRED` until the final batched S8 findings are repaired and the
-complete S7 verification/handoff is regenerated.
+The table preserves historical closure while making the external exact-current
+binding the sole authority for the new candidate. Provisional S8 discovery is
+never relabeled as formal evidence.
 
 ## S7 accepted limitations
 
@@ -224,18 +240,16 @@ complete S7 verification/handoff is regenerated.
 
 ## Next actions
 
-1. Complete affected Tier-3 review of the deterministic Observability cleanup
-   test, commit the coherent test/status repair, and update the private runtime
-   binding to that exact clean HEAD.
-2. Run the complete S7 runner, five real probes and cumulative Tier-3 review on
-   the new exact candidate; generate and validate the external
-   `FROZEN_FOR_A3` handoff only after all 40 automatic checks and five real
-   probes pass together.
-3. Run a fresh exact-candidate S8 entry audit and all automated acceptance with
+1. If the external report/handoff does not validate the exact current clean
+   HEAD, run the complete S7 runner, five real probes and cumulative Tier-3
+   review, then generate and validate `FROZEN_FOR_A3` without another tracked
+   edit. If that exact external freeze already validates, do not repeat S7.
+2. Only after that exact-current freeze, run a fresh S8 entry audit and all
+   automated acceptance with
    Chrome, Computer Use, sanitized logs and Store/Executor inspection. Record
    and batch-fix any new non-blocking finding; provisional diagnostic events are
    never relabeled as formal proof.
-4. When only physical audio/device and final human judgment remain,
+3. When only physical audio/device and final human judgment remain,
    hand the remaining physical product journey to the user for the final
    `PASS`, `PARTIAL`, `BLOCKED` or `FAIL` decision under
    [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md).
