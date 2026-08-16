@@ -77,6 +77,9 @@ _NO_PROJECTION_EVENTS = frozenset(
         "attempt.running",
         "attempt.terminal",
         "task.cancel_requested",
+        "task.adjust_requested",
+        "task.adjust_applied",
+        "task.adjust_rejected",
     }
 )
 _TASK_EVENT_PRODUCERS = {
@@ -460,9 +463,10 @@ def _evidence_id(
             else {"seq": event.seq, "event_id": event.event_id}
         ),
     }
-    return _PROGRESS_EVENT_PREFIX + hashlib.sha256(
-        canonical_json_bytes(identity)
-    ).hexdigest()
+    return (
+        _PROGRESS_EVENT_PREFIX
+        + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
+    )
 
 
 def project_task_progress_event(

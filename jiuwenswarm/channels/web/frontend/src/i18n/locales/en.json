@@ -2140,9 +2140,13 @@
     "streamingRevisionFallback": "The final response was revised. Preview speech stopped; use the text on screen.",
     "streamingFinalTimeout": "No final response confirmation arrived. Preview stopped; retry or use the text on screen.",
     "transcriptPlaceholder": "Your speech will appear here",
+    "retryListening": "Listen again",
     "formal": {
       "routeLabel": "P1 · Gateway Speech · formal",
       "editorLabel": "Recognized speech",
+      "recoveryFailed": "Voice connection recovery failed",
+      "taskTitle": "Background task",
+      "taskState": "Current state: {{state}}",
       "status": {
         "idle": "Ready for formal speech",
         "starting": "Starting microphone",

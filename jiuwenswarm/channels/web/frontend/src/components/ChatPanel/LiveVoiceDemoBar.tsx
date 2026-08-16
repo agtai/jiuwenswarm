@@ -53,6 +53,7 @@ export interface LiveVoiceDemoBarProps {
   onEnable: () => void;
   onExit: () => void;
   onPrimaryAction: () => void;
+  onRetryListening?: () => void;
 }
 
 function VoiceStatusIcon({ status }: { status: LiveVoiceVisualState }) {
@@ -276,6 +277,7 @@ export function LiveVoiceDemoBar({
   onEnable,
   onExit,
   onPrimaryAction,
+  onRetryListening,
 }: LiveVoiceDemoBarProps) {
   const { t } = useTranslation();
   const unavailableHintId = useId();
@@ -314,8 +316,8 @@ export function LiveVoiceDemoBar({
   const interim = interimTranscript.trim();
   const committed = committedTranscript.trim();
   const visibleError = errorMessage.trim() || (!available ? resolvedUnavailableMessage : '');
-  const transcript = interim || committed || visibleError || t('liveVoice.transcriptPlaceholder');
-  const transcriptKind = visibleError ? 'error' : interim ? 'interim' : committed ? 'committed' : 'placeholder';
+  const transcript = interim || committed || t('liveVoice.transcriptPlaceholder');
+  const transcriptKind = interim ? 'interim' : committed ? 'committed' : 'placeholder';
   const statusLabel = statusLabelOverride || t(`liveVoice.status.${status}`);
   const primaryActionLabel = primaryActionLabelOverride || t(`liveVoice.actions.${status}`);
   const hasTaskPanel = Boolean(taskSafetyDisclosure || taskActivity);
@@ -360,11 +362,17 @@ export function LiveVoiceDemoBar({
         ) : (
           <div
             className={`live-voice-demo__transcript live-voice-demo__transcript--${transcriptKind}`}
-            aria-live={visibleError ? undefined : 'off'}
-            role={visibleError ? 'alert' : undefined}
+            aria-live="off"
             title={transcript}
           >
             {transcript}
+          </div>
+        )}
+
+        {visibleError && (
+          <div className="live-voice-demo__error" role="alert" aria-live="assertive">
+            <AlertCircle size={15} strokeWidth={2} aria-hidden="true" />
+            <span>{visibleError}</span>
           </div>
         )}
 
@@ -385,6 +393,12 @@ export function LiveVoiceDemoBar({
                 <PrimaryActionIcon status={status} />
               </span>
               <span className="live-voice-demo__primary-label">{primaryActionLabel}</span>
+            </button>
+          )}
+          {handsFree && visibleError && onRetryListening && (
+            <button type="button" className="live-voice-demo__primary" onClick={onRetryListening}>
+              <Mic size={17} strokeWidth={2} aria-hidden="true" />
+              <span className="live-voice-demo__primary-label">{t('liveVoice.retryListening')}</span>
             </button>
           )}
           <button type="button" className="live-voice-demo__exit" aria-label={t('liveVoice.exit')} title={t('liveVoice.exit')} onClick={onExit}>

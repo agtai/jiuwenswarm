@@ -1108,6 +1108,7 @@ class IdentityRegistry:
 _COMMAND_TARGETS: Final = MappingProxyType(
     {
         "task.create": IdentityKind.TASK,
+        "task.adjust": IdentityKind.TASK,
         "task.retry": IdentityKind.TASK,
         CancelScope.PLAYBACK_STOP.value: IdentityKind.RESPONSE,
         CancelScope.RESPONSE_CANCEL.value: IdentityKind.RESPONSE,
@@ -1223,6 +1224,18 @@ def _command_payload(command_type: str, value: object) -> _FrozenObject:
             raise _violation(
                 "TASK_RETRY_ATTEMPT_NUMBER_INVALID",
                 "task.retry attempt_number must be 2 or 3",
+            )
+    elif command_type == "task.adjust":
+        _require_exact_keys(
+            data,
+            required={"adjustment"},
+            field_name="command.payload",
+        )
+        adjustment = _required_text(data["adjustment"], "command.payload.adjustment")
+        if "\x00" in adjustment or len(adjustment.encode("utf-8")) > 4_096:
+            raise _violation(
+                "INVALID_TASK_ADJUSTMENT",
+                "task.adjust payload exceeds its closed content bound",
             )
     return _freeze_object(data, "command.payload")
 

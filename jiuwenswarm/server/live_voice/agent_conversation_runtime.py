@@ -489,6 +489,7 @@ class _ResponseOutputState:
     channel_id: str
     handle: HarnessRoundHandle | None
     unit_contents: dict[str, bytes]
+    source_provenance: str = "server.agent"
     total_utf8: int = 0
     usable_finals: int = 0
     terminal_outcome: TerminalOutcome | None = None
@@ -1219,10 +1220,10 @@ class AgentConversationRuntime:
         text: str,
         channel_id: str,
         response_generation: int | None = None,
-        before_publish: Callable[
-            [AuthoritativePresentationHandle], Awaitable[None]
-        ]
+        before_publish: Callable[[AuthoritativePresentationHandle], Awaitable[None]]
         | None = None,
+        _persist_user_history: bool = True,
+        _source_provenance: str = "server.authoritative",
     ) -> AuthoritativePresentationHandle:
         """Publish bounded server truth through the normal presentation owner."""
 
@@ -1301,6 +1302,7 @@ class AgentConversationRuntime:
                     == commit.canonical_bytes()
                     and prior_output.channel_id == channel_id
                     and prior_output.handle is None
+                    and prior_output.source_provenance == _source_provenance
                     and prior_output.terminal_outcome is TerminalOutcome.COMPLETED
                     and tuple(prior_output.unit_contents.values()) == (content,)
                     and len(prior_units) == 1
@@ -1357,6 +1359,7 @@ class AgentConversationRuntime:
                     channel_id=channel_id,
                     handle=None,
                     unit_contents={unit.unit_id: content},
+                    source_provenance=_source_provenance,
                     total_utf8=len(content),
                     usable_finals=1,
                     terminal_outcome=TerminalOutcome.COMPLETED,
@@ -1380,7 +1383,7 @@ class AgentConversationRuntime:
                     commit_id=commit.commit_id,
                     seq=0,
                     event_type="chat.final",
-                    source_provenance="server.authoritative",
+                    source_provenance=_source_provenance,
                     text=text,
                 )
                 self._publish(
@@ -1400,17 +1403,57 @@ class AgentConversationRuntime:
                     outcome=TerminalOutcome.COMPLETED,
                 )
                 self._commits[commit.turn_id] = commit
-                history_task = asyncio.create_task(
-                    self._persist_user_history(commit, channel_id),
-                    name=f"live-voice-authoritative-user-history:{request_id}",
-                )
-                self._history_tasks.add(history_task)
-                history_task.add_done_callback(self._history_tasks.discard)
+                if _persist_user_history:
+                    history_task = asyncio.create_task(
+                        self._persist_user_history(commit, channel_id),
+                        name=f"live-voice-authoritative-user-history:{request_id}",
+                    )
+                    self._history_tasks.add(history_task)
+                    history_task.add_done_callback(self._history_tasks.discard)
                 return presentation_handle
             except BaseException:
                 if response_ref is None:
                     self._release_product_identity(claim)
                 raise
+
+    def task_notification_foreground_safe(self) -> bool:
+        """Report whether a new Task notification response may be allocated.
+
+        Browser capture safety is owned by the Web P1 queue.  This CR-side fact
+        only prevents a TaskEvent from superseding a generating response or an
+        enqueued presentation that has not reached its ACK checkpoint.
+        """
+
+        if self._shutdown is not None:
+            return False
+        snapshot = self._cr.snapshot()
+        conversations = snapshot.conversation
+        interactions = tuple(
+            item
+            for item in conversations.interactions
+            if item.state is InteractionState.OPEN
+        )
+        if not interactions:
+            return False
+        responses = tuple(
+            item
+            for item in conversations.responses
+            if item.ref.interaction_id
+            in {entry.interaction_id for entry in interactions}
+        )
+        if not responses:
+            return True
+        current = max(
+            responses,
+            key=lambda item: (item.ref.response_generation, item.ref.response_id),
+        )
+        if current.state is not ResponseState.TERMINAL:
+            return False
+        return not any(
+            record.unit.ref == current.ref
+            and record.state is PresentationState.ENQUEUED
+            for record in snapshot.presentation.records
+        )
 
     async def accept_task_progress_notification(
         self,

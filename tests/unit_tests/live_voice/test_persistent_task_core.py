@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenswarm.common.schema import live_voice_contract_v2 as contract_v2
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     Assurance,
@@ -195,17 +194,18 @@ def _adjust(
     request_id: str = "request-adjust",
 ) -> tuple[CommandEnvelope, TaskAuthorizationGrant]:
     base = _cancel(task_id)
+    payload = base.envelope.to_dict()
+    payload.update(
+        {
+            "request_id": request_id,
+            "command_id": command_id,
+            "command_type": "task.adjust",
+            "required_capabilities": ["task.adjust"],
+            "payload": {"adjustment": adjustment},
+        }
+    )
     return (
-        replace(
-            base.envelope,
-            request_id=request_id,
-            command_id=command_id,
-            command_type="task.adjust",
-            required_capabilities=("task.adjust",),
-            _payload=contract_v2._freeze_object(  # noqa: SLF001
-                {"adjustment": adjustment}, "command.payload"
-            ),
-        ),
+        CommandEnvelope.from_dict(payload),
         _grant("task.adjust", command_id=command_id, target=task_id),
     )
 

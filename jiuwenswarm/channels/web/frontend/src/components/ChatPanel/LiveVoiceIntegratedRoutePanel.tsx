@@ -120,6 +120,8 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   task_progress_task_id: string | null;
   task_progress_state: string | null;
   task_progress_delivery_mode: ProductTextProgressEvent['delivery_mode'] | null;
+  terminal_notification: string | null;
+  adjustment_notification: string | null;
   task_controls_locked: boolean;
 }>;
 
@@ -546,6 +548,8 @@ export type ProductP2NotificationDisposition =
       readonly unit_id: string;
       readonly ack: ProductPresentationAckInput;
       readonly replayed: boolean;
+      readonly task_notification: boolean;
+      readonly adjustment_notification: boolean;
     };
 
 function recordValue(value: unknown): Record<string, unknown> | null {
@@ -861,6 +865,8 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
       },
       unit_id: unit.unit_id,
       replayed: hasPresentedOutput,
+      task_notification: event.source_provenance === 'server.task_notification',
+      adjustment_notification: event.source_provenance === 'server.background.adjustment',
       ack: {
         response_id: response.response_id,
         response_generation: response.response_generation as number,
@@ -988,6 +994,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   });
   const [productInput, setProductInput] = useState('');
   const [productOutput, setProductOutput] = useState<string | null>(null);
+  const [terminalNotification, setTerminalNotification] = useState<string | null>(null);
+  const [adjustmentNotification, setAdjustmentNotification] = useState<string | null>(null);
   const [productTextStatus, setProductTextStatus] = useState<'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'>('idle');
   const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
   const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
@@ -1039,6 +1047,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const createdProgressTaskId = createdProgressRoute?.task_id ?? null;
   const createdProgressCorrelationId = createdProgressRoute?.correlation_id ?? null;
   const createdProgressOrigin = createdProgressRoute?.origin ?? null;
+  const createdProgressRouteRef = useRef<typeof createdProgressRoute>(null);
+  const terminalNotificationTaskIdRef = useRef<string | null>(null);
   const progressTaskTargetRef = useRef<string | null>(null);
   const recoveredP3TaskTargetRef = useRef<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
@@ -1057,6 +1067,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const startP1VoiceHandlerRef = useRef<() => Promise<void>>(async () => undefined);
   const voiceLoopEnabledRef = useRef(false);
   const voiceLoopGenerationRef = useRef(0);
+  const terminalNotificationCheckRequiredRef = useRef(false);
+  terminalNotificationCheckRequiredRef.current = Boolean(
+    createdProgressTaskId !== null &&
+      createdProgressOrigin?.kind === 'voice' &&
+      terminalNotificationTaskIdRef.current !== createdProgressTaskId,
+  );
   const submittedVoiceFinalsRef = useRef(
     new Map<string, Readonly<{ fingerprint: string; operation: Promise<void> }>>(),
   );
@@ -1118,6 +1134,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const productTurnSequenceRef = useRef(0);
   const bargeInSequenceRef = useRef(0);
   const p3MutationSequenceRef = useRef(0);
+  const adoptCreatedProgressRoute = (route: typeof createdProgressRoute) => {
+    const previousTaskId = createdProgressRouteRef.current?.task_id ?? null;
+    const nextTaskId = route?.task_id ?? null;
+    if (nextTaskId !== null && nextTaskId !== previousTaskId) {
+      terminalNotificationTaskIdRef.current = null;
+      setTerminalNotification(null);
+      setAdjustmentNotification(null);
+    }
+    createdProgressRouteRef.current = route;
+    terminalNotificationCheckRequiredRef.current = Boolean(
+      nextTaskId !== null && route?.origin?.kind === 'voice' && terminalNotificationTaskIdRef.current !== nextTaskId,
+    );
+    setCreatedProgressRoute(route);
+  };
   const cancelP3RetryInspection = () => {
     p3RetryInspectionGenerationRef.current += 1;
     p3RetryInspectionAbortRef.current?.abort();
@@ -1238,21 +1268,40 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (disposition.kind === 'failed') {
       setProductTextStatus('failed');
       scheduleProductVoiceLoopCapture();
-      return;
+      return disposition;
     }
-    if (disposition.kind !== 'presentation') return;
+    if (disposition.kind !== 'presentation') {
+      if (terminalNotificationCheckRequiredRef.current) scheduleProductVoiceLoopCapture();
+      return disposition;
+    }
     const pending = pendingPresentationAttemptRef.current;
     if (pending !== null && (pending.owner !== owner || pending.input.response_id !== disposition.response_id)) {
       throw new Error('a previous presentation ACK is still unresolved');
     }
     retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
     setProductOutput(disposition.text);
+    if (disposition.task_notification) {
+      terminalNotificationTaskIdRef.current = createdProgressRouteRef.current?.task_id ?? null;
+      terminalNotificationCheckRequiredRef.current = false;
+      setTerminalNotification(disposition.text);
+    }
+    if (disposition.adjustment_notification) setAdjustmentNotification(disposition.text);
     setProductTextStatus('presented');
-    setPendingPresentationAck(disposition.ack);
     activeVoiceResponseRef.current = disposition.replayed ? null : disposition.response;
+    const retainAck = () => {
+      if (pendingPresentationAttemptRef.current === null) {
+        pendingPresentationAttemptRef.current = {
+          owner,
+          input: {
+            ...disposition.ack,
+            presented_at: new Date().toISOString(),
+          },
+        };
+      }
+      setPendingPresentationAck(disposition.ack);
+    };
     const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null && !disposition.replayed) {
-      const loopGeneration = voiceLoopGenerationRef.current;
       void voiceOwner
         .playAgentText({
           response: disposition.response,
@@ -1263,35 +1312,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
             activeVoiceResponseRef.current = null;
           }
-          if (
-            !voiceLoopEnabledRef.current ||
-            voiceLoopGenerationRef.current !== loopGeneration ||
-            activeSessionRef.current !== owner.snapshot().binding?.session_id
-          ) {
-            return;
-          }
-          if (voiceOwner.status().status === 'capturing') {
-            const binding = currentProductP2Binding();
-            if (binding === null) return;
-            p1VoiceCaptureBindingRef.current = binding;
-            voiceOwner.armEndOfTurn(() => {
-              void stopP1VoiceHandlerRef.current();
-            });
-          } else if (['idle', 'recognized'].includes(voiceOwner.status().status)) {
-            void startP1VoiceHandlerRef.current();
-          }
+          retainAck();
         })
-        .catch(() => undefined);
+        .catch(() => {
+          if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
+          setProductTextStatus('failed');
+          retainAck();
+        });
+    } else {
+      retainAck();
     }
-    if (pending === null) {
-      pendingPresentationAttemptRef.current = {
-        owner,
-        input: {
-          ...disposition.ack,
-          presented_at: new Date().toISOString(),
-        },
-      };
-    }
+    return disposition;
   };
 
   const settleRetainedP2Operations = async (owner: ProductWebP2ActivationOwner) => {
@@ -1649,9 +1680,12 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     voiceDraftBindingRef.current = null;
     p1VoiceCaptureBindingRef.current = null;
     presentedProductResponsesRef.current.clear();
+    terminalNotificationTaskIdRef.current = null;
     setPendingPresentationAck(null);
     setProductInput('');
     setProductOutput(null);
+    setTerminalNotification(null);
+    setAdjustmentNotification(null);
     setProductTextStatus('idle');
   }, [props.activeSessionId]);
 
@@ -2139,10 +2173,25 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const owner = activationOwnerRef.current;
     const binding = p2Activation.binding;
     const journal = p2ActivationJournalRef.current;
-    if (!props.isConnected || p2Activation.status !== 'active' || !binding || !owner || !journal || pendingPresentationAck !== null) return;
+    if (
+      !props.isConnected ||
+      p2Activation.status !== 'active' ||
+      !binding ||
+      !owner ||
+      !journal ||
+      pendingPresentationAck !== null ||
+      activeVoiceResponseRef.current !== null ||
+      ['starting', 'capturing', 'recognizing', 'playing'].includes(p1VoiceStatus)
+    )
+      return;
     let cancelled = false;
     const poll = async () => {
       while (!cancelled && activationOwnerRef.current === owner) {
+        if (
+          activeVoiceResponseRef.current !== null ||
+          ['starting', 'capturing', 'recognizing', 'playing'].includes(p1VoiceOwnerRef.current?.status().status ?? p1VoiceStatus)
+        )
+          return;
         try {
           const outcome = await pollProductP2RouteWithRecovery({
             owner,
@@ -2197,6 +2246,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (cancelled || activationOwnerRef.current !== owner) return;
           adoptProductP2Notification(owner, outcome.notification);
           if (pendingPresentationAttemptRef.current?.owner === owner) return;
+          // A hands-free capture is admitted only after this exact poll has
+          // settled.  Yield after one idle keepalive so the scheduled capture
+          // cannot race a successor long poll or an arriving ASR final.
+          if (voiceLoopEnabledRef.current && terminalNotificationCheckRequiredRef.current) return;
         } catch {
           const retained = activationOwnerRef.current;
           if (
@@ -2231,7 +2284,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return () => {
       cancelled = true;
     };
-  }, [correlationId, p2Activation.binding, p2Activation.status, pendingPresentationAck, props.isConnected]);
+  }, [correlationId, p1VoiceStatus, p2Activation.binding, p2Activation.status, pendingPresentationAck, props.isConnected]);
 
   useEffect(() => {
     const ack = pendingPresentationAck;
@@ -2300,7 +2353,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setP3RetryEligibility(null);
     progressTaskTargetRef.current = null;
     recoveredP3TaskTargetRef.current = null;
-    setCreatedProgressRoute(null);
+    adoptCreatedProgressRoute(null);
     if (!FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION || !props.activeSessionId) {
       p3MutationOwnerRef.current = null;
       return;
@@ -2379,7 +2432,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         formalTaskControlLeafRef.current?.disconnect();
         formalTaskControlLeafRef.current = leaf;
         progressTaskTargetRef.current = recovered.task_id;
-        setCreatedProgressRoute(Object.freeze({ task_id: recovered.task_id, correlation_id: recovered.correlation_id, origin: null }));
+        adoptCreatedProgressRoute(Object.freeze({ task_id: recovered.task_id, correlation_id: recovered.correlation_id, origin: null }));
         setP3TargetTaskId(recovered.task_id);
         const terminalStatus = productP3TerminalStatus(record);
         setP3MutationStatus(terminalStatus ?? 'accepted');
@@ -2719,6 +2772,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingPresentationAttemptRef.current !== null ||
       pendingBargeInRef.current !== null ||
       activationOwnerRef.current?.hasPendingSubmission() ||
+      (terminalNotificationCheckRequiredRef.current && activationOwnerRef.current?.hasPendingNotification()) ||
       activationOwnerRef.current?.hasPendingPresentationAck() ||
       activationOwnerRef.current?.hasPendingBargeIn()
     )
@@ -3247,7 +3301,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           setProgressAck('idle');
         }
         progressTaskTargetRef.current = taskId;
-        setCreatedProgressRoute(Object.freeze({ task_id: taskId, correlation_id: taskControlBinding.correlation_id, origin: input.progress_origin ?? null }));
+        adoptCreatedProgressRoute(Object.freeze({ task_id: taskId, correlation_id: taskControlBinding.correlation_id, origin: input.progress_origin ?? null }));
         setP3TargetTaskId(taskId);
         const terminalStatus = productP3TerminalStatus(selected);
         if (replaceLeaf) {
@@ -3608,7 +3662,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           if (mutation.source === 'voice' && progressOrigin === null) {
             throw new Error('formal voice task.create lost its exact interaction origin');
           }
-          setCreatedProgressRoute(
+          adoptCreatedProgressRoute(
             Object.freeze({
               task_id: createdTaskId,
               correlation_id: taskControlBinding.correlation_id,
@@ -4080,6 +4134,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         task_progress_task_id: progress?.task_id ?? null,
         task_progress_state: progress?.state ?? null,
         task_progress_delivery_mode: progress?.delivery_mode ?? null,
+        terminal_notification: terminalNotification,
+        adjustment_notification: adjustmentNotification,
         task_controls_locked: taskControlsLocked,
       }),
     );
@@ -4102,6 +4158,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     taskIntentOperation,
     taskIntentSnapshot,
     taskIntentTaskId,
+    adjustmentNotification,
+    terminalNotification,
   ]);
 
   useEffect(() => {

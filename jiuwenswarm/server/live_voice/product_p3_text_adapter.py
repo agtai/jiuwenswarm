@@ -55,7 +55,7 @@ from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
 
 _QUERY_OPERATIONS = frozenset({"task.get", "task.list", "task.status", "task.events"})
-_MUTATION_OPERATIONS = frozenset({"task.create", "task.cancel"})
+_MUTATION_OPERATIONS = frozenset({"task.create", "task.adjust", "task.cancel"})
 
 
 class ProductP3TextReason(StrEnum):

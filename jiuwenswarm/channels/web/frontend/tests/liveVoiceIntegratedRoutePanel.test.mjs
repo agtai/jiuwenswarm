@@ -599,6 +599,42 @@ test('P2 notification classification surfaces failures and treats transport keep
   );
   assert.equal(replayedPresentation.kind, 'presentation');
   assert.equal(replayedPresentation.replayed, true);
+  assert.equal(replayedPresentation.task_notification, false);
+  assert.equal(replayedPresentation.adjustment_notification, false);
+  const terminalPresentation = classifyProductP2Notification({
+    kind: 'agent.output',
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-terminal',
+      response_generation: 8,
+    },
+    agent_event: {
+      event_type: 'chat.final',
+      text: 'The background task is complete and its result is ready.',
+      source_provenance: 'server.task_notification',
+    },
+    presentation_unit: { surface: 'text', unit_id: 'unit-terminal', seq: 0 },
+  });
+  assert.equal(terminalPresentation.kind, 'presentation');
+  assert.equal(terminalPresentation.task_notification, true);
+  assert.equal(terminalPresentation.adjustment_notification, false);
+  const adjustmentPresentation = classifyProductP2Notification({
+    kind: 'agent.output',
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-adjustment',
+      response_generation: 9,
+    },
+    agent_event: {
+      event_type: 'chat.final',
+      text: 'The requested change was added to the current task.',
+      source_provenance: 'server.background.adjustment',
+    },
+    presentation_unit: { surface: 'text', unit_id: 'unit-adjustment', seq: 0 },
+  });
+  assert.equal(adjustmentPresentation.kind, 'presentation');
+  assert.equal(adjustmentPresentation.task_notification, false);
+  assert.equal(adjustmentPresentation.adjustment_notification, true);
   assert.deepEqual(
     classifyProductP2Notification({
       kind: 'agent.error',

@@ -195,7 +195,18 @@ Terminal outcome is required and uses `completed`, `failed`, `cancelled`, `inter
 
 Executor attempt transitions are `accepted -> running -> terminal`, with the same terminal outcome vocabulary. An Executor reports events; it does not directly mutate the canonical task. Task Core may project `blocked` or `decision_required` from authoritative Executor/Harness events while an attempt remains live.
 
-P3α operations are `create/get/list/status/cancel/events`. `update`, `provide_input`, `pause`, `resume`, `reprioritize`, arbitrary execution recovery, and side-effect reconciliation are `UNSUPPORTED` until a later contract explicitly adds them.
+P3α operations are `create/get/list/status/cancel/events/adjust`. `task.adjust`
+targets the exact authenticated subject/project/Session current Task while it is
+non-terminal and carries one bounded untrusted instruction. Task Core persists
+the command, `task.adjust_requested` and an adjustment outbox item atomically.
+Only the running Executor may resolve that request at an authoritative safe
+checkpoint; `task.adjust_applied` or `task.adjust_rejected` is then persisted
+before terminal/result projection. A Store-only description/UI change is not an
+applied adjustment. Terminal Tasks and historical results are immutable, and a
+revision requires a distinct explicit create request. `provide_input`, generic
+`update`, `pause`, `resume`, `reprioritize`, arbitrary execution recovery, and
+side-effect reconciliation remain `UNSUPPORTED` until a later contract
+explicitly adds them.
 
 `task.cancel` targets one exact task. A cancel command result says only accepted/replayed/rejected/unknown. The task becomes terminal `cancelled` only from authoritative Executor/Core evidence. Already completed or irreversible side effects are not retroactively cancelled. D0 means a task may outlive voice/session/media disconnect while the application and Executor remain alive; after process restart, Task Core reconciles and reports truth but does not promise attempt resume.
 

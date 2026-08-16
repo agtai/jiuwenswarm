@@ -1268,6 +1268,8 @@ export function ChatPanel({
         previous.task_progress_task_id === next.task_progress_task_id &&
         previous.task_progress_state === next.task_progress_state &&
         previous.task_progress_delivery_mode === next.task_progress_delivery_mode &&
+        previous.terminal_notification === next.terminal_notification &&
+        previous.adjustment_notification === next.adjustment_notification &&
         previous.task_controls_locked === next.task_controls_locked
       ) {
         return previous;
@@ -1304,14 +1306,26 @@ export function ChatPanel({
     }
   }
   const formalStatusLabel = t(`liveVoice.status.${formalVoiceVisualState}`);
+  const formalTaskDetail =
+    productVoiceState?.terminal_notification ??
+    productVoiceState?.adjustment_notification ??
+    (productVoiceState?.task_progress_state ? t('liveVoice.formal.taskState', { state: productVoiceState.task_progress_state }) : null);
+  const formalTaskActivity: LiveVoiceDemoBarProps['taskActivity'] = formalTaskDetail
+    ? {
+        level: formalVoiceVisualState === 'error' ? 'error' : 'info',
+        title: t('liveVoice.formal.taskTitle'),
+        detail: formalTaskDetail,
+      }
+    : null;
   const formalLiveVoiceDemoProps: LiveVoiceDemoBarProps = {
     active: productVoiceActive,
     available: Boolean(productVoiceState?.available),
     status: formalVoiceVisualState,
     interimTranscript: '',
-    committedTranscript: productVoiceState?.input || productVoiceState?.output || '',
-    errorMessage: formalVoiceVisualState === 'error' ? (productVoiceState?.p1_reason ?? '') : '',
+    committedTranscript: productVoiceState?.input || '',
+    errorMessage: formalVoiceVisualState === 'error' ? t('liveVoice.formal.recoveryFailed') : '',
     statusLabel: formalStatusLabel,
+    taskActivity: formalTaskActivity,
     handsFree: true,
     onEnable: () => {
       setProductVoiceActive(true);
@@ -1323,6 +1337,10 @@ export function ChatPanel({
     },
     onPrimaryAction: () => {
       // Hands-free mode has no primary control after the first enable click.
+    },
+    onRetryListening: () => {
+      setProductVoiceActive(true);
+      void productVoiceControlRef.current?.start();
     },
   };
   const liveVoiceDemoProps = formalProductVoiceEnabled ? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps;

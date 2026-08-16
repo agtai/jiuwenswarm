@@ -489,6 +489,88 @@ async def test_voice_task_progress_enters_cr_notification_without_business_or_pr
     await current.close(timeout_seconds=1)
 
 
+@pytest.mark.asyncio
+async def test_task_notification_allocates_current_generation_and_waits_for_ack() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    await current.start()
+    await current.open_interaction("interaction-1")
+
+    dialogue = commit(text="ordinary dialogue")
+    first = await current.present_authoritative_text(
+        request_id="authoritative-request-1",
+        response_id="authoritative-response-1",
+        correlation_id="correlation-authoritative-1",
+        commit=dialogue,
+        text="ordinary answer",
+        channel_id="web",
+    )
+    first_notification = await asyncio.wait_for(current.next_notification(), timeout=1)
+    assert first_notification.presentation_unit is not None
+    assert current.task_notification_foreground_safe() is False
+    first_ack = await current.acknowledge_presentation(
+        PresentationAck(
+            ref=first.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=first_notification.presentation_unit.unit_id,
+            contiguous_cursor=first_notification.presentation_unit.seq,
+            presented_at="2026-08-05T08:00:01Z",
+        )
+    )
+    assert first_ack.accepted is True
+    assert current.task_notification_foreground_safe() is True
+
+    terminal_commit = commit(
+        turn_id="turn-task-notification-1",
+        commit_id="commit-task-notification-1",
+        text="Task notification for task-1",
+    )
+    terminal = await current.present_authoritative_text(
+        request_id="task-notification-event-1",
+        response_id="response-task-notification-event-1",
+        correlation_id="correlation-task-notification-1",
+        commit=terminal_commit,
+        text="The background task is complete and its result is ready.",
+        channel_id="web",
+        _persist_user_history=False,
+        _source_provenance="server.task_notification",
+    )
+    terminal_notification = await asyncio.wait_for(
+        current.next_notification(), timeout=1
+    )
+
+    assert (
+        terminal.response_ref.response_generation
+        > first.response_ref.response_generation
+    )
+    assert terminal_notification.response_ref == terminal.response_ref
+    assert terminal_notification.agent_event is not None
+    assert terminal_notification.agent_event.source_provenance == (
+        "server.task_notification"
+    )
+    await asyncio.sleep(0)
+    assert history.users == [(dialogue, "web")]
+    assert current.task_notification_foreground_safe() is False
+
+    terminal_unit = terminal_notification.presentation_unit
+    assert terminal_unit is not None
+    terminal_ack = await current.acknowledge_presentation(
+        PresentationAck(
+            ref=terminal.response_ref,
+            surface=PresentationSurface.TEXT,
+            unit_id=terminal_unit.unit_id,
+            contiguous_cursor=terminal_unit.seq,
+            presented_at="2026-08-05T08:00:02Z",
+        )
+    )
+    assert terminal_ack.accepted is True
+    assert current.task_notification_foreground_safe() is True
+    await current.close(timeout_seconds=1)
+
+
 async def submit(
     current: AgentConversationRuntime,
     selected: TurnCommit,

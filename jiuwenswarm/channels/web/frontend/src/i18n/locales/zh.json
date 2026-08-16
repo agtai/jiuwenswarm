@@ -2138,9 +2138,13 @@
     "streamingRevisionFallback": "最终回答发生修订，已停止预读，请以页面文字为准",
     "streamingFinalTimeout": "未收到最终回答确认，已停止本轮预读；请重试或以页面文字为准",
     "transcriptPlaceholder": "说话内容会显示在这里",
+    "retryListening": "重新监听",
     "formal": {
       "routeLabel": "P1 · Gateway Speech · 正式路线",
       "editorLabel": "语音识别文本",
+      "recoveryFailed": "语音连接恢复失败",
+      "taskTitle": "后台任务",
+      "taskState": "当前状态：{{state}}",
       "status": {
         "idle": "正式语音已就绪",
         "starting": "正在启动麦克风",

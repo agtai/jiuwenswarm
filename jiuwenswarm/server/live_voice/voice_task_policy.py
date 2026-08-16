@@ -118,7 +118,7 @@ class FormalTaskPolicyAdapter:
     """Fail closed before a formal command/query reaches the Task Core."""
 
     _QUERIES = frozenset({"task.get", "task.list", "task.status", "task.events"})
-    _COMMANDS = frozenset({"task.create", "task.cancel", "task.retry"})
+    _COMMANDS = frozenset({"task.create", "task.adjust", "task.cancel", "task.retry"})
 
     def __init__(self, commits: TurnCommitLedger | None = None) -> None:
         self._commits = commits
@@ -190,8 +190,12 @@ class FormalTaskPolicyAdapter:
                 "natural-language task intent must bind the exact committed content",
                 ErrorCode.PERMISSION_DENIED,
             )
-        if intent.operation == "task.create":
-            if intent.source_start is None and intent.source_end is None:
+        if intent.operation in {"task.create", "task.adjust"}:
+            if (
+                intent.operation == "task.create"
+                and intent.source_start is None
+                and intent.source_end is None
+            ):
                 # Compatibility for the older exact-full-commit voice create
                 # path.  The formal Voice--Task Bridge always supplies a span.
                 matches = intent.instruction == commit.text
@@ -357,12 +361,13 @@ class FormalTaskPolicyAdapter:
         if type(intent.current_task_binding) is not bool or (
             intent.current_task_binding
             and not (
-                intent.source == "voice" and intent.operation == "task.cancel"
+                intent.source == "voice"
+                and intent.operation in {"task.adjust", "task.cancel"}
             )
         ):
             raise FormalTaskViolation(
                 "INVALID_CURRENT_TASK_BINDING",
-                "current-task binding is valid only for voice cancellation",
+                "current-task binding is valid only for a voice current-task mutation",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if intent.source in {"voice", "text"}:
@@ -372,7 +377,10 @@ class FormalTaskPolicyAdapter:
                     "natural-language task intent requires the exact committed turn origin",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            if (intent.source == "text" or intent.operation == "task.cancel") and (
+            if (
+                intent.source == "text"
+                or intent.operation in {"task.adjust", "task.cancel"}
+            ) and (
                 not intent.origin_commit_sha256
                 or type(intent.source_start) is not int
                 or type(intent.source_end) is not int
@@ -453,6 +461,41 @@ class FormalTaskPolicyAdapter:
             }
             target_id = f"create:{intent.command_id}"
             extensions: dict[str, object] = {}
+        elif intent.operation == "task.adjust":
+            if not intent.task_id or not intent.instruction:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_ADJUST_INTENT",
+                    "task.adjust requires one exact Task and bounded adjustment",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            if (
+                intent.context is not None
+                or intent.name is not None
+                or bool(intent.attributes)
+                or intent.after_seq != -1
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_ADJUST_INTENT",
+                    "task.adjust cannot replace Task identity, context or model facts",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            try:
+                adjustment_bytes = intent.instruction.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_ADJUSTMENT",
+                    "task.adjust requires valid Unicode content",
+                    ErrorCode.INVALID_ARGUMENT,
+                ) from exc
+            if "\x00" in intent.instruction or len(adjustment_bytes) > 4_096:
+                raise FormalTaskViolation(
+                    "INVALID_TASK_ADJUSTMENT",
+                    "task.adjust exceeds its closed content bound",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            payload = {"adjustment": intent.instruction}
+            target_id = intent.task_id
+            extensions = {}
         elif intent.operation == "task.retry":
             # Every predecessor fact below is Store-derived by the composition
             # owner.  The external request submits only ``task_id``; this

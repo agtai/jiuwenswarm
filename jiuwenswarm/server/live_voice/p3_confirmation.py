@@ -26,7 +26,9 @@ from .p3_model_resolution import ResolvedP3Model
 
 P3_CONFIRMATION_MAX_TTL = timedelta(minutes=2)
 P3_CONFIRMATION_MAX_CAPACITY = 4_096
-_P3_MUTATION_OPERATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
+_P3_MUTATION_OPERATIONS = frozenset(
+    {"task.create", "task.adjust", "task.cancel", "task.retry"}
+)
 _P3_RETRY_ELIGIBLE_OUTCOMES = frozenset({"cancelled", "completed"})
 
 
@@ -201,6 +203,20 @@ def p3_confirmation_intent_fingerprint(
                 "model_config_version": model.config_version,
             }
         )
+    elif operation == "task.adjust":
+        if (
+            context is not None
+            or target_task_id is None
+            or name is not None
+            or instruction is None
+            or model is not None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_P3_CONFIRMATION",
+                "task.adjust confirmation requires one exact target and adjustment",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        payload["adjustment"] = instruction
     elif operation == "task.retry":
         if (
             context is None
@@ -905,7 +921,7 @@ class BoundedP3ConfirmationOwner:
         if binding.operation not in _P3_MUTATION_OPERATIONS:
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION_OPERATION",
-                "confirmation operation must be task.create, task.cancel or task.retry",
+                "confirmation operation is not a supported P3 mutation",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if binding.operation == "task.create" and binding.target_task_id is not None:
@@ -915,7 +931,7 @@ class BoundedP3ConfirmationOwner:
                 ErrorCode.INVALID_ARGUMENT,
             )
         if (
-            binding.operation in {"task.cancel", "task.retry"}
+            binding.operation in {"task.adjust", "task.cancel", "task.retry"}
             and binding.target_task_id is None
         ):
             raise FormalTaskViolation(

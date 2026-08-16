@@ -717,9 +717,8 @@ class P2ActivationLease:
         text: str,
         channel_id: str = "web",
         response_generation: int | None = None,
-        before_publish: Callable[
-            [AuthoritativePresentationHandle], Awaitable[None]
-        ]
+        source_provenance: str = "server.authoritative",
+        before_publish: Callable[[AuthoritativePresentationHandle], Awaitable[None]]
         | None = None,
     ) -> AuthoritativePresentationHandle:
         """Publish server-owned text through the retained CR presentation path."""
@@ -743,11 +742,62 @@ class P2ActivationLease:
                 channel_id=channel_id,
                 response_generation=response_generation,
                 before_publish=before_publish,
+                _source_provenance=source_provenance,
             )
             if not isinstance(outcome, AuthoritativePresentationHandle):
                 raise _violation(
                     "PRODUCT_AUTHORITATIVE_PRESENTATION_UNAVAILABLE",
                     "retained runtime returned no canonical presentation handle",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
+    async def present_task_notification(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        text: str,
+        channel_id: str = "web",
+    ) -> AuthoritativePresentationHandle:
+        """Present TaskEvent-derived text without inventing user-history input."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            foreground_safe = getattr(
+                self._runtime, "task_notification_foreground_safe", None
+            )
+            if not callable(foreground_safe) or foreground_safe() is not True:
+                raise _violation(
+                    "PRODUCT_TASK_NOTIFICATION_FOREGROUND_BUSY",
+                    "Task notification must wait for the current response presentation",
+                    ErrorCode.UNAVAILABLE,
+                )
+            present = getattr(self._runtime, "present_authoritative_text", None)
+            if not callable(present):
+                raise _violation(
+                    "PRODUCT_TASK_NOTIFICATION_UNAVAILABLE",
+                    "retained runtime has no Task notification presentation owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await present(
+                request_id=request_id,
+                response_id=response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+                text=text,
+                channel_id=channel_id,
+                _persist_user_history=False,
+                _source_provenance="server.task_notification",
+            )
+            if not isinstance(outcome, AuthoritativePresentationHandle):
+                raise _violation(
+                    "PRODUCT_TASK_NOTIFICATION_UNAVAILABLE",
+                    "retained runtime returned no canonical Task notification handle",
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome

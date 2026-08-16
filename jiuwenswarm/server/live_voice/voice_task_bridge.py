@@ -45,6 +45,7 @@ class UnifiedCommittedInputRoute(StrEnum):
 
     DIALOGUE = "dialogue"
     BACKGROUND_CREATE = "background.create"
+    BACKGROUND_UPDATE = "background.update"
     BACKGROUND_QUERY = "background.query"
     BACKGROUND_STATUS = "background.status"
     BACKGROUND_CANCEL = "background.cancel"
@@ -120,7 +121,7 @@ class CommittedTaskIntentResolverPort(Protocol):
 
 @runtime_checkable
 class UnifiedCommittedInputResolverPort(Protocol):
-    """Provider-neutral resolver for the five closed hands-free routes."""
+    """Provider-neutral resolver for the six closed hands-free routes."""
 
     def resolve_unified(
         self,
@@ -332,9 +333,31 @@ class BoundedAlphaTaskIntentResolver:
             re.I,
         ),
     )
+    _UNIFIED_ADJUSTMENT_STATUS = (
+        re.compile(
+            r"^\s*(?:刚才|之前|上次)(?:的)?(?:修改|调整|改动)"
+            r"(?:已经|是否|有)?(?:加进去|加入|应用|生效|处理)(?:了|了吗|没有|没)?\s*[？?。.]?\s*$"
+        ),
+        re.compile(
+            r"^\s*(?:was|has|is)\s+(?:the\s+)?(?:last|latest|previous)\s+"
+            r"(?:change|adjustment|update)(?:\s+been)?\s+(?:applied|added|accepted)\s*[?]?\s*$",
+            re.I,
+        ),
+    )
+    _UNIFIED_NEGATED_UPDATE = (
+        re.compile(
+            r"^\s*(?:不用|不要|别)\s*(?:修改|调整|改动|更改|更新)(?:刚才的|当前的|这个)?"
+            r"(?:后台任务|后台处理|任务|行程)?(?:了|啦|吧)?\s*[。.!！]?\s*$"
+        ),
+        re.compile(
+            r"^\s*(?:do\s+not|don't)\s+(?:change|adjust|modify|update)(?:\s+the)?"
+            r"(?:\s+current)?(?:\s+background)?(?:\s+task|\s+itinerary)?\s*[.!]?\s*$",
+            re.I,
+        ),
+    )
     _UNIFIED_EXPLICIT_CREATE = (
         re.compile(
-            r"^\s*(?:请)?(?:后台帮我|在后台帮我|后台替我|开始后台处理|开始后台执行)"
+            r"^\s*(?:请)?(?:后台帮我|在后台帮我|帮我在后台|后台替我|开始后台处理|开始后台执行)"
             r"(?P<instruction>.+?)\s*[。.!！]?\s*$",
             re.S,
         ),
@@ -346,13 +369,40 @@ class BoundedAlphaTaskIntentResolver:
     )
     _UNIFIED_TRIP_CREATE = (
         re.compile(
-            r"^\s*(?P<instruction>(?:请)?帮我根据.+?制定(?:[一二三四五六七八九十两\d]+)天(?:的)?行程(?:规划)?)"
+            r"^\s*(?P<instruction>(?:请)?(?:帮我)?(?:根据.+?)?(?:制定|规划|安排)(?:一份)?"
+            r"(?:[一二三四五六七八九十两\d]+)天(?:的)?(?:.+?)?(?:行程|旅行计划)(?:规划)?)"
             r"\s*[。.!！]?\s*$",
             re.S,
         ),
         re.compile(
             r"^\s*(?P<instruction>(?:please\s+)?(?:make|plan|create).+?"
-            r"(?:three|3)[-\s]?day\s+(?:trip|itinerary).*)\s*[.!]?\s*$",
+            r"(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)[-\s]?day\s+"
+            r"(?:trip|itinerary).*)\s*[.!]?\s*$",
+            re.I | re.S,
+        ),
+    )
+    _UNIFIED_ITINERARY_FILE_CREATE = (
+        re.compile(
+            r"^\s*(?P<instruction>(?:请)?(?:在后台)?(?:帮我)?(?:生成|创建|写一份|制作)"
+            r"(?:一份)?\s*itinerary\.md(?:\s*行程文件)?(?:，|,|:|：)?\s*.+?)\s*[。.!！]?\s*$",
+            re.I | re.S,
+        ),
+        re.compile(
+            r"^\s*(?P<instruction>(?:please\s+)?(?:generate|create|write)\s+"
+            r"(?:an?\s+)?itinerary\.md(?:\s+file)?\s*[:,-]?\s*.+?)\s*[.!]?\s*$",
+            re.I | re.S,
+        ),
+    )
+    _UNIFIED_UPDATE = (
+        re.compile(
+            r"^\s*(?P<instruction>(?:请)?(?:把|将).+?"
+            r"(?:改成|改为|调整为|更改为|换成|增加|加入|添加|留出|删除|去掉).+?)"
+            r"\s*[。.!！]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            r"^\s*(?P<instruction>(?:please\s+)?(?:change|adjust|modify|update|add|remove)\s+"
+            r"(?:the\s+)?(?:current\s+)?(?:task|itinerary|plan).+?)\s*[.!]?\s*$",
             re.I | re.S,
         ),
     )
@@ -527,7 +577,20 @@ class BoundedAlphaTaskIntentResolver:
                 UnifiedCommittedInputRoute.DIALOGUE,
                 "NEGATED_CANCEL_KEEP_RUNNING",
             )
-        if any(pattern.fullmatch(commit.text) is not None for pattern in self._UNIFIED_CANCEL):
+        if any(
+            pattern.fullmatch(commit.text) is not None
+            for pattern in self._UNIFIED_NEGATED_UPDATE
+        ):
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.DIALOGUE,
+                "NEGATED_UPDATE_KEEP_RUNNING",
+            )
+        if any(
+            pattern.fullmatch(commit.text) is not None
+            for pattern in self._UNIFIED_CANCEL
+        ):
             return self._unified_result(
                 commit,
                 current_task,
@@ -539,7 +602,25 @@ class BoundedAlphaTaskIntentResolver:
                     None if current_task is None else "current_background_task"
                 ),
             )
-        if any(pattern.fullmatch(commit.text) is not None for pattern in self._UNIFIED_STATUS):
+        if any(
+            pattern.fullmatch(commit.text) is not None
+            for pattern in self._UNIFIED_ADJUSTMENT_STATUS
+        ):
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+                "CURRENT_BACKGROUND_ADJUSTMENT_STATUS_RESOLVED",
+                task_id=None if current_task is None else current_task.task_id,
+                source_span=TaskIntentSourceSpan(0, len(commit.text)),
+                target_binding=(
+                    None if current_task is None else "current_background_task"
+                ),
+            )
+        if any(
+            pattern.fullmatch(commit.text) is not None
+            for pattern in self._UNIFIED_STATUS
+        ):
             return self._unified_result(
                 commit,
                 current_task,
@@ -554,6 +635,7 @@ class BoundedAlphaTaskIntentResolver:
         for patterns, name in (
             (self._UNIFIED_EXPLICIT_CREATE, "Background voice task"),
             (self._UNIFIED_TRIP_CREATE, "Three-day itinerary"),
+            (self._UNIFIED_ITINERARY_FILE_CREATE, "Itinerary file"),
         ):
             for pattern in patterns:
                 match = pattern.fullmatch(commit.text)
@@ -581,6 +663,35 @@ class BoundedAlphaTaskIntentResolver:
                     instruction=commit.text[start:end],
                     source_span=TaskIntentSourceSpan(start, end),
                 )
+        for pattern in self._UNIFIED_UPDATE:
+            match = pattern.fullmatch(commit.text)
+            if match is None:
+                continue
+            instruction = match.group("instruction").strip()
+            if len(instruction) > self.max_instruction_chars:
+                return self._unified_result(
+                    commit,
+                    current_task,
+                    UnifiedCommittedInputRoute.DIALOGUE,
+                    "BACKGROUND_ADJUSTMENT_TOO_LARGE",
+                )
+            start, end = match.span("instruction")
+            while start < end and commit.text[start].isspace():
+                start += 1
+            while end > start and commit.text[end - 1].isspace():
+                end -= 1
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
+                "CURRENT_BACKGROUND_UPDATE_RESOLVED",
+                task_id=None if current_task is None else current_task.task_id,
+                instruction=commit.text[start:end],
+                source_span=TaskIntentSourceSpan(start, end),
+                target_binding=(
+                    None if current_task is None else "current_background_task"
+                ),
+            )
         if any(
             pattern.fullmatch(commit.text) is not None
             for pattern in self._UNIFIED_CONTEXT_QUERY
@@ -872,7 +983,7 @@ class VoiceTaskBridge:
         authorized_scope: ScopeRef,
         current_task: CurrentBackgroundTaskContext | None,
     ) -> ResolvedUnifiedCommittedInput:
-        """Resolve and re-prove one of the five closed hands-free routes."""
+        """Resolve and re-prove one of the six closed hands-free routes."""
 
         if not isinstance(commit, TurnCommit) or commit.scope != authorized_scope:
             raise VoiceTaskBridgeViolation(
@@ -900,9 +1011,7 @@ class VoiceTaskBridge:
             or type(result.provider) is not str
             or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", result.provider) is None
             or type(result.implementation_class) is not str
-            or re.fullmatch(
-                r"[A-Za-z0-9._-]{1,128}", result.implementation_class
-            )
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", result.implementation_class)
             is None
             or type(result.reason) is not str
             or re.fullmatch(r"[A-Z0-9_]{1,128}", result.reason) is None
@@ -978,9 +1087,7 @@ class VoiceTaskBridge:
                 or not result.name
                 or not result.instruction
                 or result.source_span is None
-                or commit.text[
-                    result.source_span.start : result.source_span.end
-                ]
+                or commit.text[result.source_span.start : result.source_span.end]
                 != result.instruction
             ):
                 raise VoiceTaskBridgeViolation(
@@ -988,13 +1095,30 @@ class VoiceTaskBridge:
                     "background create must bind one exact instruction span",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
+        elif result.route is UnifiedCommittedInputRoute.BACKGROUND_UPDATE:
+            expected_task_id = None if current_task is None else current_task.task_id
+            expected_binding = (
+                None if current_task is None else "current_background_task"
+            )
+            if (
+                result.task_id != expected_task_id
+                or result.target_binding != expected_binding
+                or result.name is not None
+                or not result.instruction
+                or result.source_span is None
+                or commit.text[result.source_span.start : result.source_span.end]
+                != result.instruction
+            ):
+                raise VoiceTaskBridgeViolation(
+                    "CURRENT_BACKGROUND_TASK_MISMATCH",
+                    "background update changed its Store-derived target or instruction",
+                    ErrorCode.PERMISSION_DENIED,
+                )
         elif result.route in {
             UnifiedCommittedInputRoute.BACKGROUND_STATUS,
             UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
         }:
-            expected_task_id = (
-                None if current_task is None else current_task.task_id
-            )
+            expected_task_id = None if current_task is None else current_task.task_id
             expected_binding = (
                 None if current_task is None else "current_background_task"
             )

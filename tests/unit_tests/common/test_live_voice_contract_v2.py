@@ -1168,6 +1168,39 @@ def test_task_retry_command_and_epoch_event_are_strict_and_bounded() -> None:
     assert zero_effect_tracker.accept(retry_event).status is EventApplyStatus.APPLIED
 
 
+def test_task_adjust_command_has_one_exact_bounded_payload() -> None:
+    fixture = _load("critical_kernel.valid.json")
+    raw = copy.deepcopy(fixture["command"])
+    raw.update(
+        {
+            "request_id": "request-adjust-1",
+            "command_id": "command-adjust-1",
+            "command_type": "task.adjust",
+            "target_ref": {"kind": "task", "id": "task-1"},
+            "required_capabilities": ["task.adjust"],
+            "payload": {"adjustment": "Move dinner to 19:00."},
+        }
+    )
+
+    command = CommandEnvelope.from_dict(raw)
+    assert command.command_type == "task.adjust"
+    assert command.target_ref.kind is IdentityKind.TASK
+    assert command.target_ref.id == "task-1"
+    assert command.payload == {"adjustment": "Move dinner to 19:00."}
+
+    for payload in (
+        {},
+        {"adjustment": ""},
+        {"adjustment": "valid", "task_id": "task-2"},
+        {"adjustment": "contains\x00nul"},
+        {"adjustment": "x" * 4_097},
+    ):
+        rejected = copy.deepcopy(raw)
+        rejected["payload"] = payload
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(rejected)
+
+
 def test_event_gap_reorders_duplicate_and_conflicting_sequence_fail_closed() -> None:
     fixture = _load("critical_kernel.valid.json")
     tracker = EventSequenceTracker()

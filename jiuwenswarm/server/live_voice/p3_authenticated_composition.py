@@ -45,6 +45,7 @@ from .formal_task_models import (
     ResolvedTaskContext,
     TaskAuthorizationGrant,
     TaskResultAvailability,
+    TaskResultRecord,
     TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
     utc_now,
@@ -89,8 +90,8 @@ P3_ROUTE_METHODS: Mapping[str, str] = {
     "live_voice.task.events": "task.events",
     "live_voice.task.result": "task.result",
 }
-P3_MUTATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
-P3_TARGETED_MUTATIONS = frozenset({"task.cancel", "task.retry"})
+P3_MUTATIONS = frozenset({"task.create", "task.adjust", "task.cancel", "task.retry"})
+P3_TARGETED_MUTATIONS = frozenset({"task.adjust", "task.cancel", "task.retry"})
 P3_QUERY_OPERATIONS = frozenset(
     {"task.get", "task.list", "task.status", "task.events", "task.result"}
 )
@@ -1785,6 +1786,45 @@ class P3AuthenticatedComposition:
             if entered:
                 await self._leave_operation()
 
+    async def read_task_notification_facts(
+        self,
+        *,
+        task_id: str,
+        attempt_id: str,
+        scope: ScopeRef,
+    ) -> tuple[
+        PersistentTaskRecord,
+        TaskResultAvailability,
+        TaskResultRecord | None,
+        str,
+    ]:
+        """Read terminal TaskEvent presentation facts without retaining credentials."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            task = await self._run_blocking(
+                self._core.store.get_task,
+                task_id,
+                scope,
+            )
+            if task.attempt_id != attempt_id:
+                raise FormalTaskViolation(
+                    "TASK_NOTIFICATION_ATTEMPT_MISMATCH",
+                    "terminal notification no longer binds the exact Task attempt",
+                    ErrorCode.STALE,
+                )
+            availability, result, reason = await self._run_blocking(
+                self._core.store.task_result,
+                task_id,
+                scope,
+            )
+            return task, availability, result, reason
+        finally:
+            if entered:
+                await self._leave_operation()
+
     async def _verify_confirmation(
         self,
         *,
@@ -1886,7 +1926,7 @@ class P3AuthenticatedComposition:
                 destructive=True,
                 now=now,
             )
-            if operation == "task.cancel":
+            if operation in {"task.adjust", "task.cancel"}:
                 await self._run_blocking(
                     self._require_exact_task_context,
                     authority=authority,
@@ -1939,7 +1979,7 @@ class P3AuthenticatedComposition:
                         commit_id=str(clean["commit_id"]),
                         instruction=str(clean["instruction"]),
                     )
-            elif operation == "task.cancel" and clean["source"] in {
+            elif operation in {"task.adjust", "task.cancel"} and clean["source"] in {
                 "voice",
                 "text",
             }:
@@ -1950,7 +1990,11 @@ class P3AuthenticatedComposition:
                     commit_id=str(clean["commit_id"]),
                     commit_sha256=str(clean["origin_commit_sha256"]),
                     operation=operation,
-                    instruction=None,
+                    instruction=(
+                        str(clean["instruction"])
+                        if operation == "task.adjust"
+                        else None
+                    ),
                     task_id=str(clean["task_id"]),
                     source_start=int(clean["source_start"]),
                     source_end=int(clean["source_end"]),
@@ -2107,13 +2151,22 @@ class P3AuthenticatedComposition:
                     and current_background_session_id != clean.get("session_id")
                 )
                 or (
-                    operation == "task.cancel"
+                    operation in {"task.adjust", "task.cancel"}
                     and trusted_current_task_id is None
                 )
             ):
                 raise FormalTaskViolation(
                     "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN",
                     "trusted Demo policy requires the unified voice current-task route",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            if operation == "task.adjust" and (
+                current_background_session_id != clean.get("session_id")
+                or trusted_current_task_id is None
+            ):
+                raise FormalTaskViolation(
+                    "CURRENT_BACKGROUND_TASK_BINDING_REQUIRED",
+                    "task.adjust requires the exact current background Session and Task",
                     ErrorCode.PERMISSION_DENIED,
                 )
             authority = await self._run_blocking(
@@ -2141,6 +2194,7 @@ class P3AuthenticatedComposition:
                 "task.status",
                 "task.events",
                 "task.result",
+                "task.adjust",
                 "task.cancel",
             }:
                 await self._run_blocking(
@@ -2207,7 +2261,7 @@ class P3AuthenticatedComposition:
             )
             current_task_binding = trusted_current_task_id is not None
             if current_task_binding and (
-                operation != "task.cancel"
+                operation not in {"task.adjust", "task.cancel"}
                 or clean.get("task_id") != trusted_current_task_id
             ):
                 raise FormalTaskViolation(
@@ -2247,9 +2301,8 @@ class P3AuthenticatedComposition:
                     authority.scope,
                     session_id=str(clean["session_id"]),
                 )
-                if (
-                    current_background is None
-                    or current_background.task_id != str(clean["task_id"])
+                if current_background is None or current_background.task_id != str(
+                    clean["task_id"]
                 ):
                     raise FormalTaskViolation(
                         "CURRENT_BACKGROUND_TASK_MISMATCH",
@@ -2352,7 +2405,7 @@ class P3AuthenticatedComposition:
                     now=now,
                     current_background_session_id=(
                         current_background_session_id
-                        if operation == "task.create"
+                        if operation in {"task.create", "task.adjust"}
                         else None
                     ),
                 )
@@ -2498,6 +2551,31 @@ class P3AuthenticatedComposition:
                     }
                 ),
             ),
+            "task.adjust": (
+                frozenset(
+                    {
+                        "auth_token",
+                        "session_id",
+                        "command_id",
+                        "confirmation_id",
+                        "issued_at",
+                        "correlation_id",
+                        "task_id",
+                        "instruction",
+                    }
+                ),
+                frozenset(
+                    {
+                        "source",
+                        "interaction_id",
+                        "turn_id",
+                        "commit_id",
+                        "origin_commit_sha256",
+                        "source_start",
+                        "source_end",
+                    }
+                ),
+            ),
             # ``task.retry`` submits only its target task plus the immutable
             # request facts its product fingerprint binds.  Predecessor,
             # attempt ordinal, outcome, context and readiness stay server-owned.
@@ -2538,10 +2616,10 @@ class P3AuthenticatedComposition:
         }
         required, optional = fields[operation]
         if trusted_demo_policy_bypass:
-            if operation not in {"task.create", "task.cancel"}:
+            if operation not in {"task.create", "task.adjust", "task.cancel"}:
                 raise FormalTaskViolation(
                     "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN",
-                    "trusted Demo policy applies only to create and cancel",
+                    "trusted Demo policy applies only to unified current-task mutations",
                     ErrorCode.PERMISSION_DENIED,
                 )
             required = required - {"confirmation_id"}
@@ -2594,8 +2672,19 @@ class P3AuthenticatedComposition:
             clean["name"] = _required_text(params["name"], "name", maximum=1024)
         if "instruction" in params:
             clean["instruction"] = _required_text(
-                params["instruction"], "instruction", maximum=100_000
+                params["instruction"],
+                "instruction",
+                maximum=(4_096 if operation == "task.adjust" else 100_000),
             )
+            if (
+                operation == "task.adjust"
+                and len(clean["instruction"].encode("utf-8")) > 4_096
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_ADJUSTMENT",
+                    "task.adjust exceeds its closed UTF-8 bound",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
         if "model_intent" in params:
             clean["model_intent"] = _required_text(
                 params["model_intent"], "model_intent", maximum=256
@@ -2622,7 +2711,7 @@ class P3AuthenticatedComposition:
             }
             legacy_voice_create = source == "voice" and operation == "task.create"
             if (
-                operation not in {"task.create", "task.cancel"}
+                operation not in {"task.create", "task.adjust", "task.cancel"}
                 or not origin_fields.issubset(params)
                 or (
                     not legacy_voice_create

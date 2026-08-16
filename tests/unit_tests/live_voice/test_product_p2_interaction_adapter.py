@@ -16,10 +16,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ErrorCode,
     ResponseRef,
     ScopeRef,
+    TurnCommit,
 )
 from jiuwenswarm.server.live_voice.agent_conversation_runtime import (
     AgentConversationShutdownResult,
     AgentConversationShutdownStatus,
+    AuthoritativePresentationHandle,
 )
 from jiuwenswarm.server.live_voice.interaction_engine import (
     InteractionAction,
@@ -118,6 +120,8 @@ class FakeRuntime:
         self.progress_result = progress_result
         self.progress_intents: list[TaskProgressNotificationIntent] = []
         self.progress_responses: list[ResponseRef] = []
+        self.task_notification_safe = True
+        self.presentation_calls: list[dict[str, object]] = []
         self.start_calls = 0
         self.open_calls: list[str] = []
         self.close_calls = 0
@@ -129,6 +133,17 @@ class FakeRuntime:
         self.progress_intents.append(intent)
         self.progress_responses.append(response_ref)
         return self.progress_result
+
+    def task_notification_foreground_safe(self) -> bool:
+        return self.task_notification_safe
+
+    async def present_authoritative_text(self, **kwargs: object):
+        self.presentation_calls.append(dict(kwargs))
+        return AuthoritativePresentationHandle(
+            request_id=str(kwargs["request_id"]),
+            round_id=f"authoritative:{kwargs['request_id']}",
+            response_ref=ResponseRef("interaction-1", str(kwargs["response_id"]), 2),
+        )
 
     def attach_notification_consumer(
         self, *, consumer_id: str, connection_epoch: int
@@ -346,7 +361,9 @@ async def test_authority_succeeds_before_any_factory_or_runtime_effect() -> None
 
 
 @pytest.mark.asyncio
-async def test_voice_task_progress_requires_exact_open_p2_binding_and_cr_acceptance() -> None:
+async def test_voice_task_progress_requires_exact_open_p2_binding_and_cr_acceptance() -> (
+    None
+):
     resolver = RecordingResolver((candidate(),))
     runtime = FakeRuntime()
     result = await adapter_for(resolver, lambda _context, _binding: runtime).activate(
@@ -392,6 +409,71 @@ async def test_voice_task_progress_requires_exact_open_p2_binding_and_cr_accepta
         await result.lease.deliver_task_progress(binding, intent, response)
     assert unavailable.value.reason == "TASK_PROGRESS_VOICE_ORIGIN_UNAVAILABLE"
     assert runtime.progress_intents == [intent, intent]
+
+
+@pytest.mark.asyncio
+async def test_task_notification_waits_for_safe_foreground_and_skips_user_history() -> (
+    None
+):
+    resolver = RecordingResolver((candidate(),))
+    runtime = FakeRuntime()
+    result = await adapter_for(resolver, lambda _context, _binding: runtime).activate(
+        request()
+    )
+    assert result.lease is not None
+    binding = result.lease.binding
+    notification_commit = TurnCommit.from_dict(
+        {
+            "contract_version": "live-voice.contract.v2",
+            "commit_id": "commit-task-notification-1",
+            "turn_id": "turn-task-notification-1",
+            "interaction_id": binding.interaction_id,
+            "text": "Task notification for task-1",
+            "hypothesis_provenance": {
+                "source": "task_event",
+                "event_id": "event-terminal-1",
+            },
+            "scope": binding.scope.to_dict(),
+            "context_refs": [],
+            "committed_at": "2030-01-01T00:00:00Z",
+        }
+    )
+
+    runtime.task_notification_safe = False
+    with pytest.raises(ProductP2AdapterViolation) as busy:
+        await result.lease.present_task_notification(
+            binding,
+            request_id="task-notification-event-terminal-1",
+            response_id="response-task-notification-event-terminal-1",
+            correlation_id=binding.correlation_id,
+            commit=notification_commit,
+            text="The background task is complete and its result is ready.",
+        )
+    assert busy.value.reason == "PRODUCT_TASK_NOTIFICATION_FOREGROUND_BUSY"
+    assert runtime.presentation_calls == []
+
+    runtime.task_notification_safe = True
+    handle = await result.lease.present_task_notification(
+        binding,
+        request_id="task-notification-event-terminal-1",
+        response_id="response-task-notification-event-terminal-1",
+        correlation_id=binding.correlation_id,
+        commit=notification_commit,
+        text="The background task is complete and its result is ready.",
+    )
+    assert handle.response_ref.response_generation == 2
+    assert runtime.presentation_calls == [
+        {
+            "request_id": "task-notification-event-terminal-1",
+            "response_id": "response-task-notification-event-terminal-1",
+            "correlation_id": binding.correlation_id,
+            "commit": notification_commit,
+            "text": "The background task is complete and its result is ready.",
+            "channel_id": "web",
+            "_persist_user_history": False,
+            "_source_provenance": "server.task_notification",
+        }
+    ]
 
 
 @pytest.mark.asyncio

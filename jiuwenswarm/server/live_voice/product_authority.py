@@ -40,6 +40,7 @@ _ROUTING_CLAIM_SOURCES = frozenset({"header", "query", "client_metadata"})
 _P3_OPERATIONS = frozenset(
     {
         "task.create",
+        "task.adjust",
         "task.get",
         "task.list",
         "task.status",
@@ -48,9 +49,16 @@ _P3_OPERATIONS = frozenset(
         "task.events",
     }
 )
-_P3_MUTATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
+_P3_MUTATIONS = frozenset({"task.create", "task.adjust", "task.cancel", "task.retry"})
 _P3_TARGETED_OPERATIONS = frozenset(
-    {"task.get", "task.status", "task.cancel", "task.retry", "task.events"}
+    {
+        "task.get",
+        "task.status",
+        "task.adjust",
+        "task.cancel",
+        "task.retry",
+        "task.events",
+    }
 )
 _P3_TASK_RESOURCE_KIND = "task"
 _EVIDENCE_IDS = frozenset(

@@ -4548,42 +4548,9 @@ class SqliteTaskStore:
                         "outbox command fingerprint is invalid",
                         ErrorCode.PROTOCOL_VIOLATION,
                     )
-                command: CommandEnvelope | None
-                if kind is OutboxKind.ATTEMPT_ADJUST:
-                    required_command_keys = {
-                        "contract_version",
-                        "command_id",
-                        "command_type",
-                        "issued_at",
-                        "scope",
-                        "correlation_id",
-                        "causation_id",
-                        "origin",
-                        "target_ref",
-                        "context_refs",
-                        "required_capabilities",
-                        "payload",
-                        "extensions",
-                    }
-                    if set(command_payload) != required_command_keys:
-                        raise FormalTaskViolation(
-                            "OUTBOX_COMMAND_BINDING_MISMATCH",
-                            "adjustment command fingerprint is not canonical",
-                            ErrorCode.PROTOCOL_VIOLATION,
-                        )
-                    command = None
-                    command_id = command_payload.get("command_id")
-                    command_type = command_payload.get("command_type")
-                    command_scope = ScopeRef.from_dict(command_payload.get("scope"))
-                    command_capabilities = command_payload.get("required_capabilities")
-                else:
-                    command = CommandEnvelope.from_dict(
-                        {"request_id": "task-store-validation", **command_payload}
-                    )
-                    command_id = command.command_id
-                    command_type = command.command_type
-                    command_scope = command.scope
-                    command_capabilities = list(command.required_capabilities)
+                command = CommandEnvelope.from_dict(
+                    {"request_id": "task-store-validation", **command_payload}
+                )
                 result = ResultEnvelope.from_dict(
                     _json_load(row["command_result_json"])
                 )
@@ -4602,10 +4569,10 @@ class SqliteTaskStore:
                 ) or (
                     row["bound_command_type"] != expected_command_type
                     or row["command_scope_key"] != row["task_scope_key"]
-                    or command_id != row["command_id"]
-                    or command_type != expected_command_type
-                    or command_scope != scope
-                    or command_capabilities != [expected_command_type]
+                    or command.command_id != row["command_id"]
+                    or command.command_type != expected_command_type
+                    or command.scope != scope
+                    or tuple(command.required_capabilities) != (expected_command_type,)
                     or not result.ok
                     or result.command_id != row["command_id"]
                 ):
@@ -4619,7 +4586,6 @@ class SqliteTaskStore:
                     kind is OutboxKind.ATTEMPT_DISPATCH
                     and expected_command_type == "task.create"
                 ):
-                    assert command is not None
                     expected_payload = {
                         "name": spec.name,
                         "instruction": spec.instruction,
@@ -4648,7 +4614,6 @@ class SqliteTaskStore:
                     kind is OutboxKind.ATTEMPT_DISPATCH
                     and expected_command_type == "task.retry"
                 ):
-                    assert command is not None
                     TaskRetryProductRequestFingerprint.from_extensions(
                         command.extensions
                     )
@@ -4750,7 +4715,6 @@ class SqliteTaskStore:
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
                 elif kind is OutboxKind.ATTEMPT_CANCEL:
-                    assert command is not None
                     if (
                         command.target_ref.id != row["task_id"]
                         or command.payload
@@ -4777,11 +4741,9 @@ class SqliteTaskStore:
                         )
                 elif kind is OutboxKind.ATTEMPT_ADJUST:
                     assert adjustment is not None
-                    target_ref = command_payload.get("target_ref")
-                    adjustment_payload = command_payload.get("payload")
                     if (
-                        target_ref != {"kind": "task", "id": row["task_id"]}
-                        or adjustment_payload != {"adjustment": adjustment.adjustment}
+                        command.target_ref.id != row["task_id"]
+                        or command.payload != {"adjustment": adjustment.adjustment}
                         or adjustment.adjustment_id != row["command_id"]
                         or type(command_result) is not dict
                         or set(command_result)

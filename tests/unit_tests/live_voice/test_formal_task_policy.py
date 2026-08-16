@@ -308,6 +308,71 @@ def test_unreviewed_task_attribute_is_rejected_before_core(tmp_path: Path) -> No
     assert raised.value.reason == "UNSUPPORTED_FORMAL_TASK_ATTRIBUTE"
 
 
+def test_voice_adjust_maps_exact_current_task_and_committed_span() -> None:
+    text = "Move dinner to 19:00."
+    current_commit = TurnCommit.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "commit_id": "commit-adjust-1",
+            "turn_id": "turn-adjust-1",
+            "interaction_id": "interaction-adjust-1",
+            "text": text,
+            "hypothesis_provenance": {"provider": "test"},
+            "scope": _scope().to_dict(),
+            "context_refs": [],
+            "committed_at": NOW,
+        }
+    )
+    commits = TurnCommitLedger()
+    assert commits.accept(current_commit)
+    intent = FormalTaskPolicyInput(
+        state=InputCommitState.COMMITTED,
+        source="voice",
+        operation="task.adjust",
+        request_id="request-adjust-1",
+        command_id="command-adjust-1",
+        issued_at=NOW,
+        scope=_scope(),
+        correlation_id="correlation-adjust-1",
+        authorization=_grant(
+            "task.adjust", command_id="command-adjust-1", target="task-1"
+        ),
+        interaction_id=current_commit.interaction_id,
+        turn_id=current_commit.turn_id,
+        commit_id=current_commit.commit_id,
+        origin_commit_sha256=hashlib.sha256(
+            current_commit.canonical_bytes()
+        ).hexdigest(),
+        source_start=0,
+        source_end=len(text),
+        task_id="task-1",
+        instruction=text,
+        destructive=True,
+        confirmed=True,
+        confirmation_id="confirm-1",
+        current_task_binding=True,
+    )
+
+    invocation = FormalTaskPolicyAdapter(commits).map(intent)
+    envelope = invocation.envelope
+    assert isinstance(envelope, CommandEnvelope)
+    assert envelope.command_type == "task.adjust"
+    assert envelope.target_ref.id == "task-1"
+    assert envelope.payload == {"adjustment": text}
+    assert envelope.extensions == {}
+    assert invocation.context is None
+
+    for changes, reason in (
+        ({"task_id": "task-2"}, "FORMAL_TASK_AUTHORIZATION_DENIED"),
+        ({"source_end": len(text) - 1}, "TASK_INTENT_SOURCE_SPAN_MISMATCH"),
+        ({"instruction": "different"}, "TASK_INTENT_SOURCE_SPAN_MISMATCH"),
+        ({"context": _context(Path.cwd())}, "INVALID_TASK_ADJUST_INTENT"),
+    ):
+        with pytest.raises(FormalTaskViolation) as rejected:
+            FormalTaskPolicyAdapter(commits).map(replace(intent, **changes))
+        assert rejected.value.reason == reason
+
+
 # --- D-069 bounded task.retry mapping ---------------------------------------
 
 
@@ -492,6 +557,4 @@ def test_product_request_fingerprint_must_be_canonical_sha256() -> None:
     for invalid in ("", "b" * 63, "B" * 64, "g" * 64):
         with pytest.raises(FormalTaskViolation) as raised:
             TaskRetryProductRequestFingerprint(invalid)
-        assert raised.value.reason == (
-            "TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_INVALID"
-        )
+        assert raised.value.reason == ("TASK_RETRY_PRODUCT_REQUEST_FINGERPRINT_INVALID")

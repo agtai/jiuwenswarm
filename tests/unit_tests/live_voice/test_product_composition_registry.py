@@ -44,7 +44,9 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentTaskEvent,
     PersistentTaskRecord,
     ResolvedTaskContext,
+    TaskResultArtifact,
     TaskResultAvailability,
+    TaskResultRecord,
 )
 from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
 from jiuwenswarm.server.live_voice.batch_speech import (
@@ -93,6 +95,7 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     TaskProgressNotificationIntent,
     TaskProgressOriginBinding,
     TaskProgressOriginKind,
+    TaskProgressTextEvent,
     _evidence_id,
     project_task_progress_event,
 )
@@ -560,7 +563,10 @@ class _UnifiedP3Composition(_P3Composition):
         self.result_reason = "TASK_RESULT_NOT_READY"
         self.result_record: dict[str, object] | None = None
         self.create_effects = 0
+        self.adjust_effects = 0
         self._create_commands: set[str] = set()
+        self._adjust_commands: set[str] = set()
+        self.adjustment_events: list[dict[str, object]] = []
         self.known_tasks: dict[str, PersistentTaskRecord] = {}
 
     async def read_current_background_task(
@@ -602,6 +608,50 @@ class _UnifiedP3Composition(_P3Composition):
             )
         return retained
 
+    async def read_task_notification_facts(
+        self,
+        *,
+        task_id: str,
+        attempt_id: str,
+        scope: ScopeRef,
+    ) -> tuple[
+        PersistentTaskRecord,
+        TaskResultAvailability,
+        TaskResultRecord | None,
+        str,
+    ]:
+        task = await self.read_background_task(
+            bearer_token="trusted-token",
+            session_id=scope.session_id or "",
+            task_id=task_id,
+        )
+        if task.attempt_id != attempt_id:
+            raise FormalTaskViolation(
+                "TASK_NOTIFICATION_ATTEMPT_MISMATCH",
+                "terminal notification attempt changed",
+                ErrorCode.STALE,
+            )
+        availability = TaskResultAvailability(self.result_availability)
+        record = None
+        if availability is TaskResultAvailability.AVAILABLE:
+            raw = self.result_record
+            assert raw is not None
+            record = TaskResultRecord(
+                task_id=str(raw["task_id"]),
+                attempt_id=str(raw["attempt_id"]),
+                source_event_id=str(raw["source_event_id"]),
+                result_text=str(raw["result_text"]),
+                artifacts=tuple(
+                    TaskResultArtifact(
+                        relative_path=str(artifact["relative_path"]),
+                        sha256=str(artifact["sha256"]),
+                    )
+                    for artifact in cast(list[dict[str, object]], raw["artifacts"])
+                ),
+                completed_at=str(raw["completed_at"]),
+            )
+        return task, availability, record, self.result_reason
+
     async def handle(
         self,
         *,
@@ -612,7 +662,10 @@ class _UnifiedP3Composition(_P3Composition):
         **policy: object,
     ) -> P3RouteResult:
         self.handle_calls.append((operation, dict(params), dict(policy)))
-        if params.get("auth_token") != "trusted-token" or session_id != SCOPE.session_id:
+        if (
+            params.get("auth_token") != "trusted-token"
+            or session_id != SCOPE.session_id
+        ):
             return P3RouteResult(
                 False,
                 {
@@ -622,9 +675,11 @@ class _UnifiedP3Composition(_P3Composition):
                     "error": {"reason": "FORMAL_TASK_AUTHENTICATION_REQUIRED"},
                 },
             )
-        if operation in {"task.create", "task.cancel"} and not policy.get(
-            "trusted_demo_policy_bypass", False
-        ):
+        if operation in {
+            "task.create",
+            "task.adjust",
+            "task.cancel",
+        } and not policy.get("trusted_demo_policy_bypass", False):
             return P3RouteResult(
                 False,
                 {
@@ -661,6 +716,39 @@ class _UnifiedP3Composition(_P3Composition):
                 "state": self.current.state.value,
                 "accepted": True,
             }
+        elif operation == "task.adjust":
+            assert self.current is not None
+            assert self.current.state is not FormalTaskState.TERMINAL
+            assert params["task_id"] == self.current.task_id
+            command_id = str(params["command_id"])
+            if command_id not in self._adjust_commands:
+                self._adjust_commands.add(command_id)
+                self.adjust_effects += 1
+                self.adjustment_events.append(
+                    {
+                        "event_id": f"event-adjust-requested-{self.adjust_effects}",
+                        "task_id": self.current.task_id,
+                        "attempt_id": self.current.attempt_id,
+                        "scope": SCOPE.to_dict(),
+                        "seq": self.current.event_head + self.adjust_effects,
+                        "event_type": "task.adjust_requested",
+                        "state": self.current.state.value,
+                        "outcome": None,
+                        "producer": "task_core.control",
+                        "source_event_id": None,
+                        "causation_id": command_id,
+                        "correlation_id": self.current.correlation_id,
+                        "occurred_at": NOW,
+                        "details": {"command_id": command_id},
+                    }
+                )
+            result = {
+                "task_id": self.current.task_id,
+                "attempt_id": self.current.attempt_id,
+                "state": "pending",
+                "command_id": command_id,
+                "accepted": True,
+            }
         elif operation == "task.cancel":
             result = {
                 "task_id": params["task_id"],
@@ -682,7 +770,9 @@ class _UnifiedP3Composition(_P3Composition):
                 ),
                 "attempt": {
                     "attempt_id": (
-                        self.current.attempt_id if self.current is not None else "attempt-current-1"
+                        self.current.attempt_id
+                        if self.current is not None
+                        else "attempt-current-1"
                     ),
                     "state": "running",
                 },
@@ -693,6 +783,16 @@ class _UnifiedP3Composition(_P3Composition):
                 "availability": self.result_availability,
                 "reason": self.result_reason,
                 "task_result": self.result_record,
+            }
+        elif operation == "task.events":
+            result = {
+                "task_id": params["task_id"],
+                "events": list(self.adjustment_events),
+                "next_after_seq": (
+                    self.adjustment_events[-1]["seq"]
+                    if self.adjustment_events
+                    else int(params.get("after_seq", -1))
+                ),
             }
         else:
             raise AssertionError(f"unexpected unified P3 operation: {operation}")
@@ -745,7 +845,10 @@ class _StoreBackedUnifiedP3(_UnifiedP3Composition):
                 **policy,
             )
         self.handle_calls.append((operation, dict(params), dict(policy)))
-        if params.get("auth_token") != "trusted-token" or session_id != SCOPE.session_id:
+        if (
+            params.get("auth_token") != "trusted-token"
+            or session_id != SCOPE.session_id
+        ):
             raise AssertionError("itinerary fixture must use its exact authority")
         availability, record, reason = self.store.task_result(
             str(params["task_id"]), SCOPE
@@ -1307,8 +1410,7 @@ def test_demo_policy_bypass_is_backend_configured_and_default_off(
     )
     monkeypatch.setenv(PRODUCT_DEMO_POLICY_BYPASS_ENV, "1")
     assert (
-        ProductCompositionSettings.from_environment().demo_policy_bypass_enabled
-        is True
+        ProductCompositionSettings.from_environment().demo_policy_bypass_enabled is True
     )
 
 
@@ -1620,9 +1722,12 @@ async def test_unified_post_admission_rejection_is_durably_replayed(
     assert composition.handle_calls == []
     assert manager.agent.calls == 0
     with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT status FROM unified_committed_inputs"
-        ).fetchone()[0] == "completed"
+        assert (
+            connection.execute(
+                "SELECT status FROM unified_committed_inputs"
+            ).fetchone()[0]
+            == "completed"
+        )
     await registry.stop()
 
 
@@ -1657,9 +1762,7 @@ async def test_unified_background_intent_fails_closed_when_p3_is_off(
     assert manager.agent.calls == 0
     assert composition.read_current_calls == 0
     assert composition.handle_calls == []
-    await _ack_unified_presentation(
-        registry, sequence=0, stem="p3-off-create"
-    )
+    await _ack_unified_presentation(registry, sequence=0, stem="p3-off-create")
     await _close_unified_route(registry, stem="p3-off-create")
 
 
@@ -1860,9 +1963,7 @@ async def test_unified_presentation_crash_window_recovers_without_duplicate_effe
     )
 
     assert recovered.ok
-    assert recovered.payload["request_id"] == (
-        "request-unified-presentation-recovery"
-    )
+    assert recovered.payload["request_id"] == ("request-unified-presentation-recovery")
     assert composition.create_effects == 1
     assert len(registry._unified_operations) == 0
     assert params["commit_id"] not in registry._critical_input_commit_generations
@@ -2232,10 +2333,7 @@ async def test_cancelled_unified_rpc_settles_inner_effect_and_releases_capacity(
     await asyncio.sleep(0.08)
     release.set()
     for _ in range(1_000):
-        if (
-            not registry._unified_settlement_tasks
-            and not registry._unified_operations
-        ):
+        if not registry._unified_settlement_tasks and not registry._unified_operations:
             break
         await asyncio.sleep(0.001)
 
@@ -2357,7 +2455,9 @@ async def test_agent_checkpoint_failure_rolls_back_then_retries_once_after_resta
         if restarted_snapshot.published_notifications > 0:
             break
         await asyncio.sleep(0)
-    assert restarted_route.activation_lease._runtime.snapshot().published_notifications > 0
+    assert (
+        restarted_route.activation_lease._runtime.snapshot().published_notifications > 0
+    )
     await _close_unified_route(restarted, stem="agent-ambiguous")
 
 
@@ -2392,9 +2492,7 @@ async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
     assert default_p3.handle_calls[0][0] == "task.create"
     assert default_p3.handle_calls[0][2]["trusted_demo_policy_bypass"] is False
     assert default_manager.agent.calls == 0
-    await _ack_unified_presentation(
-        default_registry, sequence=0, stem="default-create"
-    )
+    await _ack_unified_presentation(default_registry, sequence=0, stem="default-create")
     await _close_unified_route(default_registry, stem="default-create")
 
     demo_registry, demo_p3, demo_manager = _unified_registry(
@@ -2486,16 +2584,16 @@ async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_co
     async def gateway_owned_params(*, stem: str, text: str) -> dict[str, object]:
         params = _unified_final_params(stem=stem, text=text)
         params.pop("gateway_voice_claim")
-        params["voice_commit_receipt"] = (
-            await speech.issue_streaming_voice_commit_receipt(
-                operation_id=f"speech-operation-{stem}",
-                capture_id=f"capture-{stem}",
-                capture_generation=1,
-                session_id=SCOPE.session_id or "",
-                correlation_id="correlation-p2",
-                interaction_id="interaction-1",
-                text=text,
-            )
+        params[
+            "voice_commit_receipt"
+        ] = await speech.issue_streaming_voice_commit_receipt(
+            operation_id=f"speech-operation-{stem}",
+            capture_id=f"capture-{stem}",
+            capture_generation=1,
+            session_id=SCOPE.session_id or "",
+            correlation_id="correlation-p2",
+            interaction_id="interaction-1",
+            text=text,
         )
         message = Message(
             id=f"gateway-{stem}",
@@ -2534,7 +2632,9 @@ async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_co
         "\u544a\u8bc9\u6211\u7b2c\u4e8c\u5929\u6700\u65e9\u7684\u56fa\u5b9a\u5b89\u6392\u662f\u4ec0\u4e48\u3002"
     )
     queried = await registry.handle_unified_submit(
-        params=await gateway_owned_params(stem="gateway-demo-query", text=negated_query),
+        params=await gateway_owned_params(
+            stem="gateway-demo-query", text=negated_query
+        ),
         request_id="request-gateway-demo-query",
         session_id=SCOPE.session_id,
         channel_id="web",
@@ -2551,6 +2651,352 @@ async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_co
     )
     await _close_unified_route(registry, stem="gateway-demo")
     await speech.close()
+
+
+@pytest.mark.asyncio
+async def test_unified_update_binds_current_nonterminal_and_only_applied_event_claims_success(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    current = _background_task(tmp_path)
+    composition.current = current
+    composition.known_tasks[current.task_id] = current
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-adjust-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+
+    update_text = "Please change the current itinerary so day two visits West Lake."
+    adjusted = await registry.handle_unified_submit(
+        params=_unified_final_params(stem="adjust-current", text=update_text),
+        request_id="request-adjust-current",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert adjusted.ok
+    sequence = await _ack_unified_presentation(
+        registry, sequence=0, stem="adjust-current"
+    )
+    assert manager.agent.calls == 0
+    assert composition.adjust_effects == 1
+    operation, params, policy = composition.handle_calls[-1]
+    assert operation == "task.adjust"
+    assert params["task_id"] == current.task_id
+    assert params["instruction"] == update_text[:-1]
+    assert policy["current_background_session_id"] == SCOPE.session_id
+    submitted_speech = (
+        history.assistants[-1][0].contents[0].content_utf8.decode("utf-8")
+    )
+    assert "added" in submitted_speech.lower()
+    assert "applied" not in submitted_speech.lower()
+
+    pending = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="adjust-pending",
+            text="Was the latest change applied?",
+        ),
+        request_id="request-adjust-pending",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert pending.ok
+    sequence = await _ack_unified_presentation(
+        registry, sequence=sequence, stem="adjust-pending"
+    )
+    assert (
+        "pending"
+        in history.assistants[-1][0].contents[0].content_utf8.decode("utf-8").lower()
+    )
+
+    requested = composition.adjustment_events[-1]
+    composition.adjustment_events.append(
+        {
+            **requested,
+            "event_id": "event-adjust-applied-1",
+            "seq": int(requested["seq"]) + 1,
+            "event_type": "task.adjust_applied",
+        }
+    )
+    applied = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="adjust-applied",
+            text="Has the latest change been applied?",
+        ),
+        request_id="request-adjust-applied",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert applied.ok
+    await _ack_unified_presentation(registry, sequence=sequence, stem="adjust-applied")
+    assert (
+        "applied"
+        in history.assistants[-1][0].contents[0].content_utf8.decode("utf-8").lower()
+    )
+    assert all(call[0] != "task.cancel" for call in composition.handle_calls)
+    assert composition.current is current
+    await _close_unified_route(registry, stem="adjust-current")
+
+
+@pytest.mark.asyncio
+async def test_unified_update_keeps_terminal_task_immutable_and_requests_revision(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    terminal = _background_task(
+        tmp_path,
+        state=FormalTaskState.TERMINAL,
+        outcome=TerminalOutcome.COMPLETED,
+    )
+    composition.current = terminal
+    composition.known_tasks[terminal.task_id] = terminal
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-terminal-adjust-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+    rejected = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="terminal-adjust",
+            text="Please change the current itinerary so day two visits West Lake.",
+        ),
+        request_id="request-terminal-adjust",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert rejected.ok
+    await _ack_unified_presentation(registry, sequence=0, stem="terminal-adjust")
+    speech = history.assistants[-1][0].contents[0].content_utf8.decode("utf-8")
+    assert "explicitly create a revision task" in speech
+    assert composition.adjust_effects == 0
+    assert composition.handle_calls == []
+    assert manager.agent.calls == 0
+    assert composition.current is terminal
+    await _close_unified_route(registry, stem="terminal-adjust")
+
+
+@pytest.mark.asyncio
+async def test_terminal_notification_claims_completion_only_with_exact_valid_result(
+    tmp_path: Path,
+) -> None:
+    registry, composition, _manager = _unified_registry(tmp_path)
+    terminal = _background_task(
+        tmp_path,
+        state=FormalTaskState.TERMINAL,
+        outcome=TerminalOutcome.COMPLETED,
+    )
+    composition.current = terminal
+    composition.known_tasks[terminal.task_id] = terminal
+
+    def event(outcome: TerminalOutcome) -> PersistentTaskEvent:
+        return PersistentTaskEvent(
+            event_id=f"event-terminal-{outcome.value}",
+            task_id=terminal.task_id,
+            attempt_id=terminal.attempt_id,
+            scope=terminal.scope,
+            seq=terminal.event_head,
+            event_type="task.terminal",
+            state="terminal",
+            outcome=outcome.value,
+            producer="task_core",
+            source_event_id=None,
+            causation_id="attempt-terminal-1",
+            correlation_id=terminal.correlation_id,
+            occurred_at=NOW,
+            details={},
+        )
+
+    no_result = await registry._terminal_notification_text(
+        event(TerminalOutcome.COMPLETED)
+    )
+    assert no_result == "The background task ended, but no valid result is available."
+
+    composition.result_availability = TaskResultAvailability.AVAILABLE.value
+    composition.result_reason = "TASK_RESULT_AVAILABLE"
+    composition.result_record = {
+        "task_id": terminal.task_id,
+        "attempt_id": terminal.attempt_id,
+        "source_event_id": "executor-terminal-1",
+        "result_text": "Itinerary ready.",
+        "artifacts": [{"relative_path": "itinerary.md", "sha256": "a" * 64}],
+        "completed_at": NOW,
+    }
+    completed = await registry._terminal_notification_text(
+        event(TerminalOutcome.COMPLETED)
+    )
+    assert completed == "The background task is complete and its result is ready."
+
+    composition.result_record = {
+        **composition.result_record,
+        "attempt_id": "attempt-foreign",
+    }
+    mismatched = await registry._terminal_notification_text(
+        event(TerminalOutcome.COMPLETED)
+    )
+    assert mismatched == "The background task ended, but no valid result is available."
+    assert (
+        await registry._terminal_notification_text(event(TerminalOutcome.FAILED))
+        == "The background task failed."
+    )
+    assert (
+        await registry._terminal_notification_text(event(TerminalOutcome.CANCELLED))
+        == "The background task was cancelled."
+    )
+    assert (
+        await registry._terminal_notification_text(event(TerminalOutcome.INTERRUPTED))
+        == "The background task was interrupted."
+    )
+
+
+@pytest.mark.asyncio
+async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_replay(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    terminal = _background_task(
+        tmp_path,
+        state=FormalTaskState.TERMINAL,
+        outcome=TerminalOutcome.COMPLETED,
+    )
+    composition.current = terminal
+    composition.known_tasks[terminal.task_id] = terminal
+    composition.result_availability = TaskResultAvailability.AVAILABLE.value
+    composition.result_reason = "TASK_RESULT_AVAILABLE"
+    composition.result_record = {
+        "task_id": terminal.task_id,
+        "attempt_id": terminal.attempt_id,
+        "source_event_id": "executor-terminal-notification-1",
+        "result_text": "Itinerary ready.",
+        "artifacts": [{"relative_path": "itinerary.md", "sha256": "a" * 64}],
+        "completed_at": NOW,
+    }
+    binding = TaskProgressOriginBinding(
+        scope=SCOPE,
+        task_id=terminal.task_id,
+        session_id=SCOPE.session_id or "",
+        project_id=SCOPE.project_id or "",
+        correlation_id=terminal.correlation_id,
+        origin_kind=TaskProgressOriginKind.VOICE,
+        origin_id="interaction-task-create-old",
+        generation_kind="web_task_progress_generation",
+        generation_id="generation-task-create-old",
+        generation=1,
+        source_instance_id="task-core-terminal-notification",
+        progress_producer=ProducerRef(
+            component="task_progress_return",
+            instance_id="task-progress-terminal-notification",
+            authority="adapter",
+        ),
+        progress_adapter="task_progress_return.v1",
+    )
+    task_event = PersistentTaskEvent(
+        event_id="event-terminal-notification-1",
+        task_id=terminal.task_id,
+        attempt_id=terminal.attempt_id,
+        scope=SCOPE,
+        seq=terminal.event_head,
+        event_type="task.terminal",
+        state="terminal",
+        outcome="completed",
+        producer="task_core",
+        source_event_id=None,
+        causation_id="attempt-terminal-notification-1",
+        correlation_id=terminal.correlation_id,
+        occurred_at=NOW,
+        details={},
+    )
+    projection = project_task_progress_event(task_event, binding)
+    pending = TaskProgressTextEvent(
+        origin=binding,
+        task_event=task_event,
+        source_event=projection.source_event,
+        progress_event=projection.progress_event,
+        evidence_id=_evidence_id(binding, task_event),
+    )
+    registry._remember_terminal_notification(pending)
+    await registry._deliver_terminal_notification(pending, retained=None)
+    assert tuple(registry._pending_terminal_notifications) == (task_event.event_id,)
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-terminal-notification-activate",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert activated.ok
+    history = _install_unified_history_writer(registry)
+    polled = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=1),
+        request_id="request-terminal-notification-next-1",
+        session_id=SCOPE.session_id,
+    )
+    assert polled.ok
+    notification = cast(dict[str, object], polled.payload["result"])
+    response = cast(dict[str, object], notification["response"])
+    agent_event = cast(dict[str, object], notification["agent_event"])
+    unit = cast(dict[str, object], notification["presentation_unit"])
+    assert notification["kind"] == "agent.output"
+    assert agent_event["source_provenance"] == "server.task_notification"
+    assert agent_event["text"] == (
+        "The background task is complete and its result is ready."
+    )
+    assert registry._pending_terminal_notifications == {}
+    assert history.users == []
+
+    acknowledged = await registry.handle_p2_presentation_ack(
+        params=_p2_params(
+            response_id=response["response_id"],
+            response_generation=response["response_generation"],
+            surface=unit["surface"],
+            unit_id=unit["unit_id"],
+            contiguous_cursor=unit["seq"],
+            presented_at=NOW,
+        ),
+        request_id="request-terminal-notification-ack-1",
+        session_id=SCOPE.session_id,
+    )
+    assert acknowledged.ok
+    ack_replay = await registry.handle_p2_presentation_ack(
+        params=_p2_params(
+            response_id=response["response_id"],
+            response_generation=response["response_generation"],
+            surface=unit["surface"],
+            unit_id=unit["unit_id"],
+            contiguous_cursor=unit["seq"],
+            presented_at=NOW,
+        ),
+        request_id="request-terminal-notification-ack-1",
+        session_id=SCOPE.session_id,
+    )
+    assert ack_replay.payload == acknowledged.payload
+    await asyncio.sleep(0)
+    assert history.users == []
+    assert len(history.assistants) == 1
+    keepalive = await registry.handle_p2_notification_next(
+        params=_p2_params(notification_sequence=2),
+        request_id="request-terminal-notification-next-2",
+        session_id=SCOPE.session_id,
+    )
+    assert keepalive.ok
+    assert cast(dict, keepalive.payload["result"])["kind"] == "transport.keepalive"
+    assert composition.handle_calls == []
+    assert manager.agent.calls == 0
+    assert composition.current is terminal
+    await _close_unified_route(registry, stem="terminal-notification")
 
 
 @pytest.mark.asyncio
@@ -2592,9 +3038,7 @@ async def test_unified_query_reads_authoritative_result_before_agent_and_never_c
         "attempt_id": composition.current.attempt_id,
         "source_event_id": "executor-event-itinerary-1",
         "result_text": "Day 2 earliest fixed event: museum at 08:30.",
-        "artifacts": [
-            {"relative_path": "itinerary.md", "sha256": "a" * 64}
-        ],
+        "artifacts": [{"relative_path": "itinerary.md", "sha256": "a" * 64}],
         "completed_at": NOW,
     }
     available = await registry.handle_unified_submit(
@@ -2660,8 +3104,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
     assert len(history.assistants) == 1
     assistant_intent = history.assistants[0][0]
     spoken = [
-        content.content_utf8.decode("utf-8")
-        for content in assistant_intent.contents
+        content.content_utf8.decode("utf-8") for content in assistant_intent.contents
     ]
     assert spoken == ["后台任务正在运行，已记录 4 条状态更新。"]
 
@@ -2728,9 +3171,7 @@ async def test_unified_default_cancel_keeps_confirmation_boundary_and_zero_mutat
     assert operation == "task.cancel"
     assert params["task_id"] == original.task_id
     assert policy["trusted_demo_policy_bypass"] is False
-    await _ack_unified_presentation(
-        registry, sequence=0, stem="default-cancel-current"
-    )
+    await _ack_unified_presentation(registry, sequence=0, stem="default-cancel-current")
     await _close_unified_route(registry, stem="default-cancel-current")
 
 
@@ -2768,9 +3209,7 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
     assert operation == "task.cancel"
     assert params["task_id"] == composition.current.task_id
     assert policy["trusted_demo_policy_bypass"] is True
-    await _ack_unified_presentation(
-        registry, sequence=0, stem="cancel-current"
-    )
+    await _ack_unified_presentation(registry, sequence=0, stem="cancel-current")
     await _close_unified_route(registry, stem="cancel-current")
 
 
@@ -2860,7 +3299,9 @@ async def test_unified_cancel_recovery_keeps_its_durable_original_task_target(
     )
 
     assert recovered.ok
-    cancel_calls = [call for call in composition.handle_calls if call[0] == "task.cancel"]
+    cancel_calls = [
+        call for call in composition.handle_calls if call[0] == "task.cancel"
+    ]
     assert len(cancel_calls) == 1
     assert cancel_calls[0][1]["task_id"] == original.task_id
     assert cancel_calls[0][1]["task_id"] != replacement.task_id
@@ -2997,12 +3438,10 @@ async def test_unified_stale_bindings_and_wrong_voice_claim_have_zero_effect(
     )
     stale_session["session_id"] = "session-old"
     cases.append(("request-stale-session", stale_session, "session-old"))
-    wrong_claim = _unified_final_params(
-        stem="wrong-claim", text="后台帮我制定行程。"
+    wrong_claim = _unified_final_params(stem="wrong-claim", text="后台帮我制定行程。")
+    cast(dict[str, object], wrong_claim["gateway_voice_claim"])["text_sha256"] = (
+        "0" * 64
     )
-    cast(dict[str, object], wrong_claim["gateway_voice_claim"])[
-        "text_sha256"
-    ] = "0" * 64
     cases.append(("request-wrong-claim", wrong_claim, SCOPE.session_id))
 
     for request_id, params, session_id in cases:
@@ -3018,9 +3457,12 @@ async def test_unified_stale_bindings_and_wrong_voice_claim_have_zero_effect(
     assert composition.read_current_calls == 0
     assert composition.handle_calls == []
     with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
-        assert connection.execute(
-            "SELECT COUNT(*) FROM unified_committed_inputs"
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM unified_committed_inputs"
+            ).fetchone()[0]
+            == 0
+        )
     await registry.stop()
 
 
@@ -3033,9 +3475,7 @@ def test_unified_task_result_context_is_bounded_and_rejects_unsafe_artifacts() -
                 "attempt_id": "attempt-current-1",
                 "source_event_id": "event-current-1",
                 "result_text": "safe",
-                "artifacts": [
-                    {"relative_path": "../private.txt", "sha256": "a" * 64}
-                ],
+                "artifacts": [{"relative_path": "../private.txt", "sha256": "a" * 64}],
             },
         )
     assert raised.value.reason == "TASK_RESULT_CONTEXT_INVALID"
@@ -3048,9 +3488,7 @@ def test_unified_task_result_context_is_bounded_and_rejects_unsafe_artifacts() -
                 "attempt_id": "attempt-current-1",
                 "source_event_id": "event-current-1",
                 "result_text": "\u0001" * 32_768,
-                "artifacts": [
-                    {"relative_path": "itinerary.md", "sha256": "a" * 64}
-                ],
+                "artifacts": [{"relative_path": "itinerary.md", "sha256": "a" * 64}],
             },
         )
     )
@@ -3193,14 +3631,11 @@ async def test_real_itinerary_fixture_matches_store_agent_answer_and_applied_art
     assert ITINERARY_DAY_TWO_FACT in record.result_text
     assert ITINERARY_DAY_TWO_FACT in itinerary_bytes.decode("utf-8")
     assert [call[0] for call in composition.handle_calls] == ["task.result"]
-    await _ack_unified_presentation(
-        registry, sequence=0, stem="itinerary-day-two"
-    )
+    await _ack_unified_presentation(registry, sequence=0, stem="itinerary-day-two")
     assert len(history.assistants) == 1
     assistant_intent = history.assistants[0][0]
     assert [
-        content.content_utf8.decode("utf-8")
-        for content in assistant_intent.contents
+        content.content_utf8.decode("utf-8") for content in assistant_intent.contents
     ] == [ITINERARY_DAY_TWO_ANSWER]
     await _close_unified_route(registry, stem="itinerary-day-two")
     await adapter.close()
@@ -3284,9 +3719,9 @@ async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_author
         stem="critical-demo-bypass-off",
         text=text,
     )
-    cast(dict[str, object], bypass_params["gateway_voice_claim"])[
-        "critical_policy"
-    ] = "trusted_demo_bypass"
+    cast(dict[str, object], bypass_params["gateway_voice_claim"])["critical_policy"] = (
+        "trusted_demo_bypass"
+    )
     bypass_rejected = await bypass_without_local_authority.handle_p2_submit(
         params=bypass_params,
         request_id="request-critical-demo-bypass-off",

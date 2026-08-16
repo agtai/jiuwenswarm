@@ -108,6 +108,9 @@ _TASK_EVENT_PRODUCERS = {
         {"task_core", "task_core.delivery", "task_core.reconciliation"}
     ),
     "task.cancel_requested": frozenset({"task_core.control"}),
+    "task.adjust_requested": frozenset({"task_core.control"}),
+    "task.adjust_applied": frozenset({"task_core.control"}),
+    "task.adjust_rejected": frozenset({"task_core.control"}),
 }
 _CANONICAL_EVENT_TYPES = frozenset(_TASK_EVENT_PRODUCERS) | frozenset(
     _ATTEMPT_LIFECYCLE_EVENT_STATES
@@ -1193,7 +1196,12 @@ class TaskEventSubscription:
                     expected_task_source = None
                     expected_task_cause = None
                     expected_task_outcome = None
-                elif event.event_type == "task.cancel_requested":
+                elif event.event_type in {
+                    "task.cancel_requested",
+                    "task.adjust_requested",
+                    "task.adjust_applied",
+                    "task.adjust_rejected",
+                }:
                     if event.producer not in _TASK_EVENT_PRODUCERS[event.event_type]:
                         raise _violation(
                             "TASK_EVENT_PRODUCER_MISMATCH",
@@ -1212,6 +1220,38 @@ class TaskEventSubscription:
                             "Task control event disagrees with the canonical task state",
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
+                    if event.event_type.startswith("task.adjust_"):
+                        command_id = event.details.get("command_id")
+                        expected_details = (
+                            {"command_id", "reason"}
+                            if event.event_type == "task.adjust_rejected"
+                            else {"command_id"}
+                        )
+                        reason = event.details.get("reason")
+                        if (
+                            set(event.details) != expected_details
+                            or type(command_id) is not str
+                            or not command_id.strip()
+                            or command_id != event.causation_id
+                            or (
+                                event.event_type == "task.adjust_rejected"
+                                and (
+                                    type(reason) is not str
+                                    or not reason
+                                    or len(reason) > 128
+                                    or any(
+                                        character
+                                        not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                                        for character in reason
+                                    )
+                                )
+                            )
+                        ):
+                            raise _violation(
+                                "TASK_EVENT_ADJUSTMENT_EVIDENCE_MISMATCH",
+                                "task adjustment event has invalid authority evidence",
+                                ErrorCode.PROTOCOL_VIOLATION,
+                            )
                 attempt_lifecycle_state = _ATTEMPT_LIFECYCLE_EVENT_STATES.get(
                     event.event_type
                 )

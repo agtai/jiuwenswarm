@@ -89,7 +89,8 @@
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:
     'meta actions'
-    'transcript actions';
+    'transcript actions'
+    'error actions';
   align-items: center;
   gap: 5px 12px;
   min-height: 64px;
@@ -104,6 +105,7 @@
   grid-template-areas:
     'meta actions'
     'transcript actions'
+    'error actions'
     'task actions';
 }
 
@@ -111,7 +113,8 @@
   grid-template-areas:
     'meta actions'
     'command actions'
-    'transcript actions';
+    'transcript actions'
+    'error actions';
 }
 
 .live-voice-demo--with-command-center.live-voice-demo--with-task .live-voice-demo__panel {
@@ -119,6 +122,7 @@
     'meta actions'
     'command actions'
     'transcript actions'
+    'error actions'
     'task actions';
 }
 
@@ -203,6 +207,17 @@
 
 .live-voice-demo__transcript--error {
   color: var(--color-feedback-danger);
+}
+
+.live-voice-demo__error {
+  grid-area: error;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-feedback-danger);
+  font-size: var(--font-size-xs);
+  line-height: 1.4;
 }
 
 .live-voice-demo__transcript--editor {

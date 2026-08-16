@@ -614,7 +614,15 @@ function mountedP1Element(i18n, sessionId, request, extraProps = {}) {
   );
 }
 
-function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait, isConnected = true, progressSubscribe = undefined) {
+function mountedP3Element(
+  i18n,
+  sessionId,
+  request,
+  p3RetryInspectionWait,
+  isConnected = true,
+  progressSubscribe = undefined,
+  extraProps = {},
+) {
   return React.createElement(
     I18nextProvider,
     { i18n },
@@ -626,6 +634,7 @@ function mountedP3Element(i18n, sessionId, request, p3RetryInspectionWait, isCon
       request,
       p3RetryInspectionWait,
       progressSubscribe,
+      ...extraProps,
     }),
   );
 }
@@ -2606,7 +2615,10 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
     const i18n = await createI18n();
     const browser = installP1BrowserEnvironment();
     const calls = [];
+    const productStates = [];
     let binding = null;
+    let p2Binding = null;
+    let publishP2Notification = null;
     let exactProgressActivation = null;
     let progressListener = null;
     let mutationCount = 0;
@@ -2670,10 +2682,28 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
     const request = async (method, params, options) => {
       calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
       if (method === 'live_voice.composition.p2.activate') {
+        p2Binding = { ...params };
         return { ok: true, result: { status: 'active', ...params, replayed: false } };
       }
       if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
-      if (method === 'live_voice.composition.p2.notification.next') return new Promise(() => {});
+      if (method === 'live_voice.composition.p2.notification.next') {
+        return new Promise(resolve => {
+          publishP2Notification = resolve;
+        });
+      }
+      if (method === 'live_voice.composition.p2.presentation.ack') {
+        return {
+          ok: true,
+          result: {
+            status: 'presentation_acknowledged',
+            ...params,
+            accepted: true,
+            replayed: false,
+            history_records_written: 1,
+            history_pending: false,
+          },
+        };
+      }
       if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
       if (method === 'live_voice.composition.p3.progress.activate') {
         exactProgressActivation = { ...params };
@@ -2741,7 +2771,11 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
 
     try {
       await act(async () => {
-        renderer = create(mountedP3Element(i18n, `mounted-terminal-${outcome}`, request, undefined, true, progressSubscribe));
+        renderer = create(
+          mountedP3Element(i18n, `mounted-terminal-${outcome}`, request, undefined, true, progressSubscribe, {
+            onProductVoiceStateChange: state => productStates.push(state),
+          }),
+        );
         await waitForMounted(() => JSON.stringify(renderer.toJSON()).includes('Formal P3 task control'), 'terminal-progress P3 controls did not mount');
       });
       await act(async () => {
@@ -2791,6 +2825,35 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
       assert.equal(calls.filter(call => call.method === 'live_voice.task.events').length, 1);
       assert.equal(calls.filter(call => call.method === 'live_voice.composition.p3.progress.ack').length, 1);
 
+      const terminalText = `Mounted ${outcome} notification for task-a.`;
+      assert.notEqual(p2Binding, null);
+      assert.equal(typeof publishP2Notification, 'function');
+      await act(async () => {
+        publishP2Notification({
+          ok: true,
+          result: {
+            status: 'notification',
+            ...p2Binding,
+            kind: 'agent.output',
+            response: {
+              interaction_id: p2Binding.interaction_id,
+              response_id: `mounted-terminal-notification-${outcome}`,
+              response_generation: 1,
+            },
+            agent_event: {
+              event_type: 'chat.final',
+              text: terminalText,
+              source_provenance: 'server.task_notification',
+            },
+            presentation_unit: { surface: 'text', unit_id: `mounted-terminal-unit-${outcome}`, seq: 0 },
+          },
+        });
+        await waitForMounted(
+          () => productStates.at(-1)?.terminal_notification === terminalText,
+          'the terminal notification was not associated with task-a',
+        );
+      });
+
       await act(async () => {
         mountedP3Controls(renderer).select.props.onChange({ target: { value: 'task.create' } });
         await waitForMounted(() => mountedP3Controls(renderer).select.props.value === 'task.create', 'second create did not become selectable');
@@ -2808,6 +2871,11 @@ test('mounted P3 origin panel reconciles and ACKs authoritative completed and fa
         renderer.root.findAllByProps({ 'data-testid': 'live-voice-integrated-product-progress' }).length,
         0,
         'a successor task must clear the predecessor progress projection before replay arrives',
+      );
+      assert.equal(
+        productStates.at(-1)?.terminal_notification,
+        null,
+        'a successor task must clear the predecessor terminal notification before capture can resume',
       );
       await act(async () => {
         progressListener(terminalProgress);
@@ -5485,6 +5553,72 @@ test('mounted hands-free bar keeps status transcript and Exit while hiding every
     } finally {
       if (renderer) await act(async () => renderer.unmount());
     }
+  }
+});
+
+test('mounted hands-free error stays separate from transcript, retries listening, and retains task activity after exit', async () => {
+  const i18n = await createI18n('en');
+  let retries = 0;
+  let renderer;
+  const common = {
+    available: true,
+    status: 'error',
+    interimTranscript: '',
+    committedTranscript: 'Move dinner to 19:00.',
+    handsFree: true,
+    onEnable() {},
+    onExit() {},
+    onPrimaryAction() {},
+    onRetryListening() {
+      retries += 1;
+    },
+  };
+  try {
+    await act(async () => {
+      renderer = create(
+        React.createElement(
+          I18nextProvider,
+          { i18n },
+          React.createElement(MountedLiveVoiceDemoBar, {
+            ...common,
+            active: true,
+            errorMessage: 'Voice connection recovery failed.',
+          }),
+        ),
+      );
+    });
+    const transcript = renderer.root.findByProps({
+      className: 'live-voice-demo__transcript live-voice-demo__transcript--committed',
+    });
+    assert.equal(transcript.children[0], 'Move dinner to 19:00.');
+    assert.equal(renderer.root.findByProps({ role: 'alert' }).findByType('span').children[0], 'Voice connection recovery failed.');
+    const retry = renderer.root.findAllByProps({ className: 'live-voice-demo__primary' })[0];
+    assert.equal(retry.findByProps({ className: 'live-voice-demo__primary-label' }).children[0], 'Listen again');
+    await act(async () => retry.props.onClick());
+    assert.equal(retries, 1);
+
+    await act(async () => {
+      renderer.update(
+        React.createElement(
+          I18nextProvider,
+          { i18n },
+          React.createElement(MountedLiveVoiceDemoBar, {
+            ...common,
+            active: false,
+            errorMessage: '',
+            taskActivity: {
+              level: 'success',
+              title: 'Background task',
+              detail: 'The background task is complete and its result is ready.',
+            },
+          }),
+        ),
+      );
+    });
+    assert.equal(renderer.root.findByProps({ className: 'live-voice-demo__task-title' }).children[0], 'Background task');
+    assert.equal(renderer.root.findByProps({ className: 'live-voice-demo__task-detail' }).children[0], 'The background task is complete and its result is ready.');
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
   }
 });
 

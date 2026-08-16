@@ -262,6 +262,9 @@ _NO_PROJECTION_EVENT_TYPES = frozenset(
         "attempt.running",
         "attempt.terminal",
         "task.cancel_requested",
+        "task.adjust_requested",
+        "task.adjust_applied",
+        "task.adjust_rejected",
     }
 )
 _NO_PROJECTION_SOURCE_DOMAIN = b"live-voice.no-projection.source.v1\0"
@@ -1057,7 +1060,12 @@ class ProgressNotificationArbiter:
                 "source event is not in the canonical no-projection set",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
-        if event.event_type == "task.cancel_requested":
+        if event.event_type in {
+            "task.cancel_requested",
+            "task.adjust_requested",
+            "task.adjust_applied",
+            "task.adjust_rejected",
+        }:
             valid_lifecycle = (
                 event.producer == "task_core.control"
                 and event.state
@@ -1065,6 +1073,33 @@ class ProgressNotificationArbiter:
                 and event.outcome is None
                 and event.source_event_id is None
             )
+            if event.event_type.startswith("task.adjust_"):
+                command_id = event.details.get("command_id")
+                expected_details = (
+                    {"command_id", "reason"}
+                    if event.event_type == "task.adjust_rejected"
+                    else {"command_id"}
+                )
+                reason = event.details.get("reason")
+                valid_lifecycle = bool(
+                    valid_lifecycle
+                    and set(event.details) == expected_details
+                    and type(command_id) is str
+                    and bool(command_id.strip())
+                    and command_id == event.causation_id
+                    and (
+                        event.event_type != "task.adjust_rejected"
+                        or (
+                            type(reason) is str
+                            and bool(reason)
+                            and len(reason) <= 128
+                            and all(
+                                character in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                                for character in reason
+                            )
+                        )
+                    )
+                )
         else:
             expected_state = event.event_type.removeprefix("attempt.")
             internal_terminal = event.producer in {

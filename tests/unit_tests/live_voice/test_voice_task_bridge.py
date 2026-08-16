@@ -141,6 +141,26 @@ CURRENT = CurrentBackgroundTaskContext(
             UnifiedCommittedInputRoute.BACKGROUND_CREATE,
         ),
         (
+            "帮我在后台制定一份三天杭州行程。",
+            UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+        ),
+        (
+            "请在后台生成 itinerary.md 行程文件，包含三天杭州安排。",
+            UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+        ),
+        (
+            "把第二天下午改成西湖，晚上给我留出自由时间。",
+            UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
+        ),
+        (
+            "Please change the current itinerary so day two visits West Lake.",
+            UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
+        ),
+        (
+            "刚才的修改加进去了吗？",
+            UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+        ),
+        (
             "第一天晚上给我留出的自由时间是几点？",
             UnifiedCommittedInputRoute.BACKGROUND_QUERY,
         ),
@@ -160,6 +180,7 @@ def test_unified_semantic_routes_cover_closed_protocol(
     if route in {
         UnifiedCommittedInputRoute.BACKGROUND_QUERY,
         UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+        UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
         UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
     }:
         assert resolved.task_id == CURRENT.task_id
@@ -183,6 +204,36 @@ def test_unified_negated_cancel_has_no_cancel_route(
     resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
     assert resolved.route is route
     assert resolved.route is not UnifiedCommittedInputRoute.BACKGROUND_CANCEL
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我介绍杭州。",
+        "杭州有什么特色菜？",
+        "可以改一下吗？",
+        "不要修改当前后台任务。",
+        "Don't change the current background task.",
+    ],
+)
+def test_unified_low_confidence_or_negated_update_has_zero_task_route(
+    text: str,
+) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+    assert resolved.route is UnifiedCommittedInputRoute.DIALOGUE
+    assert resolved.task_id is None
+    assert resolved.instruction is None
+
+
+def test_unified_update_binds_exact_current_task_and_instruction_span() -> None:
+    text = "把第二天下午改成西湖，晚上给我留出自由时间。"
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+    assert resolved.route is UnifiedCommittedInputRoute.BACKGROUND_UPDATE
+    assert resolved.task_id == CURRENT.task_id
+    assert resolved.target_binding == "current_background_task"
+    assert resolved.source_span is not None
+    assert resolved.instruction == text[:-1]
+    assert text[resolved.source_span.start : resolved.source_span.end] == text[:-1]
 
 
 def test_unified_route_identity_is_bound_to_current_task_context() -> None:

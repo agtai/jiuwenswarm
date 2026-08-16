@@ -36,6 +36,9 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentTaskRecord,
     ReconciliationState,
     ResolvedTaskContext,
+    TaskAdjustmentDeliveryResult,
+    TaskAdjustmentSettlement,
+    TaskAdjustmentState,
     utc_now,
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
@@ -166,6 +169,8 @@ class _Executor:
         self.dispatches: list[str] = []
         self.cancels: list[str] = []
         self.statuses: list[str] = []
+        self.adjustments: list[str] = []
+        self.adjustment_settlements: list[tuple[str, TaskAdjustmentState]] = []
         self.readiness: list[tuple[str, str]] = []
         self.retry_ready = True
         self.dispatch_outcome: TerminalOutcome | None = None
@@ -203,6 +208,22 @@ class _Executor:
             f"carrier:{item.attempt_id}",
             _observations(item, outcome=TerminalOutcome.CANCELLED),
         )
+
+    async def adjust(self, item: PersistentOutboxItem) -> TaskAdjustmentDeliveryResult:
+        assert item.adjustment is not None
+        self.adjustments.append(item.adjustment.adjustment_id)
+        return TaskAdjustmentDeliveryResult(
+            f"carrier:{item.attempt_id}",
+            item.adjustment.adjustment_id,
+            TaskAdjustmentState.APPLIED,
+        )
+
+    async def settle_adjustment(
+        self,
+        item: PersistentOutboxItem,
+        settlement: TaskAdjustmentSettlement,
+    ) -> None:
+        self.adjustment_settlements.append((item.command_id, settlement.state))
 
     async def status(
         self,
@@ -375,6 +396,20 @@ def _mutation_params(task_id: str) -> dict[str, object]:
     }
 
 
+def _adjust_params(
+    task_id: str, command_id: str = "command-adjust"
+) -> dict[str, object]:
+    return {
+        **_base(),
+        "command_id": command_id,
+        "confirmation_id": f"forged:{command_id}",
+        "issued_at": NOW,
+        "correlation_id": f"correlation:{command_id}",
+        "task_id": task_id,
+        "instruction": "Change the dinner reservation to 19:00.",
+    }
+
+
 def _issue_confirmation(
     harness: _Harness,
     params: dict[str, object],
@@ -385,7 +420,9 @@ def _issue_confirmation(
     expires_at: str = EXPIRY,
     now: str = NOW,
 ) -> dict[str, object]:
-    target_task_id = str(params["task_id"]) if operation == "task.cancel" else None
+    target_task_id = (
+        str(params["task_id"]) if operation in P3_TARGETED_MUTATIONS else None
+    )
     context = (
         harness.authority.contexts[str(params["session_id"])]
         if operation == "task.create"
@@ -412,7 +449,9 @@ def _issue_confirmation(
             context=context,
             name=(str(params["name"]) if operation == "task.create" else None),
             instruction=(
-                str(params["instruction"]) if operation == "task.create" else None
+                str(params["instruction"])
+                if operation in {"task.create", "task.adjust"}
+                else None
             ),
             model=model,
             source=str(params.get("source", "structured")),
@@ -806,7 +845,10 @@ async def test_trusted_demo_bypass_requires_unified_voice_current_binding(
         assert wrong_binding.payload["error"]["reason"] == (
             "CURRENT_BACKGROUND_TASK_MISMATCH"
         )
-        assert harness.composition._core.store.get_task(task_id, _scope()).cancel_requested is False
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).cancel_requested
+            is False
+        )
 
         cancelled = await harness.composition.handle(
             operation="task.cancel",
@@ -817,7 +859,146 @@ async def test_trusted_demo_bypass_requires_unified_voice_current_binding(
             trusted_current_task_id=task_id,
         )
         assert cancelled.ok is True
-        assert harness.composition._core.store.get_task(task_id, _scope()).cancel_requested is True
+        assert (
+            harness.composition._core.store.get_task(task_id, _scope()).cancel_requested
+            is True
+        )
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_adjust_requires_exact_current_binding_and_reaches_core(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    harness = _harness(tmp_path, commit_ledger=ledger)
+    await harness.composition.start()
+    try:
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=_issued_create_params(harness, "command-create-for-adjust"),
+            request_id="request-create-for-adjust",
+            session_id="session-1",
+            current_background_session_id="session-1",
+        )
+        assert created.ok is True
+        task_id = str(created.payload["result"]["task_id"])
+        await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+        before_rejection = _store_counts(harness.database)
+
+        oversized = _adjust_params(task_id, "command-adjust-oversized")
+        oversized["instruction"] = "好" * 1_366
+        oversized_result = await harness.composition.handle(
+            operation="task.adjust",
+            params=oversized,
+            request_id="request-adjust-oversized",
+            session_id="session-1",
+            current_background_session_id="session-1",
+            trusted_current_task_id=task_id,
+        )
+        assert oversized_result.ok is False
+        assert oversized_result.payload["error"]["reason"] == (
+            "INVALID_TASK_ADJUSTMENT"
+        )
+        assert _store_counts(harness.database) == before_rejection
+
+        def voice_adjust(command_id: str) -> dict[str, object]:
+            params = _adjust_params(task_id, command_id)
+            commit = TurnCommit.from_dict(
+                {
+                    "contract_version": CONTRACT_VERSION,
+                    "commit_id": f"commit:{command_id}",
+                    "turn_id": f"turn:{command_id}",
+                    "interaction_id": "interaction-adjust",
+                    "text": params["instruction"],
+                    "hypothesis_provenance": {
+                        "provider": "product.web.voice",
+                        "kind": "committed_text",
+                    },
+                    "scope": _scope().to_dict(),
+                    "context_refs": [],
+                    "committed_at": NOW,
+                }
+            )
+            assert ledger.accept(commit) is True
+            params.update(
+                source="voice",
+                interaction_id=commit.interaction_id,
+                turn_id=commit.turn_id,
+                commit_id=commit.commit_id,
+                origin_commit_sha256=hashlib.sha256(
+                    commit.canonical_bytes()
+                ).hexdigest(),
+                source_start=0,
+                source_end=len(commit.text),
+            )
+            return _issue_confirmation(harness, params, operation="task.adjust")
+
+        wrong_session_params = voice_adjust("command-adjust-wrong-session")
+        wrong_session = await harness.composition.handle(
+            operation="task.adjust",
+            params=wrong_session_params,
+            request_id="request-adjust-wrong-session",
+            session_id="session-1",
+            current_background_session_id="session-2",
+            trusted_current_task_id=task_id,
+        )
+        assert wrong_session.ok is False
+        assert wrong_session.payload["error"]["reason"] == (
+            "CURRENT_BACKGROUND_TASK_BINDING_REQUIRED"
+        )
+        assert _store_counts(harness.database) == before_rejection
+
+        wrong_task_params = voice_adjust("command-adjust-wrong-task")
+        wrong_task = await harness.composition.handle(
+            operation="task.adjust",
+            params=wrong_task_params,
+            request_id="request-adjust-wrong-task",
+            session_id="session-1",
+            current_background_session_id="session-1",
+            trusted_current_task_id="task-not-current",
+        )
+        assert wrong_task.ok is False
+        assert wrong_task.payload["error"]["reason"] == (
+            "CURRENT_BACKGROUND_TASK_MISMATCH"
+        )
+        assert _store_counts(harness.database) == before_rejection
+
+        exact_params = voice_adjust("command-adjust-exact")
+        exact = await harness.composition.handle(
+            operation="task.adjust",
+            params=exact_params,
+            request_id="request-adjust-exact",
+            session_id="session-1",
+            current_background_session_id="session-1",
+            trusted_current_task_id=task_id,
+        )
+        assert exact.ok is True
+        assert exact.payload["result"]["adjustment_state"] == "pending"
+        await _wait_until(
+            lambda: harness.executor.adjustments == ["command-adjust-exact"]
+        )
+        await _wait_until(
+            lambda: (
+                harness.executor.adjustment_settlements
+                == [("command-adjust-exact", TaskAdjustmentState.APPLIED)]
+            )
+        )
+        adjustment_events = [
+            event
+            for event in harness.composition._core.store.events(
+                task_id, _scope(), after_seq=-1
+            )
+            if event.event_type.startswith("task.adjust_")
+        ]
+        assert [event.event_type for event in adjustment_events] == [
+            "task.adjust_requested",
+            "task.adjust_applied",
+        ]
+        assert all(
+            event.causation_id == "command-adjust-exact" for event in adjustment_events
+        )
     finally:
         await harness.composition.stop()
 

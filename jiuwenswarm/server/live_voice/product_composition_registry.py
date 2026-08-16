@@ -55,9 +55,11 @@ from .critical_token_safety import (
 from .formal_task_models import (
     FormalTaskState,
     FormalTaskViolation,
+    PersistentTaskEvent,
     PersistentTaskRecord,
     ResolvedTaskContext,
     TaskResultArtifact,
+    TaskResultAvailability,
     TerminalOutcome,
     utc_now,
 )
@@ -166,11 +168,10 @@ _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation
 # The only Agent profile whose facade implements the formal Live Voice seam.
 _FORMAL_LIVE_VOICE_AGENT_MODE = "agent"
 _FORMAL_LIVE_VOICE_AGENT_CHANNEL = "live_voice_formal_p2"
-# Complete an otherwise-idle long poll well before the Gateway's 600-second
-# retained-unary ceiling.  The transport keepalive owns no conversation fact or
-# product effect; it only lets the browser advance its exact poll sequence
-# without turning an idle, healthy P2 route into a visible timeout failure.
-_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS = 30.0
+# Keep the notification window short enough that the browser can serialize it
+# ahead of a new microphone capture.  This closes the race where a terminal
+# TaskEvent allocates a response generation during an in-flight ASR final.
+_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS = 1.0
 
 PRODUCT_COMPOSITION_METHODS = frozenset(
     {
@@ -662,6 +663,10 @@ class AgentServerProductCompositionRegistry:
         self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_settlement_tasks: set[asyncio.Task[None]] = set()
+        # Durable truth remains the terminal TaskEvent.  This bounded map only
+        # retains which source facts still need a current P2 activation; it is
+        # neither a second notification protocol nor a completion ledger.
+        self._pending_terminal_notifications: dict[str, TaskProgressTextEvent] = {}
         task_database = p3_composition.task_database_path
         self._unified_journal = unified_journal or (
             None
@@ -1204,6 +1209,160 @@ class AgentServerProductCompositionRegistry:
                 deliveries.pop(delivery_id, None)
             raise RuntimeError("text progress Web sink is unavailable")
         delivery.delivered = True
+        if (
+            event.task_event.event_type == "task.terminal"
+            and target.requested_origin_kind is TaskProgressOriginKind.VOICE
+        ):
+            self._remember_terminal_notification(event)
+
+    def _remember_terminal_notification(self, event: TaskProgressTextEvent) -> None:
+        event_id = event.task_event.event_id
+        if event_id in self._pending_terminal_notifications:
+            return
+        if (
+            len(self._pending_terminal_notifications)
+            >= self._PRODUCT_OPERATION_CAPACITY
+        ):
+            logger.error(
+                "[LiveVoiceProduct] terminal notification capacity is unavailable",
+                extra={"live_voice_event": "task_terminal_notification_deferred"},
+            )
+            return
+        self._pending_terminal_notifications[event_id] = event
+
+    def _current_terminal_notification_route(
+        self, event: TaskProgressTextEvent
+    ) -> _P2Route | None:
+        for (session_id, _interaction_id), retained in reversed(
+            tuple(self._p2_routes.items())
+        ):
+            if (
+                session_id == event.origin.session_id
+                and retained.binding.scope == event.origin.scope
+                and retained.activation_lease.snapshot().state is P2LeaseState.OPEN
+            ):
+                return retained
+        return None
+
+    async def _terminal_notification_text(self, task_event: PersistentTaskEvent) -> str:
+        try:
+            (
+                task,
+                availability,
+                record,
+                _reason,
+            ) = await self._p3_composition.read_task_notification_facts(
+                task_id=task_event.task_id,
+                attempt_id=task_event.attempt_id,
+                scope=task_event.scope,
+            )
+            chinese = self._is_chinese_voice_text(task.spec.instruction)
+        except Exception:
+            chinese = False
+            availability = TaskResultAvailability.UNAVAILABLE
+            record = None
+        outcome = task_event.outcome
+        if outcome == TerminalOutcome.COMPLETED.value:
+            result_valid = bool(
+                availability is TaskResultAvailability.AVAILABLE
+                and record is not None
+                and record.task_id == task_event.task_id
+                and record.attempt_id == task_event.attempt_id
+            )
+            if result_valid:
+                return (
+                    "后台任务已完成，结果已经生成。"
+                    if chinese
+                    else "The background task is complete and its result is ready."
+                )
+            return (
+                "后台任务已经结束，但没有可用的合法结果。"
+                if chinese
+                else "The background task ended, but no valid result is available."
+            )
+        if outcome == TerminalOutcome.CANCELLED.value:
+            return (
+                "后台任务已取消。" if chinese else "The background task was cancelled."
+            )
+        if outcome == TerminalOutcome.FAILED.value:
+            return "后台任务失败了。" if chinese else "The background task failed."
+        if outcome == TerminalOutcome.INTERRUPTED.value:
+            return (
+                "后台任务已中断。"
+                if chinese
+                else "The background task was interrupted."
+            )
+        return (
+            "后台任务已经结束，但终态不可用。"
+            if chinese
+            else "The background task ended with an unavailable terminal state."
+        )
+
+    async def _deliver_terminal_notification(
+        self,
+        event: TaskProgressTextEvent,
+        *,
+        retained: _P2Route | None,
+    ) -> None:
+        if self._stopped:
+            return
+        selected = retained or self._current_terminal_notification_route(event)
+        if (
+            selected is None
+            or selected.binding.session_id != event.origin.session_id
+            or selected.binding.scope != event.origin.scope
+            or selected.activation_lease.snapshot().state is not P2LeaseState.OPEN
+        ):
+            return
+        identity = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "scope": event.origin.scope.to_dict(),
+                    "task_id": event.task_event.task_id,
+                    "attempt_id": event.task_event.attempt_id,
+                    "terminal_event_id": event.task_event.event_id,
+                }
+            )
+        ).hexdigest()
+        text = await self._terminal_notification_text(event.task_event)
+        commit = TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": f"commit-task-notification-{identity[:40]}",
+                "turn_id": f"turn-task-notification-{identity[:40]}",
+                "interaction_id": selected.binding.interaction_id,
+                "text": f"Task notification for {event.task_event.task_id}",
+                "hypothesis_provenance": {
+                    "source": "task_event",
+                    "task_id": event.task_event.task_id,
+                    "event_id": event.task_event.event_id,
+                },
+                "scope": event.origin.scope.to_dict(),
+                "context_refs": [],
+                "committed_at": event.task_event.occurred_at,
+            }
+        )
+        try:
+            await selected.activation_lease.present_task_notification(
+                selected.binding,
+                request_id=f"task-notification-{identity}",
+                response_id=f"response-task-notification-{identity[:40]}",
+                correlation_id=selected.binding.correlation_id,
+                commit=commit,
+                text=text,
+                channel_id="web",
+            )
+        except Exception as exc:
+            logger.info(
+                "[LiveVoiceProduct] terminal notification remains pending",
+                extra={
+                    "live_voice_event": "task_terminal_notification_deferred",
+                    "reason": getattr(exc, "reason", "TASK_NOTIFICATION_UNAVAILABLE"),
+                },
+            )
+            return
+        if self._pending_terminal_notifications.get(event.task_event.event_id) is event:
+            self._pending_terminal_notifications.pop(event.task_event.event_id, None)
 
     async def _emit_voice_progress(
         self, intent: TaskProgressNotificationIntent
@@ -2892,7 +3051,11 @@ class AgentServerProductCompositionRegistry:
             )
         instruction = (
             commit.text[span.start : span.end]
-            if route is UnifiedCommittedInputRoute.BACKGROUND_CREATE
+            if route
+            in {
+                UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+                UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
+            }
             and span is not None
             else None
         )
@@ -3078,6 +3241,7 @@ class AgentServerProductCompositionRegistry:
         commit: TurnCommit,
         text: str,
         channel_id: str,
+        source_provenance: str = "server.authoritative",
     ) -> P3RouteResult:
         journal = self._unified_journal
         if journal is None:
@@ -3115,6 +3279,7 @@ class AgentServerProductCompositionRegistry:
                             handle.response_ref.response_generation
                         ),
                         "text": text,
+                        "source_provenance": source_provenance,
                     },
                 )
 
@@ -3127,6 +3292,7 @@ class AgentServerProductCompositionRegistry:
                 text=text,
                 channel_id=channel_id,
                 before_publish=checkpoint,
+                source_provenance=source_provenance,
             )
             return presentation_result(handle)
 
@@ -3168,6 +3334,9 @@ class AgentServerProductCompositionRegistry:
             else None
         )
         text = recovery.get("text") if isinstance(recovery, Mapping) else None
+        source_provenance = (
+            recovery.get("source_provenance") if isinstance(recovery, Mapping) else None
+        )
         expected_request_id = f"unified-present-{voice_identity[:40]}"
         expected_response_id = f"response-unified-{voice_identity[:32]}"
         if (
@@ -3186,6 +3355,8 @@ class AgentServerProductCompositionRegistry:
             or not text.strip()
             or len(text) > 8_192
             or len(text.encode("utf-8")) > 32_768
+            or source_provenance
+            not in {"server.authoritative", "server.background.adjustment"}
         ):
             raise FormalTaskViolation(
                 "UNIFIED_FOREGROUND_EFFECT_RECOVERY_INVALID",
@@ -3201,6 +3372,7 @@ class AgentServerProductCompositionRegistry:
             text=text,
             channel_id=channel_id,
             response_generation=generation,
+            source_provenance=source_provenance,
         )
         if {
             "interaction_id": handle.response_ref.interaction_id,
@@ -3293,8 +3465,7 @@ class AgentServerProductCompositionRegistry:
         )
         definitive = (
             checkpointed.replay_result
-            if checkpointed is not None
-            and checkpointed.replay_result is not None
+            if checkpointed is not None and checkpointed.replay_result is not None
             else outcome.payload
         )
         payload = await asyncio.to_thread(
@@ -3469,7 +3640,9 @@ class AgentServerProductCompositionRegistry:
 
         chinese = self._is_chinese_voice_text(commit.text)
         unavailable_text = (
-            "后台任务功能当前不可用。" if chinese else "Background tasks are unavailable."
+            "后台任务功能当前不可用。"
+            if chinese
+            else "Background tasks are unavailable."
         )
         if background_authority_unavailable:
             return await self._present_unified_text(
@@ -3493,10 +3666,15 @@ class AgentServerProductCompositionRegistry:
                 text=unavailable_text,
                 channel_id=channel_id,
             )
-        if route in {
-            UnifiedCommittedInputRoute.BACKGROUND_CREATE,
-            UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
-        } and not self._settings.p3_mutation_enabled:
+        if (
+            route
+            in {
+                UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+                UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
+                UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
+            }
+            and not self._settings.p3_mutation_enabled
+        ):
             return await self._present_unified_text(
                 retained=retained,
                 voice_identity=voice_identity,
@@ -3558,8 +3736,7 @@ class AgentServerProductCompositionRegistry:
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE" and chinese
                     else "The current background task is still running."
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE"
-                    else
-                    "需要明确确认后才能开始后台处理。"
+                    else "需要明确确认后才能开始后台处理。"
                     if reason
                     in {
                         "INVALID_P3_ROUTE_ARGUMENT",
@@ -3608,7 +3785,186 @@ class AgentServerProductCompositionRegistry:
             "session_id": retained.binding.session_id,
             "task_id": current.task_id,
         }
+        if route is UnifiedCommittedInputRoute.BACKGROUND_UPDATE:
+            if current.state is FormalTaskState.TERMINAL:
+                return await self._present_unified_text(
+                    retained=retained,
+                    voice_identity=voice_identity,
+                    fingerprint=fingerprint,
+                    request_id=f"unified-present-{voice_identity[:40]}",
+                    response_id=response_id,
+                    commit=commit,
+                    text=(
+                        "当前任务已经结束；如需修改，请明确创建一份修订任务。"
+                        if chinese
+                        else "The current task has ended; explicitly create a revision task to change it."
+                    ),
+                    channel_id=channel_id,
+                )
+            assert resolution.source_span is not None
+            accepted_origin = self._commit_ledger.accept(commit)
+            if accepted_origin is not True:
+                raise FormalTaskViolation(
+                    "TURN_COMMIT_ALREADY_SUBMITTED",
+                    "unified update commit was already submitted",
+                    ErrorCode.CONFLICT,
+                )
+            try:
+                adjusted = await self._p3_composition.handle(
+                    operation="task.adjust",
+                    params={
+                        **common_params,
+                        "command_id": f"unified-adjust-{voice_identity[:48]}",
+                        "issued_at": commit.committed_at,
+                        "correlation_id": retained.binding.correlation_id,
+                        "instruction": resolution.instruction,
+                        "source": "voice",
+                        "interaction_id": commit.interaction_id,
+                        "turn_id": commit.turn_id,
+                        "commit_id": commit.commit_id,
+                        "origin_commit_sha256": resolution.commit_sha256,
+                        "source_start": resolution.source_span.start,
+                        "source_end": resolution.source_span.end,
+                    },
+                    request_id=f"unified-adjust-{voice_identity[:48]}",
+                    session_id=retained.binding.session_id,
+                    trusted_demo_policy_bypass=(
+                        self._settings.demo_policy_bypass_enabled
+                    ),
+                    current_background_session_id=retained.binding.session_id,
+                    trusted_current_task_id=current.task_id,
+                )
+            finally:
+                self._commit_ledger.release_origin(
+                    OriginRef("committed_turn", commit.turn_id, commit.commit_id),
+                    commit.scope,
+                )
+            if adjusted.ok:
+                speech = (
+                    "已将修改加入后台任务。"
+                    if chinese
+                    else "The change was added to the background task."
+                )
+            else:
+                error = adjusted.payload.get("error")
+                reason = error.get("reason") if isinstance(error, Mapping) else None
+                speech = (
+                    "当前任务已经结束；如需修改，请明确创建一份修订任务。"
+                    if reason
+                    in {
+                        "TASK_ADJUST_TERMINAL",
+                        "TASK_ALREADY_TERMINAL",
+                        "CURRENT_BACKGROUND_TASK_TERMINAL",
+                    }
+                    and chinese
+                    else "The current task has ended; explicitly create a revision task to change it."
+                    if reason
+                    in {
+                        "TASK_ADJUST_TERMINAL",
+                        "TASK_ALREADY_TERMINAL",
+                        "CURRENT_BACKGROUND_TASK_TERMINAL",
+                    }
+                    else unavailable_text
+                )
+            return await self._present_unified_text(
+                retained=retained,
+                voice_identity=voice_identity,
+                fingerprint=fingerprint,
+                request_id=f"unified-present-{voice_identity[:40]}",
+                response_id=response_id,
+                commit=commit,
+                text=speech,
+                channel_id=channel_id,
+                source_provenance="server.background.adjustment",
+            )
         if route is UnifiedCommittedInputRoute.BACKGROUND_STATUS:
+            if resolution.reason == "CURRENT_BACKGROUND_ADJUSTMENT_STATUS_RESOLVED":
+                events_response = await self._p3_composition.handle(
+                    operation="task.events",
+                    params={**common_params, "after_seq": -1},
+                    request_id=f"unified-adjust-status-{voice_identity[:40]}",
+                    session_id=retained.binding.session_id,
+                )
+                events_result = events_response.payload.get("result")
+                raw_events = (
+                    events_result.get("events")
+                    if events_response.ok and isinstance(events_result, Mapping)
+                    else None
+                )
+                adjustment_events = tuple(
+                    event
+                    for event in (raw_events if isinstance(raw_events, list) else [])
+                    if isinstance(event, Mapping)
+                    and event.get("event_type")
+                    in {
+                        "task.adjust_requested",
+                        "task.adjust_applied",
+                        "task.adjust_rejected",
+                    }
+                    and type(event.get("seq")) is int
+                    and isinstance(event.get("details"), Mapping)
+                    and type(event["details"].get("command_id")) is str
+                    and event.get("causation_id") == event["details"].get("command_id")
+                )
+                requested = max(
+                    (
+                        event
+                        for event in adjustment_events
+                        if event.get("event_type") == "task.adjust_requested"
+                    ),
+                    key=lambda event: int(event["seq"]),
+                    default=None,
+                )
+                authoritative_state: str | None = None
+                if requested is not None:
+                    command_id = requested["details"].get("command_id")
+                    final = max(
+                        (
+                            event
+                            for event in adjustment_events
+                            if event["details"].get("command_id") == command_id
+                            and event.get("event_type")
+                            in {"task.adjust_applied", "task.adjust_rejected"}
+                            and int(event["seq"]) > int(requested["seq"])
+                        ),
+                        key=lambda event: int(event["seq"]),
+                        default=None,
+                    )
+                    authoritative_state = (
+                        "pending"
+                        if final is None
+                        else "applied"
+                        if final.get("event_type") == "task.adjust_applied"
+                        else "rejected"
+                    )
+                speech = (
+                    "刚才的修改仍在等待任务执行器处理。"
+                    if authoritative_state == "pending" and chinese
+                    else "The latest change is still pending in the task executor."
+                    if authoritative_state == "pending"
+                    else "刚才的修改已经由任务执行器应用。"
+                    if authoritative_state == "applied" and chinese
+                    else "The latest change was applied by the task executor."
+                    if authoritative_state == "applied"
+                    else "刚才的修改已被任务执行器拒绝。"
+                    if authoritative_state == "rejected" and chinese
+                    else "The latest change was rejected by the task executor."
+                    if authoritative_state == "rejected"
+                    else "当前任务还没有权威的修改记录。"
+                    if chinese
+                    else "The current task has no authoritative adjustment record."
+                )
+                return await self._present_unified_text(
+                    retained=retained,
+                    voice_identity=voice_identity,
+                    fingerprint=fingerprint,
+                    request_id=f"unified-present-{voice_identity[:40]}",
+                    response_id=response_id,
+                    commit=commit,
+                    text=speech,
+                    channel_id=channel_id,
+                    source_provenance="server.background.adjustment",
+                )
             status = await self._p3_composition.handle(
                 operation="task.status",
                 params=common_params,
@@ -3621,7 +3977,9 @@ class AgentServerProductCompositionRegistry:
                 if status.ok and isinstance(status_result, Mapping)
                 else None
             )
-            state = task_status.get("state") if isinstance(task_status, Mapping) else None
+            state = (
+                task_status.get("state") if isinstance(task_status, Mapping) else None
+            )
             outcome = (
                 task_status.get("outcome") if isinstance(task_status, Mapping) else None
             )
@@ -3985,9 +4343,11 @@ class AgentServerProductCompositionRegistry:
             if preliminary.route is not UnifiedCommittedInputRoute.DIALOGUE:
                 if self._settings.p3_text_enabled:
                     try:
-                        current = await self._p3_composition.read_current_background_task(
-                            bearer_token=params.get("auth_token"),
-                            session_id=routed_session,
+                        current = (
+                            await self._p3_composition.read_current_background_task(
+                                bearer_token=params.get("auth_token"),
+                                session_id=routed_session,
+                            )
                         )
                     except FormalTaskViolation as exc:
                         if exc.code not in {
@@ -4032,6 +4392,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
             )
             if resolution.route in {
+                UnifiedCommittedInputRoute.BACKGROUND_UPDATE,
                 UnifiedCommittedInputRoute.BACKGROUND_QUERY,
                 UnifiedCommittedInputRoute.BACKGROUND_STATUS,
                 UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
@@ -4099,6 +4460,7 @@ class AgentServerProductCompositionRegistry:
                             "unified committed-input recovery capacity is full",
                             ErrorCode.UNAVAILABLE,
                         )
+
                     def allocate() -> asyncio.Task[P3RouteResult]:
                         return asyncio.create_task(
                             self._run_unified_submit(
@@ -4123,13 +4485,10 @@ class AgentServerProductCompositionRegistry:
                         commit=commit,
                         input_generation=input_generation,
                         source="voice",
-                        critical_policy=guarded_provenance.get(
-                            "critical_token_policy"
-                        ),
+                        critical_policy=guarded_provenance.get("critical_token_policy"),
                         route=(
                             ProtectedRoute.AGENT
-                            if resolution.route
-                            is UnifiedCommittedInputRoute.DIALOGUE
+                            if resolution.route is UnifiedCommittedInputRoute.DIALOGUE
                             else ProtectedRoute.TASK
                         ),
                         effect=allocate,
@@ -4194,9 +4553,7 @@ class AgentServerProductCompositionRegistry:
                     name=f"live-voice-unified-settlement:{voice_identity[:16]}",
                 )
                 self._unified_settlement_tasks.add(settlement)
-                settlement.add_done_callback(
-                    self._unified_settlement_tasks.discard
-                )
+                settlement.add_done_callback(self._unified_settlement_tasks.discard)
             elif (
                 voice_identity is not None
                 and retained_commit_id is not None
@@ -4409,6 +4766,7 @@ class AgentServerProductCompositionRegistry:
                 else {
                     "seq": agent_event.seq,
                     "event_type": agent_event.event_type,
+                    "source_provenance": agent_event.source_provenance,
                     "text": agent_event.text,
                     "capability": agent_event.capability,
                     "error_reason": agent_event.error_reason,
@@ -4446,6 +4804,22 @@ class AgentServerProductCompositionRegistry:
         request_id: str,
     ) -> P3RouteResult:
         try:
+            pending_terminal = next(
+                (
+                    event
+                    for event in self._pending_terminal_notifications.values()
+                    if event.origin.session_id == retained.binding.session_id
+                    and event.origin.scope == retained.binding.scope
+                ),
+                None,
+            )
+            if pending_terminal is not None:
+                # The Web owner only polls while capture/playout and prior ACK
+                # work are idle. Allocate the fresh response generation here,
+                # not when the TaskEvent races an in-flight ASR final.
+                await self._deliver_terminal_notification(
+                    pending_terminal, retained=retained
+                )
             notification = await asyncio.wait_for(
                 retained.activation_lease.next_notification(retained.binding),
                 timeout=_P2_NOTIFICATION_LONG_POLL_TIMEOUT_SECONDS,
@@ -5166,7 +5540,7 @@ class AgentServerProductCompositionRegistry:
         if operation not in P3_MUTATIONS:
             raise FormalTaskViolation(
                 "INVALID_P3_CONFIRMATION_OPERATION",
-                "product mutation must be task.create, task.cancel or task.retry",
+                "product mutation is not a supported P3 operation",
                 ErrorCode.UNSUPPORTED,
             )
         required = {
@@ -5199,6 +5573,19 @@ class AgentServerProductCompositionRegistry:
             # attempt ordinal, outcome, context and readiness are server-owned
             # and a voice-committed origin cannot be claimed for it.
             required.add("task_id")
+        elif operation == "task.adjust":
+            required.update({"task_id", "instruction"})
+            optional.update(
+                {
+                    "source",
+                    "interaction_id",
+                    "turn_id",
+                    "commit_id",
+                    "origin_commit_sha256",
+                    "source_start",
+                    "source_end",
+                }
+            )
         else:
             required.add("task_id")
             optional.update(
@@ -5515,7 +5902,7 @@ class AgentServerProductCompositionRegistry:
                         manifest=manifest,
                     )
                 if (
-                    operation in {"task.create", "task.cancel"}
+                    operation in {"task.create", "task.adjust", "task.cancel"}
                     and forwarded.get("source") == "voice"
                 ):
                     commit_id = str(forwarded.get("commit_id") or "")
@@ -5623,7 +6010,7 @@ class AgentServerProductCompositionRegistry:
         """Atomically bind one retained voice origin to one mutation request."""
 
         if (
-            operation not in {"task.create", "task.cancel"}
+            operation not in {"task.create", "task.adjust", "task.cancel"}
             or forwarded.get("source") != "voice"
         ):
             return None
@@ -8073,6 +8460,7 @@ class AgentServerProductCompositionRegistry:
                     )
             self._pending_task_intents.clear()
             self._voice_task_origins.clear()
+            self._pending_terminal_notifications.clear()
             retained_voice_origins = (
                 tuple(self._accepted_turn_commits_by_commit.values())
                 + tuple(self._unknown_turn_commits_by_commit.values())

@@ -882,3 +882,14 @@
 - 不降低底线：D-032 正例/负例/零禁止副作用矩阵、Tier-3 独立评审（聚合到批次收口与终态累积层级执行）、真实 Provider/设备/Executor 不得造假、D-074 审查语义全部保持；本决定只取消重复时点，与 D-074"修复只重跑受影响层级，不因无关调整重跑未受影响阶段"的既有效率条款一致。
 - 取代关系：本窗口内取代 STATUS 旧 Next actions 中"任何新源码修复即重启精确候选评审与 S7 冻结"的操作性节奏，以及实践中形成的"每修复即全量 runner + 再冻结"惯例；不取代 Alpha acceptance 内容、外部冻结绑定规则或 S5–S8 计划 §7 排除项。
 - 重新评估条件：阻塞级发现在三批次上限内无法收敛；最终 runner 因非 flaky 原因反复失败；机器证据与人工观察边界发生争议；或用户收回快速模式、恢复逐修复冻结节奏。
+
+## D-080 Live Voice 运行中调整与终态主动通知复用现有 v3/P2 权威链路
+
+- 日期：2026-08-16
+- 状态：Accepted Tier-3 design checkpoint（实施与候选验收仍待 D119 闭环）
+- 调整契约：第一版正式增加 `task.adjust`，只绑定认证主体、项目、Session 下的非终态 current background Task。它复用 Store v3 的 command、通用 outbox、TaskEvent 和 current pointer，不预设 v4 或独立 adjustments 表。原子 admission 写入 command、`task.adjust_requested` 和 adjustment outbox；运行中的 Direct Executor 必须在安全检查点按权威顺序真实消费，只有 Core 持久化 `task.adjust_applied` 后才可声称已应用，无法消费或已越过检查点则写入 `task.adjust_rejected`。状态只包含 pending/applied/rejected。
+- 终态与修订：终态 Task、历史 TaskResult 和已应用结果不可修改。本批次只提示用户明确创建修订任务，不自动创建 successor revision，不增加撤回、合并、superseded 或 revision lineage。
+- 通知契约：终态 TaskEvent 是稳定通知身份和恢复事实；继续使用 TaskEvent → task progress return → P2 notification/presentation/ACK/TTS，不增加完成通知表或第二套协议。主动播报由当前有效 P2 activation 取得新的 response generation，禁止复用 task-create 的旧/superseded response；没有有效 activation 时保留未消费的 TaskEvent，待下一次有效 activation 重放。completed 只有同时存在合法 immutable TaskResult 才能播报完成，failed/cancelled/interrupted 分别如实播报。
+- 重放语义：presentation ACK 后同一稳定通知不再投递；播放后 ACK 前崩溃继续遵循现有 P2 replay，不宣称无条件 exactly-once。通知与 ASR final、Agent output、TTS 串行互斥，且通知、插话、Speech 错误对 Task cancel/mutation 的副作用必须为零。
+- 语义与 UI：统一入口扩展为 dialogue、background.create/update/query/status/cancel 六路。create/update 分离并使用高置信度全句规则；普通非任务问句、歧义和低置信度保持 dialogue，current Task 的结果、进度和 adjustment 状态问句仍路由 query/status。UI 只增加转写/错误分离、重新监听、调整状态和终态通知，不恢复 Send、Agent/Task、operation 或 Task ID 控件。
+- 重新评估条件：源码或并发测试证明 v3 无法原子表达上述 admission/排序/重放；现有 TaskEvent/P2 ledger 无法在进程恢复后重建未 ACK 通知；或 Direct Executor 无法在终态前提供确定性安全检查点。只允许针对被证明缺口的最小结构扩展。
