@@ -34,6 +34,9 @@ from .formal_task_models import (
     PersistentTaskEvent,
     PersistentTaskRecord,
     ResolvedTaskContext,
+    TaskAdjustmentDeliveryResult,
+    TaskAdjustmentSettlement,
+    TaskAdjustmentState,
     TaskAuthorizationGrant,
     TaskMutationDisposition,
     TaskMutationResult,
@@ -65,6 +68,16 @@ class FormalExecutor(Protocol):
 
     async def cancel(self, item: PersistentOutboxItem) -> ExecutorDeliveryResult:
         """Request cancellation of the exact bound attempt."""
+
+    async def adjust(self, item: PersistentOutboxItem) -> TaskAdjustmentDeliveryResult:
+        """Durably consume one ordered adjustment at a live safe checkpoint."""
+
+    async def settle_adjustment(
+        self,
+        item: PersistentOutboxItem,
+        settlement: TaskAdjustmentSettlement,
+    ) -> None:
+        """Open the Executor terminal fence after Store-owned final truth."""
 
     async def status(
         self, task: PersistentTaskRecord, attempt: PersistentAttemptRecord
@@ -277,6 +290,7 @@ class PersistentTaskCore:
                 "task.create",
                 "task.cancel",
                 "task.retry",
+                "task.adjust",
             }:
                 raise FormalTaskViolation(
                     "UNSUPPORTED_FORMAL_TASK_COMMAND",
@@ -324,6 +338,23 @@ class PersistentTaskCore:
                     command.payload, frozenset(), field_name="task.cancel payload"
                 )
                 return self.store.cancel(command, observed_at=observed_at)
+            if command.command_type == "task.adjust":
+                require_exact_payload(
+                    command.payload,
+                    frozenset({"adjustment"}),
+                    field_name="task.adjust payload",
+                )
+                if current_background_session_id is None:
+                    raise FormalTaskViolation(
+                        "CURRENT_BACKGROUND_SESSION_REQUIRED",
+                        "task.adjust requires the current authorized Session",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                return self.store.adjust(
+                    command,
+                    observed_at=observed_at,
+                    current_background_session_id=current_background_session_id,
+                )
             if command.command_type == "task.retry":
                 authority_or_replay = self.store.read_retry_authority(command)
                 if isinstance(authority_or_replay, ResultEnvelope):
@@ -587,21 +618,59 @@ class PersistentTaskCore:
         try:
             if item.kind is OutboxKind.ATTEMPT_DISPATCH:
                 delivery = await self.executor.dispatch(item)
-            else:
+            elif item.kind is OutboxKind.ATTEMPT_CANCEL:
                 delivery = await self.executor.cancel(item)
+            else:
+                adjustment_delivery = await self.executor.adjust(item)
         except FormalTaskViolation as error:
-            if error.code in {
+            if item.kind is OutboxKind.ATTEMPT_ADJUST and error.code not in {
+                ErrorCode.UNAVAILABLE,
+                ErrorCode.TIMEOUT,
+                ErrorCode.RESULT_UNKNOWN,
+            }:
+                assert item.executor_ref is not None
+                adjustment_delivery = TaskAdjustmentDeliveryResult(
+                    item.executor_ref,
+                    item.command_id,
+                    TaskAdjustmentState.REJECTED,
+                    error.reason,
+                )
+            elif error.code in {
                 ErrorCode.UNAVAILABLE,
                 ErrorCode.TIMEOUT,
                 ErrorCode.RESULT_UNKNOWN,
             }:
                 self.store.release_outbox(item, str(error))
                 raise
-            self.store.reject_outbox(item, error)
-            return True
+            else:
+                self.store.reject_outbox(item, error)
+                return True
         except Exception as error:
             self.store.release_outbox(item, str(error))
             raise
+        if item.kind is OutboxKind.ATTEMPT_ADJUST:
+            try:
+                settlement = self.store.complete_adjustment_outbox(
+                    item,
+                    adjustment_delivery,
+                )
+            except FormalTaskViolation as error:
+                rejected = TaskAdjustmentSettlement(
+                    TaskAdjustmentState.REJECTED,
+                    False,
+                )
+                await self.executor.settle_adjustment(item, rejected)
+                try:
+                    self.store.release_outbox(item, str(error))
+                except FormalTaskViolation:
+                    pass
+                raise FormalTaskViolation(
+                    error.reason,
+                    "Executor adjustment exists but Core rejected its evidence",
+                    ErrorCode.RESULT_UNKNOWN,
+                ) from error
+            await self.executor.settle_adjustment(item, settlement)
+            return True
         if item.kind is OutboxKind.ATTEMPT_DISPATCH and not delivery.observations:
             self.store.release_outbox(
                 item, "dispatch returned no accepted Executor evidence"

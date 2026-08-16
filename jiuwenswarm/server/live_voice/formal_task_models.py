@@ -54,6 +54,7 @@ class FormalAttemptState(StrEnum):
 class OutboxKind(StrEnum):
     ATTEMPT_DISPATCH = "attempt.dispatch"
     ATTEMPT_CANCEL = "attempt.cancel"
+    ATTEMPT_ADJUST = "attempt.adjust"
 
 
 class OutboxState(StrEnum):
@@ -86,6 +87,15 @@ class TaskResultAvailability(StrEnum):
     AVAILABLE = "available"
     NOT_READY = "not_ready"
     UNAVAILABLE = "unavailable"
+
+
+class TaskAdjustmentState(StrEnum):
+    PENDING = "pending"
+    APPLIED = "applied"
+    REJECTED = "rejected"
+
+
+_MAX_TASK_ADJUSTMENT_BYTES = 4096
 
 
 def utc_now() -> str:
@@ -1291,6 +1301,119 @@ class TaskEventAuthoritySnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskAdjustmentRequest:
+    """One bounded untrusted adjustment bound to its durable request event."""
+
+    adjustment_id: str
+    adjustment: str
+    requested_seq: int
+
+    def __post_init__(self) -> None:
+        _require_text(self.adjustment_id, "task_adjustment.adjustment_id")
+        _require_text(self.adjustment, "task_adjustment.adjustment")
+        if (
+            "\x00" in self.adjustment
+            or _utf8_size(self.adjustment, "task_adjustment.adjustment")
+            > _MAX_TASK_ADJUSTMENT_BYTES
+        ):
+            raise FormalTaskViolation(
+                "TASK_ADJUSTMENT_INVALID",
+                "task adjustment must be bounded text without NUL characters",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(self.requested_seq) is not int or self.requested_seq < 1:
+            raise FormalTaskViolation(
+                "TASK_ADJUSTMENT_SEQUENCE_INVALID",
+                "task adjustment must bind a positive durable event sequence",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "adjustment_id": self.adjustment_id,
+            "adjustment": self.adjustment,
+            "requested_seq": self.requested_seq,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: object) -> TaskAdjustmentRequest:
+        if type(payload) is not dict or set(payload) != {
+            "adjustment_id",
+            "adjustment",
+            "requested_seq",
+        }:
+            raise FormalTaskViolation(
+                "TASK_ADJUSTMENT_INVALID",
+                "task adjustment carrier is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        return cls(
+            adjustment_id=_require_text(
+                payload["adjustment_id"], "task_adjustment.adjustment_id"
+            ),
+            adjustment=_require_text(
+                payload["adjustment"], "task_adjustment.adjustment"
+            ),
+            requested_seq=payload["requested_seq"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAdjustmentDeliveryResult:
+    """Executor checkpoint result; content never crosses this acknowledgement."""
+
+    executor_ref: str
+    adjustment_id: str
+    state: TaskAdjustmentState
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        _require_text(self.executor_ref, "task_adjustment_result.executor_ref")
+        _require_text(self.adjustment_id, "task_adjustment_result.adjustment_id")
+        if self.state not in {
+            TaskAdjustmentState.APPLIED,
+            TaskAdjustmentState.REJECTED,
+        }:
+            raise FormalTaskViolation(
+                "TASK_ADJUSTMENT_RESULT_INVALID",
+                "Executor adjustment result must be applied or rejected",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if self.state is TaskAdjustmentState.APPLIED:
+            if self.reason is not None:
+                raise FormalTaskViolation(
+                    "TASK_ADJUSTMENT_RESULT_INVALID",
+                    "applied adjustment result cannot carry a rejection reason",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        else:
+            _require_text(self.reason, "task_adjustment_result.reason")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskAdjustmentSettlement:
+    """Store-owned final state and terminal-fence continuation fact."""
+
+    state: TaskAdjustmentState
+    has_more: bool
+
+    def __post_init__(self) -> None:
+        if (
+            self.state
+            not in {
+                TaskAdjustmentState.APPLIED,
+                TaskAdjustmentState.REJECTED,
+            }
+            or type(self.has_more) is not bool
+        ):
+            raise FormalTaskViolation(
+                "TASK_ADJUSTMENT_SETTLEMENT_INVALID",
+                "task adjustment settlement is not canonical",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class PersistentOutboxItem:
     outbox_id: str
     kind: OutboxKind
@@ -1304,6 +1427,24 @@ class PersistentOutboxItem:
     state: OutboxState
     delivery_count: int
     claim_token: str | None = None
+    adjustment: TaskAdjustmentRequest | None = None
+
+    def __post_init__(self) -> None:
+        if (self.kind is OutboxKind.ATTEMPT_ADJUST) != (self.adjustment is not None):
+            raise FormalTaskViolation(
+                "OUTBOX_ADJUSTMENT_BINDING_MISMATCH",
+                "adjustment outbox kind and carrier must agree",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            self.adjustment is not None
+            and self.adjustment.adjustment_id != self.command_id
+        ):
+            raise FormalTaskViolation(
+                "OUTBOX_ADJUSTMENT_BINDING_MISMATCH",
+                "adjustment identity must equal the durable command identity",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1348,9 +1489,7 @@ class ExecutorObservation:
         if self.result_text is not None and (
             "\x00" in self.result_text
             or len(self.result_text) > 32_768
-            or _utf8_size(
-                self.result_text, "executor_observation.result_text"
-            )
+            or _utf8_size(self.result_text, "executor_observation.result_text")
             > 131_072
         ):
             raise FormalTaskViolation(
@@ -1530,6 +1669,10 @@ __all__ = [
     "ReconciliationState",
     "ResolvedTaskContext",
     "TaskAuthorizationGrant",
+    "TaskAdjustmentDeliveryResult",
+    "TaskAdjustmentRequest",
+    "TaskAdjustmentSettlement",
+    "TaskAdjustmentState",
     "TaskEventAuthoritySnapshot",
     "TaskMutationDisposition",
     "TaskMutationResult",

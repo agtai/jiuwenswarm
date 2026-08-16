@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from jiuwenswarm.common.schema import live_voice_contract_v2 as contract_v2
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CONTRACT_VERSION,
     Assurance,
@@ -40,6 +41,9 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     ReconciliationState,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskAdjustmentDeliveryResult,
+    TaskAdjustmentSettlement,
+    TaskAdjustmentState,
     TaskEventAuthoritySnapshot,
     TaskMutationDisposition,
     TaskResultArtifact,
@@ -183,6 +187,29 @@ def _cancel(task_id: str):
     return FormalTaskPolicyAdapter().map(intent)
 
 
+def _adjust(
+    task_id: str,
+    adjustment: str,
+    *,
+    command_id: str = "command-adjust",
+    request_id: str = "request-adjust",
+) -> tuple[CommandEnvelope, TaskAuthorizationGrant]:
+    base = _cancel(task_id)
+    return (
+        replace(
+            base.envelope,
+            request_id=request_id,
+            command_id=command_id,
+            command_type="task.adjust",
+            required_capabilities=("task.adjust",),
+            _payload=contract_v2._freeze_object(  # noqa: SLF001
+                {"adjustment": adjustment}, "command.payload"
+            ),
+        ),
+        _grant("task.adjust", command_id=command_id, target=task_id),
+    )
+
+
 def _retry(
     task_id: str,
     previous_attempt_id: str,
@@ -313,11 +340,11 @@ def _observations(
                 attempt_outcome=state_outcome,
                 occurred_at=utc_now(),
                 raw_status=("success" if outcome else "running"),
-                result_text=(result_text if state is FormalAttemptState.TERMINAL else None),
+                result_text=(
+                    result_text if state is FormalAttemptState.TERMINAL else None
+                ),
                 result_artifacts=(
-                    result_artifacts
-                    if state is FormalAttemptState.TERMINAL
-                    else ()
+                    result_artifacts if state is FormalAttemptState.TERMINAL else ()
                 ),
             )
         )
@@ -384,9 +411,7 @@ def test_v1_schema_migrates_atomically_and_preserves_active_attempt(
     assert reopened.get_task(task_id, _scope()).attempt_id == attempt_id
     assert reopened.get_attempt(attempt_id).attempt_number == 1
     assert (
-        reopened.get_current_background_task(
-            _scope(), session_id=_scope().session_id
-        )
+        reopened.get_current_background_task(_scope(), session_id=_scope().session_id)
         is None
     )
     with sqlite3.connect(database) as connection:
@@ -706,13 +731,14 @@ def test_current_background_create_is_one_atomic_winner_and_replays_exactly(
     tmp_path: Path,
 ) -> None:
     database = tmp_path / "current-race.sqlite"
-    invocations = (_create(tmp_path, identity_suffix="-a"), _create(tmp_path, identity_suffix="-b"))
+    invocations = (
+        _create(tmp_path, identity_suffix="-a"),
+        _create(tmp_path, identity_suffix="-b"),
+    )
 
     def submit(index: int):
         invocation = invocations[index]
-        return PersistentTaskCore(
-            SqliteTaskStore(database), _Executor()
-        ).execute(
+        return PersistentTaskCore(SqliteTaskStore(database), _Executor()).execute(
             invocation.envelope,
             invocation.authorization,
             context=invocation.context,
@@ -747,6 +773,327 @@ def test_current_background_create_is_one_atomic_winner_and_replays_exactly(
     winner = results.index(accepted[0])
     assert submit(winner) == accepted[0]
     assert store.counts()["tasks"] == 1
+
+
+@pytest.mark.asyncio
+async def test_adjustment_admission_replay_conflict_and_final_event_are_v3(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    create = _create(tmp_path)
+    created = core.execute(
+        create.envelope,
+        create.authorization,
+        context=create.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    assert await core.drain_outbox_once(worker_id="dispatch") is True
+    task_id = str(created.result["task_id"])
+    command, grant = _adjust(task_id, "Move the museum visit to 09:30.")
+
+    admitted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    replay = core.execute(
+        replace(command, request_id="request-adjust-replay"),
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert admitted.ok and admitted.result is not None
+    assert admitted.result["adjustment_state"] == "pending"
+    assert replay.ok and replay.result == admitted.result
+    conflict, conflict_grant = _adjust(
+        task_id,
+        "Delete the itinerary.",
+        command_id=command.command_id,
+        request_id="request-adjust-conflict",
+    )
+    rejected_conflict = core.execute(
+        conflict,
+        conflict_grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert not rejected_conflict.ok
+    assert rejected_conflict.error is not None
+    assert rejected_conflict.error.reason == "IDEMPOTENCY_CONFLICT"
+
+    requested = [
+        event
+        for event in store.events(task_id, _scope(), after_seq=-1)
+        if event.event_type == "task.adjust_requested"
+    ]
+    assert len(requested) == 1
+    assert dict(requested[0].details) == {"command_id": command.command_id}
+    assert "09:30" not in json.dumps(requested[0].to_dict())
+
+    assert await core.drain_outbox_once(worker_id="adjust") is True
+    final = core.execute(
+        replace(command, request_id="request-adjust-final-replay"),
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert final.ok and final.result is not None
+    assert final.result["adjustment_state"] == "applied"
+    assert final.result["reason"] is None
+    adjustment_events = [
+        event
+        for event in store.events(task_id, _scope(), after_seq=-1)
+        if event.event_type.startswith("task.adjust_")
+    ]
+    assert [event.event_type for event in adjustment_events] == [
+        "task.adjust_requested",
+        "task.adjust_applied",
+    ]
+    assert all(
+        event.producer == "task_core.control"
+        and event.causation_id == command.command_id
+        and "09:30" not in json.dumps(event.to_dict())
+        for event in adjustment_events
+    )
+    assert executor.adjustments == [command.command_id]
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False)
+    ]
+    with sqlite3.connect(database) as connection:
+        assert (
+            connection.execute(
+                "SELECT value FROM metadata WHERE key='schema_version'"
+            ).fetchone()[0]
+            == "3"
+        )
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    assert "task_adjustments" not in tables
+
+    artifact_path = tmp_path / "adjusted-final.txt"
+    artifact_path.write_text("museum at 09:30\n", encoding="utf-8")
+    artifact = TaskResultArtifact(
+        relative_path="adjusted-final.txt",
+        sha256=hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+    )
+    attempt = store.get_attempt(str(created.result["attempt_id"]))
+    assert attempt.executor_ref is not None
+    store.apply_observations(
+        (
+            ExecutorObservation(
+                resolution=ExecutorResolution.KNOWN,
+                executor_id=attempt.executor_id,
+                executor_ref=attempt.executor_ref,
+                task_id=task_id,
+                attempt_id=attempt.attempt_id,
+                source_event_id="executor-adjusted-terminal",
+                source_seq=2,
+                attempt_state=FormalAttemptState.TERMINAL,
+                attempt_outcome=TerminalOutcome.COMPLETED,
+                occurred_at=utc_now(),
+                raw_status="completed",
+                result_text="museum at 09:30",
+                result_artifacts=(artifact,),
+            ),
+        )
+    )
+    events = store.events(task_id, _scope(), after_seq=-1)
+    event_types = [event.event_type for event in events]
+    assert event_types.index("task.adjust_applied") < event_types.index("task.terminal")
+    availability, result, _reason = store.task_result(task_id, _scope())
+    assert availability is TaskResultAvailability.AVAILABLE
+    assert result is not None and result.result_text == "museum at 09:30"
+
+
+@pytest.mark.asyncio
+async def test_terminal_fence_rejects_pending_adjustment_without_executor_effect(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "tasks.sqlite")
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    create = _create(tmp_path)
+    created = core.execute(
+        create.envelope,
+        create.authorization,
+        context=create.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    await core.drain_outbox_once(worker_id="dispatch")
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    command, grant = _adjust(task_id, "Add an unsafe late change.")
+    admitted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert admitted.ok
+    attempt = store.get_attempt(attempt_id)
+    artifact_path = tmp_path / "final.txt"
+    artifact_path.write_text("immutable\n", encoding="utf-8")
+    artifact = TaskResultArtifact(
+        relative_path="final.txt",
+        sha256=hashlib.sha256(artifact_path.read_bytes()).hexdigest(),
+    )
+    terminal = ExecutorObservation(
+        resolution=ExecutorResolution.KNOWN,
+        executor_id=attempt.executor_id,
+        executor_ref=attempt.executor_ref,
+        task_id=task_id,
+        attempt_id=attempt_id,
+        source_event_id="executor-terminal",
+        source_seq=2,
+        attempt_state=FormalAttemptState.TERMINAL,
+        attempt_outcome=TerminalOutcome.COMPLETED,
+        occurred_at=utc_now(),
+        raw_status="completed",
+        result_text="immutable result",
+        result_artifacts=(artifact,),
+    )
+    store.apply_observations((terminal,))
+
+    replay = core.execute(
+        replace(command, request_id="request-terminal-replay"),
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert replay.ok and replay.result is not None
+    assert replay.result["adjustment_state"] == "rejected"
+    assert replay.result["reason"] == "TASK_TERMINAL_BEFORE_ADJUSTMENT"
+    events = store.events(task_id, _scope(), after_seq=-1)
+    types = [event.event_type for event in events]
+    assert types.index("task.adjust_rejected") < types.index("task.terminal")
+    assert executor.adjustments == []
+    result_state, result, _reason = store.task_result(task_id, _scope())
+    assert result_state is TaskResultAvailability.AVAILABLE
+    assert result is not None and result.result_text == "immutable result"
+
+
+@pytest.mark.asyncio
+async def test_two_store_connections_serialize_same_and_distinct_adjustments(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    first_store = SqliteTaskStore(database)
+    executor = _Executor()
+    first_core = PersistentTaskCore(first_store, executor)
+    create = _create(tmp_path)
+    created = first_core.execute(
+        create.envelope,
+        create.authorization,
+        context=create.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    dispatch = first_store.claim_outbox("dispatch")
+    assert dispatch is not None
+    first_store.complete_outbox(
+        dispatch,
+        executor_ref=f"legacy:{dispatch.attempt_id}",
+        observations=_observations(dispatch),
+    )
+    second_store = SqliteTaskStore(database)
+    second_core = PersistentTaskCore(second_store, executor)
+    task_id = str(created.result["task_id"])
+    same_command, same_grant = _adjust(task_id, "Keep lunch vegetarian.")
+
+    def submit_same(core: PersistentTaskCore, request_id: str):
+        return core.execute(
+            replace(same_command, request_id=request_id),
+            same_grant,
+            now=NOW,
+            current_background_session_id="session-1",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        same_results = tuple(
+            pool.map(
+                lambda args: submit_same(*args),
+                ((first_core, "same-a"), (second_core, "same-b")),
+            )
+        )
+    assert all(result.ok for result in same_results)
+    same_events = [
+        event
+        for event in first_store.events(task_id, _scope(), after_seq=-1)
+        if event.event_type == "task.adjust_requested"
+    ]
+    assert len(same_events) == 1
+
+    command_a, grant_a = _adjust(
+        task_id,
+        "Add a morning walk.",
+        command_id="command-adjust-a",
+        request_id="distinct-a",
+    )
+    command_b, grant_b = _adjust(
+        task_id,
+        "Move dinner later.",
+        command_id="command-adjust-b",
+        request_id="distinct-b",
+    )
+
+    def submit_distinct(args):
+        core, command, grant = args
+        return core.execute(
+            command,
+            grant,
+            now=NOW,
+            current_background_session_id="session-1",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        distinct = tuple(
+            pool.map(
+                submit_distinct,
+                ((first_core, command_a, grant_a), (second_core, command_b, grant_b)),
+            )
+        )
+    assert all(result.ok for result in distinct)
+    requested = [
+        event
+        for event in first_store.events(task_id, _scope(), after_seq=-1)
+        if event.event_type == "task.adjust_requested"
+    ]
+    assert [event.seq for event in requested] == sorted(
+        event.seq for event in requested
+    )
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute(
+            """
+            SELECT e.seq, o.command_id FROM outbox AS o
+            JOIN task_events AS e
+              ON e.task_id=o.task_id AND e.attempt_id=o.attempt_id
+             AND e.event_type='task.adjust_requested'
+             AND e.causation_id=o.command_id
+            WHERE o.kind='attempt.adjust' ORDER BY e.seq
+            """
+        ).fetchall()
+    assert [row[0] for row in rows] == [event.seq for event in requested]
+    authoritative_command_order = [row[1] for row in rows]
+    for index, expected_command_id in enumerate(authoritative_command_order):
+        item = first_store.claim_outbox(f"adjust-order-{index}")
+        assert item is not None and item.command_id == expected_command_id
+        delivery = await executor.adjust(item)
+        settlement = first_store.complete_adjustment_outbox(item, delivery)
+        await executor.settle_adjustment(item, settlement)
+    assert executor.adjustments == authoritative_command_order
 
 
 def test_task_result_is_three_state_immutable_and_revalidates_artifact(
@@ -2191,6 +2538,10 @@ class _Executor:
     def __init__(self) -> None:
         self.dispatches: list[str] = []
         self.cancels: list[str] = []
+        self.adjustments: list[str] = []
+        self.adjustment_state = TaskAdjustmentState.APPLIED
+        self.adjustment_reason: str | None = None
+        self.adjustment_settlements: list[TaskAdjustmentSettlement] = []
         self.fail_dispatches = 0
         self.status_resolution: ExecutorResolution | None = None
         self.retry_ready = True
@@ -2226,6 +2577,23 @@ class _Executor:
             f"legacy:{item.attempt_id}",
             _observations(item, outcome=TerminalOutcome.CANCELLED),
         )
+
+    async def adjust(self, item: PersistentOutboxItem) -> TaskAdjustmentDeliveryResult:
+        self.adjustments.append(item.command_id)
+        assert item.executor_ref is not None
+        return TaskAdjustmentDeliveryResult(
+            item.executor_ref,
+            item.command_id,
+            self.adjustment_state,
+            self.adjustment_reason,
+        )
+
+    async def settle_adjustment(
+        self,
+        _item: PersistentOutboxItem,
+        settlement: TaskAdjustmentSettlement,
+    ) -> None:
+        self.adjustment_settlements.append(settlement)
 
     async def status(
         self,

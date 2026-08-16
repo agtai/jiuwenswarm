@@ -41,6 +41,10 @@ from .formal_task_models import (
     PersistentTaskEvent,
     PersistentTaskRecord,
     ReconciliationState,
+    TaskAdjustmentDeliveryResult,
+    TaskAdjustmentRequest,
+    TaskAdjustmentSettlement,
+    TaskAdjustmentState,
     TaskEventAuthoritySnapshot,
     TaskMutationDisposition,
     TaskMutationResult,
@@ -283,9 +287,7 @@ _TASK_STORE_UNIQUE_KEYS_V3 = {
     "executor_events": frozenset({("source_event_id",), ("attempt_id", "source_seq")}),
     "outbox": frozenset({("outbox_id",)}),
     "current_background_tasks": frozenset({("scope_key", "session_id")}),
-    "task_results": frozenset(
-        {("task_id", "attempt_id", "source_event_id")}
-    ),
+    "task_results": frozenset({("task_id", "attempt_id", "source_event_id")}),
 }
 _TASK_STORE_FOREIGN_KEYS = {
     "metadata": frozenset(),
@@ -375,6 +377,20 @@ _OUTBOX_BINDING_SELECT = """
            re.occurred_at AS retry_event_occurred_at,
            re.details_json AS retry_event_details_json,
            re.seq AS retry_event_seq,
+           ae.event_id AS adjust_event_id,
+           ae.task_id AS adjust_event_task_id,
+           ae.attempt_id AS adjust_event_attempt_id,
+           ae.scope_json AS adjust_event_scope_json,
+           ae.event_type AS adjust_event_type,
+           ae.state AS adjust_event_state,
+           ae.outcome AS adjust_event_outcome,
+           ae.producer AS adjust_event_producer,
+           ae.source_event_id AS adjust_event_source_event_id,
+           ae.causation_id AS adjust_event_causation_id,
+           ae.correlation_id AS adjust_event_correlation_id,
+           ae.occurred_at AS adjust_event_occurred_at,
+           ae.details_json AS adjust_event_details_json,
+           ae.seq AS adjust_event_seq,
            (
              SELECT COUNT(*) FROM task_events AS ce_count
              WHERE ce_count.task_id=o.task_id
@@ -389,6 +405,13 @@ _OUTBOX_BINDING_SELECT = """
                AND re_count.event_type='task.retry_accepted'
                AND re_count.causation_id=o.command_id
            ) AS retry_event_count
+           ,(
+             SELECT COUNT(*) FROM task_events AS ae_count
+             WHERE ae_count.task_id=o.task_id
+               AND ae_count.attempt_id=o.attempt_id
+               AND ae_count.event_type='task.adjust_requested'
+               AND ae_count.causation_id=o.command_id
+           ) AS adjust_event_count
            ,(
              SELECT MIN(re_start.seq) FROM task_events AS re_start
              WHERE re_start.task_id=o.task_id
@@ -411,6 +434,11 @@ _OUTBOX_BINDING_SELECT = """
      AND re.attempt_id=o.attempt_id
      AND re.event_type='task.retry_accepted'
      AND re.causation_id=o.command_id
+    LEFT JOIN task_events AS ae
+      ON ae.task_id=o.task_id
+     AND ae.attempt_id=o.attempt_id
+     AND ae.event_type='task.adjust_requested'
+     AND ae.causation_id=o.command_id
 """
 
 
@@ -705,9 +733,7 @@ class SqliteTaskStore:
                 """
             ).fetchall()
         }
-        expected_tables = (
-            _TASK_STORE_TABLES if version >= 3 else _TASK_STORE_TABLES_V2
-        )
+        expected_tables = _TASK_STORE_TABLES if version >= 3 else _TASK_STORE_TABLES_V2
         if not expected_tables.issubset(tables):
             raise cls._schema_unsupported(
                 "formal task Store schema is missing required tables"
@@ -1194,6 +1220,126 @@ class SqliteTaskStore:
                 )
             return task
 
+    def adjust(
+        self,
+        command: CommandEnvelope,
+        *,
+        observed_at: str,
+        current_background_session_id: str,
+    ) -> ResultEnvelope:
+        """Atomically admit one adjustment for the exact current attempt."""
+
+        if (
+            type(current_background_session_id) is not str
+            or not current_background_session_id.strip()
+            or len(current_background_session_id) > 256
+            or command.scope.session_id != current_background_session_id
+        ):
+            raise FormalTaskViolation(
+                "CURRENT_BACKGROUND_SESSION_MISMATCH",
+                "task adjustment requires the exact authorized Session",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        payload = command.payload
+        if type(payload) is not dict or set(payload) != {"adjustment"}:
+            raise FormalTaskViolation(
+                "TASK_ADJUSTMENT_INVALID",
+                "task.adjust payload must contain exactly one adjustment",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        # Validate content before opening the write transaction; the final carrier
+        # is reconstructed with the authoritative request-event sequence below.
+        TaskAdjustmentRequest(command.command_id, payload["adjustment"], 1)
+        fingerprint = command.fingerprint()
+        scope_key = _scope_key(command.scope)
+        task_id = command.target_ref.id
+        with self._transaction() as connection:
+            replay = self._command_replay(connection, command, fingerprint)
+            if replay is not None:
+                return replay
+            current = connection.execute(
+                """
+                SELECT t.* FROM current_background_tasks AS c
+                JOIN tasks AS t ON t.task_id=c.task_id
+                WHERE c.scope_key=? AND c.session_id=?
+                """,
+                (scope_key, current_background_session_id),
+            ).fetchone()
+            if current is None or current["task_id"] != task_id:
+                raise FormalTaskViolation(
+                    "CURRENT_BACKGROUND_TASK_MISMATCH",
+                    "task adjustment must target the exact current background task",
+                    ErrorCode.CONFLICT,
+                )
+            task = self._require_task_row(connection, task_id, command.scope)
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?",
+                (task["attempt_id"],),
+            ).fetchone()
+            if (
+                task["state"] == FormalTaskState.TERMINAL.value
+                or attempt is None
+                or attempt["task_id"] != task_id
+                or attempt["state"] == FormalAttemptState.TERMINAL.value
+            ):
+                raise FormalTaskViolation(
+                    "TASK_ALREADY_TERMINAL",
+                    "terminal tasks cannot accept adjustment",
+                    ErrorCode.CONFLICT,
+                )
+            requested_event = self._append_event(
+                connection,
+                task,
+                event_type="task.adjust_requested",
+                state=task["state"],
+                outcome=None,
+                producer="task_core.control",
+                source_event_id=None,
+                causation_id=command.command_id,
+                occurred_at=observed_at,
+                details={"command_id": command.command_id},
+            )
+            adjustment = TaskAdjustmentRequest(
+                command.command_id,
+                payload["adjustment"],
+                requested_event.seq,
+            )
+            outbox_id = f"outbox-{uuid.uuid4().hex}"
+            self._insert_outbox(
+                connection,
+                outbox_id=outbox_id,
+                kind=OutboxKind.ATTEMPT_ADJUST,
+                task_id=task_id,
+                attempt_id=task["attempt_id"],
+                command_id=command.command_id,
+                scope=command.scope,
+                spec=FormalTaskSpec.from_dict(_json_load(task["spec_json"])),
+                now=observed_at,
+                executor_ref=attempt["executor_ref"],
+                adjustment=adjustment,
+            )
+            result = ResultEnvelope.success(
+                owner=command,
+                result={
+                    "task_id": task_id,
+                    "attempt_id": task["attempt_id"],
+                    "adjustment_id": command.command_id,
+                    "adjustment_state": TaskAdjustmentState.PENDING.value,
+                    "reason": None,
+                    "outbox_id": outbox_id,
+                },
+                observed_at=observed_at,
+            )
+            self._insert_command(
+                connection,
+                command,
+                fingerprint,
+                scope_key,
+                result,
+                observed_at,
+            )
+            return result
+
     def cancel(
         self,
         command: CommandEnvelope,
@@ -1320,9 +1466,14 @@ class SqliteTaskStore:
                     details={"reason": "CANCELLED_BEFORE_DISPATCH"},
                 )
                 task = self._require_task_row(connection, task_id, command.scope)
+                self._reject_open_adjustments_before_terminal(
+                    connection,
+                    task=task,
+                    observed_at=now,
+                )
                 self._append_event(
                     connection,
-                    task,
+                    self._require_task_row(connection, task_id, command.scope),
                     event_type="task.terminal",
                     state=FormalTaskState.TERMINAL.value,
                     outcome=TerminalOutcome.CANCELLED.value,
@@ -1944,23 +2095,29 @@ class SqliteTaskStore:
     @classmethod
     def _outbox_payload(
         cls, payload_json: str | bytes
-    ) -> tuple[ScopeRef, FormalTaskSpec, str | None]:
-        def load() -> tuple[ScopeRef, FormalTaskSpec, str | None]:
+    ) -> tuple[ScopeRef, FormalTaskSpec, str | None, TaskAdjustmentRequest | None]:
+        def load() -> tuple[
+            ScopeRef, FormalTaskSpec, str | None, TaskAdjustmentRequest | None
+        ]:
             payload = _json_load(payload_json)
-            if type(payload) is not dict or set(payload) != {
-                "scope",
-                "spec",
-                "executor_ref",
+            if type(payload) is not dict or frozenset(payload) not in {
+                frozenset({"scope", "spec", "executor_ref"}),
+                frozenset({"scope", "spec", "executor_ref", "adjustment"}),
             }:
                 raise cls._corrupt("formal Task dispatch payload is not canonical")
             scope = ScopeRef.from_dict(payload["scope"])
             spec = FormalTaskSpec.from_dict(payload["spec"])
             executor_ref = payload["executor_ref"]
+            adjustment = (
+                None
+                if "adjustment" not in payload
+                else TaskAdjustmentRequest.from_dict(payload["adjustment"])
+            )
             if executor_ref is not None and type(executor_ref) is not str:
                 raise cls._corrupt("formal Task dispatch executor_ref is invalid")
             if spec.context.scope != scope:
                 raise cls._corrupt("formal Task dispatch context does not match scope")
-            return scope, spec, executor_ref
+            return scope, spec, executor_ref, adjustment
 
         return _stored_record("outbox", load)
 
@@ -2095,7 +2252,7 @@ class SqliteTaskStore:
                     command_rows[0]
                 )
                 outbox_row = dispatch_rows[0]
-                scope, dispatch_spec, executor_ref = cls._outbox_payload(
+                scope, dispatch_spec, executor_ref, adjustment = cls._outbox_payload(
                     outbox_row["payload_json"]
                 )
                 try:
@@ -2110,6 +2267,7 @@ class SqliteTaskStore:
                     scope != task.scope
                     or dispatch_spec.executor_id != attempt.executor_id
                     or executor_ref is not None
+                    or adjustment is not None
                     or outbox_row["command_id"] != command_id
                     or delivery_count < 0
                     or (
@@ -2492,7 +2650,21 @@ class SqliteTaskStore:
         spec: FormalTaskSpec,
         now: str,
         executor_ref: str | None = None,
+        adjustment: TaskAdjustmentRequest | None = None,
     ) -> None:
+        if (kind is OutboxKind.ATTEMPT_ADJUST) != (adjustment is not None):
+            raise FormalTaskViolation(
+                "OUTBOX_ADJUSTMENT_BINDING_MISMATCH",
+                "adjustment outbox kind and carrier must agree",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        payload: dict[str, object] = {
+            "scope": scope.to_dict(),
+            "spec": spec.to_dict(),
+            "executor_ref": executor_ref,
+        }
+        if adjustment is not None:
+            payload["adjustment"] = adjustment.to_dict()
         connection.execute(
             """
             INSERT INTO outbox(
@@ -2507,13 +2679,7 @@ class SqliteTaskStore:
                 task_id,
                 attempt_id,
                 command_id,
-                _json_dump(
-                    {
-                        "scope": scope.to_dict(),
-                        "spec": spec.to_dict(),
-                        "executor_ref": executor_ref,
-                    }
-                ),
+                _json_dump(payload),
                 OutboxState.PENDING.value,
                 now,
                 now,
@@ -2530,9 +2696,32 @@ class SqliteTaskStore:
                 _OUTBOX_BINDING_SELECT
                 + """
                   WHERE o.state=?
+                    AND (
+                      o.kind<>?
+                      OR NOT EXISTS (
+                        SELECT 1
+                        FROM outbox AS prior
+                        JOIN task_events AS prior_event
+                          ON prior_event.task_id=prior.task_id
+                         AND prior_event.attempt_id=prior.attempt_id
+                         AND prior_event.event_type='task.adjust_requested'
+                         AND prior_event.causation_id=prior.command_id
+                        WHERE prior.task_id=o.task_id
+                          AND prior.attempt_id=o.attempt_id
+                          AND prior.kind=?
+                          AND prior.state IN (?, ?)
+                          AND prior_event.seq<ae.seq
+                      )
+                    )
                   ORDER BY o.updated_at, o.created_at, o.outbox_id
                 """,
-                (OutboxState.PENDING.value,),
+                (
+                    OutboxState.PENDING.value,
+                    OutboxKind.ATTEMPT_ADJUST.value,
+                    OutboxKind.ATTEMPT_ADJUST.value,
+                    OutboxState.PENDING.value,
+                    OutboxState.CLAIMED.value,
+                ),
             )
             row = None
             for candidate in candidates:
@@ -2695,6 +2884,11 @@ class SqliteTaskStore:
                     occurred_at=now,
                     details=details,
                 )
+                self._reject_open_adjustments_before_terminal(
+                    connection,
+                    task=self._require_task_row_by_id(connection, item.task_id),
+                    observed_at=now,
+                )
                 self._append_event(
                     connection,
                     self._require_task_row_by_id(connection, item.task_id),
@@ -2805,22 +2999,25 @@ class SqliteTaskStore:
                 )
             now = utc_now()
             if item.kind is OutboxKind.ATTEMPT_DISPATCH:
-                pending_cancels = connection.execute(
+                pending_controls = connection.execute(
                     _OUTBOX_BINDING_SELECT
-                    + " WHERE o.attempt_id=? AND o.kind=? AND o.state=?",
+                    + " WHERE o.attempt_id=? AND o.kind IN (?, ?) AND o.state=?",
                     (
                         item.attempt_id,
                         OutboxKind.ATTEMPT_CANCEL.value,
+                        OutboxKind.ATTEMPT_ADJUST.value,
                         OutboxState.PENDING.value,
                     ),
                 ).fetchall()
-                for cancel_row in pending_cancels:
-                    cancel_item = self._outbox_from_row(cancel_row)
+                for control_row in pending_controls:
+                    control_item = self._outbox_from_row(control_row)
                     payload = {
-                        "scope": cancel_item.scope.to_dict(),
-                        "spec": cancel_item.spec.to_dict(),
+                        "scope": control_item.scope.to_dict(),
+                        "spec": control_item.spec.to_dict(),
                         "executor_ref": executor_ref,
                     }
+                    if control_item.adjustment is not None:
+                        payload["adjustment"] = control_item.adjustment.to_dict()
                     changed = connection.execute(
                         """
                         UPDATE outbox SET payload_json=?, updated_at=?
@@ -2829,14 +3026,14 @@ class SqliteTaskStore:
                         (
                             _json_dump(payload),
                             now,
-                            cancel_item.outbox_id,
+                            control_item.outbox_id,
                             OutboxState.PENDING.value,
                         ),
                     ).rowcount
                     if changed != 1:
                         raise FormalTaskViolation(
                             "TASK_STORE_CORRUPT",
-                            "pending cancel outbox changed during Executor binding",
+                            "pending control outbox changed during Executor binding",
                             ErrorCode.INTERNAL,
                         )
             connection.execute(
@@ -2852,6 +3049,261 @@ class SqliteTaskStore:
                 """,
                 (OutboxState.DELIVERED.value, now, item.outbox_id),
             )
+
+    @staticmethod
+    def _write_adjustment_command_result(
+        connection: sqlite3.Connection,
+        *,
+        scope_key: str,
+        command_id: str,
+        state: TaskAdjustmentState,
+        reason: str | None,
+        observed_at: str,
+    ) -> None:
+        row = connection.execute(
+            "SELECT result_json FROM commands WHERE scope_key=? AND command_id=?",
+            (scope_key, command_id),
+        ).fetchone()
+        if row is None:
+            raise FormalTaskViolation(
+                "TASK_STORE_CORRUPT",
+                "task adjustment command ledger is unavailable",
+                ErrorCode.INTERNAL,
+            )
+        try:
+            stored = ResultEnvelope.from_dict(_json_load(row["result_json"]))
+            payload = stored.to_dict()
+            result = stored.result
+            if (
+                not stored.ok
+                or stored.command_id != command_id
+                or type(result) is not dict
+                or set(result)
+                != {
+                    "task_id",
+                    "attempt_id",
+                    "adjustment_id",
+                    "adjustment_state",
+                    "reason",
+                    "outbox_id",
+                }
+                or result["adjustment_id"] != command_id
+                or result["adjustment_state"]
+                not in {
+                    TaskAdjustmentState.PENDING.value,
+                    state.value,
+                }
+            ):
+                raise ValueError("non-canonical adjustment result")
+            result["adjustment_state"] = state.value
+            result["reason"] = reason
+            payload["result"] = result
+            payload["observed_at"] = observed_at
+            final = ResultEnvelope.from_dict(payload)
+        except (ContractViolation, KeyError, TypeError, ValueError) as error:
+            raise FormalTaskViolation(
+                "TASK_STORE_CORRUPT",
+                "task adjustment command result is not canonical",
+                ErrorCode.INTERNAL,
+            ) from error
+        connection.execute(
+            "UPDATE commands SET result_json=? WHERE scope_key=? AND command_id=?",
+            (_json_dump(final.to_dict()), scope_key, command_id),
+        )
+
+    def _finalize_adjustment(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        outbox: sqlite3.Row,
+        task: sqlite3.Row,
+        state: TaskAdjustmentState,
+        reason: str | None,
+        observed_at: str,
+    ) -> None:
+        event_type = (
+            "task.adjust_applied"
+            if state is TaskAdjustmentState.APPLIED
+            else "task.adjust_rejected"
+        )
+        details: dict[str, object] = {"command_id": outbox["command_id"]}
+        if reason is not None:
+            details["reason"] = reason
+        self._append_event(
+            connection,
+            task,
+            event_type=event_type,
+            state=task["state"],
+            outcome=None,
+            producer="task_core.control",
+            source_event_id=None,
+            causation_id=outbox["command_id"],
+            occurred_at=observed_at,
+            details=details,
+        )
+        self._write_adjustment_command_result(
+            connection,
+            scope_key=task["scope_key"],
+            command_id=outbox["command_id"],
+            state=state,
+            reason=reason,
+            observed_at=observed_at,
+        )
+
+    def _reject_open_adjustments_before_terminal(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        task: sqlite3.Row,
+        observed_at: str,
+    ) -> None:
+        rows = connection.execute(
+            """
+            SELECT o.*, e.seq AS requested_seq
+            FROM outbox AS o
+            JOIN task_events AS e
+              ON e.task_id=o.task_id
+             AND e.attempt_id=o.attempt_id
+             AND e.event_type='task.adjust_requested'
+             AND e.causation_id=o.command_id
+            WHERE o.task_id=? AND o.attempt_id=? AND o.kind=?
+              AND o.state IN (?, ?)
+            ORDER BY e.seq
+            """,
+            (
+                task["task_id"],
+                task["attempt_id"],
+                OutboxKind.ATTEMPT_ADJUST.value,
+                OutboxState.PENDING.value,
+                OutboxState.CLAIMED.value,
+            ),
+        ).fetchall()
+        current = task
+        for row in rows:
+            self._finalize_adjustment(
+                connection,
+                outbox=row,
+                task=current,
+                state=TaskAdjustmentState.REJECTED,
+                reason="TASK_TERMINAL_BEFORE_ADJUSTMENT",
+                observed_at=observed_at,
+            )
+            connection.execute(
+                """
+                UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
+                    claim_token=NULL, last_error=?, updated_at=? WHERE outbox_id=?
+                """,
+                (
+                    OutboxState.SUPPRESSED.value,
+                    "TASK_TERMINAL_BEFORE_ADJUSTMENT",
+                    observed_at,
+                    row["outbox_id"],
+                ),
+            )
+            current = self._require_task_row_by_id(connection, task["task_id"])
+
+    def complete_adjustment_outbox(
+        self,
+        item: PersistentOutboxItem,
+        delivery: TaskAdjustmentDeliveryResult,
+        *,
+        observed_at: str | None = None,
+    ) -> TaskAdjustmentSettlement:
+        """Commit the checkpoint result before the Executor terminal fence opens."""
+
+        if item.kind is not OutboxKind.ATTEMPT_ADJUST or item.adjustment is None:
+            raise FormalTaskViolation(
+                "OUTBOX_ADJUSTMENT_BINDING_MISMATCH",
+                "adjustment completion requires an adjustment outbox item",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        now = observed_at or utc_now()
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM outbox WHERE outbox_id=?", (item.outbox_id,)
+            ).fetchone()
+            if (
+                row is None
+                or row["state"] != OutboxState.CLAIMED.value
+                or item.claim_token is None
+                or row["claim_token"] != item.claim_token
+            ):
+                raise FormalTaskViolation(
+                    "OUTBOX_CLAIM_LOST",
+                    "claimed adjustment outbox is no longer deliverable",
+                    ErrorCode.CONFLICT,
+                )
+            if (
+                row["kind"] != OutboxKind.ATTEMPT_ADJUST.value
+                or row["task_id"] != item.task_id
+                or row["attempt_id"] != item.attempt_id
+                or row["command_id"] != item.command_id
+                or delivery.adjustment_id != item.command_id
+            ):
+                raise FormalTaskViolation(
+                    "OUTBOX_ADJUSTMENT_BINDING_MISMATCH",
+                    "adjustment result does not bind the claimed delivery",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+            task = self._require_task_row_by_id(connection, item.task_id)
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?", (item.attempt_id,)
+            ).fetchone()
+            if (
+                task["attempt_id"] != item.attempt_id
+                or task["state"] == FormalTaskState.TERMINAL.value
+                or attempt is None
+                or attempt["task_id"] != item.task_id
+                or attempt["state"] == FormalAttemptState.TERMINAL.value
+                or attempt["executor_ref"] != delivery.executor_ref
+                or item.executor_ref != delivery.executor_ref
+            ):
+                raise FormalTaskViolation(
+                    "TASK_ADJUSTMENT_STALE",
+                    "adjustment result no longer binds a live current attempt",
+                    ErrorCode.STALE,
+                )
+            reason = delivery.reason
+            self._finalize_adjustment(
+                connection,
+                outbox=row,
+                task=task,
+                state=delivery.state,
+                reason=reason,
+                observed_at=now,
+            )
+            connection.execute(
+                """
+                UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
+                    claim_token=NULL, last_error=?, updated_at=? WHERE outbox_id=?
+                """,
+                (
+                    OutboxState.DELIVERED.value,
+                    reason,
+                    now,
+                    item.outbox_id,
+                ),
+            )
+            has_more = (
+                connection.execute(
+                    """
+                SELECT 1 FROM outbox
+                WHERE task_id=? AND attempt_id=? AND kind=?
+                  AND state IN (?, ?) AND outbox_id<>?
+                LIMIT 1
+                """,
+                    (
+                        item.task_id,
+                        item.attempt_id,
+                        OutboxKind.ATTEMPT_ADJUST.value,
+                        OutboxState.PENDING.value,
+                        OutboxState.CLAIMED.value,
+                        item.outbox_id,
+                    ),
+                ).fetchone()
+                is not None
+            )
+            return TaskAdjustmentSettlement(delivery.state, has_more)
 
     def apply_observations(
         self, observations: tuple[ExecutorObservation, ...]
@@ -3123,6 +3575,11 @@ class SqliteTaskStore:
                     "terminal task cannot accept a new Executor outcome",
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
+            self._reject_open_adjustments_before_terminal(
+                connection,
+                task=task,
+                observed_at=observation.occurred_at,
+            )
             appended.append(
                 self._append_event(
                     connection,
@@ -3143,10 +3600,7 @@ class SqliteTaskStore:
                 and observation.result_text is not None
             ):
                 artifacts_json = _json_dump(
-                    [
-                        artifact.to_dict()
-                        for artifact in observation.result_artifacts
-                    ]
+                    [artifact.to_dict() for artifact in observation.result_artifacts]
                 )
                 existing_result = connection.execute(
                     """
@@ -3251,8 +3705,7 @@ class SqliteTaskStore:
                         sha256=item["sha256"],
                     )
                     for item in raw_artifacts
-                    if type(item) is dict
-                    and set(item) == {"relative_path", "sha256"}
+                    if type(item) is dict and set(item) == {"relative_path", "sha256"}
                 )
                 if len(artifacts) != len(raw_artifacts):
                     raise ValueError("artifact shape mismatch")
@@ -3265,9 +3718,7 @@ class SqliteTaskStore:
                     completed_at=row["completed_at"],
                 )
             except (FormalTaskViolation, KeyError, TypeError, ValueError) as exc:
-                raise self._corrupt(
-                    "formal Task result record is invalid"
-                ) from exc
+                raise self._corrupt("formal Task result record is invalid") from exc
             if not self._result_artifacts_match(task, result.artifacts):
                 return (
                     TaskResultAvailability.UNAVAILABLE,
@@ -3567,6 +4018,11 @@ class SqliteTaskStore:
                     details={"reason": reason},
                 )
             ]
+            self._reject_open_adjustments_before_terminal(
+                connection,
+                task=self._require_task_row_by_id(connection, task_id),
+                observed_at=now,
+            )
             appended.append(
                 self._append_event(
                     connection,
@@ -3935,21 +4391,25 @@ class SqliteTaskStore:
     @staticmethod
     def _outbox_from_row(row: sqlite3.Row) -> PersistentOutboxItem:
         def load() -> PersistentOutboxItem:
+            kind = OutboxKind(row["kind"])
             payload = _json_load(row["payload_json"])
-            if type(payload) is not dict or set(payload) != {
-                "scope",
-                "spec",
-                "executor_ref",
-            }:
+            expected_payload_keys = {"scope", "spec", "executor_ref"}
+            if kind is OutboxKind.ATTEMPT_ADJUST:
+                expected_payload_keys.add("adjustment")
+            if type(payload) is not dict or set(payload) != expected_payload_keys:
                 raise FormalTaskViolation(
                     "TASK_STORE_CORRUPT",
                     "formal Task Store contains an invalid outbox payload",
                     ErrorCode.INTERNAL,
                 )
             row_keys = set(row.keys())
-            kind = OutboxKind(row["kind"])
             scope = ScopeRef.from_dict(payload["scope"])
             spec = FormalTaskSpec.from_dict(payload["spec"])
+            adjustment = (
+                TaskAdjustmentRequest.from_dict(payload["adjustment"])
+                if kind is OutboxKind.ATTEMPT_ADJUST
+                else None
+            )
             if spec.context.scope != scope:
                 raise FormalTaskViolation(
                     "OUTBOX_BINDING_MISMATCH",
@@ -4015,6 +4475,21 @@ class SqliteTaskStore:
                 "retry_event_seq",
                 "retry_event_count",
                 "retry_segment_start_seq",
+                "adjust_event_id",
+                "adjust_event_task_id",
+                "adjust_event_attempt_id",
+                "adjust_event_scope_json",
+                "adjust_event_type",
+                "adjust_event_state",
+                "adjust_event_outcome",
+                "adjust_event_producer",
+                "adjust_event_source_event_id",
+                "adjust_event_causation_id",
+                "adjust_event_correlation_id",
+                "adjust_event_occurred_at",
+                "adjust_event_details_json",
+                "adjust_event_seq",
+                "adjust_event_count",
             }.issubset(row_keys):
                 if (
                     row["canonical_attempt_id"] is None
@@ -4073,16 +4548,53 @@ class SqliteTaskStore:
                         "outbox command fingerprint is invalid",
                         ErrorCode.PROTOCOL_VIOLATION,
                     )
-                command = CommandEnvelope.from_dict(
-                    {"request_id": "task-store-validation", **command_payload}
-                )
+                command: CommandEnvelope | None
+                if kind is OutboxKind.ATTEMPT_ADJUST:
+                    required_command_keys = {
+                        "contract_version",
+                        "command_id",
+                        "command_type",
+                        "issued_at",
+                        "scope",
+                        "correlation_id",
+                        "causation_id",
+                        "origin",
+                        "target_ref",
+                        "context_refs",
+                        "required_capabilities",
+                        "payload",
+                        "extensions",
+                    }
+                    if set(command_payload) != required_command_keys:
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "adjustment command fingerprint is not canonical",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    command = None
+                    command_id = command_payload.get("command_id")
+                    command_type = command_payload.get("command_type")
+                    command_scope = ScopeRef.from_dict(command_payload.get("scope"))
+                    command_capabilities = command_payload.get("required_capabilities")
+                else:
+                    command = CommandEnvelope.from_dict(
+                        {"request_id": "task-store-validation", **command_payload}
+                    )
+                    command_id = command.command_id
+                    command_type = command.command_type
+                    command_scope = command.scope
+                    command_capabilities = list(command.required_capabilities)
                 result = ResultEnvelope.from_dict(
                     _json_load(row["command_result_json"])
                 )
                 expected_command_type = (
                     row["bound_command_type"]
                     if kind is OutboxKind.ATTEMPT_DISPATCH
-                    else "task.cancel"
+                    else (
+                        "task.cancel"
+                        if kind is OutboxKind.ATTEMPT_CANCEL
+                        else "task.adjust"
+                    )
                 )
                 if (
                     expected_command_type not in {"task.create", "task.retry"}
@@ -4090,10 +4602,10 @@ class SqliteTaskStore:
                 ) or (
                     row["bound_command_type"] != expected_command_type
                     or row["command_scope_key"] != row["task_scope_key"]
-                    or command.command_id != row["command_id"]
-                    or command.command_type != expected_command_type
-                    or command.scope != scope
-                    or tuple(command.required_capabilities) != (expected_command_type,)
+                    or command_id != row["command_id"]
+                    or command_type != expected_command_type
+                    or command_scope != scope
+                    or command_capabilities != [expected_command_type]
                     or not result.ok
                     or result.command_id != row["command_id"]
                 ):
@@ -4107,6 +4619,7 @@ class SqliteTaskStore:
                     kind is OutboxKind.ATTEMPT_DISPATCH
                     and expected_command_type == "task.create"
                 ):
+                    assert command is not None
                     expected_payload = {
                         "name": spec.name,
                         "instruction": spec.instruction,
@@ -4135,6 +4648,7 @@ class SqliteTaskStore:
                     kind is OutboxKind.ATTEMPT_DISPATCH
                     and expected_command_type == "task.retry"
                 ):
+                    assert command is not None
                     TaskRetryProductRequestFingerprint.from_extensions(
                         command.extensions
                     )
@@ -4235,30 +4749,63 @@ class SqliteTaskStore:
                             "retry dispatch does not match its durable lineage boundary",
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
-                elif (
-                    command.target_ref.id != row["task_id"]
-                    or command.payload
-                    or type(command_result) is not dict
-                    or set(command_result)
-                    != {
-                        "task_id",
-                        "attempt_id",
-                        "cancel_acknowledged",
-                        "applied",
-                        "state",
-                        "outbox_id",
-                    }
-                    or command_result["task_id"] != row["task_id"]
-                    or command_result["attempt_id"] != row["attempt_id"]
-                    or command_result["cancel_acknowledged"] is not True
-                    or command_result["applied"] is not True
-                    or command_result["outbox_id"] != row["outbox_id"]
-                ):
-                    raise FormalTaskViolation(
-                        "OUTBOX_COMMAND_BINDING_MISMATCH",
-                        "cancel outbox does not match its cancel command facts",
-                        ErrorCode.PROTOCOL_VIOLATION,
-                    )
+                elif kind is OutboxKind.ATTEMPT_CANCEL:
+                    assert command is not None
+                    if (
+                        command.target_ref.id != row["task_id"]
+                        or command.payload
+                        or type(command_result) is not dict
+                        or set(command_result)
+                        != {
+                            "task_id",
+                            "attempt_id",
+                            "cancel_acknowledged",
+                            "applied",
+                            "state",
+                            "outbox_id",
+                        }
+                        or command_result["task_id"] != row["task_id"]
+                        or command_result["attempt_id"] != row["attempt_id"]
+                        or command_result["cancel_acknowledged"] is not True
+                        or command_result["applied"] is not True
+                        or command_result["outbox_id"] != row["outbox_id"]
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "cancel outbox does not match its cancel command facts",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                elif kind is OutboxKind.ATTEMPT_ADJUST:
+                    assert adjustment is not None
+                    target_ref = command_payload.get("target_ref")
+                    adjustment_payload = command_payload.get("payload")
+                    if (
+                        target_ref != {"kind": "task", "id": row["task_id"]}
+                        or adjustment_payload != {"adjustment": adjustment.adjustment}
+                        or adjustment.adjustment_id != row["command_id"]
+                        or type(command_result) is not dict
+                        or set(command_result)
+                        != {
+                            "task_id",
+                            "attempt_id",
+                            "adjustment_id",
+                            "adjustment_state",
+                            "reason",
+                            "outbox_id",
+                        }
+                        or command_result["task_id"] != row["task_id"]
+                        or command_result["attempt_id"] != row["attempt_id"]
+                        or command_result["adjustment_id"] != row["command_id"]
+                        or command_result["adjustment_state"]
+                        != TaskAdjustmentState.PENDING.value
+                        or command_result["reason"] is not None
+                        or command_result["outbox_id"] != row["outbox_id"]
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "adjustment outbox does not match its command facts",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
                 if kind is OutboxKind.ATTEMPT_CANCEL:
                     if (
                         int(row["cancel_event_count"]) != 1
@@ -4300,6 +4847,45 @@ class SqliteTaskStore:
                             "cancel result does not match its durable request event",
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
+                elif kind is OutboxKind.ATTEMPT_ADJUST:
+                    if (
+                        int(row["adjust_event_count"]) != 1
+                        or type(row["adjust_event_id"]) is not str
+                        or not row["adjust_event_id"].strip()
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "adjustment outbox lacks one exact durable request event",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                    adjust_scope = ScopeRef.from_dict(
+                        _json_load(row["adjust_event_scope_json"])
+                    )
+                    adjust_details = _json_load(row["adjust_event_details_json"])
+                    adjust_state = FormalTaskState(row["adjust_event_state"])
+                    adjust_seq = int(row["adjust_event_seq"])
+                    if (
+                        row["adjust_event_task_id"] != row["task_id"]
+                        or row["adjust_event_attempt_id"] != row["attempt_id"]
+                        or adjust_scope != scope
+                        or row["adjust_event_type"] != "task.adjust_requested"
+                        or adjust_state
+                        not in {FormalTaskState.ACCEPTED, FormalTaskState.RUNNING}
+                        or row["adjust_event_outcome"] is not None
+                        or row["adjust_event_producer"] != "task_core.control"
+                        or row["adjust_event_source_event_id"] is not None
+                        or row["adjust_event_causation_id"] != row["command_id"]
+                        or row["adjust_event_correlation_id"]
+                        != row["task_correlation_id"]
+                        or adjust_details != {"command_id": row["command_id"]}
+                        or adjust_seq != adjustment.requested_seq
+                        or adjust_seq > int(row["task_event_head"])
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_COMMAND_BINDING_MISMATCH",
+                            "adjustment request does not match its durable event",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
                 task_state = FormalTaskState(row["bound_task_state"])
                 attempt_state = FormalAttemptState(row["bound_attempt_state"])
                 cancel_requested = row["task_cancel_requested"]
@@ -4330,17 +4916,28 @@ class SqliteTaskStore:
                             "dispatch outbox does not match its task lifecycle",
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
-                elif (
-                    not bool(cancel_requested)
-                    or not bool(dispatch_fenced)
-                    or (task_state is FormalTaskState.ACCEPTED)
-                    != (attempt_state is FormalAttemptState.ACCEPTED)
-                    or (task_state is FormalTaskState.RUNNING)
-                    != (attempt_state is FormalAttemptState.RUNNING)
+                elif kind is OutboxKind.ATTEMPT_CANCEL:
+                    if (
+                        not bool(cancel_requested)
+                        or not bool(dispatch_fenced)
+                        or (task_state is FormalTaskState.ACCEPTED)
+                        != (attempt_state is FormalAttemptState.ACCEPTED)
+                        or (task_state is FormalTaskState.RUNNING)
+                        != (attempt_state is FormalAttemptState.RUNNING)
+                    ):
+                        raise FormalTaskViolation(
+                            "OUTBOX_LIFECYCLE_MISMATCH",
+                            "cancel outbox lacks its durable cancellation lifecycle",
+                            ErrorCode.PROTOCOL_VIOLATION,
+                        )
+                elif (task_state is FormalTaskState.ACCEPTED) != (
+                    attempt_state is FormalAttemptState.ACCEPTED
+                ) or (task_state is FormalTaskState.RUNNING) != (
+                    attempt_state is FormalAttemptState.RUNNING
                 ):
                     raise FormalTaskViolation(
                         "OUTBOX_LIFECYCLE_MISMATCH",
-                        "cancel outbox lacks its durable cancellation lifecycle",
+                        "adjustment outbox does not bind a nonterminal attempt",
                         ErrorCode.PROTOCOL_VIOLATION,
                     )
             source_seq = (
@@ -4359,6 +4956,7 @@ class SqliteTaskStore:
                 OutboxState(row["state"]),
                 int(row["delivery_count"]),
                 row["claim_token"],
+                adjustment,
             )
 
         return _stored_record("outbox", load)

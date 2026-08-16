@@ -43,6 +43,9 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     PersistentOutboxItem,
     PersistentTaskRecord,
     ResolvedTaskContext,
+    TaskAdjustmentRequest,
+    TaskAdjustmentSettlement,
+    TaskAdjustmentState,
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     AgentManagerProjectBindingResolver,
@@ -158,6 +161,37 @@ class _DemoItineraryProjectExecutor(_DirectProjectExecutor):
             )
         finally:
             self.finished.set()
+
+
+class _AdjustableItineraryProjectExecutor(_DirectProjectExecutor):
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        self.started.set()
+        project = Path(request.params["project_dir"]).resolve()
+        if request.params["source"] == "live_voice.formal_task.d0":
+            (project / "itinerary.md").write_text(
+                "# Itinerary\n\nMuseum at 08:30.\n",
+                encoding="utf-8",
+            )
+            content = "Initial itinerary ready."
+        else:
+            query = request.params["query"]
+            itinerary = (project / "itinerary.md").read_text(encoding="utf-8")
+            if "09:30" in query:
+                itinerary = itinerary.replace("08:30", "09:30")
+                content = "Museum moved to 09:30."
+            elif "vegetarian" in query:
+                itinerary += "Vegetarian lunch.\n"
+                content = "Vegetarian lunch added."
+            else:
+                content = "Adjustment could not be applied."
+            (project / "itinerary.md").write_text(itinerary, encoding="utf-8")
+        yield AgentResponseChunk(
+            request.request_id,
+            request.channel_id,
+            payload={"event_type": "chat.final", "content": content},
+            is_complete=True,
+        )
 
 
 class _ExactRootDirectProjectExecutor(_DirectProjectExecutor):
@@ -428,6 +462,34 @@ def _item(project: Path, *, kind=OutboxKind.ATTEMPT_DISPATCH, source_seq=-1):
         source_seq=source_seq,
         state=OutboxState.CLAIMED,
         delivery_count=1,
+    )
+
+
+def _adjustment_item(
+    project: Path,
+    *,
+    command_id: str,
+    adjustment: str,
+    requested_seq: int,
+) -> PersistentOutboxItem:
+    return PersistentOutboxItem(
+        outbox_id=f"outbox-{command_id}",
+        kind=OutboxKind.ATTEMPT_ADJUST,
+        task_id="task-1",
+        attempt_id="attempt-1",
+        command_id=command_id,
+        scope=_scope(),
+        spec=_spec(project),
+        executor_ref="d0-project:attempt-1",
+        source_seq=1,
+        state=OutboxState.CLAIMED,
+        delivery_count=1,
+        claim_token=f"claim-{command_id}",
+        adjustment=TaskAdjustmentRequest(
+            command_id,
+            adjustment,
+            requested_seq,
+        ),
     )
 
 
@@ -930,12 +992,12 @@ async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carr
     assert terminal.observations[0].attempt_outcome is TerminalOutcome.COMPLETED
     assert terminal.observations[0].result_text == "done"
     assert [
-        artifact.relative_path
-        for artifact in terminal.observations[0].result_artifacts
+        artifact.relative_path for artifact in terminal.observations[0].result_artifacts
     ] == ["result.txt"]
-    assert terminal.observations[0].result_artifacts[0].sha256 == hashlib.sha256(
-        b"done"
-    ).hexdigest()
+    assert (
+        terminal.observations[0].result_artifacts[0].sha256
+        == hashlib.sha256(b"done").hexdigest()
+    )
     assert resolver.calls == [True]
     assert len(executor.requests) == 1
     request = executor.requests[0]
@@ -1001,6 +1063,112 @@ async def test_demo_itinerary_fixture_constrains_real_direct_executor_and_seals_
     assert "<itinerary_requirements>" in query
     assert spec.instruction in query
     assert _git(project, "status", "--porcelain") == "?? itinerary.md"
+
+
+@pytest.mark.asyncio
+async def test_direct_adjustments_are_ordered_durable_and_fence_terminal_result(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "adjustable-itinerary"
+    _git_project(project)
+    executor = _AdjustableItineraryProjectExecutor(project)
+    checkpoint_open = asyncio.Event()
+    release_checkpoint = asyncio.Event()
+
+    async def checkpoint_barrier(attempt_id: str) -> None:
+        assert attempt_id == "attempt-1"
+        checkpoint_open.set()
+        await release_checkpoint.wait()
+
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        adjustment_checkpoint_barrier=checkpoint_barrier,
+    )
+    await adapter.dispatch(_item(project))
+    await asyncio.wait_for(checkpoint_open.wait(), timeout=2)
+    first = _adjustment_item(
+        project,
+        command_id="adjust-1",
+        adjustment="Move the museum visit to 09:30.",
+        requested_seq=4,
+    )
+    second = _adjustment_item(
+        project,
+        command_id="adjust-2",
+        adjustment="Make lunch vegetarian.",
+        requested_seq=5,
+    )
+    checkpoint = adapter._adjustment_checkpoints["attempt-1"]
+    first_delivery_task = asyncio.create_task(adapter.adjust(first))
+    await asyncio.wait_for(checkpoint.changed.wait(), timeout=2)
+    checkpoint.changed.clear()
+    second_delivery_task = asyncio.create_task(adapter.adjust(second))
+    await asyncio.wait_for(checkpoint.changed.wait(), timeout=2)
+    assert len(checkpoint.pending) == 2
+    release_checkpoint.set()
+
+    first_delivery = await asyncio.wait_for(first_delivery_task, timeout=2)
+    assert first_delivery.state is TaskAdjustmentState.APPLIED
+    replay = await adapter.adjust(
+        replace(first, outbox_id="outbox-adjust-1-replay", claim_token="replay")
+    )
+    assert replay == first_delivery
+    assert len(executor.requests) == 2
+    successor_executor = _AdjustableItineraryProjectExecutor(project)
+    successor = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, successor_executor)),
+        tmp_path / "p3.sqlite3",
+    )
+    restart_replay = await successor.adjust(
+        replace(first, outbox_id="outbox-adjust-1-restart", claim_token="restart")
+    )
+    assert restart_replay == first_delivery
+    assert successor_executor.requests == []
+    task, attempt = _direct_task_attempt(project)
+    before_store_ack = await adapter.status(task, attempt)
+    assert isinstance(before_store_ack, ExecutorDeliveryResult)
+    assert before_store_ack.observations == ()
+
+    await adapter.settle_adjustment(
+        first,
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, True),
+    )
+    second_delivery = await asyncio.wait_for(second_delivery_task, timeout=2)
+    assert second_delivery.state is TaskAdjustmentState.APPLIED
+    await adapter.settle_adjustment(
+        second,
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False),
+    )
+    await _wait_direct_settled(adapter)
+
+    terminal = await adapter.status(task, attempt)
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert terminal.observations[-1].result_text == "Vegetarian lunch added."
+    itinerary = (project / "itinerary.md").read_text(encoding="utf-8")
+    assert "Museum at 09:30." in itinerary
+    assert "Vegetarian lunch." in itinerary
+    adjustment_requests = executor.requests[1:]
+    assert [
+        request.metadata["formal_adjustment_id"] for request in adjustment_requests
+    ] == ["adjust-1", "adjust-2"]
+    assert [
+        record.state for record in adapter._journal.all_adjustments("attempt-1")
+    ] == [TaskAdjustmentState.APPLIED, TaskAdjustmentState.APPLIED]
+
+    before = (project / "itinerary.md").read_bytes()
+    late = _adjustment_item(
+        project,
+        command_id="adjust-late",
+        adjustment="Delete the itinerary.",
+        requested_seq=6,
+    )
+    late_result = await adapter.adjust(late)
+    assert late_result.state is TaskAdjustmentState.REJECTED
+    assert late_result.reason == "ADJUSTMENT_CHECKPOINT_CLOSED"
+    assert (project / "itinerary.md").read_bytes() == before
+    assert len(executor.requests) == 3
 
 
 @pytest.mark.asyncio
@@ -2134,9 +2302,7 @@ async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
     terminal = await adapter.status(replace(task, spec=spec), attempt)
     observation = terminal.observations[-1]
     assert observation.attempt_outcome is TerminalOutcome.COMPLETED
-    assert observation.result_text == (
-        "第二天最早的固定安排是 08:30 参观博物馆。"
-    )
+    assert observation.result_text == ("第二天最早的固定安排是 08:30 参观博物馆。")
     assert len(observation.result_artifacts) == 1
     artifact = observation.result_artifacts[0]
     assert artifact.relative_path == "itinerary.md"
