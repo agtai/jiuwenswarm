@@ -18,6 +18,7 @@ import {
   MEDIA_END_OF_TURN_CAPABILITY,
   type MediaAudioFrame,
   type MediaEndOfTurn,
+  type MediaSpeechStart,
 } from './adapters/browserGatewayMediaTransport.js';
 import {
   GatewayBatchSpeechClient,
@@ -258,6 +259,8 @@ export class ProductP1VoiceRouteOwner {
   readonly #origin: string;
   readonly #socketFactory: DedicatedMediaSocketFactory;
   readonly #onStatus?: (status: ProductP1VoiceStatus, reason: string | null) => void;
+  readonly #onConcurrentCaptureStarted?: () => void;
+  readonly #onBargeInSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #audio: BrowserAudioIOAdapter;
   #status: ProductP1VoiceStatus;
@@ -294,9 +297,11 @@ export class ProductP1VoiceRouteOwner {
   #streamingFallbackTier: 'batch' | 'text' | null = null;
   #pendingMediaActivation: Promise<unknown> | null = null;
   #endOfTurnNegotiated = false;
+  #pendingSpeechStart: Readonly<MediaSpeechStart> | null = null;
   #pendingEndOfTurn: Readonly<MediaEndOfTurn> | null = null;
   #endOfTurnHandler: (() => void) | null = null;
   #endOfTurnDelivered = false;
+  #bargeInSpeechStartDelivered = false;
   #bargeInEndOfTurnDelivered = false;
   #stopAndRecognizePromise: Promise<Readonly<ProductP1Recognition>> | null = null;
   #captureRotationPromise: Promise<void> | null = null;
@@ -310,6 +315,8 @@ export class ProductP1VoiceRouteOwner {
       socket_factory?: DedicatedMediaSocketFactory;
       audio_environment?: BrowserAudioEnvironment;
       on_status?: (status: ProductP1VoiceStatus, reason: string | null) => void;
+      on_concurrent_capture_started?: () => void;
+      on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
       on_barge_in_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
     }>
   ) {
@@ -318,6 +325,8 @@ export class ProductP1VoiceRouteOwner {
     this.#origin = requiredText(input.expected_origin, 'expected_origin');
     this.#socketFactory = input.socket_factory ?? defaultSocketFactory;
     this.#onStatus = input.on_status;
+    this.#onConcurrentCaptureStarted = input.on_concurrent_capture_started;
+    this.#onBargeInSpeechStart = input.on_barge_in_speech_start;
     this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
     this.#status = this.#enabled ? 'idle' : 'closed';
     this.#audio = new BrowserAudioIOAdapter({
@@ -408,9 +417,11 @@ export class ProductP1VoiceRouteOwner {
     this.#streamingFallbackReason = null;
     this.#streamingFallbackTier = null;
     this.#endOfTurnNegotiated = false;
+    this.#pendingSpeechStart = null;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnHandler = null;
     this.#endOfTurnDelivered = false;
+    this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
     this.#failureCleanupReason = null;
@@ -528,6 +539,9 @@ export class ProductP1VoiceRouteOwner {
           ...(this.#endOfTurnNegotiated
             ? {
                 end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+                on_speech_start: (event: Readonly<MediaSpeechStart>) => {
+                  this.#observeSpeechStartControl(operationGeneration, ownedRoute, event);
+                },
                 on_end_of_turn: (event: Readonly<MediaEndOfTurn>) => {
                   this.#observeEndOfTurnControl(operationGeneration, ownedRoute, event);
                 },
@@ -787,13 +801,14 @@ export class ProductP1VoiceRouteOwner {
       };
       pendingRef = pendingPlayout;
       this.#pendingPlayout = pendingPlayout;
-      this.#deliverBargeInEndOfTurn(operationGeneration, this.#route);
       if (downlinkTerminal !== null && downlinkRoute !== null) {
         this.#observeMediaTerminal(downlinkRoute, downlinkTerminal);
         this.#requireCurrent(operationGeneration);
       }
       this.#audio.beginPlayout(result.response);
       this.#fillPlayoutQueue(pendingPlayout);
+      this.#deliverBargeInSpeechStart(operationGeneration, this.#route);
+      this.#deliverBargeInEndOfTurn(operationGeneration, this.#route);
       await rendered;
       this.#requireCurrent(operationGeneration);
       if (downlinkRoute !== null) {
@@ -954,8 +969,10 @@ export class ProductP1VoiceRouteOwner {
     this.#route = null;
     this.#speech = null;
     this.#endOfTurnNegotiated = false;
+    this.#pendingSpeechStart = null;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnDelivered = false;
+    this.#bargeInSpeechStartDelivered = false;
     this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
     const metadata = await this.#audio.startCapture(
@@ -1049,6 +1066,9 @@ export class ProductP1VoiceRouteOwner {
         ...(this.#endOfTurnNegotiated
           ? {
               end_of_turn_capability: MEDIA_END_OF_TURN_CAPABILITY,
+              on_speech_start: (event: Readonly<MediaSpeechStart>) => {
+                this.#observeSpeechStartControl(operationGeneration, ownedRoute, event);
+              },
               on_end_of_turn: (event: Readonly<MediaEndOfTurn>) => {
                 this.#observeEndOfTurnControl(operationGeneration, ownedRoute, event);
               },
@@ -1074,6 +1094,8 @@ export class ProductP1VoiceRouteOwner {
       },
     });
     await this.#awaitCaptureReadiness(route, operationGeneration);
+    this.#requireCurrent(operationGeneration);
+    this.#onConcurrentCaptureStarted?.();
   }
 
   async #rotateConcurrentCapture(operationGeneration: number): Promise<void> {
@@ -1638,6 +1660,7 @@ export class ProductP1VoiceRouteOwner {
 
   async #releaseResources(reason: string, pendingFailureReason: string | null = null): Promise<void> {
     this.#operationGeneration += 1;
+    this.#pendingSpeechStart = null;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnHandler = null;
     this.#endOfTurnDelivered = false;
@@ -1803,6 +1826,49 @@ export class ProductP1VoiceRouteOwner {
         handler();
       }
     });
+  }
+
+  #observeSpeechStartControl(
+    operationGeneration: number,
+    route: ActiveBrowserDedicatedMediaRoute | null,
+    event: Readonly<MediaSpeechStart>
+  ): void {
+    if (
+      route === null ||
+      route !== this.#route ||
+      operationGeneration !== this.#operationGeneration
+    ) {
+      return;
+    }
+    if (
+      event.lease_id !== route.binding.lease_id ||
+      event.generation !== route.binding.generation.value
+    ) {
+      throw new Error('speech-start control escaped its media authority');
+    }
+    this.#pendingSpeechStart = event;
+    this.#deliverBargeInSpeechStart(operationGeneration, route);
+  }
+
+  #deliverBargeInSpeechStart(
+    operationGeneration: number,
+    route: ActiveBrowserDedicatedMediaRoute | null
+  ): void {
+    const event = this.#pendingSpeechStart;
+    if (
+      event === null ||
+      this.#onBargeInSpeechStart === undefined ||
+      this.#bargeInSpeechStartDelivered ||
+      this.#status !== 'playing' ||
+      this.#pendingPlayout === null ||
+      route === null ||
+      route !== this.#route ||
+      operationGeneration !== this.#operationGeneration
+    ) {
+      return;
+    }
+    this.#bargeInSpeechStartDelivered = true;
+    this.#onBargeInSpeechStart(event);
   }
 
   #observeEndOfTurnControl(

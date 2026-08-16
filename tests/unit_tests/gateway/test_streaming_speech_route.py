@@ -354,6 +354,9 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
             provider_start_ms=100,
         )
     )
+    speech_start = await asyncio.wait_for(owner.wait_speech_start(handle), timeout=1)
+    assert speech_start.provider_start_ms == 100
+    assert speech_start.timing_basis is RecognitionTimingBasis.PROVIDER_TIME
     await provider.events.put(
         RecognitionTurnBoundaryEvent(
             handle.ref,

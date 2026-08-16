@@ -2143,6 +2143,7 @@
       "routeLabel": "P1 · Gateway Speech · 正式路线",
       "editorLabel": "语音识别文本",
       "recoveryFailed": "语音连接恢复失败",
+      "recoveryFailedWithReason": "语音恢复失败（阶段：{{phase}}，原因：{{reason}}）",
       "taskTitle": "后台任务",
       "taskState": "当前状态：{{state}}",
       "status": {

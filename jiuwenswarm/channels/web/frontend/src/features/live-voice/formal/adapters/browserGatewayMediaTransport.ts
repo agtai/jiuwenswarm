@@ -166,6 +166,20 @@ export interface MediaDetach {
   readonly business_cancel_count_delta: 0;
 }
 
+export interface MediaSpeechStart {
+  readonly type: 'media.speech_start';
+  readonly capability_version: typeof MEDIA_END_OF_TURN_CAPABILITY;
+  readonly lease_id: string;
+  readonly generation: number;
+  readonly detector: 'server_vad';
+  readonly provider_start_ms: number;
+  readonly timing_basis: 'provider_time';
+  readonly timing_provenance: 'adapter_derived';
+  readonly create_response: false;
+  readonly interrupt_response: false;
+  readonly business_cancel_count_delta: 0;
+}
+
 export interface MediaEndOfTurn {
   readonly type: 'media.end_of_turn';
   readonly capability_version: typeof MEDIA_END_OF_TURN_CAPABILITY;
@@ -193,7 +207,7 @@ export interface MediaPlaybackStopReceipt {
   readonly business_cancel_count_delta: 0;
 }
 
-export type MediaControl = MediaAttach | MediaAck | MediaDetach | MediaEndOfTurn | MediaPlaybackStopReceipt;
+export type MediaControl = MediaAttach | MediaAck | MediaDetach | MediaSpeechStart | MediaEndOfTurn | MediaPlaybackStopReceipt;
 
 export interface MediaAudioFrame {
   readonly seq: number;
@@ -738,6 +752,21 @@ export function serializeMediaControl(control: MediaControl): string {
         'playback stop cannot carry business cancellation',
       );
     }
+  } else if (control.type === 'media.speech_start') {
+    requireId('lease_id', control.lease_id, MAX_LEASE_ID_BYTES);
+    requireSafeUint('generation', control.generation);
+    requireSafeUint('provider_start_ms', control.provider_start_ms);
+    if (
+      control.capability_version !== MEDIA_END_OF_TURN_CAPABILITY ||
+      control.detector !== 'server_vad' ||
+      control.timing_basis !== 'provider_time' ||
+      control.timing_provenance !== 'adapter_derived' ||
+      control.create_response !== false ||
+      control.interrupt_response !== false ||
+      control.business_cancel_count_delta !== 0
+    ) {
+      throw new MediaTransportViolation('MEDIA_INVALID_CONTROL', 'speech-start control contract is not exact');
+    }
   } else if (control.type === 'media.end_of_turn') {
     requireId('lease_id', control.lease_id, MAX_LEASE_ID_BYTES);
     requireSafeUint('generation', control.generation);
@@ -815,6 +844,53 @@ export function deserializeMediaControl(text: string): MediaControl {
       generation: raw.generation,
       reason_id: raw.reason_id,
       through_seq: raw.through_seq as number | null,
+      business_cancel_count_delta: 0,
+    });
+  }
+  if (raw.type === 'media.speech_start') {
+    requireExactKeys(
+      raw,
+      [
+        'type',
+        'contract_version',
+        'capability_version',
+        'lease_id',
+        'generation',
+        'detector',
+        'provider_start_ms',
+        'timing_basis',
+        'timing_provenance',
+        'create_response',
+        'interrupt_response',
+        'business_cancel_count_delta',
+      ],
+      'speech_start'
+    );
+    requireId('lease_id', raw.lease_id, MAX_LEASE_ID_BYTES);
+    requireSafeUint('generation', raw.generation, 'MEDIA_MALFORMED_CONTROL');
+    requireSafeUint('provider_start_ms', raw.provider_start_ms, 'MEDIA_MALFORMED_CONTROL');
+    if (
+      raw.capability_version !== MEDIA_END_OF_TURN_CAPABILITY ||
+      raw.detector !== 'server_vad' ||
+      raw.timing_basis !== 'provider_time' ||
+      raw.timing_provenance !== 'adapter_derived' ||
+      raw.create_response !== false ||
+      raw.interrupt_response !== false ||
+      raw.business_cancel_count_delta !== 0
+    ) {
+      throw new MediaTransportViolation('MEDIA_MALFORMED_CONTROL', 'speech-start control contract is not exact');
+    }
+    return Object.freeze({
+      type: 'media.speech_start',
+      capability_version: MEDIA_END_OF_TURN_CAPABILITY,
+      lease_id: raw.lease_id,
+      generation: raw.generation,
+      detector: 'server_vad',
+      provider_start_ms: raw.provider_start_ms,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
       business_cancel_count_delta: 0,
     });
   }

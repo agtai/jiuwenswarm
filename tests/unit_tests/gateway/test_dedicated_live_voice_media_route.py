@@ -30,6 +30,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaFrameFormat,
     MediaGenerationBinding,
     MediaGenerationKind,
+    MediaSpeechStart,
     MediaPlayoutBinding,
     MediaPlaybackStopOutcome,
     MediaTransportViolation,
@@ -921,6 +922,14 @@ async def test_socket_leaf_single_sender_orders_ack_before_eot_then_peer_detach(
 
     socket = _EotSocket()
 
+    async def next_speech_start() -> MediaSpeechStart:
+        await socket.waiting_after_audio.wait()
+        return MediaSpeechStart(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+        )
+
     async def next_end_of_turn() -> MediaEndOfTurn:
         await socket.waiting_after_audio.wait()
         return MediaEndOfTurn(
@@ -935,18 +944,20 @@ async def test_socket_leaf_single_sender_orders_ack_before_eot_then_peer_detach(
             _request(binding),
             socket=socket,
             on_audio_frame=lambda _frame: None,
+            next_speech_start=next_speech_start,
             next_end_of_turn=next_end_of_turn,
             cleanup_owner=DedicatedMediaLeafCleanupOwner(),
         )
     )
     for _ in range(40):
-        if len(socket.sent) == 3:
+        if len(socket.sent) == 4:
             break
         await asyncio.sleep(0)
     controls = [deserialize_media_control(item) for item in socket.sent]
     assert [type(control) for control in controls] == [
         MediaAttach,
         MediaAck,
+        MediaSpeechStart,
         MediaEndOfTurn,
     ]
     socket.release_detach.set()
@@ -1240,6 +1251,74 @@ async def test_hostile_eot_is_retained_bounded_and_truthfully_converges(
     assert closed.value.reason_id == "MEDIA_CLEANUP_OWNER_CLOSED"
     assert closed_socket.sent == []
     assert closed_socket.close_calls == []
+
+
+@pytest.mark.asyncio
+async def test_speech_start_failure_keeps_hostile_eot_owned_until_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_SOCKET_CLOSE_TIMEOUT_SECONDS", 0.01)
+    binding = _binding()
+    owner = DedicatedMediaLeafCleanupOwner(capacity=3)
+    peer_detach = MediaDetach(
+        lease_id=binding.lease_id,
+        generation=binding.generation.value,
+        reason_id=MediaDetachReason.PEER_CLOSE,
+    )
+    hostile_eot = _CancellationHostileAwaitable(
+        MediaEndOfTurn(
+            lease_id=binding.lease_id,
+            generation=binding.generation.value,
+            provider_start_ms=100,
+            provider_end_ms=700,
+        )
+    )
+    speech_start_failed = asyncio.Event()
+    release_detach = asyncio.Event()
+
+    async def next_speech_start() -> MediaSpeechStart:
+        await hostile_eot.started.wait()
+        speech_start_failed.set()
+        raise RuntimeError("content-free speech-start source failure")
+
+    class _DetachAfterSpeechStartFailure(_FakeDedicatedSocket):
+        async def recv(self) -> str | bytes:
+            await release_detach.wait()
+            return serialize_media_control(peer_detach)
+
+    socket = _DetachAfterSpeechStartFailure([])
+    route_task = asyncio.create_task(
+        run_dedicated_media_socket_leaf(
+            _request(binding),
+            socket=socket,
+            on_audio_frame=lambda _frame: None,
+            next_speech_start=next_speech_start,
+            next_end_of_turn=lambda: hostile_eot,
+            cleanup_owner=owner,
+        )
+    )
+    await asyncio.wait_for(speech_start_failed.wait(), timeout=1)
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert [type(deserialize_media_control(item)) for item in socket.sent] == [
+        MediaAttach
+    ]
+
+    release_detach.set()
+    result = await asyncio.wait_for(route_task, timeout=1)
+
+    assert result.reason_id is MediaDetachReason.PEER_CLOSE
+    assert result.cleanup_complete is False
+    assert result.cleanup_pending_tasks == 1
+    assert hostile_eot.cancel_observed.is_set()
+    assert owner.snapshot.retained_tasks == 1
+    assert [type(deserialize_media_control(item)) for item in socket.sent] == [
+        MediaAttach
+    ]
+
+    hostile_eot.release.set()
+    assert await owner.retry_cleanup(timeout_seconds=1) is True
+    assert owner.snapshot.cleanup_complete is True
 
 
 @pytest.mark.asyncio

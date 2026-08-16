@@ -97,6 +97,7 @@ const MAX_ID_LENGTH = 512;
 const MAX_CONTENT_LENGTH = 100_000;
 const MAX_DURABLE_OPERATION_BYTES = 131_072;
 let recoveryTokenSequence = 0;
+let routeIdentitySequence = 0;
 
 function requiredText(value: unknown, field: string, maxLength = MAX_ID_LENGTH): string {
   if (typeof value !== 'string' || !value.trim() || value.length > maxLength) {
@@ -406,6 +407,14 @@ function allocateRecoveryToken(ownerId: string): string {
   return `p2-recovery-${ownerId.replace(/[^A-Za-z0-9_-]/g, '')}-${random}`.slice(0, MAX_ID_LENGTH);
 }
 
+function allocateSessionRouteIdentity(sessionId: string, clientInstanceId: string): string {
+  routeIdentitySequence += 1;
+  const session = sessionId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || 'session';
+  const client = clientInstanceId.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 48) || 'client';
+  const nonce = (globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${routeIdentitySequence}`).replace(/[^A-Za-z0-9_-]/g, '');
+  return `${client}-${session}-${nonce}`.slice(0, 192);
+}
+
 const nodeRecoveryLocks = new Map<string, true>();
 
 /** Browser Web Locks hold one same-sessionStorage refresh recovery across every await. */
@@ -474,7 +483,11 @@ export class ProductP2ActivationJournal implements ProductP2DurableOperationJour
       if (decoded.legacy) journal.#write({ ...decoded.record, revision: decoded.record.revision + 1 });
       return journal;
     }
-    const routeId = clientInstanceId.replace(/[^A-Za-z0-9_-]/g, '') || 'route';
+    // A React page instance survives same-tab Session switches.  A fresh
+    // per-Session journal therefore needs its own durable route identity;
+    // reusing only client_instance_id would reset response generations under
+    // the same interaction/correlation in the Gateway synthesis owner.
+    const routeId = allocateSessionRouteIdentity(sessionId, clientInstanceId);
     const record: StoredJournal = {
       schema: PRODUCT_P2_ACTIVATION_JOURNAL_SCHEMA,
       revision: 0,
@@ -823,6 +836,31 @@ export async function reconcileProductP2Predecessor(
           } catch (error) {
             if (!checkpoint()) {
               outcome = superseded();
+              return outcome;
+            }
+            // An exact presentation ACK can outlive its P2 route when the page
+            // refreshes across an AgentServer restart.  The authoritative
+            // route-not-found result proves that neither the ACK nor the old
+            // activation can still complete, so retaining either checkpoint
+            // would only replay the same impossible ACK on every remount.
+            if (
+              pending.method === P2_PRESENTATION_ACK_METHOD &&
+              ['PRODUCT_P2_ROUTE_NOT_FOUND', 'STALE_RESPONSE_OUTPUT', 'UNKNOWN_AGENT_RESPONSE'].includes(
+                input.error_reason(error) ?? '',
+              )
+            ) {
+              try {
+                input.journal.settleRecoveredOperation(pending, claim);
+                snapshot = input.journal.assertRecovery(claim);
+                if (snapshot.binding === null) {
+                  outcome = blocked();
+                  return outcome;
+                }
+                input.journal.markClosed(snapshot.binding, claim);
+                outcome = ready();
+              } catch (checkpointError) {
+                outcome = snapshot.binding === null ? blocked() : resolveCheckpointFailure(checkpointError, snapshot.binding);
+              }
               return outcome;
             }
             outcome = input.operation_retryable?.(error) === true ? retry() : blocked();

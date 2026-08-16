@@ -107,6 +107,32 @@ test('LVM1 frame and typed control round trip preserve exact codec facts', () =>
   assert.deepEqual(decodedControl, attach);
 });
 
+test('speech-start control round trip is exact and missing bindings fail closed', () => {
+  const speechStart = {
+    type: 'media.speech_start',
+    capability_version: 'media.end_of_turn.v1',
+    lease_id: 'lease-opaque-01',
+    generation: 7,
+    detector: 'server_vad',
+    provider_start_ms: 320,
+    timing_basis: 'provider_time',
+    timing_provenance: 'adapter_derived',
+    create_response: false,
+    interrupt_response: false,
+    business_cancel_count_delta: 0,
+  };
+
+  assert.deepEqual(deserializeMediaControl(serializeMediaControl(speechStart)), speechStart);
+  for (const omitted of ['lease_id', 'generation', 'provider_start_ms']) {
+    const malformed = JSON.parse(serializeMediaControl(speechStart));
+    delete malformed[omitted];
+    assert.throws(
+      () => deserializeMediaControl(JSON.stringify(malformed)),
+      (error) => error instanceof MediaTransportViolation && error.reasonId === 'MEDIA_MALFORMED_CONTROL',
+    );
+  }
+});
+
 test('actual AudioContext rate is preserved without resampling', () => {
   const exactBinding = binding({
     frame_format: {

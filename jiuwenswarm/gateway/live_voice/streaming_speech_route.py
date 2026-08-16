@@ -113,6 +113,18 @@ class StreamingRecognitionEndOfTurn:
     business_cancel_count_delta: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class StreamingRecognitionSpeechStart:
+    provider: ProviderRef
+    provider_start_ms: int
+    detector: str = "server_vad"
+    timing_basis: RecognitionTimingBasis = RecognitionTimingBasis.PROVIDER_TIME
+    timing_provenance: CapabilityProvenance = CapabilityProvenance.ADAPTER_DERIVED
+    create_response: bool = False
+    interrupt_response: bool = False
+    business_cancel_count_delta: int = 0
+
+
 @dataclass(slots=True)
 class StreamingRecognitionHandle:
     ref: RecognitionStreamRef
@@ -123,6 +135,9 @@ class StreamingRecognitionHandle:
         default=None, repr=False
     )
     end_of_turn: asyncio.Future[StreamingRecognitionEndOfTurn] | None = field(
+        default=None, repr=False
+    )
+    speech_start: asyncio.Future[StreamingRecognitionSpeechStart] | None = field(
         default=None, repr=False
     )
     finish_task: asyncio.Task[StreamingRecognitionOutcome] | None = field(
@@ -303,6 +318,11 @@ class StreamingRecognitionRouteOwner:
                     if detection.server_vad is not None
                     else None
                 ),
+                speech_start=(
+                    asyncio.get_running_loop().create_future()
+                    if detection.server_vad is not None
+                    else None
+                ),
             )
             handle.pump_task = asyncio.create_task(
                 self._pump(handle),
@@ -314,6 +334,10 @@ class StreamingRecognitionRouteOwner:
             )
             if handle.end_of_turn is not None:
                 handle.end_of_turn.add_done_callback(_consume_eot_future_failure)
+                assert handle.speech_start is not None
+                handle.speech_start.add_done_callback(
+                    _consume_speech_start_future_failure
+                )
                 handle.event_task.add_done_callback(_eot_collector_callback(handle))
             async with self._handle_lock:
                 publish = not self._closed and self._handles.get(stream_key) is None
@@ -394,6 +418,14 @@ class StreamingRecognitionRouteOwner:
         future = handle.end_of_turn
         if future is None:
             raise RuntimeError("end-of-turn was not negotiated for this stream")
+        return await asyncio.shield(future)
+
+    async def wait_speech_start(
+        self, handle: StreamingRecognitionHandle
+    ) -> StreamingRecognitionSpeechStart:
+        future = handle.speech_start
+        if future is None:
+            raise RuntimeError("speech-start was not negotiated for this stream")
         return await asyncio.shield(future)
 
     async def finish(
@@ -983,6 +1015,15 @@ class StreamingRecognitionRouteOwner:
             if handle.speech_start_ms is not None or event.provider_start_ms is None:
                 raise RuntimeError("speech start boundary was duplicated")
             handle.speech_start_ms = event.provider_start_ms
+            future = handle.speech_start
+            if future is None or future.done():
+                raise RuntimeError("speech-start boundary was not uniquely negotiated")
+            future.set_result(
+                StreamingRecognitionSpeechStart(
+                    provider=event.provider,
+                    provider_start_ms=event.provider_start_ms,
+                )
+            )
             return
         if event.kind is RecognitionTurnBoundaryKind.SPEECH_STOPPED:
             if (
@@ -1355,8 +1396,18 @@ def _settle_eot_from_collector(
     except BaseException:
         failure = RuntimeError("streaming recognition collector failed")
     if task.cancelled() or failure is not None:
+        speech_start = handle.speech_start
+        if speech_start is not None and not speech_start.done():
+            speech_start.set_exception(
+                RuntimeError("streaming recognition speech-start failed")
+            )
         future.set_exception(RuntimeError("streaming recognition EOT failed"))
         return
+    speech_start = handle.speech_start
+    if speech_start is not None and not speech_start.done():
+        speech_start.set_exception(
+            RuntimeError("streaming recognition speech-start was absent")
+        )
     future.set_exception(RuntimeError("streaming recognition EOT was absent"))
 
 
@@ -1380,10 +1431,22 @@ def _consume_eot_future_failure(
         return
 
 
+def _consume_speech_start_future_failure(
+    future: asyncio.Future[StreamingRecognitionSpeechStart],
+) -> None:
+    if future.cancelled():
+        return
+    try:
+        future.exception()
+    except BaseException:
+        return
+
+
 __all__ = [
     "StreamingRecognitionEndOfTurn",
     "StreamingRecognitionFallbackReason",
     "StreamingRecognitionHandle",
     "StreamingRecognitionOutcome",
     "StreamingRecognitionRouteOwner",
+    "StreamingRecognitionSpeechStart",
 ]

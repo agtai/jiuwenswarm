@@ -221,6 +221,7 @@ interface ChatState {
   removeRuntime: (sessionId: string) => void;
 
   addMessage: (sessionId: string, message: Message) => void;
+  addMessageIfAbsent: (sessionId: string, message: Message) => void;
   replaceHistoryMessages: (sessionId: string, messages: Message[]) => void;
   updateMessage: (sessionId: string, id: string, updates: Partial<Message>) => void;
   appendStreamContent: (sessionId: string, content: string, streamKey?: string) => void;
@@ -331,6 +332,27 @@ export const useChatStore = create<ChatState>()(subscribeWithSelector((set, get)
     set((state) => {
       const runtime = state.runtimes[sessionId];
       if (!runtime) return state;
+      const { messages, messageRenderKeySeq } = assignMessageRenderKeys(runtime, [message]);
+      return {
+        runtimes: {
+          ...state.runtimes,
+          [sessionId]: {
+            ...runtime,
+            messages: [...runtime.messages, ...messages],
+            messageRenderKeySeq,
+            ...(message.role === 'user' ? { assistantStreamSplit: false, reasoningSegments: [] } : {}),
+          },
+        },
+      };
+    });
+  },
+
+  addMessageIfAbsent: (sessionId, message) => {
+    set((state) => {
+      const runtime = state.runtimes[sessionId];
+      if (!runtime || runtime.messages.some(existing => existing.id === message.id)) {
+        return state;
+      }
       const { messages, messageRenderKeySeq } = assignMessageRenderKeys(runtime, [message]);
       return {
         runtimes: {

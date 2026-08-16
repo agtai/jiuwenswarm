@@ -593,7 +593,12 @@ test('P2 notification classification surfaces failures and treats transport keep
         response_generation: 7,
       },
       agent_event: { event_type: 'chat.final', text: '已开始处理。' },
-      presentation_unit: { surface: 'text', unit_id: 'unit-stable', seq: 0 },
+      presentation_unit: {
+        surface: 'text',
+        unit_id: 'unit-stable',
+        seq: 0,
+        content_ref: `sha256:${'a'.repeat(64)}`,
+      },
     },
     true,
   );
@@ -601,6 +606,10 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(replayedPresentation.replayed, true);
   assert.equal(replayedPresentation.task_notification, false);
   assert.equal(replayedPresentation.adjustment_notification, false);
+  assert.equal(
+    replayedPresentation.history_message_id,
+    `live-voice:interaction-1:response-stable:7:text:0:0:${'a'.repeat(64)}`,
+  );
   const terminalPresentation = classifyProductP2Notification({
     kind: 'agent.output',
     response: {
@@ -1333,6 +1342,10 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   assert.match(source, /const liveVoiceDemoProps = formalProductVoiceEnabled \? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps/);
   assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
+  assert.match(source, /addMessageIfAbsent\(event\.session_id/);
+  assert.match(source, /recoveryFailedWithReason/);
+  assert.match(source, /formalVoiceErrorReason/);
+  assert.match(source, /productVoiceState\?\.text_status === 'failed'/);
   assert.match(formalProps, /handsFree:\s*true/);
   assert.doesNotMatch(formalProps, /commandCenter:|editableTranscript:|setCommandRoute|setTaskOperation|setTaskId|submitCommand/);
   assert.match(barSource, /data-testid="live-voice-command-center"/);
@@ -1364,6 +1377,13 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   assert.match(source, /if \(props\.isConnected\) return;/);
   assert.match(source, /voiceOwner\s*\.close\(\)\s*\.then/);
   assert.match(source, /\[props\.isConnected\]/);
+  assert.match(source, /'failed', 'cleanup_pending', 'closed'/);
+  assert.match(source, /PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED/);
+  assert.match(source, /setP2RecoveryEpoch\(epoch => epoch \+ 1\)/);
+  assert.match(
+    source,
+    /isStaleProductResponseError\(error\)[\s\S]{0,300}setProductTextReason\(null\)[\s\S]{0,120}setProductTextStatus\('waiting'\)/,
+  );
 });
 
 test('voice Task origin is exact-session and exact-committed-text only', () => {
@@ -1442,6 +1462,18 @@ test('product barge-in stops local playout before any response cancel request', 
   assert.match(handler, /cancel_response: true/);
   assert.match(handler, /p2Owner\.hasPendingBargeIn\(\)/);
   assert.match(handler, /pendingBargeInRef\.current === retained/);
+});
+
+test('overlap capture publishes its exact binding before playout EOT can race completion', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('on_concurrent_capture_started: () =>');
+  const end = source.indexOf('on_barge_in_end_of_turn: () =>', start);
+  const handler = source.slice(start, end);
+
+  assert.equal(start >= 0 && end > start, true);
+  assert.match(handler, /voiceLoopGenerationRef\.current === loopGeneration/);
+  assert.match(handler, /p1VoiceOwnerRef\.current === owner/);
+  assert.match(handler, /p1VoiceCaptureBindingRef\.current = binding/);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {

@@ -48,6 +48,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaGenerationBinding,
     MediaGenerationKind,
     MediaEndOfTurn,
+    MediaSpeechStart,
     MediaPlayoutBinding,
     MediaTransportViolation,
     MediaAttach,
@@ -68,6 +69,7 @@ from jiuwenswarm.gateway.live_voice.streaming_speech_route import (
     StreamingRecognitionHandle,
     StreamingRecognitionOutcome,
     StreamingRecognitionRouteOwner,
+    StreamingRecognitionSpeechStart,
 )
 from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
     ProductStreamingSynthesisSource,
@@ -1542,6 +1544,49 @@ class DedicatedMediaProductRegistry:
             )
             raise RuntimeError("end-of-turn Provider path failed") from None
 
+    async def wait_streaming_speech_start(
+        self, record: _MediaAuthority
+    ) -> MediaSpeechStart:
+        """Return one negotiated, content-free Provider speech-start control."""
+
+        try:
+            await self._await_streaming_begin(record)
+            with self._lock:
+                owner = self._streaming_recognition_owner
+                handle = record.streaming_recognition_handle
+                current = (
+                    self._records.get(record.record_id) is record
+                    and not record.route_completed
+                    and record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+                )
+            if not current or owner is None or handle is None:
+                raise RuntimeError("speech-start route is unavailable")
+            observed: StreamingRecognitionSpeechStart = await owner.wait_speech_start(
+                handle
+            )
+            with self._lock:
+                if (
+                    self._records.get(record.record_id) is not record
+                    or record.route_completed
+                    or record.streaming_recognition_handle is not handle
+                ):
+                    raise RuntimeError("speech-start authority became stale")
+            return MediaSpeechStart(
+                lease_id=record.binding.lease_id,
+                generation=record.binding.generation.value,
+                provider_start_ms=observed.provider_start_ms,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._emit_streaming_observability(
+                record,
+                outcome=self._streaming_fallback(
+                    StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
+                ),
+            )
+            raise RuntimeError("speech-start Provider path failed") from None
+
     def accept_streaming_frame(
         self, record: _MediaAuthority, frame: MediaAudioFrame
     ) -> None:
@@ -2625,6 +2670,11 @@ class DedicatedMediaProductRegistry:
                 sample_rate_hz=request.required_sample_rate_hz,
                 event_timeout_seconds=request.timeout_ms / 1000,
             ),
+            scope_identity=(
+                session_id,
+                context.subject_id,
+                request.correlation_id,
+            ),
             on_outcome=observe_outcome,
         )
         if start.source is None:
@@ -3632,6 +3682,11 @@ async def handle_registered_media_socket(
                 socket=ws,
                 on_audio_frame=retain_uplink_frame,
                 on_complete=retain_uplink_completion,
+                next_speech_start=(
+                    (lambda: registry.wait_streaming_speech_start(record))
+                    if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+                    else None
+                ),
                 next_end_of_turn=(
                     (lambda: registry.wait_streaming_end_of_turn(record))
                     if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY

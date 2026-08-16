@@ -762,6 +762,8 @@ class P2ActivationLease:
         commit: TurnCommit,
         text: str,
         channel_id: str = "web",
+        before_publish: Callable[[AuthoritativePresentationHandle], Awaitable[None]]
+        | None = None,
     ) -> AuthoritativePresentationHandle:
         """Present TaskEvent-derived text without inventing user-history input."""
 
@@ -791,6 +793,7 @@ class P2ActivationLease:
                 commit=commit,
                 text=text,
                 channel_id=channel_id,
+                before_publish=before_publish,
                 _persist_user_history=False,
                 _source_provenance="server.task_notification",
             )

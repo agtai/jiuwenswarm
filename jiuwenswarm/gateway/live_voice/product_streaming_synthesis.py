@@ -119,13 +119,24 @@ class ProductStreamingSynthesisSource:
 
     async def aclose(self) -> None:
         async with self._close_lock:
-            if self._closed:
+            if self._closed and self.handle.cleanup_complete:
                 return
             self._closed = True
             self.first_chunk = None
             outcome = await self.owner.cancel(
                 self.handle, reason=StreamingSynthesisReason.ROUTE_ABORTED
             )
+            if not self.handle.cleanup_complete:
+                # The first hard deadline retains the Provider cleanup task.
+                # Join it before one bounded retry so two cancel calls never
+                # race the same Provider stream.
+                retained_settled = await self.owner.wait_for_retained_cleanup(
+                    self.handle
+                )
+                if retained_settled and not self.handle.cleanup_complete:
+                    outcome = await self.owner.cancel(
+                        self.handle, reason=StreamingSynthesisReason.ROUTE_ABORTED
+                    )
             self._observe(outcome)
 
     def _accept_chunk(self, chunk: StreamingSynthesisChunk) -> MediaAudioFrame:
@@ -156,11 +167,12 @@ async def start_product_streaming_synthesis(
     owner: StreamingSynthesisRouteOwner,
     request: SynthesisStreamRequest,
     *,
+    scope_identity: tuple[str, str, str] | None = None,
     on_outcome: OutcomeObserver | None = None,
 ) -> ProductStreamingSynthesisStart:
     """Open and pull first audio before the caller may mint a media ticket."""
 
-    handle, outcome = await owner.begin(request)
+    handle, outcome = await owner.begin(request, scope_identity=scope_identity)
     if handle is None:
         assert outcome is not None
         if on_outcome is not None:

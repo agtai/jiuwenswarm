@@ -508,6 +508,11 @@ async def test_exact_agent_final_opens_real_streaming_product_downlink() -> None
     )
     assert downlink is not None and downlink.downlink_stream_source is not None
     source = downlink.downlink_stream_source
+    assert source.handle.scope_identity == (
+        "session-1",
+        context.subject_id,
+        "correlation-1",
+    )
     assert (await source.__anext__()).seq == 0
     with pytest.raises(StopAsyncIteration):
         await source.__anext__()

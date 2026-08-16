@@ -230,6 +230,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
   let latestWorklet = null;
   let latestSource = null;
   const sockets = [];
+  const speechStartSignals = [];
   const endOfTurnSignals = [];
 
   class FakeAudioTrack {
@@ -485,6 +486,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
 
   return {
     counts,
+    speechStartSignals,
     endOfTurnSignals,
     emitDeviceChange() {
       mediaDeviceListeners.get('devicechange')?.();
@@ -523,11 +525,31 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
       });
       await new Promise(resolve => setImmediate(resolve));
     },
-    async emitSpeechEndOfTurnDuringPlayout() {
+    async emitSpeechStartDuringPlayout() {
       await waitForMounted(
         () => sockets.filter(socket => socket.binding?.direction === 'uplink').length >= 2,
         'successor uplink media route did not attach during playout',
       );
+      const uplinkSockets = sockets.filter(socket => socket.binding?.direction === 'uplink');
+      const socket = uplinkSockets.at(-1);
+      const event = {
+        type: 'media.speech_start',
+        capability_version: 'media.end_of_turn.v1',
+        lease_id: socket.binding.lease_id,
+        generation: socket.binding.generation.value,
+        detector: 'server_vad',
+        provider_start_ms: 100,
+        timing_basis: 'provider_time',
+        timing_provenance: 'adapter_derived',
+        create_response: false,
+        interrupt_response: false,
+        business_cancel_count_delta: 0,
+      };
+      speechStartSignals.push(event);
+      socket.onmessage?.({ data: serializeMediaControl(event) });
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    async emitSpeechEndOfTurnDuringPlayout() {
       const uplinkSockets = sockets.filter(socket => socket.binding?.direction === 'uplink');
       const socket = uplinkSockets.at(-1);
       const event = {
@@ -557,6 +579,21 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
         'active uplink media route did not attach for server EOT',
       );
       const socket = sockets.filter(candidate => candidate.binding?.direction === 'uplink').at(-1);
+      const speechStart = {
+        type: 'media.speech_start',
+        capability_version: 'media.end_of_turn.v1',
+        lease_id: socket.binding.lease_id,
+        generation: socket.binding.generation.value,
+        detector: 'server_vad',
+        provider_start_ms: 100,
+        timing_basis: 'provider_time',
+        timing_provenance: 'adapter_derived',
+        create_response: false,
+        interrupt_response: false,
+        business_cancel_count_delta: 0,
+      };
+      speechStartSignals.push(speechStart);
+      socket.onmessage?.({ data: serializeMediaControl(speechStart) });
       const event = {
         type: 'media.end_of_turn',
         capability_version: 'media.end_of_turn.v1',
@@ -5622,7 +5659,193 @@ test('mounted hands-free error stays separate from transcript, retries listening
   }
 });
 
-test('mounted server speech-start EOT barges Agent playout through P2 with zero Task mutation', async () => {
+test('mounted TTS failure and ACK transport loss keep text visible, replay one ACK identity, and resume one capture', async () => {
+  const i18n = await createI18n('zh');
+  const sessionId = 'mounted-tts-failure-recovery-session';
+  const controlRef = { current: null };
+  const states = [];
+  const calls = [];
+  const projectedMessages = [];
+  const queuedNotifications = [];
+  const notificationWaiters = [];
+  let notificationFailuresRemaining = 0;
+  let activeMediaBinding = null;
+  let presentationAckAttempts = 0;
+  let rejectSynthesis = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const publishNotification = notification => {
+    queuedNotifications.push(notification);
+    notificationFailuresRemaining = 3;
+    const waiter = notificationWaiters.shift();
+    if (waiter) {
+      notificationFailuresRemaining -= 1;
+      waiter.reject(Object.assign(new Error('mounted notification response unknown'), { code: 'WS_DISCONNECTED' }));
+    }
+  };
+
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (notificationFailuresRemaining > 0) {
+        notificationFailuresRemaining -= 1;
+        throw Object.assign(new Error('mounted notification response unknown'), { code: 'WS_DISCONNECTED' });
+      }
+      if (queuedNotifications.length > 0) return queuedNotifications.shift();
+      return new Promise((resolve, reject) => notificationWaiters.push({ resolve, reject }));
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      presentationAckAttempts += 1;
+      if (presentationAckAttempts === 1) {
+        throw Object.assign(new Error('mounted ACK response unknown'), { code: 'WS_DISCONNECTED' });
+      }
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: 1,
+          history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      const index = calls.filter(call => call.method === method).length;
+      activeMediaBinding = mountedMediaBinding(params, index);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-tts-failure-media-${index}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'F'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.speech.recognize_batch') return mountedRecognition(params, '请用中文简短介绍杭州。', 1);
+    if (method === 'live_voice.composition.unified.submit') {
+      const response = {
+        interaction_id: params.interaction_id,
+        response_id: 'mounted-tts-failure-response',
+        response_generation: 1,
+      };
+      publishNotification({
+        ok: true,
+        result: {
+          status: 'notification',
+          session_id: params.session_id,
+          correlation_id: params.correlation_id,
+          interaction_id: params.interaction_id,
+          activation_id: params.activation_id,
+          activation_generation: params.activation_generation,
+          kind: 'agent.output',
+          response,
+          agent_event: { event_type: 'chat.final', text: '杭州是一座兼具山水与人文魅力的城市。' },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: 'mounted-tts-failure-unit',
+            seq: 0,
+            content_ref: `sha256:${'f'.repeat(64)}`,
+          },
+        },
+      });
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'round_accepted',
+          session_id: params.session_id,
+          correlation_id: params.correlation_id,
+          interaction_id: params.interaction_id,
+          activation_id: params.activation_id,
+          activation_generation: params.activation_generation,
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+          request_id: 'mounted-tts-failure-agent-request',
+          round_id: 'mounted-tts-failure-round',
+          response,
+        },
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      return new Promise((_, reject) => {
+        rejectSynthesis = reject;
+      });
+    }
+    throw new Error(`unexpected mounted TTS failure request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          onProductVoiceStateChange: state => states.push(state),
+          onProductVoiceMessage: event => projectedMessages.push(event),
+        }),
+      );
+      await waitForMounted(() => controlRef.current !== null && states.at(-1)?.available === true, 'TTS failure route unavailable');
+      void controlRef.current.start();
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'initial TTS failure capture unavailable');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => projectedMessages.some(event => event.message.role === 'assistant') && states.some(state => state.p1_status === 'playing'),
+        'recovered notification did not reach held TTS',
+      );
+      assert.equal(calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length, 0);
+      rejectSynthesis(Object.assign(new Error('mounted synthesis unavailable'), { reason: 'SPEECH_PROVIDER_UNAVAILABLE' }));
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack').length === 2,
+        `TTS failure did not retain the text presentation ACK; states=${states.map(state => `${state.p1_status}/${state.p1_reason}/${state.text_status}/${state.text_reason}/retained=${state.operation_retained}`).join(',')}; methods=${calls.map(call => call.method).join(',')}`,
+      );
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 2,
+        `TTS failure did not allocate one bounded successor: ${states.map(state => `${state.p1_status}/${state.p1_reason}/${state.text_status}/${state.text_reason}`).join(',')}; methods=${calls.map(call => call.method).join(',')}`,
+      );
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'TTS failure successor did not resume capture');
+    });
+
+    assert.deepEqual(projectedMessages.map(event => [event.message.role, event.message.content]), [
+      ['user', '请用中文简短介绍杭州。'],
+      ['assistant', '杭州是一座兼具山水与人文魅力的城市。'],
+    ]);
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length, 1);
+    const presentationAcks = calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack');
+    assert.equal(presentationAcks.length, 2);
+    assert.equal(new Set(presentationAcks.map(call => call.requestId)).size, 1);
+    assert.equal(browser.counts.getUserMedia, 2);
+    assert.equal(
+      calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
+      false,
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted terminal-response barge converges without voice failure and keeps zero Task mutation', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-barge-session';
   const controlRef = { current: null };
@@ -5653,6 +5876,12 @@ test('mounted server speech-start EOT barges Agent playout through P2 with zero 
       return new Promise(resolve => notificationWaiters.push(resolve));
     }
     if (method === 'live_voice.composition.p2.presentation.ack') {
+      if (params.response_id === 'mounted-barge-response-1') {
+        throw Object.assign(new Error('ACK belongs to a stale response generation'), {
+          code: 'STALE',
+          reason: 'UNKNOWN_AGENT_RESPONSE',
+        });
+      }
       return {
         request_id: options.requestId,
         ok: true,
@@ -5668,26 +5897,10 @@ test('mounted server speech-start EOT barges Agent playout through P2 with zero 
       };
     }
     if (method === 'live_voice.composition.p2.barge_in') {
-      return {
-        request_id: options.requestId,
-        ok: true,
-        error: null,
-        result: {
-          status: 'barge_in_applied',
-          session_id: params.session_id,
-          correlation_id: params.correlation_id,
-          interaction_id: params.interaction_id,
-          activation_id: params.activation_id,
-          activation_generation: params.activation_generation,
-          action_id: params.action_id,
-          response_id: params.response_id,
-          response_generation: params.response_generation,
-          cancel_response: params.cancel_response,
-          applied: true,
-          replayed: false,
-          effect_ids: ['mounted-response-cancel-effect'],
-        },
-      };
+      throw Object.assign(new Error('response completed before remote barge-in'), {
+        code: 'CONFLICT',
+        reason: 'RESPONSE_ALREADY_TERMINAL',
+      });
     }
     if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
     if (method === 'live_voice.media.activate') {
@@ -5740,6 +5953,26 @@ test('mounted server speech-start EOT barges Agent playout through P2 with zero 
             response,
             agent_event: { event_type: 'chat.final', text: '这是一个可插话的简短回答。' },
             presentation_unit: { surface: 'text', unit_id: 'mounted-barge-unit-1', seq: 0 },
+          },
+        });
+      } else {
+        publishNotification({
+          ok: true,
+          result: {
+            status: 'notification',
+            session_id: params.session_id,
+            correlation_id: params.correlation_id,
+            interaction_id: params.interaction_id,
+            activation_id: params.activation_id,
+            activation_generation: params.activation_generation,
+            kind: 'agent.output',
+            response: {
+              interaction_id: params.interaction_id,
+              response_id: 'mounted-barge-response-2',
+              response_generation: 2,
+            },
+            agent_event: { event_type: 'chat.final', text: '插话后的新回答仍然正常呈现。' },
+            presentation_unit: { surface: 'text', unit_id: 'mounted-barge-unit-2', seq: 0 },
           },
         });
       }
@@ -5859,17 +6092,26 @@ test('mounted server speech-start EOT barges Agent playout through P2 with zero 
         () => browser.counts.sourceStarts === 1,
         'dedicated Agent audio did not begin browser rendering',
       );
-      await browser.emitSpeechEndOfTurnDuringPlayout();
+      await browser.emitSpeechStartDuringPlayout();
       await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
-        'server speech-start EOT did not reach the mounted P2 barge-in owner',
+        'server speech-start did not reach the mounted P2 barge-in owner',
       );
+      assert.equal(browser.counts.sourceStops, 1, 'speech-start did not immediately stop browser playout');
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length,
+        1,
+        'speech-start must not submit recognition before EOT',
+      );
+      await browser.emitSpeechEndOfTurnDuringPlayout();
     });
 
     const bargeCalls = calls.filter(call => call.method === 'live_voice.composition.p2.barge_in');
     assert.equal(bargeCalls.length, 1);
     assert.equal(bargeCalls[0].params.cancel_response, true);
     assert.equal(browser.counts.sourceStops, 1);
+    assert.equal(browser.speechStartSignals.length, 1);
+    assert.equal(browser.speechStartSignals[0].business_cancel_count_delta, 0);
     assert.equal(browser.endOfTurnSignals.length, 1);
     assert.equal(browser.endOfTurnSignals[0].speech_started_observed, true);
     assert.equal(browser.endOfTurnSignals[0].business_cancel_count_delta, 0);
@@ -5887,6 +6129,20 @@ test('mounted server speech-start EOT barges Agent playout through P2 with zero 
     await waitForMounted(
       () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 2,
       'barge-in speech was not committed through unified submit',
+    );
+    await waitForMounted(
+      () => calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length === 2,
+      `stale predecessor ACK blocked the new answer from reaching TTS; methods=${calls.map(call => call.method).join(',')}; states=${states.slice(-8).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+    );
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p2.close').length,
+      0,
+      'a definitive stale predecessor ACK must not tear down the active route',
+    );
+    assert.equal(
+      states.some(state => state.text_reason === 'PRODUCT_BARGE_IN_RECOVERY_REQUIRED'),
+      false,
+      'a response that completed before remote barge-in must not degrade Live Voice',
     );
   } finally {
     if (renderer) await act(async () => renderer.unmount());
@@ -6578,6 +6834,7 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
   const controlRef = { current: null };
   const states = [];
   const calls = [];
+  const projectedMessages = [];
   const utterances = [
     '帮我根据这些要求制定三天的行程。',
     '不用停止后台任务，告诉我第二天最早的固定安排是什么。',
@@ -6706,7 +6963,12 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
           kind: 'agent.output',
           response,
           agent_event: { event_type: 'chat.final', text: answers[index] },
-          presentation_unit: { surface: 'text', unit_id: `unit-${presentationGeneration}`, seq: 0 },
+          presentation_unit: {
+            surface: 'text',
+            unit_id: `unit-${presentationGeneration}`,
+            seq: 0,
+            content_ref: `sha256:${String(presentationGeneration).padStart(64, '0')}`,
+          },
         },
       });
       return {
@@ -6753,6 +7015,7 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
         mountedFullyEnabledElement(i18n, sessionId, request, true, {
           productVoiceControlRef: controlRef,
           onProductVoiceStateChange: state => states.push(state),
+          onProductVoiceMessage: event => projectedMessages.push(event),
         }),
       );
       await waitForMounted(() => controlRef.current !== null && states.at(-1)?.available === true, 'unified Live Voice did not become available');
@@ -6810,6 +7073,14 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
       calls.filter(call => call.method === 'live_voice.composition.unified.submit').map(call => call.params.text),
       utterances,
     );
+    assert.deepEqual(
+      projectedMessages.map(event => [event.session_id, event.message.role, event.message.content]),
+      utterances.flatMap((text, index) => [
+        [sessionId, 'user', text],
+        [sessionId, 'assistant', answers[index]],
+      ]),
+    );
+    assert.equal(new Set(projectedMessages.map(event => event.message.id)).size, projectedMessages.length);
 
     const captureCountBeforeExit = browser.counts.getUserMedia;
     await act(async () => {

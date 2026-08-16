@@ -330,6 +330,41 @@ class MediaDetach:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaSpeechStart:
+    lease_id: str
+    generation: int
+    provider_start_ms: int
+    capability_version: str = MEDIA_END_OF_TURN_CAPABILITY
+    detector: str = "server_vad"
+    timing_basis: str = "provider_time"
+    timing_provenance: str = "adapter_derived"
+    create_response: bool = False
+    interrupt_response: bool = False
+    business_cancel_count_delta: int = 0
+    type: str = field(default="media.speech_start", init=False)
+
+    def __post_init__(self) -> None:
+        _require_id("lease_id", self.lease_id, max_chars=_MAX_LEASE_ID_BYTES)
+        _require_safe_uint("generation", self.generation)
+        _require_safe_uint("provider_start_ms", self.provider_start_ms)
+        if (
+            self.capability_version != MEDIA_END_OF_TURN_CAPABILITY
+            or self.detector != "server_vad"
+            or self.timing_basis != "provider_time"
+            or self.timing_provenance != "adapter_derived"
+            or self.create_response is not False
+            or self.interrupt_response is not False
+        ):
+            raise MediaTransportViolation(
+                "MEDIA_INVALID_CONTROL", "speech-start control contract is not exact"
+            )
+        _require_zero_business_cancel(
+            self.business_cancel_count_delta,
+            reason_id="MEDIA_CANCEL_SCOPE_VIOLATION",
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class MediaEndOfTurn:
     lease_id: str
     generation: int
@@ -401,7 +436,12 @@ class MediaPlaybackStopReceipt:
 
 
 MediaControl: TypeAlias = (
-    MediaAttach | MediaAck | MediaDetach | MediaEndOfTurn | MediaPlaybackStopReceipt
+    MediaAttach
+    | MediaAck
+    | MediaDetach
+    | MediaSpeechStart
+    | MediaEndOfTurn
+    | MediaPlaybackStopReceipt
 )
 
 
@@ -620,7 +660,7 @@ def serialize_media_control(control: MediaControl) -> str:
             control.business_cancel_count_delta,
             reason_id="MEDIA_CANCEL_SCOPE_VIOLATION",
         )
-    elif isinstance(control, MediaEndOfTurn):
+    elif isinstance(control, (MediaSpeechStart, MediaEndOfTurn)):
         # Frozen typed controls were validated at construction.
         pass
     elif not isinstance(control, MediaAttach):
@@ -819,6 +859,39 @@ def deserialize_media_control(text: str) -> MediaControl:
             value["generation"],  # type: ignore[arg-type]
             reason_id,
             through_seq,  # type: ignore[arg-type]
+        )
+    if control_type == "media.speech_start":
+        _require_exact_keys(
+            value,
+            {
+                "type",
+                "contract_version",
+                "capability_version",
+                "lease_id",
+                "generation",
+                "detector",
+                "provider_start_ms",
+                "timing_basis",
+                "timing_provenance",
+                "create_response",
+                "interrupt_response",
+                "business_cancel_count_delta",
+            },
+            "speech_start",
+        )
+        return MediaSpeechStart(
+            lease_id=_check_control_id(
+                "lease_id", value["lease_id"], max_chars=_MAX_LEASE_ID_BYTES
+            ),
+            generation=value["generation"],  # type: ignore[arg-type]
+            provider_start_ms=value["provider_start_ms"],  # type: ignore[arg-type]
+            capability_version=value["capability_version"],  # type: ignore[arg-type]
+            detector=value["detector"],  # type: ignore[arg-type]
+            timing_basis=value["timing_basis"],  # type: ignore[arg-type]
+            timing_provenance=value["timing_provenance"],  # type: ignore[arg-type]
+            create_response=value["create_response"],  # type: ignore[arg-type]
+            interrupt_response=value["interrupt_response"],  # type: ignore[arg-type]
+            business_cancel_count_delta=value["business_cancel_count_delta"],  # type: ignore[arg-type]
         )
     if control_type == "media.end_of_turn":
         _require_exact_keys(

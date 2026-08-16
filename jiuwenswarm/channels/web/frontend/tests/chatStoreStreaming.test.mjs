@@ -3,6 +3,31 @@ import test from 'node:test';
 
 import { useChatStore } from '../node_modules/.cache/chat-store-streaming/chatStore.mjs';
 
+test('addMessageIfAbsent projects one stable formal voice message exactly once', () => {
+  const sessionId = 'live-voice-formal-message-projection';
+  const store = useChatStore.getState();
+  store.ensureRuntime(sessionId);
+  const message = {
+    id: 'live-voice:commit-1:user',
+    role: 'user',
+    content: '请用中文回答。',
+    timestamp: '2026-08-16T12:00:00.000Z',
+  };
+
+  try {
+    store.addMessageIfAbsent(sessionId, message);
+    store.addMessageIfAbsent(sessionId, { ...message });
+    const messages = useChatStore.getState().getRuntime(sessionId).messages;
+    assert.equal(messages.length, 1);
+    assert.deepEqual(
+      { id: messages[0].id, role: messages[0].role, content: messages[0].content },
+      { id: message.id, role: message.role, content: message.content },
+    );
+  } finally {
+    useChatStore.getState().removeRuntime(sessionId);
+  }
+});
+
 test('setThinking does not notify subscribers when the value is unchanged', () => {
   const sessionId = 'streaming-thinking-noop';
   useChatStore.getState().ensureRuntime(sessionId);

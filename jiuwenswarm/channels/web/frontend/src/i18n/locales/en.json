@@ -2145,6 +2145,7 @@
       "routeLabel": "P1 · Gateway Speech · formal",
       "editorLabel": "Recognized speech",
       "recoveryFailed": "Voice connection recovery failed",
+      "recoveryFailedWithReason": "Voice recovery failed (phase: {{phase}}, reason: {{reason}})",
       "taskTitle": "Background task",
       "taskState": "Current state: {{state}}",
       "status": {

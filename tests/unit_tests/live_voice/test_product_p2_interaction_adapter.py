@@ -138,12 +138,16 @@ class FakeRuntime:
         return self.task_notification_safe
 
     async def present_authoritative_text(self, **kwargs: object):
+        before_publish = kwargs.pop("before_publish", None)
         self.presentation_calls.append(dict(kwargs))
-        return AuthoritativePresentationHandle(
+        handle = AuthoritativePresentationHandle(
             request_id=str(kwargs["request_id"]),
             round_id=f"authoritative:{kwargs['request_id']}",
             response_ref=ResponseRef("interaction-1", str(kwargs["response_id"]), 2),
         )
+        if callable(before_publish):
+            await before_publish(handle)
+        return handle
 
     def attach_notification_consumer(
         self, *, consumer_id: str, connection_epoch: int
@@ -453,6 +457,11 @@ async def test_task_notification_waits_for_safe_foreground_and_skips_user_histor
     assert runtime.presentation_calls == []
 
     runtime.task_notification_safe = True
+    before_publish_refs: list[ResponseRef] = []
+
+    async def before_publish(handle: AuthoritativePresentationHandle) -> None:
+        before_publish_refs.append(handle.response_ref)
+
     handle = await result.lease.present_task_notification(
         binding,
         request_id="task-notification-event-terminal-1",
@@ -460,8 +469,10 @@ async def test_task_notification_waits_for_safe_foreground_and_skips_user_histor
         correlation_id=binding.correlation_id,
         commit=notification_commit,
         text="The background task is complete and its result is ready.",
+        before_publish=before_publish,
     )
     assert handle.response_ref.response_generation == 2
+    assert before_publish_refs == [handle.response_ref]
     assert runtime.presentation_calls == [
         {
             "request_id": "task-notification-event-terminal-1",

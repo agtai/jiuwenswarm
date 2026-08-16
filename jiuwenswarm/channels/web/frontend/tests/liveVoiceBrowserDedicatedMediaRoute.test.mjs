@@ -166,6 +166,7 @@ function active({
   maxDrainStallRetries,
   drainScheduler,
   endOfTurnCapability,
+  onSpeechStart,
   onEndOfTurn,
 } = {}) {
   const counters = effects ?? { audio: 0, agent: 0, tool: 0, task: 0, history: 0, persistence: 0 };
@@ -195,6 +196,7 @@ function active({
     schedule_drain_retry: drainScheduler?.schedule,
     cancel_drain_retry: drainScheduler?.cancel,
     end_of_turn_capability: endOfTurnCapability,
+    on_speech_start: onSpeechStart,
     on_end_of_turn: onEndOfTurn,
   });
   assert.equal(activation.active, true);
@@ -834,14 +836,29 @@ test('uplink completion waits for the exact server detach receipt before physica
 });
 
 test('negotiated EOT is content-free, one-shot, and preserves pending uplink completion', async () => {
-  const observed = [];
+  const observedStarts = [];
+  const observedEnds = [];
   const route = active({
     endOfTurnCapability: 'media.end_of_turn.v1',
-    onEndOfTurn: event => observed.push(event),
+    onSpeechStart: event => observedStarts.push(event),
+    onEndOfTurn: event => observedEnds.push(event),
   });
   attach(route);
   const completion = route.activation.leaf.completeUplink('MEDIA_LOCAL_CLOSE');
   const detach = deserializeMediaControl(route.socket.sent.at(-1));
+  const speechStart = {
+    type: 'media.speech_start',
+    capability_version: 'media.end_of_turn.v1',
+    lease_id: route.activation.binding.lease_id,
+    generation: route.activation.binding.generation.value,
+    detector: 'server_vad',
+    provider_start_ms: 320,
+    timing_basis: 'provider_time',
+    timing_provenance: 'adapter_derived',
+    create_response: false,
+    interrupt_response: false,
+    business_cancel_count_delta: 0,
+  };
   const endOfTurn = {
     type: 'media.end_of_turn',
     capability_version: 'media.end_of_turn.v1',
@@ -857,8 +874,12 @@ test('negotiated EOT is content-free, one-shot, and preserves pending uplink com
     interrupt_response: false,
     business_cancel_count_delta: 0,
   };
+  route.socket.message(serializeMediaControl(speechStart));
+  assert.deepEqual(observedStarts, [speechStart]);
+  assert.deepEqual(observedEnds, []);
+  assert.equal(route.socket.closes.length, 0);
   route.socket.message(serializeMediaControl(endOfTurn));
-  assert.deepEqual(observed, [endOfTurn]);
+  assert.deepEqual(observedEnds, [endOfTurn]);
   assert.equal(route.socket.closes.length, 0);
   assert.deepEqual(route.effects, {
     audio: 0,
@@ -872,25 +893,23 @@ test('negotiated EOT is content-free, one-shot, and preserves pending uplink com
   assert.equal((await completion).reason_id, 'MEDIA_LOCAL_CLOSE');
 });
 
-test('unnegotiated, duplicate, or stale EOT fails closed with zero business effects', () => {
+test('unnegotiated, duplicate, stale, or out-of-order speech boundaries fail closed with zero business effects', () => {
   const exact = active();
   attach(exact);
-  const control = {
-    type: 'media.end_of_turn',
+  const speechStart = {
+    type: 'media.speech_start',
     capability_version: 'media.end_of_turn.v1',
     lease_id: exact.activation.binding.lease_id,
     generation: exact.activation.binding.generation.value,
     detector: 'server_vad',
-    speech_started_observed: true,
     provider_start_ms: 10,
-    provider_end_ms: 20,
     timing_basis: 'provider_time',
     timing_provenance: 'adapter_derived',
     create_response: false,
     interrupt_response: false,
     business_cancel_count_delta: 0,
   };
-  exact.socket.message(serializeMediaControl(control));
+  exact.socket.message(serializeMediaControl(speechStart));
   assert.equal(exact.activation.leaf.closed, true);
   assert.deepEqual(exact.effects, {
     audio: 0,
@@ -904,11 +923,12 @@ test('unnegotiated, duplicate, or stale EOT fails closed with zero business effe
   const observed = [];
   const duplicate = active({
     endOfTurnCapability: 'media.end_of_turn.v1',
-    onEndOfTurn: event => observed.push(event),
+    onSpeechStart: event => observed.push(event),
+    onEndOfTurn: () => undefined,
   });
   attach(duplicate);
   const duplicateControl = {
-    ...control,
+    ...speechStart,
     lease_id: duplicate.activation.binding.lease_id,
     generation: duplicate.activation.binding.generation.value,
   };
@@ -917,6 +937,30 @@ test('unnegotiated, duplicate, or stale EOT fails closed with zero business effe
   assert.equal(observed.length, 1);
   assert.equal(duplicate.activation.leaf.closed, true);
   assert.deepEqual(duplicate.effects, exact.effects);
+
+  const outOfOrder = active({
+    endOfTurnCapability: 'media.end_of_turn.v1',
+    onSpeechStart: () => undefined,
+    onEndOfTurn: () => undefined,
+  });
+  attach(outOfOrder);
+  outOfOrder.socket.message(serializeMediaControl({
+    type: 'media.end_of_turn',
+    capability_version: 'media.end_of_turn.v1',
+    lease_id: outOfOrder.activation.binding.lease_id,
+    generation: outOfOrder.activation.binding.generation.value,
+    detector: 'server_vad',
+    speech_started_observed: true,
+    provider_start_ms: 10,
+    provider_end_ms: 20,
+    timing_basis: 'provider_time',
+    timing_provenance: 'adapter_derived',
+    create_response: false,
+    interrupt_response: false,
+    business_cancel_count_delta: 0,
+  }));
+  assert.equal(outOfOrder.activation.leaf.closed, true);
+  assert.deepEqual(outOfOrder.effects, exact.effects);
 });
 
 test('a fully rendered downlink exact detach is expected completion while an early detach is peer-owned', () => {

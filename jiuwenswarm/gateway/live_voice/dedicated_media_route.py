@@ -49,6 +49,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaDetachReason,
     MediaDirection,
     MediaEndOfTurn,
+    MediaSpeechStart,
     MediaPlaybackStopReceipt,
     MediaTransportViolation,
     StrictMediaReceiver,
@@ -697,6 +698,7 @@ async def run_dedicated_media_socket_leaf(
     socket: DedicatedMediaSocket,
     on_audio_frame: Callable[[MediaAudioFrame], None],
     on_complete: Callable[[DedicatedMediaSocketLeafResult], None] | None = None,
+    next_speech_start: Callable[[], Awaitable[MediaSpeechStart]] | None = None,
     next_end_of_turn: Callable[[], Awaitable[MediaEndOfTurn]] | None = None,
     cleanup_owner: DedicatedMediaLeafCleanupOwner | None = None,
 ) -> DedicatedMediaSocketLeafResult:
@@ -730,16 +732,23 @@ async def run_dedicated_media_socket_leaf(
         raise MediaTransportViolation(
             "MEDIA_INVALID_CONSUMER", "end-of-turn source must be callable"
         )
-    if next_end_of_turn is not None and not isinstance(
-        cleanup_owner, DedicatedMediaLeafCleanupOwner
-    ):
+    if next_speech_start is not None and not callable(next_speech_start):
+        raise MediaTransportViolation(
+            "MEDIA_INVALID_CONSUMER", "speech-start source must be callable"
+        )
+    if (
+        next_speech_start is not None or next_end_of_turn is not None
+    ) and not isinstance(cleanup_owner, DedicatedMediaLeafCleanupOwner):
         raise MediaTransportViolation(
             "MEDIA_CLEANUP_OWNER_REQUIRED",
-            "end-of-turn arbitration requires a bounded cleanup owner",
+            "speech boundary arbitration requires a bounded cleanup owner",
         )
     cleanup_token = (
-        cleanup_owner.reserve(2)
-        if next_end_of_turn is not None and cleanup_owner is not None
+        cleanup_owner.reserve(
+            1 + int(next_speech_start is not None) + int(next_end_of_turn is not None)
+        )
+        if (next_speech_start is not None or next_end_of_turn is not None)
+        and cleanup_owner is not None
         else None
     )
 
@@ -747,6 +756,10 @@ async def run_dedicated_media_socket_leaf(
     binding = session.binding
     attach_sent = False
     socket_touched = False
+    speech_start_task: asyncio.Task[MediaSpeechStart] | None = None
+    speech_start_sent = False
+    speech_start_ms: int | None = None
+    speech_boundaries_disabled = False
     end_of_turn_task: asyncio.Task[MediaEndOfTurn] | None = None
     end_of_turn_sent = False
     receive_task: asyncio.Task[str | bytes | bytearray | memoryview] | None = None
@@ -761,7 +774,11 @@ async def run_dedicated_media_socket_leaf(
             return None, cleanup_pending_count
         process_control: BaseException | None = None
         wait_interruption: BaseException | None = None
-        owned_tasks = {task for task in tasks if task is not None}
+        owned_tasks = {
+            task
+            for task in (*tasks, speech_start_task, end_of_turn_task)
+            if task is not None
+        }
         for task in owned_tasks:
             if not task.done():
                 task.cancel()
@@ -821,7 +838,11 @@ async def run_dedicated_media_socket_leaf(
             pass
 
     async def send_control(
-        control: MediaAck | MediaDetach | MediaAttach | MediaEndOfTurn,
+        control: MediaAck
+        | MediaDetach
+        | MediaAttach
+        | MediaSpeechStart
+        | MediaEndOfTurn,
     ) -> bool:
         nonlocal socket_touched
         try:
@@ -867,14 +888,19 @@ async def run_dedicated_media_socket_leaf(
         *,
         acknowledge_peer_detach: bool = False,
     ) -> DedicatedMediaSocketLeafResult:
+        owned_speech_start = speech_start_task
         owned_end_of_turn = end_of_turn_task
         owned_receive = receive_task
-        for owned_task in (owned_receive, owned_end_of_turn):
+        for owned_task in (
+            owned_receive,
+            owned_speech_start,
+            owned_end_of_turn,
+        ):
             if owned_task is not None and not owned_task.done():
                 owned_task.cancel()
         try:
             task_process_control, cleanup_pending_tasks = await settle_owned_tasks(
-                owned_receive, owned_end_of_turn
+                owned_receive, owned_speech_start, owned_end_of_turn
             )
         except BaseException:
             try:
@@ -936,6 +962,23 @@ async def run_dedicated_media_socket_leaf(
         closed = session.close(MediaDetachReason.TRANSPORT_SEND_FAILED)
         return await terminate(closed)
     attach_sent = True
+    if next_speech_start is not None:
+        try:
+            speech_start_task = asyncio.create_task(
+                _await_owned_call(next_speech_start),
+                name="live-voice-media-speech-start",
+            )
+        except BaseException:
+            session.close(MediaDetachReason.TRANSPORT_CLOSED)
+            try:
+                await close_socket()
+            except BaseException:
+                pass
+            try:
+                await settle_owned_tasks()
+            except BaseException:
+                pass
+            raise
     if next_end_of_turn is not None:
         try:
             end_of_turn_task = asyncio.create_task(
@@ -976,7 +1019,12 @@ async def run_dedicated_media_socket_leaf(
             return await terminate(closed)
         socket_touched = True
         try:
-            if end_of_turn_task is None:
+            boundary_tasks = {
+                task
+                for task in (speech_start_task, end_of_turn_task)
+                if task is not None
+            }
+            if not boundary_tasks:
                 message = await recv()
             else:
                 receive_task = asyncio.create_task(
@@ -986,8 +1034,17 @@ async def run_dedicated_media_socket_leaf(
                 if end_of_turn_sent:
                     message = await asyncio.shield(receive_task)
                 else:
+                    awaited_boundaries: set[asyncio.Task[Any]] = set()
+                    if not speech_start_sent and speech_start_task is not None:
+                        awaited_boundaries.add(speech_start_task)
+                    if (
+                        not speech_boundaries_disabled
+                        and (speech_start_sent or speech_start_task is None)
+                        and end_of_turn_task is not None
+                    ):
+                        awaited_boundaries.add(end_of_turn_task)
                     done, _pending = await asyncio.wait(
-                        {receive_task, end_of_turn_task},
+                        {receive_task, *awaited_boundaries},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if receive_task in done:
@@ -995,29 +1052,68 @@ async def run_dedicated_media_socket_leaf(
                         # is serialized before the already-ready server control.
                         message = receive_task.result()
                     else:
-                        try:
-                            end_of_turn = end_of_turn_task.result()
-                        except Exception:
-                            # The product owner logs/XOBS the typed failure. Keep
-                            # manual stop usable without claiming automatic EOT.
-                            end_of_turn_task = None
-                        else:
-                            if (
-                                end_of_turn.lease_id != binding.lease_id
-                                or end_of_turn.generation != binding.generation.value
-                                or binding.direction is not MediaDirection.UPLINK
-                            ):
-                                closed = session.close(
-                                    MediaDetachReason.BINDING_MISMATCH
-                                )
-                                await send_close_detach(closed)
-                                return await terminate(closed)
-                            if not await send_control(end_of_turn):
-                                closed = session.close(
-                                    MediaDetachReason.TRANSPORT_SEND_FAILED
-                                )
-                                return await terminate(closed)
-                            end_of_turn_sent = True
+                        if speech_start_task is not None and speech_start_task in done:
+                            try:
+                                speech_start = speech_start_task.result()
+                            except Exception:
+                                # Without a trusted start, EOT remains manual.
+                                speech_start_task = None
+                                speech_boundaries_disabled = True
+                            else:
+                                if (
+                                    speech_start.lease_id != binding.lease_id
+                                    or speech_start.generation
+                                    != binding.generation.value
+                                    or binding.direction is not MediaDirection.UPLINK
+                                    or speech_start_sent
+                                ):
+                                    closed = session.close(
+                                        MediaDetachReason.BINDING_MISMATCH
+                                    )
+                                    await send_close_detach(closed)
+                                    return await terminate(closed)
+                                if not await send_control(speech_start):
+                                    closed = session.close(
+                                        MediaDetachReason.TRANSPORT_SEND_FAILED
+                                    )
+                                    return await terminate(closed)
+                                speech_start_sent = True
+                                speech_start_ms = speech_start.provider_start_ms
+                        if (
+                            not speech_boundaries_disabled
+                            and (speech_start_sent or speech_start_task is None)
+                            and end_of_turn_task is not None
+                            and end_of_turn_task.done()
+                        ):
+                            try:
+                                end_of_turn = end_of_turn_task.result()
+                            except Exception:
+                                # The product owner logs/XOBS the typed failure. Keep
+                                # manual stop usable without claiming automatic EOT.
+                                end_of_turn_task = None
+                            else:
+                                if (
+                                    end_of_turn.lease_id != binding.lease_id
+                                    or end_of_turn.generation
+                                    != binding.generation.value
+                                    or binding.direction is not MediaDirection.UPLINK
+                                    or (
+                                        speech_start_sent
+                                        and end_of_turn.provider_start_ms
+                                        != speech_start_ms
+                                    )
+                                ):
+                                    closed = session.close(
+                                        MediaDetachReason.BINDING_MISMATCH
+                                    )
+                                    await send_close_detach(closed)
+                                    return await terminate(closed)
+                                if not await send_control(end_of_turn):
+                                    closed = session.close(
+                                        MediaDetachReason.TRANSPORT_SEND_FAILED
+                                    )
+                                    return await terminate(closed)
+                                end_of_turn_sent = True
                         message = await asyncio.shield(receive_task)
                 receive_task = None
         except asyncio.CancelledError:

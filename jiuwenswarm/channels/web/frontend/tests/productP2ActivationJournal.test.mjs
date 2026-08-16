@@ -443,6 +443,106 @@ test('operation timeout or expired replay keeps activation close and successor e
   }
 });
 
+test('same-tab Session switches allocate independent interaction and correlation generations', () => {
+  const storage = memoryStorage();
+  const firstSession = ProductP2ActivationJournal.open({
+    session_id: 'session-a',
+    client_instance_id: 'same-tab-client',
+    storage,
+  });
+  const firstBinding = firstSession.prepareSuccessor('same-tab-page');
+  firstSession.markActive(firstBinding);
+  firstSession.markClosing(firstBinding);
+  firstSession.markClosed(firstBinding);
+
+  const secondSession = ProductP2ActivationJournal.open({
+    session_id: 'session-b',
+    client_instance_id: 'same-tab-client',
+    storage,
+  });
+  const secondBinding = secondSession.prepareSuccessor('same-tab-page');
+
+  assert.notEqual(secondBinding.interaction_id, firstBinding.interaction_id);
+  assert.notEqual(secondBinding.correlation_id, firstBinding.correlation_id);
+  assert.equal(firstBinding.activation_generation, 1);
+  assert.equal(secondBinding.activation_generation, 1);
+
+  const restoredFirst = ProductP2ActivationJournal.open({
+    session_id: 'session-a',
+    client_instance_id: 'same-tab-client',
+    storage,
+  });
+  assert.equal(restoredFirst.snapshot().interaction_id, firstBinding.interaction_id);
+  assert.equal(restoredFirst.snapshot().correlation_id, firstBinding.correlation_id);
+  assert.equal(restoredFirst.snapshot().last_generation, 1);
+});
+
+test('refresh drops a retained presentation ACK when the exact P2 route no longer exists', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage, 'client-missing-ack-route');
+  const binding = firstPage.prepareSuccessor('page-missing-ack-route');
+  firstPage.markActive(binding);
+  const operation = durableOperations(binding)[1];
+  firstPage.checkpointOperation(operation);
+  const refreshedPage = openJournal(storage, 'refresh-missing-ack-route');
+  const effects = [];
+
+  const recovered = await reconcileProductP2Predecessor({
+    journal: refreshedPage,
+    replay_operation: async retained => {
+      effects.push(['operation', retained.request_id]);
+      throw { code: 'NOT_FOUND', reason: 'PRODUCT_P2_ROUTE_NOT_FOUND' };
+    },
+    activate_exact: async () => {
+      effects.push(['activate']);
+      return { replayed: true };
+    },
+    close_exact: async () => effects.push(['close']),
+    error_reason: error => error?.reason,
+    activation_retryable: () => false,
+    operation_retryable: () => false,
+  });
+
+  assert.deepEqual(recovered, { kind: 'ready' });
+  assert.deepEqual(effects, [['operation', operation.request_id]]);
+  assert.equal(refreshedPage.snapshot().phase, 'closed');
+  assert.equal(refreshedPage.snapshot().pending_operation, null);
+  assert.equal(refreshedPage.prepareSuccessor('page-after-missing-route').activation_generation, binding.activation_generation + 1);
+});
+
+test('refresh settles a retained presentation ACK rejected after its Agent response was superseded', async () => {
+  const storage = memoryStorage();
+  const firstPage = openJournal(storage, 'client-stale-ack-output');
+  const binding = firstPage.prepareSuccessor('page-stale-ack-output');
+  firstPage.markActive(binding);
+  const operation = durableOperations(binding)[1];
+  firstPage.checkpointOperation(operation);
+  const refreshedPage = openJournal(storage, 'refresh-stale-ack-output');
+  const effects = [];
+
+  const recovered = await reconcileProductP2Predecessor({
+    journal: refreshedPage,
+    replay_operation: async retained => {
+      effects.push(['operation', retained.request_id]);
+      throw { code: 'STALE', reason: 'UNKNOWN_AGENT_RESPONSE' };
+    },
+    activate_exact: async () => {
+      effects.push(['activate']);
+      return { replayed: true };
+    },
+    close_exact: async () => effects.push(['close']),
+    error_reason: error => error?.reason,
+    activation_retryable: () => false,
+    operation_retryable: () => false,
+  });
+
+  assert.deepEqual(recovered, { kind: 'ready' });
+  assert.deepEqual(effects, [['operation', operation.request_id]]);
+  assert.equal(refreshedPage.snapshot().phase, 'closed');
+  assert.equal(refreshedPage.snapshot().pending_operation, null);
+  assert.equal(refreshedPage.prepareSuccessor('page-after-stale-output').activation_generation, binding.activation_generation + 1);
+});
+
 test('foreign retained result keeps the journal pending and later recovery effects at zero', async () => {
   const storage = memoryStorage();
   const firstPage = openJournal(storage, 'client-foreign-result');

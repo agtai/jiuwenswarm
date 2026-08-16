@@ -15,6 +15,9 @@ import pytest
 
 from jiuwenswarm.gateway.live_voice import streaming_synthesis_route as route_module
 from jiuwenswarm.common.schema.live_voice_contract_v2 import ResponseRef
+from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
+    ProductStreamingSynthesisSource,
+)
 from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisFallbackAction,
     StreamingSynthesisReason,
@@ -1001,8 +1004,14 @@ async def test_hard_deadlines_bound_cancellation_hostile_provider_calls(
     assert loop.time() - started < 0.2
     assert cancel_outcome.reason is StreamingSynthesisReason.ROUTE_ABORTED
     assert 0 < cancel_owner.retained_task_count <= cancel_owner.retained_task_capacity
+    assert cancel_handle.cleanup_complete is False
+    assert cancel_owner.active_count == 1
     cancelling.cancel_gate.set()
     await _wait_for_retained_cleanup(cancel_owner)
+    recovered_cancel = await cancel_owner.cancel(cancel_handle)
+    assert recovered_cancel == cancel_outcome
+    assert cancel_handle.cleanup_complete is True
+    assert cancel_owner.active_count == 0
     await cancel_owner.close()
 
     closing = _FakeProvider()
@@ -1018,6 +1027,54 @@ async def test_hard_deadlines_bound_cancellation_hostile_provider_calls(
     assert 0 < close_owner.retained_task_count <= close_owner.retained_task_capacity
     closing.close_gate.set()
     await _wait_for_retained_cleanup(close_owner)
+
+
+@pytest.mark.asyncio
+async def test_product_source_joins_exact_retained_cancel_before_finalize(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(route_module, "_PROVIDER_CLEANUP_TIMEOUT_SECONDS", 0.05)
+    provider = _FakeProvider()
+    provider.cancel_gate = asyncio.Event()
+    provider.ignore_cancel_cancel = True
+    owner, handle = await _begin(
+        provider, _request(stream_id="product-source-cancel-hostile")
+    )
+    source = ProductStreamingSynthesisSource(owner, handle, None)
+    unrelated_started = asyncio.Event()
+    unrelated_gate = asyncio.Event()
+
+    async def unrelated_operation() -> None:
+        unrelated_started.set()
+        await unrelated_gate.wait()
+
+    unrelated = asyncio.create_task(
+        owner._task_owner.run(
+            unrelated_operation(),
+            timeout_seconds=1,
+            operation="unrelated-test-operation",
+        )
+    )
+    await unrelated_started.wait()
+
+    async def release_retained_cancel() -> None:
+        await provider.cancel_started.wait()
+        await asyncio.sleep(0.06)
+        assert provider.cancel_gate is not None
+        provider.cancel_gate.set()
+
+    release = asyncio.create_task(release_retained_cancel())
+    await asyncio.wait_for(source.aclose(), timeout=0.2)
+    await release
+
+    assert provider.cancelled == [handle.ref]
+    assert handle.cleanup_complete is True
+    assert owner.active_count == 0
+    assert unrelated.done() is False
+    unrelated_gate.set()
+    await unrelated
+    assert owner.retained_task_count == 0
+    await owner.close()
 
 
 @pytest.mark.asyncio
@@ -1351,6 +1408,7 @@ async def test_post_validation_failures_capture_no_request_text(
     assert activation_provider.open_count == 0
     assert activation_provider.cancelled == []
     assert (
+        ("legacy-session", "legacy-subject", "legacy-correlation"),
         activation_request.ref.stream_id,
         activation_request.ref.stream_generation,
     ) in activation_owner._retained_bindings
@@ -1478,10 +1536,13 @@ async def test_predecessor_open_process_control_cleans_then_rethrows() -> None:
 
     predecessor = asyncio.create_task(fail_predecessor())
     await predecessor_done.wait()
-    predecessor_key = ("predecessor", 0)
+    legacy_scope = ("legacy-session", "legacy-subject", "legacy-correlation")
+    predecessor_key = (legacy_scope, "predecessor", 0)
     owner._opening[predecessor_key] = predecessor
     owner._opening_responses[predecessor_key] = prior_response
-    owner._current_responses[prior_response.interaction_id] = prior_response
+    owner._current_responses[(legacy_scope, prior_response.interaction_id)] = (
+        prior_response
+    )
     successor = _request(
         stream_id="successor-control",
         response_id="response-1",
@@ -1493,13 +1554,34 @@ async def test_predecessor_open_process_control_cleans_then_rethrows() -> None:
     assert provider.open_count == 0
     assert provider.cancelled == []
     assert (
+        legacy_scope,
         successor.ref.stream_id,
         successor.ref.stream_generation,
     ) not in owner._opening
-    assert owner._current_responses[prior_response.interaction_id] == prior_response
+    assert (
+        owner._current_responses[(legacy_scope, prior_response.interaction_id)]
+        == prior_response
+    )
     owner._opening.pop(predecessor_key, None)
     owner._opening_responses.pop(predecessor_key, None)
     await owner.close()
+
+
+def test_response_generation_high_water_is_isolated_by_trusted_scope() -> None:
+    async def selector() -> StreamingSpeechSelection:
+        return StreamingSpeechSelection(SpeechRouteTier.TEXT, None, None)
+
+    owner = StreamingSynthesisRouteOwner(selector)
+    first_scope = ("session-a", "subject-a", "correlation-a")
+    second_scope = ("session-b", "subject-a", "correlation-b")
+    prior = ResponseRef("shared-interaction", "response-a", 3)
+    reset = ResponseRef("shared-interaction", "response-b", 0)
+    owner._current_responses[(first_scope, prior.interaction_id)] = prior
+
+    owner._preflight_response(reset, second_scope)
+    with pytest.raises(StreamingSynthesisRouteViolation) as stale:
+        owner._preflight_response(reset, first_scope)
+    assert stale.value.reason == "STALE_SYNTHESIS_RESPONSE"
 
 
 @pytest.mark.asyncio

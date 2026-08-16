@@ -1,6 +1,6 @@
 # Live Voice current status
 
-> Updated: 2026-08-16
+> Updated: 2026-08-17
 > This is the only mutable source for current branch expectations, stage/task,
 > blockers and next actions. Git is the implementation fact; detailed S7 facts
 > are in the linked review record.
@@ -72,13 +72,68 @@
   later explicit enable creates a new generation. Real server speech-start/EOT
   during playout interrupts the current P2 response/TTS only and asserts zero
   Task cancellation/mutation.
+- **Known interruption boundary (2026-08-16):** capture is not available while
+  the Agent is generating before playout. Generation-time control remains
+  explicitly deferred from the current quick-repair batch, so the Demo operator
+  must wait through “Understanding and answering”. The separate physical
+  terminal-response versus active-playout race is repaired in the current
+  uncommitted source: an authoritative overlap capture now publishes its exact
+  P2 binding as soon as it is ready, so an EOT racing the final playout frame can
+  still recognize and submit the utterance. Barge-in still stops only the
+  response/playout and retains zero Task cancellation/mutation.
+- **Deferred conversation enhancements (2026-08-17):** keeping capture active
+  while the Agent is generating so that “等一下” can interrupt that generation
+  remains a later enhancement, not part of the current quick-repair scope. A
+  complete conversational treatment should also carry Agent `ask_user`
+  questions and the user's answers through the same Live Voice entry instead
+  of leaving that interaction text-only.
+- **Visible product history and dialogue continuity (2026-08-16):** formal
+  voice previously kept recognized input and presented output only in the Live
+  Voice surface. The quick repair now projects stable-id committed-user and
+  assistant TEXT presentation facts into the ordinary current-session message
+  store without calling the ordinary send path. The existing formal context
+  selector was already correct: it selects at most four acknowledged dialogue
+  pairs in the exact scope. A focused regression now proves that bounded
+  context reaches the next unified Agent turn; no second history system was
+  added.
+- **Confirmed normal second-turn recovery defect and language cause
+  (2026-08-16):** after refresh, “请用一句话简短介绍杭州” completed with text and
+  speech; the successor final “请说中文” reached a second Agent round and the
+  model completed at 13:29:26, but its presentation did not complete and the UI
+  changed to “Voice is unavailable / Voice connection recovery failed”. The UI
+  currently maps every P1 `failed` or `cleanup_pending` state to that generic
+  text and hides the stable underlying reason, so the exact media failure still
+  requires a focused trace. This is not caused by an OpenAI Speech default:
+  capture explicitly uses `zh-CN` and the Provider receives `language=zh`;
+  TTS reads the Agent output. At reproduction time the host JiuwenSwarm
+  configuration had `preferred_language: en`, which the formal Agent inherited;
+  it was changed outside Git to `preferred_language: zh` on 2026-08-16. The
+  quick repair closes the presentation/TTS/ACK race, permits one bounded
+  successor capture from `failed`/`cleanup_pending`, keeps answer text when TTS
+  fails, and surfaces only stable failure codes with the failing phase. Physical
+  two-turn verification on the rebuilt source remains required.
 - **Terminal notification boundary:** the terminal TaskEvent is the stable
   durable identity, but product delivery acquires the current valid P2
   activation and a fresh response generation. It never reuses the superseded
   task-create response. Existing presentation/ACK/TTS and replay semantics are
-  reused: ACK suppresses later delivery, while a crash after playout but before
-  ACK may replay. Only `completed` plus a legal TaskResult announces completion;
+  reused: the terminal event stays pending until the exact TEXT ACK is accepted,
+  and a route close before ACK replays it on the successor activation. ACK
+  suppresses later delivery, while a crash after playout but before ACK may
+  replay. Only `completed` plus a legal TaskResult announces completion;
   failed, cancelled and interrupted outcomes remain distinct and truthful.
+- **Physical unified-create completion-announcement gap (2026-08-17,
+  pending):** Session `web_1a00ccdf1a1_6de4c7d60a45` created Task
+  `task-57dbbe3b88014a32af0fa92fe19c756c`, applied its queued adjustment and
+  completed with a legal result plus `08-三日行程安排.md`, but no proactive
+  terminal presentation was constructed. The runtime contains no
+  `live_voice.composition.p3.progress.activate`, `task-notification-*` or
+  `response-task-notification-*`; this is therefore a missing unified-create
+  Task binding/subscription and continuous-capture wakeup seam, not a TTS
+  failure. The next repair must retain the exact Task binding returned by
+  unified create, activate the existing P3 progress route, turn the terminal
+  TaskEvent into the existing P2 presentation/TTS/ACK flow, safely pause only
+  the active capture while announcing, and resume exactly one capture. It must
+  preserve zero Task cancel/mutation and existing ACK/replay semantics.
 - **Automated verification:** on exact implementation source `3bc7f934`, the
   serial cumulative backend matrix passed `1,776` with `2` expected Windows
   symlink skips and one Authlib deprecation warning; Integrated Web passed
@@ -89,14 +144,57 @@
   duplicate i18n `empty` notices remain non-blocking. The coherent-batch cold
   review and new independent read-only Tier-3/scoped-Sol post-review have no
   open P0-P3 source findings. See [D119](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md).
+- **Quick-repair verification (uncommitted source, 2026-08-16):** Integrated
+  Web passed `376 / 376`, including notification/ACK transport loss, held TTS,
+  overlap-capture binding before the playout/EOT boundary, one successor
+  capture, visible-message projection and zero Task side effects; chat-store
+  projection passed `4 / 4`; the focused backend context regression passed;
+  `git diff --check` and the production build (`4,642` modules) passed.
+  Independent review findings were repaired; physical microphone/TTS validation
+  is still pending.
+- **Physical stale-ACK repair (uncommitted source, 2026-08-16):** a real
+  background itinerary Task completed and wrote `hangzhou-3day-itinerary.md`,
+  but “当前后台任务情况如何” was routed to dialogue; a subsequent playout
+  interruption made the old generation's presentation ACK return `STALE`.
+  The Web owner failed to classify that code as definitive, retained the old
+  ACK and blocked the already-completed next Agent answer. The first repair
+  released `STALE` ACK ownership in the active Web owner, retained true
+  transport-unknown recovery, and added anchored current-background-task
+  “情况/进展如何” status forms. A later physical refresh exposed the distinct
+  durable-journal path: after AgentServer restart the exact old route returned
+  `NOT_FOUND / PRODUCT_P2_ROUTE_NOT_FOUND`, but refresh recovery retained that
+  definitive ACK failure and replayed it on every remount. The current repair
+  settles only that exact retained presentation ACK, marks the authoritatively
+  absent predecessor closed, and permits one successor activation; other
+  non-retryable durable-operation failures remain blocked. Focused journal plus
+  Web-owner tests pass `85 / 85`, the semantic bridge passes `52 / 52`, and the
+  production build passes. Physical voice confirmation after one page reload
+  remains the user's next acceptance step.
+- **Completion-adjacent barge/P2 recovery race (2026-08-17, pending):** when a
+  background Task completes close to “barge in + immediately submit the next
+  utterance”, the interrupted response's old ACK and the successor Agent round
+  can race with P2 route recovery. The old ACK produced by an intentional
+  interruption must settle as expected stale state rather than immediately
+  rebuilding the whole P2 route. Interruption recovery and the next submit must
+  be serialized so a new Agent round cannot run while its P2 route is being
+  closed. Normal and recovery ACKs must share one settlement owner, and the old
+  visible error must clear after ACK settlement and generation-2 activation.
+  While cleanup is pending the UI should say “正在恢复”; only a bounded recovery
+  failure is an error, and its stable underlying code must not be overwritten by
+  the generic `P2_REFRESH_RECONCILIATION_REQUIRED`. Add a focused regression for
+  “background Task completes near barge-in, then the user immediately speaks a
+  next sentence”. Until repaired, page refresh or “重新监听” is the documented
+  temporary recovery.
 - **Physical acceptance:** not yet run on the exact candidate. The protected
-  host configuration contains a Speech key binding, but provider/model runtime
-  readiness has not been established and ports 18092, 19000, 19001, 3000 and
-  5173 currently have no listeners. No credential is moved into chat or Git.
-  The exact seven-step D119 itinerary Journey, including intervening dialogue,
-  a truly non-terminal update, applied-before-terminal evidence, current-
-  generation announcement, artifact inspection and disposable-fixture cleanup,
-  remains required before S8/A3 product acceptance can pass.
+  local runtime currently has AgentServer on 18092 and Gateway services on
+  19000/19001, and real STT/TTS has run without moving credentials into chat or
+  Git. Partial physical checks discovered the interruption, visible-history,
+  second-turn recovery, dialogue-context and language-selection defects above;
+  they are not acceptance. The exact seven-step D119 itinerary Journey,
+  including intervening dialogue, a truly non-terminal update, applied-before-
+  terminal evidence, current-generation announcement, artifact inspection and
+  disposable-fixture cleanup, remains required before S8/A3 product acceptance
+  can pass.
 
 ## Superseded pre-implementation capsule (historical)
 
@@ -593,14 +691,32 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. From protected local terminals, establish the private Speech/product
-   runtime and run the single D119 seven-step Journey from the actual Live
-   Voice entry on the exact candidate. Route Facts and mounted tests are not a
-   substitute for microphone/TTS acceptance.
-2. Record current-generation terminal playout/ACK behavior, the authoritative
-   adjustment event order, TaskResult/artifact SHA and visible artifact
-   contents, then remove only the resolved disposable fixture and isolated data
-   directory described in the runbook.
-3. Keep S8/A3 `PENDING` until that physical Journey actually passes. The local
-   implementation is committed and four commits ahead of upstream; every
-   remote-ref update still requires separate exact approval.
+1. Repair and focused-verify the physical unified-create completion-
+   announcement gap above. The core regression is: create a background Task by
+   voice, say nothing afterward, wait for completion, and hear exactly one
+   authoritative completion announcement; verify the legal result/artifact,
+   no duplicate after ACK, existing crash-before-ACK replay behavior, and zero
+   Task cancel/mutation.
+2. Repair the completion-adjacent barge/P2 recovery race above with one ACK
+   settlement owner, serialized recovery/next-submit ownership, truthful
+   cleanup-pending UI and stable error-code preservation. Run the exact focused
+   regression before broader physical acceptance.
+3. Physically regress two normal consecutive Chinese turns and one short
+   playout interruption such as “等一下” on the rebuilt exact source; verify
+   visible chat synchronization, contextual follow-up, answer delivery,
+   overlap-capture recognition, resumed listening and an unchanged current
+   background Task. If a failure remains, record the newly visible stable
+   phase/reason code.
+4. Keep Agent-generation interruption out of this candidate and instruct the
+   Demo operator not to speak during “Understanding and answering”. Track the
+   generation-time interruption and `ask_user` voice loop as later enhancements.
+5. Then run the single D119 seven-step Journey from the actual Live Voice entry.
+   Route Facts and mounted tests are not a substitute for microphone/TTS
+   acceptance. Record current-generation terminal playout/ACK behavior, the
+   authoritative adjustment event order, TaskResult/artifact SHA and visible
+   artifact contents, then remove only the resolved disposable fixture and
+   isolated data directory described in the runbook.
+6. Keep S8/A3 `PENDING` until that physical Journey actually passes. The newly
+   recorded completion-announcement gap remains unresolved and is not covered
+   by the current candidate. Every remote-ref update still requires separate
+   exact approval.

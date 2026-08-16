@@ -42,7 +42,10 @@ from jiuwenswarm.server.runtime.agent_adapter.formal_live_voice import (
     FormalContextSnapshot,
 )
 
-from .agent_conversation_runtime import AgentConversationRuntime
+from .agent_conversation_runtime import (
+    AgentConversationRuntime,
+    AuthoritativePresentationHandle,
+)
 from .critical_token_safety import (
     CommittedSpeechCandidate,
     CriticalTokenDecisionStatus,
@@ -667,6 +670,12 @@ class AgentServerProductCompositionRegistry:
         # retains which source facts still need a current P2 activation; it is
         # neither a second notification protocol nor a completion ledger.
         self._pending_terminal_notifications: dict[str, TaskProgressTextEvent] = {}
+        # A Task notification remains pending until the exact TEXT presentation
+        # is acknowledged.  The ResponseRef is activation-local, while the map
+        # key is the stable terminal TaskEvent identity; a successor activation
+        # may therefore replace only the delivery binding without losing the
+        # authoritative event that still needs presentation.
+        self._terminal_notification_responses: dict[str, ResponseRef] = {}
         task_database = p3_composition.task_database_path
         self._unified_journal = unified_journal or (
             None
@@ -1244,6 +1253,20 @@ class AgentServerProductCompositionRegistry:
                 return retained
         return None
 
+    def _acknowledge_terminal_notification(self, response_ref: ResponseRef) -> None:
+        event_id = next(
+            (
+                candidate
+                for candidate, retained_ref in self._terminal_notification_responses.items()
+                if retained_ref == response_ref
+            ),
+            None,
+        )
+        if event_id is None:
+            return
+        self._terminal_notification_responses.pop(event_id, None)
+        self._pending_terminal_notifications.pop(event_id, None)
+
     async def _terminal_notification_text(self, task_event: PersistentTaskEvent) -> str:
         try:
             (
@@ -1342,6 +1365,14 @@ class AgentServerProductCompositionRegistry:
                 "committed_at": event.task_event.occurred_at,
             }
         )
+        async def register_before_publish(
+            handle: AuthoritativePresentationHandle,
+        ) -> None:
+            if self._pending_terminal_notifications.get(event.task_event.event_id) is event:
+                self._terminal_notification_responses[event.task_event.event_id] = (
+                    handle.response_ref
+                )
+
         try:
             await selected.activation_lease.present_task_notification(
                 selected.binding,
@@ -1351,6 +1382,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=text,
                 channel_id="web",
+                before_publish=register_before_publish,
             )
         except Exception as exc:
             logger.info(
@@ -1361,8 +1393,6 @@ class AgentServerProductCompositionRegistry:
                 },
             )
             return
-        if self._pending_terminal_notifications.get(event.task_event.event_id) is event:
-            self._pending_terminal_notifications.pop(event.task_event.event_id, None)
 
     async def _emit_voice_progress(
         self, intent: TaskProgressNotificationIntent
@@ -3736,6 +3766,10 @@ class AgentServerProductCompositionRegistry:
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE" and chinese
                     else "The current background task is still running."
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE"
+                    else "项目工作区有未提交修改，无法启动后台任务。"
+                    if reason == "TASK_CONTEXT_WORKTREE_DIRTY" and chinese
+                    else "The project worktree has uncommitted changes, so the background task cannot start."
+                    if reason == "TASK_CONTEXT_WORKTREE_DIRTY"
                     else "需要明确确认后才能开始后台处理。"
                     if reason
                     in {
@@ -5132,6 +5166,11 @@ class AgentServerProductCompositionRegistry:
                             outcome = await retained.activation_lease.acknowledge_presentation(
                                 retained.binding, ack
                             )
+                            if (
+                                outcome.accepted
+                                and ack.surface is PresentationSurface.TEXT
+                            ):
+                                self._acknowledge_terminal_notification(ack.ref)
                             return _success_result(
                                 request_id,
                                 {
@@ -8461,6 +8500,7 @@ class AgentServerProductCompositionRegistry:
             self._pending_task_intents.clear()
             self._voice_task_origins.clear()
             self._pending_terminal_notifications.clear()
+            self._terminal_notification_responses.clear()
             retained_voice_origins = (
                 tuple(self._accepted_turn_commits_by_commit.values())
                 + tuple(self._unknown_turn_commits_by_commit.values())

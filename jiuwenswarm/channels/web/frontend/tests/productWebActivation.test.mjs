@@ -1152,6 +1152,46 @@ test('unresolved presentation ACK blocks a second turn and preserves exact retry
   assert.equal(calls.filter(([method]) => method === PRODUCT_P2_SUBMIT_METHOD).length, 0);
 });
 
+test('stale presentation ACK is definitive and releases the next turn', async () => {
+  const calls = [];
+  const owner = new ProductWebP2ActivationOwner({
+    enabled: true,
+    request: async (method, params, requestId) => {
+      calls.push([method, params, requestId]);
+      if (method === PRODUCT_P2_ACTIVATE_METHOD) return response('active');
+      if (method === PRODUCT_P2_PRESENTATION_ACK_METHOD) {
+        const error = webError('ACK belongs to a stale response generation', 'STALE');
+        error.reason = 'UNKNOWN_AGENT_RESPONSE';
+        throw error;
+      }
+      return agentSubmitResponse(requestId, params, { round_id: 'round-after-stale-ack' });
+    },
+  });
+  await owner.start(binding);
+  const ack = {
+    response_id: 'response-stale',
+    response_generation: 6,
+    surface: 'text',
+    unit_id: 'unit-stale',
+    contiguous_cursor: 0,
+    presented_at: '2026-08-16T14:51:20.134Z',
+  };
+
+  await assert.rejects(owner.acknowledgePresentation(ack), /stale response generation/);
+  assert.equal(owner.hasPendingPresentationAck(), false);
+
+  await owner.submitText({
+    commit_id: 'commit-after-stale-ack',
+    turn_id: 'turn-after-stale-ack',
+    response_id: 'response-after-stale-ack',
+    committed_at: '2026-08-16T14:51:40.366Z',
+    text: '你好',
+  });
+
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_PRESENTATION_ACK_METHOD).length, 1);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P2_SUBMIT_METHOD).length, 1);
+});
+
 test('completed Web submission capacity recovers and old replay fails closed', async () => {
   let submissionCalls = 0;
   const owner = new ProductWebP2ActivationOwner({

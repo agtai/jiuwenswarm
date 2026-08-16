@@ -815,7 +815,6 @@ test('formal P1 drains capture accumulated before media attach through bounded A
   );
   await owner.close();
 });
-
 test('formal P1 rejects a media leaf that closes in the first-frame readiness window', async () => {
   const calls = [];
   const statuses = [];
@@ -2205,6 +2204,21 @@ test('formal P1 auto and manual EOT retain one stop and recognition operation', 
   );
   socket.onmessage?.({
     data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: binding.lease_id,
+      generation: binding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 100,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  socket.onmessage?.({
+    data: serializeMediaControl({
       type: 'media.end_of_turn',
       capability_version: 'media.end_of_turn.v1',
       lease_id: binding.lease_id,
@@ -2286,6 +2300,21 @@ test('formal P1 manual stop wins the queued EOT callback without a late second s
     }),
     true
   );
+  socket.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: binding.lease_id,
+      generation: binding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 100,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
   socket.onmessage?.({
     data: serializeMediaControl({
       type: 'media.end_of_turn',
@@ -3507,6 +3536,8 @@ async function runConcurrentCaptureJourney(options = {}) {
   let transportAckBeforeRenderSnapshot = null;
   let secondMediaCloseFailures = options.failSecondMediaCloseOnce === true ? 1 : 0;
   let activationCountAtFinalDownlinkAck = null;
+  let concurrentCaptureStartedCalls = 0;
+  let bargeInSpeechStartCalls = 0;
   let bargeInEotCalls = 0;
   let bargeInStopped = null;
   let captureRotationSnapshot = null;
@@ -3653,13 +3684,21 @@ async function runConcurrentCaptureJourney(options = {}) {
     enabled: true,
     expected_origin: 'https://voice.example.test',
     on_status: status => statuses.push(status),
+    on_concurrent_capture_started: () => {
+      concurrentCaptureStartedCalls += 1;
+    },
     ...(options.triggerBargeInEot === true
       ? {
+          on_barge_in_speech_start: event => {
+            bargeInSpeechStartCalls += 1;
+            assert.equal(event.detector, 'server_vad');
+            assert.equal(event.business_cancel_count_delta, 0);
+            bargeInStopped = owner.stopAgentPlayout(response);
+          },
           on_barge_in_end_of_turn: event => {
             bargeInEotCalls += 1;
             assert.equal(event.speech_started_observed, true);
             assert.equal(event.business_cancel_count_delta, 0);
-            bargeInStopped = owner.stopAgentPlayout(response);
           },
         }
       : {}),
@@ -3673,7 +3712,10 @@ async function runConcurrentCaptureJourney(options = {}) {
         socket.readyState = 1;
         socket.onopen?.({});
         const binding = socket.serverBinding;
-        assert.ok(binding);
+        // An immediate speech-start barge can close a just-created downlink
+        // before this queued fake open runs. That is a valid cancelled route,
+        // not a missing authority on an active route.
+        if (binding === null) return;
         socket.onmessage?.({
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
@@ -3948,6 +3990,26 @@ async function runConcurrentCaptureJourney(options = {}) {
   if (options.triggerBargeInEot === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
     assert.ok(uplinkSocket);
+    uplinkSocket.onmessage?.({
+      data: serializeMediaControl({
+        type: 'media.speech_start',
+        capability_version: 'media.end_of_turn.v1',
+        lease_id: uplinkSocket.serverBinding.lease_id,
+        generation: uplinkSocket.serverBinding.generation.value,
+        detector: 'server_vad',
+        provider_start_ms: 100,
+        timing_basis: 'provider_time',
+        timing_provenance: 'adapter_derived',
+        create_response: false,
+        interrupt_response: false,
+        business_cancel_count_delta: 0,
+      }),
+    });
+    for (let turn = 0; turn < 100 && bargeInSpeechStartCalls === 0; turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    assert.equal(bargeInSpeechStartCalls, 1);
+    assert.equal(bargeInStopped, true);
     uplinkSocket.onmessage?.({
       data: serializeMediaControl({
         type: 'media.end_of_turn',
@@ -4279,6 +4341,8 @@ async function runConcurrentCaptureJourney(options = {}) {
     captureDurationLateFrameUplinkCount,
     activationCountAtFinalDownlinkAck,
     transportAckBeforeRenderSnapshot,
+    concurrentCaptureStartedCalls,
+    bargeInSpeechStartCalls,
     bargeInEotCalls,
     bargeInStopped,
     captureRotationSnapshot,
@@ -4292,6 +4356,7 @@ test('formal P1 dedicated downlink ACKs scheduled audio and receipts only render
 
   assert.equal(playError, null);
   assert.equal(owner.status().status, 'capturing');
+  assert.equal(journey.concurrentCaptureStartedCalls, 1);
   assert.equal(activationCount, 2);
   assert.equal(environment.contexts.length, 1);
   assert.equal(environment.contexts[0].state, 'running');
@@ -4311,7 +4376,8 @@ test('server speech-start/EOT during playout triggers barge-in without Task muta
     triggerBargeInEot: true,
     holdDownlinkDetachAfterFinalRender: true,
   });
-  assert.equal(journey.bargeInEotCalls, 1);
+  assert.equal(journey.bargeInSpeechStartCalls, 1);
+  assert.equal(journey.bargeInEotCalls, 0);
   assert.equal(journey.bargeInStopped, true);
   assert.equal(journey.playError, null);
   assert.equal(journey.owner.status().status, 'capturing');
@@ -4322,9 +4388,12 @@ test('server speech-start/EOT during playout triggers barge-in without Task muta
     false,
   );
   const downlink = journey.sockets.find(socket => socket.serverBinding?.direction === 'downlink');
-  const controls = downlink.sent.filter(value => typeof value === 'string').map(JSON.parse);
-  const detach = controls.find(control => control.type === 'media.detach');
-  assert.equal(detach.business_cancel_count_delta, 0);
+  if (downlink !== undefined) {
+    const controls = downlink.sent.filter(value => typeof value === 'string').map(JSON.parse);
+    const detach = controls.find(control => control.type === 'media.detach');
+    if (detach !== undefined) assert.equal(detach.business_cancel_count_delta, 0);
+  }
+  await journey.owner.close();
 });
 
 test('server speech-start/EOT interrupts an answer estimated beyond twenty seconds without Task mutation', async () => {
@@ -4336,7 +4405,8 @@ test('server speech-start/EOT interrupts an answer estimated beyond twenty secon
       '实时语音系统会依次完成录音采集、前端处理、语音识别、Agent 推理、语音合成和浏览器播放。'.repeat(8),
   });
   assert.equal(journey.activationCount, 2);
-  assert.equal(journey.bargeInEotCalls, 1);
+  assert.equal(journey.bargeInSpeechStartCalls, 1);
+  assert.equal(journey.bargeInEotCalls, 0);
   assert.equal(journey.bargeInStopped, true);
   assert.equal(journey.playError, null);
   assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });

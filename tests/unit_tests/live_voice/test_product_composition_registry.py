@@ -1491,6 +1491,18 @@ async def test_unified_continuous_dialogue_releases_all_in_memory_identity_state
         )
 
     assert manager.agent.calls == 40
+    assert [
+        entry.content for entry in manager.agent.executions[-1].context.entries
+    ] == [
+        "普通连续对话第 35 轮。",
+        "formal result",
+        "普通连续对话第 36 轮。",
+        "formal result",
+        "普通连续对话第 37 轮。",
+        "formal result",
+        "普通连续对话第 38 轮。",
+        "formal result",
+    ]
     await _close_unified_route(registry, stem="soak")
 
 
@@ -1814,6 +1826,54 @@ async def test_unified_background_permission_denial_is_spoken_and_resumes_via_ac
     ).decode("utf-8")
     assert spoken == "后台任务功能当前不可用。"
     await _close_unified_route(registry, stem="permission-denied-create")
+
+
+@pytest.mark.asyncio
+async def test_unified_dirty_worktree_create_reports_actionable_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-dirty-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+
+    async def reject_dirty(**kwargs: object) -> P3RouteResult:
+        return P3RouteResult(
+            False,
+            {
+                "request_id": kwargs["request_id"],
+                "ok": False,
+                "result": None,
+                "error": {"reason": "TASK_CONTEXT_WORKTREE_DIRTY"},
+            },
+        )
+
+    monkeypatch.setattr(composition, "handle", reject_dirty)
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="dirty-create",
+            text="后台帮我根据项目中的订单整理三天行程。",
+        ),
+        request_id="request-unified-dirty-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert manager.agent.calls == 0
+    await _ack_unified_presentation(registry, sequence=0, stem="dirty-create")
+    spoken = b"".join(
+        content.content_utf8 for content in history.assistants[0][0].contents
+    ).decode("utf-8")
+    assert spoken == "项目工作区有未提交修改，无法启动后台任务。"
+    await _close_unified_route(registry, stem="dirty-create")
 
 
 @pytest.mark.asyncio
@@ -2954,10 +3014,23 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     assert agent_event["text"] == (
         "The background task is complete and its result is ready."
     )
-    assert registry._pending_terminal_notifications == {}
+    assert tuple(registry._pending_terminal_notifications) == (task_event.event_id,)
+    assert registry._terminal_notification_responses == {
+        task_event.event_id: ResponseRef(
+            "interaction-1",
+            cast(str, response["response_id"]),
+            cast(int, response["response_generation"]),
+        )
+    }
     assert history.users == []
 
-    acknowledged = await registry.handle_p2_presentation_ack(
+    closed = await registry.handle_p2_close(
+        params=_p2_params(),
+        request_id="request-terminal-notification-close-1",
+        session_id=SCOPE.session_id,
+    )
+    assert closed.ok
+    stale_ack = await registry.handle_p2_presentation_ack(
         params=_p2_params(
             response_id=response["response_id"],
             response_generation=response["response_generation"],
@@ -2966,28 +3039,77 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
             contiguous_cursor=unit["seq"],
             presented_at=NOW,
         ),
-        request_id="request-terminal-notification-ack-1",
+        request_id="request-terminal-notification-stale-ack-1",
+        session_id=SCOPE.session_id,
+    )
+    assert not stale_ack.ok
+    assert tuple(registry._pending_terminal_notifications) == (task_event.event_id,)
+
+    successor_binding = _p2_params(
+        activation_id="activation-2",
+        activation_generation=2,
+    )
+    successor = await registry.handle_p2_activate(
+        params=successor_binding,
+        request_id="request-terminal-notification-activate-2",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert successor.ok
+    successor_history = _install_unified_history_writer(registry)
+    replayed_notification = await registry.handle_p2_notification_next(
+        params={**successor_binding, "notification_sequence": 1},
+        request_id="request-terminal-notification-next-successor-1",
+        session_id=SCOPE.session_id,
+    )
+    assert replayed_notification.ok
+    replayed_payload = cast(dict[str, object], replayed_notification.payload["result"])
+    replayed_response = cast(dict[str, object], replayed_payload["response"])
+    replayed_event = cast(dict[str, object], replayed_payload["agent_event"])
+    replayed_unit = cast(dict[str, object], replayed_payload["presentation_unit"])
+    assert replayed_payload["kind"] == "agent.output"
+    assert replayed_event["source_provenance"] == "server.task_notification"
+    assert replayed_event["text"] == agent_event["text"]
+    assert replayed_response["response_id"] == response["response_id"]
+    assert replayed_response["response_generation"] == 1
+    assert tuple(registry._pending_terminal_notifications) == (task_event.event_id,)
+
+    acknowledged = await registry.handle_p2_presentation_ack(
+        params={
+            **successor_binding,
+            "response_id": replayed_response["response_id"],
+            "response_generation": replayed_response["response_generation"],
+            "surface": replayed_unit["surface"],
+            "unit_id": replayed_unit["unit_id"],
+            "contiguous_cursor": replayed_unit["seq"],
+            "presented_at": NOW,
+        },
+        request_id="request-terminal-notification-ack-successor-1",
         session_id=SCOPE.session_id,
     )
     assert acknowledged.ok
     ack_replay = await registry.handle_p2_presentation_ack(
-        params=_p2_params(
-            response_id=response["response_id"],
-            response_generation=response["response_generation"],
-            surface=unit["surface"],
-            unit_id=unit["unit_id"],
-            contiguous_cursor=unit["seq"],
-            presented_at=NOW,
-        ),
-        request_id="request-terminal-notification-ack-1",
+        params={
+            **successor_binding,
+            "response_id": replayed_response["response_id"],
+            "response_generation": replayed_response["response_generation"],
+            "surface": replayed_unit["surface"],
+            "unit_id": replayed_unit["unit_id"],
+            "contiguous_cursor": replayed_unit["seq"],
+            "presented_at": NOW,
+        },
+        request_id="request-terminal-notification-ack-successor-1",
         session_id=SCOPE.session_id,
     )
     assert ack_replay.payload == acknowledged.payload
+    assert registry._pending_terminal_notifications == {}
+    assert registry._terminal_notification_responses == {}
     await asyncio.sleep(0)
     assert history.users == []
-    assert len(history.assistants) == 1
+    assert history.assistants == []
+    assert len(successor_history.assistants) == 1
     keepalive = await registry.handle_p2_notification_next(
-        params=_p2_params(notification_sequence=2),
+        params={**successor_binding, "notification_sequence": 2},
         request_id="request-terminal-notification-next-2",
         session_id=SCOPE.session_id,
     )
@@ -2996,7 +3118,12 @@ async def test_terminal_notification_waits_for_activation_then_uses_p2_ack_repla
     assert composition.handle_calls == []
     assert manager.agent.calls == 0
     assert composition.current is terminal
-    await _close_unified_route(registry, stem="terminal-notification")
+    closed_successor = await registry.handle_p2_close(
+        params=successor_binding,
+        request_id="request-terminal-notification-close-successor",
+        session_id=SCOPE.session_id,
+    )
+    assert closed_successor.ok
 
 
 @pytest.mark.asyncio

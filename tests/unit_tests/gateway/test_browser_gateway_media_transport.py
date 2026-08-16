@@ -31,6 +31,7 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaGenerationKind,
     MediaPlayoutBinding,
     MediaPlaybackStopOutcome,
+    MediaSpeechStart,
     MediaTransportViolation,
     create_gateway_media_activation,
     create_playback_stop_receipt,
@@ -208,6 +209,30 @@ def test_end_of_turn_cross_language_fixture_is_exact_and_content_free() -> None:
     assert "audio_cursor" not in raw
     assert "transcript" not in raw
     assert deserialize_media_control(serialize_media_control(control)) == control
+
+
+def test_speech_start_control_is_exact_content_free_and_round_trips() -> None:
+    control = MediaSpeechStart(
+        lease_id="fixture-eot-lease",
+        generation=7,
+        provider_start_ms=320,
+    )
+    raw = json.loads(serialize_media_control(control))
+    assert raw == {
+        "business_cancel_count_delta": 0,
+        "capability_version": MEDIA_END_OF_TURN_CAPABILITY,
+        "contract_version": MEDIA_CONTRACT_VERSION,
+        "create_response": False,
+        "detector": "server_vad",
+        "generation": 7,
+        "interrupt_response": False,
+        "lease_id": "fixture-eot-lease",
+        "provider_start_ms": 320,
+        "timing_basis": "provider_time",
+        "timing_provenance": "adapter_derived",
+        "type": "media.speech_start",
+    }
+    assert deserialize_media_control(json.dumps(raw)) == control
 
 
 @pytest.mark.parametrize(

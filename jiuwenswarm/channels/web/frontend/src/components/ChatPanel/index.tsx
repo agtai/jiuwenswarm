@@ -1244,6 +1244,7 @@ export function ChatPanel({
   const formalProductVoiceEnabled = FEATURE_LIVE_VOICE_INTEGRATED_WEB && FEATURE_LIVE_VOICE_INTEGRATED_P1;
   const productVoiceControlRef = useRef<ProductLiveVoiceSurfaceControl | null>(null);
   const [productVoiceState, setProductVoiceState] = useState<Readonly<ProductLiveVoiceSurfaceState> | null>(null);
+  const addMessageIfAbsent = useChatStore((state) => state.addMessageIfAbsent);
   const [productVoiceActive, setProductVoiceActive] = useState(false);
   const adoptProductVoiceState = useCallback((next: Readonly<ProductLiveVoiceSurfaceState>) => {
     setProductVoiceState(previous => {
@@ -1255,6 +1256,7 @@ export function ChatPanel({
         previous.input === next.input &&
         previous.output === next.output &&
         previous.text_status === next.text_status &&
+        previous.text_reason === next.text_reason &&
         previous.confirmation_phase === next.confirmation_phase &&
         previous.operation_retained === next.operation_retained &&
         previous.command_route === next.command_route &&
@@ -1285,6 +1287,8 @@ export function ChatPanel({
   let formalVoiceVisualState: LiveVoiceVisualState = 'idle';
   if (productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting') {
     formalVoiceVisualState = 'thinking';
+  } else if (productVoiceState?.text_status === 'failed') {
+    formalVoiceVisualState = 'error';
   } else {
     switch (productVoiceState?.p1_status) {
       case 'starting':
@@ -1306,6 +1310,11 @@ export function ChatPanel({
     }
   }
   const formalStatusLabel = t(`liveVoice.status.${formalVoiceVisualState}`);
+  const formalVoiceErrorReason =
+    productVoiceState?.text_status === 'failed' && productVoiceState.text_reason
+      ? productVoiceState.text_reason
+      : productVoiceState?.p1_reason ?? productVoiceState?.text_reason ?? null;
+  const formalVoiceErrorPhase = productVoiceState?.text_status === 'failed' && productVoiceState.text_reason ? 'text' : productVoiceState?.p1_status;
   const formalTaskDetail =
     productVoiceState?.terminal_notification ??
     productVoiceState?.adjustment_notification ??
@@ -1323,7 +1332,15 @@ export function ChatPanel({
     status: formalVoiceVisualState,
     interimTranscript: '',
     committedTranscript: productVoiceState?.input || '',
-    errorMessage: formalVoiceVisualState === 'error' ? t('liveVoice.formal.recoveryFailed') : '',
+    errorMessage:
+      formalVoiceVisualState === 'error'
+        ? formalVoiceErrorReason
+          ? t('liveVoice.formal.recoveryFailedWithReason', {
+              phase: formalVoiceErrorPhase,
+              reason: formalVoiceErrorReason,
+            })
+          : t('liveVoice.formal.recoveryFailed')
+        : '',
     statusLabel: formalStatusLabel,
     taskActivity: formalTaskActivity,
     handsFree: true,
@@ -1520,6 +1537,14 @@ export function ChatPanel({
           taskCompatibilityAvailable={Boolean(liveVoiceTaskRequest && liveVoiceTaskExecutionContext)}
           productVoiceControlRef={formalProductVoiceEnabled ? productVoiceControlRef : undefined}
           onProductVoiceStateChange={formalProductVoiceEnabled ? adoptProductVoiceState : undefined}
+          onProductVoiceMessage={
+            formalProductVoiceEnabled
+              ? event => {
+                  if (event.session_id !== activeSessionId) return;
+                  addMessageIfAbsent(event.session_id, { ...event.message });
+                }
+              : undefined
+          }
         />
       )}
 

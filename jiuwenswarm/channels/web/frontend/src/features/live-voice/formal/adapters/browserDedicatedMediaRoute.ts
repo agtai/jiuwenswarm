@@ -15,6 +15,7 @@ import {
   type MediaDetach,
   type MediaDetachReason,
   type MediaEndOfTurn,
+  type MediaSpeechStart,
   type MediaEnqueueResult,
   type MediaAudioFrame,
   type MediaPlaybackStopReceipt,
@@ -131,6 +132,7 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
   readonly on_terminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly end_of_turn_capability?: 'media.end_of_turn.v1';
+  readonly on_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
   readonly on_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly max_pending_frames?: number;
   readonly max_pending_bytes?: number;
@@ -484,11 +486,13 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
     throw new TypeError('on_terminal must be a function');
   }
   if (
+    (request.end_of_turn_capability === undefined) !== (request.on_speech_start === undefined) ||
     (request.end_of_turn_capability === undefined) !== (request.on_end_of_turn === undefined) ||
     (request.end_of_turn_capability !== undefined && request.end_of_turn_capability !== 'media.end_of_turn.v1') ||
+    (request.on_speech_start !== undefined && typeof request.on_speech_start !== 'function') ||
     (request.on_end_of_turn !== undefined && typeof request.on_end_of_turn !== 'function')
   ) {
-    throw new TypeError('end-of-turn requires one exact negotiated capability and consumer');
+    throw new TypeError('speech boundaries require one exact negotiated capability and both consumers');
   }
   const maxPendingFrames = boundedPositiveInteger(request.max_pending_frames ?? 8, MAX_PENDING_FRAMES, 'max_pending_frames');
   const maxPendingBytes = boundedPositiveInteger(request.max_pending_bytes ?? 131_072, MAX_PENDING_BYTES, 'max_pending_bytes');
@@ -553,6 +557,7 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
       authenticationFrame,
       request.on_terminal,
       request.end_of_turn_capability,
+      request.on_speech_start,
       request.on_end_of_turn,
       DEDICATED_MEDIA_LEAF_CONSTRUCTION_TOKEN
     );
@@ -590,6 +595,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   #pendingAuthenticationFrame: string | null;
   readonly #onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly #endOfTurnCapability?: 'media.end_of_turn.v1';
+  readonly #onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #pendingDownlinkAcks = new Map<number, Readonly<{ ack: Readonly<MediaAck>; byteLength: number }>>();
   #pendingDownlinkBytes = 0;
@@ -599,6 +605,8 @@ export class BrowserDedicatedMediaSocketLeaf {
   #retainedClose: MediaRegistrationOwnerCloseResult | null = null;
   #pendingUplinkCompletion: PendingUplinkCompletion | null = null;
   #terminalNotified = false;
+  #speechStartSeen = false;
+  #speechStartProviderMs: number | null = null;
   #endOfTurnSeen = false;
   #scheduledDrainRetry: ScheduledDrainRetry | null = null;
   #drainRetryGeneration = 0;
@@ -618,6 +626,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     authenticationFrame: string | null,
     onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void,
     endOfTurnCapability?: 'media.end_of_turn.v1',
+    onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void,
     onEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void,
     constructionToken?: symbol
   ) {
@@ -638,6 +647,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#pendingAuthenticationFrame = authenticationFrame;
     this.#onTerminal = onTerminal;
     this.#endOfTurnCapability = endOfTurnCapability;
+    this.#onSpeechStart = onSpeechStart;
     this.#onEndOfTurn = onEndOfTurn;
     socket.binaryType = 'arraybuffer';
     socket.onopen = () => {
@@ -1018,6 +1028,10 @@ export class BrowserDedicatedMediaSocketLeaf {
       this.#closeSocket();
       return;
     }
+    if (control.type === 'media.speech_start') {
+      this.#acceptSpeechStart(control);
+      return;
+    }
     if (control.type === 'media.end_of_turn') {
       this.#acceptEndOfTurn(control);
       return;
@@ -1051,6 +1065,10 @@ export class BrowserDedicatedMediaSocketLeaf {
     const pending = this.#pendingUplinkCompletion;
     if (pending === null) return;
     const expected = pending.expected;
+    if (control.type === 'media.speech_start') {
+      this.#acceptSpeechStart(control);
+      return;
+    }
     if (control.type === 'media.end_of_turn') {
       this.#acceptEndOfTurn(control);
       return;
@@ -1080,6 +1098,37 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#closeSocket();
   }
 
+  #acceptSpeechStart(control: Readonly<MediaSpeechStart>): void {
+    if (
+      this.#endOfTurnCapability !== 'media.end_of_turn.v1' ||
+      this.#onSpeechStart === undefined ||
+      this.binding.direction !== 'uplink' ||
+      control.capability_version !== this.#endOfTurnCapability ||
+      control.lease_id !== this.binding.lease_id ||
+      control.generation !== this.binding.generation.value ||
+      this.#speechStartSeen ||
+      this.#endOfTurnSeen
+    ) {
+      if (this.#pendingUplinkCompletion !== null) {
+        this.#failPendingUplinkCompletion('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+      } else {
+        this.#terminate('MEDIA_TRANSPORT_PROTOCOL_ERROR');
+      }
+      return;
+    }
+    this.#speechStartSeen = true;
+    this.#speechStartProviderMs = control.provider_start_ms;
+    try {
+      this.#onSpeechStart(control);
+    } catch {
+      if (this.#pendingUplinkCompletion !== null) {
+        this.#failPendingUplinkCompletion('MEDIA_CONSUMER_FAILED');
+      } else {
+        this.#terminate('MEDIA_CONSUMER_FAILED');
+      }
+    }
+  }
+
   #acceptEndOfTurn(control: Readonly<MediaEndOfTurn>): void {
     if (
       this.#endOfTurnCapability !== 'media.end_of_turn.v1' ||
@@ -1088,6 +1137,8 @@ export class BrowserDedicatedMediaSocketLeaf {
       control.capability_version !== this.#endOfTurnCapability ||
       control.lease_id !== this.binding.lease_id ||
       control.generation !== this.binding.generation.value ||
+      !this.#speechStartSeen ||
+      control.provider_start_ms !== this.#speechStartProviderMs ||
       this.#endOfTurnSeen
     ) {
       if (this.#pendingUplinkCompletion !== null) {

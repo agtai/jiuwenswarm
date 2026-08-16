@@ -166,6 +166,14 @@ CURRENT = CurrentBackgroundTaskContext(
         ),
         ("后台现在做到哪了？", UnifiedCommittedInputRoute.BACKGROUND_STATUS),
         (
+            "当前后台任务情况如何？",
+            UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+        ),
+        (
+            "当前后台任务进展如何？",
+            UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+        ),
+        (
             "停止刚才的行程规划。",
             UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
         ),
