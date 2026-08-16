@@ -164,6 +164,10 @@ class _DemoItineraryProjectExecutor(_DirectProjectExecutor):
 
 
 class _AdjustableItineraryProjectExecutor(_DirectProjectExecutor):
+    def __init__(self, project: Path) -> None:
+        super().__init__(project)
+        self.initial_complete = asyncio.Event()
+
     async def process_background_code_task_stream(self, request):
         self.requests.append(request)
         self.started.set()
@@ -174,6 +178,7 @@ class _AdjustableItineraryProjectExecutor(_DirectProjectExecutor):
                 encoding="utf-8",
             )
             content = "Initial itinerary ready."
+            self.initial_complete.set()
         else:
             query = request.params["query"]
             itinerary = (project / "itinerary.md").read_text(encoding="utf-8")
@@ -1066,6 +1071,96 @@ async def test_demo_itinerary_fixture_constrains_real_direct_executor_and_seals_
 
 
 @pytest.mark.asyncio
+async def test_demo_itinerary_checkpoint_keeps_task_running_until_real_adjustment(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "adjustable-demo-itinerary"
+    _git_project(project)
+    executor = _AdjustableItineraryProjectExecutor(project)
+    spec = replace(
+        _spec(project),
+        name="Three-day itinerary",
+        instruction="Create a three-day itinerary.",
+    )
+    item = replace(_item(project), spec=spec)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        demo_itinerary_fixture_enabled=True,
+        demo_itinerary_adjustment_checkpoint_enabled=True,
+    )
+
+    await adapter.dispatch(item)
+    await asyncio.wait_for(executor.initial_complete.wait(), timeout=2)
+    task, attempt = _direct_task_attempt(project)
+    before_adjustment = await adapter.status(replace(task, spec=spec), attempt)
+
+    assert before_adjustment.observations == ()
+    assert adapter._adjustment_checkpoints["attempt-1"].accepting is True
+
+    adjustment = replace(
+        _adjustment_item(
+            project,
+            command_id="adjust-1",
+            adjustment="Move the museum visit to 09:30.",
+            requested_seq=4,
+        ),
+        spec=spec,
+    )
+    delivery = await asyncio.wait_for(adapter.adjust(adjustment), timeout=2)
+
+    assert delivery.state is TaskAdjustmentState.APPLIED
+    assert len(executor.requests) == 2
+    before_store_ack = await adapter.status(replace(task, spec=spec), attempt)
+    assert before_store_ack.observations == ()
+
+    await adapter.settle_adjustment(
+        adjustment,
+        TaskAdjustmentSettlement(TaskAdjustmentState.APPLIED, False),
+    )
+    await _wait_direct_settled(adapter)
+    terminal = await adapter.status(replace(task, spec=spec), attempt)
+
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert "09:30" in (project / "itinerary.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_demo_itinerary_checkpoint_close_interrupts_wait_without_target_mutation(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "closed-demo-itinerary"
+    _git_project(project)
+    executor = _AdjustableItineraryProjectExecutor(project)
+    spec = replace(
+        _spec(project),
+        name="Three-day itinerary",
+        instruction="Create a three-day itinerary.",
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        demo_itinerary_fixture_enabled=True,
+        demo_itinerary_adjustment_checkpoint_enabled=True,
+    )
+
+    await adapter.dispatch(replace(_item(project), spec=spec))
+    await asyncio.wait_for(executor.initial_complete.wait(), timeout=2)
+    isolated_root = Path(executor.requests[0].params["project_dir"])
+
+    await adapter.close(interrupt_running=True)
+
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(replace(task, spec=spec), attempt)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert adapter._running == {}
+    assert adapter._adjustment_checkpoints == {}
+    assert not isolated_root.exists()
+    assert not (project / "itinerary.md").exists()
+    assert _git(project, "status", "--porcelain") == ""
+
+
+@pytest.mark.asyncio
 async def test_direct_adjustments_are_ordered_durable_and_fence_terminal_result(
     tmp_path: Path,
 ) -> None:
@@ -1212,6 +1307,18 @@ def test_demo_itinerary_fixture_flag_requires_exact_boolean(tmp_path: Path) -> N
             _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
             tmp_path / "p3.sqlite3",
             demo_itinerary_fixture_enabled=1,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="must be a boolean"):
+        DirectProjectCodeExecutorAdapter(
+            _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+            tmp_path / "p3.sqlite3",
+            demo_itinerary_adjustment_checkpoint_enabled=1,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="requires the itinerary fixture"):
+        DirectProjectCodeExecutorAdapter(
+            _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+            tmp_path / "p3.sqlite3",
+            demo_itinerary_adjustment_checkpoint_enabled=True,
         )
 
 

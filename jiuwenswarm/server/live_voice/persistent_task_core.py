@@ -42,6 +42,7 @@ from .formal_task_models import (
     TaskMutationResult,
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
+    canonical_task_adjustment_rejection_reason,
     require_exact_payload,
     utc_now,
 )
@@ -633,7 +634,7 @@ class PersistentTaskCore:
                     item.executor_ref,
                     item.command_id,
                     TaskAdjustmentState.REJECTED,
-                    error.reason,
+                    canonical_task_adjustment_rejection_reason(error.reason),
                 )
             elif error.code in {
                 ErrorCode.UNAVAILABLE,

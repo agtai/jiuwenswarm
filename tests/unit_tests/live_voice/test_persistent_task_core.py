@@ -915,6 +915,72 @@ async def test_adjustment_admission_replay_conflict_and_final_event_are_v3(
     assert result is not None and result.result_text == "museum at 09:30"
 
 
+@pytest.mark.parametrize("malformed_mode", ["result", "raised"])
+@pytest.mark.asyncio
+async def test_malformed_executor_adjustment_reason_is_canonicalized_before_store(
+    tmp_path: Path,
+    malformed_mode: str,
+) -> None:
+    database = tmp_path / "tasks.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    create = _create(tmp_path)
+    created = core.execute(
+        create.envelope,
+        create.authorization,
+        context=create.context,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert created.ok and created.result is not None
+    assert await core.drain_outbox_once(worker_id="dispatch") is True
+    task_id = str(created.result["task_id"])
+    command, grant = _adjust(task_id, "Move the museum visit to 09:30.")
+    admitted = core.execute(
+        command,
+        grant,
+        now=NOW,
+        current_background_session_id="session-1",
+    )
+    assert admitted.ok
+    executor.adjustment_state = TaskAdjustmentState.REJECTED
+    if malformed_mode == "result":
+        executor.adjustment_reason = "not applicable"
+    else:
+        executor.adjustment_error = FormalTaskViolation(
+            "not applicable",
+            "custom Executor returned malformed authority evidence",
+            ErrorCode.PROTOCOL_VIOLATION,
+        )
+
+    assert await core.drain_outbox_once(worker_id="malformed-adjust") is True
+
+    events = [
+        event
+        for event in store.events(task_id, _scope(), after_seq=-1)
+        if event.event_type.startswith("task.adjust_")
+    ]
+    assert [event.event_type for event in events] == [
+        "task.adjust_requested",
+        "task.adjust_rejected",
+    ]
+    assert dict(events[-1].details) == {
+        "command_id": command.command_id,
+        "reason": "TASK_ADJUSTMENT_RESULT_INVALID",
+    }
+    assert "not applicable" not in json.dumps([event.to_dict() for event in events])
+    assert executor.adjustment_settlements == [
+        TaskAdjustmentSettlement(TaskAdjustmentState.REJECTED, False)
+    ]
+    with sqlite3.connect(database) as connection:
+        outbox = connection.execute(
+            "SELECT state, last_error FROM outbox WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+    assert outbox == ("delivered", "TASK_ADJUSTMENT_RESULT_INVALID")
+
+
 @pytest.mark.asyncio
 async def test_terminal_fence_rejects_pending_adjustment_without_executor_effect(
     tmp_path: Path,
@@ -2541,6 +2607,7 @@ class _Executor:
         self.adjustments: list[str] = []
         self.adjustment_state = TaskAdjustmentState.APPLIED
         self.adjustment_reason: str | None = None
+        self.adjustment_error: FormalTaskViolation | None = None
         self.adjustment_settlements: list[TaskAdjustmentSettlement] = []
         self.fail_dispatches = 0
         self.status_resolution: ExecutorResolution | None = None
@@ -2581,6 +2648,8 @@ class _Executor:
     async def adjust(self, item: PersistentOutboxItem) -> TaskAdjustmentDeliveryResult:
         self.adjustments.append(item.command_id)
         assert item.executor_ref is not None
+        if self.adjustment_error is not None:
+            raise self.adjustment_error
         return TaskAdjustmentDeliveryResult(
             item.executor_ref,
             item.command_id,

@@ -96,6 +96,17 @@ class TaskAdjustmentState(StrEnum):
 
 
 _MAX_TASK_ADJUSTMENT_BYTES = 4096
+_TASK_ADJUSTMENT_REASON_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
+
+
+def canonical_task_adjustment_rejection_reason(value: object) -> str:
+    if (
+        type(value) is str
+        and 0 < len(value) <= 128
+        and all(character in _TASK_ADJUSTMENT_REASON_ALPHABET for character in value)
+    ):
+        return value
+    return "TASK_ADJUSTMENT_RESULT_INVALID"
 
 
 def utc_now() -> str:
@@ -1387,7 +1398,12 @@ class TaskAdjustmentDeliveryResult:
                     ErrorCode.PROTOCOL_VIOLATION,
                 )
         else:
-            _require_text(self.reason, "task_adjustment_result.reason")
+            if canonical_task_adjustment_rejection_reason(self.reason) != self.reason:
+                raise FormalTaskViolation(
+                    "TASK_ADJUSTMENT_RESULT_INVALID",
+                    "rejected adjustment result must carry a canonical reason",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1683,6 +1699,7 @@ __all__ = [
     "TaskRetryPrecondition",
     "TaskRetryProductRequestFingerprint",
     "TASK_RETRY_PRODUCT_REQUEST_EXTENSION",
+    "canonical_task_adjustment_rejection_reason",
     "require_exact_payload",
     "safe_json_value",
     "utc_now",

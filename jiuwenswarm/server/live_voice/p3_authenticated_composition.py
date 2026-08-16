@@ -113,6 +113,9 @@ _PRODUCT_P2_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
 _PRODUCT_DEMO_POLICY_BYPASS_ENV = (
     "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED"
 )
+_DEMO_ADJUSTMENT_CHECKPOINT_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED"
+)
 _PRODUCT_P2_OPERATION = "agent.chat"
 
 
@@ -2868,6 +2871,10 @@ def create_p3_composition_from_environment(
         database_path,
         demo_itinerary_fixture_enabled=_is_enabled(
             os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV)
+        ),
+        demo_itinerary_adjustment_checkpoint_enabled=(
+            _is_enabled(os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV))
+            and _is_enabled(os.getenv(_DEMO_ADJUSTMENT_CHECKPOINT_ENV))
         ),
     )
     runtime_owner = _DirectP3RuntimeOwner(

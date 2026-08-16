@@ -5894,6 +5894,279 @@ test('mounted server speech-start EOT barges Agent playout through P2 with zero 
   }
 });
 
+test('mounted stale TTS settlement after Session switch cannot retain predecessor ACK or block successor capture', async () => {
+  const i18n = await createI18n();
+  const predecessorSession = 'mounted-tts-predecessor-session';
+  const successorSession = 'mounted-tts-successor-session';
+  const controlRef = { current: null };
+  const states = [];
+  const calls = [];
+  const queuedNotifications = new Map();
+  const notificationWaiters = new Map();
+  const activateP2 = createMountedP2ActivationResponder();
+  let activeMediaBinding = null;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+
+  const publishNotification = (sessionId, notification) => {
+    const waiters = notificationWaiters.get(sessionId) ?? [];
+    const waiter = waiters.shift();
+    notificationWaiters.set(sessionId, waiters);
+    if (waiter) {
+      waiter(notification);
+      return;
+    }
+    const queued = queuedNotifications.get(sessionId) ?? [];
+    queued.push(notification);
+    queuedNotifications.set(sessionId, queued);
+  };
+
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.composition.p2.notification.next') {
+      const queued = queuedNotifications.get(params.session_id) ?? [];
+      if (queued.length > 0) {
+        const notification = queued.shift();
+        queuedNotifications.set(params.session_id, queued);
+        return notification;
+      }
+      return new Promise(resolve => {
+        const waiters = notificationWaiters.get(params.session_id) ?? [];
+        waiters.push(resolve);
+        notificationWaiters.set(params.session_id, waiters);
+      });
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: 1,
+          history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.media.activate') {
+      activeMediaBinding = mountedMediaBinding(
+        params,
+        calls.filter(call => call.method === method).length,
+      );
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-stale-tts-media-${params.capture_generation}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'S'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') {
+      return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    }
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(params, 'Please answer this predecessor question.', 1);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      const response = {
+        interaction_id: params.interaction_id,
+        response_id: 'mounted-stale-tts-response',
+        response_generation: 1,
+      };
+      publishNotification(params.session_id, {
+        ok: true,
+        result: {
+          status: 'notification',
+          session_id: params.session_id,
+          correlation_id: params.correlation_id,
+          interaction_id: params.interaction_id,
+          activation_id: params.activation_id,
+          activation_generation: params.activation_generation,
+          kind: 'agent.output',
+          response,
+          agent_event: { event_type: 'chat.final', text: 'This predecessor answer is still playing.' },
+          presentation_unit: { surface: 'text', unit_id: 'mounted-stale-tts-unit', seq: 0 },
+        },
+      });
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'round_accepted',
+          session_id: params.session_id,
+          correlation_id: params.correlation_id,
+          interaction_id: params.interaction_id,
+          activation_id: params.activation_id,
+          activation_generation: params.activation_generation,
+          turn_id: params.turn_id,
+          commit_id: params.commit_id,
+          request_id: 'mounted-stale-tts-agent-request',
+          round_id: 'mounted-stale-tts-round',
+          response,
+        },
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      const downlink = mountedDownlinkBinding(
+        params.response,
+        params.unit_id,
+        1,
+        activeMediaBinding,
+      );
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'pcm_f32_mono_20ms',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            delivery: 'dedicated_media_downlink',
+            endpoint_path: '/ws/live-voice/media',
+            media_ticket: 'T'.repeat(43),
+            subprotocol: 'live-voice.media.v1',
+            ticket_ttl_ms: 30_000,
+            frame_count: 1,
+            streaming: false,
+            degradation_reason: null,
+            binding: downlink,
+            max_pending_frames: 8,
+            max_pending_bytes: 131_072,
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
+    }
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: 'mounted-stale-tts-playout-receipt',
+        ...params,
+        duplex_media_observed: true,
+      };
+    }
+    throw new Error(`unexpected stale TTS request: ${method}`);
+  };
+
+  const element = sessionId => mountedFullyEnabledElement(i18n, sessionId, request, true, {
+    productVoiceControlRef: controlRef,
+    onProductVoiceStateChange: state => states.push(state),
+  });
+
+  try {
+    await act(async () => {
+      renderer = create(element(predecessorSession));
+      await waitForMounted(
+        () => controlRef.current !== null && states.at(-1)?.available === true,
+        'predecessor Live Voice did not become available',
+      );
+      void controlRef.current.start();
+      await browser.emitFirstFrame();
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'capturing',
+        'predecessor capture did not start',
+      );
+      await controlRef.current.stop();
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'playing',
+        'predecessor TTS did not start',
+      );
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.speech.synthesize_batch'),
+        'predecessor TTS did not request authoritative synthesis',
+      );
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 2,
+        'predecessor playout did not allocate its serialized successor capture',
+      );
+      await browser.emitFirstFrame();
+      try {
+        await browser.emitDownlinkFrame();
+      } catch (error) {
+        assert.fail(
+          `${error.message}; states=${states.slice(-6).map(state => `${state.p1_status}/${state.p1_reason}`).join(',')}; methods=${calls.slice(-12).map(call => call.method).join(',')}`,
+        );
+      }
+      await waitForMounted(
+        () => browser.counts.sourceStarts === 1,
+        'predecessor TTS did not begin browser rendering',
+      );
+    });
+
+    await act(async () => {
+      renderer.update(element(successorSession));
+      await waitForMounted(
+        () => calls.some(call =>
+          call.method === 'live_voice.composition.p2.activate'
+          && call.params.session_id === successorSession),
+        'successor P2 activation did not start',
+      );
+      browser.endLatestSource();
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+    });
+
+    assert.equal(
+      calls.some(call =>
+        call.method === 'live_voice.composition.p2.presentation.ack'
+        && call.params.session_id === predecessorSession),
+      false,
+    );
+
+    await act(async () => {
+      void controlRef.current.start();
+      await waitForMounted(
+        () => calls.some(call =>
+          call.method === 'live_voice.media.activate'
+          && call.params.session_id === successorSession),
+        'successor capture remained blocked by the predecessor presentation',
+      );
+      await browser.emitFirstFrame();
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'capturing',
+        'successor capture did not reach capturing',
+      );
+    });
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
 test('mounted Exit fences a blocked start and immediate re-enable starts only the new loop generation', async () => {
   const i18n = await createI18n();
   const sessionId = 'mounted-exit-reenable-session';

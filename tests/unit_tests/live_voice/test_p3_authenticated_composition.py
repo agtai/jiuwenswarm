@@ -2227,6 +2227,49 @@ def test_factory_gates_itinerary_fixture_with_trusted_demo_policy(
     assert composition._core.executor._demo_itinerary_fixture_enabled is fixture_enabled
 
 
+@pytest.mark.parametrize(
+    ("demo_policy", "checkpoint_policy", "checkpoint_enabled"),
+    [
+        ("0", "0", False),
+        ("0", "1", False),
+        ("1", "0", False),
+        ("1", "1", True),
+    ],
+)
+def test_factory_gates_demo_adjustment_checkpoint_behind_both_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    demo_policy: str,
+    checkpoint_policy: str,
+    checkpoint_enabled: bool,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 3600)
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED",
+        demo_policy,
+    )
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED",
+        checkpoint_policy,
+    )
+    database = tmp_path / f"demo-checkpoint-{demo_policy}-{checkpoint_policy}.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+
+    composition = create_p3_composition_from_environment(
+        agent_manager=object(), model_resolver=_ModelResolver()
+    )
+
+    assert composition is not None
+    assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
+    assert (
+        composition._core.executor._demo_itinerary_adjustment_checkpoint_enabled
+        is checkpoint_enabled
+    )
+
+
 @pytest.mark.asyncio
 async def test_factory_direct_executor_lifecycle_releases_agent_bindings(
     tmp_path: Path,

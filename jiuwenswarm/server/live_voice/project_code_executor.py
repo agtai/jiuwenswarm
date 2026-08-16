@@ -2157,6 +2157,7 @@ class DirectProjectCodeExecutorAdapter:
         cancel_timeout: float = 1.0,
         close_timeout: float = 5.0,
         demo_itinerary_fixture_enabled: bool = False,
+        demo_itinerary_adjustment_checkpoint_enabled: bool = False,
         adjustment_checkpoint_barrier: (Callable[[str], Awaitable[None]] | None) = None,
     ) -> None:
         if (
@@ -2183,6 +2184,17 @@ class DirectProjectCodeExecutorAdapter:
                 )
         if not isinstance(demo_itinerary_fixture_enabled, bool):
             raise ValueError("demo_itinerary_fixture_enabled must be a boolean")
+        if not isinstance(demo_itinerary_adjustment_checkpoint_enabled, bool):
+            raise ValueError(
+                "demo_itinerary_adjustment_checkpoint_enabled must be a boolean"
+            )
+        if (
+            demo_itinerary_adjustment_checkpoint_enabled
+            and not demo_itinerary_fixture_enabled
+        ):
+            raise ValueError(
+                "demo itinerary adjustment checkpoint requires the itinerary fixture"
+            )
         if adjustment_checkpoint_barrier is not None and not callable(
             adjustment_checkpoint_barrier
         ):
@@ -2194,6 +2206,9 @@ class DirectProjectCodeExecutorAdapter:
         self._cancel_timeout = float(cancel_timeout)
         self._close_timeout = float(close_timeout)
         self._demo_itinerary_fixture_enabled = demo_itinerary_fixture_enabled
+        self._demo_itinerary_adjustment_checkpoint_enabled = (
+            demo_itinerary_adjustment_checkpoint_enabled
+        )
         self._adjustment_checkpoint_barrier = adjustment_checkpoint_barrier
         self._owner_id = f"d0-project-executor-{uuid.uuid4().hex}"
         self._running: dict[str, asyncio.Task[None]] = {}
@@ -2597,6 +2612,20 @@ class DirectProjectCodeExecutorAdapter:
         barrier = self._adjustment_checkpoint_barrier
         if barrier is not None:
             await barrier(item.attempt_id)
+        if (
+            demo_itinerary_attempt
+            and self._demo_itinerary_adjustment_checkpoint_enabled
+        ):
+            while True:
+                async with self._lifecycle_lock:
+                    if any(
+                        not pending.delivery.done()
+                        for pending in checkpoint.pending.values()
+                    ):
+                        break
+                    checkpoint.changed.clear()
+                    changed = checkpoint.changed
+                await changed.wait()
         expect_more = False
         while True:
             async with self._lifecycle_lock:

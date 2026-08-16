@@ -1288,7 +1288,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (disposition.adjustment_notification) setAdjustmentNotification(disposition.text);
     setProductTextStatus('presented');
     activeVoiceResponseRef.current = disposition.replayed ? null : disposition.response;
-    const retainAck = () => {
+    const presentationBinding = owner.snapshot().binding;
+    const retainAck = (playoutFailed = false) => {
+      if (
+        !mountedRef.current ||
+        presentationBinding === null ||
+        activationOwnerRef.current !== owner ||
+        activeSessionRef.current !== presentationBinding.session_id ||
+        !owner.authorizesMediaStart(presentationBinding)
+      ) {
+        return;
+      }
       if (pendingPresentationAttemptRef.current === null) {
         pendingPresentationAttemptRef.current = {
           owner,
@@ -1298,6 +1308,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           },
         };
       }
+      if (playoutFailed) setProductTextStatus('failed');
       setPendingPresentationAck(disposition.ack);
     };
     const voiceOwner = p1VoiceOwnerRef.current;
@@ -1316,8 +1327,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         })
         .catch(() => {
           if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
-          setProductTextStatus('failed');
-          retainAck();
+          retainAck(true);
         });
     } else {
       retainAck();
