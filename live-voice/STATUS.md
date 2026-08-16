@@ -7,22 +7,26 @@
 
 ## Resume capsule
 
-- **Current result:** `IMPLEMENTED / AUTOMATED PASS / PHYSICAL ACCEPTANCE
-  PENDING` for the S8/A3 Shared-X + P1/P2/P3alpha Tier-3 unified hands-free
-  Live Voice batch. The uncommitted worktree is based on exact
-  `14d5529d75e9228af8d2e306dcb20f3ac8180aa5` on
-  `hx/0812_live_voice_w3`; local HEAD and
-  `origin/hx/0812_live_voice_w3` are synchronized (`0 / 0`). No commit or
-  remote-ref update has been performed.
+- **Current result:** `IMPLEMENTED / S7-A2 AUTOMATION + REVIEW PASS / S8-A3
+  PHYSICAL ACCEPTANCE PENDING` for the Shared-X + P1/P2/P3alpha Tier-3
+  running-adjustment and terminal-notification batch. The exact implementation
+  candidate is `3bc7f9345f5b3832367e0a34b0dee8853d3d2c02` on
+  `hx/0812_live_voice_w3`, four local commits ahead of
+  `origin/hx/0812_live_voice_w3`. No remote-ref update has been performed. A
+  later documentation-only status commit does not change this tested product
+  source.
 - **Product behavior now implemented:** one click starts a generation-fenced
   hands-free loop; authoritative ASR final is automatically submitted exactly
   once to the independent `live_voice.composition.unified.submit` owner.
   Partial/interim speech has zero Agent, Task or presentation effects. The
   visible panel retains enable, status, transcript and Exit, while Send,
-  Agent/Task, operation and Task-ID controls are absent. The five closed routes
-  are `dialogue`, `background.create`, `background.query`,
-  `background.status` and `background.cancel`; negative cancellation forms are
-  parsed before positive cancellation and never mutate a Task.
+  Agent/Task, operation and Task-ID controls are absent. The six closed routes
+  are `dialogue`, `background.create`, `background.update`,
+  `background.query`, `background.status` and `background.cancel`. Create and
+  update use distinct high-confidence full-utterance grammars; ordinary
+  non-task questions, ambiguity, negation and low confidence have zero Task
+  effects, while explicit result/progress/adjustment-status questions retain
+  their query/status routes.
 - **One-current-task boundary:** Task Store schema v3 owns the
   subject/project/Session current pointer, restores it across activation
   rollover/page refresh, and performs current check + Task/attempt/outbox
@@ -30,6 +34,14 @@
   sequential create while the current Task is non-terminal produces zero new
   Task side effects. This batch intentionally does not implement multiple
   concurrent background tasks.
+- **Running adjustment boundary:** schema v3 is sufficient; no v4 migration or
+  adjustment table was added. An authenticated `task.adjust` command creates an
+  ordered adjustment outbox item and authoritative
+  `task.adjust_requested/applied/rejected` events. The Direct Executor consumes
+  each request at a real pre-terminal checkpoint, and only a persisted
+  `applied` event may support a claim that the final artifact includes the
+  change. Terminal Tasks and immutable historical results reject adjustment;
+  no successor revision is created automatically.
 - **Result boundary:** immutable `task_results` are keyed by
   task/attempt/source-event identity. Only a completed Task with an applied,
   attributable patch and verified bounded artifact path/SHA can be
@@ -60,20 +72,31 @@
   later explicit enable creates a new generation. Real server speech-start/EOT
   during playout interrupts the current P2 response/TTS only and asserts zero
   Task cancellation/mutation.
-- **Automated verification:** Integrated Web `372 / 372` passed; the seven broad
-  backend suites passed `541` with `2` skipped; Gateway/AgentServer route suites
-  passed `222 / 222`; P2 runtime/Bridge/Adapter regressions passed
-  `158 / 158`; the focused unified journal suite passed `14 / 14`. Python compilation,
-  the formal-flag production build (`4,642` modules) and `git diff --check`
-  passed. Existing Vite chunk/dynamic-import notices, duplicate i18n `empty`
-  notices and one Authlib deprecation warning remain non-blocking. See
-  [D118](D118_UNIFIED_HANDS_FREE_LIVE_VOICE_REVIEW_2026-08-16.md).
-- **Physical acceptance:** not run on this dirty source. On this host the Speech
-  provider and product/Demo environment variables are absent and ports 18092,
-  19000, 19001, 3000 and 5173 have no listeners. Restoring private provider
-  configuration is deliberately outside Git and this task. The exact five-turn
-  itinerary journey and disposable-fixture cleanup steps remain required before
-  product acceptance; no credential should be pasted into chat or committed.
+- **Terminal notification boundary:** the terminal TaskEvent is the stable
+  durable identity, but product delivery acquires the current valid P2
+  activation and a fresh response generation. It never reuses the superseded
+  task-create response. Existing presentation/ACK/TTS and replay semantics are
+  reused: ACK suppresses later delivery, while a crash after playout but before
+  ACK may replay. Only `completed` plus a legal TaskResult announces completion;
+  failed, cancelled and interrupted outcomes remain distinct and truthful.
+- **Automated verification:** on exact implementation source `3bc7f934`, the
+  serial cumulative backend matrix passed `1,776` with `2` expected Windows
+  symlink skips and one Authlib deprecation warning; Integrated Web passed
+  `374 / 374`; the post-format affected backend set passed `324` with the same
+  `2` skips; the mounted stale-TTS Session-switch regression passed; Ruff,
+  Ruff format check, Python compilation, `git diff --check` and the production
+  build (`4,642` modules) passed. Existing Vite chunk/dynamic-import and
+  duplicate i18n `empty` notices remain non-blocking. The coherent-batch cold
+  review and new independent read-only Tier-3/scoped-Sol post-review have no
+  open P0-P3 source findings. See [D119](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md).
+- **Physical acceptance:** not yet run on the exact candidate. The protected
+  host configuration contains a Speech key binding, but provider/model runtime
+  readiness has not been established and ports 18092, 19000, 19001, 3000 and
+  5173 currently have no listeners. No credential is moved into chat or Git.
+  The exact seven-step D119 itinerary Journey, including intervening dialogue,
+  a truly non-terminal update, applied-before-terminal evidence, current-
+  generation announcement, artifact inspection and disposable-fixture cleanup,
+  remains required before S8/A3 product acceptance can pass.
 
 ## Superseded pre-implementation capsule (historical)
 
@@ -570,13 +593,14 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Restore provider settings only in protected local terminals, then run the
-   D118 five-turn running/cancel Journey and the separate completed-result
-   fixture Journey from the actual Live Voice entry. Route Facts are not a
-   product control surface.
-2. Record microphone/EOT/barge-in observations plus Store/result/file SHA
-   comparison, then safely remove only the resolved disposable fixture and
-   isolated data directory as described in the runbook.
-3. The local branch and upstream remain synchronized at the baseline; this
-   implementation is intentionally uncommitted. Any commit remains a user
-   decision, and every remote-ref update requires separate exact approval.
+1. From protected local terminals, establish the private Speech/product
+   runtime and run the single D119 seven-step Journey from the actual Live
+   Voice entry on the exact candidate. Route Facts and mounted tests are not a
+   substitute for microphone/TTS acceptance.
+2. Record current-generation terminal playout/ACK behavior, the authoritative
+   adjustment event order, TaskResult/artifact SHA and visible artifact
+   contents, then remove only the resolved disposable fixture and isolated data
+   directory described in the runbook.
+3. Keep S8/A3 `PENDING` until that physical Journey actually passes. The local
+   implementation is committed and four commits ahead of upstream; every
+   remote-ref update still requires separate exact approval.

@@ -11,7 +11,8 @@ Core/Store, Direct Executor, progress/presentation owner and Integrated Web UI
 Risk tier: Tier 3 — shared protocol, authority, durability, mutation and
 concurrency
 
-Status: **DESIGN CHECKPOINT PASSED / IMPLEMENTATION IN PROGRESS**
+Status: **DESIGN + IMPLEMENTATION + S7/A2 AUTOMATION/REVIEW PASSED / S8/A3
+PHYSICAL ACCEPTANCE PENDING**
 
 ## Frozen minimal design
 
@@ -88,10 +89,69 @@ cold review and one new independent read-only review; that independent review
 also satisfies scoped Sol post-review. A material shared-semantic fix repeats
 only the affected final cold-review scope.
 
-Verification results, exact tested source, review findings and the single real
-product Journey will be appended only after they actually run. D-071/D-072
+The implementation and verification results are recorded below. D-071/D-072
 retired signed Gate, fixed manifest, Replacement Ledger and Gate-only tools are
 not restored.
+
+## Exact candidate and verification
+
+The exact tested implementation source is
+`3bc7f9345f5b3832367e0a34b0dee8853d3d2c02` on
+`hx/0812_live_voice_w3`. It consists of four coherent local commits after
+upstream `e014d1bffb204300064ac77eebaee89e1d64d7fc`; no remote ref was updated.
+A later documentation-only status commit does not change the tested product
+source.
+
+- Serial cumulative backend matrix: `1,776 passed, 2 skipped, 1 warning` in
+  383.74 seconds. The skips are the existing Windows symlink cases and the
+  warning is the existing Authlib deprecation.
+- Integrated Web: `374 / 374` passed, including Session switch while old TTS is
+  unresolved and successor capture after the stale playout settles.
+- Post-format affected backend set: `324 passed, 2 skipped, 1 warning`.
+- Production frontend build: passed with `4,642` modules. Existing chunk-size,
+  dynamic-import and duplicate i18n `empty` notices are non-blocking.
+- Ruff check/format check, Python compilation and `git diff --check`: passed.
+
+One cumulative backend run performed concurrently with the frontend exposed a
+single `ROLLBACK_FAILED` result in an existing P2 adapter test. All four exact
+parameters and the complete 46-test owner file immediately passed serially;
+the final serial cumulative run above also passed. No source change was made to
+hide or relabel that load-sensitive observation.
+
+## Coherent-batch review result
+
+Main completed the full-diff self/cold review. A fresh read-only Tier-3 review,
+also serving as scoped Sol post-review, found three material issues before
+closure:
+
+1. the isolated product fixture lacked a deterministic real checkpoint for an
+   update submitted after intervening dialogue;
+2. late settlement of an old Session's TTS could reinstall a stale ACK owner
+   and block successor capture; and
+3. a malformed custom Executor rejection reason could poison or repeatedly
+   lease the durable adjustment outbox path.
+
+The exact candidate closes all three: the Demo-only checkpoint is event-driven
+and doubly flag-gated, deferred ACK retention is fenced to the exact current
+activation/Session/generation, and malformed returned or raised Executor
+reasons are canonically rejected before durable publication. Focused negative,
+flag-off, cancellation/close, zero-mutation and mounted rollover tests cover
+the repairs. The independent reviewer reported no remaining P0-P3 source
+finding.
+
+## S8/A3 product acceptance
+
+Physical acceptance is still **PENDING**. The host has a protected Speech key
+binding, but the private product/provider runtime is not currently listening
+and provider/model readiness has not been established. No automated or mounted
+test is substituted for the real microphone/TTS Journey.
+
+The single required run is the seven-step D119 itinerary Journey in
+[E2E_RUNBOOK.md](runbooks/E2E_RUNBOOK.md): dialogue, background create,
+intervening dialogue, update while the Task is truly non-terminal, adjustment
+status, authoritative applied-before-terminal/current-generation announcement,
+and result-backed artifact query. It must also verify ACK refresh suppression,
+ASR/TTS mutual exclusion, artifact contents/SHA and bounded fixture cleanup.
 
 ## Exclusions
 
