@@ -352,6 +352,88 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 真实任务测试必须保存脱敏的 task ID、原始状态、请求顺序和目标环境说明；不能用 UI 反馈代替后台事实。已接受的 2026-08-05 样本格式见 [D-031 project-bound evidence](../evidence/D031_20260805_PROJECT_BOUND.md)。
 
+### 7.5 统一免手 Live Voice 行程 Demo（D118）
+
+本节取代 7.4 的旧手动命令中心步骤，但不改变 7.4 的目标隔离、项目绑定和真实副作用警告。只使用一个当前后台任务，不测试多任务并行。前端不应出现 Send、Agent/Task、operation 或 Task ID 控件。
+
+在启动 AgentServer、Gateway 和 WebChannel 的受保护终端中，除了第 4–7 节已有的同一隔离 `JIUWENSWARM_DATA_DIR` 和本机私有 Provider 配置，还要显式启用正式组合能力与 Demo policy。下面只列非敏感开关；不要把 Speech key/token 写入脚本、日志或仓库：
+
+```powershell
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED = '1'
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED = '1'
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED = '1'
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED = '1'
+$env:JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED = '1'
+$env:JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED = '1'
+# Set this in the Gateway process so server EOT, rather than a hidden manual
+# stop control, commits each authoritative final turn.
+$env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED = '1'
+$env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED = '1'
+```
+
+`JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED` 是后端可信的、仅供隔离 Demo 使用的显式策略。它一方面允许 create/cancel 跳过二次确认，另一方面允许 Gateway 为包含数字等 critical token 的权威 ASR final 签发独立的 `trusted_demo_bypass`，使“三天”“第二天”等本 Demo 话术不进入生产 clarification。两者都不是用户 confirmation，不伪造或声称用户完成了 confirmation，也不绕过 scope、幂等、目标绑定或 mutation authority。不得在普通生产会话中启用该变量；生产/默认验收必须删除它，并验证 create/cancel 仍要求原有确认、critical speech 仍走默认安全策略：
+
+```powershell
+Remove-Item Env:JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED -ErrorAction SilentlyContinue
+```
+
+在 Vite 终端启用正式前端开关，保持旧 `VITE_FEATURE_LIVE_VOICE_TASK_DEMO` 关闭：
+
+```powershell
+$env:VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB = 'true'
+$env:VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1 = 'true'
+$env:VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION = 'true'
+Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
+Set-Location jiuwenswarm\channels\web\frontend
+npm run dev
+```
+
+真实 Journey 必须使用新建的可丢弃、干净 Git fixture。不要复用源码仓库或已有项目。以下命令只创建隔离目标，不含任何 Provider 凭据：
+
+```powershell
+$fixtureRoot = Join-Path $env:TEMP ("jiuwenswarm-live-voice-itinerary-" + [guid]::NewGuid().ToString("N"))
+$demoDataRoot = Join-Path $env:TEMP ("jiuwenswarm-live-voice-data-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $fixtureRoot, $demoDataRoot | Out-Null
+Set-Location -LiteralPath $fixtureRoot
+git init
+git config user.name "Live Voice Fixture"
+git config user.email "live-voice-fixture@example.invalid"
+git config core.autocrlf false
+New-Item -ItemType File -Path README.md | Out-Null
+git add README.md
+git commit -m "test: initialize live voice itinerary fixture"
+$env:JIUWENSWARM_DATA_DIR = $demoDataRoot
+git status --short --branch
+git rev-parse --show-toplevel
+git rev-parse HEAD
+```
+
+把这个已解析的 `$fixtureRoot` 注册/选择为本次真实 Session 的唯一 Project，保存 Session 后核对页面 project、服务端 authority contract 与 `git rev-parse --show-toplevel` 完全相同。启动 Journey 前 `git status --short` 必须为空。可信 Demo policy 开关同时允许 Direct Executor 对精确的 `Three-day itinerary` 规格启用受控 fixture contract：结果必须有真实 `chat.final`，且补丁只能生成 `itinerary.md`；零补丁或任何额外 artifact 都会 fail closed，不能作为成功 Demo。关闭该后端开关时，这个 fixture contract 和免确认 policy 都不启用。
+
+进入已经保存的真实 Session 后只点击一次 Live Voice，然后依次说：
+
+1. “帮我根据这些要求制定三天的行程。”预期自动提交一次并创建一个后台任务，只播报“已开始处理”，随后自动恢复监听。
+2. “不用停止后台任务，告诉我第二天最早的固定安排是什么。”预期取消/暂停副作用均为 0；在这个仍运行且随后需要取消的 Journey 中，权威播报“尚未生成，任务继续运行”，不得进入 Agent 猜测。
+3. “第一天晚上给我留出的自由时间是几点？”预期自动关联当前行程；由于本批次只发布最终结果，任务仍运行时再次权威播报“尚未生成，任务继续运行”，不得伪造阶段内容。
+4. “后台现在做到哪了？”预期从 Task Store 返回真实 running 状态/进度并自动恢复监听。
+5. “停止刚才的行程规划。”预期 Demo policy 下直接发出一次 cancel；accepted 只能播报“已请求停止”，只有 Store 已为 terminal/cancelled 才能播报“已停止”。
+
+同时验证：partial/interim 零提交；重复 ASR final 只产生一个业务结果；后台运行时可继续下一轮；Agent/Task 播报结束自动回听；播放期间由真实 speech-start/EOT 触发插话会停掉当前朗读/Agent response，但 Task cancel/mutation 为 0；Exit 后迟到回调不能开麦，再次启用则新 generation 正常监听；刷新后从 Store 恢复 current，且不重新 create。
+
+上面的五轮运行中/取消 Journey 与 completed 结果 Journey 必须分开验收：最终结果只在 Task `terminal/completed` 且 artifact 已成功应用和校验后发布；此时再对同一 Task 要求 accepted cancel 在语义上不成立。使用第二个全新 disposable fixture 与 Session，重新创建行程任务并让它完成，然后说“第二天最早的固定安排是什么？”验证 Agent 基于权威结果回答；该 completed Journey 不再要求 cancel accepted。
+
+真实结果闭环不能只检查路径存在。比较 `live_voice.task.result` / Store 中的 bounded result、Agent 回答中的至少一个事实与最终 `itinerary.md` 内容完全一致，并重新计算应用后文件的 SHA-256 与 Store artifact SHA 一致。`not_ready` 和 `unavailable` 均不得调用 Agent；failed/cancelled/interrupted 必须是稳定 `unavailable`，客户端不得继续轮询。
+
+验收结束后先正常停止全部服务，确认 Task/attempt/outbox/owner/lease 已终结或释放，再打印并逐一核对 `$fixtureRoot` 与 `$demoDataRoot` 的解析后绝对路径。记录 `git status --short`、`git diff -- itinerary.md`、文件 SHA-256 和 Store artifact SHA；随后只把这两个已确认的可丢弃目标移入回收站或按本机受控流程清理。禁止递归清理源码 worktree、未解析变量、`$env:TEMP` 本身或任何宽泛目录。自动化 mounted fixture 使用 pytest 临时目录，测试结束由 pytest 清理。
+
+关闭隔离 Demo 服务后至少清除本节的 Demo/EOT 专用临时开关；若同一终端还设置了其余 composition/P2/P3/critical 开关，也应在恢复默认生产策略前逐项清除：
+
+```powershell
+Remove-Item Env:JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED -ErrorAction SilentlyContinue
+Remove-Item Env:JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED -ErrorAction SilentlyContinue
+Remove-Item Env:JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED -ErrorAction SilentlyContinue
+```
+
 ## 8. 先做文字工具冒烟，再做语音
 
 先用文字发送一个强制使用真实终端工具、结果可核对的请求：

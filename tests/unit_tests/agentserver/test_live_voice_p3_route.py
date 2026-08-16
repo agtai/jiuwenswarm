@@ -122,6 +122,10 @@ class _ProductRegistry:
         self.calls.append(("p2.submit", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
 
+    async def handle_unified_submit(self, **kwargs):
+        self.calls.append(("unified.submit", kwargs))
+        return P3RouteResult(True, {"ok": True, "result": {"accepted": True}})
+
     async def handle_p2_notification_next(self, **kwargs):
         self.calls.append(("p2.notification.next", kwargs))
         return P3RouteResult(True, {"ok": True, "result": {"kind": "agent.output"}})
@@ -480,6 +484,7 @@ def test_all_formal_methods_have_req_method_values() -> None:
         "live_voice.task.status",
         "live_voice.task.cancel",
         "live_voice.task.events",
+        "live_voice.task.result",
     }
     assert methods <= _FORWARD_REQ_METHODS
     assert methods <= _FORWARD_NO_LOCAL_HANDLER_METHODS
@@ -495,6 +500,7 @@ def test_all_product_composition_methods_are_forwarded_without_local_handlers() 
         "live_voice.composition.p2.activate",
         "live_voice.composition.p2.close",
         "live_voice.composition.p2.submit",
+        "live_voice.composition.unified.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
         "live_voice.composition.p2.barge_in",
@@ -755,6 +761,11 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
     ("method", "label", "includes_channel"),
     [
         (ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT, "p2.submit", True),
+        (
+            ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
+            "unified.submit",
+            True,
+        ),
         (
             ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
             "p2.notification.next",

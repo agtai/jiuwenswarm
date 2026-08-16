@@ -82,6 +82,12 @@ class ExecutorResolution(StrEnum):
     LOST = "lost"
 
 
+class TaskResultAvailability(StrEnum):
+    AVAILABLE = "available"
+    NOT_READY = "not_ready"
+    UNAVAILABLE = "unavailable"
+
+
 def utc_now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
@@ -94,6 +100,17 @@ def _require_text(value: object, field_name: str) -> str:
             ErrorCode.INVALID_ARGUMENT,
         )
     return value
+
+
+def _utf8_size(value: str, field_name: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise FormalTaskViolation(
+            "INVALID_FORMAL_TASK_FIELD",
+            f"{field_name} must contain valid Unicode scalar values",
+            ErrorCode.INVALID_ARGUMENT,
+        ) from exc
 
 
 def _parse_utc(value: object, field_name: str) -> datetime:
@@ -369,6 +386,7 @@ class TaskAuthorizationGrant:
     confirmation_id: str | None
     confirmed: bool
     expires_at: str
+    policy_bypass: str | None = None
 
     def __post_init__(self) -> None:
         _require_text(self.principal_id, "authorization.principal_id")
@@ -383,6 +401,7 @@ class TaskAuthorizationGrant:
             ("authorization.command_id", self.command_id),
             ("authorization.target_task_id", self.target_task_id),
             ("authorization.confirmation_id", self.confirmation_id),
+            ("authorization.policy_bypass", self.policy_bypass),
         ):
             if value is not None:
                 _require_text(value, field_name)
@@ -390,6 +409,20 @@ class TaskAuthorizationGrant:
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_AUTHORIZATION",
                 "authorization confirmed flag must be boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if self.policy_bypass not in {None, "trusted_demo_live_voice_v1"}:
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_AUTHORIZATION",
+                "authorization policy bypass is unsupported",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if self.policy_bypass is not None and (
+            self.confirmed or self.confirmation_id is not None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_FORMAL_TASK_AUTHORIZATION",
+                "policy bypass cannot impersonate user confirmation",
                 ErrorCode.INVALID_ARGUMENT,
             )
         if type(self.allowed_capabilities) is not frozenset or any(
@@ -450,10 +483,16 @@ class TaskAuthorizationGrant:
                 "authorization has expired",
                 ErrorCode.PERMISSION_DENIED,
             )
-        if destructive and (not self.confirmed or not self.confirmation_id):
+        confirmed_boundary = self.confirmed and self.confirmation_id is not None
+        bypass_boundary = (
+            not self.confirmed
+            and self.confirmation_id is None
+            and self.policy_bypass == "trusted_demo_live_voice_v1"
+        )
+        if destructive and not (confirmed_boundary or bypass_boundary):
             raise FormalTaskViolation(
                 "FORMAL_TASK_CONFIRMATION_REQUIRED",
-                "destructive task operation requires exact confirmation",
+                "destructive task operation requires confirmation or trusted policy",
                 ErrorCode.PERMISSION_DENIED,
             )
 
@@ -674,6 +713,115 @@ class PersistentAttemptRecord:
             "outcome": None if self.outcome is None else self.outcome.value,
             "source_seq": self.source_seq,
             "attempt_number": self.attempt_number,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TaskResultArtifact:
+    relative_path: str
+    sha256: str
+
+    def __post_init__(self) -> None:
+        path = _require_text(self.relative_path, "task_result.relative_path")
+        if (
+            len(path) > 512
+            or _utf8_size(path, "task_result.relative_path") > 2_048
+            or "\\" in path
+            or path.startswith("/")
+            or path.startswith("./")
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or ":" in path.split("/", 1)[0]
+            or "\x00" in path
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_RESULT_ARTIFACT",
+                "task result artifact must be one normalized relative path",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            type(self.sha256) is not str
+            or len(self.sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.sha256)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_RESULT_ARTIFACT",
+                "task result artifact requires canonical SHA-256",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+
+    def to_dict(self) -> dict[str, str]:
+        return {"relative_path": self.relative_path, "sha256": self.sha256}
+
+
+@dataclass(frozen=True, slots=True)
+class TaskResultRecord:
+    task_id: str
+    attempt_id: str
+    source_event_id: str
+    result_text: str
+    artifacts: tuple[TaskResultArtifact, ...]
+    completed_at: str
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("task_result.task_id", self.task_id),
+            ("task_result.attempt_id", self.attempt_id),
+            ("task_result.source_event_id", self.source_event_id),
+        ):
+            identity = _require_text(value, field_name)
+            if (
+                "\x00" in identity
+                or len(identity) > 256
+                or _utf8_size(identity, field_name) > 1_024
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_RESULT_IDENTITY",
+                    "task result identity exceeds its closed bound",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        text = _require_text(self.result_text, "task_result.result_text")
+        if (
+            "\x00" in text
+            or len(text) > 32_768
+            or _utf8_size(text, "task_result.result_text") > 131_072
+        ):
+            raise FormalTaskViolation(
+                (
+                    "INVALID_TASK_RESULT_TEXT"
+                    if "\x00" in text
+                    else "TASK_RESULT_TOO_LARGE"
+                ),
+                "task result text is invalid or exceeds its closed bound",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            type(self.artifacts) is not tuple
+            or not self.artifacts
+            or len(self.artifacts) > 32
+            or any(not isinstance(item, TaskResultArtifact) for item in self.artifacts)
+            or len({item.relative_path for item in self.artifacts})
+            != len(self.artifacts)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_RESULT_ARTIFACT",
+                "task result artifacts are invalid or duplicated",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        completed = _parse_utc(self.completed_at, "task_result.completed_at")
+        object.__setattr__(
+            self,
+            "completed_at",
+            completed.isoformat().replace("+00:00", "Z"),
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_id": self.task_id,
+            "attempt_id": self.attempt_id,
+            "source_event_id": self.source_event_id,
+            "result_text": self.result_text,
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "completed_at": self.completed_at,
         }
 
 
@@ -1173,6 +1321,8 @@ class ExecutorObservation:
     raw_status: str | None
     summary: str | None = None
     error: str | None = None
+    result_text: str | None = None
+    result_artifacts: tuple[TaskResultArtifact, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.resolution, ExecutorResolution):
@@ -1191,9 +1341,60 @@ class ExecutorObservation:
             ("executor_observation.raw_status", self.raw_status),
             ("executor_observation.summary", self.summary),
             ("executor_observation.error", self.error),
+            ("executor_observation.result_text", self.result_text),
         ):
             if value is not None:
                 _require_text(value, field_name)
+        if self.result_text is not None and (
+            "\x00" in self.result_text
+            or len(self.result_text) > 32_768
+            or _utf8_size(
+                self.result_text, "executor_observation.result_text"
+            )
+            > 131_072
+        ):
+            raise FormalTaskViolation(
+                (
+                    "INVALID_TASK_RESULT_TEXT"
+                    if "\x00" in self.result_text
+                    else "TASK_RESULT_TOO_LARGE"
+                ),
+                "Executor result text is invalid or exceeds its closed bound",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            type(self.result_artifacts) is not tuple
+            or len(self.result_artifacts) > 32
+            or any(
+                not isinstance(artifact, TaskResultArtifact)
+                for artifact in self.result_artifacts
+            )
+            or len({artifact.relative_path for artifact in self.result_artifacts})
+            != len(self.result_artifacts)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_RESULT_ARTIFACT",
+                "Executor result artifacts are invalid or duplicated",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        publishes_result = self.result_text is not None or bool(self.result_artifacts)
+        if (self.result_text is None) != (not self.result_artifacts):
+            raise FormalTaskViolation(
+                "INVALID_TASK_RESULT_STATE",
+                "Executor result text requires applied artifact evidence",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if publishes_result and not (
+            self.resolution is ExecutorResolution.KNOWN
+            and self.attempt_state is FormalAttemptState.TERMINAL
+            and self.attempt_outcome is TerminalOutcome.COMPLETED
+            and self.result_text is not None
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_RESULT_STATE",
+                "only one completed Executor observation may publish a result",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
         if self.resolution is ExecutorResolution.KNOWN:
             if (
                 self.executor_ref is None
@@ -1254,6 +1455,10 @@ class ExecutorObservation:
             "raw_status": self.raw_status,
             "summary": self.summary,
             "error": self.error,
+            "result_text": self.result_text,
+            "result_artifacts": [
+                artifact.to_dict() for artifact in self.result_artifacts
+            ],
         }
 
 
@@ -1328,6 +1533,9 @@ __all__ = [
     "TaskEventAuthoritySnapshot",
     "TaskMutationDisposition",
     "TaskMutationResult",
+    "TaskResultArtifact",
+    "TaskResultAvailability",
+    "TaskResultRecord",
     "TaskRetryAuthoritySnapshot",
     "TaskRetryPrecondition",
     "TaskRetryProductRequestFingerprint",

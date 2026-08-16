@@ -322,6 +322,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
         self._symphony_stream_handler = SymphonyToolStreamHandler()
         self._formal_tool_event_captures: dict[str, FormalToolEventCapture] = {}
+        self._formal_no_tool_sessions: set[str] = set()
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -557,10 +558,13 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         self._conversation_ids.pop(sid, None)
         self._main_sessions.pop(sid, None)
         self._cancelled_tool_results.pop(sid, None)
+        self._formal_no_tool_sessions.discard(sid)
 
     def open_formal_tool_event_capture(
         self,
         session_id: str,
+        *,
+        allow_tools: bool = True,
     ) -> FormalToolEventCapture:
         """Open the sole callback-authoritative capture for ``session_id``."""
 
@@ -568,8 +572,12 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
             raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_SESSION_INVALID")
         if session_id in self._formal_tool_event_captures:
             raise RuntimeError("FORMAL_TOOL_EVENT_CAPTURE_CONFLICT")
+        if type(allow_tools) is not bool:
+            raise RuntimeError("FORMAL_TOOL_POLICY_INVALID")
         capture = FormalToolEventCapture(session_id)
         self._formal_tool_event_captures[session_id] = capture
+        if not allow_tools:
+            self._formal_no_tool_sessions.add(session_id)
         return capture
 
     def close_formal_tool_event_capture(
@@ -591,6 +599,7 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         finally:
             if self._formal_tool_event_captures.get(session_id) is capture:
                 self._formal_tool_event_captures.pop(session_id, None)
+            self._formal_no_tool_sessions.discard(session_id)
 
     def get_cancelled_tool_results(self, session_id: str = "") -> list[dict[str, Any]]:
         """Get cancelled tool results collected during interrupt.
@@ -695,7 +704,13 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
-        self._inject_tool_call_goal_schema(ctx)
+        if sid in self._formal_no_tool_sessions:
+            try:
+                ctx.inputs.tools = []
+            except (AttributeError, TypeError) as exc:
+                raise RuntimeError("FORMAL_NO_TOOL_MODEL_INPUT_REJECTED") from exc
+        else:
+            self._inject_tool_call_goal_schema(ctx)
 
         if ctx.context is not None:
             if not self._read_image_multimodal_enabled():
@@ -766,6 +781,8 @@ class JiuSwarmStreamEventRail(DeepAgentRail):
         await self._get_pause_event(sid).wait()
         if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
+        if sid in self._formal_no_tool_sessions:
+            raise RuntimeError("FORMAL_TOOL_EXECUTION_FORBIDDEN")
 
         session = ctx.session
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):

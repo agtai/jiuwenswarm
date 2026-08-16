@@ -97,9 +97,11 @@ _LIVE_VOICE_WEB_ALPHA_CREDENTIAL_METHODS = frozenset(
         "live_voice.task.list",
         "live_voice.task.status",
         "live_voice.task.events",
+        "live_voice.task.result",
         "live_voice.composition.p2.activate",
         "live_voice.composition.p2.close",
         "live_voice.composition.p2.submit",
+        "live_voice.composition.unified.submit",
         "live_voice.composition.p2.notification.next",
         "live_voice.composition.p2.presentation.ack",
         "live_voice.composition.p2.barge_in",
@@ -204,7 +206,10 @@ async def _inject_live_voice_gateway_voice_claim(
     """Replace a browser receipt with a Gateway-owned closed speech claim."""
 
     method = getattr(getattr(msg, "req_method", None), "value", "")
-    if msg.channel_id != "web" or method != "live_voice.composition.p2.submit":
+    if msg.channel_id != "web" or method not in {
+        "live_voice.composition.p2.submit",
+        "live_voice.composition.unified.submit",
+    }:
         return
     params = dict(msg.params or {})
     params.pop("gateway_voice_claim", None)

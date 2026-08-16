@@ -212,6 +212,7 @@ def test_live_voice_web_alpha_credential_owner_is_default_off(
     "method",
     [
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
         ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
@@ -245,7 +246,16 @@ def test_live_voice_web_alpha_credential_owner_replaces_client_claim(
 
 
 @pytest.mark.asyncio
-async def test_gateway_redeems_voice_receipt_and_strips_client_claim() -> None:
+@pytest.mark.parametrize(
+    "method",
+    [
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
+    ],
+)
+async def test_gateway_redeems_voice_receipt_and_strips_client_claim(
+    method: ReqMethod,
+) -> None:
     calls: list[dict[str, object]] = []
 
     class SpeechOwner:
@@ -283,7 +293,7 @@ async def test_gateway_redeems_voice_receipt_and_strips_client_claim() -> None:
         },
         timestamp=time.time(),
         ok=True,
-        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        req_method=method,
     )
 
     await _inject_live_voice_gateway_voice_claim(msg, SpeechOwner())
@@ -308,7 +318,16 @@ async def test_gateway_redeems_voice_receipt_and_strips_client_claim() -> None:
 
 
 @pytest.mark.asyncio
-async def test_gateway_strips_forged_voice_claim_without_receipt() -> None:
+@pytest.mark.parametrize(
+    "method",
+    [
+        ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
+    ],
+)
+async def test_gateway_strips_forged_voice_claim_without_receipt(
+    method: ReqMethod,
+) -> None:
     msg = Message(
         id="req-forged-voice-claim",
         type="req",
@@ -320,7 +339,7 @@ async def test_gateway_strips_forged_voice_claim_without_receipt() -> None:
         },
         timestamp=time.time(),
         ok=True,
-        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+        req_method=method,
     )
 
     await _inject_live_voice_gateway_voice_claim(msg, None)

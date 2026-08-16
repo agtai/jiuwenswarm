@@ -1152,6 +1152,7 @@ class JiuWenSwarm:
                 "enable_memory": False,
                 "skip_a2ui": True,
                 "formal_live_voice": True,
+                "formal_live_voice_tools_allowed": execution.allow_tools,
             },
             enable_memory=False,
         )

@@ -505,6 +505,48 @@ async def submit(
     )
 
 
+@pytest.mark.asyncio
+async def test_synchronous_after_dispatch_failure_revokes_agent_before_first_turn() -> (
+    None
+):
+    lower = LowerFormalAdapter()
+    history = RecordingHistoryWriter()
+    current = runtime(lower, history)
+    selected = commit()
+    await current.start()
+    await current.open_interaction(selected.interaction_id)
+
+    class DurableCheckpointFailure(OSError):
+        pass
+
+    def fail_checkpoint(_handle) -> None:
+        raise DurableCheckpointFailure("durable checkpoint unavailable")
+
+    with pytest.raises(DurableCheckpointFailure):
+        await current.submit_committed_turn(
+            request_id="request-checkpoint-failure",
+            response_id="response-checkpoint-failure",
+            correlation_id="correlation-checkpoint-failure",
+            commit=selected,
+            context=FormalContextSnapshot(selected.scope),
+            after_dispatch=fail_checkpoint,
+        )
+
+    for _ in range(20):
+        await asyncio.sleep(0)
+    snapshot = current.snapshot()
+    assert lower.calls == 0
+    assert history.users == []
+    assert history.assistant_intents == []
+    assert snapshot.published_notifications == 0
+    assert snapshot.harness.active_rounds == ()
+    assert snapshot.bridge.active_requests == ()
+    assert snapshot.bridge.pending_dispatches == 0
+    assert (await current.close(timeout_seconds=1)).status is (
+        AgentConversationShutdownStatus.CLOSED
+    )
+
+
 async def claim_and_ack_effects(
     current: AgentConversationRuntime,
     lease: AgentConversationNotificationLease,

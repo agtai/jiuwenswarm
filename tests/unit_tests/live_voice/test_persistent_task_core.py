@@ -42,6 +42,9 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskAuthorizationGrant,
     TaskEventAuthoritySnapshot,
     TaskMutationDisposition,
+    TaskResultArtifact,
+    TaskResultAvailability,
+    TaskResultRecord,
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
     utc_now,
@@ -285,6 +288,8 @@ def _observations(
     item: PersistentOutboxItem,
     *,
     outcome: TerminalOutcome | None = None,
+    result_text: str | None = None,
+    result_artifacts: tuple[TaskResultArtifact, ...] = (),
 ) -> tuple[ExecutorObservation, ...]:
     target_seq = 2 if outcome is not None else 1
     states = (
@@ -308,6 +313,12 @@ def _observations(
                 attempt_outcome=state_outcome,
                 occurred_at=utc_now(),
                 raw_status=("success" if outcome else "running"),
+                result_text=(result_text if state is FormalAttemptState.TERMINAL else None),
+                result_artifacts=(
+                    result_artifacts
+                    if state is FormalAttemptState.TERMINAL
+                    else ()
+                ),
             )
         )
     return tuple(result)
@@ -338,6 +349,8 @@ def _downgrade_fixture_to_v1(database: Path) -> None:
         )
         connection.execute("DROP TABLE attempts")
         connection.execute("ALTER TABLE attempts_v1 RENAME TO attempts")
+        connection.execute("DROP TABLE task_results")
+        connection.execute("DROP TABLE current_background_tasks")
         connection.execute("UPDATE metadata SET value='1' WHERE key='schema_version'")
         connection.commit()
 
@@ -370,10 +383,16 @@ def test_v1_schema_migrates_atomically_and_preserves_active_attempt(
     assert reopened.counts() == before
     assert reopened.get_task(task_id, _scope()).attempt_id == attempt_id
     assert reopened.get_attempt(attempt_id).attempt_number == 1
+    assert (
+        reopened.get_current_background_task(
+            _scope(), session_id=_scope().session_id
+        )
+        is None
+    )
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("2",)
+        ).fetchone() == ("3",)
         columns = {row[1] for row in connection.execute("PRAGMA table_info(attempts)")}
         assert "attempt_number" in columns
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -667,10 +686,10 @@ def test_fresh_task_schema_coexists_with_unrelated_component_tables(
         ).fetchall() == [("confirmation-1",)]
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("2",)
+        ).fetchone() == ("3",)
 
 
-def test_concurrent_initializers_converge_on_schema_v2(tmp_path: Path) -> None:
+def test_concurrent_initializers_converge_on_schema_v3(tmp_path: Path) -> None:
     database = tmp_path / "concurrent.sqlite"
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -680,7 +699,228 @@ def test_concurrent_initializers_converge_on_schema_v2(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT value FROM metadata WHERE key='schema_version'"
-        ).fetchone() == ("2",)
+        ).fetchone() == ("3",)
+
+
+def test_current_background_create_is_one_atomic_winner_and_replays_exactly(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "current-race.sqlite"
+    invocations = (_create(tmp_path, identity_suffix="-a"), _create(tmp_path, identity_suffix="-b"))
+
+    def submit(index: int):
+        invocation = invocations[index]
+        return PersistentTaskCore(
+            SqliteTaskStore(database), _Executor()
+        ).execute(
+            invocation.envelope,
+            invocation.authorization,
+            context=invocation.context,
+            now=NOW,
+            current_background_session_id=_scope().session_id,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = tuple(pool.map(submit, range(2)))
+
+    accepted = [result for result in results if result.ok]
+    rejected = [result for result in results if not result.ok]
+    assert len(accepted) == len(rejected) == 1
+    assert rejected[0].error is not None
+    assert rejected[0].error.reason == "CURRENT_BACKGROUND_TASK_ACTIVE"
+    store = SqliteTaskStore(database)
+    assert store.counts() == {
+        "commands": 1,
+        "tasks": 1,
+        "attempts": 1,
+        "task_events": 1,
+        "executor_events": 0,
+        "outbox": 1,
+    }
+    current = store.get_current_background_task(
+        _scope(), session_id=_scope().session_id
+    )
+    assert current is not None
+    assert accepted[0].result is not None
+    assert current.task_id == accepted[0].result["task_id"]
+
+    winner = results.index(accepted[0])
+    assert submit(winner) == accepted[0]
+    assert store.counts()["tasks"] == 1
+
+
+def test_task_result_is_three_state_immutable_and_revalidates_artifact(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "result.sqlite")
+    invocation = _create(tmp_path)
+    created = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        current_background_session_id=_scope().session_id,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    assert store.task_result(task_id, _scope()) == (
+        TaskResultAvailability.NOT_READY,
+        None,
+        "TASK_RESULT_NOT_READY",
+    )
+
+    artifact_path = tmp_path / "itinerary.md"
+    artifact_bytes = "第二天最早的固定安排是 08:30 早餐。\n".encode()
+    artifact_path.write_bytes(artifact_bytes)
+    artifact = TaskResultArtifact(
+        relative_path="itinerary.md",
+        sha256=hashlib.sha256(artifact_bytes).hexdigest(),
+    )
+    item = store.claim_outbox("result-worker")
+    assert item is not None
+    observations = _observations(
+        item,
+        outcome=TerminalOutcome.COMPLETED,
+        result_text="三天行程已完成；第二天 08:30 安排早餐。",
+        result_artifacts=(artifact,),
+    )
+    with pytest.raises(FormalTaskViolation) as missing_artifact:
+        replace(observations[-1], result_artifacts=())
+    assert missing_artifact.value.reason == "INVALID_TASK_RESULT_STATE"
+    store.complete_outbox(
+        item,
+        executor_ref=f"legacy:{item.attempt_id}",
+        observations=observations,
+    )
+
+    availability, record, reason = store.task_result(task_id, _scope())
+    assert availability is TaskResultAvailability.AVAILABLE
+    assert reason == "TASK_RESULT_AVAILABLE"
+    assert record is not None and record.artifacts == (artifact,)
+    assert store.apply_observations(observations).events == ()
+    with pytest.raises(FormalTaskViolation, match="Executor event identity"):
+        store.apply_observations(
+            (replace(observations[-1], result_text="conflicting result"),)
+        )
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM task_results").fetchone() == (
+            1,
+        )
+
+    artifact_path.write_text("tampered", encoding="utf-8")
+    assert store.task_result(task_id, _scope()) == (
+        TaskResultAvailability.UNAVAILABLE,
+        None,
+        "TASK_RESULT_ARTIFACT_INVALID",
+    )
+
+
+def test_nul_executor_result_is_rejected_before_any_terminal_store_write(
+    tmp_path: Path,
+) -> None:
+    store = SqliteTaskStore(tmp_path / "nul-result.sqlite")
+    invocation = _create(tmp_path)
+    created = PersistentTaskCore(store, _Executor()).execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        current_background_session_id=_scope().session_id,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    item = store.claim_outbox("nul-result-worker")
+    assert item is not None
+    observations = _observations(
+        item,
+        outcome=TerminalOutcome.COMPLETED,
+        result_text="safe result",
+        result_artifacts=(
+            TaskResultArtifact(relative_path="itinerary.md", sha256="a" * 64),
+        ),
+    )
+    object.__setattr__(observations[-1], "result_text", "unsafe\x00result")
+
+    with pytest.raises(FormalTaskViolation) as invalid:
+        store.complete_outbox(
+            item,
+            executor_ref=f"legacy:{item.attempt_id}",
+            observations=observations,
+        )
+    assert invalid.value.reason == "INVALID_TASK_RESULT_TEXT"
+    task = store.get_task(task_id, _scope())
+    assert task is not None
+    assert task.state is FormalTaskState.ACCEPTED
+    assert task.outcome is None
+    assert store.task_result(task_id, _scope()) == (
+        TaskResultAvailability.NOT_READY,
+        None,
+        "TASK_RESULT_NOT_READY",
+    )
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM task_results").fetchone() == (
+            0,
+        )
+        assert connection.execute(
+            "SELECT COUNT(*) FROM task_events WHERE event_type='task.terminal'"
+        ).fetchone() == (0,)
+
+
+def test_task_result_record_rejects_nul_and_canonicalizes_utc_offset() -> None:
+    artifact = TaskResultArtifact(
+        relative_path="itinerary.md",
+        sha256="a" * 64,
+    )
+    with pytest.raises(FormalTaskViolation) as invalid_text:
+        TaskResultRecord(
+            task_id="task-1",
+            attempt_id="attempt-1",
+            source_event_id="source-1",
+            result_text="unsafe\x00result",
+            artifacts=(artifact,),
+            completed_at="2030-01-01T08:00:00+08:00",
+        )
+    assert invalid_text.value.reason == "INVALID_TASK_RESULT_TEXT"
+
+    with pytest.raises(FormalTaskViolation) as invalid_identity:
+        TaskResultRecord(
+            task_id="task-1",
+            attempt_id="attempt-1",
+            source_event_id="source\x00id",
+            result_text="safe result",
+            artifacts=(artifact,),
+            completed_at="2030-01-01T00:00:00Z",
+        )
+    assert invalid_identity.value.reason == "INVALID_TASK_RESULT_IDENTITY"
+
+    record = TaskResultRecord(
+        task_id="task-1",
+        attempt_id="attempt-1",
+        source_event_id="source-1",
+        result_text="safe result",
+        artifacts=(artifact,),
+        completed_at="2030-01-01T08:00:00+08:00",
+    )
+    assert record.completed_at == "2030-01-01T00:00:00Z"
+
+    astral = TaskResultRecord(
+        task_id="😀" * 256,
+        attempt_id="attempt-astral",
+        source_event_id="source-astral",
+        result_text="😀" * 20_000,
+        artifacts=(
+            TaskResultArtifact(
+                relative_path=f"{'😀' * 300}.md",
+                sha256="b" * 64,
+            ),
+        ),
+        completed_at="2030-01-01T00:00:00Z",
+    )
+    assert len(astral.result_text) == 20_000
+
+    with pytest.raises(FormalTaskViolation) as oversized_identity:
+        replace(record, task_id="😀" * 257)
+    assert oversized_identity.value.reason == "INVALID_TASK_RESULT_IDENTITY"
 
 
 def _terminal_task(
@@ -707,6 +947,31 @@ def _terminal_task(
         observations=_observations(item, outcome=outcome),
     )
     return store, executor, core, item.task_id, item.attempt_id
+
+
+@pytest.mark.parametrize(
+    ("outcome", "reason"),
+    (
+        (TerminalOutcome.CANCELLED, "TASK_CANCELLED"),
+        (TerminalOutcome.FAILED, "TASK_FAILED"),
+        (TerminalOutcome.INTERRUPTED, "TASK_INTERRUPTED"),
+    ),
+)
+def test_terminal_noncompleted_task_result_is_stably_unavailable(
+    tmp_path: Path,
+    outcome: TerminalOutcome,
+    reason: str,
+) -> None:
+    store, _executor, _core, task_id, _attempt_id = _terminal_task(
+        tmp_path,
+        outcome=outcome,
+    )
+
+    assert store.task_result(task_id, _scope()) == (
+        TaskResultAvailability.UNAVAILABLE,
+        None,
+        reason,
+    )
 
 
 def test_retry_a_to_b_is_atomic_and_preserves_exact_history(tmp_path: Path) -> None:

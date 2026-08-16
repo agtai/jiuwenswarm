@@ -2146,18 +2146,18 @@
         "starting": "正在启动麦克风",
         "capturing": "正在通过正式 P1 聆听",
         "recognizing": "正在识别语音",
-        "recognized": "请检查识别文本",
+        "recognized": "正在理解识别内容",
         "playing": "正在播放 Agent 回答",
         "cleanup_pending": "语音清理仍在进行",
         "failed": "正式语音当前不可用",
         "closed": "正式语音已关闭",
-        "confirming": "请确认识别文本",
+        "confirming": "正在理解请求",
         "waiting": "Agent 正在工作"
       },
       "actions": {
         "start": "开始说话",
         "stopRecognize": "结束并识别",
-        "reviewSend": "检查并发送",
+        "reviewSend": "提交最终语音",
         "stopPlayback": "停止播放",
         "working": "处理中"
       }
@@ -2184,8 +2184,8 @@
       "speakConfirmation": "说出确认语"
     },
     "integrated": {
-      "title": "Integrated Web 路由事实",
-      "shellOnly": "下方 P2 文本路线仅在 activation 生效时属于正式路径。语音、物理音频、任务完成和 Integrated Demo/Web Alpha Gate 验收仍未证明。",
+      "title": "Live Voice 诊断信息",
+      "shellOnly": "免手操作 Live Voice 仅提交一次权威最终语音，由服务端统一路由普通对话和当前后台任务，并在播报完成后恢复监听。",
       "routes": "P1 / P2 / P3alpha 路由选择",
       "platform": "Chrome 与 Web 诊断",
       "refresh": "刷新 Web 诊断",
@@ -2321,7 +2321,7 @@
         }
       },
       "safetyTitle": "真实副作用：",
-      "safetyDisclosure": "执行器 JiuwenSwarm Code Agent；固定项目绑定流水线 project_code_pipeline；只允许以当前已保存项目为执行根，所有 shell、测试、Git 和远端命令均被硬阻止。Live Voice 的打断或退出只停止语音反馈，不会中止 schedule.run 或已创建任务；取消必须使用“确认取消后台代码优化任务”和已观察到的真实任务 ID，且不能撤销已经产生的修改。切换会话或项目会隔离未决命令，只有返回原上下文才能继续核对；刷新仍会丢失语音侧任务记忆，之后应到后台任务列表处理。",
+      "safetyDisclosure": "执行器 JiuwenSwarm Code Agent；固定项目绑定流水线 project_code_pipeline；只允许以当前已保存项目为执行根，所有 shell、测试、Git 和远端命令均被硬阻止。Live Voice 的插话或退出只停止语音反馈，不会取消当前后台任务。生产环境继续执行原确认策略；只有后端明确授权的 Demo 策略可以免确认，且仍须通过作用域、幂等、目标绑定和变更权限校验。刷新后仅从权威 Task Store 恢复当前任务。",
       "contextIsolatedTitle": "任务命令已隔离",
       "contextIsolated": "任务命令 {{commandId}} 的请求或结果仍未核对，但会话或项目上下文已经改变。为防止重复副作用，其他上下文不会重试；请返回原会话和项目继续核对。",
       "isolatedResult": "该结果属于已隔离的原上下文，不会合入当前上下文：{{detail}}",
@@ -2333,7 +2333,7 @@
     },
     "actions": {
       "idle": "开始说话",
-      "listening": "结束并发送",
+      "listening": "结束说话",
       "thinking": "打断并说话",
       "speaking": "打断并说话",
       "interrupted": "继续说话",
@@ -2342,7 +2342,7 @@
     "status": {
       "idle": "已就绪",
       "listening": "正在听你说话",
-      "thinking": "Agent 正在工作",
+      "thinking": "正在理解并回答",
       "speaking": "正在朗读回答",
       "interrupted": "已打断，等待新要求",
       "error": "语音功能出现问题"

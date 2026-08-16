@@ -476,6 +476,7 @@ class JiuWenSwarmRoundHarness:
         context: FormalContextSnapshot,
         facade: FormalAgentFacade,
         channel_id: str = "web",
+        allow_tools: bool = True,
     ) -> HarnessRoundHandle:
         running = self._require_owner()
         record = self._require_reservation(reservation)
@@ -518,6 +519,12 @@ class JiuWenSwarmRoundHarness:
             )
         context.validate_for(binding.commit)
         _require_text(channel_id, "channel_id")
+        if type(allow_tools) is not bool:
+            raise HarnessRoundViolation(
+                "INVALID_HARNESS_ROUND_INPUT",
+                "round tool policy must be a boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         if record.facade is not None and facade is not record.facade:
             raise HarnessRoundViolation(
                 "HARNESS_FACADE_BINDING_CONFLICT",
@@ -538,6 +545,11 @@ class JiuWenSwarmRoundHarness:
             internal_session_id=f"lv-formal-{reservation.reservation_token}",
             commit=binding.commit,
             context=context,
+            allow_tools=allow_tools
+            and not any(
+                entry.ref.source == "live_voice.task_result"
+                for entry in context.entries
+            ),
         )
         started = asyncio.Event()
         cancel_safe = asyncio.Event()
@@ -594,6 +606,51 @@ class JiuWenSwarmRoundHarness:
             )
         record.state = HarnessReservationState.ABORTED
         record.abort_reason = reason
+        return True
+
+    def rollback_unstarted_round(
+        self, reservation: HarnessRoundReservation, *, reason: str
+    ) -> bool:
+        """Synchronously revoke a just-committed round before it can run.
+
+        ``commit_round`` schedules the task on this same event loop.  The
+        composition owner may still need to persist a durable dispatch
+        checkpoint before yielding control.  If that synchronous checkpoint
+        fails, this method proves that the task has not entered ``_run_round``,
+        cancels it, and removes the committed handle.  It must never be used
+        after the event loop has had an opportunity to start the round.
+        """
+
+        self._require_owner()
+        record = self._require_reservation(reservation)
+        _require_text(reason, "reason")
+        if record.state is HarnessReservationState.ABORTED:
+            return False
+        if record.state is not HarnessReservationState.COMMITTED:
+            raise HarnessRoundViolation(
+                "HARNESS_ROUND_NOT_ROLLBACKABLE",
+                "only a committed, unstarted round can be rolled back",
+                ErrorCode.CONFLICT,
+            )
+        handle = record.handle
+        if handle is None:
+            raise HarnessRoundViolation(
+                "HARNESS_ROUND_NOT_ROLLBACKABLE",
+                "committed round has no exact handle",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        round_record = self._rounds.get(handle.round_id)
+        if round_record is None or round_record.started.is_set():
+            raise HarnessRoundViolation(
+                "HARNESS_ROUND_ALREADY_STARTED",
+                "a started round cannot be rolled back",
+                ErrorCode.CONFLICT,
+            )
+        round_record.task.cancel()
+        self._rounds.pop(handle.round_id, None)
+        record.state = HarnessReservationState.ABORTED
+        record.abort_reason = reason
+        record.handle = None
         return True
 
     def cancel_round(

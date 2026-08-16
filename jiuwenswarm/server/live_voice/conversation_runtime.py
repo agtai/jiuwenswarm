@@ -326,7 +326,11 @@ class ConversationRuntime:
             )
 
     def accept_response(
-        self, turn_id: str, response_id: str
+        self,
+        turn_id: str,
+        response_id: str,
+        *,
+        response_generation: int | None = None,
     ) -> tuple[ResponseRef, RuntimeEvent]:
         with self._lock:
             self._require_enabled()
@@ -355,11 +359,15 @@ class ConversationRuntime:
                 )
             interaction_id = turn.interaction_id
             prior_generation = self._last_generation.get(interaction_id, -1)
-            generation = (
-                prior_generation + 1
-                if self._response_generation_owner is None
-                else self._response_generation_owner(interaction_id, prior_generation)
-            )
+            generation = response_generation
+            if generation is None:
+                generation = (
+                    prior_generation + 1
+                    if self._response_generation_owner is None
+                    else self._response_generation_owner(
+                        interaction_id, prior_generation
+                    )
+                )
             if (
                 type(generation) is not int
                 or generation <= prior_generation

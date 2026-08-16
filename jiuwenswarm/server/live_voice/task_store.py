@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import time
 import uuid
@@ -12,6 +13,8 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
@@ -41,16 +44,19 @@ from .formal_task_models import (
     TaskEventAuthoritySnapshot,
     TaskMutationDisposition,
     TaskMutationResult,
+    TaskResultArtifact,
+    TaskResultAvailability,
+    TaskResultRecord,
     TaskRetryAuthoritySnapshot,
     TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
     utc_now,
 )
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _JOURNAL_MODE_RETRY_SECONDS = 10.0
 _JOURNAL_MODE_RETRY_INTERVAL_SECONDS = 0.01
-_TASK_STORE_TABLES = frozenset(
+_TASK_STORE_TABLES_V2 = frozenset(
     {
         "metadata",
         "commands",
@@ -60,6 +66,9 @@ _TASK_STORE_TABLES = frozenset(
         "executor_events",
         "outbox",
     }
+)
+_TASK_STORE_TABLES = _TASK_STORE_TABLES_V2 | frozenset(
+    {"current_background_tasks", "task_results"}
 )
 _TASK_STORE_COLUMNS = {
     "metadata": ("key", "value"),
@@ -137,6 +146,20 @@ _TASK_STORE_COLUMNS = {
         "created_at",
         "updated_at",
     ),
+    "current_background_tasks": (
+        "scope_key",
+        "session_id",
+        "task_id",
+        "updated_at",
+    ),
+    "task_results": (
+        "task_id",
+        "attempt_id",
+        "source_event_id",
+        "result_text",
+        "artifacts_json",
+        "completed_at",
+    ),
 }
 _TASK_STORE_NOT_NULL = {
     "metadata": frozenset({"value"}),
@@ -196,6 +219,19 @@ _TASK_STORE_NOT_NULL = {
             "updated_at",
         }
     ),
+    "current_background_tasks": frozenset(
+        {"scope_key", "session_id", "task_id", "updated_at"}
+    ),
+    "task_results": frozenset(
+        {
+            "task_id",
+            "attempt_id",
+            "source_event_id",
+            "result_text",
+            "artifacts_json",
+            "completed_at",
+        }
+    ),
 }
 _TASK_STORE_PRIMARY_KEYS = {
     "metadata": ("key",),
@@ -205,6 +241,8 @@ _TASK_STORE_PRIMARY_KEYS = {
     "task_events": ("task_id", "seq"),
     "executor_events": ("source_event_id",),
     "outbox": ("outbox_id",),
+    "current_background_tasks": ("scope_key", "session_id"),
+    "task_results": ("task_id", "attempt_id", "source_event_id"),
 }
 _TASK_STORE_INTEGER_COLUMNS = frozenset(
     {
@@ -231,8 +269,12 @@ _TASK_STORE_NAMED_INDEXES = {
     "idx_tasks_scope": ("tasks", ("scope_key", "task_id")),
     "idx_tasks_state": ("tasks", ("state", "task_id")),
     "idx_outbox_pending": ("outbox", ("state", "created_at", "outbox_id")),
+    "idx_task_results_task": (
+        "task_results",
+        ("task_id", "attempt_id", "completed_at"),
+    ),
 }
-_TASK_STORE_UNIQUE_KEYS_V2 = {
+_TASK_STORE_UNIQUE_KEYS_V3 = {
     "metadata": frozenset({("key",)}),
     "commands": frozenset({("scope_key", "command_id")}),
     "tasks": frozenset({("task_id",), ("attempt_id",)}),
@@ -240,6 +282,10 @@ _TASK_STORE_UNIQUE_KEYS_V2 = {
     "task_events": frozenset({("task_id", "seq"), ("event_id",)}),
     "executor_events": frozenset({("source_event_id",), ("attempt_id", "source_seq")}),
     "outbox": frozenset({("outbox_id",)}),
+    "current_background_tasks": frozenset({("scope_key", "session_id")}),
+    "task_results": frozenset(
+        {("task_id", "attempt_id", "source_event_id")}
+    ),
 }
 _TASK_STORE_FOREIGN_KEYS = {
     "metadata": frozenset(),
@@ -252,6 +298,21 @@ _TASK_STORE_FOREIGN_KEYS = {
         {
             ("task_id", "tasks", "task_id", "CASCADE"),
             ("attempt_id", "attempts", "attempt_id", "CASCADE"),
+        }
+    ),
+    "current_background_tasks": frozenset(
+        {("task_id", "tasks", "task_id", "RESTRICT")}
+    ),
+    "task_results": frozenset(
+        {
+            ("task_id", "tasks", "task_id", "CASCADE"),
+            ("attempt_id", "attempts", "attempt_id", "CASCADE"),
+            (
+                "source_event_id",
+                "executor_events",
+                "source_event_id",
+                "CASCADE",
+            ),
         }
     ),
 }
@@ -497,8 +558,8 @@ class SqliteTaskStore:
             }
             task_store_tables = tables & _TASK_STORE_TABLES
             if not task_store_tables:
-                self._create_schema_v2(connection)
-                self._verify_schema_structure(connection, version=2)
+                self._create_schema_v3(connection)
+                self._verify_schema_structure(connection, version=3)
                 self._verify_database(connection)
                 self._hit("initialize.bootstrap.before_metadata")
                 connection.execute(
@@ -533,8 +594,13 @@ class SqliteTaskStore:
                 if version == 1:
                     self._verify_schema_structure(connection, version=1)
                     self._migrate_v1_to_v2(connection)
-                elif version == _SCHEMA_VERSION:
+                    self._migrate_v2_to_v3(connection)
+                elif version == 2:
                     self._verify_schema_structure(connection, version=2)
+                    self._verify_database(connection)
+                    self._migrate_v2_to_v3(connection)
+                elif version == _SCHEMA_VERSION:
+                    self._verify_schema_structure(connection, version=3)
                     self._verify_database(connection)
                 else:
                     raise FormalTaskViolation(
@@ -639,15 +705,18 @@ class SqliteTaskStore:
                 """
             ).fetchall()
         }
-        if not _TASK_STORE_TABLES.issubset(tables):
+        expected_tables = (
+            _TASK_STORE_TABLES if version >= 3 else _TASK_STORE_TABLES_V2
+        )
+        if not expected_tables.issubset(tables):
             raise cls._schema_unsupported(
                 "formal task Store schema is missing required tables"
             )
 
-        unique_keys = dict(_TASK_STORE_UNIQUE_KEYS_V2)
+        unique_keys = dict(_TASK_STORE_UNIQUE_KEYS_V3)
         if version == 1:
             unique_keys["attempts"] = frozenset({("attempt_id",), ("task_id",)})
-        for table in sorted(_TASK_STORE_TABLES):
+        for table in sorted(expected_tables):
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             expected_columns = _TASK_STORE_COLUMNS[table]
             if version == 1 and table == "attempts":
@@ -729,6 +798,8 @@ class SqliteTaskStore:
                 )
 
         for index_name, (table, expected_columns) in _TASK_STORE_NAMED_INDEXES.items():
+            if table not in expected_tables:
+                continue
             indexes = {
                 row["name"]: row
                 for row in connection.execute(f"PRAGMA index_list({table})").fetchall()
@@ -749,7 +820,7 @@ class SqliteTaskStore:
                     f"formal task Store index {index_name} is unsupported"
                 )
 
-        if version == 2:
+        if version >= 2:
             attempt_sql_row = connection.execute(
                 "SELECT sql FROM sqlite_master WHERE type='table' AND name='attempts'"
             ).fetchone()
@@ -761,7 +832,7 @@ class SqliteTaskStore:
                 )
 
     @staticmethod
-    def _create_schema_v2(connection: sqlite3.Connection) -> None:
+    def _create_schema_v3(connection: sqlite3.Connection) -> None:
         statements = (
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             """CREATE TABLE commands (
@@ -814,6 +885,22 @@ class SqliteTaskStore:
                 claimed_by TEXT, claimed_at TEXT, claim_token TEXT,
                 last_error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
             "CREATE INDEX idx_outbox_pending ON outbox(state, created_at, outbox_id)",
+            """CREATE TABLE current_background_tasks (
+                scope_key TEXT NOT NULL, session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(scope_key, session_id))""",
+            """CREATE TABLE task_results (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                source_event_id TEXT NOT NULL
+                    REFERENCES executor_events(source_event_id) ON DELETE CASCADE,
+                result_text TEXT NOT NULL, artifacts_json TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, attempt_id, source_event_id))""",
+            """CREATE INDEX idx_task_results_task
+                ON task_results(task_id, attempt_id, completed_at)""",
         )
         for statement in statements:
             connection.execute(statement)
@@ -848,12 +935,49 @@ class SqliteTaskStore:
         self._hit("migration.v1_to_v2.before_metadata")
         changed = connection.execute(
             "UPDATE metadata SET value=? WHERE key='schema_version' AND value='1'",
-            (str(_SCHEMA_VERSION),),
+            ("2",),
         ).rowcount
         if changed != 1:
             raise FormalTaskViolation(
                 "TASK_STORE_SCHEMA_UNSUPPORTED",
                 "formal task Store schema changed during migration",
+                ErrorCode.UNSUPPORTED,
+            )
+
+    def _migrate_v2_to_v3(self, connection: sqlite3.Connection) -> None:
+        self._hit("migration.v2_to_v3.before_create")
+        connection.execute(
+            """CREATE TABLE current_background_tasks (
+                scope_key TEXT NOT NULL, session_id TEXT NOT NULL,
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE RESTRICT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(scope_key, session_id))"""
+        )
+        connection.execute(
+            """CREATE TABLE task_results (
+                task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+                attempt_id TEXT NOT NULL
+                    REFERENCES attempts(attempt_id) ON DELETE CASCADE,
+                source_event_id TEXT NOT NULL
+                    REFERENCES executor_events(source_event_id) ON DELETE CASCADE,
+                result_text TEXT NOT NULL, artifacts_json TEXT NOT NULL,
+                completed_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, attempt_id, source_event_id))"""
+        )
+        connection.execute(
+            """CREATE INDEX idx_task_results_task
+                ON task_results(task_id, attempt_id, completed_at)"""
+        )
+        self._hit("migration.v2_to_v3.after_create")
+        self._verify_schema_structure(connection, version=3)
+        self._verify_database(connection)
+        changed = connection.execute(
+            "UPDATE metadata SET value='3' WHERE key='schema_version' AND value='2'"
+        ).rowcount
+        if changed != 1:
+            raise FormalTaskViolation(
+                "TASK_STORE_SCHEMA_UNSUPPORTED",
+                "formal task Store changed during v3 migration",
                 ErrorCode.UNSUPPORTED,
             )
 
@@ -883,7 +1007,19 @@ class SqliteTaskStore:
         spec: FormalTaskSpec,
         *,
         observed_at: str,
+        current_background_session_id: str | None = None,
     ) -> ResultEnvelope:
+        if current_background_session_id is not None and (
+            type(current_background_session_id) is not str
+            or not current_background_session_id.strip()
+            or len(current_background_session_id) > 256
+            or command.scope.session_id != current_background_session_id
+        ):
+            raise FormalTaskViolation(
+                "CURRENT_BACKGROUND_SESSION_MISMATCH",
+                "current background task requires the exact authorized Session",
+                ErrorCode.PERMISSION_DENIED,
+            )
         fingerprint = canonical_json_bytes(
             {
                 "command": json.loads(command.fingerprint()),
@@ -895,6 +1031,24 @@ class SqliteTaskStore:
             replay = self._command_replay(connection, command, fingerprint)
             if replay is not None:
                 return replay
+            if current_background_session_id is not None:
+                current = connection.execute(
+                    """
+                    SELECT t.* FROM current_background_tasks AS c
+                    JOIN tasks AS t ON t.task_id=c.task_id
+                    WHERE c.scope_key=? AND c.session_id=?
+                    """,
+                    (scope_key, current_background_session_id),
+                ).fetchone()
+                if (
+                    current is not None
+                    and current["state"] != FormalTaskState.TERMINAL.value
+                ):
+                    raise FormalTaskViolation(
+                        "CURRENT_BACKGROUND_TASK_ACTIVE",
+                        "the current background task is still running",
+                        ErrorCode.CONFLICT,
+                    )
             self._hit("create.before_ids")
             task_id = f"task-{uuid.uuid4().hex}"
             attempt_id = f"attempt-{uuid.uuid4().hex}"
@@ -986,7 +1140,59 @@ class SqliteTaskStore:
                 observed_at,
             )
             self._hit("create.after_command")
+            if current_background_session_id is not None:
+                connection.execute(
+                    """
+                    INSERT INTO current_background_tasks(
+                        scope_key, session_id, task_id, updated_at
+                    ) VALUES(?, ?, ?, ?)
+                    ON CONFLICT(scope_key, session_id) DO UPDATE SET
+                        task_id=excluded.task_id,
+                        updated_at=excluded.updated_at
+                    """,
+                    (
+                        scope_key,
+                        current_background_session_id,
+                        task_id,
+                        observed_at,
+                    ),
+                )
+                self._hit("create.after_current_pointer")
             return result
+
+    def get_current_background_task(
+        self, scope: ScopeRef, *, session_id: str
+    ) -> PersistentTaskRecord | None:
+        if (
+            type(session_id) is not str
+            or not session_id.strip()
+            or len(session_id) > 256
+            or scope.session_id != session_id
+        ):
+            raise FormalTaskViolation(
+                "CURRENT_BACKGROUND_SESSION_MISMATCH",
+                "current background task requires the exact authorized Session",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        with self._reader() as connection:
+            row = connection.execute(
+                """
+                SELECT t.* FROM current_background_tasks AS c
+                JOIN tasks AS t ON t.task_id=c.task_id
+                WHERE c.scope_key=? AND c.session_id=?
+                """,
+                (_scope_key(scope), session_id),
+            ).fetchone()
+            if row is None:
+                return None
+            task = self._task_from_row(row)
+            if task.scope != scope:
+                raise FormalTaskViolation(
+                    "TASK_STORE_CORRUPT",
+                    "current background task escaped its exact scope",
+                    ErrorCode.INTERNAL,
+                )
+            return task
 
     def cancel(
         self,
@@ -2736,6 +2942,12 @@ class SqliteTaskStore:
     def _apply_observation(
         self, connection: sqlite3.Connection, observation: ExecutorObservation
     ) -> tuple[PersistentTaskEvent, ...]:
+        if observation.result_text is not None and "\x00" in observation.result_text:
+            raise FormalTaskViolation(
+                "INVALID_TASK_RESULT_TEXT",
+                "Executor result text contains a forbidden NUL character",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
         if observation.resolution is not ExecutorResolution.KNOWN:
             raise FormalTaskViolation(
                 "EXECUTOR_FACT_NOT_KNOWN",
@@ -2926,6 +3138,57 @@ class SqliteTaskStore:
                     update_task=True,
                 )
             )
+            if (
+                observation.attempt_outcome is TerminalOutcome.COMPLETED
+                and observation.result_text is not None
+            ):
+                artifacts_json = _json_dump(
+                    [
+                        artifact.to_dict()
+                        for artifact in observation.result_artifacts
+                    ]
+                )
+                existing_result = connection.execute(
+                    """
+                    SELECT * FROM task_results
+                    WHERE task_id=? AND attempt_id=? AND source_event_id=?
+                    """,
+                    (
+                        observation.task_id,
+                        observation.attempt_id,
+                        observation.source_event_id,
+                    ),
+                ).fetchone()
+                expected = (
+                    observation.result_text,
+                    artifacts_json,
+                    observation.occurred_at,
+                )
+                if existing_result is None:
+                    connection.execute(
+                        """
+                        INSERT INTO task_results(
+                            task_id, attempt_id, source_event_id, result_text,
+                            artifacts_json, completed_at
+                        ) VALUES(?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            observation.task_id,
+                            observation.attempt_id,
+                            observation.source_event_id,
+                            *expected,
+                        ),
+                    )
+                elif (
+                    existing_result["result_text"],
+                    existing_result["artifacts_json"],
+                    existing_result["completed_at"],
+                ) != expected:
+                    raise FormalTaskViolation(
+                        "TASK_RESULT_ID_CONFLICT",
+                        "completed task result identity was reused with different facts",
+                        ErrorCode.PROTOCOL_VIOLATION,
+                    )
             connection.execute(
                 """
                 UPDATE outbox SET state=?, last_error=?, updated_at=?
@@ -2941,6 +3204,108 @@ class SqliteTaskStore:
                 ),
             )
         return tuple(appended)
+
+    def task_result(
+        self, task_id: str, scope: ScopeRef
+    ) -> tuple[TaskResultAvailability, TaskResultRecord | None, str]:
+        """Read one immutable final result without guessing or polling failures."""
+
+        with self._reader() as connection:
+            task_row = self._require_task_row(connection, task_id, scope)
+            task = self._task_from_row(task_row)
+            if task.state is not FormalTaskState.TERMINAL:
+                return (
+                    TaskResultAvailability.NOT_READY,
+                    None,
+                    "TASK_RESULT_NOT_READY",
+                )
+            if task.outcome is not TerminalOutcome.COMPLETED:
+                reason = {
+                    TerminalOutcome.CANCELLED: "TASK_CANCELLED",
+                    TerminalOutcome.FAILED: "TASK_FAILED",
+                    TerminalOutcome.INTERRUPTED: "TASK_INTERRUPTED",
+                }.get(task.outcome, "TASK_RESULT_UNAVAILABLE")
+                return TaskResultAvailability.UNAVAILABLE, None, reason
+            rows = connection.execute(
+                """
+                SELECT * FROM task_results
+                WHERE task_id=? AND attempt_id=?
+                ORDER BY completed_at, source_event_id
+                """,
+                (task.task_id, task.attempt_id),
+            ).fetchall()
+            if len(rows) != 1:
+                return (
+                    TaskResultAvailability.UNAVAILABLE,
+                    None,
+                    "TASK_RESULT_NOT_CAPTURED",
+                )
+            row = rows[0]
+            raw_artifacts = _json_load(row["artifacts_json"])
+            if type(raw_artifacts) is not list:
+                raise self._corrupt("formal Task result artifacts are invalid")
+            try:
+                artifacts = tuple(
+                    TaskResultArtifact(
+                        relative_path=item["relative_path"],
+                        sha256=item["sha256"],
+                    )
+                    for item in raw_artifacts
+                    if type(item) is dict
+                    and set(item) == {"relative_path", "sha256"}
+                )
+                if len(artifacts) != len(raw_artifacts):
+                    raise ValueError("artifact shape mismatch")
+                result = TaskResultRecord(
+                    task_id=row["task_id"],
+                    attempt_id=row["attempt_id"],
+                    source_event_id=row["source_event_id"],
+                    result_text=row["result_text"],
+                    artifacts=artifacts,
+                    completed_at=row["completed_at"],
+                )
+            except (FormalTaskViolation, KeyError, TypeError, ValueError) as exc:
+                raise self._corrupt(
+                    "formal Task result record is invalid"
+                ) from exc
+            if not self._result_artifacts_match(task, result.artifacts):
+                return (
+                    TaskResultAvailability.UNAVAILABLE,
+                    None,
+                    "TASK_RESULT_ARTIFACT_INVALID",
+                )
+            return TaskResultAvailability.AVAILABLE, result, "TASK_RESULT_AVAILABLE"
+
+    @staticmethod
+    def _result_artifacts_match(
+        task: PersistentTaskRecord,
+        artifacts: tuple[TaskResultArtifact, ...],
+    ) -> bool:
+        """Re-prove applied artifact identity without disclosing its contents."""
+
+        if not artifacts:
+            return True
+        parsed = urlparse(task.spec.context.uri)
+        if parsed.scheme != "file" or parsed.netloc not in {"", "localhost"}:
+            return False
+        try:
+            project_root = Path(url2pathname(parsed.path)).resolve(strict=True)
+            if not project_root.is_dir():
+                return False
+            for artifact in artifacts:
+                candidate = (project_root / artifact.relative_path).resolve(strict=True)
+                candidate.relative_to(project_root)
+                if not candidate.is_file():
+                    return False
+                digest = hashlib.sha256()
+                with candidate.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(64 * 1024), b""):
+                        digest.update(chunk)
+                if digest.hexdigest() != artifact.sha256:
+                    return False
+        except (OSError, RuntimeError, ValueError):
+            return False
+        return True
 
     @classmethod
     def _mutation_result(

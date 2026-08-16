@@ -6,7 +6,9 @@ import asyncio
 import hashlib
 import json
 import sqlite3
+import subprocess
 import threading
+import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -17,8 +19,11 @@ from typing import Mapping, NoReturn, cast
 import pytest
 
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
+from jiuwenswarm.common.schema.message import Message, ReqMethod
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    CONTRACT_VERSION,
     Assurance,
+    CommandEnvelope,
     ContractViolation,
     ErrorCode,
     MAX_SAFE_INTEGER,
@@ -27,13 +32,24 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ResponseRef,
     ResultEnvelope,
     ScopeRef,
+    TerminalOutcome,
     TurnCommit,
     TurnCommitLedger,
 )
 from jiuwenswarm.server.live_voice.formal_task_models import (
+    ExecutorDeliveryResult,
+    FormalTaskSpec,
+    FormalTaskState,
     FormalTaskViolation,
     PersistentTaskEvent,
+    PersistentTaskRecord,
     ResolvedTaskContext,
+    TaskResultAvailability,
+)
+from jiuwenswarm.gateway.app_gateway import _inject_live_voice_gateway_voice_claim
+from jiuwenswarm.server.live_voice.batch_speech import (
+    FormalBatchSpeechService,
+    UnavailableBatchSpeechProvider,
 )
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import (
     P3AuthenticatedComposition,
@@ -59,6 +75,7 @@ from jiuwenswarm.server.live_voice.product_composition_registry import (
     AgentServerProductCompositionRegistry,
     PRODUCT_COMPOSITION_ENABLE_ENV,
     PRODUCT_CRITICAL_INPUT_ENABLE_ENV,
+    PRODUCT_DEMO_POLICY_BYPASS_ENV,
     PRODUCT_P2_ENABLE_ENV,
     PRODUCT_P3_TEXT_ENABLE_ENV,
     ProductCompositionSettings,
@@ -79,6 +96,15 @@ from jiuwenswarm.server.live_voice.task_progress_return import (
     _evidence_id,
     project_task_progress_event,
 )
+from jiuwenswarm.server.live_voice.project_code_executor import (
+    DirectProjectCodeExecutorAdapter,
+    FORMAL_PROJECT_EXECUTOR_ID,
+    ProjectExecutionBinding,
+)
+from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
+from jiuwenswarm.server.live_voice.unified_committed_input import (
+    SqliteUnifiedCommittedInputJournal,
+)
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
     VoiceTaskBridgeViolation,
 )
@@ -92,6 +118,25 @@ SCOPE = ScopeRef(
     "session-product",
     Assurance.AUTHENTICATED,
 )
+ITINERARY_TEXT = """# 三天行程
+
+## 第一天
+- 18:00 晚餐
+- 20:00–21:30 自由时间
+
+## 第二天
+- 08:30 参观博物馆（当天最早的固定安排）
+- 12:30 午餐
+
+## 第三天
+- 09:00 城市步行
+"""
+ITINERARY_RESULT_TEXT = (
+    "三天行程已完成。第一天自由时间为 20:00–21:30；"
+    "第二天最早的固定安排是 08:30 参观博物馆。"
+)
+ITINERARY_DAY_TWO_ANSWER = "第二天最早的固定安排是 08:30 参观博物馆。"
+ITINERARY_DAY_TWO_FACT = "08:30 参观博物馆"
 
 
 def _resource(task_id: str) -> AuthorityResourceBinding:
@@ -127,6 +172,32 @@ class _Facade:
     async def wait_for_calls(self, expected: int) -> None:
         async with self._calls_changed:
             await self._calls_changed.wait_for(lambda: self.calls >= expected)
+
+
+class _ItineraryAnswerFacade(_Facade):
+    def __init__(self) -> None:
+        super().__init__()
+        self.answers: list[str] = []
+
+    async def process_formal_live_voice_stream(self, execution):
+        context = json.loads(execution.context.entries[-1].content)
+        assert context["trust"] == "untrusted_reference_data"
+        assert context["authority"] == "none"
+        assert ITINERARY_DAY_TWO_ANSWER in context["result_text"]
+        async with self._calls_changed:
+            self.calls += 1
+            self.executions.append(execution)
+            self.answers.append(ITINERARY_DAY_TWO_ANSWER)
+            self._calls_changed.notify_all()
+        yield AgentResponseChunk(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            payload={
+                "event_type": "chat.final",
+                "content": ITINERARY_DAY_TWO_ANSWER,
+            },
+            is_complete=True,
+        )
 
 
 class _BlockingFacade(_Facade):
@@ -397,6 +468,309 @@ class _P3Composition(P3AuthenticatedComposition):
         )
 
 
+def _background_task(
+    project_dir: Path,
+    *,
+    state: FormalTaskState = FormalTaskState.RUNNING,
+    outcome: TerminalOutcome | None = None,
+    task_id: str = "task-current-1",
+    attempt_id: str = "attempt-current-1",
+) -> PersistentTaskRecord:
+    context = ResolvedTaskContext(
+        source="test.server.project",
+        stable_id=SCOPE.project_id or "",
+        uri=project_dir.resolve().as_uri(),
+        revision_kind="version",
+        revision_value="revision-1",
+        scope=SCOPE,
+        permissions=("project.write", "task.execute"),
+        expires_at=EXPIRY,
+        redaction_policy_id="test-policy",
+    )
+    return PersistentTaskRecord(
+        task_id=task_id,
+        scope=SCOPE,
+        spec=FormalTaskSpec(
+            name="Three-day itinerary",
+            instruction="Plan a three-day itinerary.",
+            origin=OriginRef("structured", None, None),
+            context=context,
+            executor_id="jiuwenswarm_code_agent.project_code",
+            required_capabilities=("task.create",),
+            side_effect_class="project_mutation",
+            attributes=(),
+        ),
+        state=state,
+        attempt_id=attempt_id,
+        correlation_id="correlation-p2",
+        cancel_requested=False,
+        dispatch_fenced=False,
+        outcome=outcome,
+        reconciliation_state=None,
+        reconciliation_reason=None,
+        event_head=3,
+    )
+
+
+class _ItineraryProjectExecutor:
+    def __init__(self) -> None:
+        self.finished = asyncio.Event()
+        self.requests: list[object] = []
+
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        project = Path(request.params["project_dir"]).resolve()
+        try:
+            (project / "itinerary.md").write_text(
+                ITINERARY_TEXT,
+                encoding="utf-8",
+                newline="\n",
+            )
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={
+                    "event_type": "chat.final",
+                    "content": ITINERARY_RESULT_TEXT,
+                },
+                is_complete=True,
+            )
+        finally:
+            self.finished.set()
+
+
+class _ItineraryBindingResolver:
+    def __init__(self, binding: ProjectExecutionBinding) -> None:
+        self.binding = binding
+        self.calls = 0
+
+    async def resolve(self, _spec, *, for_dispatch: bool):
+        assert for_dispatch is True
+        self.calls += 1
+        return self.binding
+
+
+class _UnifiedP3Composition(_P3Composition):
+    def __init__(self, project_dir: Path) -> None:
+        super().__init__(project_dir)
+        self.current: PersistentTaskRecord | None = None
+        self.handle_calls: list[tuple[str, dict[str, object], dict[str, object]]] = []
+        self.read_current_calls = 0
+        self.result_availability = "not_ready"
+        self.result_reason = "TASK_RESULT_NOT_READY"
+        self.result_record: dict[str, object] | None = None
+        self.create_effects = 0
+        self._create_commands: set[str] = set()
+        self.known_tasks: dict[str, PersistentTaskRecord] = {}
+
+    async def read_current_background_task(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+    ) -> PersistentTaskRecord | None:
+        self.read_current_calls += 1
+        if bearer_token != "trusted-token" or session_id != SCOPE.session_id:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task authentication is required",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        return self.current
+
+    async def read_background_task(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+        task_id: str,
+    ) -> PersistentTaskRecord:
+        if bearer_token != "trusted-token" or session_id != SCOPE.session_id:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task authentication is required",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        if self.current is not None and self.current.task_id == task_id:
+            return self.current
+        retained = self.known_tasks.get(task_id)
+        if retained is None:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_NOT_FOUND",
+                "formal task was not found",
+                ErrorCode.NOT_FOUND,
+            )
+        return retained
+
+    async def handle(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        **policy: object,
+    ) -> P3RouteResult:
+        self.handle_calls.append((operation, dict(params), dict(policy)))
+        if params.get("auth_token") != "trusted-token" or session_id != SCOPE.session_id:
+            return P3RouteResult(
+                False,
+                {
+                    "request_id": request_id,
+                    "ok": False,
+                    "result": None,
+                    "error": {"reason": "FORMAL_TASK_AUTHENTICATION_REQUIRED"},
+                },
+            )
+        if operation in {"task.create", "task.cancel"} and not policy.get(
+            "trusted_demo_policy_bypass", False
+        ):
+            return P3RouteResult(
+                False,
+                {
+                    "request_id": request_id,
+                    "ok": False,
+                    "result": None,
+                    "error": {"reason": "FORMAL_TASK_CONFIRMATION_REQUIRED"},
+                },
+            )
+        if operation == "task.create":
+            command_id = str(params["command_id"])
+            if command_id not in self._create_commands:
+                if (
+                    self.current is not None
+                    and self.current.state is not FormalTaskState.TERMINAL
+                ):
+                    return P3RouteResult(
+                        False,
+                        {
+                            "request_id": request_id,
+                            "ok": False,
+                            "result": None,
+                            "error": {"reason": "CURRENT_BACKGROUND_TASK_ACTIVE"},
+                        },
+                    )
+                self._create_commands.add(command_id)
+                self.create_effects += 1
+                self.current = _background_task(self.project_dir)
+                self.known_tasks[self.current.task_id] = self.current
+            assert self.current is not None
+            result: dict[str, object] = {
+                "task_id": self.current.task_id,
+                "attempt_id": self.current.attempt_id,
+                "state": self.current.state.value,
+                "accepted": True,
+            }
+        elif operation == "task.cancel":
+            result = {
+                "task_id": params["task_id"],
+                "state": self.current.state.value if self.current else "running",
+                "cancel_acknowledged": True,
+                "accepted": True,
+            }
+        elif operation == "task.status":
+            result = {
+                "task": (
+                    self.current.to_dict()
+                    if self.current is not None
+                    else {
+                        "task_id": params["task_id"],
+                        "state": FormalTaskState.RUNNING.value,
+                        "outcome": None,
+                        "event_head": 0,
+                    }
+                ),
+                "attempt": {
+                    "attempt_id": (
+                        self.current.attempt_id if self.current is not None else "attempt-current-1"
+                    ),
+                    "state": "running",
+                },
+            }
+        elif operation == "task.result":
+            result = {
+                "task_id": params["task_id"],
+                "availability": self.result_availability,
+                "reason": self.result_reason,
+                "task_result": self.result_record,
+            }
+        else:
+            raise AssertionError(f"unexpected unified P3 operation: {operation}")
+        return P3RouteResult(
+            True,
+            {
+                "request_id": request_id,
+                "ok": True,
+                "result": result,
+                "error": None,
+            },
+        )
+
+
+class _StoreBackedUnifiedP3(_UnifiedP3Composition):
+    def __init__(self, project_dir: Path, store: SqliteTaskStore) -> None:
+        super().__init__(project_dir)
+        self.store = store
+
+    async def read_current_background_task(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+    ) -> PersistentTaskRecord | None:
+        self.read_current_calls += 1
+        if bearer_token != "trusted-token" or session_id != SCOPE.session_id:
+            raise FormalTaskViolation(
+                "FORMAL_TASK_AUTHENTICATION_REQUIRED",
+                "formal task authentication is required",
+                ErrorCode.UNAUTHENTICATED,
+            )
+        return self.store.get_current_background_task(SCOPE, session_id=session_id)
+
+    async def handle(
+        self,
+        *,
+        operation: str,
+        params: Mapping[str, object],
+        request_id: str,
+        session_id: str | None,
+        **policy: object,
+    ) -> P3RouteResult:
+        if operation != "task.result":
+            return await super().handle(
+                operation=operation,
+                params=params,
+                request_id=request_id,
+                session_id=session_id,
+                **policy,
+            )
+        self.handle_calls.append((operation, dict(params), dict(policy)))
+        if params.get("auth_token") != "trusted-token" or session_id != SCOPE.session_id:
+            raise AssertionError("itinerary fixture must use its exact authority")
+        availability, record, reason = self.store.task_result(
+            str(params["task_id"]), SCOPE
+        )
+        return P3RouteResult(
+            True,
+            {
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "task_id": params["task_id"],
+                    "availability": availability.value,
+                    "reason": reason,
+                    "task_result": (
+                        record.to_dict()
+                        if availability is TaskResultAvailability.AVAILABLE
+                        and record is not None
+                        else None
+                    ),
+                },
+                "error": None,
+            },
+        )
+
+
 class _MutationP3Composition(_P3Composition):
     def __init__(
         self,
@@ -567,6 +941,7 @@ def _registry(
     push_success: bool = True,
     commit_ledger: TurnCommitLedger | None = None,
     critical_input: bool = False,
+    unified: bool = False,
 ):
     p3_composition = _P3Composition(tmp_path)
     manager = _AgentManager()
@@ -586,8 +961,46 @@ def _registry(
         agent_manager=manager,
         push_text_event=push,
         commit_ledger=commit_ledger,
+        unified_journal=(
+            SqliteUnifiedCommittedInputJournal(tmp_path / "unified.sqlite3")
+            if unified
+            else None
+        ),
     )
     return registry, p3_composition, manager, pushed
+
+
+def _unified_registry(
+    tmp_path: Path,
+    *,
+    p3_enabled: bool = True,
+    mutation_enabled: bool = True,
+    demo_policy_bypass: bool = False,
+    critical_input: bool = False,
+    composition: _UnifiedP3Composition | None = None,
+) -> tuple[AgentServerProductCompositionRegistry, _UnifiedP3Composition, _AgentManager]:
+    composition = composition or _UnifiedP3Composition(tmp_path)
+    manager = _AgentManager()
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=p3_enabled,
+            p3_mutation_enabled=mutation_enabled,
+            demo_policy_bypass_enabled=demo_policy_bypass,
+            critical_input_enabled=critical_input,
+        ),
+        p3_composition=composition,
+        agent_manager=manager,
+        push_text_event=push,
+        unified_journal=SqliteUnifiedCommittedInputJournal(
+            tmp_path / "unified.sqlite3"
+        ),
+    )
+    return registry, composition, manager
 
 
 def _p2_params(**changes: object) -> dict[str, object]:
@@ -626,6 +1039,193 @@ def _p2_task_origin_params(*, stem: str, text: str) -> dict[str, object]:
             "critical_policy": "eligible",
         },
     )
+
+
+def _unified_final_params(*, stem: str, text: str) -> dict[str, object]:
+    params = _p2_task_origin_params(stem=stem, text=text)
+    params.pop("dispatch_target")
+    params["input_state"] = "final"
+    return params
+
+
+def _initialize_itinerary_fixture(project: Path) -> None:
+    project.mkdir(parents=True)
+    for arguments in (
+        ("init",),
+        ("config", "user.name", "Live Voice Itinerary Fixture"),
+        ("config", "user.email", "live-voice-itinerary@example.invalid"),
+        ("config", "core.autocrlf", "false"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(project), *arguments],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    (project / "README.md").write_text(
+        "isolated live voice itinerary fixture\n", encoding="utf-8"
+    )
+    subprocess.run(
+        ["git", "-C", str(project), "add", "README.md"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(project), "commit", "-m", "fixture baseline"],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def _itinerary_spec(project: Path) -> FormalTaskSpec:
+    return FormalTaskSpec(
+        name="三天行程规划",
+        instruction="根据这些要求制定三天的行程，并写入 itinerary.md。",
+        origin=OriginRef("structured", None, None),
+        context=ResolvedTaskContext(
+            source="test.isolated_itinerary_fixture",
+            stable_id=SCOPE.project_id or "",
+            uri=project.resolve().as_uri(),
+            revision_kind="version",
+            revision_value="itinerary-fixture-v1",
+            scope=SCOPE,
+            permissions=("project.write", "task.execute"),
+            expires_at=EXPIRY,
+            redaction_policy_id="live_voice.itinerary_fixture.v1",
+        ),
+        executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+        required_capabilities=("task.create",),
+        side_effect_class="project_mutation",
+        attributes=(
+            ("model_config_version", "catalog-v1"),
+            ("model_identity", "default#0"),
+        ),
+    )
+
+
+def _itinerary_command(spec: FormalTaskSpec) -> CommandEnvelope:
+    return CommandEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": "request-itinerary-fixture",
+            "command_id": "command-itinerary-fixture",
+            "command_type": "task.create",
+            "issued_at": NOW,
+            "scope": SCOPE.to_dict(),
+            "correlation_id": "correlation-p2",
+            "causation_id": None,
+            "origin": {"kind": "structured", "turn_id": None, "commit_id": None},
+            "target_ref": {
+                "kind": "task",
+                "id": "create:command-itinerary-fixture",
+            },
+            "context_refs": [],
+            "required_capabilities": ["task.create"],
+            "payload": {
+                "name": spec.name,
+                "instruction": spec.instruction,
+                "executor_id": spec.executor_id,
+                "side_effect_class": spec.side_effect_class,
+                "attributes": dict(spec.attributes),
+            },
+            "extensions": {},
+        }
+    )
+
+
+async def _wait_itinerary_executor(
+    adapter: DirectProjectCodeExecutorAdapter,
+    attempt_id: str,
+) -> None:
+    for _ in range(500):
+        record = adapter._journal.get(attempt_id)
+        if not adapter._running and record is not None and record.source_seq >= 2:
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("itinerary fixture Executor did not settle")
+
+
+async def _ack_unified_presentation(
+    registry: AgentServerProductCompositionRegistry,
+    *,
+    sequence: int,
+    stem: str,
+) -> int:
+    for _ in range(4):
+        sequence += 1
+        polled = await asyncio.wait_for(
+            registry.handle_p2_notification_next(
+                params=_p2_params(notification_sequence=sequence),
+                request_id=f"request-{stem}-notification-{sequence}",
+                session_id=SCOPE.session_id,
+            ),
+            timeout=1,
+        )
+        assert polled.ok
+        notification = cast(dict[str, object], polled.payload["result"])
+        presentation = notification.get("presentation_unit")
+        if not isinstance(presentation, dict):
+            continue
+        response = cast(dict[str, object], notification["response"])
+        acknowledged = await registry.handle_p2_presentation_ack(
+            params=_p2_params(
+                response_id=response["response_id"],
+                response_generation=response["response_generation"],
+                surface=presentation["surface"],
+                unit_id=presentation["unit_id"],
+                contiguous_cursor=presentation["seq"],
+                presented_at=NOW,
+            ),
+            request_id=f"request-{stem}-ack-{sequence}",
+            session_id=SCOPE.session_id,
+        )
+        assert acknowledged.ok
+        return sequence
+    raise AssertionError("unified presentation was not delivered")
+
+
+def _install_unified_history_writer(
+    registry: AgentServerProductCompositionRegistry,
+) -> _HistoryWriter:
+    history = _HistoryWriter()
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    route.activation_lease._runtime._history_writer = history
+    return history
+
+
+async def _close_unified_route(
+    registry: AgentServerProductCompositionRegistry,
+    *,
+    stem: str,
+) -> None:
+    closed: P3RouteResult | None = None
+    for attempt in range(20):
+        closed = await registry.handle_p2_close(
+            params=_p2_params(),
+            request_id=f"request-{stem}-close-{attempt}",
+            session_id=SCOPE.session_id,
+        )
+        if closed.ok:
+            break
+        assert cast(dict, closed.payload["error"])["reason"] == (
+            "PRODUCT_P2_CLEANUP_PENDING"
+        )
+        await asyncio.sleep(0)
+    if closed is None or not closed.ok:
+        retained = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+        raise AssertionError(
+            (
+                retained.lease.pending_adapter_ids,
+                retained.activation_lease.snapshot(),
+                retained.activation_lease._runtime.snapshot(),
+            )
+        )
+    await registry.stop()
 
 
 def _progress_params(**changes: object) -> dict[str, object]:
@@ -697,6 +1297,1915 @@ def test_critical_input_product_composition_flag_is_default_off(
     assert ProductCompositionSettings.from_environment().critical_input_enabled is True
 
 
+def test_demo_policy_bypass_is_backend_configured_and_default_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(PRODUCT_DEMO_POLICY_BYPASS_ENV, raising=False)
+    assert (
+        ProductCompositionSettings.from_environment().demo_policy_bypass_enabled
+        is False
+    )
+    monkeypatch.setenv(PRODUCT_DEMO_POLICY_BYPASS_ENV, "1")
+    assert (
+        ProductCompositionSettings.from_environment().demo_policy_bypass_enabled
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_unified_final_dialogue_is_exactly_once_and_replays_by_voice_identity(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-unified-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok
+    params = _unified_final_params(stem="dialogue-once", text="你好。")
+
+    first = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-unified-first",
+        session_id="session-product",
+        channel_id="web",
+    )
+    replay = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-unified-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+
+    assert first.ok
+    assert first.payload["request_id"] == "request-unified-first"
+    assert replay.payload["request_id"] == "request-unified-replay"
+    assert {
+        key: value for key, value in replay.payload.items() if key != "request_id"
+    } == {key: value for key, value in first.payload.items() if key != "request_id"}
+    assert manager.agent.calls == 1
+    assert manager.agent.executions[0].commit.text == "你好。"
+    assert manager.agent.executions[0].allow_tools is True
+    await _close_unified_route(registry, stem="p3-off-create")
+
+
+@pytest.mark.asyncio
+async def test_unified_continuous_dialogue_releases_all_in_memory_identity_state(
+    tmp_path: Path,
+) -> None:
+    registry, _composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-soak-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    presentation_sequence = 0
+
+    for index in range(40):
+        stem = f"soak-{index}"
+        result = await registry.handle_unified_submit(
+            params=_unified_final_params(
+                stem=stem,
+                text=f"普通连续对话第 {index} 轮。",
+            ),
+            request_id=f"request-unified-{stem}",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+        assert result.ok
+        assert registry._unified_operations == {}
+        assert registry._critical_input_commit_generations == {}
+        assert registry._critical_input_guarded_commits == set()
+        presentation_sequence = await _ack_unified_presentation(
+            registry,
+            sequence=presentation_sequence,
+            stem=stem,
+        )
+
+    assert manager.agent.calls == 40
+    await _close_unified_route(registry, stem="soak")
+
+
+@pytest.mark.asyncio
+async def test_unified_interim_and_request_content_conflict_have_zero_agent_effect(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-unified-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok
+    interim = _unified_final_params(stem="interim", text="尚未结束")
+    interim["input_state"] = "partial"
+    rejected = await registry.handle_unified_submit(
+        params=interim,
+        request_id="request-unified-conflict",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert not rejected.ok
+    assert cast(dict, rejected.payload["error"])["reason"] == "INPUT_NOT_FINAL"
+    assert manager.agent.calls == 0
+
+    accepted = await registry.handle_unified_submit(
+        params=_unified_final_params(stem="accepted", text="第一条对话。"),
+        request_id="request-unified-conflict",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert accepted.ok
+    assert manager.agent.calls == 1
+    conflict = await registry.handle_unified_submit(
+        params=_unified_final_params(stem="changed", text="不同的内容。"),
+        request_id="request-unified-conflict",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert not conflict.ok
+    assert cast(dict, conflict.payload["error"])["reason"] == (
+        "UNIFIED_INPUT_ID_CONFLICT"
+    )
+    assert manager.agent.calls == 1
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_unified_pre_admission_failures_release_critical_voice_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-pre-admission-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+
+    invalid_time = _unified_final_params(
+        stem="pre-admission-time",
+        text="invalid committed time must retain no identity",
+    )
+    invalid_time["committed_at"] = "not-a-timestamp"
+    rejected_time = await registry.handle_unified_submit(
+        params=invalid_time,
+        request_id="request-unified-pre-admission-time",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert not rejected_time.ok
+    assert manager.agent.calls == 0
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    original_select = route.activation_lease.select_formal_context
+
+    async def fail_context(_binding: object) -> object:
+        raise RuntimeError("private context selector failure")
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "select_formal_context",
+        fail_context,
+    )
+    context_params = _unified_final_params(
+        stem="pre-admission-context",
+        text="context failure must retain no identity",
+    )
+    rejected_context = await registry.handle_unified_submit(
+        params=context_params,
+        request_id="request-unified-pre-admission-context",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert not rejected_context.ok
+    assert cast(dict, rejected_context.payload["error"])["reason"] == (
+        "UNIFIED_INPUT_FAILED"
+    )
+    assert manager.agent.calls == 0
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "select_formal_context",
+        original_select,
+    )
+    accepted = await registry.handle_unified_submit(
+        params=context_params,
+        request_id="request-unified-pre-admission-context-retry",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert accepted.ok
+    assert manager.agent.calls == 1
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+    await _close_unified_route(registry, stem="pre-admission")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_unified_pre_admission_context_releases_identity_with_zero_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-pre-admission-cancel-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+    entered = asyncio.Event()
+    blocker = asyncio.Event()
+
+    async def block_context(_binding: object) -> object:
+        entered.set()
+        await blocker.wait()
+        raise AssertionError("cancelled context selector resumed")
+
+    monkeypatch.setattr(
+        route.activation_lease,
+        "select_formal_context",
+        block_context,
+    )
+    caller = asyncio.create_task(
+        registry.handle_unified_submit(
+            params=_unified_final_params(
+                stem="pre-admission-cancel",
+                text="cancel before semantic admission",
+            ),
+            request_id="request-unified-pre-admission-cancel",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    assert manager.agent.calls == 0
+    assert composition.handle_calls == []
+    assert composition.read_current_calls == 0
+    assert route.activation_lease._runtime.snapshot().published_notifications == 0
+    assert registry._unified_operations == {}
+    assert registry._critical_input_commit_generations == {}
+    assert registry._critical_input_guarded_commits == set()
+    gate = registry._critical_token_gate
+    assert gate._candidate_fingerprints == {}
+    assert gate._commit_interactions == {}
+    assert gate._commit_generations == {}
+    await _close_unified_route(registry, stem="pre-admission-cancel")
+
+
+@pytest.mark.asyncio
+async def test_unified_post_admission_rejection_is_durably_replayed(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        critical_input=True,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-critical-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    params = _unified_final_params(
+        stem="unified-critical",
+        text="后台帮我 create task 42 on feature/safe。",
+    )
+
+    first = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-unified-critical-first",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    replay = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-unified-critical-replay",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert not first.ok
+    assert first.payload["request_id"] == "request-unified-critical-first"
+    assert replay.payload["request_id"] == "request-unified-critical-replay"
+    assert {
+        key: value for key, value in replay.payload.items() if key != "request_id"
+    } == {key: value for key, value in first.payload.items() if key != "request_id"}
+    assert cast(dict, first.payload["error"])["reason"] == (
+        "CRITICAL_TOKEN_CLARIFICATION_REQUIRED"
+    )
+    assert composition.handle_calls == []
+    assert manager.agent.calls == 0
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM unified_committed_inputs"
+        ).fetchone()[0] == "completed"
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_unified_background_intent_fails_closed_when_p3_is_off(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path, p3_enabled=False, mutation_enabled=False
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-off-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="p3-off-create",
+            text="帮我根据这些要求制定三天的行程。",
+        ),
+        request_id="request-unified-off-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert manager.agent.calls == 0
+    assert composition.read_current_calls == 0
+    assert composition.handle_calls == []
+    await _ack_unified_presentation(
+        registry, sequence=0, stem="p3-off-create"
+    )
+    await _close_unified_route(registry, stem="p3-off-create")
+
+
+@pytest.mark.asyncio
+async def test_unified_background_permission_denial_is_spoken_and_resumes_via_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-denied-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+
+    async def deny_current(**_kwargs: object) -> None:
+        raise FormalTaskViolation(
+            "FORMAL_TASK_AUTHORIZATION_DENIED",
+            "must not be exposed as an RPC-only failure",
+            ErrorCode.PERMISSION_DENIED,
+        )
+
+    monkeypatch.setattr(composition, "read_current_background_task", deny_current)
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="permission-denied-create",
+            text="后台帮我制定三天行程。",
+        ),
+        request_id="request-unified-permission-denied",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert manager.agent.calls == 0
+    assert composition.handle_calls == []
+    await _ack_unified_presentation(
+        registry,
+        sequence=0,
+        stem="permission-denied-create",
+    )
+    assert len(history.assistants) == 1
+    spoken = b"".join(
+        content.content_utf8 for content in history.assistants[0][0].contents
+    ).decode("utf-8")
+    assert spoken == "后台任务功能当前不可用。"
+    await _close_unified_route(registry, stem="permission-denied-create")
+
+
+@pytest.mark.asyncio
+async def test_unified_unknown_failure_never_exposes_exception_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-safe-failure-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+
+    async def fail_current_read(**_kwargs: object) -> None:
+        raise RuntimeError(r"C:\private\itinerary\secret.txt")
+
+    monkeypatch.setattr(
+        composition,
+        "read_current_background_task",
+        fail_current_read,
+    )
+    rejected = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="safe-failure",
+            text="后台现在做到哪了？",
+        ),
+        request_id="request-unified-safe-failure",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert not rejected.ok
+    error = cast(dict[str, object], rejected.payload["error"])
+    assert error["reason"] == "UNIFIED_INPUT_FAILED"
+    assert error["message"] == "unified committed input failed closed"
+    assert "private" not in json.dumps(rejected.payload)
+    assert manager.agent.calls == 0
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_unified_journal_seal_failure_never_exposes_exception_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _composition, manager, _pushed = _registry(tmp_path, unified=True)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-seal-failure-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    journal = registry._unified_journal
+    assert journal is not None
+
+    def fail_seal(**_kwargs: object) -> None:
+        raise RuntimeError(r"C:\private\journal\voice.sqlite3")
+
+    async def fail_business(**_kwargs: object) -> None:
+        raise RuntimeError(r"C:\private\agent\response.txt")
+
+    monkeypatch.setattr(journal, "complete", fail_seal)
+    monkeypatch.setattr(registry, "_run_unified_submit", fail_business)
+    rejected = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="seal-failure",
+            text="你好。",
+        ),
+        request_id="request-unified-seal-failure",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert not rejected.ok
+    error = cast(dict[str, object], rejected.payload["error"])
+    assert error == {
+        "code": ErrorCode.UNAVAILABLE.value,
+        "reason": "UNIFIED_INPUT_EXECUTION_LEASE_LOST",
+        "message": "unified committed-input result could not be durably sealed",
+    }
+    assert "private" not in json.dumps(rejected.payload)
+    assert manager.agent.calls == 0
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_unified_presentation_crash_window_recovers_without_duplicate_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-crash-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+    journal = registry._unified_journal
+    assert journal is not None
+    complete = journal.complete
+    complete_calls = 0
+
+    def fail_after_first_presentation(**kwargs: object):
+        nonlocal complete_calls
+        complete_calls += 1
+        if complete_calls == 1:
+            raise RuntimeError("simulated process loss before journal completion")
+        return complete(**kwargs)
+
+    monkeypatch.setattr(journal, "complete", fail_after_first_presentation)
+    params = _unified_final_params(
+        stem="presentation-crash",
+        text="帮我根据这些要求制定三天的行程。",
+    )
+    first = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-unified-presentation-crash",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert not first.ok
+    assert composition.create_effects == 1
+    assert len(registry._unified_operations) == 1
+
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=0 "
+            "WHERE status='pending'"
+        )
+    recovered = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-unified-presentation-recovery",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert recovered.ok
+    assert recovered.payload["request_id"] == (
+        "request-unified-presentation-recovery"
+    )
+    assert composition.create_effects == 1
+    assert len(registry._unified_operations) == 0
+    assert params["commit_id"] not in registry._critical_input_commit_generations
+    await _ack_unified_presentation(
+        registry,
+        sequence=0,
+        stem="presentation-crash",
+    )
+    assert len(history.users) == 1
+    assert len(history.assistants) == 1
+    assert manager.agent.calls == 0
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM unified_committed_inputs"
+        ).fetchone() == ("completed",)
+    await _close_unified_route(registry, stem="presentation-crash")
+
+
+@pytest.mark.asyncio
+async def test_unified_presentation_crash_rebuilds_runtime_with_same_effect_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class IdempotentHistory(_HistoryWriter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.user_ids: set[str] = set()
+            self.assistant_ids: set[tuple[object, ...]] = set()
+
+        async def persist_user(self, commit, *, channel_id: str) -> bool:
+            if commit.commit_id in self.user_ids:
+                return False
+            self.user_ids.add(commit.commit_id)
+            return await super().persist_user(commit, channel_id=channel_id)
+
+        async def persist_assistant(
+            self, intent, *, session_id: str, channel_id: str
+        ) -> tuple[bool, ...]:
+            key = (
+                intent.ref.interaction_id,
+                intent.ref.response_id,
+                intent.ref.response_generation,
+                intent.surface.value,
+                intent.contiguous_cursor,
+                tuple(content.unit.unit_id for content in intent.contents),
+            )
+            if key in self.assistant_ids:
+                return tuple(False for _ in intent.contents)
+            self.assistant_ids.add(key)
+            return await super().persist_assistant(
+                intent,
+                session_id=session_id,
+                channel_id=channel_id,
+            )
+
+    first, composition, first_manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    assert (
+        await first.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-restart-first-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = IdempotentHistory()
+    first_route = first._p2_routes[(SCOPE.session_id, "interaction-1")]
+    first_route.activation_lease._runtime._history_writer = history
+    first_journal = first._unified_journal
+    assert first_journal is not None
+
+    def lose_process_after_presentation(**_kwargs: object) -> None:
+        raise RuntimeError("simulated process loss after presentation")
+
+    monkeypatch.setattr(first_journal, "complete", lose_process_after_presentation)
+    params = _unified_final_params(
+        stem="presentation-process-restart",
+        text="帮我根据这些要求制定三天的行程。",
+    )
+    rejected = await first.handle_unified_submit(
+        params=params,
+        request_id="request-unified-before-process-restart",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert not rejected.ok
+    await _ack_unified_presentation(
+        first,
+        sequence=0,
+        stem="presentation-process-restart-first",
+    )
+    await _close_unified_route(first, stem="presentation-process-restart-first")
+    assert len(history.users) == 1
+    assert len(history.assistants) == 1
+    first_intent = history.assistants[0][0]
+    first_identity = (
+        first_intent.ref,
+        tuple(content.unit.unit_id for content in first_intent.contents),
+    )
+
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=0 "
+            "WHERE status='pending'"
+        )
+    prior_handle_calls = len(composition.handle_calls)
+    restarted, _, restarted_manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+        composition=composition,
+    )
+    assert (
+        await restarted.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-restart-second-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    restarted_route = restarted._p2_routes[(SCOPE.session_id, "interaction-1")]
+    restarted_route.activation_lease._runtime._history_writer = history
+
+    recovered = await restarted.handle_unified_submit(
+        params=params,
+        request_id="request-unified-after-process-restart",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert recovered.ok
+    assert recovered.payload["request_id"] == "request-unified-after-process-restart"
+    assert composition.create_effects == 1
+    assert len(composition.handle_calls) == prior_handle_calls
+    assert first_manager.agent.calls == 0
+    assert restarted_manager.agent.calls == 0
+    records = (
+        restarted_route.activation_lease._runtime._cr.snapshot().presentation.records
+    )
+    assert len(records) == 1
+    assert (records[0].unit.ref, (records[0].unit.unit_id,)) == first_identity
+    await _ack_unified_presentation(
+        restarted,
+        sequence=0,
+        stem="presentation-process-restart-second",
+    )
+    await _close_unified_route(
+        restarted,
+        stem="presentation-process-restart-second",
+    )
+    assert len(history.users) == 1
+    assert len(history.assistants) == 1
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM unified_committed_inputs"
+        ).fetchone() == ("completed",)
+
+
+@pytest.mark.asyncio
+async def test_unified_agent_checkpoint_replays_after_runtime_restart_without_redispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, composition, first_manager = _unified_registry(tmp_path)
+    assert (
+        await first.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-agent-restart-first-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(first)
+    first_journal = first._unified_journal
+    assert first_journal is not None
+
+    def lose_process_after_agent_dispatch(**_kwargs: object) -> None:
+        raise RuntimeError("simulated process loss after Agent dispatch")
+
+    monkeypatch.setattr(first_journal, "complete", lose_process_after_agent_dispatch)
+    params = _unified_final_params(
+        stem="agent-process-restart",
+        text="请告诉我今天适合喝什么茶。",
+    )
+    rejected = await first.handle_unified_submit(
+        params=params,
+        request_id="request-agent-before-process-restart",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert not rejected.ok
+    await _ack_unified_presentation(
+        first,
+        sequence=0,
+        stem="agent-process-restart-first",
+    )
+    await _close_unified_route(first, stem="agent-process-restart-first")
+    assert first_manager.agent.calls == 1
+    assert len(history.users) == 1
+    assert len(history.assistants) == 1
+
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=0 "
+            "WHERE status='pending'"
+        )
+    restarted, _, restarted_manager = _unified_registry(
+        tmp_path,
+        composition=composition,
+    )
+    assert (
+        await restarted.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-agent-restart-second-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    restarted_route = restarted._p2_routes[(SCOPE.session_id, "interaction-1")]
+    restarted_route.activation_lease._runtime._history_writer = history
+
+    recovered = await restarted.handle_unified_submit(
+        params=params,
+        request_id="request-agent-after-process-restart",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert recovered.ok
+    assert recovered.payload["request_id"] == "request-agent-after-process-restart"
+    assert first_manager.agent.calls == 1
+    assert restarted_manager.agent.calls == 0
+    assert (
+        restarted_route.activation_lease._runtime.snapshot().published_notifications
+        == 0
+    )
+    await _close_unified_route(restarted, stem="agent-process-restart-second")
+    assert len(history.users) == 1
+    assert len(history.assistants) == 1
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT status FROM unified_committed_inputs"
+        ).fetchone() == ("completed",)
+
+
+@pytest.mark.asyncio
+async def test_unified_agent_pre_dispatch_checkpoint_never_masks_dispatch_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _composition, manager = _unified_registry(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-agent-dispatch-failure-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    route = registry._p2_routes[(SCOPE.session_id, "interaction-1")]
+
+    def fail_after_checkpoint(*_args: object, **_kwargs: object):
+        raise RuntimeError("simulated Harness dispatch failure")
+
+    monkeypatch.setattr(
+        route.activation_lease._runtime._harness,
+        "commit_round",
+        fail_after_checkpoint,
+    )
+    params = _unified_final_params(
+        stem="agent-dispatch-failure",
+        text="请告诉我今天适合喝什么茶。",
+    )
+    rejected = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-agent-dispatch-failure",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    replay = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-agent-dispatch-failure-replay",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert not rejected.ok
+    assert replay.payload == {
+        **rejected.payload,
+        "request_id": "request-agent-dispatch-failure-replay",
+    }
+    assert rejected.payload["result"] is None
+    assert manager.agent.calls == 0
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        effect = connection.execute(
+            "SELECT status, result_json FROM unified_foreground_effects"
+        ).fetchone()
+    assert effect is not None
+    assert effect[0] == "completed"
+    assert json.loads(effect[1])["ok"] is False
+    await _close_unified_route(registry, stem="agent-dispatch-failure")
+
+
+@pytest.mark.asyncio
+async def test_cancelled_unified_rpc_settles_inner_effect_and_releases_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry, _composition, _manager = _unified_registry(tmp_path)
+    assert registry._unified_journal is not None
+    monkeypatch.setattr(registry._unified_journal, "_LEASE_SECONDS", 0.03)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-cancelled-caller-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    started = asyncio.Event()
+    release = asyncio.Event()
+    side_effects = 0
+
+    async def retained_effect(**kwargs: object) -> P3RouteResult:
+        nonlocal side_effects
+        side_effects += 1
+        started.set()
+        await release.wait()
+        request_id = str(kwargs["request_id"])
+        return P3RouteResult(
+            True,
+            {
+                "request_id": request_id,
+                "ok": True,
+                "result": {
+                    "status": "authoritative_presentation_accepted",
+                    "response": {
+                        "interaction_id": "interaction-1",
+                        "response_id": "response-cancelled-caller",
+                        "response_generation": 1,
+                    },
+                },
+                "error": None,
+            },
+        )
+
+    monkeypatch.setattr(registry, "_run_unified_submit", retained_effect)
+    params = _unified_final_params(
+        stem="cancelled-caller",
+        text="请告诉我今天适合喝什么茶。",
+    )
+    caller = asyncio.create_task(
+        registry.handle_unified_submit(
+            params=params,
+            request_id="request-cancelled-caller",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    assert len(registry._unified_settlement_tasks) == 1
+
+    await asyncio.sleep(0.08)
+    release.set()
+    for _ in range(1_000):
+        if (
+            not registry._unified_settlement_tasks
+            and not registry._unified_operations
+        ):
+            break
+        await asyncio.sleep(0.001)
+
+    assert side_effects == 1
+    assert registry._unified_settlement_tasks == set()
+    assert registry._unified_operations == {}
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        status, result_json = connection.execute(
+            "SELECT status, result_json FROM unified_committed_inputs"
+        ).fetchone()
+    assert status == "completed"
+    assert json.loads(result_json)["ok"] is True
+
+    replay = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-cancelled-caller-replay",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert replay.ok
+    assert replay.payload["request_id"] == "request-cancelled-caller-replay"
+    assert side_effects == 1
+    await _close_unified_route(registry, stem="cancelled-caller")
+
+
+@pytest.mark.asyncio
+async def test_agent_checkpoint_failure_rolls_back_then_retries_once_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first, composition, first_manager = _unified_registry(tmp_path)
+    assert (
+        await first.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-agent-ambiguous-first-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(first)
+    first_journal = first._unified_journal
+    assert first_journal is not None
+
+    class SimulatedProcessLoss(BaseException):
+        pass
+
+    def lose_process_before_result_promotion(**_kwargs: object) -> None:
+        raise SimulatedProcessLoss
+
+    monkeypatch.setattr(
+        first_journal,
+        "checkpoint_foreground_effect_result",
+        lose_process_before_result_promotion,
+    )
+    params = _unified_final_params(
+        stem="agent-ambiguous-promotion",
+        text="请告诉我今天适合喝什么茶。",
+    )
+    with pytest.raises(SimulatedProcessLoss):
+        await first.handle_unified_submit(
+            params=params,
+            request_id="request-agent-ambiguous-before-restart",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    assert first_manager.agent.calls == 0
+    first_route = first._p2_routes[(SCOPE.session_id, "interaction-1")]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    first_published = (
+        first_route.activation_lease._runtime.snapshot().published_notifications
+    )
+    assert first_published == 0
+    first_snapshot = first_route.activation_lease._runtime.snapshot()
+    assert first_snapshot.harness.active_rounds == ()
+    assert first_snapshot.bridge.active_requests == ()
+    assert first_snapshot.bridge.pending_dispatches == 0
+
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        foreground = connection.execute(
+            "SELECT status, result_json FROM unified_foreground_effects"
+        ).fetchone()
+        assert foreground == ("prepared", None)
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=0 "
+            "WHERE status='pending'"
+        )
+
+    restarted, _, restarted_manager = _unified_registry(
+        tmp_path,
+        composition=composition,
+    )
+    assert (
+        await restarted.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-agent-ambiguous-second-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    recovered = await restarted.handle_unified_submit(
+        params=params,
+        request_id="request-agent-ambiguous-after-restart",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert recovered.ok
+    assert recovered.payload["result"]["status"] == "round_accepted"
+    assert first_manager.agent.calls == 0
+    assert (
+        first_route.activation_lease._runtime.snapshot().published_notifications
+        == first_published
+    )
+    assert restarted_manager.agent.calls == 1
+    restarted_route = restarted._p2_routes[(SCOPE.session_id, "interaction-1")]
+    for _ in range(1_000):
+        restarted_snapshot = restarted_route.activation_lease._runtime.snapshot()
+        if restarted_snapshot.published_notifications > 0:
+            break
+        await asyncio.sleep(0)
+    assert restarted_route.activation_lease._runtime.snapshot().published_notifications > 0
+    await _close_unified_route(restarted, stem="agent-ambiguous")
+
+
+@pytest.mark.asyncio
+async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
+    tmp_path: Path,
+) -> None:
+    default_registry, default_p3, default_manager = _unified_registry(
+        tmp_path / "default",
+        demo_policy_bypass=False,
+    )
+    assert (
+        await default_registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-default-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(default_registry)
+    default_result = await default_registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="default-create",
+            text="帮我根据这些要求制定三天的行程。",
+        ),
+        request_id="request-default-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert default_result.ok
+    assert default_p3.current is None
+    assert default_p3.handle_calls[0][0] == "task.create"
+    assert default_p3.handle_calls[0][2]["trusted_demo_policy_bypass"] is False
+    assert default_manager.agent.calls == 0
+    await _ack_unified_presentation(
+        default_registry, sequence=0, stem="default-create"
+    )
+    await _close_unified_route(default_registry, stem="default-create")
+
+    demo_registry, demo_p3, demo_manager = _unified_registry(
+        tmp_path / "demo",
+        demo_policy_bypass=True,
+    )
+    assert (
+        await demo_registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-demo-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(demo_registry)
+    first_params = _unified_final_params(
+        stem="demo-create",
+        text="帮我根据这些要求制定三天的行程。",
+    )
+    first = await demo_registry.handle_unified_submit(
+        params=first_params,
+        request_id="request-demo-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    replay = await demo_registry.handle_unified_submit(
+        params=first_params,
+        request_id="request-demo-create-replay",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    presentation_sequence = await _ack_unified_presentation(
+        demo_registry, sequence=0, stem="demo-create"
+    )
+    second = await demo_registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="demo-second-create",
+            text="后台帮我再制定一个新行程。",
+        ),
+        request_id="request-demo-second-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert first.ok and second.ok
+    assert first.payload["request_id"] == "request-demo-create"
+    assert replay.payload["request_id"] == "request-demo-create-replay"
+    assert {
+        key: value for key, value in replay.payload.items() if key != "request_id"
+    } == {key: value for key, value in first.payload.items() if key != "request_id"}
+    assert demo_p3.current is not None
+    create_calls = [call for call in demo_p3.handle_calls if call[0] == "task.create"]
+    assert len(create_calls) == 2
+    assert demo_p3.create_effects == 1
+    assert create_calls[0][2]["trusted_demo_policy_bypass"] is True
+    assert create_calls[0][2]["current_background_session_id"] == SCOPE.session_id
+    assert demo_manager.agent.calls == 0
+    await _ack_unified_presentation(
+        demo_registry,
+        sequence=presentation_sequence,
+        stem="demo-second-create",
+    )
+    await _close_unified_route(demo_registry, stem="demo-create")
+
+
+@pytest.mark.asyncio
+async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_confirmation(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+        critical_input=True,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-gateway-demo-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    speech = FormalBatchSpeechService(
+        UnavailableBatchSpeechProvider(),
+        trusted_demo_critical_bypass=True,
+    )
+
+    async def gateway_owned_params(*, stem: str, text: str) -> dict[str, object]:
+        params = _unified_final_params(stem=stem, text=text)
+        params.pop("gateway_voice_claim")
+        params["voice_commit_receipt"] = (
+            await speech.issue_streaming_voice_commit_receipt(
+                operation_id=f"speech-operation-{stem}",
+                capture_id=f"capture-{stem}",
+                capture_generation=1,
+                session_id=SCOPE.session_id or "",
+                correlation_id="correlation-p2",
+                interaction_id="interaction-1",
+                text=text,
+            )
+        )
+        message = Message(
+            id=f"gateway-{stem}",
+            type="req",
+            channel_id="web",
+            session_id=SCOPE.session_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
+        )
+        await _inject_live_voice_gateway_voice_claim(message, speech)
+        claim = cast(dict[str, object], message.params["gateway_voice_claim"])
+        assert claim["critical_policy"] == "trusted_demo_bypass"
+        assert "critical_confirmation" not in message.params
+        assert "voice_commit_receipt" not in message.params
+        return cast(dict[str, object], message.params)
+
+    create_text = "\u5e2e\u6211\u6839\u636e\u8fd9\u4e9b\u8981\u6c42\u5236\u5b9a\u4e09\u5929\u7684\u884c\u7a0b\u3002"
+    created = await registry.handle_unified_submit(
+        params=await gateway_owned_params(stem="gateway-demo-create", text=create_text),
+        request_id="request-gateway-demo-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert created.ok
+    assert composition.create_effects == 1
+    sequence = await _ack_unified_presentation(
+        registry,
+        sequence=0,
+        stem="gateway-demo-create",
+    )
+
+    negated_query = (
+        "\u4e0d\u7528\u505c\u6b62\u540e\u53f0\u4efb\u52a1\uff0c"
+        "\u544a\u8bc9\u6211\u7b2c\u4e8c\u5929\u6700\u65e9\u7684\u56fa\u5b9a\u5b89\u6392\u662f\u4ec0\u4e48\u3002"
+    )
+    queried = await registry.handle_unified_submit(
+        params=await gateway_owned_params(stem="gateway-demo-query", text=negated_query),
+        request_id="request-gateway-demo-query",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert queried.ok
+    assert composition.create_effects == 1
+    assert [call[0] for call in composition.handle_calls].count("task.cancel") == 0
+    assert [call[0] for call in composition.handle_calls].count("task.result") == 1
+    assert manager.agent.calls == 0
+    await _ack_unified_presentation(
+        registry,
+        sequence=sequence,
+        stem="gateway-demo-query",
+    )
+    await _close_unified_route(registry, stem="gateway-demo")
+    await speech.close()
+
+
+@pytest.mark.asyncio
+async def test_unified_query_reads_authoritative_result_before_agent_and_never_cancels(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    composition.current = _background_task(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-query-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+
+    not_ready = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="query-not-ready",
+            text="不用停止后台任务，告诉我第二天最早的固定安排是什么。",
+        ),
+        request_id="request-query-not-ready",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert not_ready.ok
+    assert manager.agent.calls == 0
+    assert [call[0] for call in composition.handle_calls] == ["task.result"]
+    presentation_sequence = await _ack_unified_presentation(
+        registry, sequence=0, stem="query-not-ready"
+    )
+
+    composition.result_availability = "available"
+    composition.result_reason = "TASK_RESULT_AVAILABLE"
+    composition.result_record = {
+        "task_id": composition.current.task_id,
+        "attempt_id": composition.current.attempt_id,
+        "source_event_id": "executor-event-itinerary-1",
+        "result_text": "Day 2 earliest fixed event: museum at 08:30.",
+        "artifacts": [
+            {"relative_path": "itinerary.md", "sha256": "a" * 64}
+        ],
+        "completed_at": NOW,
+    }
+    available = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="query-available",
+            text="第二天最早的固定安排是什么？",
+        ),
+        request_id="request-query-available",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert available.ok
+    assert manager.agent.calls == 1
+    execution = manager.agent.executions[0]
+    assert execution.allow_tools is False
+    assert execution.commit.text == "第二天最早的固定安排是什么？"
+    result_context = json.loads(execution.context.entries[-1].content)
+    assert result_context["trust"] == "untrusted_reference_data"
+    assert result_context["authority"] == "none"
+    assert "08:30" in result_context["result_text"]
+    assert all(call[0] != "task.cancel" for call in composition.handle_calls)
+    await _ack_unified_presentation(
+        registry,
+        sequence=presentation_sequence,
+        stem="query-available",
+    )
+    await _close_unified_route(registry, stem="query")
+
+
+@pytest.mark.asyncio
+async def test_unified_status_presents_authoritative_store_progress_shape(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(tmp_path)
+    composition.current = _background_task(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-status-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+
+    status = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="status-current",
+            text="后台现在做到哪了？",
+        ),
+        request_id="request-status-current",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert status.ok
+    assert manager.agent.calls == 0
+    assert [call[0] for call in composition.handle_calls] == ["task.status"]
+    presentation_sequence = await _ack_unified_presentation(
+        registry, sequence=0, stem="status-current"
+    )
+    assert len(history.assistants) == 1
+    assistant_intent = history.assistants[0][0]
+    spoken = [
+        content.content_utf8.decode("utf-8")
+        for content in assistant_intent.contents
+    ]
+    assert spoken == ["后台任务正在运行，已记录 4 条状态更新。"]
+
+    composition.current = _background_task(
+        tmp_path,
+        state=FormalTaskState.TERMINAL,
+        outcome=TerminalOutcome.CANCELLED,
+    )
+    terminal_status = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="status-cancelled",
+            text="后台现在做到哪了？",
+        ),
+        request_id="request-status-cancelled",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert terminal_status.ok
+    await _ack_unified_presentation(
+        registry, sequence=presentation_sequence, stem="status-cancelled"
+    )
+    terminal_spoken = [
+        content.content_utf8.decode("utf-8")
+        for content in history.assistants[-1][0].contents
+    ]
+    assert terminal_spoken == ["已停止后台任务。"]
+    await _close_unified_route(registry, stem="status-current")
+
+
+@pytest.mark.asyncio
+async def test_unified_default_cancel_keeps_confirmation_boundary_and_zero_mutation(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path, demo_policy_bypass=False
+    )
+    original = _background_task(tmp_path)
+    composition.current = original
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-default-cancel-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="default-cancel-current",
+            text="停止刚才的行程规划。",
+        ),
+        request_id="request-default-cancel-current",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert composition.current == original
+    assert manager.agent.calls == 0
+    assert len(composition.handle_calls) == 1
+    operation, params, policy = composition.handle_calls[0]
+    assert operation == "task.cancel"
+    assert params["task_id"] == original.task_id
+    assert policy["trusted_demo_policy_bypass"] is False
+    await _ack_unified_presentation(
+        registry, sequence=0, stem="default-cancel-current"
+    )
+    await _close_unified_route(registry, stem="default-cancel-current")
+
+
+@pytest.mark.asyncio
+async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path, demo_policy_bypass=True
+    )
+    composition.current = _background_task(tmp_path)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-cancel-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    result = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="cancel-current",
+            text="停止刚才的行程规划。",
+        ),
+        request_id="request-cancel-current",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert result.ok
+    assert manager.agent.calls == 0
+    assert len(composition.handle_calls) == 1
+    operation, params, policy = composition.handle_calls[0]
+    assert operation == "task.cancel"
+    assert params["task_id"] == composition.current.task_id
+    assert policy["trusted_demo_policy_bypass"] is True
+    await _ack_unified_presentation(
+        registry, sequence=0, stem="cancel-current"
+    )
+    await _close_unified_route(registry, stem="cancel-current")
+
+
+@pytest.mark.asyncio
+async def test_unified_cancel_recovery_keeps_its_durable_original_task_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SimulatedProcessLoss(BaseException):
+        pass
+
+    first, composition, _manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    original = _background_task(tmp_path, task_id="task-original-current")
+    composition.current = original
+    composition.known_tasks[original.task_id] = original
+    assert (
+        await first.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-target-crash-first-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    journal = first._unified_journal
+    assert journal is not None
+    admit = journal.admit
+
+    def lose_process_after_admission(**kwargs: object):
+        admit(**kwargs)
+        raise SimulatedProcessLoss()
+
+    monkeypatch.setattr(journal, "admit", lose_process_after_admission)
+    params = _unified_final_params(
+        stem="target-crash",
+        text="停止刚才的后台任务。",
+    )
+    with pytest.raises(SimulatedProcessLoss):
+        await first.handle_unified_submit(
+            params=params,
+            request_id="request-target-before-crash",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    assert composition.handle_calls == []
+
+    completed_original = _background_task(
+        tmp_path,
+        state=FormalTaskState.TERMINAL,
+        outcome=TerminalOutcome.COMPLETED,
+        task_id=original.task_id,
+    )
+    composition.known_tasks[original.task_id] = completed_original
+    replacement = _background_task(
+        tmp_path,
+        task_id="task-replacement-current",
+        attempt_id="attempt-replacement-current",
+    )
+    composition.current = replacement
+    composition.known_tasks[replacement.task_id] = replacement
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=0 "
+            "WHERE status='pending'"
+        )
+
+    restarted, _, restarted_manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+        composition=composition,
+    )
+    assert (
+        await restarted.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-target-crash-second-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    recovered = await restarted.handle_unified_submit(
+        params=params,
+        request_id="request-target-after-crash",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert recovered.ok
+    cancel_calls = [call for call in composition.handle_calls if call[0] == "task.cancel"]
+    assert len(cancel_calls) == 1
+    assert cancel_calls[0][1]["task_id"] == original.task_id
+    assert cancel_calls[0][1]["task_id"] != replacement.task_id
+    assert composition.current == replacement
+    assert restarted_manager.agent.calls == 0
+    await _ack_unified_presentation(
+        restarted,
+        sequence=0,
+        stem="target-crash-recovered",
+    )
+    await _close_unified_route(restarted, stem="target-crash-recovered")
+    await first.stop()
+
+
+@pytest.mark.parametrize(
+    ("stem", "text"),
+    (
+        ("no-current-cancel", "停止刚才的后台任务。"),
+        ("no-current-status", "后台现在做到哪了？"),
+        ("no-current-query", "告诉我第二天最早的固定安排是什么。"),
+    ),
+)
+@pytest.mark.asyncio
+async def test_unified_recovery_never_drifts_a_null_task_target_to_a_new_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stem: str,
+    text: str,
+) -> None:
+    class SimulatedProcessLoss(BaseException):
+        pass
+
+    first, composition, _manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    assert composition.current is None
+    assert (
+        await first.handle_p2_activate(
+            params=_p2_params(),
+            request_id=f"request-{stem}-first-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    journal = first._unified_journal
+    assert journal is not None
+    admit = journal.admit
+
+    def lose_process_after_admission(**kwargs: object):
+        admit(**kwargs)
+        raise SimulatedProcessLoss()
+
+    monkeypatch.setattr(journal, "admit", lose_process_after_admission)
+    params = _unified_final_params(stem=stem, text=text)
+    with pytest.raises(SimulatedProcessLoss):
+        await first.handle_unified_submit(
+            params=params,
+            request_id=f"request-{stem}-before-crash",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    assert composition.handle_calls == []
+
+    replacement = _background_task(
+        tmp_path,
+        task_id=f"task-{stem}-replacement",
+        attempt_id=f"attempt-{stem}-replacement",
+    )
+    composition.current = replacement
+    composition.known_tasks[replacement.task_id] = replacement
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        connection.execute(
+            "UPDATE unified_committed_inputs SET lease_expires_at=0 "
+            "WHERE status='pending'"
+        )
+
+    restarted, _, restarted_manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+        composition=composition,
+    )
+    assert (
+        await restarted.handle_p2_activate(
+            params=_p2_params(),
+            request_id=f"request-{stem}-second-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    recovered = await restarted.handle_unified_submit(
+        params=params,
+        request_id=f"request-{stem}-after-crash",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+
+    assert recovered.ok
+    assert composition.handle_calls == []
+    assert composition.current == replacement
+    assert restarted_manager.agent.calls == 0
+    await _ack_unified_presentation(
+        restarted,
+        sequence=0,
+        stem=f"{stem}-recovered",
+    )
+    await _close_unified_route(restarted, stem=f"{stem}-recovered")
+    await first.stop()
+
+
+@pytest.mark.asyncio
+async def test_unified_stale_bindings_and_wrong_voice_claim_have_zero_effect(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path, demo_policy_bypass=True
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-stale-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    cases = []
+    stale_activation = _unified_final_params(
+        stem="stale-activation", text="后台帮我制定行程。"
+    )
+    stale_activation["activation_generation"] = 2
+    cases.append(("request-stale-activation", stale_activation, SCOPE.session_id))
+    stale_session = _unified_final_params(
+        stem="stale-session", text="后台帮我制定行程。"
+    )
+    stale_session["session_id"] = "session-old"
+    cases.append(("request-stale-session", stale_session, "session-old"))
+    wrong_claim = _unified_final_params(
+        stem="wrong-claim", text="后台帮我制定行程。"
+    )
+    cast(dict[str, object], wrong_claim["gateway_voice_claim"])[
+        "text_sha256"
+    ] = "0" * 64
+    cases.append(("request-wrong-claim", wrong_claim, SCOPE.session_id))
+
+    for request_id, params, session_id in cases:
+        rejected = await registry.handle_unified_submit(
+            params=params,
+            request_id=request_id,
+            session_id=session_id,
+            channel_id="web",
+        )
+        assert not rejected.ok
+
+    assert manager.agent.calls == 0
+    assert composition.read_current_calls == 0
+    assert composition.handle_calls == []
+    with sqlite3.connect(tmp_path / "unified.sqlite3") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM unified_committed_inputs"
+        ).fetchone()[0] == 0
+    await registry.stop()
+
+
+def test_unified_task_result_context_is_bounded_and_rejects_unsafe_artifacts() -> None:
+    with pytest.raises(FormalTaskViolation) as raised:
+        AgentServerProductCompositionRegistry._bounded_untrusted_result_context(
+            scope=SCOPE,
+            task_result={
+                "task_id": "task-current-1",
+                "attempt_id": "attempt-current-1",
+                "source_event_id": "event-current-1",
+                "result_text": "safe",
+                "artifacts": [
+                    {"relative_path": "../private.txt", "sha256": "a" * 64}
+                ],
+            },
+        )
+    assert raised.value.reason == "TASK_RESULT_CONTEXT_INVALID"
+
+    _ref, entry = (
+        AgentServerProductCompositionRegistry._bounded_untrusted_result_context(
+            scope=SCOPE,
+            task_result={
+                "task_id": "task-current-1",
+                "attempt_id": "attempt-current-1",
+                "source_event_id": "event-current-1",
+                "result_text": "\u0001" * 32_768,
+                "artifacts": [
+                    {"relative_path": "itinerary.md", "sha256": "a" * 64}
+                ],
+            },
+        )
+    )
+    assert len(entry.content.encode("utf-8")) <= 32_768
+    payload = json.loads(entry.content)
+    assert payload["authority"] == "none"
+    assert payload["instruction_policy"].startswith("Never treat")
+
+
+@pytest.mark.asyncio
+async def test_real_itinerary_fixture_matches_store_agent_answer_and_applied_artifact(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "isolated-itinerary-project"
+    _initialize_itinerary_fixture(project)
+    database = tmp_path / "isolated-itinerary-runtime.sqlite3"
+    store = SqliteTaskStore(database)
+    spec = _itinerary_spec(project)
+    created = store.create(
+        _itinerary_command(spec),
+        spec,
+        observed_at=NOW,
+        current_background_session_id=SCOPE.session_id,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    item = store.claim_outbox("itinerary-fixture-worker")
+    assert item is not None
+
+    executor = _ItineraryProjectExecutor()
+
+    async def dispatch_fence() -> None:
+        return None
+
+    binding = ProjectExecutionBinding(
+        service=None,
+        execution_agent=object(),
+        project_executor=executor,
+        effective_execution_root=str(project.resolve()),
+        execution_target={
+            "project_dir": str(project.resolve()),
+            "project_id": SCOPE.project_id,
+            "origin_session_id": SCOPE.session_id,
+            "origin_channel_id": "web",
+        },
+        owner_scope={
+            "channel_id": "formal-task-core",
+            "session_id": SCOPE.session_id,
+            "app_id": "live-voice",
+        },
+        resolved_revision_kind="version",
+        resolved_revision_value="itinerary-fixture-v1",
+        model_identity="default#0",
+        model_config_version="catalog-v1",
+        dispatch_fence=dispatch_fence,
+    )
+    resolver = _ItineraryBindingResolver(binding)
+    adapter = DirectProjectCodeExecutorAdapter(resolver, database)
+    dispatched = await adapter.dispatch(item)
+    store.complete_outbox(
+        item,
+        executor_ref=dispatched.executor_ref,
+        observations=dispatched.observations,
+    )
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_itinerary_executor(adapter, attempt_id)
+    journal_record = adapter._journal.get(attempt_id)
+    assert journal_record is not None
+    assert journal_record.outcome is TerminalOutcome.COMPLETED, (
+        journal_record.raw_status,
+        journal_record.error,
+    )
+    assert journal_record.source_seq == 2
+    assert journal_record.state.value == "terminal"
+    assert journal_record.result_text == ITINERARY_RESULT_TEXT
+    persisted_attempt = store.get_attempt(attempt_id)
+    assert persisted_attempt.source_seq == 1
+    terminal = await adapter.status(
+        store.get_task(task_id, SCOPE),
+        persisted_attempt,
+    )
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    store.apply_observations(terminal.observations)
+
+    availability, record, reason = store.task_result(task_id, SCOPE)
+    assert availability is TaskResultAvailability.AVAILABLE
+    assert reason == "TASK_RESULT_AVAILABLE"
+    assert record is not None
+    itinerary_path = project / "itinerary.md"
+    itinerary_bytes = itinerary_path.read_bytes()
+    assert itinerary_bytes.decode("utf-8") == ITINERARY_TEXT
+    assert record.result_text == ITINERARY_RESULT_TEXT
+    assert record.artifacts[0].relative_path == "itinerary.md"
+    assert record.artifacts[0].sha256 == hashlib.sha256(itinerary_bytes).hexdigest()
+
+    composition = _StoreBackedUnifiedP3(project, store)
+    manager = _AgentManager()
+    itinerary_agent = _ItineraryAnswerFacade()
+    manager.agent = itinerary_agent
+
+    async def push(_message: dict[str, object]) -> bool:
+        return True
+
+    registry = AgentServerProductCompositionRegistry(
+        settings=ProductCompositionSettings(
+            p2_enabled=True,
+            p3_text_enabled=True,
+            p3_mutation_enabled=True,
+        ),
+        p3_composition=composition,
+        agent_manager=manager,
+        push_text_event=push,
+        unified_journal=SqliteUnifiedCommittedInputJournal(
+            tmp_path / "itinerary-unified.sqlite3"
+        ),
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-itinerary-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    history = _install_unified_history_writer(registry)
+    answered = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="itinerary-day-two",
+            text="第二天最早的固定安排是什么？",
+        ),
+        request_id="request-itinerary-day-two",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert answered.ok
+    assert itinerary_agent.answers == [ITINERARY_DAY_TWO_ANSWER]
+    assert ITINERARY_DAY_TWO_FACT in itinerary_agent.answers[0]
+    assert ITINERARY_DAY_TWO_FACT in record.result_text
+    assert ITINERARY_DAY_TWO_FACT in itinerary_bytes.decode("utf-8")
+    assert [call[0] for call in composition.handle_calls] == ["task.result"]
+    await _ack_unified_presentation(
+        registry, sequence=0, stem="itinerary-day-two"
+    )
+    assert len(history.assistants) == 1
+    assistant_intent = history.assistants[0][0]
+    assert [
+        content.content_utf8.decode("utf-8")
+        for content in assistant_intent.contents
+    ] == [ITINERARY_DAY_TWO_ANSWER]
+    await _close_unified_route(registry, stem="itinerary-day-two")
+    await adapter.close()
+
+
 @pytest.mark.asyncio
 async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_authority(
     tmp_path: Path,
@@ -758,6 +3267,71 @@ async def test_enabled_critical_gate_blocks_unconfirmed_voice_before_task_author
     assert confirmed.ok is True
     assert "commit-critical-confirmed" in registry._accepted_turn_commits_by_commit
     await registry.stop()
+
+    bypass_without_local_authority, _p3, bypass_manager, _pushed = _registry(
+        tmp_path / "bypass-off",
+        critical_input=True,
+    )
+    assert (
+        await bypass_without_local_authority.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-critical-bypass-off-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok
+    bypass_params = _p2_task_origin_params(
+        stem="critical-demo-bypass-off",
+        text=text,
+    )
+    cast(dict[str, object], bypass_params["gateway_voice_claim"])[
+        "critical_policy"
+    ] = "trusted_demo_bypass"
+    bypass_rejected = await bypass_without_local_authority.handle_p2_submit(
+        params=bypass_params,
+        request_id="request-critical-demo-bypass-off",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert not bypass_rejected.ok
+    assert cast(dict, bypass_rejected.payload["error"])["reason"] == (
+        "CRITICAL_TOKEN_POLICY_REQUIRED"
+    )
+    assert bypass_manager.agent.calls == 0
+    await bypass_without_local_authority.stop()
+
+    bypass_enabled, _p3, _manager = _unified_registry(
+        tmp_path / "bypass-on",
+        demo_policy_bypass=True,
+        critical_input=True,
+    )
+    assert (
+        await bypass_enabled.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-critical-bypass-on-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok
+    accepted_params = _p2_task_origin_params(
+        stem="critical-demo-bypass-on",
+        text=text,
+    )
+    cast(dict[str, object], accepted_params["gateway_voice_claim"])[
+        "critical_policy"
+    ] = "trusted_demo_bypass"
+    bypass_accepted = await bypass_enabled.handle_p2_submit(
+        params=accepted_params,
+        request_id="request-critical-demo-bypass-on",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert bypass_accepted.ok
+    assert (
+        "commit-critical-demo-bypass-on"
+        in bypass_enabled._accepted_turn_commits_by_commit
+    )
+    await bypass_enabled.stop()
 
 
 def test_factory_requires_real_authenticated_authority_when_enabled(

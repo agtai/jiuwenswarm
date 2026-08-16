@@ -204,6 +204,9 @@ class AgentBridgeCompletionHandle:
     def _set_exception(self, error: BaseException) -> None:
         self._future.set_exception(error)
 
+    def _cancel(self) -> None:
+        self._future.cancel()
+
 
 @dataclass(frozen=True, slots=True)
 class AgentBridgeSubmission:
@@ -665,6 +668,60 @@ class AgentBridgeRuntime:
         self._reservation_states[reservation.request_id] = (
             AgentBridgeReservationState.ABORTED
         )
+        return True
+
+    def rollback_undelivered_dispatch(
+        self, reservation: AgentBridgeDispatchReservation, *, reason: str
+    ) -> bool:
+        """Revoke a committed dispatch while it is still in the local queue.
+
+        This narrow rollback is used when the synchronous durable checkpoint
+        immediately following ``commit_dispatch`` fails.  Because no await is
+        permitted between commit and rollback, finding the exact request in
+        ``_pending`` proves that no adapter/Agent work has started.
+        """
+
+        self._require_admission()
+        _validate_runtime_text(
+            reason, "reason", reason="INVALID_DISPATCH_ABORT_REASON"
+        )
+        retained = self._reservations.get(reservation.request_id)
+        if retained != reservation:
+            raise AgentBridgeRuntimeViolation(
+                "UNTRUSTED_DISPATCH_RESERVATION",
+                "dispatch reservation does not match the Bridge ledger",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        state = self._reservation_states[reservation.request_id]
+        if state is AgentBridgeReservationState.ABORTED:
+            return False
+        if state is not AgentBridgeReservationState.COMMITTED:
+            raise AgentBridgeRuntimeViolation(
+                "DISPATCH_NOT_ROLLBACKABLE",
+                "only a committed, undelivered dispatch can be rolled back",
+                ErrorCode.CONFLICT,
+            )
+        request_id = reservation.request_id
+        retained_pending = next(
+            (
+                pending
+                for pending in self._pending
+                if pending.submission.request.request_id == request_id
+            ),
+            None,
+        )
+        if retained_pending is None or request_id in self._active:
+            raise AgentBridgeRuntimeViolation(
+                "DISPATCH_ALREADY_DELIVERED",
+                "a delivered dispatch cannot be rolled back",
+                ErrorCode.CONFLICT,
+            )
+        self._pending.remove(retained_pending)
+        submission = self._submissions.pop(request_id, None)
+        self._fingerprints.pop(request_id, None)
+        self._reservation_states[request_id] = AgentBridgeReservationState.ABORTED
+        if submission is not None and not submission.completion.done():
+            submission.completion._cancel()
         return True
 
     async def next_delivery(self) -> AgentBridgeDelivery:

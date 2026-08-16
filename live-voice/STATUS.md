@@ -1,11 +1,81 @@
 # Live Voice current status
 
-> Updated: 2026-08-15
+> Updated: 2026-08-16
 > This is the only mutable source for current branch expectations, stage/task,
 > blockers and next actions. Git is the implementation fact; detailed S7 facts
 > are in the linked review record.
 
 ## Resume capsule
+
+- **Current result:** `IMPLEMENTED / AUTOMATED PASS / PHYSICAL ACCEPTANCE
+  PENDING` for the S8/A3 Shared-X + P1/P2/P3alpha Tier-3 unified hands-free
+  Live Voice batch. The uncommitted worktree is based on exact
+  `14d5529d75e9228af8d2e306dcb20f3ac8180aa5` on
+  `hx/0812_live_voice_w3`; local HEAD and
+  `origin/hx/0812_live_voice_w3` are synchronized (`0 / 0`). No commit or
+  remote-ref update has been performed.
+- **Product behavior now implemented:** one click starts a generation-fenced
+  hands-free loop; authoritative ASR final is automatically submitted exactly
+  once to the independent `live_voice.composition.unified.submit` owner.
+  Partial/interim speech has zero Agent, Task or presentation effects. The
+  visible panel retains enable, status, transcript and Exit, while Send,
+  Agent/Task, operation and Task-ID controls are absent. The five closed routes
+  are `dialogue`, `background.create`, `background.query`,
+  `background.status` and `background.cancel`; negative cancellation forms are
+  parsed before positive cancellation and never mutate a Task.
+- **One-current-task boundary:** Task Store schema v3 owns the
+  subject/project/Session current pointer, restores it across activation
+  rollover/page refresh, and performs current check + Task/attempt/outbox
+  creation + pointer update in one SQLite transaction. A second concurrent or
+  sequential create while the current Task is non-terminal produces zero new
+  Task side effects. This batch intentionally does not implement multiple
+  concurrent background tasks.
+- **Result boundary:** immutable `task_results` are keyed by
+  task/attempt/source-event identity. Only a completed Task with an applied,
+  attributable patch and verified bounded artifact path/SHA can be
+  `available`; running work is `not_ready`, and failed/cancelled/interrupted or
+  invalid artifacts are `unavailable`. Query enters the existing P2 Agent
+  facade only for `available`; the other states receive authoritative bounded
+  presentation without Agent speculation. Result/artifact data is untrusted
+  reference context, is not ordinary-log material, and grants no instruction
+  or tool authority.
+- **Authority and durability:** old `p2.submit(agent|task)`, P2 journal,
+  activation recovery and `task.status/events` contracts remain unchanged.
+  Unified submission validates final speech, current P2 activation, Session and
+  Gateway voice claim before semantic parsing. Its independent SQLite journal
+  provides request/content conflict detection, same-voice replay, leases and
+  crash recovery. P3 flag-off or insufficient authority fails closed without
+  Agent fallback. Demo create/cancel confirmation bypass is available only
+  through the explicit trusted backend policy
+  `JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED`. In the isolated
+  Demo the same backend-owned flag also authorizes a distinct
+  `trusted_demo_bypass` for exact authoritative finals containing critical
+  tokens such as itinerary day numbers, avoiding the production clarification
+  prompt. Neither path fabricates or claims user confirmation; scope,
+  idempotency, target binding and mutation authority still apply. With the flag
+  unset, the production confirmation and critical-input policies are unchanged.
+- **Hands-free lifecycle:** Agent and Task presentation completion schedule one
+  successor capture; one coordinator owns capture start/stop; Exit advances a
+  loop-generation fence so late callbacks cannot reopen the microphone. A
+  later explicit enable creates a new generation. Real server speech-start/EOT
+  during playout interrupts the current P2 response/TTS only and asserts zero
+  Task cancellation/mutation.
+- **Automated verification:** Integrated Web `372 / 372` passed; the seven broad
+  backend suites passed `541` with `2` skipped; Gateway/AgentServer route suites
+  passed `222 / 222`; P2 runtime/Bridge/Adapter regressions passed
+  `158 / 158`; the focused unified journal suite passed `14 / 14`. Python compilation,
+  the formal-flag production build (`4,642` modules) and `git diff --check`
+  passed. Existing Vite chunk/dynamic-import notices, duplicate i18n `empty`
+  notices and one Authlib deprecation warning remain non-blocking. See
+  [D118](D118_UNIFIED_HANDS_FREE_LIVE_VOICE_REVIEW_2026-08-16.md).
+- **Physical acceptance:** not run on this dirty source. On this host the Speech
+  provider and product/Demo environment variables are absent and ports 18092,
+  19000, 19001, 3000 and 5173 have no listeners. Restoring private provider
+  configuration is deliberately outside Git and this task. The exact five-turn
+  itinerary journey and disposable-fixture cleanup steps remain required before
+  product acceptance; no credential should be pasted into chat or committed.
+
+## Superseded pre-implementation capsule (historical)
 
 - **Current result:** `IN PROGRESS — POST-ALPHA DEMO COMMAND CENTER DELTA` on
   clean base `ff2c3b746`. The uncommitted product delta moves formal
@@ -500,12 +570,13 @@ never relabeled as formal evidence.
 
 ## Next actions
 
-1. Run one fresh browser/microphone demo from the bottom Live Voice command
-   center: Agent/Tool, Task create plus spoken confirmation, status, cancel and
-   visible progress. Do not use Route Facts as a product control surface.
-2. Obtain the remaining independent review entry (or explicitly accept the
-   recorded substitute limitation) before treating this Tier-2 delta as
-   closed. The historical D-079 Alpha packet remains closed.
-3. The local branch ref and its upstream remain synchronized at `ff2c3b746`;
-   the current delta is uncommitted. Any future remote-ref update still
-   requires separate exact approval.
+1. Restore provider settings only in protected local terminals, then run the
+   D118 five-turn running/cancel Journey and the separate completed-result
+   fixture Journey from the actual Live Voice entry. Route Facts are not a
+   product control surface.
+2. Record microphone/EOT/barge-in observations plus Store/result/file SHA
+   comparison, then safely remove only the resolved disposable fixture and
+   isolated data directory as described in the runbook.
+3. The local branch and upstream remain synchronized at the baseline; this
+   implementation is intentionally uncommitted. Any commit remains a user
+   decision, and every remote-ref update requires separate exact approval.

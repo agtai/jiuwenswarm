@@ -9303,17 +9303,23 @@ class JiuWenSwarmDeepAdapter:
             "source",
             "supports_user_interaction",
         }
+        tools_allowed = metadata.get("formal_live_voice_tools_allowed")
         if (
             set(params) - allowed_params
             or params.get("mode") != "agent"
             or params.get("source") != "live_voice.formal"
             or params.get("supports_user_interaction") is not False
-            or metadata
+            or set(metadata)
             != {
-                "enable_memory": False,
-                "skip_a2ui": True,
-                "formal_live_voice": True,
+                "enable_memory",
+                "skip_a2ui",
+                "formal_live_voice",
+                "formal_live_voice_tools_allowed",
             }
+            or metadata.get("enable_memory") is not False
+            or metadata.get("skip_a2ui") is not True
+            or metadata.get("formal_live_voice") is not True
+            or type(tools_allowed) is not bool
             or inputs.get("enable_memory") is not False
             or inputs.get("skip_a2ui") is not True
             or inputs.get("conversation_id") != request.session_id
@@ -9391,7 +9397,8 @@ class JiuWenSwarmDeepAdapter:
                 ):
                     raise RuntimeError("FORMAL_TOOL_EVENT_AUTHORITY_UNAVAILABLE")
                 tool_capture = stream_event_rail.open_formal_tool_event_capture(
-                    session_id
+                    session_id,
+                    allow_tools=tools_allowed,
                 )
                 interaction_stream = await self._instance.attach_output()
                 if interaction_stream is None:

@@ -1983,6 +1983,7 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_TASK_STATUS,
                 ReqMethod.LIVE_VOICE_TASK_CANCEL,
                 ReqMethod.LIVE_VOICE_TASK_EVENTS,
+                ReqMethod.LIVE_VOICE_TASK_RESULT,
             }:
                 await self._handle_live_voice_p3_request(ws, request, send_lock)
                 return
@@ -1990,6 +1991,7 @@ class AgentWebSocketServer:
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_CLOSE,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT,
+                ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_PRESENTATION_ACK,
                 ReqMethod.LIVE_VOICE_COMPOSITION_P2_BARGE_IN,
@@ -9063,7 +9065,8 @@ class AgentWebSocketServer:
             if (
                 registry is not None
                 and registry.p3_text_enabled
-                and operation in {"task.get", "task.list", "task.status", "task.events"}
+                and operation
+                in {"task.get", "task.list", "task.status", "task.events"}
             ):
                 result = await registry.handle_p3_query(
                     operation=operation,
@@ -9138,6 +9141,13 @@ class AgentWebSocketServer:
                 )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_SUBMIT:
                 result = await registry.handle_p2_submit(
+                    params=params,
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    channel_id=request.channel_id,
+                )
+            elif method is ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT:
+                result = await registry.handle_unified_submit(
                     params=params,
                     request_id=request.request_id,
                     session_id=request.session_id,

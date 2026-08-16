@@ -321,6 +321,7 @@ class ConversationRuntimeLoop:
         response_id: str,
         *,
         history_policy: HistorySurfacePolicy = HistorySurfacePolicy.TEXT,
+        response_generation: int | None = None,
     ) -> tuple[ResponseRef, RuntimeEvent]:
         def apply() -> tuple[ResponseRef, RuntimeEvent]:
             policy = self._history_policy(history_policy)
@@ -337,7 +338,11 @@ class ConversationRuntimeLoop:
                 if turn is None
                 else self._latest_response_record(turn.interaction_id)
             )
-            ref, event = self._runtime.accept_response(turn_id, response_id)
+            ref, event = self._runtime.accept_response(
+                turn_id,
+                response_id,
+                response_generation=response_generation,
+            )
             self._presentation.begin_response(ref, policy)
             if prior is not None:
                 self._fence_presentation(prior.ref, reason="response_replaced")

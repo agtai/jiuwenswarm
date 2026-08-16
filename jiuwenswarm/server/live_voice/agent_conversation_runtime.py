@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import math
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
@@ -112,6 +112,13 @@ class AgentConversationHandle:
     round_id: str
     response_ref: ResponseRef
     completion: AgentBridgeCompletionHandle
+
+
+@dataclass(frozen=True, slots=True)
+class AuthoritativePresentationHandle:
+    request_id: str
+    round_id: str
+    response_ref: ResponseRef
 
 
 @dataclass(frozen=True, slots=True)
@@ -480,7 +487,7 @@ class _ResponseOutputState:
     request_id: str
     commit: TurnCommit
     channel_id: str
-    handle: HarnessRoundHandle
+    handle: HarnessRoundHandle | None
     unit_contents: dict[str, bytes]
     total_utf8: int = 0
     usable_finals: int = 0
@@ -975,6 +982,9 @@ class AgentConversationRuntime:
         commit: TurnCommit,
         context: FormalContextSnapshot,
         channel_id: str = "web",
+        before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
+        after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
+        allow_tools: bool = True,
     ) -> AgentConversationHandle:
         """Own one retained product submission from TurnCommit through dispatch.
 
@@ -999,6 +1009,12 @@ class AgentConversationRuntime:
             )
         context.validate_for(commit)
         self._validate_dispatch_channel(channel_id)
+        if type(allow_tools) is not bool:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AGENT_TOOL_POLICY",
+                "formal Agent tool policy must be a boolean",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         # This side-effect-free construction validates all reservation identity
         # fields before start_turn can mutate CR.
         HarnessRoundBinding(
@@ -1014,6 +1030,7 @@ class AgentConversationRuntime:
             commit=commit,
             context=context,
             channel_id=channel_id,
+            allow_tools=allow_tools,
         )
         product_entry = self._committed_turn_submissions.get(request_id)
         if product_entry is not None:
@@ -1053,6 +1070,9 @@ class AgentConversationRuntime:
                         context=context,
                         channel_id=channel_id,
                         fingerprint=fingerprint,
+                        before_dispatch=before_dispatch,
+                        after_dispatch=after_dispatch,
+                        allow_tools=allow_tools,
                     )
                 else:
                     turn_key = (commit.interaction_id, commit.turn_id)
@@ -1076,6 +1096,9 @@ class AgentConversationRuntime:
                             context=context,
                             channel_id=channel_id,
                             fingerprint=fingerprint,
+                            before_dispatch=before_dispatch,
+                            after_dispatch=after_dispatch,
+                            allow_tools=allow_tools,
                         )
                     except BaseException:
                         self._release_product_identity(claim)
@@ -1185,6 +1208,209 @@ class AgentConversationRuntime:
                     "Task-origin CR write did not reach a provable terminal result",
                     ErrorCode.RESULT_UNKNOWN,
                 )
+
+    async def present_authoritative_text(
+        self,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        text: str,
+        channel_id: str,
+        response_generation: int | None = None,
+        before_publish: Callable[
+            [AuthoritativePresentationHandle], Awaitable[None]
+        ]
+        | None = None,
+    ) -> AuthoritativePresentationHandle:
+        """Publish bounded server truth through the normal presentation owner."""
+
+        self._require_admission()
+        self._validate_turn_commit(commit)
+        HarnessRoundBinding(
+            request_id=request_id,
+            response_id=response_id,
+            correlation_id=correlation_id,
+            commit=commit,
+        )
+        if not isinstance(text, str) or not text.strip():
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AUTHORITATIVE_PRESENTATION",
+                "authoritative presentation text must be non-empty",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        try:
+            content = text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AUTHORITATIVE_PRESENTATION",
+                "authoritative presentation text must be valid UTF-8",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from exc
+        if len(text) > 8_192 or len(content) > 32_768:
+            raise AgentConversationRuntimeViolation(
+                "INVALID_AUTHORITATIVE_PRESENTATION",
+                "authoritative presentation text exceeds its closed bound",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        async with self._identity_claim_lock:
+            loop_snapshot = self._cr.snapshot()
+            snapshot = loop_snapshot.conversation
+            prior_turn = next(
+                (item for item in snapshot.turns if item.turn_id == commit.turn_id),
+                None,
+            )
+            prior_response = next(
+                (
+                    item
+                    for item in snapshot.responses
+                    if item.ref.response_id == response_id
+                ),
+                None,
+            )
+            if prior_turn is not None or prior_response is not None:
+                prior_output = (
+                    None
+                    if prior_response is None
+                    else self._outputs.get(prior_response.ref)
+                )
+                prior_units = (
+                    ()
+                    if prior_response is None
+                    else tuple(
+                        record
+                        for record in loop_snapshot.presentation.records
+                        if record.unit.ref == prior_response.ref
+                        and record.unit.surface is PresentationSurface.TEXT
+                    )
+                )
+                exact_replay = (
+                    prior_turn is not None
+                    and prior_turn.interaction_id == commit.interaction_id
+                    and prior_turn.commit_id == commit.commit_id
+                    and prior_turn.state is TurnState.COMMITTED
+                    and prior_response is not None
+                    and prior_response.turn_id == commit.turn_id
+                    and prior_response.ref.interaction_id == commit.interaction_id
+                    and prior_response.state is ResponseState.TERMINAL
+                    and prior_response.outcome is TerminalOutcome.COMPLETED
+                    and prior_output is not None
+                    and prior_output.request_id == request_id
+                    and prior_output.commit.canonical_bytes()
+                    == commit.canonical_bytes()
+                    and prior_output.channel_id == channel_id
+                    and prior_output.handle is None
+                    and prior_output.terminal_outcome is TerminalOutcome.COMPLETED
+                    and tuple(prior_output.unit_contents.values()) == (content,)
+                    and len(prior_units) == 1
+                    and prior_units[0].unit.content_ref
+                    == f"sha256:{hashlib.sha256(content).hexdigest()}"
+                    and prior_units[0].state
+                    in {PresentationState.ENQUEUED, PresentationState.PRESENTED}
+                )
+                if exact_replay:
+                    self._commits[commit.turn_id] = commit
+                    return AuthoritativePresentationHandle(
+                        request_id=request_id,
+                        round_id=f"authoritative:{request_id}",
+                        response_ref=prior_response.ref,
+                    )
+                raise AgentConversationRuntimeViolation(
+                    "AUTHORITATIVE_PRESENTATION_IDENTITY_CONFLICT",
+                    "authoritative presentation identity is already owned",
+                    ErrorCode.CONFLICT,
+                )
+            claim = self._claim_product_identity(commit, request_id=request_id)
+            response_ref: ResponseRef | None = None
+            try:
+                await self._cr.start_turn(commit.interaction_id, commit.turn_id)
+                accepted, _event = await self._cr.commit_turn(commit)
+                if accepted is not True:
+                    raise AgentConversationRuntimeViolation(
+                        "AUTHORITATIVE_PRESENTATION_COMMIT_REJECTED",
+                        "authoritative presentation turn was not accepted",
+                        ErrorCode.CONFLICT,
+                    )
+                response_ref, _event = await self._cr.accept_response(
+                    commit.turn_id,
+                    response_id,
+                    history_policy=HistorySurfacePolicy.TEXT,
+                    response_generation=response_generation,
+                )
+                await self._cr.transition_response(
+                    response_ref, ResponseState.GENERATING
+                )
+                digest = hashlib.sha256(content).hexdigest()
+                unit = PresentationUnit(
+                    ref=response_ref,
+                    surface=PresentationSurface.TEXT,
+                    unit_id=f"authoritative-final:{request_id.encode('utf-8').hex()}:0",
+                    seq=0,
+                    source_start_utf8=0,
+                    source_end_utf8=len(content),
+                    content_ref=f"sha256:{digest}",
+                )
+                state = _ResponseOutputState(
+                    request_id=request_id,
+                    commit=commit,
+                    channel_id=channel_id,
+                    handle=None,
+                    unit_contents={unit.unit_id: content},
+                    total_utf8=len(content),
+                    usable_finals=1,
+                    terminal_outcome=TerminalOutcome.COMPLETED,
+                )
+                self._outputs[response_ref] = state
+                await self._cr.produce_unit(unit)
+                await self._cr.enqueue_unit(
+                    response_ref, PresentationSurface.TEXT, unit.unit_id
+                )
+                presentation_handle = AuthoritativePresentationHandle(
+                    request_id=request_id,
+                    round_id=f"authoritative:{request_id}",
+                    response_ref=response_ref,
+                )
+                if before_publish is not None:
+                    await before_publish(presentation_handle)
+                event = AgentEvent(
+                    request_id=request_id,
+                    interaction_id=commit.interaction_id,
+                    turn_id=commit.turn_id,
+                    commit_id=commit.commit_id,
+                    seq=0,
+                    event_type="chat.final",
+                    source_provenance="server.authoritative",
+                    text=text,
+                )
+                self._publish(
+                    AgentConversationNotification(
+                        kind="agent.output",
+                        request_id=request_id,
+                        round_id=f"authoritative:{request_id}",
+                        response_ref=response_ref,
+                        agent_event=event,
+                        presentation_unit=unit,
+                    ),
+                    critical_key=("presentation", request_id),
+                )
+                await self._cr.transition_response(
+                    response_ref,
+                    ResponseState.TERMINAL,
+                    outcome=TerminalOutcome.COMPLETED,
+                )
+                self._commits[commit.turn_id] = commit
+                history_task = asyncio.create_task(
+                    self._persist_user_history(commit, channel_id),
+                    name=f"live-voice-authoritative-user-history:{request_id}",
+                )
+                self._history_tasks.add(history_task)
+                history_task.add_done_callback(self._history_tasks.discard)
+                return presentation_handle
+            except BaseException:
+                if response_ref is None:
+                    self._release_product_identity(claim)
+                raise
 
     async def accept_task_progress_notification(
         self,
@@ -1296,6 +1522,9 @@ class AgentConversationRuntime:
         context: FormalContextSnapshot,
         channel_id: str,
         fingerprint: bytes,
+        before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
+        after_dispatch: Callable[[AgentConversationHandle], None] | None,
+        allow_tools: bool,
     ) -> asyncio.Future[_AdmissionOutcome]:
         """Register one preflighted submission while admission fence is held."""
 
@@ -1403,6 +1632,9 @@ class AgentConversationRuntime:
                 commit=commit,
                 context=context,
                 channel_id=channel_id,
+                before_dispatch=before_dispatch,
+                after_dispatch=after_dispatch,
+                allow_tools=allow_tools,
             ),
             name=f"live-voice-product-turn:{request_id}",
         )
@@ -1437,6 +1669,7 @@ class AgentConversationRuntime:
             commit=commit,
             context=context,
             channel_id=channel_id,
+            allow_tools=True,
         )
 
         async with self._identity_claim_lock:
@@ -1850,7 +2083,9 @@ class AgentConversationRuntime:
                         ErrorCode.CONFLICT,
                     )
                 state = self._outputs.get(ack.ref)
-                if state is None or state.handle.response_ref != ack.ref:
+                if state is None or (
+                    state.handle is not None and state.handle.response_ref != ack.ref
+                ):
                     raise AgentConversationRuntimeViolation(
                         "UNKNOWN_AGENT_RESPONSE",
                         "ACK requires the exact active Agent response generation",
@@ -2207,6 +2442,9 @@ class AgentConversationRuntime:
         *,
         context: FormalContextSnapshot,
         channel_id: str,
+        before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
+        after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
+        allow_tools: bool = True,
     ) -> None:
         reservation = entry.harness_reservation
         bridge_reservation = entry.bridge_reservation
@@ -2219,12 +2457,15 @@ class AgentConversationRuntime:
                 reservation.binding.response_id,
                 history_policy=HistorySurfacePolicy.TEXT,
             )
+            if before_dispatch is not None:
+                await before_dispatch(response_ref, reservation.round_id)
             round_handle = self._harness.commit_round(
                 reservation,
                 response_ref=response_ref,
                 context=context,
                 facade=facade,
                 channel_id=channel_id,
+                allow_tools=allow_tools,
             )
             adapter = JiuWenSwarmAgentAdapter(round_handle)
             submission = self._bridge.commit_dispatch(
@@ -2238,6 +2479,12 @@ class AgentConversationRuntime:
                 response_ref=response_ref,
                 completion=submission.completion,
             )
+            if after_dispatch is not None:
+                # No await occurs between scheduling the Harness/Bridge work
+                # and this callback.  The unified owner can therefore persist
+                # the exact accepted control result before Agent/Tool work gets
+                # an event-loop turn, closing its false-success checkpoint gap.
+                after_dispatch(handle)
             self._handles[handle.request_id] = handle
             self._round_handles[handle.round_id] = round_handle
             self._outputs[handle.response_ref] = _ResponseOutputState(
@@ -2255,6 +2502,23 @@ class AgentConversationRuntime:
             history_task.add_done_callback(self._history_tasks.discard)
             entry.outcome.set_result(_AdmissionOutcome(handle=handle))
         except BaseException as error:  # noqa: BLE001
+            # ``after_dispatch`` is the durable acceptance seam for unified
+            # input.  It runs synchronously before this coroutine yields, so a
+            # failure can still prove that neither the queued Bridge delivery
+            # nor the scheduled Harness task has started.  Revoke both exact
+            # commits before falling back to ordinary reservation aborts.
+            try:
+                self._bridge.rollback_undelivered_dispatch(
+                    bridge_reservation, reason="composition_checkpoint_failed"
+                )
+            except (AgentBridgeRuntimeViolation, RuntimeError):
+                pass
+            try:
+                self._harness.rollback_unstarted_round(
+                    reservation, reason="composition_checkpoint_failed"
+                )
+            except (HarnessRoundViolation, RuntimeError):
+                pass
             try:
                 self._bridge.abort_dispatch(
                     bridge_reservation, reason="composition_commit_failed"
@@ -2286,6 +2550,9 @@ class AgentConversationRuntime:
         commit: TurnCommit,
         context: FormalContextSnapshot,
         channel_id: str,
+        before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None,
+        after_dispatch: Callable[[AgentConversationHandle], None] | None,
+        allow_tools: bool,
     ) -> None:
         try:
             await self._commit_admitted_turn(
@@ -2296,6 +2563,9 @@ class AgentConversationRuntime:
                 entry,
                 context=context,
                 channel_id=channel_id,
+                before_dispatch=before_dispatch,
+                after_dispatch=after_dispatch,
+                allow_tools=allow_tools,
             )
         except BaseException as error:  # noqa: BLE001 - retained outcome truth
             try:
@@ -2972,6 +3242,7 @@ class AgentConversationRuntime:
         commit: TurnCommit,
         context: FormalContextSnapshot,
         channel_id: str,
+        allow_tools: bool,
     ) -> bytes:
         return canonical_json_bytes(
             {
@@ -2987,5 +3258,6 @@ class AgentConversationRuntime:
                     for entry in context.entries
                 ],
                 "channel_id": channel_id,
+                "allow_tools": allow_tools,
             }
         )

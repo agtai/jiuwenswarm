@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import json
 import os
@@ -121,6 +122,40 @@ class _DirectProjectExecutor:
                     payload={"event_type": "chat.final", "content": "done"},
                     is_complete=True,
                 )
+        finally:
+            self.finished.set()
+
+
+class _DemoItineraryProjectExecutor(_DirectProjectExecutor):
+    def __init__(self, project: Path, *, extra_change: bool = False) -> None:
+        super().__init__(project)
+        self.extra_change = extra_change
+
+    async def process_background_code_task_stream(self, request):
+        self.requests.append(request)
+        self.started.set()
+        project = Path(request.params["project_dir"]).resolve()
+        try:
+            itinerary = (
+                "# 三天行程\n\n"
+                "## 第一天\n\n20:00–21:30 自由活动。\n\n"
+                "## 第二天\n\n08:30 参观博物馆。\n\n"
+                "## 第三天\n\n10:00 城市步行。\n"
+            )
+            (project / "itinerary.md").write_text(itinerary, encoding="utf-8")
+            if self.extra_change:
+                (project / "outside-fixture.txt").write_text(
+                    "forbidden\n", encoding="utf-8"
+                )
+            yield AgentResponseChunk(
+                request.request_id,
+                request.channel_id,
+                payload={
+                    "event_type": "chat.final",
+                    "content": "第二天最早的固定安排是 08:30 参观博物馆。",
+                },
+                is_complete=True,
+            )
         finally:
             self.finished.set()
 
@@ -862,6 +897,15 @@ def test_shutdown_interruption_is_not_projected_as_user_cancellation() -> None:
     assert outcome is TerminalOutcome.INTERRUPTED
 
 
+def test_chat_final_with_nul_is_never_publishable_result_content() -> None:
+    assert (
+        project_code_executor._bounded_chat_final(
+            {"event_type": "chat.final", "content": "unsafe\x00result"}
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carrier(
     tmp_path: Path,
@@ -884,6 +928,14 @@ async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carr
     assert isinstance(terminal, ExecutorDeliveryResult)
     assert [event.source_seq for event in terminal.observations] == [2]
     assert terminal.observations[0].attempt_outcome is TerminalOutcome.COMPLETED
+    assert terminal.observations[0].result_text == "done"
+    assert [
+        artifact.relative_path
+        for artifact in terminal.observations[0].result_artifacts
+    ] == ["result.txt"]
+    assert terminal.observations[0].result_artifacts[0].sha256 == hashlib.sha256(
+        b"done"
+    ).hexdigest()
     assert resolver.calls == [True]
     assert len(executor.requests) == 1
     request = executor.requests[0]
@@ -906,6 +958,93 @@ async def test_direct_d0_executor_persists_exact_lifecycle_without_schedule_carr
         not Path(path).resolve().is_relative_to(project.resolve())
         for path in governance["application_paths"].values()
     )
+
+
+@pytest.mark.asyncio
+async def test_demo_itinerary_fixture_constrains_real_direct_executor_and_seals_fact(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "isolated-itinerary-project"
+    _git_project(project)
+    executor = _DemoItineraryProjectExecutor(project)
+    spec = replace(
+        _spec(project),
+        name="Three-day itinerary",
+        instruction="帮我根据这些要求制定三天的行程。",
+    )
+    item = replace(_item(project), spec=spec)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        demo_itinerary_fixture_enabled=True,
+    )
+
+    await adapter.dispatch(item)
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(replace(task, spec=spec), attempt)
+
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
+    assert terminal.observations[-1].result_text == (
+        "第二天最早的固定安排是 08:30 参观博物馆。"
+    )
+    assert len(terminal.observations[-1].result_artifacts) == 1
+    artifact = terminal.observations[-1].result_artifacts[0]
+    assert artifact.relative_path == "itinerary.md"
+    itinerary = (project / "itinerary.md").read_bytes()
+    assert artifact.sha256 == hashlib.sha256(itinerary).hexdigest()
+    assert "08:30 参观博物馆" in itinerary.decode("utf-8")
+    query = executor.requests[0].params["query"]
+    assert "exactly one project artifact named itinerary.md" in query
+    assert "do not change any other file" in query
+    assert "<itinerary_requirements>" in query
+    assert spec.instruction in query
+    assert _git(project, "status", "--porcelain") == "?? itinerary.md"
+
+
+@pytest.mark.asyncio
+async def test_demo_itinerary_fixture_rejects_extra_artifact_without_applying_patch(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "isolated-itinerary-project"
+    _git_project(project)
+    executor = _DemoItineraryProjectExecutor(project, extra_change=True)
+    spec = replace(
+        _spec(project),
+        name="Three-day itinerary",
+        instruction="帮我根据这些要求制定三天的行程。",
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        demo_itinerary_fixture_enabled=True,
+    )
+
+    await adapter.dispatch(replace(_item(project), spec=spec))
+    await asyncio.wait_for(executor.finished.wait(), timeout=2)
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(replace(task, spec=spec), attempt)
+
+    assert terminal.observations[-1].attempt_outcome is TerminalOutcome.FAILED
+    record = adapter._journal.get("attempt-1")
+    assert record is not None
+    assert record.error == "DEMO_ITINERARY_FIXTURE_CONTRACT_VIOLATION"
+    assert not (project / "itinerary.md").exists()
+    assert not (project / "outside-fixture.txt").exists()
+    assert _git(project, "status", "--porcelain") == ""
+
+
+def test_demo_itinerary_fixture_flag_requires_exact_boolean(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    with pytest.raises(ValueError, match="must be a boolean"):
+        DirectProjectCodeExecutorAdapter(
+            _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+            tmp_path / "p3.sqlite3",
+            demo_itinerary_fixture_enabled=1,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.asyncio
@@ -1009,6 +1148,12 @@ async def test_direct_d0_accepts_exact_patch_when_autocrlf_changes_raw_bytes(
     assert isinstance(terminal, ExecutorDeliveryResult)
     assert terminal.observations[-1].attempt_outcome is TerminalOutcome.COMPLETED
     assert readme.read_bytes() == b"baseline\r\ncompleted\r\n"
+    assert terminal.observations[-1].result_artifacts == (
+        project_code_executor.TaskResultArtifact(
+            relative_path="README.md",
+            sha256=hashlib.sha256(readme.read_bytes()).hexdigest(),
+        ),
+    )
     record = adapter._journal.get("attempt-1")
     assert record is not None
     assert record.expected_tree is not None
@@ -1935,6 +2080,71 @@ async def test_close_is_bounded_and_retains_cleanup_while_patch_is_applying(
     assert adapter._running == {}
 
 
+@pytest.mark.asyncio
+async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "isolated-itinerary-project"
+    _git_project(project)
+    entered = Event()
+    release = Event()
+    real_apply = project_code_executor._apply_attempt_patch
+
+    def blocked_apply(*args, **kwargs):
+        entered.set()
+        assert release.wait(2)
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(project_code_executor, "_apply_attempt_patch", blocked_apply)
+    executor = _DemoItineraryProjectExecutor(project)
+    spec = replace(
+        _spec(project),
+        name="Three-day itinerary",
+        instruction="帮我根据这些要求制定三天的行程。",
+    )
+    dispatch_item = replace(_item(project), spec=spec)
+    adapter = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, executor)),
+        tmp_path / "p3.sqlite3",
+        heartbeat_interval=0.005,
+        cancel_timeout=0.01,
+        demo_itinerary_fixture_enabled=True,
+    )
+    delivered = await adapter.dispatch(dispatch_item)
+    assert await asyncio.to_thread(entered.wait, 5)
+    cancel_item = replace(
+        _item(project, kind=OutboxKind.ATTEMPT_CANCEL, source_seq=1),
+        spec=spec,
+        executor_ref=delivered.executor_ref,
+    )
+
+    with pytest.raises(FormalTaskViolation) as pending:
+        await adapter.cancel(cancel_item)
+    assert pending.value.reason == "EXECUTOR_CANCEL_PENDING"
+    await asyncio.sleep(0.03)
+    record = adapter._journal.get("attempt-1")
+    assert record is not None
+    assert record.raw_status == "applying"
+    assert "attempt-1" in adapter._running
+
+    release.set()
+    await _wait_direct_settled(adapter)
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(replace(task, spec=spec), attempt)
+    observation = terminal.observations[-1]
+    assert observation.attempt_outcome is TerminalOutcome.COMPLETED
+    assert observation.result_text == (
+        "第二天最早的固定安排是 08:30 参观博物馆。"
+    )
+    assert len(observation.result_artifacts) == 1
+    artifact = observation.result_artifacts[0]
+    assert artifact.relative_path == "itinerary.md"
+    itinerary = (project / "itinerary.md").read_bytes()
+    assert artifact.sha256 == hashlib.sha256(itinerary).hexdigest()
+    assert adapter._running == {}
+
+
 @pytest.mark.parametrize("field", ["cancel_timeout", "close_timeout"])
 @pytest.mark.parametrize("value", [False, 0, float("inf"), 5.01])
 def test_direct_executor_cleanup_timeouts_are_closed_and_bounded(
@@ -2843,12 +3053,20 @@ def test_direct_executor_restart_classifies_atomic_apply_crash_window(
     readme = project / "README.md"
     readme.write_text("expected change\n", encoding="utf-8")
     expected_content = project_code_executor._project_content_fingerprint(project)
+    expected_artifact_hash = hashlib.sha256(readme.read_bytes()).hexdigest()
     readme.write_text("baseline\n", encoding="utf-8")
     reserved, _ = journal.reserve_completion(
         item.attempt_id,
         owner_id="dead-process",
         expected_tree=expected_content,
         now="2026-08-07T10:00:00Z",
+        result_text="generated result",
+        result_artifacts=(
+            project_code_executor.TaskResultArtifact(
+                relative_path="README.md",
+                sha256=expected_artifact_hash,
+            ),
+        ),
     )
     assert reserved is True
     if root_state == "applied":
@@ -2863,6 +3081,13 @@ def test_direct_executor_restart_classifies_atomic_apply_crash_window(
     assert recovered.outcome is expected_outcome
     assert recovered.raw_status == expected_status
     assert recovered.error == expected_error
+    assert recovered.result_text == "generated result"
+    assert json.loads(recovered.artifacts_json or "[]") == [
+        {
+            "relative_path": "README.md",
+            "sha256": expected_artifact_hash,
+        }
+    ]
 
 
 def test_direct_executor_restart_recognizes_exact_autocrlf_patch(

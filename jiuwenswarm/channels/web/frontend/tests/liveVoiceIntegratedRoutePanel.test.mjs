@@ -266,11 +266,11 @@ test('route panel renders three truthful predecessor classes and the non-success
   assert.equal(html.includes('ui-route-test'), true);
   assert.equal(html.includes('compat.browser-speech'), true);
   assert.equal(html.includes('browser-speech'), true);
-  assert.equal(html.includes('P2 text route below is formal only'), true);
-  assert.equal(html.includes('Speech'), true);
-  assert.equal(html.includes('physical audio'), true);
-  assert.equal(html.includes('task completion'), true);
-  assert.equal(html.includes('Gate acceptance'), true);
+  assert.equal(html.includes('aria-hidden="true"'), true);
+  assert.equal(html.includes('hidden=""'), true);
+  assert.equal(html.includes('Hands-free Live Voice submits authoritative final speech once'), true);
+  assert.equal(html.includes('routes dialogue and the current background task on the server'), true);
+  assert.equal(html.includes('resumes listening after presentation'), true);
 });
 
 test('route panel renders only a validated authenticated text progress fact', async () => {
@@ -584,6 +584,21 @@ test('P2 notification classification surfaces failures and treats transport keep
     }),
     { kind: 'continue' },
   );
+  const replayedPresentation = classifyProductP2Notification(
+    {
+      kind: 'agent.output',
+      response: {
+        interaction_id: 'interaction-1',
+        response_id: 'response-stable',
+        response_generation: 7,
+      },
+      agent_event: { event_type: 'chat.final', text: '已开始处理。' },
+      presentation_unit: { surface: 'text', unit_id: 'unit-stable', seq: 0 },
+    },
+    true,
+  );
+  assert.equal(replayedPresentation.kind, 'presentation');
+  assert.equal(replayedPresentation.replayed, true);
   assert.deepEqual(
     classifyProductP2Notification({
       kind: 'agent.error',
@@ -1273,19 +1288,20 @@ test('ChatPanel retains one integrated route owner across the first-message layo
 test('actual Live Voice product entry selects the formal P1 owner while compatibility fallback remains flag-off only', async () => {
   const source = await readFile(new URL('../src/components/ChatPanel/index.tsx', import.meta.url), 'utf8');
   const barSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceDemoBar.tsx', import.meta.url), 'utf8');
+  const formalProps = source.slice(
+    source.indexOf('const formalLiveVoiceDemoProps'),
+    source.indexOf('const liveVoiceDemoProps'),
+  );
 
   assert.match(source, /FEATURE_LIVE_VOICE_INTEGRATED_WEB\s*&&\s*FEATURE_LIVE_VOICE_INTEGRATED_P1/);
   assert.match(source, /const liveVoiceDemoProps = formalProductVoiceEnabled \? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps/);
   assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
-  assert.match(source, /productVoiceControlRef\.current\?\.stop\(\)/);
-  assert.match(source, /productVoiceControlRef\.current\?\.submitCommand\(\)/);
-  assert.match(source, /onRouteChange:\s*route\s*=>\s*productVoiceControlRef\.current\?\.setCommandRoute\(route\)/);
-  assert.match(source, /onTaskOperationChange:\s*operation\s*=>\s*productVoiceControlRef\.current\?\.setTaskOperation\(operation\)/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
-  assert.match(source, /liveVoice\.commandCenter\.routeLabel/);
+  assert.match(formalProps, /handsFree:\s*true/);
+  assert.doesNotMatch(formalProps, /commandCenter:|editableTranscript:|setCommandRoute|setTaskOperation|setTaskId|submitCommand/);
   assert.match(barSource, /data-testid="live-voice-command-center"/);
   assert.match(barSource, /data-testid="live-voice-command-task-confirmation"/);
-  assert.match(barSource, /editableTranscript/);
+  assert.match(barSource, /!handsFree/);
 });
 
 test('integrated route diagnostics remain vertically reachable in a bounded panel', async () => {

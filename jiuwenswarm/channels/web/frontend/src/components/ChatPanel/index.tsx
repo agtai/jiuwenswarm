@@ -1303,44 +1303,7 @@ export function ChatPanel({
         formalVoiceVisualState = 'idle';
     }
   }
-  const formalP1Status = productVoiceState?.p1_status ?? 'idle';
-  const formalVoiceCanStop = formalP1Status === 'capturing' || formalP1Status === 'playing';
-  const formalTaskTransportBusy = Boolean(productVoiceState?.task_controls_locked && !productVoiceState.task_confirmation_form);
-  const formalVoiceBusy =
-    formalP1Status === 'starting' ||
-    formalP1Status === 'recognizing' ||
-    productVoiceState?.confirmation_phase != null ||
-    ['submitting', 'waiting', 'presented'].includes(productVoiceState?.text_status ?? 'idle') ||
-    Boolean(productVoiceState?.operation_retained) ||
-    formalTaskTransportBusy;
-  const formalStatusLabel =
-    productVoiceState?.task_confirmation_form
-      ? t('liveVoice.commandCenter.confirmationStatus')
-      : productVoiceState?.text_status === 'submitting' || productVoiceState?.text_status === 'waiting'
-        ? t('liveVoice.formal.status.waiting')
-        : productVoiceState?.task_status === 'submitting'
-          ? t('liveVoice.commandCenter.taskWorking')
-          : t(`liveVoice.formal.status.${formalP1Status}`);
-  const formalPrimaryActionLabel =
-    formalP1Status === 'capturing'
-      ? t('liveVoice.formal.actions.stopRecognize')
-      : formalP1Status === 'playing'
-        ? t('liveVoice.formal.actions.stopPlayback')
-        : formalP1Status === 'recognized' && Boolean(productVoiceState?.input.trim())
-          ? productVoiceState?.command_route === 'task'
-            ? t('liveVoice.commandCenter.submitTask')
-            : t('liveVoice.commandCenter.sendAgent')
-          : productVoiceState?.task_confirmation_form
-            ? t('liveVoice.commandCenter.speakConfirmation')
-          : formalVoiceBusy
-            ? t('liveVoice.formal.actions.working')
-            : t('liveVoice.formal.actions.start');
-  const formalTaskTargetMissing =
-    productVoiceState?.command_route === 'task' &&
-    productVoiceState.task_operation !== 'task.create' &&
-    !productVoiceState.task_id.trim() &&
-    formalP1Status === 'recognized';
-  const formalCommandControlsDisabled = formalVoiceCanStop || formalVoiceBusy;
+  const formalStatusLabel = t(`liveVoice.status.${formalVoiceVisualState}`);
   const formalLiveVoiceDemoProps: LiveVoiceDemoBarProps = {
     active: productVoiceActive,
     available: Boolean(productVoiceState?.available),
@@ -1348,37 +1311,8 @@ export function ChatPanel({
     interimTranscript: '',
     committedTranscript: productVoiceState?.input || productVoiceState?.output || '',
     errorMessage: formalVoiceVisualState === 'error' ? (productVoiceState?.p1_reason ?? '') : '',
-    routeLabel: t('liveVoice.commandCenter.routeLabel'),
     statusLabel: formalStatusLabel,
-    primaryActionLabel: formalPrimaryActionLabel,
-    primaryActionDisabled: (!formalVoiceCanStop && formalVoiceBusy) || formalTaskTargetMissing,
-    ...(formalP1Status === 'recognized' && productVoiceState?.text_status === 'idle' && Boolean(productVoiceState.input.trim())
-      ? {
-          editableTranscript: productVoiceState?.input ?? '',
-          onTranscriptChange: (value: string) => productVoiceControlRef.current?.updateInput(value),
-        }
-      : {}),
-    commandCenter: productVoiceState
-      ? {
-          route: productVoiceState.command_route,
-          taskAvailable: productVoiceState.task_available,
-          taskOperation: productVoiceState.task_operation,
-          taskId: productVoiceState.task_id,
-          taskStatus: productVoiceState.task_status,
-          taskReason: productVoiceState.task_reason,
-          taskResult: productVoiceState.task_result,
-          taskConfirmationForm: productVoiceState.task_confirmation_form,
-          taskProgressTaskId: productVoiceState.task_progress_task_id,
-          taskProgressState: productVoiceState.task_progress_state,
-          taskProgressDeliveryMode: productVoiceState.task_progress_delivery_mode,
-          controlsDisabled: formalCommandControlsDisabled,
-          taskControlsLocked: productVoiceState.task_controls_locked,
-          onRouteChange: route => productVoiceControlRef.current?.setCommandRoute(route),
-          onTaskOperationChange: operation => productVoiceControlRef.current?.setTaskOperation(operation),
-          onTaskIdChange: taskId => productVoiceControlRef.current?.setTaskId(taskId),
-          onCancelTaskConfirmation: () => productVoiceControlRef.current?.cancelTaskConfirmation(),
-        }
-      : undefined,
+    handsFree: true,
     onEnable: () => {
       setProductVoiceActive(true);
       void productVoiceControlRef.current?.start();
@@ -1388,13 +1322,7 @@ export function ChatPanel({
       void productVoiceControlRef.current?.close();
     },
     onPrimaryAction: () => {
-      if (formalVoiceCanStop) {
-        void productVoiceControlRef.current?.stop();
-      } else if (formalP1Status === 'recognized' && productVoiceState?.input.trim()) {
-        productVoiceControlRef.current?.submitCommand();
-      } else {
-        void productVoiceControlRef.current?.start();
-      }
+      // Hands-free mode has no primary control after the first enable click.
     },
   };
   const liveVoiceDemoProps = formalProductVoiceEnabled ? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps;

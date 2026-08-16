@@ -61,6 +61,9 @@ SPEECH_API_KEY_ENV = "LIVE_VOICE_SPEECH_API_KEY"
 SPEECH_STT_MODEL_ENV = "LIVE_VOICE_SPEECH_STT_MODEL"
 SPEECH_TTS_MODEL_ENV = "LIVE_VOICE_SPEECH_TTS_MODEL"
 SPEECH_TTS_VOICE_ENV = "LIVE_VOICE_SPEECH_TTS_VOICE"
+PRODUCT_DEMO_POLICY_BYPASS_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED"
+)
 
 RECOGNIZE_OPERATION = "speech.recognize.batch"
 SYNTHESIZE_OPERATION = "speech.synthesize.batch"
@@ -1354,6 +1357,7 @@ class FormalBatchSpeechService:
         monotonic: Callable[[], float] = time.monotonic,
         max_completed_operations: int = MAX_COMPLETED_OPERATIONS,
         max_identity_tombstones: int = MAX_IDENTITY_TOMBSTONES,
+        trusted_demo_critical_bypass: bool | None = None,
     ) -> None:
         self._provider = provider
         self._provider_capability = provider.capability()
@@ -1379,6 +1383,13 @@ class FormalBatchSpeechService:
         self._monotonic = monotonic
         self._max_completed = max(1, max_completed_operations)
         self._max_identity_tombstones = max(1, max_identity_tombstones)
+        self._trusted_demo_critical_bypass = (
+            _enabled(os.getenv(PRODUCT_DEMO_POLICY_BYPASS_ENV))
+            if trusted_demo_critical_bypass is None
+            else trusted_demo_critical_bypass
+        )
+        if type(self._trusted_demo_critical_bypass) is not bool:
+            raise TypeError("trusted Demo critical bypass must be a boolean")
         self._lock = asyncio.Lock()
         self._closed = False
         self._close_task: asyncio.Task[dict[str, object]] | None = None
@@ -1431,7 +1442,16 @@ class FormalBatchSpeechService:
             raise ValueError("voice commit receipt binding is invalid")
         now = self._monotonic()
         critical_tokens = CriticalTokenPolicy().scan(str(text))
-        if critical_tokens and critical_confirmation is not True:
+        trusted_demo_bypass = (
+            bool(critical_tokens)
+            and critical_confirmation is not True
+            and self._trusted_demo_critical_bypass
+        )
+        if (
+            critical_tokens
+            and critical_confirmation is not True
+            and not trusted_demo_bypass
+        ):
             raise ValueError("critical speech tokens require explicit confirmation")
         async with self._lock:
             self._prune_voice_commit_receipts_locked(now)
@@ -1472,7 +1492,13 @@ class FormalBatchSpeechService:
                 "turn_id": binding[3],
                 "commit_id": binding[4],
                 "text_sha256": hashlib.sha256(binding[5].encode("utf-8")).hexdigest(),
-                "critical_policy": "confirmed" if critical_tokens else "eligible",
+                "critical_policy": (
+                    "trusted_demo_bypass"
+                    if trusted_demo_bypass
+                    else "confirmed"
+                    if critical_tokens
+                    else "eligible"
+                ),
             }
 
     async def _issue_voice_commit_receipt(

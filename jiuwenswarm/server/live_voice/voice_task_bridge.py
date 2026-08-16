@@ -40,6 +40,49 @@ class TaskIntentDisposition(StrEnum):
     REJECTED = "rejected"
 
 
+class UnifiedCommittedInputRoute(StrEnum):
+    """Closed product routes for one committed hands-free voice turn."""
+
+    DIALOGUE = "dialogue"
+    BACKGROUND_CREATE = "background.create"
+    BACKGROUND_QUERY = "background.query"
+    BACKGROUND_STATUS = "background.status"
+    BACKGROUND_CANCEL = "background.cancel"
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentBackgroundTaskContext:
+    """Store-derived current-task identity available to semantic resolution.
+
+    The short-lived P2 activation is deliberately absent.  Callers may only
+    construct this value after resolving the subject/project/Session binding
+    from the authoritative Task Store.
+    """
+
+    task_id: str
+    name: str
+    state: str
+    terminal: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedUnifiedCommittedInput:
+    """Content-bound semantic route with an optional Store-derived target."""
+
+    route: UnifiedCommittedInputRoute
+    reason: str
+    provider: str
+    implementation_class: str
+    resolution_id: str
+    commit_sha256: str
+    current_task_sha256: str | None
+    task_id: str | None = None
+    name: str | None = None
+    instruction: str | None = None
+    source_span: TaskIntentSourceSpan | None = None
+    target_binding: str | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class TaskIntentSourceSpan:
     """One exact Python-string span into the authoritative TurnCommit text."""
@@ -73,6 +116,17 @@ class CommittedTaskIntentResolverPort(Protocol):
     """Provider-neutral resolver seam; implementations receive only a commit."""
 
     def resolve(self, commit: TurnCommit) -> ResolvedTaskIntent: ...
+
+
+@runtime_checkable
+class UnifiedCommittedInputResolverPort(Protocol):
+    """Provider-neutral resolver for the five closed hands-free routes."""
+
+    def resolve_unified(
+        self,
+        commit: TurnCommit,
+        current_task: CurrentBackgroundTaskContext | None,
+    ) -> ResolvedUnifiedCommittedInput: ...
 
 
 _TASK_ID = r"[A-Za-z0-9][A-Za-z0-9._-]{2,127}"
@@ -115,6 +169,56 @@ def _resolution_identity(
         "requires_confirmation": requires_confirmation,
         "confirmation_token": confirmation_token,
         "reason": reason,
+    }
+
+
+def _current_task_identity(
+    current_task: CurrentBackgroundTaskContext | None,
+) -> str | None:
+    if current_task is None:
+        return None
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "task_id": current_task.task_id,
+                "name": current_task.name,
+                "state": current_task.state,
+                "terminal": current_task.terminal,
+            }
+        )
+    ).hexdigest()
+
+
+def _unified_resolution_identity(
+    *,
+    provider: str,
+    implementation_class: str,
+    commit_sha256: str,
+    current_task_sha256: str | None,
+    route: UnifiedCommittedInputRoute,
+    reason: str,
+    task_id: str | None,
+    name: str | None,
+    instruction: str | None,
+    source_span: TaskIntentSourceSpan | None,
+    target_binding: str | None,
+) -> dict[str, object]:
+    return {
+        "provider": provider,
+        "implementation_class": implementation_class,
+        "commit_sha256": commit_sha256,
+        "current_task_sha256": current_task_sha256,
+        "route": route.value,
+        "reason": reason,
+        "task_id": task_id,
+        "name": name,
+        "instruction": instruction,
+        "source_span": (
+            None
+            if source_span is None
+            else {"start": source_span.start, "end": source_span.end}
+        ),
+        "target_binding": target_binding,
     }
 
 
@@ -176,6 +280,93 @@ class BoundedAlphaTaskIntentResolver:
     _KNOWN_UNSUPPORTED_FULL_P3 = re.compile(
         rf"^\s*(?:(?:pause|resume)\s+task\s+{_TASK_ID}|(?:暂停|恢复)任务\s+{_TASK_ID})\s*$",
         re.I,
+    )
+
+    # The unified grammar is deliberately full-utterance and ordered.  In
+    # particular, negative cancellation is resolved before affirmative cancel;
+    # no ``substring in text`` decision can produce a Task side effect.
+    _UNIFIED_NEGATED_CANCEL_QUERY = (
+        re.compile(
+            r"^\s*(?:不用|不要|别)\s*(?:停止|取消|终止)(?:刚才的|当前的|这个)?"
+            r"(?:后台任务|后台处理|行程规划|任务|行程)?\s*[，,、;；]\s*"
+            r"(?P<query>(?:请)?告诉我.+?)\s*[。.!！?？]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            r"^\s*(?:do\s+not|don't)\s+(?:stop|cancel)\s+(?:the\s+)?"
+            r"(?:current\s+)?background\s+task\s*[,;]\s*"
+            r"(?P<query>(?:please\s+)?tell\s+me.+?)\s*[.!?]?\s*$",
+            re.I | re.S,
+        ),
+    )
+    _UNIFIED_NEGATED_CANCEL_KEEP = (
+        re.compile(
+            r"^\s*(?:不用|不要|别)\s*(?:停止|取消|终止)(?:后台任务|后台处理|任务)?"
+            r"\s*[，,、;；]?\s*(?:继续(?:做|处理|执行)?|保持运行)(?:吧)?\s*[。.!！]?\s*$"
+        ),
+        re.compile(
+            r"^\s*(?:do\s+not|don't)\s+(?:stop|cancel)(?:\s+the)?(?:\s+background)?"
+            r"(?:\s+task)?\s*[,;]?\s*(?:keep\s+going|continue)\s*[.!]?\s*$",
+            re.I,
+        ),
+    )
+    _UNIFIED_CANCEL = (
+        re.compile(
+            r"^\s*(?:请)?(?:停止|取消|终止)(?:一下)?(?:刚才的|当前的|这个)?"
+            r"(?:后台任务|后台处理|行程规划|任务|行程)(?:吧)?\s*[。.!！]?\s*$"
+        ),
+        re.compile(
+            r"^\s*(?:please\s+)?(?:stop|cancel)(?:\s+the)?(?:\s+current|\s+previous)?"
+            r"\s+(?:background\s+task|trip\s+planning|task)\s*[.!]?\s*$",
+            re.I,
+        ),
+    )
+    _UNIFIED_STATUS = (
+        re.compile(
+            r"^\s*(?:后台|后台任务|刚才的任务|当前任务|这个任务|这个行程|行程规划)"
+            r"(?:现在)?(?:做到哪(?:里|儿)?了|进度(?:怎么样|如何|是多少)?|什么状态)\s*[？?。.]?\s*$"
+        ),
+        re.compile(
+            r"^\s*(?:how\s+far\s+is|what(?:'s|\s+is)\s+the\s+(?:progress|status)\s+of)"
+            r"(?:\s+the)?(?:\s+current)?\s+(?:background\s+task|task|trip)\s*[?]?\s*$",
+            re.I,
+        ),
+    )
+    _UNIFIED_EXPLICIT_CREATE = (
+        re.compile(
+            r"^\s*(?:请)?(?:后台帮我|在后台帮我|后台替我|开始后台处理|开始后台执行)"
+            r"(?P<instruction>.+?)\s*[。.!！]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            r"^\s*(?:please\s+)?(?:handle|process|work\s+on)\s+(?:this\s+)?in\s+the\s+background"
+            r"\s*[:,-]?\s*(?P<instruction>.+?)\s*[.!]?\s*$",
+            re.I | re.S,
+        ),
+    )
+    _UNIFIED_TRIP_CREATE = (
+        re.compile(
+            r"^\s*(?P<instruction>(?:请)?帮我根据.+?制定(?:[一二三四五六七八九十两\d]+)天(?:的)?行程(?:规划)?)"
+            r"\s*[。.!！]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            r"^\s*(?P<instruction>(?:please\s+)?(?:make|plan|create).+?"
+            r"(?:three|3)[-\s]?day\s+(?:trip|itinerary).*)\s*[.!]?\s*$",
+            re.I | re.S,
+        ),
+    )
+    _UNIFIED_CONTEXT_QUERY = (
+        re.compile(
+            r"^\s*(?:(?:请)?告诉我)?(?:第[一二三四五六七八九十两\d]+天|刚才的任务|"
+            r"当前任务|这个行程|这次行程|行程里).+?[？?。.]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            r"^\s*(?:(?:please\s+)?tell\s+me\s+)?(?:day\s+\d+|the\s+current\s+task|"
+            r"this\s+trip|the\s+itinerary).+?[?]?\s*$",
+            re.I | re.S,
+        ),
     )
 
     def resolve(self, commit: TurnCommit) -> ResolvedTaskIntent:
@@ -276,6 +467,183 @@ class BoundedAlphaTaskIntentResolver:
                 if self._TASK_WORD.search(text)
                 else "UNSUPPORTED_TASK_INTENT"
             ),
+        )
+
+    def resolve_unified(
+        self,
+        commit: TurnCommit,
+        current_task: CurrentBackgroundTaskContext | None,
+    ) -> ResolvedUnifiedCommittedInput:
+        if not isinstance(commit, TurnCommit):
+            raise VoiceTaskBridgeViolation(
+                "COMMITTED_ORIGIN_REQUIRED",
+                "unified voice routing requires an authoritative TurnCommit",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if current_task is not None and (
+            type(current_task.task_id) is not str
+            or re.fullmatch(_TASK_ID, current_task.task_id) is None
+            or type(current_task.name) is not str
+            or not current_task.name.strip()
+            or len(current_task.name) > 256
+            or type(current_task.state) is not str
+            or not current_task.state.strip()
+            or type(current_task.terminal) is not bool
+        ):
+            raise VoiceTaskBridgeViolation(
+                "INVALID_CURRENT_BACKGROUND_TASK",
+                "current background task context is invalid",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if len(commit.text) > self.max_commit_chars:
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.DIALOGUE,
+                "UNIFIED_INPUT_TOO_LARGE",
+            )
+
+        for pattern in self._UNIFIED_NEGATED_CANCEL_QUERY:
+            match = pattern.fullmatch(commit.text)
+            if match is not None:
+                return self._unified_result(
+                    commit,
+                    current_task,
+                    UnifiedCommittedInputRoute.BACKGROUND_QUERY,
+                    "NEGATED_CANCEL_CONTEXT_QUERY",
+                    task_id=None if current_task is None else current_task.task_id,
+                    source_span=TaskIntentSourceSpan(*match.span("query")),
+                    target_binding=(
+                        None if current_task is None else "current_background_task"
+                    ),
+                )
+        if any(
+            pattern.fullmatch(commit.text) is not None
+            for pattern in self._UNIFIED_NEGATED_CANCEL_KEEP
+        ):
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.DIALOGUE,
+                "NEGATED_CANCEL_KEEP_RUNNING",
+            )
+        if any(pattern.fullmatch(commit.text) is not None for pattern in self._UNIFIED_CANCEL):
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
+                "CURRENT_BACKGROUND_CANCEL_RESOLVED",
+                task_id=None if current_task is None else current_task.task_id,
+                source_span=TaskIntentSourceSpan(0, len(commit.text)),
+                target_binding=(
+                    None if current_task is None else "current_background_task"
+                ),
+            )
+        if any(pattern.fullmatch(commit.text) is not None for pattern in self._UNIFIED_STATUS):
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+                "CURRENT_BACKGROUND_STATUS_RESOLVED",
+                task_id=None if current_task is None else current_task.task_id,
+                source_span=TaskIntentSourceSpan(0, len(commit.text)),
+                target_binding=(
+                    None if current_task is None else "current_background_task"
+                ),
+            )
+        for patterns, name in (
+            (self._UNIFIED_EXPLICIT_CREATE, "Background voice task"),
+            (self._UNIFIED_TRIP_CREATE, "Three-day itinerary"),
+        ):
+            for pattern in patterns:
+                match = pattern.fullmatch(commit.text)
+                if match is None:
+                    continue
+                instruction = match.group("instruction").strip()
+                if len(instruction) > self.max_instruction_chars:
+                    return self._unified_result(
+                        commit,
+                        current_task,
+                        UnifiedCommittedInputRoute.DIALOGUE,
+                        "BACKGROUND_INSTRUCTION_TOO_LARGE",
+                    )
+                start, end = match.span("instruction")
+                while start < end and commit.text[start].isspace():
+                    start += 1
+                while end > start and commit.text[end - 1].isspace():
+                    end -= 1
+                return self._unified_result(
+                    commit,
+                    current_task,
+                    UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+                    "BACKGROUND_CREATE_RESOLVED",
+                    name=name,
+                    instruction=commit.text[start:end],
+                    source_span=TaskIntentSourceSpan(start, end),
+                )
+        if any(
+            pattern.fullmatch(commit.text) is not None
+            for pattern in self._UNIFIED_CONTEXT_QUERY
+        ):
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.BACKGROUND_QUERY,
+                "CURRENT_BACKGROUND_CONTEXT_QUERY_RESOLVED",
+                task_id=None if current_task is None else current_task.task_id,
+                source_span=TaskIntentSourceSpan(0, len(commit.text)),
+                target_binding=(
+                    None if current_task is None else "current_background_task"
+                ),
+            )
+        return self._unified_result(
+            commit,
+            current_task,
+            UnifiedCommittedInputRoute.DIALOGUE,
+            "DIALOGUE_RESOLVED",
+        )
+
+    def _unified_result(
+        self,
+        commit: TurnCommit,
+        current_task: CurrentBackgroundTaskContext | None,
+        route: UnifiedCommittedInputRoute,
+        reason: str,
+        *,
+        task_id: str | None = None,
+        name: str | None = None,
+        instruction: str | None = None,
+        source_span: TaskIntentSourceSpan | None = None,
+        target_binding: str | None = None,
+    ) -> ResolvedUnifiedCommittedInput:
+        commit_sha256 = hashlib.sha256(commit.canonical_bytes()).hexdigest()
+        current_task_sha256 = _current_task_identity(current_task)
+        identity = _unified_resolution_identity(
+            provider=self.provider,
+            implementation_class="bounded_contextual_semantic_v1",
+            commit_sha256=commit_sha256,
+            current_task_sha256=current_task_sha256,
+            route=route,
+            reason=reason,
+            task_id=task_id,
+            name=name,
+            instruction=instruction,
+            source_span=source_span,
+            target_binding=target_binding,
+        )
+        return ResolvedUnifiedCommittedInput(
+            route=route,
+            reason=reason,
+            provider=self.provider,
+            implementation_class="bounded_contextual_semantic_v1",
+            resolution_id=hashlib.sha256(canonical_json_bytes(identity)).hexdigest(),
+            commit_sha256=commit_sha256,
+            current_task_sha256=current_task_sha256,
+            task_id=task_id,
+            name=name,
+            instruction=instruction,
+            source_span=source_span,
+            target_binding=target_binding,
         )
 
     def _result(
@@ -498,6 +866,178 @@ class VoiceTaskBridge:
             )
         return result
 
+    def resolve_unified(
+        self,
+        commit: TurnCommit,
+        authorized_scope: ScopeRef,
+        current_task: CurrentBackgroundTaskContext | None,
+    ) -> ResolvedUnifiedCommittedInput:
+        """Resolve and re-prove one of the five closed hands-free routes."""
+
+        if not isinstance(commit, TurnCommit) or commit.scope != authorized_scope:
+            raise VoiceTaskBridgeViolation(
+                "TASK_SCOPE_MISMATCH",
+                "unified committed input must match the exact authorized scope",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        resolver = self._resolver
+        resolve_unified = getattr(resolver, "resolve_unified", None)
+        if not callable(resolve_unified):
+            raise VoiceTaskBridgeViolation(
+                "UNIFIED_INPUT_RESOLVER_REQUIRED",
+                "unified committed-input resolver is unavailable",
+                ErrorCode.CAPABILITY_UNAVAILABLE,
+            )
+        result = resolve_unified(commit, current_task)
+        if not isinstance(result, ResolvedUnifiedCommittedInput):
+            raise VoiceTaskBridgeViolation(
+                "INVALID_UNIFIED_INPUT_RESOLUTION",
+                "unified resolver returned an unsupported result",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        if (
+            not isinstance(result.route, UnifiedCommittedInputRoute)
+            or type(result.provider) is not str
+            or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", result.provider) is None
+            or type(result.implementation_class) is not str
+            or re.fullmatch(
+                r"[A-Za-z0-9._-]{1,128}", result.implementation_class
+            )
+            is None
+            or type(result.reason) is not str
+            or re.fullmatch(r"[A-Z0-9_]{1,128}", result.reason) is None
+            or any(
+                value is not None and type(value) is not str
+                for value in (
+                    result.task_id,
+                    result.name,
+                    result.instruction,
+                    result.target_binding,
+                )
+            )
+            or (
+                result.source_span is not None
+                and not isinstance(result.source_span, TaskIntentSourceSpan)
+            )
+        ):
+            raise VoiceTaskBridgeViolation(
+                "INVALID_UNIFIED_INPUT_RESOLUTION",
+                "unified resolver returned invalid bounded fields",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        commit_sha256 = hashlib.sha256(commit.canonical_bytes()).hexdigest()
+        current_sha256 = _current_task_identity(current_task)
+        if (
+            result.commit_sha256 != commit_sha256
+            or result.current_task_sha256 != current_sha256
+        ):
+            raise VoiceTaskBridgeViolation(
+                "UNIFIED_INPUT_BINDING_MISMATCH",
+                "unified resolution changed commit or current-task identity",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        expected_id = hashlib.sha256(
+            canonical_json_bytes(
+                _unified_resolution_identity(
+                    provider=result.provider,
+                    implementation_class=result.implementation_class,
+                    commit_sha256=result.commit_sha256,
+                    current_task_sha256=result.current_task_sha256,
+                    route=result.route,
+                    reason=result.reason,
+                    task_id=result.task_id,
+                    name=result.name,
+                    instruction=result.instruction,
+                    source_span=result.source_span,
+                    target_binding=result.target_binding,
+                )
+            )
+        ).hexdigest()
+        if result.resolution_id != expected_id:
+            raise VoiceTaskBridgeViolation(
+                "UNIFIED_INPUT_RESOLUTION_ID_MISMATCH",
+                "unified resolution changed its content-bound identity",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if result.source_span is not None and (
+            type(result.source_span.start) is not int
+            or type(result.source_span.end) is not int
+            or not 0
+            <= result.source_span.start
+            < result.source_span.end
+            <= len(commit.text)
+        ):
+            raise VoiceTaskBridgeViolation(
+                "UNIFIED_INPUT_SOURCE_SPAN_MISMATCH",
+                "unified route span does not fit the authoritative commit",
+                ErrorCode.PERMISSION_DENIED,
+            )
+        if result.route is UnifiedCommittedInputRoute.BACKGROUND_CREATE:
+            if (
+                result.task_id is not None
+                or not result.name
+                or not result.instruction
+                or result.source_span is None
+                or commit.text[
+                    result.source_span.start : result.source_span.end
+                ]
+                != result.instruction
+            ):
+                raise VoiceTaskBridgeViolation(
+                    "INVALID_TASK_CREATE_INTENT",
+                    "background create must bind one exact instruction span",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        elif result.route in {
+            UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+            UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
+        }:
+            expected_task_id = (
+                None if current_task is None else current_task.task_id
+            )
+            expected_binding = (
+                None if current_task is None else "current_background_task"
+            )
+            if (
+                result.task_id != expected_task_id
+                or result.target_binding != expected_binding
+                or result.instruction is not None
+                or result.name is not None
+            ):
+                raise VoiceTaskBridgeViolation(
+                    "CURRENT_BACKGROUND_TASK_MISMATCH",
+                    "targeted background route changed the Store-derived task",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+        elif result.route is UnifiedCommittedInputRoute.BACKGROUND_QUERY:
+            if result.task_id != (
+                None if current_task is None else current_task.task_id
+            ) or result.target_binding != (
+                None if current_task is None else "current_background_task"
+            ):
+                raise VoiceTaskBridgeViolation(
+                    "CURRENT_BACKGROUND_TASK_MISMATCH",
+                    "background query changed its Store-derived current target",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+        elif result.route is UnifiedCommittedInputRoute.DIALOGUE:
+            if any(
+                value is not None
+                for value in (
+                    result.task_id,
+                    result.name,
+                    result.instruction,
+                    result.source_span,
+                    result.target_binding,
+                )
+            ):
+                raise VoiceTaskBridgeViolation(
+                    "INVALID_DIALOGUE_ROUTE",
+                    "dialogue route cannot carry Task authority",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        return result
+
     @staticmethod
     def _verify_span(
         text: str, span: TaskIntentSourceSpan | None, expected: str | None
@@ -592,10 +1132,14 @@ class VoiceTaskBridge:
 __all__ = [
     "BoundedAlphaTaskIntentResolver",
     "CommittedTaskIntentResolverPort",
+    "CurrentBackgroundTaskContext",
     "ResolvedTaskIntent",
+    "ResolvedUnifiedCommittedInput",
     "TaskIntent",
     "TaskIntentDisposition",
     "TaskIntentSourceSpan",
+    "UnifiedCommittedInputResolverPort",
+    "UnifiedCommittedInputRoute",
     "VoiceTaskBridge",
     "VoiceTaskBridgeViolation",
 ]

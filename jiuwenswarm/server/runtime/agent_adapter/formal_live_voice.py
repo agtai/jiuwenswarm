@@ -120,6 +120,7 @@ class FormalAgentExecution:
     internal_session_id: str
     commit: TurnCommit
     context: FormalContextSnapshot
+    allow_tools: bool = True
 
     def __post_init__(self) -> None:
         _require_text(self.request_id, "request_id")
@@ -129,6 +130,11 @@ class FormalAgentExecution:
             raise FormalLiveVoiceViolation(
                 "INVALID_FORMAL_AGENT_INPUT",
                 "formal execution requires a canonical TurnCommit",
+            )
+        if type(self.allow_tools) is not bool:
+            raise FormalLiveVoiceViolation(
+                "INVALID_FORMAL_AGENT_INPUT",
+                "formal execution tool policy must be a boolean",
             )
         self.context.validate_for(self.commit)
 

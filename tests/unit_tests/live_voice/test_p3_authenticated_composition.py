@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import math
 import sqlite3
 import subprocess
@@ -535,6 +536,12 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
             request_id="request-events",
             session_id="session-1",
         )
+        result_result = await harness.composition.handle(
+            operation="task.result",
+            params={**_base(), "task_id": task_id},
+            request_id="request-result",
+            session_id="session-1",
+        )
 
         assert get_result.payload["result"]["task"]["task_id"] == task_id
         assert [item["task_id"] for item in list_result.payload["result"]["tasks"]] == [
@@ -551,6 +558,10 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
             2,
             3,
         ]
+        assert result_result.ok is False
+        assert result_result.payload["error"]["reason"] == (
+            "CURRENT_BACKGROUND_TASK_MISMATCH"
+        )
 
         wrong_scope = await harness.composition.handle(
             operation="task.get",
@@ -558,6 +569,13 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
             request_id="request-wrong-scope",
             session_id="session-2",
         )
+        wrong_scope_result = await harness.composition.handle(
+            operation="task.result",
+            params={**_base("session-2"), "task_id": task_id},
+            request_id="request-wrong-scope-result",
+            session_id="session-2",
+        )
+        assert wrong_scope_result.ok is False
         assert wrong_scope.ok is False
         assert wrong_scope.payload["error"]["code"] == "NOT_FOUND"
         assert task_id not in str(wrong_scope.payload["error"])
@@ -574,7 +592,7 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
         await harness.composition.reconcile_once()
         assert len(harness.executor.dispatches) == 1
         assert len(harness.executor.cancels) == 1
-        assert len(harness.telemetry.events) == 7
+        assert len(harness.telemetry.events) == 9
     finally:
         await harness.composition.stop()
     assert harness.closer.calls == 1
@@ -659,6 +677,147 @@ async def test_voice_task_create_requires_exact_accepted_commit_and_text(
         )
         assert accepted.ok is True
         await _wait_until(lambda: len(harness.executor.dispatches) == 1)
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_trusted_demo_bypass_requires_unified_voice_current_binding(
+    tmp_path: Path,
+) -> None:
+    ledger = TurnCommitLedger()
+    harness = _harness(tmp_path, commit_ledger=ledger)
+    await harness.composition.start()
+    try:
+        structured = _create_params("command-structured-bypass")
+        structured.pop("confirmation_id")
+        forbidden = await harness.composition.handle(
+            operation="task.create",
+            params=structured,
+            request_id="request-structured-bypass",
+            session_id="session-1",
+            trusted_demo_policy_bypass=True,
+            current_background_session_id="session-1",
+        )
+        assert forbidden.ok is False
+        assert forbidden.payload["error"]["reason"] == (
+            "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN"
+        )
+        assert _store_counts(harness.database) == (0, 0, 0, 0, 0)
+
+        create_commit = TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": "commit-demo-create",
+                "turn_id": "turn-demo-create",
+                "interaction_id": "interaction-demo",
+                "text": "Create one bounded project change.",
+                "hypothesis_provenance": {
+                    "provider": "product.web.voice",
+                    "kind": "committed_text",
+                },
+                "scope": _scope().to_dict(),
+                "context_refs": [],
+                "committed_at": NOW,
+            }
+        )
+        assert ledger.accept(create_commit) is True
+        create_params = _create_params("command-demo-create")
+        create_params.pop("confirmation_id")
+        create_params.update(
+            source="voice",
+            interaction_id=create_commit.interaction_id,
+            turn_id=create_commit.turn_id,
+            commit_id=create_commit.commit_id,
+            origin_commit_sha256=hashlib.sha256(
+                create_commit.canonical_bytes()
+            ).hexdigest(),
+            source_start=0,
+            source_end=len(create_commit.text),
+        )
+        created = await harness.composition.handle(
+            operation="task.create",
+            params=create_params,
+            request_id="request-demo-create",
+            session_id="session-1",
+            trusted_demo_policy_bypass=True,
+            current_background_session_id="session-1",
+        )
+        assert created.ok is True
+        task_id = created.payload["result"]["task_id"]
+        current = await harness.composition.read_current_background_task(
+            bearer_token=TOKEN,
+            session_id="session-1",
+        )
+        assert current is not None and current.task_id == task_id
+        current_result = await harness.composition.handle(
+            operation="task.result",
+            params={**_base(), "task_id": task_id},
+            request_id="request-demo-current-result",
+            session_id="session-1",
+        )
+        assert current_result.ok is True
+        assert current_result.payload["result"] == {
+            "task_id": task_id,
+            "availability": "not_ready",
+            "reason": "TASK_RESULT_NOT_READY",
+            "task_result": None,
+        }
+
+        cancel_commit = TurnCommit.from_dict(
+            {
+                "contract_version": CONTRACT_VERSION,
+                "commit_id": "commit-demo-cancel",
+                "turn_id": "turn-demo-cancel",
+                "interaction_id": "interaction-demo",
+                "text": "停止刚才的后台任务。",
+                "hypothesis_provenance": {
+                    "provider": "product.web.voice",
+                    "kind": "committed_text",
+                },
+                "scope": _scope().to_dict(),
+                "context_refs": [],
+                "committed_at": NOW,
+            }
+        )
+        assert ledger.accept(cancel_commit) is True
+        cancel_params = _mutation_params(task_id)
+        cancel_params.pop("confirmation_id")
+        cancel_params.update(
+            source="voice",
+            interaction_id=cancel_commit.interaction_id,
+            turn_id=cancel_commit.turn_id,
+            commit_id=cancel_commit.commit_id,
+            origin_commit_sha256=hashlib.sha256(
+                cancel_commit.canonical_bytes()
+            ).hexdigest(),
+            source_start=0,
+            source_end=len(cancel_commit.text),
+        )
+        wrong_binding = await harness.composition.handle(
+            operation="task.cancel",
+            params=cancel_params,
+            request_id="request-demo-cancel-wrong-target",
+            session_id="session-1",
+            trusted_demo_policy_bypass=True,
+            trusted_current_task_id="task-wrong-current",
+        )
+        assert wrong_binding.ok is False
+        assert wrong_binding.payload["error"]["reason"] == (
+            "CURRENT_BACKGROUND_TASK_MISMATCH"
+        )
+        assert harness.composition._core.store.get_task(task_id, _scope()).cancel_requested is False
+
+        cancelled = await harness.composition.handle(
+            operation="task.cancel",
+            params=cancel_params,
+            request_id="request-demo-cancel",
+            session_id="session-1",
+            trusted_demo_policy_bypass=True,
+            trusted_current_task_id=task_id,
+        )
+        assert cancelled.ok is True
+        assert harness.composition._core.store.get_task(task_id, _scope()).cancel_requested is True
     finally:
         await harness.composition.stop()
 
@@ -1856,6 +2015,35 @@ def test_factory_accepts_reconciliation_interval_boundaries(
     assert composition is not None
     assert composition._reconcile_interval == interval
     assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
+
+
+@pytest.mark.parametrize(
+    ("demo_policy", "fixture_enabled"), [("0", False), ("1", True)]
+)
+def test_factory_gates_itinerary_fixture_with_trusted_demo_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    demo_policy: str,
+    fixture_enabled: bool,
+) -> None:
+    _configure_enabled_factory(monkeypatch, 3600)
+    monkeypatch.setenv(
+        "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED",
+        demo_policy,
+    )
+    database = tmp_path / f"demo-policy-{demo_policy}.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+
+    composition = create_p3_composition_from_environment(
+        agent_manager=object(), model_resolver=_ModelResolver()
+    )
+
+    assert composition is not None
+    assert type(composition._core.executor) is DirectProjectCodeExecutorAdapter
+    assert composition._core.executor._demo_itinerary_fixture_enabled is fixture_enabled
 
 
 @pytest.mark.asyncio

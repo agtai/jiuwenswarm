@@ -563,6 +563,30 @@ async def test_critical_voice_receipt_requires_confirmation_and_expires() -> Non
 
 
 @pytest.mark.asyncio
+async def test_trusted_demo_receipt_bypasses_critical_confirmation_without_forging_it() -> None:
+    service = FormalBatchSpeechService(
+        CriticalTextProvider(),
+        authorization_resolver=ExactAuthorizationResolver(),
+        trusted_demo_critical_bypass=True,
+    )
+    recognized = await service.recognize(_recognize_request(), CONTEXT)
+    receipt = recognized["result"]["voice_commit_receipt"]
+    claim = await service.claim_voice_commit_receipt(
+        receipt=receipt,
+        session_id="session-1",
+        correlation_id="correlation-1",
+        interaction_id="interaction-1",
+        turn_id="turn-demo",
+        commit_id="commit-demo",
+        text="delete 3 files",
+        critical_confirmation=None,
+    )
+
+    assert claim["critical_policy"] == "trusted_demo_bypass"
+    assert "confirmation" not in claim
+
+
+@pytest.mark.asyncio
 async def test_scope_and_authority_fail_closed_without_provider_side_effects() -> None:
     provider = ControlledProvider()
     service = _service(provider)

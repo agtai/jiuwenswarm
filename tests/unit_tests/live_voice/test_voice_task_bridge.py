@@ -12,10 +12,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
     BoundedAlphaTaskIntentResolver,
+    CurrentBackgroundTaskContext,
     ResolvedTaskIntent,
     TaskIntent,
     TaskIntentDisposition,
     TaskIntentSourceSpan,
+    UnifiedCommittedInputRoute,
     VoiceTaskBridge,
     VoiceTaskBridgeViolation,
 )
@@ -116,6 +118,84 @@ def test_confirmed_exact_cancel_maps_without_terminal_claim() -> None:
     assert command.operation == "task.cancel"
     assert command.target_task_id == "task-1"
     assert command.spec is None
+
+
+CURRENT = CurrentBackgroundTaskContext(
+    task_id="task-current-1",
+    name="Three-day itinerary",
+    state="running",
+    terminal=False,
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "route"),
+    [
+        ("你好，介绍一下你自己。", UnifiedCommittedInputRoute.DIALOGUE),
+        (
+            "后台帮我检查这些资料并整理报告。",
+            UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+        ),
+        (
+            "帮我根据这些要求制定三天的行程。",
+            UnifiedCommittedInputRoute.BACKGROUND_CREATE,
+        ),
+        (
+            "第一天晚上给我留出的自由时间是几点？",
+            UnifiedCommittedInputRoute.BACKGROUND_QUERY,
+        ),
+        ("后台现在做到哪了？", UnifiedCommittedInputRoute.BACKGROUND_STATUS),
+        (
+            "停止刚才的行程规划。",
+            UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
+        ),
+    ],
+)
+def test_unified_semantic_routes_cover_closed_protocol(
+    text: str, route: UnifiedCommittedInputRoute
+) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+    assert resolved.route is route
+    assert resolved.provider == "local.closed_schema"
+    if route in {
+        UnifiedCommittedInputRoute.BACKGROUND_QUERY,
+        UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+        UnifiedCommittedInputRoute.BACKGROUND_CANCEL,
+    }:
+        assert resolved.task_id == CURRENT.task_id
+        assert resolved.target_binding == "current_background_task"
+
+
+@pytest.mark.parametrize(
+    ("text", "route"),
+    [
+        (
+            "不用停止后台任务，告诉我第二天最早的固定安排是什么。",
+            UnifiedCommittedInputRoute.BACKGROUND_QUERY,
+        ),
+        ("不要取消，继续做。", UnifiedCommittedInputRoute.DIALOGUE),
+        ("别停止后台任务，继续处理。", UnifiedCommittedInputRoute.DIALOGUE),
+    ],
+)
+def test_unified_negated_cancel_has_no_cancel_route(
+    text: str, route: UnifiedCommittedInputRoute
+) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+    assert resolved.route is route
+    assert resolved.route is not UnifiedCommittedInputRoute.BACKGROUND_CANCEL
+
+
+def test_unified_route_identity_is_bound_to_current_task_context() -> None:
+    first = VoiceTaskBridge().resolve_unified(
+        committed("后台现在做到哪了？"), SCOPE, CURRENT
+    )
+    second = VoiceTaskBridge().resolve_unified(
+        committed("后台现在做到哪了？"),
+        SCOPE,
+        replace(CURRENT, task_id="task-current-2"),
+    )
+    assert first.resolution_id != second.resolution_id
+    assert first.current_task_sha256 != second.current_task_sha256
 
 
 @pytest.mark.parametrize(

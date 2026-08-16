@@ -83,7 +83,11 @@ class FormalInstance:
         return rail in self.registered_rails
 
 
-def formal_request(*, params_extra: dict | None = None) -> tuple[AgentRequest, dict]:
+def formal_request(
+    *,
+    params_extra: dict | None = None,
+    tools_allowed: bool = True,
+) -> tuple[AgentRequest, dict]:
     params = {
         "query": "/goal must remain plain committed text",
         "mode": "agent",
@@ -95,6 +99,7 @@ def formal_request(*, params_extra: dict | None = None) -> tuple[AgentRequest, d
         "enable_memory": False,
         "skip_a2ui": True,
         "formal_live_voice": True,
+        "formal_live_voice_tools_allowed": tools_allowed,
     }
     request = AgentRequest(
         request_id="formal-request-1",
@@ -132,6 +137,45 @@ def adapter_with(instance: FormalInstance) -> JiuWenSwarmDeepAdapter:
     adapter._update_runtime_config = update
     adapter.formal_runtime_configs = seen
     return adapter
+
+
+@pytest.mark.asyncio
+async def test_formal_task_result_policy_removes_and_hard_denies_tools() -> None:
+    rail = interface_deep.JiuSwarmStreamEventRail()
+    session_id = "lv-formal-no-tools-1"
+    capture = rail.open_formal_tool_event_capture(
+        session_id,
+        allow_tools=False,
+    )
+    model_inputs = SimpleNamespace(tools=[SimpleNamespace(name="delete_file")])
+    await rail.before_model_call(
+        SimpleNamespace(
+            inputs=model_inputs,
+            session=AsyncMock(),
+            context=None,
+            extra={rail._SID_KEY: session_id},
+        )
+    )
+    assert model_inputs.tools == []
+
+    tool_call = SimpleNamespace(
+        id="forbidden-tool-call",
+        name="delete_file",
+        arguments={"path": "private.txt"},
+    )
+    with pytest.raises(RuntimeError, match="FORMAL_TOOL_EXECUTION_FORBIDDEN"):
+        await rail.before_tool_call(
+            SimpleNamespace(
+                inputs=ToolCallInputs(
+                    tool_call=tool_call,
+                    tool_name=tool_call.name,
+                    tool_args=dict(tool_call.arguments),
+                ),
+                session=AsyncMock(),
+                extra={rail._SID_KEY: session_id},
+            )
+        )
+    rail.close_formal_tool_event_capture(session_id, capture, abort=True)
 
 
 class CallbackFormalInstance(FormalInstance):

@@ -37,6 +37,9 @@ export const PRODUCT_P1_CAPTURE_MAX_DURATION_MS = 30_000;
 export const PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON = 'AUDIO_CAPTURE_DURATION_EXCEEDED';
 export const PRODUCT_P1_EMPTY_TRANSCRIPT_REASON = 'SPEECH_PROVIDER_EMPTY_TRANSCRIPT';
 const MAX_CAPTURE_FRAMES = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
+// This local observation never commits speech or selects a business route. It
+// only prevents a lease rotation from truncating a possibly spoken utterance.
+const CAPTURE_SPEECH_ENERGY_FLOOR = 0.015;
 export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
 // Streaming TTS is independently bounded from the 30-second microphone
 // capture. Reusing the capture frame limit here cut every answer at exactly
@@ -47,7 +50,6 @@ const ROUTE_READY_TIMEOUT_MS = 3_000;
 const ROUTE_DRAIN_TIMEOUT_MS = 3_000;
 const ROUTE_COMPLETION_TIMEOUT_MS = 3_000;
 const CAPTURE_FIRST_FRAME_TIMEOUT_MS = 1_000;
-const PRODUCT_P1_OVERLAP_MAX_ESTIMATED_DURATION_MS = 20_000;
 
 export type ProductP1VoiceStatus = 'idle' | 'starting' | 'capturing' | 'recognizing' | 'recognized' | 'playing' | 'cleanup_pending' | 'failed' | 'closed';
 
@@ -141,20 +143,6 @@ function requiredText(value: unknown, field: string): string {
     throw new Error(`${field} is invalid`);
   }
   return value;
-}
-
-function estimatedSpeechDurationMs(text: string, locale: 'zh-CN' | 'en-US'): number {
-  const punctuationCount = Array.from(text).filter(character => /[，。！？；：,.!?;:]/u.test(character)).length;
-  if (locale === 'zh-CN') {
-    const spokenCharacters = Array.from(text).filter(character => !/\s/u.test(character)).length;
-    return spokenCharacters * 260 + punctuationCount * 180;
-  }
-  const wordCount = text.trim().split(/\s+/u).filter(Boolean).length;
-  return wordCount * 400 + punctuationCount * 150;
-}
-
-function permitsConcurrentCapture(text: string, locale: 'zh-CN' | 'en-US'): boolean {
-  return estimatedSpeechDurationMs(text, locale) <= PRODUCT_P1_OVERLAP_MAX_ESTIMATED_DURATION_MS;
 }
 
 function consumePrivateText(record: Record<string, unknown>, key: string, field: string): string {
@@ -270,10 +258,12 @@ export class ProductP1VoiceRouteOwner {
   readonly #origin: string;
   readonly #socketFactory: DedicatedMediaSocketFactory;
   readonly #onStatus?: (status: ProductP1VoiceStatus, reason: string | null) => void;
+  readonly #onBargeInEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #audio: BrowserAudioIOAdapter;
   #status: ProductP1VoiceStatus;
   #reason: string | null = null;
   #frames: Readonly<CapturedAudioFrame>[] = [];
+  #captureSpeechObserved = false;
   #mediaSentFrames = 0;
   #captureFramesAcked = 0;
   #route: ActiveBrowserDedicatedMediaRoute | null = null;
@@ -307,7 +297,10 @@ export class ProductP1VoiceRouteOwner {
   #pendingEndOfTurn: Readonly<MediaEndOfTurn> | null = null;
   #endOfTurnHandler: (() => void) | null = null;
   #endOfTurnDelivered = false;
+  #bargeInEndOfTurnDelivered = false;
   #stopAndRecognizePromise: Promise<Readonly<ProductP1Recognition>> | null = null;
+  #captureRotationPromise: Promise<void> | null = null;
+  #captureRotationStopping = false;
 
   constructor(
     input: Readonly<{
@@ -317,6 +310,7 @@ export class ProductP1VoiceRouteOwner {
       socket_factory?: DedicatedMediaSocketFactory;
       audio_environment?: BrowserAudioEnvironment;
       on_status?: (status: ProductP1VoiceStatus, reason: string | null) => void;
+      on_barge_in_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
     }>
   ) {
     this.#enabled = input.enabled === true;
@@ -324,6 +318,7 @@ export class ProductP1VoiceRouteOwner {
     this.#origin = requiredText(input.expected_origin, 'expected_origin');
     this.#socketFactory = input.socket_factory ?? defaultSocketFactory;
     this.#onStatus = input.on_status;
+    this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
     this.#status = this.#enabled ? 'idle' : 'closed';
     this.#audio = new BrowserAudioIOAdapter({
       enabled: this.#enabled,
@@ -341,6 +336,7 @@ export class ProductP1VoiceRouteOwner {
               reason: 'AUDIO_INPUT_MUTED',
             });
           } else if (['stopping', 'stopped'].includes(event.state)) {
+            if (this.#captureRotationStopping) return;
             failure = Object.assign(new Error('formal browser capture stopped unexpectedly'), {
               reason: stableCaptureStopReason(event.reason),
             });
@@ -415,9 +411,11 @@ export class ProductP1VoiceRouteOwner {
     this.#pendingEndOfTurn = null;
     this.#endOfTurnHandler = null;
     this.#endOfTurnDelivered = false;
+    this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
     this.#failureCleanupReason = null;
     this.#frames = [];
+    this.#captureSpeechObserved = false;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#route = null;
@@ -656,6 +654,7 @@ export class ProductP1VoiceRouteOwner {
       // The formal STT result, not captured samples, is the retained product
       // fact. Release the browser copy as soon as the exact request settles.
       this.#frames = [];
+      this.#captureSpeechObserved = false;
       this.#mediaSentFrames = 0;
       this.#route = null;
       this.#requireCurrent(operationGeneration);
@@ -674,6 +673,7 @@ export class ProductP1VoiceRouteOwner {
         // No recognition receipt is returned, so callers cannot commit an empty
         // Agent/Tool turn.
         this.#frames = [];
+        this.#captureSpeechObserved = false;
         this.#mediaSentFrames = 0;
         this.#route = null;
         this.#setStatus('idle', PRODUCT_P1_EMPTY_TRANSCRIPT_REASON);
@@ -732,7 +732,7 @@ export class ProductP1VoiceRouteOwner {
       // nullish coalescing here would turn a valid stream into a zero-frame
       // batch and reject its first media frame as stale.
       const frameCount = result.downlink === null ? chunks.length : result.downlink.frame_count;
-      const captureDuringPlayout = result.downlink !== null && permitsConcurrentCapture(text, this.#locale);
+      const captureDuringPlayout = result.downlink !== null;
       if (result.downlink !== null) {
         if (captureDuringPlayout) {
           await this.#startConcurrentCapture(operationGeneration);
@@ -787,6 +787,7 @@ export class ProductP1VoiceRouteOwner {
       };
       pendingRef = pendingPlayout;
       this.#pendingPlayout = pendingPlayout;
+      this.#deliverBargeInEndOfTurn(operationGeneration, this.#route);
       if (downlinkTerminal !== null && downlinkRoute !== null) {
         this.#observeMediaTerminal(downlinkRoute, downlinkTerminal);
         this.#requireCurrent(operationGeneration);
@@ -802,15 +803,9 @@ export class ProductP1VoiceRouteOwner {
           throw new Error('dedicated media downlink did not close after final render ACK');
         }
         await waitTurn();
-        if (!captureDuringPlayout) {
-          // A long response can outlive the bounded 30 second capture material
-          // retained for Batch STT fallback. Starting the successor capture
-          // after the final rendered frame keeps the full answer audible while
-          // preserving the exact bound for the next user utterance.
-          await this.#startConcurrentCapture(operationGeneration);
-          this.#requireCurrent(operationGeneration);
-        }
       }
+      const rotation = this.#captureRotationPromise;
+      if (rotation !== null) await rotation;
       // When overlap is enabled, the successor capture remains live while the
       // final downlink detach is drained. Any capture startup or device failure
       // synchronously changes the operation generation; fence it before minting
@@ -831,6 +826,7 @@ export class ProductP1VoiceRouteOwner {
     } catch (error) {
       if (error !== null && typeof error === 'object' && (error as Record<string, unknown>).reason === 'FORMAL_PLAYOUT_BARGED') {
         this.#setStatus(this.#route === null ? 'recognized' : 'capturing', null);
+        this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
         return;
       }
       const failure =
@@ -952,6 +948,7 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('concurrent capture authority is unavailable');
     }
     this.#frames = [];
+    this.#captureSpeechObserved = false;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#route = null;
@@ -959,6 +956,7 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnNegotiated = false;
     this.#pendingEndOfTurn = null;
     this.#endOfTurnDelivered = false;
+    this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
     const metadata = await this.#audio.startCapture(
       this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
@@ -1076,6 +1074,54 @@ export class ProductP1VoiceRouteOwner {
       },
     });
     await this.#awaitCaptureReadiness(route, operationGeneration);
+  }
+
+  async #rotateConcurrentCapture(operationGeneration: number): Promise<void> {
+    const route = this.#route;
+    const priorAuthority = this.#mediaCloseBinding;
+    if (
+      route === null
+      || priorAuthority === null
+      || (this.#pendingPlayout ?? this.#settlingPlayout) === null
+      || this.#status !== 'playing'
+    ) {
+      throw Object.assign(new Error('formal overlap capture rotation lost authority'), {
+        reason: 'FORMAL_OVERLAP_CAPTURE_ROTATION_UNAVAILABLE',
+      });
+    }
+    this.#captureRotationStopping = true;
+    try {
+      await this.#audio.stopCapture('formal_overlap_capture_rotation');
+    } finally {
+      this.#captureRotationStopping = false;
+    }
+    this.#requireCurrent(operationGeneration);
+    this.#drainCaptureFrames();
+    const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
+    let pending = route.leaf.flush();
+    while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
+      await waitTurn();
+      this.#requireCurrent(operationGeneration);
+      this.#drainCaptureFrames();
+      pending = route.leaf.flush();
+    }
+    if (this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) {
+      throw Object.assign(new Error('formal overlap capture did not drain before rotation'), {
+        reason: 'FORMAL_OVERLAP_CAPTURE_ROTATION_DRAIN_FAILED',
+      });
+    }
+    await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+    this.#requireCurrent(operationGeneration);
+    this.#frames = [];
+    this.#captureSpeechObserved = false;
+    this.#mediaSentFrames = 0;
+    this.#captureFramesAcked = 0;
+    if (this.#route === route) this.#route = null;
+    this.#speech = null;
+    await this.#startConcurrentCapture(operationGeneration);
+    this.#requireCurrent(operationGeneration);
+    await this.#revokeMediaAuthority(priorAuthority);
+    this.#requireCurrent(operationGeneration);
   }
 
   #openDownlinkRoute(
@@ -1435,6 +1481,37 @@ export class ProductP1VoiceRouteOwner {
 
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
     if (this.#closed || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
+    if (!this.#captureSpeechObserved) {
+      let energy = 0;
+      for (const sample of frame.samples) energy += sample * sample;
+      this.#captureSpeechObserved =
+        Math.sqrt(energy / frame.samples.length) >= CAPTURE_SPEECH_ENERGY_FLOOR;
+    }
+    const activePlayout = this.#pendingPlayout ?? this.#settlingPlayout;
+    const canRotateSilentOverlap =
+      this.#frames.length === MAX_CAPTURE_FRAMES - 1
+      && !this.#captureSpeechObserved
+      && this.#status === 'playing'
+      && activePlayout !== null;
+    if (canRotateSilentOverlap) {
+      // Keep the exact boundary frame before rotating. Once local speech energy
+      // has been observed, the duration bound fails closed instead of clearing
+      // an utterance that is still waiting for authoritative server EOT.
+      this.#frames.push(frame);
+      this.#drainCaptureFrames();
+      if (this.#captureRotationPromise === null) {
+        const operationGeneration = this.#operationGeneration;
+        const rotation = this.#rotateConcurrentCapture(operationGeneration)
+          .catch(async error => {
+            if (!this.#closed && this.#operationGeneration === operationGeneration) await this.#fail(error);
+          })
+          .finally(() => {
+            if (this.#captureRotationPromise === rotation) this.#captureRotationPromise = null;
+          });
+        this.#captureRotationPromise = rotation;
+      }
+      return;
+    }
     if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
       // Batch STT owns the complete bounded utterance, so ACKed frames cannot be
       // evicted without truncating recognition input. Treat the declared 30s
@@ -1565,6 +1642,7 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnHandler = null;
     this.#endOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
+    this.#captureRotationStopping = false;
     this.#route?.leaf.close('MEDIA_LOCAL_CLOSE');
     this.#route = null;
     this.#speech = null;
@@ -1586,6 +1664,7 @@ export class ProductP1VoiceRouteOwner {
     // fallible browser or remote authority cleanup; retained close bindings are
     // sufficient for an exact retry and must never retain expired audio.
     this.#frames = [];
+    this.#captureSpeechObserved = false;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#playout = null;
@@ -1745,7 +1824,40 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('end-of-turn control escaped its media authority');
     }
     this.#pendingEndOfTurn = event;
+    this.#deliverBargeInEndOfTurn(operationGeneration, route);
     this.#deliverEndOfTurn(operationGeneration, route);
+  }
+
+  #deliverBargeInEndOfTurn(
+    operationGeneration: number,
+    route: ActiveBrowserDedicatedMediaRoute | null
+  ): void {
+    const event = this.#pendingEndOfTurn;
+    if (
+      event === null ||
+      this.#onBargeInEndOfTurn === undefined ||
+      this.#bargeInEndOfTurnDelivered ||
+      this.#status !== 'playing' ||
+      this.#pendingPlayout === null ||
+      route === null ||
+      route !== this.#route ||
+      operationGeneration !== this.#operationGeneration
+    ) {
+      return;
+    }
+    this.#bargeInEndOfTurnDelivered = true;
+    const callback = this.#onBargeInEndOfTurn;
+    Promise.resolve().then(() => {
+      if (
+        !this.#closed &&
+        this.#status === 'playing' &&
+        this.#pendingEndOfTurn === event &&
+        route === this.#route &&
+        operationGeneration === this.#operationGeneration
+      ) {
+        callback(event);
+      }
+    });
   }
 
   #publish(): void {

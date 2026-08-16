@@ -49,6 +49,7 @@ export interface LiveVoiceDemoBarProps {
   editableTranscript?: string;
   onTranscriptChange?: (value: string) => void;
   commandCenter?: LiveVoiceCommandCenterProps;
+  handsFree?: boolean;
   onEnable: () => void;
   onExit: () => void;
   onPrimaryAction: () => void;
@@ -271,6 +272,7 @@ export function LiveVoiceDemoBar({
   editableTranscript,
   onTranscriptChange,
   commandCenter,
+  handsFree = false,
   onEnable,
   onExit,
   onPrimaryAction,
@@ -317,8 +319,8 @@ export function LiveVoiceDemoBar({
   const statusLabel = statusLabelOverride || t(`liveVoice.status.${status}`);
   const primaryActionLabel = primaryActionLabelOverride || t(`liveVoice.actions.${status}`);
   const hasTaskPanel = Boolean(taskSafetyDisclosure || taskActivity);
-  const hasEditableTranscript = editableTranscript !== undefined && onTranscriptChange !== undefined;
-  const hasCommandCenter = commandCenter !== undefined;
+  const hasEditableTranscript = !handsFree && editableTranscript !== undefined && onTranscriptChange !== undefined;
+  const hasCommandCenter = !handsFree && commandCenter !== undefined;
 
   return (
     <section
@@ -344,7 +346,7 @@ export function LiveVoiceDemoBar({
           )}
         </div>
 
-        {commandCenter && <CommandCenter commandCenter={commandCenter} />}
+        {hasCommandCenter && commandCenter && <CommandCenter commandCenter={commandCenter} />}
 
         {hasEditableTranscript ? (
           <textarea
@@ -369,20 +371,22 @@ export function LiveVoiceDemoBar({
         <TaskActivityPanel taskSafetyDisclosure={taskSafetyDisclosure} taskActivity={taskActivity} />
 
         <div className="live-voice-demo__actions">
-          <button
-            type="button"
-            className="live-voice-demo__primary"
-            disabled={!available || primaryActionDisabled}
-            aria-label={primaryActionLabel}
-            aria-pressed={status === 'listening'}
-            title={!available ? resolvedUnavailableMessage : primaryActionLabel}
-            onClick={onPrimaryAction}
-          >
-            <span aria-hidden="true">
-              <PrimaryActionIcon status={status} />
-            </span>
-            <span className="live-voice-demo__primary-label">{primaryActionLabel}</span>
-          </button>
+          {!handsFree && (
+            <button
+              type="button"
+              className="live-voice-demo__primary"
+              disabled={!available || primaryActionDisabled}
+              aria-label={primaryActionLabel}
+              aria-pressed={status === 'listening'}
+              title={!available ? resolvedUnavailableMessage : primaryActionLabel}
+              onClick={onPrimaryAction}
+            >
+              <span aria-hidden="true">
+                <PrimaryActionIcon status={status} />
+              </span>
+              <span className="live-voice-demo__primary-label">{primaryActionLabel}</span>
+            </button>
+          )}
           <button type="button" className="live-voice-demo__exit" aria-label={t('liveVoice.exit')} title={t('liveVoice.exit')} onClick={onExit}>
             <X size={17} strokeWidth={2} aria-hidden="true" />
           </button>

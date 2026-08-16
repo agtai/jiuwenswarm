@@ -263,6 +263,7 @@ class PersistentTaskCore:
         *,
         context: ResolvedTaskContext | None = None,
         now: str | None = None,
+        current_background_session_id: str | None = None,
     ) -> ResultEnvelope:
         observed_at = now or utc_now()
         try:
@@ -408,7 +409,12 @@ class PersistentTaskCore:
                     "project Code Agent tasks require project_mutation side effects",
                     ErrorCode.CAPABILITY_UNAVAILABLE,
                 )
-            return self.store.create(command, spec, observed_at=observed_at)
+            return self.store.create(
+                command,
+                spec,
+                observed_at=observed_at,
+                current_background_session_id=current_background_session_id,
+            )
         except FormalTaskViolation as error:
             return _failure(command, error, observed_at=observed_at)
 

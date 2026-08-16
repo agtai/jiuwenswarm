@@ -20,7 +20,7 @@ import hashlib
 import json
 import math
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -41,6 +41,7 @@ from .agent_conversation_runtime import (
     AgentConversationNotification,
     AgentConversationShutdownResult,
     AgentConversationShutdownStatus,
+    AuthoritativePresentationHandle,
     PresentationAckResult,
 )
 from .conversation_runtime_loop import BargeInResult
@@ -608,6 +609,9 @@ class P2ActivationLease:
         commit: TurnCommit,
         context: FormalContextSnapshot,
         channel_id: str = "web",
+        before_dispatch: Callable[[ResponseRef, str], Awaitable[None]] | None = None,
+        after_dispatch: Callable[[AgentConversationHandle], None] | None = None,
+        allow_tools: bool = True,
     ) -> AgentConversationHandle:
         """Forward one exact committed turn through the retained runtime owner."""
 
@@ -628,6 +632,9 @@ class P2ActivationLease:
                 commit=commit,
                 context=context,
                 channel_id=channel_id,
+                before_dispatch=before_dispatch,
+                after_dispatch=after_dispatch,
+                allow_tools=allow_tools,
             )
             if not isinstance(outcome, AgentConversationHandle):
                 raise _violation(
@@ -695,6 +702,52 @@ class P2ActivationLease:
                 raise _violation(
                     "PRODUCT_TASK_ORIGIN_UNAVAILABLE",
                     "retained runtime returned no canonical Task-origin response",
+                    ErrorCode.UNAVAILABLE,
+                )
+            return outcome
+
+    async def present_authoritative_text(
+        self,
+        binding: P2InteractionBinding,
+        *,
+        request_id: str,
+        response_id: str,
+        correlation_id: str,
+        commit: TurnCommit,
+        text: str,
+        channel_id: str = "web",
+        response_generation: int | None = None,
+        before_publish: Callable[
+            [AuthoritativePresentationHandle], Awaitable[None]
+        ]
+        | None = None,
+    ) -> AuthoritativePresentationHandle:
+        """Publish server-owned text through the retained CR presentation path."""
+
+        async with self._operation_lock:
+            with self._state_lock:
+                self._require_open_exact_binding(binding)
+            present = getattr(self._runtime, "present_authoritative_text", None)
+            if not callable(present):
+                raise _violation(
+                    "PRODUCT_AUTHORITATIVE_PRESENTATION_UNAVAILABLE",
+                    "retained runtime has no authoritative presentation owner",
+                    ErrorCode.UNAVAILABLE,
+                )
+            outcome = await present(
+                request_id=request_id,
+                response_id=response_id,
+                correlation_id=correlation_id,
+                commit=commit,
+                text=text,
+                channel_id=channel_id,
+                response_generation=response_generation,
+                before_publish=before_publish,
+            )
+            if not isinstance(outcome, AuthoritativePresentationHandle):
+                raise _violation(
+                    "PRODUCT_AUTHORITATIVE_PRESENTATION_UNAVAILABLE",
+                    "retained runtime returned no canonical presentation handle",
                     ErrorCode.UNAVAILABLE,
                 )
             return outcome

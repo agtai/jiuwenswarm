@@ -41,8 +41,10 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 from .formal_task_models import (
     FormalTaskViolation,
     FormalTaskSpec,
+    PersistentTaskRecord,
     ResolvedTaskContext,
     TaskAuthorizationGrant,
+    TaskResultAvailability,
     TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
     utc_now,
@@ -85,10 +87,13 @@ P3_ROUTE_METHODS: Mapping[str, str] = {
     "live_voice.task.status": "task.status",
     "live_voice.task.cancel": "task.cancel",
     "live_voice.task.events": "task.events",
+    "live_voice.task.result": "task.result",
 }
 P3_MUTATIONS = frozenset({"task.create", "task.cancel", "task.retry"})
 P3_TARGETED_MUTATIONS = frozenset({"task.cancel", "task.retry"})
-P3_QUERY_OPERATIONS = frozenset({"task.get", "task.list", "task.status", "task.events"})
+P3_QUERY_OPERATIONS = frozenset(
+    {"task.get", "task.list", "task.status", "task.events", "task.result"}
+)
 # ``task.retry`` deliberately has no direct transport method: the only W2
 # carrier is the product composition mutate route.  It must still be a first
 # class P3 operation, because dropping it here would silently disable the
@@ -104,6 +109,9 @@ _DATABASE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_DATABASE"
 _RECONCILE_ENV = "JIUWENSWARM_LIVE_VOICE_P3_RECONCILE_SECONDS"
 _PRODUCT_COMPOSITION_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_COMPOSITION_ENABLED"
 _PRODUCT_P2_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P2_ENABLED"
+_PRODUCT_DEMO_POLICY_BYPASS_ENV = (
+    "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED"
+)
 _PRODUCT_P2_OPERATION = "agent.chat"
 
 
@@ -961,6 +969,13 @@ class P3AuthenticatedComposition:
     def mutation_authority_ready(self) -> bool:
         return self._confirmation_verifier is not None
 
+    @property
+    def task_database_path(self) -> Path | None:
+        core = getattr(self, "_core", None)
+        store = getattr(core, "store", None)
+        database = getattr(store, "database_path", None)
+        return None if database is None else Path(database)
+
     def next_product_p2_response_generation(
         self,
         session_id: str,
@@ -1031,6 +1046,7 @@ class P3AuthenticatedComposition:
             "task.get",
             "task.status",
             "task.events",
+            "task.result",
             "task.cancel",
         }
         if targeted != bool(task_id):
@@ -1138,7 +1154,7 @@ class P3AuthenticatedComposition:
             )
         operation = canonical.operation
         target_task_id = query.authorization.target_task_id
-        if operation in {"task.get", "task.status", "task.events"}:
+        if operation in {"task.get", "task.status", "task.events", "task.result"}:
             self._require_exact_task_context(
                 authority=current,
                 operation=operation,
@@ -1683,6 +1699,92 @@ class P3AuthenticatedComposition:
             if entered:
                 await self._leave_operation()
 
+    async def read_current_background_task(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+    ) -> PersistentTaskRecord | None:
+        """Restore only the Store-bound current task for one authenticated Session."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            now = self._clock()
+            principal = self._authenticator.authenticate(
+                bearer_token,
+                operation="task.status",
+                now=now,
+            )
+            authority = await self._run_blocking(
+                self._authority_resolver.resolve,
+                principal,
+                session_id=session_id,
+                now=now,
+                require_clean=False,
+            )
+            current = await self._run_blocking(
+                self._core.store.get_current_background_task,
+                authority.scope,
+                session_id=session_id,
+            )
+            if current is not None:
+                await self._run_blocking(
+                    self._require_exact_task_context,
+                    authority=authority,
+                    operation="task.status",
+                    task_id=current.task_id,
+                    now=now,
+                )
+            return current
+        finally:
+            if entered:
+                await self._leave_operation()
+
+    async def read_background_task(
+        self,
+        *,
+        bearer_token: object,
+        session_id: str,
+        task_id: str,
+    ) -> PersistentTaskRecord:
+        """Read one immutable semantic target under its authenticated scope."""
+
+        entered = False
+        try:
+            await self._enter_operation()
+            entered = True
+            now = self._clock()
+            principal = self._authenticator.authenticate(
+                bearer_token,
+                operation="task.status",
+                now=now,
+            )
+            authority = await self._run_blocking(
+                self._authority_resolver.resolve,
+                principal,
+                session_id=session_id,
+                now=now,
+                require_clean=False,
+            )
+            task = await self._run_blocking(
+                self._core.store.get_task,
+                task_id,
+                authority.scope,
+            )
+            await self._run_blocking(
+                self._require_exact_task_context,
+                authority=authority,
+                operation="task.status",
+                task_id=task.task_id,
+                now=now,
+            )
+            return task
+        finally:
+            if entered:
+                await self._leave_operation()
+
     async def _verify_confirmation(
         self,
         *,
@@ -1970,6 +2072,9 @@ class P3AuthenticatedComposition:
         params: Mapping[str, object],
         request_id: str,
         session_id: str | None,
+        trusted_demo_policy_bypass: bool = False,
+        current_background_session_id: str | None = None,
+        trusted_current_task_id: str | None = None,
     ) -> P3RouteResult:
         started = time.monotonic()
         outcome = "rejected"
@@ -1989,8 +2094,28 @@ class P3AuthenticatedComposition:
                 params.get("auth_token"), operation=operation, now=now
             )
             clean = self._validate_params(
-                operation, params, session_id=session_id, now=now
+                operation,
+                params,
+                session_id=session_id,
+                now=now,
+                trusted_demo_policy_bypass=trusted_demo_policy_bypass,
             )
+            if trusted_demo_policy_bypass and (
+                clean.get("source") != "voice"
+                or (
+                    operation == "task.create"
+                    and current_background_session_id != clean.get("session_id")
+                )
+                or (
+                    operation == "task.cancel"
+                    and trusted_current_task_id is None
+                )
+            ):
+                raise FormalTaskViolation(
+                    "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN",
+                    "trusted Demo policy requires the unified voice current-task route",
+                    ErrorCode.PERMISSION_DENIED,
+                )
             authority = await self._run_blocking(
                 self._authority_resolver.resolve,
                 principal,
@@ -2011,7 +2136,13 @@ class P3AuthenticatedComposition:
                 destructive=destructive,
                 now=now,
             )
-            if operation in {"task.get", "task.status", "task.events", "task.cancel"}:
+            if operation in {
+                "task.get",
+                "task.status",
+                "task.events",
+                "task.result",
+                "task.cancel",
+            }:
                 await self._run_blocking(
                     self._require_exact_task_context,
                     authority=authority,
@@ -2066,9 +2197,24 @@ class P3AuthenticatedComposition:
                     now=now,
                     retry=(None if retry_snapshot is None else retry_snapshot.facts),
                 )
-                if destructive
+                if destructive and not trusted_demo_policy_bypass
                 else None
             )
+            policy_bypass = (
+                "trusted_demo_live_voice_v1"
+                if destructive and trusted_demo_policy_bypass
+                else None
+            )
+            current_task_binding = trusted_current_task_id is not None
+            if current_task_binding and (
+                operation != "task.cancel"
+                or clean.get("task_id") != trusted_current_task_id
+            ):
+                raise FormalTaskViolation(
+                    "CURRENT_BACKGROUND_TASK_MISMATCH",
+                    "trusted current-task binding changed its exact target",
+                    ErrorCode.PERMISSION_DENIED,
+                )
             grant = TaskAuthorizationGrant(
                 principal_id=principal.principal_id,
                 scope=authority.scope,
@@ -2093,7 +2239,57 @@ class P3AuthenticatedComposition:
                     if verified_confirmation is not None
                     else principal.expires_at
                 ),
+                policy_bypass=policy_bypass,
             )
+            if operation == "task.result":
+                current_background = await self._run_blocking(
+                    self._core.store.get_current_background_task,
+                    authority.scope,
+                    session_id=str(clean["session_id"]),
+                )
+                if (
+                    current_background is None
+                    or current_background.task_id != str(clean["task_id"])
+                ):
+                    raise FormalTaskViolation(
+                        "CURRENT_BACKGROUND_TASK_MISMATCH",
+                        "task result is available only for the exact current task",
+                        ErrorCode.NOT_FOUND,
+                    )
+                grant.authorize(
+                    scope=authority.scope,
+                    operation=operation,
+                    command_id=None,
+                    target_task_id=str(clean["task_id"]),
+                    required_capabilities=frozenset({operation}),
+                    destructive=False,
+                    now=now,
+                )
+                availability, record, result_reason = await self._run_blocking(
+                    self._core.store.task_result,
+                    str(clean["task_id"]),
+                    authority.scope,
+                )
+                outcome = "accepted"
+                return P3RouteResult(
+                    True,
+                    {
+                        "request_id": request_id,
+                        "ok": True,
+                        "result": {
+                            "task_id": str(clean["task_id"]),
+                            "availability": availability.value,
+                            "reason": result_reason,
+                            "task_result": (
+                                record.to_dict()
+                                if availability is TaskResultAvailability.AVAILABLE
+                                and record is not None
+                                else None
+                            ),
+                        },
+                        "error": None,
+                    },
+                )
             intent = FormalTaskPolicyInput(
                 state=InputCommitState.COMMITTED,
                 source=str(clean["source"]),
@@ -2136,6 +2332,8 @@ class P3AuthenticatedComposition:
                     if verified_confirmation is not None
                     else None
                 ),
+                policy_bypass=policy_bypass,
+                current_task_binding=current_task_binding,
                 after_seq=int(clean.get("after_seq", -1)),
                 retry_precondition=(
                     None if retry_snapshot is None else retry_snapshot.precondition
@@ -2152,6 +2350,11 @@ class P3AuthenticatedComposition:
                     invocation.authorization,
                     context=invocation.context,
                     now=now,
+                    current_background_session_id=(
+                        current_background_session_id
+                        if operation == "task.create"
+                        else None
+                    ),
                 )
             else:
                 assert isinstance(invocation.envelope, QueryEnvelope)
@@ -2242,6 +2445,7 @@ class P3AuthenticatedComposition:
         *,
         session_id: str | None,
         now: str,
+        trusted_demo_policy_bypass: bool = False,
     ) -> dict[str, Any]:
         fields: dict[str, tuple[frozenset[str], frozenset[str]]] = {
             "task.create": (
@@ -2327,8 +2531,20 @@ class P3AuthenticatedComposition:
                 frozenset({"auth_token", "session_id", "task_id"}),
                 frozenset(),
             ),
+            "task.result": (
+                frozenset({"auth_token", "session_id", "task_id"}),
+                frozenset(),
+            ),
         }
         required, optional = fields[operation]
+        if trusted_demo_policy_bypass:
+            if operation not in {"task.create", "task.cancel"}:
+                raise FormalTaskViolation(
+                    "TRUSTED_DEMO_POLICY_BYPASS_FORBIDDEN",
+                    "trusted Demo policy applies only to create and cancel",
+                    ErrorCode.PERMISSION_DENIED,
+                )
+            required = required - {"confirmation_id"}
         keys = set(params)
         if required - keys or keys - required - optional:
             raise FormalTaskViolation(
@@ -2558,7 +2774,13 @@ def create_p3_composition_from_environment(
         model_resolver=model_resolver,
         principal=principal,
     )
-    executor = DirectProjectCodeExecutorAdapter(binding_resolver, database_path)
+    executor = DirectProjectCodeExecutorAdapter(
+        binding_resolver,
+        database_path,
+        demo_itinerary_fixture_enabled=_is_enabled(
+            os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV)
+        ),
+    )
     runtime_owner = _DirectP3RuntimeOwner(
         executor=executor,
         binding_resolver=binding_resolver,

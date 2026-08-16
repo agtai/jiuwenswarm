@@ -77,6 +77,10 @@ import {
   BrowserAudioDeviceSelectionOwner,
   type BrowserAudioDeviceSelectionSnapshot,
 } from '../../features/live-voice/formal/browserAudioDeviceSelection';
+import {
+  ProductUnifiedCommittedInputOwner,
+  type UnifiedAuthoritativeFinal,
+} from '../../features/live-voice/formal/unifiedCommittedInputOwner';
 import { extractWebErrorReason, webClient, webReconnectDelayMs } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
 import './LiveVoiceIntegratedRoutePanel.css';
@@ -165,6 +169,19 @@ export type ProductPresentationAckInput = {
   unit_id: string;
   contiguous_cursor: number;
 };
+
+function sameProductPresentation(
+  left: ProductPresentationAckInput,
+  right: ProductPresentationAckInput,
+): boolean {
+  return (
+    left.response_id === right.response_id &&
+    left.response_generation === right.response_generation &&
+    left.surface === right.surface &&
+    left.unit_id === right.unit_id &&
+    left.contiguous_cursor === right.contiguous_cursor
+  );
+}
 
 type ProductTurnInput = {
   commit_id: string;
@@ -528,6 +545,7 @@ export type ProductP2NotificationDisposition =
       }>;
       readonly unit_id: string;
       readonly ack: ProductPresentationAckInput;
+      readonly replayed: boolean;
     };
 
 function recordValue(value: unknown): Record<string, unknown> | null {
@@ -842,6 +860,7 @@ export function classifyProductP2Notification(notification: Readonly<Record<stri
         response_generation: response.response_generation as number,
       },
       unit_id: unit.unit_id,
+      replayed: hasPresentedOutput,
       ack: {
         response_id: response.response_id,
         response_generation: response.response_generation as number,
@@ -1030,10 +1049,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const activationOwnerRef = useRef<ProductWebP2ActivationOwner | null>(null);
   const p2ActivationJournalRef = useRef<ProductP2ActivationJournal | null>(null);
   const p1VoiceOwnerRef = useRef<ProductP1VoiceRouteOwner | null>(null);
+  const unifiedInputOwnerRef = useRef<ProductUnifiedCommittedInputOwner | null>(null);
   const deviceSelectionOwnerRef = useRef<BrowserAudioDeviceSelectionOwner | null>(null);
-  const pendingP1VoiceStartRef = useRef<Promise<void> | null>(null);
+  const pendingP1VoiceStartRef = useRef<Readonly<{ generation: number; promise: Promise<void> }> | null>(null);
   const pendingP1VoiceStopRef = useRef<Promise<void> | null>(null);
   const stopP1VoiceHandlerRef = useRef<() => Promise<void>>(async () => undefined);
+  const startP1VoiceHandlerRef = useRef<() => Promise<void>>(async () => undefined);
+  const voiceLoopEnabledRef = useRef(false);
+  const voiceLoopGenerationRef = useRef(0);
+  const submittedVoiceFinalsRef = useRef(
+    new Map<string, Readonly<{ fingerprint: string; operation: Promise<void> }>>(),
+  );
+  const pendingUnifiedFinalRef = useRef<Readonly<{
+    receipt: string;
+    input: UnifiedAuthoritativeFinal;
+  }> | null>(null);
   const pendingProductTurnRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: ProductTurnInput;
@@ -1116,8 +1146,32 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   activeSessionRef.current = props.activeSessionId;
   isConnectedRef.current = props.isConnected;
 
+  const scheduleProductVoiceLoopCapture = () => {
+    if (!voiceLoopEnabledRef.current) return;
+    const loopGeneration = voiceLoopGenerationRef.current;
+    globalThis.setTimeout(() => {
+      const voiceOwner = p1VoiceOwnerRef.current;
+      if (
+        voiceLoopEnabledRef.current &&
+        voiceLoopGenerationRef.current === loopGeneration &&
+        pendingUnifiedFinalRef.current === null &&
+        pendingProductTurnRef.current === null &&
+        pendingPresentationAttemptRef.current === null &&
+        pendingBargeInRef.current === null &&
+        (voiceOwner === null || ['idle', 'recognized', 'closed'].includes(voiceOwner.status().status))
+      ) {
+        void startP1VoiceHandlerRef.current();
+      }
+    }, 0);
+  };
+
   useEffect(() => {
     const sessionId = props.activeSessionId;
+    voiceLoopEnabledRef.current = false;
+    voiceLoopGenerationRef.current += 1;
+    unifiedInputOwnerRef.current = null;
+    submittedVoiceFinalsRef.current.clear();
+    pendingUnifiedFinalRef.current = null;
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || sessionId === null) {
       setP2JournalState(null);
@@ -1183,6 +1237,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const disposition = classifyProductP2Notification(notification, responseId !== null && presentedProductResponsesRef.current.has(responseId));
     if (disposition.kind === 'failed') {
       setProductTextStatus('failed');
+      scheduleProductVoiceLoopCapture();
       return;
     }
     if (disposition.kind !== 'presentation') return;
@@ -1194,14 +1249,37 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     setProductOutput(disposition.text);
     setProductTextStatus('presented');
     setPendingPresentationAck(disposition.ack);
-    activeVoiceResponseRef.current = disposition.response;
+    activeVoiceResponseRef.current = disposition.replayed ? null : disposition.response;
     const voiceOwner = p1VoiceOwnerRef.current;
-    if (voiceOwner !== null) {
+    if (voiceOwner !== null && !disposition.replayed) {
+      const loopGeneration = voiceLoopGenerationRef.current;
       void voiceOwner
         .playAgentText({
           response: disposition.response,
           unit_id: disposition.unit_id,
           text: disposition.text,
+        })
+        .then(() => {
+          if (activeVoiceResponseRef.current?.response_id === disposition.response_id) {
+            activeVoiceResponseRef.current = null;
+          }
+          if (
+            !voiceLoopEnabledRef.current ||
+            voiceLoopGenerationRef.current !== loopGeneration ||
+            activeSessionRef.current !== owner.snapshot().binding?.session_id
+          ) {
+            return;
+          }
+          if (voiceOwner.status().status === 'capturing') {
+            const binding = currentProductP2Binding();
+            if (binding === null) return;
+            p1VoiceCaptureBindingRef.current = binding;
+            voiceOwner.armEndOfTurn(() => {
+              void stopP1VoiceHandlerRef.current();
+            });
+          } else if (['idle', 'recognized'].includes(voiceOwner.status().status)) {
+            void startP1VoiceHandlerRef.current();
+          }
         })
         .catch(() => undefined);
     }
@@ -1265,10 +1343,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           operation: () => owner.acknowledgePresentation(pendingPresentation.input),
           is_current: isCurrent,
         });
-        if (pendingPresentationAttemptRef.current === pendingPresentation) {
+        const currentPresentation = pendingPresentationAttemptRef.current;
+        if (
+          currentPresentation?.owner === owner &&
+          sameProductPresentation(currentPresentation.input, pendingPresentation.input)
+        ) {
           pendingPresentationAttemptRef.current = null;
           setPendingPresentationAck(null);
           setProductTextStatus('acknowledged');
+          scheduleProductVoiceLoopCapture();
         }
       } catch (error) {
         if (owner.hasPendingPresentationAck()) throw error;
@@ -2175,10 +2258,17 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       is_current: () => !cancelled && activationOwnerRef.current === owner && activeSessionRef.current === p2Activation.binding?.session_id,
     })
       .then(() => {
-        if (!cancelled && activationOwnerRef.current === owner && pendingPresentationAttemptRef.current === retained) {
+        const currentPresentation = pendingPresentationAttemptRef.current;
+        if (
+          !cancelled &&
+          activationOwnerRef.current === owner &&
+          currentPresentation?.owner === owner &&
+          sameProductPresentation(currentPresentation.input, retained.input)
+        ) {
           pendingPresentationAttemptRef.current = null;
           setPendingPresentationAck(null);
           setProductTextStatus('acknowledged');
+          scheduleProductVoiceLoopCapture();
         }
       })
       .catch(() => {
@@ -2517,7 +2607,85 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     }
   };
 
+  const submitUnifiedRecognizedVoice = (
+    recognized: ProductRecognizedVoice,
+    binding: Readonly<NonNullable<ProductWebP2ActivationSnapshot['binding']>>,
+  ): Promise<void> => {
+    const fingerprint = JSON.stringify({
+      session_id: binding.session_id,
+      correlation_id: binding.correlation_id,
+      interaction_id: binding.interaction_id,
+      activation_id: binding.activation_id,
+      activation_generation: binding.activation_generation,
+      text: recognized.text,
+    });
+    const retained = submittedVoiceFinalsRef.current.get(recognized.voice_commit_receipt);
+    if (retained !== undefined) {
+      if (retained.fingerprint !== fingerprint) {
+        return Promise.reject(new Error('voice final identity changed its committed content'));
+      }
+      return retained.operation;
+    }
+    productTurnSequenceRef.current += 1;
+    const identity = `${Date.now()}-${productTurnSequenceRef.current}`;
+    const input: UnifiedAuthoritativeFinal = Object.freeze({
+      request_id: `live-voice-unified-${identity}`,
+      commit_id: `web-commit-${identity}`,
+      turn_id: `web-turn-${identity}`,
+      committed_at: new Date().toISOString(),
+      text: recognized.text,
+      voice_commit_receipt: recognized.voice_commit_receipt,
+    });
+    const operation = (async () => {
+      let owner = unifiedInputOwnerRef.current;
+      if (owner === null) {
+        owner = new ProductUnifiedCommittedInputOwner((method, params, requestId) =>
+          productRequest(method, params, productP2WebRequestOptions(method, requestId)),
+        );
+        unifiedInputOwnerRef.current = owner;
+      }
+      pendingUnifiedFinalRef.current = Object.freeze({
+        receipt: recognized.voice_commit_receipt,
+        input,
+      });
+      setProductOutput(null);
+      setProductTextStatus('submitting');
+      try {
+        await retryRetainedProductOperation({
+          operation: () => owner!.submit(binding, input),
+          is_current: () =>
+            activationOwnerRef.current?.snapshot().status === 'active' &&
+            activeSessionRef.current === binding.session_id,
+        });
+        if (pendingUnifiedFinalRef.current?.input === input) {
+          pendingUnifiedFinalRef.current = null;
+        }
+        if (recognizedVoiceRef.current === recognized) recognizedVoiceRef.current = null;
+        setProductTextStatus('waiting');
+      } catch {
+        let settledWithoutPresentation = false;
+        if (!owner.hasPending() && pendingUnifiedFinalRef.current?.input === input) {
+          pendingUnifiedFinalRef.current = null;
+          settledWithoutPresentation = true;
+        }
+        if (recognizedVoiceRef.current === recognized) recognizedVoiceRef.current = null;
+        setProductTextStatus('failed');
+        if (settledWithoutPresentation) scheduleProductVoiceLoopCapture();
+      }
+    })();
+    if (submittedVoiceFinalsRef.current.size >= 128) {
+      const oldest = submittedVoiceFinalsRef.current.keys().next().value;
+      if (typeof oldest === 'string') submittedVoiceFinalsRef.current.delete(oldest);
+    }
+    submittedVoiceFinalsRef.current.set(
+      recognized.voice_commit_receipt,
+      Object.freeze({ fingerprint, operation }),
+    );
+    return operation;
+  };
+
   const startProductVoiceCaptureOwned = async () => {
+    const loopGeneration = voiceLoopGenerationRef.current;
     updateRecognizedSpeechConfirmation(null);
     p1VoiceCaptureBindingRef.current = null;
     const binding = currentProductP2Binding();
@@ -2527,6 +2695,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       return (
         mountedRef.current &&
         isConnectedRef.current &&
+        voiceLoopEnabledRef.current &&
+        voiceLoopGenerationRef.current === loopGeneration &&
         activeSessionRef.current === binding?.session_id &&
         activation?.status === 'active' &&
         current != null &&
@@ -2545,6 +2715,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       binding === null ||
       typeof window === 'undefined' ||
       pendingProductTurnRef.current !== null ||
+      pendingUnifiedFinalRef.current !== null ||
       pendingPresentationAttemptRef.current !== null ||
       pendingBargeInRef.current !== null ||
       activationOwnerRef.current?.hasPendingSubmission() ||
@@ -2631,6 +2802,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       return;
     }
     if (owner === null || owner.status().status === 'closed') {
+      if (!isCurrentBinding()) return;
       owner = new ProductP1VoiceRouteOwner({
         enabled: true,
         expected_origin: window.location.origin,
@@ -2641,10 +2813,32 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             setP1VoiceReason(reason);
           }
         },
+        on_barge_in_end_of_turn: () => {
+          if (
+            voiceLoopEnabledRef.current &&
+            voiceLoopGenerationRef.current === loopGeneration &&
+            p1VoiceOwnerRef.current === owner
+          ) {
+            // Product P1 has already opened the successor uplink while the
+            // answer is playing. Publish its stable P2 binding before the
+            // playout rejection settles so the retained EOT handler can stop,
+            // recognize, and commit this interruption through unified submit.
+            const binding = currentProductP2Binding();
+            if (binding !== null) p1VoiceCaptureBindingRef.current = binding;
+            void stopProductVoicePlayout();
+          }
+        },
       });
       p1VoiceOwnerRef.current = owner;
     }
     const startingOwner = owner;
+    if (!isCurrentBinding()) {
+      if (p1VoiceOwnerRef.current === startingOwner) {
+        await startingOwner.close().catch(() => undefined);
+        if (p1VoiceOwnerRef.current === startingOwner) p1VoiceOwnerRef.current = null;
+      }
+      return;
+    }
     try {
       await activationOwner.runAuthorizedMediaStart(binding, {
         start: () =>
@@ -2676,23 +2870,39 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   const startProductVoiceCapture = (): Promise<void> => {
     const pending = pendingP1VoiceStartRef.current;
-    if (pending !== null) return pending;
-    const retained = startProductVoiceCaptureOwned().finally(() => {
-      if (pendingP1VoiceStartRef.current === retained) pendingP1VoiceStartRef.current = null;
+    const generation = voiceLoopGenerationRef.current;
+    if (pending !== null && pending.generation === generation) return pending.promise;
+    const predecessor = pending?.promise.catch(() => undefined) ?? Promise.resolve();
+    const retained = predecessor.then(async () => {
+      if (!voiceLoopEnabledRef.current || voiceLoopGenerationRef.current !== generation) return;
+      await startProductVoiceCaptureOwned();
+    }).finally(() => {
+      if (pendingP1VoiceStartRef.current?.promise === retained) pendingP1VoiceStartRef.current = null;
     });
-    pendingP1VoiceStartRef.current = retained;
+    pendingP1VoiceStartRef.current = Object.freeze({ generation, promise: retained });
     return retained;
   };
+  startP1VoiceHandlerRef.current = startProductVoiceCapture;
 
   const stopProductVoiceCaptureOwned = async () => {
     const owner = p1VoiceOwnerRef.current;
     const captureBinding = p1VoiceCaptureBindingRef.current;
+    const loopGeneration = voiceLoopGenerationRef.current;
     if (owner === null || owner.status().status !== 'capturing' || captureBinding === null) return;
+    const isCurrentBinding = () =>
+      p1VoiceOwnerRef.current === owner &&
+      p1VoiceCaptureBindingRef.current === captureBinding &&
+      voiceLoopEnabledRef.current &&
+      voiceLoopGenerationRef.current === loopGeneration;
     try {
       const recognition = await owner.stopAndRecognize();
-      if (props.activeSessionId !== null) {
+      if (
+        props.activeSessionId !== null &&
+        voiceLoopEnabledRef.current &&
+        voiceLoopGenerationRef.current === loopGeneration
+      ) {
         updateRecognizedSpeechConfirmation(null);
-        recognizedVoiceRef.current = Object.freeze({
+        const recognized = Object.freeze({
           session_id: props.activeSessionId,
           text: recognition.text,
           voice_commit_receipt: recognition.voice_commit_receipt,
@@ -2701,6 +2911,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           activation_id: captureBinding.activation_id,
           activation_generation: captureBinding.activation_generation,
         });
+        recognizedVoiceRef.current = recognized;
         voiceDraftBindingRef.current = Object.freeze({
           session_id: props.activeSessionId,
           correlation_id: captureBinding.correlation_id,
@@ -2717,6 +2928,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         setP3TaskName('Voice task');
         setP3TaskInstruction(recognition.text);
         setTaskIntentText(recognition.text);
+        p1VoiceCaptureBindingRef.current = null;
+        await submitUnifiedRecognizedVoice(recognized, captureBinding);
+      } else if (!isCurrentBinding()) {
+        await owner.close().catch(() => undefined);
+        if (p1VoiceOwnerRef.current === owner) p1VoiceOwnerRef.current = null;
       }
     } catch {
       // The owner publishes a content-free reason and retains cleanup.
@@ -3627,6 +3843,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   const productTextTransportRetained = Boolean(
     pendingProductTurnRef.current ||
+    pendingUnifiedFinalRef.current ||
+    unifiedInputOwnerRef.current?.hasPending() ||
     pendingPresentationAttemptRef.current ||
     pendingBargeInRef.current ||
     activationOwnerRef.current?.hasPendingSubmission() ||
@@ -3801,6 +4019,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   };
 
   const closeProductVoice = async () => {
+    voiceLoopEnabledRef.current = false;
+    voiceLoopGenerationRef.current += 1;
     const hadVoiceDraft = recognizedVoiceRef.current !== null || voiceDraftBindingRef.current !== null;
     updateRecognizedSpeechConfirmation(null);
     recognizedVoiceRef.current = null;
@@ -3826,6 +4046,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       // Retain the exact cleanup_pending owner. A later explicit start retries
       // cleanup before it can construct a successor route.
     }
+  };
+
+  const startProductVoiceLoop = async () => {
+    if (!voiceLoopEnabledRef.current) {
+      voiceLoopGenerationRef.current += 1;
+      voiceLoopEnabledRef.current = true;
+    }
+    await startProductVoiceCapture();
   };
 
   useEffect(() => {
@@ -3878,7 +4106,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
 
   useEffect(() => {
     const control = Object.freeze<ProductLiveVoiceSurfaceControl>({
-      start: startProductVoiceCapture,
+      start: startProductVoiceLoop,
       stop: () => (p1VoiceOwnerRef.current?.status().status === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture()),
       updateInput: handleProductCommandInput,
       submit: handleProductSubmit,
@@ -3921,7 +4149,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       onDraftInputDevice={setDraftInputDeviceToken}
       onDraftOutputDevice={setDraftOutputDeviceToken}
       onApplyAudioDevices={() => void applyProductAudioDevices()}
-      onP1VoiceStart={() => void startProductVoiceCapture()}
+      onP1VoiceStart={() => void startProductVoiceLoop()}
       onP1VoiceStop={() => void (p1VoiceStatus === 'playing' ? stopProductVoicePlayout() : stopProductVoiceCapture())}
       productOperationRetained={productOperationRetained}
       productTextTransportRetained={productTextTransportRetained}
@@ -4257,9 +4485,19 @@ export function LiveVoiceIntegratedRoutePanelView({
     taskIntentSnapshot?.retained_transport === true ||
     taskIntentSnapshot?.status === 'submitting';
   const taskIntentResultSummary = formalTaskIntentResultSummary(taskIntentSnapshot?.receipt);
+  // Retain the established diagnostic harness behind the hidden/aria-hidden
+  // owner surface so lifecycle regressions stay testable. The product bar is
+  // the only visible Live Voice UI and never exposes these controls.
+  const legacyManualControls = true;
 
   return (
-    <details className="live-voice-integrated" data-composition={manifest.composition_state} data-testid="live-voice-integrated-route">
+    <details
+      className="live-voice-integrated"
+      data-composition={manifest.composition_state}
+      data-testid="live-voice-integrated-route"
+      aria-hidden="true"
+      hidden
+    >
       <summary className="live-voice-integrated__summary">
         <Activity size={16} strokeWidth={2} aria-hidden="true" />
         <span>{t('liveVoice.integrated.title')}</span>
@@ -4326,7 +4564,7 @@ export function LiveVoiceIntegratedRoutePanelView({
               {p3Activation.fallback_reason && <DiagnosticsFact label="Task progress activation fallback" value={p3Activation.fallback_reason} />}
             </div>
           )}
-          {p1VoiceEnabled && onP1VoiceStart && onP1VoiceStop && (
+          {legacyManualControls && p1VoiceEnabled && onP1VoiceStart && onP1VoiceStop && (
             <div className="live-voice-integrated__text-route" data-testid="live-voice-integrated-product-voice">
               <strong>Formal P1 voice</strong>
               {deviceSelection && onLoadAudioDevices && onDraftInputDevice && onDraftOutputDevice && onApplyAudioDevices && (
@@ -4403,7 +4641,7 @@ export function LiveVoiceIntegratedRoutePanelView({
               )}
             </div>
           )}
-          {p2Activation?.status === 'active' && onProductInput && onProductSubmit && (
+          {legacyManualControls && p2Activation?.status === 'active' && onProductInput && onProductSubmit && (
             <form
               className="live-voice-integrated__text-route"
               data-testid="live-voice-integrated-product-text"
@@ -4428,7 +4666,7 @@ export function LiveVoiceIntegratedRoutePanelView({
               {productOutput !== null && <output aria-live="polite">{productOutput}</output>}
             </form>
           )}
-          {recognizedSpeechConfirmation !== null && onRecognizedSpeechConfirm && onRecognizedSpeechCancel && (
+          {legacyManualControls && recognizedSpeechConfirmation !== null && onRecognizedSpeechConfirm && onRecognizedSpeechCancel && (
             <div className="live-voice-integrated__text-route" data-testid="live-voice-integrated-recognized-confirmation" role="note">
               <strong>{t('liveVoice.integrated.recognizedConfirmation.title')}</strong>
               <span className="live-voice-integrated__progress-note">{t(`liveVoice.integrated.recognizedConfirmation.${recognizedSpeechConfirmation}`)}</span>
@@ -4440,7 +4678,7 @@ export function LiveVoiceIntegratedRoutePanelView({
               </button>
             </div>
           )}
-          {taskIntentEnabled && onTaskIntentOperation && onTaskIntentText && onTaskIntentTaskId && onTaskIntentSubmit && (
+          {legacyManualControls && taskIntentEnabled && onTaskIntentOperation && onTaskIntentText && onTaskIntentTaskId && onTaskIntentSubmit && (
             <form
               className="live-voice-integrated__text-route"
               data-testid="live-voice-integrated-formal-task-intent"
@@ -4526,7 +4764,7 @@ export function LiveVoiceIntegratedRoutePanelView({
               {taskIntentResultSummary !== null && <DiagnosticsFact label="Task intent result" value={taskIntentResultSummary} />}
             </form>
           )}
-          {p3MutationEnabled && onP3MutationOperation && onP3TaskName && onP3TaskInstruction && onP3TargetTaskId && onP3Issue && onP3Execute && (
+          {legacyManualControls && p3MutationEnabled && onP3MutationOperation && onP3TaskName && onP3TaskInstruction && onP3TargetTaskId && onP3Issue && onP3Execute && (
             <div className="live-voice-integrated__text-route" data-testid="live-voice-integrated-p3-mutation">
               <strong>{t('liveVoice.integrated.taskControl.title')}</strong>
               <span className="live-voice-integrated__progress-note">{t('liveVoice.integrated.taskControl.disclosure')}</span>

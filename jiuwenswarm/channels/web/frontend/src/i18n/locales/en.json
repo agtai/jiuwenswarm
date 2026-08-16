@@ -2148,18 +2148,18 @@
         "starting": "Starting microphone",
         "capturing": "Listening through formal P1",
         "recognizing": "Recognizing speech",
-        "recognized": "Review recognized speech",
+        "recognized": "Understanding recognized speech",
         "playing": "Playing the Agent response",
         "cleanup_pending": "Voice cleanup is pending",
         "failed": "Formal voice is unavailable",
         "closed": "Formal voice is closed",
-        "confirming": "Confirm the recognized text",
+        "confirming": "Understanding the request",
         "waiting": "The Agent is working"
       },
       "actions": {
         "start": "Start speaking",
         "stopRecognize": "Stop and recognize",
-        "reviewSend": "Review and send",
+        "reviewSend": "Submit final speech",
         "stopPlayback": "Stop playback",
         "working": "Working"
       }
@@ -2186,8 +2186,8 @@
       "speakConfirmation": "Speak confirmation"
     },
     "integrated": {
-      "title": "Integrated Web route facts",
-      "shellOnly": "The P2 text route below is formal only while its activation is active. Speech, physical audio, task completion, and Integrated Demo/Web Alpha Gate acceptance remain unproven.",
+      "title": "Live Voice diagnostics",
+      "shellOnly": "Hands-free Live Voice submits authoritative final speech once, routes dialogue and the current background task on the server, and resumes listening after presentation.",
       "routes": "P1 / P2 / P3alpha route selection",
       "platform": "Chrome and Web diagnostics",
       "refresh": "Refresh Web diagnostics",
@@ -2323,7 +2323,7 @@
         }
       },
       "safetyTitle": "Real side effects:",
-      "safetyDisclosure": "Executor JiuwenSwarm Code Agent; fixed project-bound project_code_pipeline; the saved project is the only execution root, and all shell, test, Git, and remote commands are blocked. Live Voice interrupt/exit only stops voice feedback and does not abort schedule.run or an existing task. Cancellation requires the explicit confirmed command and an observed real task ID, and cannot undo changes that already happened. Switching session or project isolates an unresolved command; only returning to its original context can resume reconciliation. Refreshing still loses voice-side task memory, so use the background task list afterward.",
+      "safetyDisclosure": "Executor JiuwenSwarm Code Agent; fixed project-bound project_code_pipeline; the saved project is the only execution root, and all shell, test, Git, and remote commands are blocked. Live Voice interrupt/exit only stops voice feedback and does not cancel the current background task. Production cancellation keeps its confirmation policy; an explicitly authorized Demo policy may bypass that confirmation without bypassing scope, idempotency, target binding, or mutation authority. Refresh restores the current task only from the authoritative Task Store.",
       "contextIsolatedTitle": "Task command isolated",
       "contextIsolated": "Command {{commandId}} still has an unverified request or result, but the session or project context changed. To prevent duplicate side effects, other contexts will not retry it. Return to the original session and project to continue reconciliation.",
       "isolatedResult": "This result belongs to the isolated original context and was not merged into the current context: {{detail}}",
@@ -2335,7 +2335,7 @@
     },
     "actions": {
       "idle": "Start speaking",
-      "listening": "Stop and send",
+      "listening": "Finish speaking",
       "thinking": "Interrupt and speak",
       "speaking": "Interrupt and speak",
       "interrupted": "Continue speaking",
@@ -2344,7 +2344,7 @@
     "status": {
       "idle": "Ready",
       "listening": "Listening",
-      "thinking": "Agent is working",
+      "thinking": "Understanding and answering",
       "speaking": "Reading the response",
       "interrupted": "Interrupted, waiting for your update",
       "error": "Voice is unavailable"
