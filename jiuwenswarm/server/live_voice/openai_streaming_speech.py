@@ -382,6 +382,10 @@ class _TransportCleanupOwner:
     def __init__(self) -> None:
         self._tasks: dict[asyncio.Task[_CleanupOutcome], _CleanupEntry] = {}
         self._by_key: dict[tuple[str, int], asyncio.Task[_CleanupOutcome]] = {}
+        self._attempt_results: dict[
+            asyncio.Task[_CleanupOutcome], asyncio.Future[bool]
+        ] = {}
+        self._attempt_deadlines: dict[asyncio.Task[_CleanupOutcome], float] = {}
         self._failed: dict[tuple[str, int], _CleanupEntry] = {}
         self._process_controls: deque[BaseException] = deque(
             maxlen=MAX_INCOMPLETE_TRANSPORT_CLEANUPS
@@ -420,34 +424,77 @@ class _TransportCleanupOwner:
         key = (kind, id(resource))
         task = self._by_key.get(key)
         if task is not None:
-            # A previous caller already owns the bounded close attempt.  Waiting
-            # another full budget here would couple worker termination to a
-            # cancellation-defiant transport close.
-            _log_transport_cleanup(
-                kind=kind, reason="already-pending", retained_count=len(self._tasks)
-            )
-            return False
-        entry = self._failed.pop(key, None) or _CleanupEntry(key, kind, cleanup)
+            entry = self._tasks.get(task)
+            if (
+                entry is None
+                or task not in self._attempt_results
+                or not _same_cleanup(entry.cleanup, cleanup)
+            ):
+                _log_transport_cleanup(
+                    kind=kind,
+                    reason="identity-conflict",
+                    retained_count=len(self._tasks),
+                )
+                return False
+            return await self._await_shared_attempt(task, kind=kind)
+        entry = self._failed.get(key)
+        if entry is not None:
+            if not _same_cleanup(entry.cleanup, cleanup):
+                _log_transport_cleanup(
+                    kind=kind,
+                    reason="identity-conflict",
+                    retained_count=len(self._tasks),
+                )
+                return False
+            del self._failed[key]
+        else:
+            entry = _CleanupEntry(key, kind, cleanup)
         if len(self._tasks) + len(self._failed) >= MAX_INCOMPLETE_TRANSPORT_CLEANUPS:
             _log_transport_cleanup(
                 kind=kind, reason="capacity", retained_count=len(self._tasks)
             )
             return False
         task = asyncio.create_task(_await_cleanup(entry.cleanup))
+        self._track_attempt(task, entry)
+        return await self._await_shared_attempt(task, kind=kind)
+
+    def _track_attempt(
+        self, task: asyncio.Task[_CleanupOutcome], entry: _CleanupEntry
+    ) -> None:
+        loop = asyncio.get_running_loop()
         self._tasks[task] = entry
-        self._by_key[key] = task
+        self._by_key[entry.key] = task
+        self._attempt_results[task] = loop.create_future()
+        self._attempt_deadlines[task] = (
+            loop.time() + TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
+        )
         task.add_done_callback(self._release)
-        try:
-            done, _ = await asyncio.wait(
-                {task}, timeout=TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS
+
+    async def _await_shared_attempt(
+        self, task: asyncio.Task[_CleanupOutcome], *, kind: str
+    ) -> bool:
+        result = self._attempt_results.get(task)
+        deadline = self._attempt_deadlines.get(task)
+        if result is None or deadline is None:
+            _log_transport_cleanup(
+                kind=kind,
+                reason="identity-conflict",
+                retained_count=len(self._tasks),
             )
+            return False
+        try:
+            remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+            done, _ = await asyncio.wait({result}, timeout=remaining)
         except asyncio.CancelledError:
-            task.cancel()
             _log_transport_cleanup(
                 kind=kind, reason="caller-cancelled", retained_count=len(self._tasks)
             )
             raise
-        if task not in done:
+        timed_out = False
+        if result not in done and not result.done():
+            result.set_result(False)
+            timed_out = True
+        if timed_out:
             # The caller's budget is spent, but the close itself must keep
             # running: a real WebSocket close handshake needs a network round
             # trip, which never fits this budget.  Cancelling here would leave
@@ -459,13 +506,9 @@ class _TransportCleanupOwner:
             _log_transport_cleanup(
                 kind=kind, reason="timeout", retained_count=len(self._tasks)
             )
-            return False
         self._prune()
         self._raise_process_control()
-        if task.cancelled():
-            return False
-        outcome = task.result()
-        return outcome.succeeded
+        return result.result()
 
     async def cancel_task(self, task: asyncio.Task[Any], *, kind: str) -> bool:
         self._prune()
@@ -523,9 +566,7 @@ class _TransportCleanupOwner:
                 continue
             self._failed.pop(entry.key, None)
             task = asyncio.create_task(_await_cleanup(entry.cleanup))
-            self._tasks[task] = entry
-            self._by_key[entry.key] = task
-            task.add_done_callback(self._release)
+            self._track_attempt(task, entry)
         tasks = tuple(self._tasks)
         if tasks:
             _, pending = await asyncio.wait(
@@ -556,14 +597,20 @@ class _TransportCleanupOwner:
         entry = self._tasks.pop(task, None)
         if entry is None:
             return
+        result = self._attempt_results.pop(task, None)
+        self._attempt_deadlines.pop(task, None)
         if self._by_key.get(entry.key) is task:
             del self._by_key[entry.key]
         if task.cancelled():
+            if result is not None and not result.done():
+                result.set_result(False)
             if entry.cleanup is not None:
                 self._failed[entry.key] = entry
             return
         with suppress(Exception, asyncio.CancelledError):
             outcome = task.result()
+            if result is not None and not result.done():
+                result.set_result(outcome.succeeded)
             if outcome.process_control is not None:
                 self._process_controls.append(outcome.process_control)
             if not outcome.succeeded and entry.cleanup is not None:
@@ -2227,6 +2274,23 @@ async def _await_cleanup(
             raise failure
         return _CleanupOutcome(False)
     return _CleanupOutcome(True)
+
+
+def _same_cleanup(
+    first: Callable[[], Awaitable[None]] | None,
+    second: Callable[[], Awaitable[None]],
+) -> bool:
+    if first is second:
+        return True
+    first_self = getattr(first, "__self__", None)
+    second_self = getattr(second, "__self__", None)
+    first_function = getattr(first, "__func__", None)
+    return (
+        first_self is not None
+        and first_self is second_self
+        and first_function is not None
+        and first_function is getattr(second, "__func__", None)
+    )
 
 
 async def _await_cancelled_task(task: asyncio.Task[Any]) -> _CleanupOutcome:

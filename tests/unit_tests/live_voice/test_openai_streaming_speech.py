@@ -180,6 +180,20 @@ class CancellationDefiantCloseSocket(FakeSocket):
         self.close_returned.set()
 
 
+class CoordinatedCloseSocket(FakeSocket):
+    def __init__(self, initial: tuple[dict[str, object], ...] = ()) -> None:
+        super().__init__(initial)
+        self.close_calls = 0
+        self.close_started = asyncio.Event()
+        self.release_close = asyncio.Event()
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.close_started.set()
+        await self.release_close.wait()
+        await super().close()
+
+
 class CancellationDefiantCloseStream(BlockingSseStream):
     def __init__(self) -> None:
         super().__init__()
@@ -1493,6 +1507,143 @@ async def test_transport_cleanup_owner_hard_caps_cancel_swallowing_tasks() -> No
 
 
 @pytest.mark.asyncio
+async def test_transport_cleanup_owner_shares_one_same_key_result_only() -> None:
+    owner = _TransportCleanupOwner()
+    resource = object()
+    other_resource = object()
+    started = asyncio.Event()
+    other_started = asyncio.Event()
+    release = asyncio.Event()
+    other_release = asyncio.Event()
+    cleanup_calls = 0
+    other_cleanup_calls = 0
+    conflicting_cleanup_calls = 0
+
+    async def cleanup() -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        started.set()
+        await release.wait()
+
+    async def other_cleanup() -> None:
+        nonlocal other_cleanup_calls
+        other_cleanup_calls += 1
+        other_started.set()
+        await other_release.wait()
+
+    async def conflicting_cleanup() -> None:
+        nonlocal conflicting_cleanup_calls
+        conflicting_cleanup_calls += 1
+
+    first = asyncio.create_task(
+        owner.attempt(kind="socket", resource=resource, cleanup=cleanup)
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    same_key_waiter = asyncio.create_task(
+        owner.attempt(kind="socket", resource=resource, cleanup=cleanup)
+    )
+    cancelled_waiter = asyncio.create_task(
+        owner.attempt(kind="socket", resource=resource, cleanup=cleanup)
+    )
+    await asyncio.sleep(0)
+    assert same_key_waiter.done() is False
+    cancelled_waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_waiter
+    assert cleanup_calls == 1
+
+    assert (
+        await owner.attempt(
+            kind="socket", resource=resource, cleanup=conflicting_cleanup
+        )
+        is False
+    )
+    other = asyncio.create_task(
+        owner.attempt(kind="socket", resource=other_resource, cleanup=other_cleanup)
+    )
+    await asyncio.wait_for(other_started.wait(), timeout=1)
+
+    release.set()
+    other_release.set()
+    assert await asyncio.gather(first, same_key_waiter, other) == [True, True, True]
+    assert cleanup_calls == 1
+    assert other_cleanup_calls == 1
+    assert conflicting_cleanup_calls == 0
+    assert owner.snapshot().clean is True
+
+
+@pytest.mark.asyncio
+async def test_transport_cleanup_owner_shares_timeout_and_failure_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.openai_streaming_speech."
+        "TRANSPORT_CLEANUP_ATTEMPT_BUDGET_SECONDS",
+        0.01,
+    )
+    owner = _TransportCleanupOwner()
+    timeout_resource = object()
+    timeout_started = asyncio.Event()
+    timeout_release = asyncio.Event()
+    timeout_calls = 0
+
+    async def timed_out_cleanup() -> None:
+        nonlocal timeout_calls
+        timeout_calls += 1
+        timeout_started.set()
+        await timeout_release.wait()
+
+    first_timeout = asyncio.create_task(
+        owner.attempt(
+            kind="socket", resource=timeout_resource, cleanup=timed_out_cleanup
+        )
+    )
+    await asyncio.wait_for(timeout_started.wait(), timeout=1)
+    timeout_waiter = asyncio.create_task(
+        owner.attempt(
+            kind="socket", resource=timeout_resource, cleanup=timed_out_cleanup
+        )
+    )
+    assert await asyncio.gather(first_timeout, timeout_waiter) == [False, False]
+    assert timeout_calls == 1
+    assert owner.snapshot().retained_task_count == 1
+
+    timeout_release.set()
+    assert (await owner.close()).clean is True
+
+    failure_resource = object()
+    failure_started = asyncio.Event()
+    failure_release = asyncio.Event()
+    failure_calls = 0
+
+    async def retryable_failed_cleanup() -> None:
+        nonlocal failure_calls
+        failure_calls += 1
+        if failure_calls == 1:
+            failure_started.set()
+            await failure_release.wait()
+            raise RuntimeError("injected cleanup failure")
+
+    first_failure = asyncio.create_task(
+        owner.attempt(
+            kind="socket", resource=failure_resource, cleanup=retryable_failed_cleanup
+        )
+    )
+    await asyncio.wait_for(failure_started.wait(), timeout=1)
+    failure_waiter = asyncio.create_task(
+        owner.attempt(
+            kind="socket", resource=failure_resource, cleanup=retryable_failed_cleanup
+        )
+    )
+    failure_release.set()
+    assert await asyncio.gather(first_failure, failure_waiter) == [False, False]
+    assert failure_calls == 1
+    assert owner.snapshot().failed_resource_count == 1
+    assert (await owner.close()).clean is True
+    assert failure_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_recognition_cancel_is_local_fence_not_provider_ack() -> None:
     facts: list[SpeechDegradationFact] = []
     socket = FakeSocket((session_updated_event(),))
@@ -1556,6 +1707,75 @@ async def test_noncooperative_socket_close_is_retained_and_reported() -> None:
         await asyncio.wait_for(socket.close_returned.wait(), timeout=1)
         await provider.close()
     assert provider.cleanup_snapshot.clean is True
+
+
+@pytest.mark.asyncio
+async def test_final_and_explicit_close_share_cleanup_before_successor_listening() -> (
+    None
+):
+    socket = CoordinatedCloseSocket((session_updated_event(),))
+    successor_socket = FakeSocket((session_updated_event(),))
+    sockets = iter((socket, successor_socket))
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return next(sockets)
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=2)
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    socket.push({"type": "input_audio_buffer.committed", "item_id": "race-item"})
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "race-item",
+            "transcript": "normal final",
+        }
+    )
+    await asyncio.wait_for(socket.close_started.wait(), timeout=1)
+
+    explicit_close = asyncio.create_task(provider._close_socket(socket))
+    await asyncio.sleep(0)
+    assert explicit_close.done() is False
+    socket.release_close.set()
+    assert await asyncio.wait_for(explicit_close, timeout=1) is True
+
+    final = await provider.next_recognition_event(ref, timeout_seconds=1)
+    assert final.kind is RecognitionEventKind.FINAL
+    assert final.hypothesis is not None
+    assert final.hypothesis.selected.display_text == "normal final"
+    assert socket.close_calls == 1
+    assert provider.cleanup_snapshot.clean is True
+
+    successor_ref = RecognitionStreamRef(
+        "recognition-1", 1, CaptureRef("capture-1", 1, 48_000)
+    )
+    await provider.open_recognition(successor_ref, timeout_seconds=2)
+    await provider.send_recognition_audio(recognition_frame(successor_ref))
+    await provider.commit_recognition(successor_ref)
+    successor_socket.push(
+        {"type": "input_audio_buffer.committed", "item_id": "successor-item"}
+    )
+    successor_socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "successor-item",
+            "transcript": "successor final",
+        }
+    )
+    successor_final = await provider.next_recognition_event(
+        successor_ref, timeout_seconds=1
+    )
+    assert successor_final.kind is RecognitionEventKind.FINAL
+    assert successor_final.hypothesis is not None
+    assert successor_final.hypothesis.selected.display_text == "successor final"
+    assert provider.degradation_facts == ()
+    assert provider.conformance.snapshot().pending_provider_controls == 0
+    assert_zero_business_effects(provider)
+    await provider.close()
 
 
 @pytest.mark.asyncio
