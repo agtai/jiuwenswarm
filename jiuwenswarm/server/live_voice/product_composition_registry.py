@@ -3272,6 +3272,7 @@ class AgentServerProductCompositionRegistry:
         text: str,
         channel_id: str,
         source_provenance: str = "server.authoritative",
+        task_id: str | None = None,
     ) -> P3RouteResult:
         journal = self._unified_journal
         if journal is None:
@@ -3282,16 +3283,19 @@ class AgentServerProductCompositionRegistry:
             )
 
         def presentation_result(handle: Any) -> P3RouteResult:
+            result: dict[str, object] = {
+                "status": "authoritative_presentation_accepted",
+                "response": {
+                    "interaction_id": handle.response_ref.interaction_id,
+                    "response_id": handle.response_ref.response_id,
+                    "response_generation": handle.response_ref.response_generation,
+                },
+            }
+            if task_id is not None:
+                result["task_id"] = task_id
             return _success_result(
                 request_id,
-                {
-                    "status": "authoritative_presentation_accepted",
-                    "response": {
-                        "interaction_id": handle.response_ref.interaction_id,
-                        "response_id": handle.response_ref.response_id,
-                        "response_generation": handle.response_ref.response_generation,
-                    },
-                },
+                result,
                 retained.manifest,
             )
 
@@ -3324,6 +3328,21 @@ class AgentServerProductCompositionRegistry:
                 before_publish=checkpoint,
                 source_provenance=source_provenance,
             )
+            if task_id is not None:
+                async with self._lock:
+                    if (
+                        task_id in self._voice_task_origins
+                        or len(self._voice_task_origins)
+                        < self._PRODUCT_OPERATION_CAPACITY
+                    ):
+                        self._voice_task_origins[task_id] = _VoiceTaskOrigin(
+                            session_id=retained.binding.session_id,
+                            interaction_id=retained.binding.interaction_id,
+                            activation_id=retained.binding.activation_id,
+                            activation_generation=retained.binding.activation_generation,
+                            correlation_id=retained.binding.correlation_id,
+                            response_ref=handle.response_ref,
+                        )
             return presentation_result(handle)
 
         return await self._run_unified_foreground_effect(
@@ -3756,7 +3775,13 @@ class AgentServerProductCompositionRegistry:
                     OriginRef("committed_turn", commit.turn_id, commit.commit_id),
                     commit.scope,
                 )
+            created_task_id: str | None = None
             if result.ok:
+                formal_task_result = result.payload.get("result")
+                if isinstance(formal_task_result, Mapping):
+                    created = formal_task_result.get("task_id")
+                    if isinstance(created, str) and created:
+                        created_task_id = created
                 speech = "已开始处理。" if chinese else "Background processing started."
             else:
                 error = result.payload.get("error")
@@ -3796,6 +3821,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                task_id=created_task_id,
             )
 
         if current is None:

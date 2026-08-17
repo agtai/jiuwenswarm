@@ -117,7 +117,7 @@ function exactControlResult(
   const roundAccepted = status === 'round_accepted';
   if (
     (!authoritativePresentation && !roundAccepted)
-    || (authoritativePresentation && !exactKeys(resultObject, ['status', 'response']))
+    || (authoritativePresentation && !exactKeys(resultObject, ['status', 'response'], ['task_id']))
     || (roundAccepted && !exactKeys(resultObject, [
       'status',
       'session_id',
@@ -163,6 +163,11 @@ function exactControlResult(
     || !Number.isSafeInteger(response.response_generation)
     || Number(response.response_generation) < 0
   ) throw new Error('unified committed-input presentation binding is invalid');
+  if (
+    authoritativePresentation
+    && Object.prototype.hasOwnProperty.call(resultObject, 'task_id')
+    && (typeof resultObject.task_id !== 'string' || !resultObject.task_id.trim())
+  ) throw new Error('unified committed-input task_id is invalid');
   return Object.freeze({ ...payload });
 }
 

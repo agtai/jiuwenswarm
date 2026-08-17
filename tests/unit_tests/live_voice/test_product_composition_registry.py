@@ -2619,6 +2619,50 @@ async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
 
 
 @pytest.mark.asyncio
+async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origin(
+    tmp_path: Path,
+) -> None:
+    registry, composition, manager = _unified_registry(
+        tmp_path,
+        demo_policy_bypass=True,
+    )
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-unified-origin-activate",
+            session_id=SCOPE.session_id,
+            channel_id="web",
+        )
+    ).ok
+    _install_unified_history_writer(registry)
+    created = await registry.handle_unified_submit(
+        params=_unified_final_params(
+            stem="unified-origin-create",
+            text="帮我根据这些要求制定三天的行程。",
+        ),
+        request_id="request-unified-origin-create",
+        session_id=SCOPE.session_id,
+        channel_id="web",
+    )
+    assert created.ok
+    result = cast(dict[str, object], created.payload["result"])
+    assert result["status"] == "authoritative_presentation_accepted"
+    assert result["task_id"] == "task-current-1"
+    assert composition.create_effects == 1
+    assert manager.agent.calls == 0
+    origin = registry._voice_task_origins["task-current-1"]
+    assert origin.session_id == "session-product"
+    assert origin.interaction_id == "interaction-1"
+    assert origin.activation_id == "activation-1"
+    assert origin.activation_generation == 1
+    assert origin.correlation_id == "correlation-p2"
+    await _ack_unified_presentation(
+        registry, sequence=0, stem="unified-origin-create"
+    )
+    await _close_unified_route(registry, stem="unified-origin-create")
+
+
+@pytest.mark.asyncio
 async def test_trusted_demo_gateway_receipt_reaches_unified_itinerary_without_confirmation(
     tmp_path: Path,
 ) -> None:

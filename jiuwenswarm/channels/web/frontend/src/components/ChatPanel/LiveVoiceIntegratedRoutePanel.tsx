@@ -2812,7 +2812,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setProductTextReason(null);
       setProductTextStatus('submitting');
       try {
-        await retryRetainedProductOperation({
+        const submitResult = await retryRetainedProductOperation({
           operation: () => owner!.submit(binding, input),
           is_current: () =>
             activationOwnerRef.current?.snapshot().status === 'active' &&
@@ -2832,6 +2832,23 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
                 content: input.text,
                 timestamp: input.committed_at,
               }),
+            }),
+          );
+        }
+        const unifiedResult = (submitResult as Readonly<Record<string, unknown>>).result as
+          | Readonly<Record<string, unknown>>
+          | null
+          | undefined;
+        const createdTaskId =
+          typeof unifiedResult?.task_id === 'string' && unifiedResult.task_id.trim()
+            ? unifiedResult.task_id
+            : null;
+        if (createdTaskId !== null) {
+          adoptCreatedProgressRoute(
+            Object.freeze({
+              task_id: createdTaskId,
+              correlation_id: binding.correlation_id,
+              origin: Object.freeze({ kind: 'voice' as const, id: binding.interaction_id }),
             }),
           );
         }
