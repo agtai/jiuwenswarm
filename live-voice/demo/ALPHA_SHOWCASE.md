@@ -7,17 +7,20 @@
 
 This is the D-075 `A3 Product Acceptance` script. The active S5–S8 task contract is [ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](../roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md). Run this journey once only after its A2 automation and cumulative review pass on one exact clean tested source. W2 observations may guide setup but do not automatically pass any Alpha step.
 
-## S7-04 handoff binding
+> **Historical/reusable acceptance reference.** Integrated Web Alpha is already
+> accepted. Under D-081, current Post-Alpha Demo preparation and bug repair do
+> not rerun S7/S8. Use [STATUS](../STATUS.md) and runbook §7.5 for the current
+> Demo; retain this file for the accepted Alpha record and regression reference.
 
-The S7 handoff is **ready for A3**. [STATUS](../STATUS.md) records S7/A2 closed,
-and the external sanitized `s7-final-report.json` binds the exact clean handoff
-candidate to all 40 automatic `PASS` checks and all five real `VERIFY` results.
-The detailed counts, runtime binding, accepted limitations and review result are
-in the
-[S7 integration review](../S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md). This
-readiness does not replace any physical or human product observation below.
+## Historical S7-04 handoff contract
 
-The frozen handoff profile is desktop Chrome on Windows; private same-origin
+This section documents the accepted Alpha handoff and applies again only if the
+user explicitly reopens Alpha. It is not a gate for the current Post-Alpha Demo.
+Historical S7 freezes and the [S7 integration review](../S7_ALPHA_INTEGRATION_REVIEW_2026-08-13.md)
+do not authorize later product source claims, and the accepted Alpha result does
+not transfer its exact-source credit to later Demo code.
+
+The required handoff profile is desktop Chrome on Windows; private same-origin
 HTTPS/WSS; system-selected input/output devices recorded by sanitized reference;
 the official OpenAI Speech origin with D-078 STT/TTS models and `marin`;
 JiuwenSwarm Agent Provider; formal Task Core and
@@ -25,10 +28,10 @@ JiuwenSwarm Agent Provider; formal Task Core and
 Streaming -> W2 Batch -> Browser/text explicit fallback. Integrated Web, P1,
 P2, P3 text/mutation, dedicated media, EOT, critical-input, credential and
 formal batch/streaming flags are exactly `true`; the superseded frontend Task
-Demo and Streaming Speech entry flags are unset. Current known non-blocking
-build warnings are limited to a duplicate i18n key, mixed static/dynamic import
-and large chunks. No source repair, hidden route switch, public deployment or
-real-user project is permitted during A3.
+Demo and Streaming Speech entry flags are unset. The handoff must record the
+candidate's actual non-blocking build warnings rather than inherit historical
+ones. No source repair, hidden route switch, public deployment or real-user
+project is permitted during A3.
 
 ## 1. Preflight and candidate identity
 
@@ -65,8 +68,16 @@ Record the A2 fixed-corpus p50/p95/sample/failure report by reference; do not es
 
 ## 4. P2 — realtime conversation under slow work
 
+Current Post-Alpha Demo capture is unavailable while the foreground Agent is
+generating. Do not speak while the product shows “Understanding and answering”.
+The interruption check below starts only after playout begins and does not claim
+generation-time interruption. A full voice loop for Agent `ask_user` questions
+and the user's answers is Later; text-only handling must not be credited as that
+capability. Slow-work concurrency below uses independent background work, not an
+active foreground-generation capture.
+
 1. Submit a request that forces one safe read-only real Tool operation; verify the exact Tool fact, visible final result and audible result.
-2. Start a deliberately slow Harness/Agent round. While it is running, continue multiple voice Turns.
+2. Start a deliberately slow independent background Harness/Agent round. While it is running, continue multiple voice Turns.
 3. Interrupt or revise the exact current response. Verify microphone/media remain responsive, old output is fenced, the correction targets the correct response/round and history contains only presented facts.
 4. Observe bounded working/progress behavior under load. A synchronous slow-Harness wait on the realtime hot path, cross-response cancellation or stale UI/audio/history effect is a failure.
 

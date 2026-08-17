@@ -352,9 +352,16 @@ Remove-Item Env:VITE_FEATURE_LIVE_VOICE_TASK_DEMO -ErrorAction SilentlyContinue
 
 真实任务测试必须保存脱敏的 task ID、原始状态、请求顺序和目标环境说明；不能用 UI 反馈代替后台事实。已接受的 2026-08-05 样本格式见 [D-031 project-bound evidence](../evidence/D031_20260805_PROJECT_BOUND.md)。
 
-### 7.5 统一免手 Live Voice 运行中调整与完成通知 Journey（D118/D119）
+### 7.5 Post-Alpha 统一免手 Live Voice Demo 验证（D118/D119）
+
+本节当前用于已验收 Alpha 之后的 Demo 准备和最终验证；它不重新打开 S7/S8、不产生新的 Alpha PASS，也不表示 S9 已开始。修复完成后只在最终 Demo 源码上运行一次完整 Journey 并记录结果。
 
 本节取代 7.4 的旧手动命令中心步骤，但不改变 7.4 的目标隔离、项目绑定和真实副作用警告。只使用一个当前后台任务，不测试多任务并行。前端不应出现 Send、Agent/Task、operation 或 Task ID 控件。D119 Journey 必须让真实 Direct Executor 在非终态 adjustment checkpoint 等待权威 adjustment 投递；使用确定性的 fixture/barrier，而不是生产 sleep 或“说得够快”的时间假设。只有 `task.adjust_applied` 已写入且其 seq 早于 terminal/result，才能继续完成步骤。
+
+当前 Post-Alpha Demo 在前台 Agent 生成回答期间不保持 capture。页面显示
+“Understanding and answering”时不要继续说话；本节的插话验证只在回答已经开始
+播放后执行，不能据此声称支持 generation-time interruption。Agent `ask_user`
+问题及用户回答的完整语音回路属于 Later；当前候选不得把文字交互冒充该能力。
 
 在启动 AgentServer、Gateway 和 WebChannel 的受保护终端中，除了第 4–7 节已有的同一隔离 `JIUWENSWARM_DATA_DIR` 和本机私有 Provider 配置，还要显式启用正式组合能力与 Demo policy。下面只列非敏感开关；不要把 Speech key/token 写入脚本、日志或仓库：
 

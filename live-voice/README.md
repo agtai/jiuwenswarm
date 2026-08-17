@@ -18,6 +18,7 @@ it is not a project summary, document catalog or historical handoff.
 |---|---|
 | Current Alpha implementation, investigation or bug fix | Read §1–2 and only the task ID named by STATUS in the [S5–S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), then the affected source/tests and only the acceptance bullets that task consumes. Read prerequisite task sections only when their output is missing or conflicts. |
 | Alpha task/stage planning | Read §1–2 plus only the current stage section of the S5–S8 plan. Add D-075/D-076 and the relevant roadmap section only when changing task order, scope or exits. |
+| Post-Alpha Demo implementation, investigation or bug fix | Read STATUS, D-081, the affected source/tests and only the relevant D119 contract boundary. Use runbook §7.5 only for runtime/Demo validation. Do not reopen S7/S8 or start S9. |
 | Ordinary non-Alpha module work | Read the affected source/tests, the relevant module/package contract and only the governing decision or ACG sections. Do not read old integration reviews by default. |
 | Documentation structure/update | Read [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md), then only the authoritative files changed by the update. |
 | Architecture, authority, protocol, security or durability change | Read the exact relevant ACG sections and current decisions. Add the complete solution only when the long-term boundary itself is in scope. |

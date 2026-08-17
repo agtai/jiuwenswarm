@@ -893,3 +893,14 @@
 - 重放语义：presentation ACK 后同一稳定通知不再投递；播放后 ACK 前崩溃继续遵循现有 P2 replay，不宣称无条件 exactly-once。通知与 ASR final、Agent output、TTS 串行互斥，且通知、插话、Speech 错误对 Task cancel/mutation 的副作用必须为零。
 - 语义与 UI：统一入口扩展为 dialogue、background.create/update/query/status/cancel 六路。create/update 分离并使用高置信度全句规则；普通非任务问句、歧义和低置信度保持 dialogue，current Task 的结果、进度和 adjustment 状态问句仍路由 query/status。UI 只增加转写/错误分离、重新监听、调整状态和终态通知，不恢复 Send、Agent/Task、operation 或 Task ID 控件。
 - 重新评估条件：源码或并发测试证明 v3 无法原子表达上述 admission/排序/重放；现有 TaskEvent/P2 ledger 无法在进程恢复后重建未 ACK 通知；或 Direct Executor 无法在终态前提供确定性安全检查点。只允许针对被证明缺口的最小结构扩展。
+
+## D-081 已验收 Alpha 不因 Post-Alpha Demo 扩展与修复回退
+
+- 日期：2026-08-17
+- 状态：Accepted project-status and validation decision（用户明确要求保留已经完成的 Alpha 验收，不因准备后续 Demo 时发现并修复缺陷而把 S7/S8 改回未完成）
+- 里程碑语义：`PASS — INTEGRATED WEB ALPHA` 继续绑定 2026-08-15 已验收的精确源码 `d33b520e0d21ae0829d30814d77a01cc18256f09`，S8/A3 保持关闭。Alpha 之后加入的免手循环、运行中调整和终态通知能力，以及这些能力暴露的后续缺陷，不倒写该历史验收、不把 S7/A2 或 S8/A3 重新打开，也不把新源码冒充为原验收源码。
+- 当前工作：当前阶段内工作定义为 `Post-Alpha Demo preparation / bug repair`。先修复 STATUS 中的 unified-create 完成通知与 completion-adjacent barge/P2 recovery 两个阻塞，再在最终 Demo 源码上验证；它们阻塞新的 Demo，不撤销 Alpha PASS。
+- 验证方式：修复过程运行受影响正例、关键负例、flag-off、恢复/并发与零禁止副作用检查；最终源码运行 Demo 范围内风险相称的受影响/累计检查和 Tier-3 评审，随后完成一次完整真实麦克风/TTS Demo Journey。这是 Post-Alpha Demo 验证，不创建新的 Alpha freeze/handoff，不重走 S7/S8 流程，也不降低 D-032、D-071、D-074 的安全、真实路径和评审底线。
+- S9 边界：S9 尚未开始。完整 P3、Beta/RC/Production、公开部署、生产鉴权/多租户、D1/D2 和稳定性/SLO 等仍属 Later；当前 Demo 修复本身不取得任何 S9 进度信用。
+- 取代关系：本决定取代 D119 结尾“当前还需一次 S8/A3 physical acceptance”的当前状态解释；D119 对精确 `3bc7f934` 的设计、实现、测试与评审事实保持冻结有效，其 S7/A2、S8/A3 文案只作为当时候选记录。当前事实和下一步只看 STATUS。
+- 重新评估条件：用户明确重新打开 Alpha 里程碑；发现原已验收源码本身的验收记录失实；当前范围扩展到 S9；或 Demo 修复改变已接受的核心安全/权威合同而需要新的阶段定义。

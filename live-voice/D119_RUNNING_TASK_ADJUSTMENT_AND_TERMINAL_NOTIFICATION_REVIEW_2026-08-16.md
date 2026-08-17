@@ -2,6 +2,13 @@
 
 Date: 2026-08-16
 
+> **Candidate-specific frozen review.** The S7/A2 automation and review PASS in
+> this record remains valid only for exact source `3bc7f9345f5b3832367e0a34b0dee8853d3d2c02`.
+> Later product source, including `f118f51b`, is not covered by that PASS. Read
+> [STATUS](STATUS.md) for the current candidate, blockers and next action. Under
+> D-081, this record's historical S7/A2 and S8/A3 wording does not reopen the
+> already accepted Integrated Web Alpha milestone.
+
 Stage / target nodes: renewed S7/A2 candidate verification, then one S8/A3
 product acceptance on the exact tested source
 
@@ -140,6 +147,11 @@ the repairs. The independent reviewer reported no remaining P0-P3 source
 finding.
 
 ## S8/A3 product acceptance
+
+> **Frozen candidate wording.** This section records what remained for the D119
+> candidate on 2026-08-16. D-081 keeps the already accepted Alpha closed; the
+> seven-step journey is now reused as Post-Alpha Demo validation, not as another
+> S8/A3 run. Current blockers and results belong only in [STATUS](STATUS.md).
 
 Physical acceptance is still **PENDING**. The host has a protected Speech key
 binding, but the private product/provider runtime is not currently listening

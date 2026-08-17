@@ -2,6 +2,13 @@
 
 Date: 2026-08-16
 
+> **Historical pre-D119 candidate snapshot.** This record intentionally
+> describes the unified hands-free implementation while its reviewed diff was
+> still uncommitted. It is not the current branch/candidate status and does not
+> include the later running-adjustment and terminal-notification batch. Read
+> [STATUS](STATUS.md) for current facts and [D119](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md)
+> for the successor candidate-specific review.
+
 Stage / target node: S8 / A3 implementation candidate
 
 Tracks / modules: Shared-X, P1, P2, P3alpha; Web integrated owner, Gateway,

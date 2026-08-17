@@ -28,6 +28,8 @@
 | X-OBS | [X-OBS review](X_OBS_IMPLEMENTATION_REVIEW_2026-08-05.md) |
 | X-E2E/X-WEB | [X-E2E/X-WEB review](X_E2E_X_WEB_IMPLEMENTATION_REVIEW_2026-08-05.md) |
 | Product composition | [Product Composition Gate 0](roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md), then only the implicated integration record |
+| Unified hands-free baseline | [D118 pre-D119 candidate snapshot](D118_UNIFIED_HANDS_FREE_LIVE_VOICE_REVIEW_2026-08-16.md) |
+| Running adjustment and terminal notification | [D119 candidate-specific frozen review](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md) |
 
 The dated Alpha integration sequence is
 [first product integration](ALPHA_PRODUCT_INTEGRATION_REVIEW_2026-08-07.md) →

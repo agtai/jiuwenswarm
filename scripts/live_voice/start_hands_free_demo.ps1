@@ -54,6 +54,87 @@ function Fail([string]$Text) {
     throw $Text
 }
 
+function Get-ChromeExecutable {
+    $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    $candidateRoots = @(
+        $env:ProgramFiles,
+        $programFilesX86,
+        $env:LOCALAPPDATA
+    )
+    foreach ($root in $candidateRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) {
+            continue
+        }
+        $candidate = Join-Path $root 'Google\Chrome\Application\chrome.exe'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            return (Get-Item -LiteralPath $candidate -Force).FullName
+        }
+    }
+    Fail '找不到 Google Chrome。请安装桌面版 Google Chrome，或使用 -NoBrowser 仅启动服务。'
+}
+
+function Start-IsolatedChrome([string]$ChromeExecutable, [string]$Url) {
+    $profileName = 'jiuwenswarm-live-voice-chrome-{0}-{1}' -f (
+        Get-Date -Format 'yyyyMMdd-HHmmss'
+    ), ([guid]::NewGuid().ToString('N').Substring(0, 8))
+    $profilePath = Join-Path ([System.IO.Path]::GetTempPath()) $profileName
+    if (Test-Path -LiteralPath $profilePath) {
+        Fail "隔离 Chrome profile 路径意外已存在：$profilePath"
+    }
+    New-Item -ItemType Directory -Path $profilePath | Out-Null
+
+    $quotedProfilePath = '"' + $profilePath + '"'
+    $arguments = @(
+        "--user-data-dir=$quotedProfilePath",
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-background-mode',
+        '--new-window',
+        $Url
+    )
+    $chrome = Start-Process -FilePath $ChromeExecutable -ArgumentList $arguments -WindowStyle Normal -PassThru
+    Start-Sleep -Milliseconds 750
+    if ($chrome.HasExited) {
+        Fail "隔离 Chrome 启动后立即退出（exit=$($chrome.ExitCode)）。"
+    }
+    return $profilePath
+}
+
+function Stop-ExistingIsolatedChrome([string]$ChromeExecutable) {
+    $profilePrefix = Join-Path ([System.IO.Path]::GetTempPath()) 'jiuwenswarm-live-voice-chrome-'
+    $processes = @(
+        Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -like "*$profilePrefix*" }
+    )
+    if ($processes.Count -eq 0) {
+        return
+    }
+    $unexpected = @(
+        $processes | Where-Object {
+            [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -or
+            ([string]$_.ExecutablePath -ine $ChromeExecutable)
+        }
+    )
+    if ($unexpected.Count -gt 0) {
+        Fail '旧隔离 Chrome profile 匹配到了非预期可执行文件；为避免误停进程，脚本已停止。'
+    }
+    foreach ($process in $processes) {
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 250
+        $remaining = @(
+            Get-CimInstance Win32_Process -Filter "Name = 'chrome.exe'" -ErrorAction SilentlyContinue |
+                Where-Object { $_.CommandLine -like "*$profilePrefix*" }
+        )
+    } while ($remaining.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline)
+    if ($remaining.Count -gt 0) {
+        Fail "仍有 $($remaining.Count) 个旧隔离 Chrome 进程未退出。"
+    }
+    Write-Pass "已关闭 $($processes.Count) 个旧隔离 Chrome 进程；未删除其 profile 目录"
+}
+
 function Get-CanonicalPath([string]$Path) {
     return (Get-Item -LiteralPath $Path -Force -ErrorAction Stop).FullName.TrimEnd('\')
 }
@@ -186,6 +267,11 @@ try {
             Fail "PATH 中找不到 $command。"
         }
     }
+    $ChromeExecutable = $null
+    if (-not $NoBrowser) {
+        $ChromeExecutable = Get-ChromeExecutable
+        Write-Pass "隔离浏览器将使用 Google Chrome：$ChromeExecutable"
+    }
     & $Python -c "import openjiuwen.symphony, yaml; print('runtime-imports-ok')" | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Fail 'Python 环境不能导入 openjiuwen.symphony/yaml；请重新运行 uv sync。'
@@ -300,6 +386,11 @@ try {
     $configFacts = $configProbe | ConvertFrom-Json
     if ($configFacts.language -ne 'zh') { Fail "preferred_language 必须为 zh，当前为 '$($configFacts.language)'。" }
     if (-not $configFacts.models -or -not $configFacts.leader) { Fail 'Agent 默认模型或 agent_leader 配置缺失。' }
+    # This launcher is intentionally pinned to the official OpenAI Speech
+    # origin below. The runtime requires an explicit provider label as well;
+    # without it both Streaming and Batch fail closed as unavailable even when
+    # the key, base URL and models are otherwise valid.
+    [Environment]::SetEnvironmentVariable('LIVE_VOICE_SPEECH_PROVIDER', 'openai', 'Process')
     Import-PrivateValue -Name 'API_KEY' -PrivateEnvPath $PrivateEnvPath -Required | Out-Null
     $speechKey = Import-PrivateValue -Name 'LIVE_VOICE_SPEECH_API_KEY' -PrivateEnvPath $PrivateEnvPath -Required
     $speechBase = Import-PrivateValue -Name 'LIVE_VOICE_SPEECH_API_BASE' -PrivateEnvPath $PrivateEnvPath -Required
@@ -310,6 +401,14 @@ try {
     if ($sttModel -ne 'gpt-4o-mini-transcribe-2025-12-15') { Fail 'STT 模型不是已验证的 Demo 模型。' }
     if ($ttsModel -ne 'gpt-4o-mini-tts-2025-12-15') { Fail 'TTS 模型不是已验证的 Demo 模型。' }
     [Environment]::SetEnvironmentVariable('LIVE_VOICE_SPEECH_TTS_VOICE', 'marin', 'Process')
+    [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED', '1', 'Process')
+    [Environment]::SetEnvironmentVariable('LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED', '1', 'Process')
+    $speechProbeJson = & $Python -c "import asyncio,json; from jiuwenswarm.server.live_voice.batch_speech import create_environment_batch_speech_provider; from jiuwenswarm.server.live_voice.openai_streaming_speech import select_environment_streaming_speech; b=create_environment_batch_speech_provider().capability(); s=asyncio.run(select_environment_streaming_speech(batch_available=b.available)); print(json.dumps({'batch':b.available,'streaming':s.tier.value == 'streaming' and s.provider is not None}))"
+    if ($LASTEXITCODE -ne 0) { Fail '无法执行正式 Speech Provider 可用性探针。' }
+    $speechProbe = $speechProbeJson | ConvertFrom-Json
+    if ($speechProbe.batch -ne $true -or $speechProbe.streaming -ne $true) {
+        Fail '正式 Streaming/Batch Speech Provider 未就绪。'
+    }
     Write-Pass '中文 Agent、OpenAI Speech、STT/TTS 模型和 TTS voice 已就绪（私密值未输出）'
 
     Write-Step '设置完整免手 Demo 能力与安全边界'
@@ -344,6 +443,7 @@ try {
         JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED            = '1'
         JIUWENSWARM_LIVE_VOICE_END_OF_TURN_ENABLED                = '1'
         JIUWENSWARM_LIVE_VOICE_WEB_ALPHA_CREDENTIAL_ENABLED       = '1'
+        LIVE_VOICE_SPEECH_PROVIDER                               = 'openai'
         LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED                    = '1'
         LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED                = '1'
         VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB                    = 'true'
@@ -395,6 +495,9 @@ try {
     }
 
     Write-Step '处理旧服务并从最新源码构建'
+    if (-not $NoBrowser) {
+        Stop-ExistingIsolatedChrome -ChromeExecutable $ChromeExecutable
+    }
     $owners = @(Get-ListeningOwners -Ports @($ExpectedPorts.Values))
     if ($owners.Count -gt 0) {
         if (-not $RestartExisting) {
@@ -438,17 +541,23 @@ try {
     Write-Pass 'P3 authenticated route 与 P2/P3 product composition 已就绪'
     Write-Pass '四个固定端口均已就绪；未发生静默端口漂移'
 
+    $isolatedChromeProfile = $null
+    if (-not $NoBrowser) {
+        Write-Step '打开全新隔离 Chrome'
+        $isolatedChromeProfile = Start-IsolatedChrome -ChromeExecutable $ChromeExecutable -Url 'http://localhost:6173'
+        Write-Pass "隔离 Chrome 已打开：$isolatedChromeProfile"
+    }
+
     Write-Host "`n============================================================" -ForegroundColor Green
     Write-Host '  JiuwenSwarm Live Voice 免手 Demo 已准备完成' -ForegroundColor Green
     Write-Host '  Web: http://localhost:6173' -ForegroundColor White
     Write-Host "  Project: $ProjectPath" -ForegroundColor White
     Write-Host "  Log: $logPath" -ForegroundColor DarkGray
+    if ($null -ne $isolatedChromeProfile) {
+        Write-Host "  Isolated Chrome: $isolatedChromeProfile" -ForegroundColor DarkGray
+    }
     Write-Host '  首次进入页面仍需由浏览器授予麦克风权限并选择该项目。' -ForegroundColor Yellow
     Write-Host '============================================================' -ForegroundColor Green
-
-    if (-not $NoBrowser) {
-        Start-Process 'http://localhost:6173' | Out-Null
-    }
     exit 0
 } catch {
     $failureLine = $_.InvocationInfo.ScriptLineNumber
