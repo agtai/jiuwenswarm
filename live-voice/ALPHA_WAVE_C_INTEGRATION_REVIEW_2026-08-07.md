@@ -129,7 +129,7 @@ Automated tests are software evidence only. They do not prove a real Provider, p
 
 Wave C generated no new sanitized real E2E evidence. No physical browser/device, live Provider, running Agent/Tool service, disposable Task Executor, deployed proxy or X-OBS backend was exercised. The source-integrated committed-text P2 route and the new P3 authority foundation were observed only in deterministic/local software tests.
 
-Therefore the Integrated Demo remains `NOT RUNNABLE`, no Immutable Alpha Gate was run, and the Demo Replacement Ledger remains `0/100`. The acceptance authority remains [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) and [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md); package tests and review passes cannot award their credit.
+Therefore the Integrated Demo remains `NOT RUNNABLE`, no Immutable Alpha Gate was run, and the Demo Replacement Ledger remains `0/100`. The acceptance authority at this review's exact source was [Integrated Demo acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md) plus the historical `validation/ALPHA_ACCEPTANCE.md`, now recoverable from Git history; package tests and review passes cannot award their credit, and the current product-readiness contract does not retroactively replace that Alpha contract.
 
 The consolidated user-dependent package is:
 

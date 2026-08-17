@@ -1,6 +1,6 @@
 # JiuwenSwarm 实时语音交互：目标架构、核心任务与竞品对比
 
-> **历史架构快照提示（2026-08-05）：** 本文保留 2026-07-30 接受时的 Windows Desktop / WebView2 载体、范围和估算，正文中的 Windows Alpha 与 X-WIN 表述仅是历史设计事实。[D-055](../decisions/DECISIONS.md) 已将当前产品载体调整为 **Integrated Web Alpha**；当前状态、交付顺序和稳定替换关系分别以 [STATUS](../STATUS.md)、当前决策/路线以及 [Web Alpha 交付矩阵](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md) 为准。该载体更新不改变本文定义的 P1/P2/P3 能力边界，也不得用历史 Windows 或并行日历文字指导当前实现。
+> **历史架构快照提示（2026-08-17）：** 本文保留 2026-07-30 接受时的 Windows Desktop / WebView2 载体、范围和估算，正文中的 Windows Alpha、X-WIN、Work Package、时间盒和交付顺序仅是历史设计事实。[D-055](../decisions/DECISIONS.md) 已将当前产品载体调整为 **Integrated Web Alpha**；[D-084](../decisions/DECISIONS.md) 进一步规定，当前完成边界、唯一能力矩阵和依赖路线只看 [STATUS](../STATUS.md)。本文只有第 2 节的 P1/P2/P3 能力边界及第 4–5 节的目标模块/契约继续作为稳定设计输入；第 3 节代码基线、第 6 节拆包/排期、第 7 节竞品时点证据以及其余载体描述均不得当作当前实现事实或排期。
 
 - 日期：2026-07-30
 - 首期产品：JiuwenSwarm Windows Desktop / WebView2

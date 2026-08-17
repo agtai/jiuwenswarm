@@ -4,9 +4,11 @@
 >
 > Current progress: [STATUS.md](../STATUS.md)
 >
-> Pass/fail authority: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
+> Historical pass/fail authority: `validation/ALPHA_ACCEPTANCE.md`, recoverable
+> from Git history for this plan's exact source.
 >
-> Human A3 journey: [ALPHA_SHOWCASE.md](../demo/ALPHA_SHOWCASE.md)
+> Historical human A3 journey: `demo/ALPHA_SHOWCASE.md`, recoverable from Git
+> history and not replaced retroactively by the current product-readiness journey.
 >
 > Stable module/package map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 >
@@ -313,7 +315,7 @@ without the runtime facts and real probes.
 - Bind the A3 script to the exact candidate, environment, Provider/Executor,
   disposable project, flags, known deviations and automated report.
 - Confirm that A3 contains no source repair, hidden route switch or new scope.
-- **Exit:** [ALPHA_SHOWCASE.md](../demo/ALPHA_SHOWCASE.md) is executable end to end
+- **Exit:** the historical `demo/ALPHA_SHOWCASE.md` is executable end to end
   by the user on the frozen candidate.
 
 ## 6. S8 / A3 — product acceptance tasks

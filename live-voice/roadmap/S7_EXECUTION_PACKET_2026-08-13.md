@@ -93,7 +93,7 @@ runs again.
 ## 4. S7-03 — cumulative cold review
 
 Review `2a69c2b8..candidate` against the original Alpha request, repository rules,
-the complete [Alpha acceptance contract](../validation/ALPHA_ACCEPTANCE.md) and
+the complete historical `validation/ALPHA_ACCEPTANCE.md` contract and
 actual S7-02 output. The review must cover:
 
 - P1 capture/recognition/synthesis/playout ↔ P2 realtime media ownership;
@@ -112,7 +112,9 @@ materially changes integration semantics.
 
 Bind the successful candidate, runtime declaration, Provider/Executor,
 disposable project, flags, known warnings/deviations and S7 reports to the
-[Alpha showcase](../demo/ALPHA_SHOWCASE.md). Confirm the script requires no source
+historical `demo/ALPHA_SHOWCASE.md`. Both historical files are now recoverable
+from Git history and are not replaced retroactively by the current
+product-readiness contract. Confirm the script requires no source
 repair or hidden route switch and is executable end to end by the user.
 
 S7/A2 closes only when S7-01 through S7-04 refer to the same clean source and no

@@ -11,9 +11,9 @@
 
 This record applies the
 [S7 execution packet](roadmap/S7_EXECUTION_PACKET_2026-08-13.md), complete
-[Alpha acceptance contract](validation/ALPHA_ACCEPTANCE.md), D-074 review
+historical `validation/ALPHA_ACCEPTANCE.md`, D-074 review
 cadence and D-078 runtime choices. The exact clean handoff HEAD includes this
-record, [STATUS](STATUS.md) and the [Alpha showcase](demo/ALPHA_SHOWCASE.md), and
+record, [STATUS](STATUS.md) and historical `demo/ALPHA_SHOWCASE.md`, and
 is bound by the external sanitized `s7-final-report.json` generated after
 that documentation commit. The external report is authoritative for the final
 Git SHA and dependency hashes; private paths, hostnames, credentials, raw media
@@ -206,7 +206,9 @@ candidate/runtime binding, counts and zero-effect fields.
 | S7/A2 exit satisfied | Yes |
 
 S7/A2 is closed. The next stage is the user-owned A3 journey in
-[STATUS](STATUS.md) and [ALPHA_SHOWCASE](demo/ALPHA_SHOWCASE.md). It must keep
+[STATUS](STATUS.md) and historical `demo/ALPHA_SHOWCASE.md`. The exact historical
+contract and journey are now recoverable from Git history; the current
+product-readiness files do not replace them retroactively. It must keep
 the candidate/profile unchanged and physically verify microphone capture,
 heard playout, permission/device/lifecycle behavior and the complete joint
 P1/P2/P3alpha product journey. This record does not claim

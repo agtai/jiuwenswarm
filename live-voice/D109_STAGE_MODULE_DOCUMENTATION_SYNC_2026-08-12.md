@@ -34,7 +34,10 @@ This change does not alter implementation, roll back W2 acceptance, repeat the W
 - D-075 freezes the four-layer vocabulary, S0–S9 stage sequence and A0–A3 Alpha entry/exit nodes.
 - STATUS was reduced to a current resume capsule, stage dashboard, module dashboard, Alpha node exits, current constraints, policy and grouped history routes. Detailed failed attempts remain intact in D90–D108 and Git history.
 - W2 remains bound to `INTEGRATED_DEMO_ACCEPTANCE.md + INTEGRATED_SHOWCASE.md`.
-- Alpha is now bound to `ALPHA_ACCEPTANCE.md + ALPHA_SHOWCASE.md`; the new script covers platform lifecycle, P1 measurement reference, P2 slow-load behavior, structured and natural-language P3alpha, joint concurrency, privacy/trace and cleanup.
+- Alpha was bound at this record's exact source to
+  `ALPHA_ACCEPTANCE.md + ALPHA_SHOWCASE.md`; both are now recoverable from Git
+  history and are not replaced retroactively by the current product-readiness
+  contract.
 - The roadmap now owns stable stage/node exits and explicitly distinguishes tracks/modules/work packages/windows.
 - The runbook requires selecting exactly one milestone contract, routes Alpha through A2/A3 and reflects coherent local commits plus separately approved remote updates.
 - The ACG and frozen package matrix received interpretation notes only; their technical contract/package content was not rewritten.
@@ -50,12 +53,12 @@ This change does not alter implementation, roll back W2 acceptance, repeat the W
 | `STATUS.md` | Sole mutable stage, node, module coverage, constraints and next actions |
 | `decisions/DECISIONS.md` | D-075 accepted rationale and re-evaluation conditions |
 | `architecture/ARCHITECTURE_CONTRACT_GATE_V1.md` | Non-semantic terminology note for historical Phase/Week references |
-| `roadmap/POST_V0_DELIVERY_ROADMAP.md` | Stable S0–S9/A0–A3 definitions and exit criteria |
+| root `TESTING.md` | Current stable risk tiers, scenario dimensions and review cadence; the former roadmap's numbered sequence is historical |
 | `roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md` | Historical-window-to-current-stage interpretation only |
 | `validation/INTEGRATED_DEMO_ACCEPTANCE.md` | Explicit S3/W2-only scope and D-074 review authority |
-| `validation/ALPHA_ACCEPTANCE.md` | S5–S8 entry/exit and Alpha-specific A3 route |
+| historical `validation/ALPHA_ACCEPTANCE.md` | S5–S8 entry/exit and Alpha-specific A3 route at this record's exact source; now recoverable from Git history |
 | `demo/INTEGRATED_SHOWCASE.md` | W2-only human journey |
-| `demo/ALPHA_SHOWCASE.md` | Alpha-only A3 human journey |
+| historical `demo/ALPHA_SHOWCASE.md` | Alpha-only A3 human journey at this record's exact source; now recoverable from Git history |
 | `runbooks/E2E_RUNBOOK.md` | Exact milestone selection, A2/A3 sequencing and current Git policy |
 | `scripts/live_voice/w2_rehearsal/README.md` | W2-only diagnostic boundary; no Alpha closure credit |
 

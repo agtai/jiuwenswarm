@@ -321,7 +321,7 @@
 - 日期：2026-08-02
 - 状态：Accepted（测试从合同出发、正反例、零禁止副作用和 immutable evidence 原则保留；普遍双回顾/完整矩阵流程已由 D-046 的 Tier 0–3 风险分级取代）
 - 背景：现有 Foundation 的 Python `226/226`、Live Voice `155/155`、相关回归 `24/24` 能证明对应 suites 在当时最终代码上通过；155 与 24 两组有 9 项重叠且 Git 未保存 JUnit 产物。测试数量、行覆盖率或纯函数测试无法单独证明模块定义中的所有行为、拒绝路径、竞态、恢复和真实接线均已覆盖。若 tests 只是跟随当前实现编写，还可能把错误行为固化成“预期”。
-- 决策：每个模块或逻辑切片在语义开发前、实现完成后各做一次正式回顾。两次都必须重新理解完整方案、当前阶段、模块契约/非目标、上下游、现有 tests 和实际风险，并维护 test inventory、每项 test 的设计原因以及 `scenario → test/evidence` 矩阵。每个改变的不变量必须同时有正向正确场景和反向拒绝场景；反向业务动作必须明确失败、拒绝或安全 no-op，并断言所有禁止副作用为 0，而测试进程本身应 PASS。边界、状态、时序、重复/乱序、并发/重试、恢复、scope/权限、feature flag/降级、协议/持久格式兼容和真实跨模块路径按适用性覆盖；`N/A` 必须说明理由。详细执行规范和记录模板以 [POST_V0_DELIVERY_ROADMAP.md](../roadmap/POST_V0_DELIVERY_ROADMAP.md) §3.1 为唯一权威。
+- 决策：每个模块或逻辑切片在语义开发前、实现完成后各做一次正式回顾。两次都必须重新理解完整方案、当前阶段、模块契约/非目标、上下游、现有 tests 和实际风险，并维护 test inventory、每项 test 的设计原因以及 `scenario → test/evidence` 矩阵。每个改变的不变量必须同时有正向正确场景和反向拒绝场景；反向业务动作必须明确失败、拒绝或安全 no-op，并断言所有禁止副作用为 0，而测试进程本身应 PASS。边界、状态、时序、重复/乱序、并发/重试、恢复、scope/权限、feature flag/降级、协议/持久格式兼容和真实跨模块路径按适用性覆盖；`N/A` 必须说明理由。当前风险分级、场景维度和 review cadence 的稳定执行权威为根 [TESTING.md](../../TESTING.md)；本段历史的通用双回顾要求继续受 D-046/D-074 限定。
 - 决策：只有双回顾齐全、全部必需场景有证据、最终命令在包含全部 code/test 行为输入且相关路径干净的 immutable candidate SHA 上通过、必要 E2E/人工观察完成且无未解释 flaky/必需 gap 时，模块才可标记 `CLOSED`；否则只能是 `PARTIAL` 或 `BLOCKED`。任何后续 code/test/input 变化都会使受影响闭环失效。现有 Foundation 结果保留为历史回归证据，但不能倒写成已经走过 D-032；已有模块在再次修改、作为新切片闭环依赖或进入版本 Gate 前补齐受影响范围。
 - 原因：这迫使测试从项目方案和模块定义出发，既证明“应该成功的确实成功”，也证明“不应发生的确实被阻止且没有副作用”，并让新机器或新 Codex 会话能够从 Git 恢复每项测试为何存在、覆盖了什么和还缺什么。
 - 影响：历史上 D-031 被指定为第一个完整应用切片；当前 D-046 只要求 Tier 2/3 保留适用或完整双回顾，Tier 0/1 使用最小充分证据。详细矩阵进入 dated/module review record，`STATUS.md` 只保存短 dashboard、当前状态和链接；独立 `HANDOFF.md` 已由 D-040 取消。V0 acceptance/evidence 继续独立，不将 Post-V0 流程倒灌进 V0 事实。
@@ -904,3 +904,50 @@
 - S9 边界：S9 尚未开始。完整 P3、Beta/RC/Production、公开部署、生产鉴权/多租户、D1/D2 和稳定性/SLO 等仍属 Later；当前 Demo 修复本身不取得任何 S9 进度信用。
 - 取代关系：本决定取代 D119 结尾“当前还需一次 S8/A3 physical acceptance”的当前状态解释；D119 对精确 `3bc7f934` 的设计、实现、测试与评审事实保持冻结有效，其 S7/A2、S8/A3 文案只作为当时候选记录。当前事实和下一步只看 STATUS。
 - 重新评估条件：用户明确重新打开 Alpha 里程碑；发现原已验收源码本身的验收记录失实；当前范围扩展到 S9；或 Demo 修复改变已接受的核心安全/权威合同而需要新的阶段定义。
+
+## D-082 当前项目状态改用产品准备度与能力/模块完成度
+
+- 日期：2026-08-17
+- 状态：Accepted project-governance decision（用户要求从项目角度重新审视真实实现，明确已完成、部分完成和未完成，并停止使用旧的编号阶段体系表达当前状态）
+- 当前状态语义：`STATUS.md` 只按产品准备度、能力/模块完成度、真实阻塞和有序下一步表达当前项目。有效状态包括明确边界内的 `COMPLETE`、`PARTIAL`、`BLOCKED`、`NOT STARTED`/`NOT READY`；任何“完成”都必须同时写清适用源码和产品边界。
+- 历史验收语义：已接受的 Integrated Web Alpha 继续绑定精确源码 `d33b520e0d21ae0829d30814d77a01cc18256f09`。改用能力口径既不撤销该历史验收，也不把后续源码、Demo 扩展或生产范围自动标记为完成。
+- 执行包语义：新的实现或修复包必须声明产品能力/模块、风险等级、依赖、包含项、排除项和验收；不得再从旧计划编号推导当前队列、优先级、进度或验收要求。
+- 历史保留：冻结的路线、执行计划、评审、证据及已有测试/文件名中的旧编号保持历史真实性，待代码与文档整理时按安全范围归档或重命名；它们不能覆盖 STATUS，也不构成当前工作授权。
+- 取代关系：本决定取代 D-075/D-076/D-079/D-081 中关于“用编号阶段/节点描述当前工作”的解释。上述决定的能力边界、安全要求、精确源码验收事实、测试/评审证据和历史顺序继续有效。
+- 重新评估条件：用户重新要求阶段式项目管理；能力依赖无法通过模块执行包表达；产品边界发生需要新里程碑合同的重大变化；或历史验收事实被证明不真实。
+
+## D-083 先收敛当前文档权威，再按产品真实性优先完成实现
+
+- 日期：2026-08-17
+- 状态：Accepted cleanup/execution decision（用户批准立即执行稳定验证权威迁移与第一批文档删除，要求把产品缺陷记录为后续实现最高优先级，同意测试先迁移再删除旧入口，并把 develop 集成延后到全部功能完成）
+- 文档执行：根 `TESTING.md` 接管 D-032/D-046/D-074 的当前风险分级、场景维度和 review cadence；带日期的 Post-V0 路线图从工作树删除。当前 pass/fail 与人工 Journey 分别改为 `validation/PRODUCT_READINESS_ACCEPTANCE.md` 和 `demo/PRODUCT_READINESS_SHOWCASE.md`，不再使用编号阶段作为当前验收入口。文档退休审计 Batch A 的 19 份历史/孤立/旧脚本文档已删除，精确内容由 Git 历史恢复。
+- 实现优先级：下一项产品代码工作必须先关闭 STATUS 中 Executor application/terminal/result、Task truth、bounded update/status、result context 和 P2/TTS/presentation 生命周期缺陷；文档清理不得把这些缺陷挤到后面。
+- 测试迁移：删除 S7/S8/W2 rehearsal 等旧脚本或测试入口前，必须先把仍适用的正例、负例、flag-off、恢复/并发和零禁止副作用 oracle 迁移到能力/模块 owner，并证明新 owner 可独立发现相应缺陷。入口删除与迁移后的 affected discovery/checks 属于同一清理批次。
+- Hardcode 时机：`.env.production` 默认开启部分 Demo 能力及 launcher 对该文件的强依赖是当前应处理的产品真实性问题，必须在下一受控产品候选构建前改为显式 Demo profile/进程配置；精确 itinerary、trusted Demo bypass、adjustment checkpoint 和 launcher 的其余场景固定值保留到下一次干净真实 Journey，随后随泛化替换而删除。协议常量、安全边界、稳定事件/错误名和显式 bounds 不按 hardcode 债务删除。
+- 重复代码时机：registry generation-index 遍历只在当前缺陷批实际触及该 owner 时做窄合并；前端 validator、`exactObject`、binding equality 和 task clone 在后续代码整理批统一。confirmation/mutation/close/ACK 等 authority handler 即使结构相似也不在当前抽象，除非先证明业务绑定、幂等、失败和零副作用语义完全一致。
+- develop 集成：用户明确要求在全部产品功能完成前不 re-fetch/rebase/merge/cherry-pick `origin/develop`。现有分叉继续作为 STATUS 风险记录，但不进入当前执行队列；功能完成后再单独审计累计差异并选择历史策略。
+- 单 commit 与分批 review：继续遵守“全部修改完成后只建立一个最终 commit”。分批 review 指在未提交工作树中按文档清理、测试迁移、缺陷修复、兼容/Hardcode 退休分别检查 scoped diff 和运行 affected checks；它们不是中间 commit。全部完成后再审累计 diff、运行最终验证并建立一次 commit。
+- 重新评估条件：文档删除发现唯一当前合同/证据没有稳定 owner；测试无法在删除旧入口前迁移；产品缺陷修复必须改变已接受的高风险合同；或长期 develop 分叉使继续实现产生已证明的重复劳动/不可解决冲突。
+
+## D-084 用四个完成边界和当前能力矩阵定义完整项目接续
+
+- 日期：2026-08-17
+- 状态：Accepted project-completion decision（用户要求新 Session 不仅能看到优先缺陷和待办类别，还能理解完整项目剩余能力、依赖、完成判据和 `develop` 集成触发点，并批准执行文档重构）
+- 完成边界：当前项目依次区分 `controlled product-readiness candidate`、`feature complete`、`productized candidate` 和 `RC / Production ready`。四者是累计但不可互换的产品结论；历史 Integrated Web Alpha 继续绑定其原精确源码。
+- 功能完整：`feature complete` 包含正式 P1/P2、完整 P3、Integrated Web 体验、多任务寻址与完整控制操作、结果/replay、按 Executor capability 如实提供的 D0–D2 语义、延迟指标、Provider/Executor/配置/语言/任务策略泛化、Demo/legacy authority 退休、广泛自动验证、竞品缺口审查和独立跨模块深度 review。
+- 功能完整排除项：生产鉴权/多租户、公开部署、SLO/retention、发布/回滚运营、额外平台承诺和可选 Native model-level duplex 不阻塞 feature-complete；这些进入 productized 或 RC/Production 边界，除非后续决定显式提前。
+- 集成触发：用户所说“全部功能完成后再集成 develop”绑定 `feature complete` 验收通过。通过前不 re-fetch/rebase/merge/cherry-pick `origin/develop`；通过后先审计实时 Git 分叉和累计冲突，再选择历史策略并完成受影响验证。历史 ahead/behind 数字不作为长期状态事实。
+- 当前权威：`STATUS.md` 用一张能力矩阵同时表达已实现、剩余功能、依赖和验收，并用一个当前执行包和一条到 feature-complete 的依赖路线取代多份重复的 completed/remaining/next-work 摘要。实时 HEAD、branch、upstream、ahead/behind 和 dirty 状态只从 Git 读取；STATUS 仅记录最后完成产品代码审查的基线。
+- 历史设计：`FULL_SOLUTION_2026-07-30.md` §§2、4–5 继续提供稳定 P1/P2/P3 能力、模块和共享合同边界；其旧载体、旧代码差距、编号 Work Package、日历 timebox 和交付顺序是历史输入，不得直接变成当前任务。
+- 取代关系：本决定取代 D-075/D-076/D-081 中仍以编号阶段表达当前项目完成路线的解释，并扩展 D-082 的能力口径与 D-083 的“全部功能完成后集成”边界；这些决定保存的精确源码、已执行验收、安全合同、测试迁移和清理时机事实继续有效。
+- 重新评估条件：用户改变 `develop` 集成触发边界；Production 能力被要求提前进入 feature-complete；某项完整 P3/D1/D2 能力被明确移出产品范围；或代码事实证明当前模块划分无法表达真实产品权威。
+
+## D-085 逐模块代码事实审计是当前修复和功能完整路线的前置依赖
+
+- 日期：2026-08-17
+- 状态：Accepted execution-dependency decision（用户确认现有能力矩阵尚未经过一次全新的逐模块代码事实审计，并要求将该工作写入待办与 feature-complete 依赖顺序）
+- 审计范围：在精确当前源码上逐一检查 STATUS 的 15 个能力域，记录实际 entrypoint/owner/call chain、formal/legacy/Demo/flag-off 路径、已实现行为、测试与缺失 oracle、hardcode、重复实现、退休条件、跨模块依赖和有代码证据的状态判断。
+- 顺序与信用：审计是当前 Tier-3 产品真实性修复的只读前置步骤。STATUS 完成校准前不得基于现有矩阵授予新的模块完成信用；六个已知阻塞不因此降级，审计应先验证并补全它们，再进入同一确认后的修复包。
+- 验证强度：只读审计本身不要求预先运行全量测试；先执行源码/测试发现与静态核对，只对有争议的代码事实运行 focused tests。实现修复、候选关闭和 feature-complete 仍执行各自风险相称的累计验证与真实 Journey。
+- 交付物：一份可追溯的逐模块代码事实审计、每个能力域的代码—测试—缺口—依赖—状态映射，以及所有发现不一致后的 STATUS/执行包/优先级更新。
+- 重新评估条件：审计期间产品代码改变；模块 owner/能力边界无法按当前 15 域表达；focused evidence 与既有 exact-source 记录冲突；或发现必须先改变高风险合同才能判断实现状态。

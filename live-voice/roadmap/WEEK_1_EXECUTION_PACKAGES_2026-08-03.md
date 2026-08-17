@@ -5,7 +5,7 @@
 > Freeze-state snapshot at plan creation: **SOL DESIGN COMPLETE / IMPLEMENTATION NOT STARTED**; consult STATUS for the completed implementation facts.
 > Original delivery window: the five working days after the documentation candidate was committed; this is historical timing, not a current schedule.
 > Current progress authority: [STATUS.md](../STATUS.md)
-> Product milestones and risk tiers: [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)
+> Current risk tiers and review cadence: root [TESTING.md](../../TESTING.md). Historical product ordering in this file is not current status.
 > Shared contract authority: [ARCHITECTURE_CONTRACT_GATE_V1.md](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md)
 > Ownership update: [D-049](../decisions/DECISIONS.md) replaces this snapshot's W1-K1 non-Sol owner with direct Sol implementation after five unsuccessful candidate reviews. The original owner text below is retained as dated history; see [the review record](../W1_K1_IMPLEMENTATION_REVIEWS_2026-08-03.md) and STATUS for current action.
 > Execution-policy history: [D-052](../decisions/DECISIONS.md) ended switching work to DeepSeek; [D-060](../decisions/DECISIONS.md) later created a bounded four-lane Alpha exception. Historical owner/model fields below no longer assign work; STATUS and the Alpha parallel plan own current allocation, while package boundaries, dependencies, risk tiers and scenario oracles remain valid.

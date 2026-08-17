@@ -20,7 +20,9 @@ The code boundary is the frontend formal Live Voice area, its focused tests, thi
 - Normative contract: `architecture/ARCHITECTURE_CONTRACT_GATE_V1.md` §§3–4, 7, 10–15.
 - Current decisions: D-039, D-042, D-044, D-046, D-047, D-052, D-053, D-055 and D-058.
 - Stable packages: `roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md` AIO-B/AIO-C/X-WEB rows.
-- Acceptance consumers: `validation/ALPHA_ACCEPTANCE.md` §§3 and 7; this batch cannot close those full Gates.
+- Historical acceptance consumer: `validation/ALPHA_ACCEPTANCE.md` §§3 and 7 at
+  this review's exact source. That contract is now recoverable from Git history;
+  the current product-readiness contract does not retroactively replace it.
 
 `AIO-B` is Tier 2 because it owns device/permission state, frame ordering, stale callback fencing and local playback effects. The X-WEB compatibility decision and eventual release Gate are Tier 3. This coherent batch therefore uses the D-053 three-review process and records every applicable risk dimension below.
 

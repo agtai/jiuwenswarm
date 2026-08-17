@@ -1,56 +1,36 @@
 # JiuwenSwarm Live Voice router
 
-This file is the lightweight entrypoint. It tells a new Session what to read;
-it is not a project summary, document catalog or historical handoff.
+Root `AGENTS.md` owns mandatory bootstrap and Git authority. After following it,
+read [STATUS](STATUS.md), select exactly one route below and load only the named
+sections plus affected source/tests. A link is a route, not a whole-file read
+command.
 
-## Always read
+## Task routing
 
-1. Read the repository root `AGENTS.md`.
-2. Verify Git with `git status --short --branch`, `git rev-parse HEAD`, the
-   configured upstream and `HEAD...@{upstream}`.
-3. Read [STATUS.md](STATUS.md). It is the only mutable current-state source.
-4. Select one route below. Do not load every linked document or every section of
-   a routed document.
-
-## Current-task routing
-
-| Task | Additional reading |
+| Task | Read after STATUS |
 |---|---|
-| Current Alpha implementation, investigation or bug fix | Read §1–2 and only the task ID named by STATUS in the [S5–S8 plan](roadmap/ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md), then the affected source/tests and only the acceptance bullets that task consumes. Read prerequisite task sections only when their output is missing or conflicts. |
-| Alpha task/stage planning | Read §1–2 plus only the current stage section of the S5–S8 plan. Add D-075/D-076 and the relevant roadmap section only when changing task order, scope or exits. |
-| Post-Alpha Demo implementation, investigation or bug fix | Read STATUS, D-081, the affected source/tests and only the relevant D119 contract boundary. Use runbook §7.5 only for runtime/Demo validation. Do not reopen S7/S8 or start S9. |
-| Ordinary non-Alpha module work | Read the affected source/tests, the relevant module/package contract and only the governing decision or ACG sections. Do not read old integration reviews by default. |
-| Documentation structure/update | Read [DOCUMENTATION_RULES.md](DOCUMENTATION_RULES.md), then only the authoritative files changed by the update. |
-| Architecture, authority, protocol, security or durability change | Read the exact relevant ACG sections and current decisions. Add the complete solution only when the long-term boundary itself is in scope. |
-| S7/A2 candidate verification | Read plan §1–2 and §5, [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md), affected module reviews/tests and only the required runbook sections. |
-| S8/A3 product acceptance | Read plan §1–2 and §6, Alpha acceptance, [Alpha showcase](demo/ALPHA_SHOWCASE.md) and the Alpha operating sections of the [runbook](runbooks/E2E_RUNBOOK.md). |
-| Git/review/parallel authority | Read root `AGENTS.md`, D-074 and only an active packet explicitly named by STATUS. Completed W2 lane assignments are not current. |
-| V0, W2, D-031, W3 migration, historical package or forensic work | Use the conditional [reference index](REFERENCE_INDEX.md); it must not be read during ordinary bootstrap. |
+| Current implementation packet | STATUS `Current execution packet`; affected source/tests; its linked contract/evidence boundaries; applicable root `TESTING.md` risk sections |
+| Another capability/module | That capability row and dependency route in STATUS; affected source/tests; only the relevant accepted design/ACG/decision sections |
+| Complete-project planning | STATUS completion boundaries, full capability matrix and dependency route; heading `D-084` in [decisions](decisions/DECISIONS.md); stable capability/contract sections (§§2, 4–5) of the [design snapshot](architecture/FULL_SOLUTION_2026-07-30.md) |
+| Candidate/product acceptance | Applicable acceptance contract; complete human journey; only required environment/start/cleanup sections of the runbook |
+| Documentation change | [Documentation rules](DOCUMENTATION_RULES.md) and only the authorities changed by the edit |
+| Architecture/authority/protocol/security/durability change | Exact ACG and governing decision sections; full design only if the long-term boundary itself changes or is ambiguous |
+| Git/review/parallel work | Root `AGENTS.md`, applicable root `TESTING.md` sections and only the active packet named by STATUS |
+| Historical/migration/forensic work | One route from the conditional [reference index](REFERENCE_INDEX.md); never use historical priority/status as the current queue |
 
-## Sectional-reading rules
+## Section rules
 
-- A link is a route, not an instruction to read the whole target.
-- In `DECISIONS.md`, locate the required `## D-nnn` heading and read only that
-  decision through the next decision heading.
-- In the execution plan, read common rules/dependencies plus the active task or
-  stage section. Read the whole plan only when auditing or changing the task graph.
-- Acceptance is required while implementing only for the bullets owned by the
-  active task; the complete contract is required at A2/A3.
-- Showcase and physical runbook steps are A3/runtime material, not ordinary
-  implementation context.
-- Frozen reviews/evidence explain history. Read one only for a concrete regression,
-  disputed invariant or evidence question.
+- In `DECISIONS.md`, read one required `## D-nnn` section through the next
+  decision heading.
+- Read complete acceptance only to decide a candidate/boundary. During
+  implementation, read only bullets owned by the changed capability.
+- Read showcase and physical runbook material only for runtime preparation or
+  product acceptance.
+- Read a complete historical packet/review only for a concrete regression,
+  disputed invariant or forensic question.
+- If Git/source/tests and prose disagree, Git is implementation fact. Repair
+  STATUS or the owning authority instead of copying the conflict elsewhere.
 
-## Authority and conflict order
-
-1. User's latest explicit instruction.
-2. Checked-out Git source and tests.
-3. STATUS for mutable state/current task.
-4. Accepted decisions, active execution task and acceptance contract.
-5. Stable roadmap/ACG, then the full design snapshot.
-6. Frozen reviews/evidence and archive.
-
-If sources disagree, report and repair the authoritative document. Do not copy
-the same mutable fact into several files. Git does not restore credentials,
-Provider/model configuration, project registration, browser permissions/devices,
-runtime data or network state.
+Credentials, Provider/model configuration, project registration, browser/device
+state, runtime data and network availability are machine-private and are not
+restored by Git.

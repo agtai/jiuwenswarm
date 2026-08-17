@@ -1,6 +1,6 @@
 # Live Voice V0 验收手册
 
-> 当前边界说明：本文只冻结 V0 `ee2896a4` 的验收合同。文末或历史决策中把 D-031 写成 Post-V0 下一步的语句已由 D-046 取代，不再定义当前排序。Week 2/Week 4 分别使用 [INTEGRATED_DEMO_ACCEPTANCE.md](INTEGRATED_DEMO_ACCEPTANCE.md) 和 [ALPHA_ACCEPTANCE.md](ALPHA_ACCEPTANCE.md)。
+> 当前边界说明：本文只冻结 V0 `ee2896a4` 的验收合同。文末或历史决策中把 D-031 写成 Post-V0 下一步的语句已由 D-046 取代，不再定义当前排序。Week 2 使用 [INTEGRATED_DEMO_ACCEPTANCE.md](INTEGRATED_DEMO_ACCEPTANCE.md)；历史 Week 4 使用的 `ALPHA_ACCEPTANCE.md` 已从工作树删除，精确内容由 Git 保留。当前候选入口只看 [STATUS](../STATUS.md)。
 
 - 版本：V0 / Vertical Slice Demo
 - 当前共享开发分支：`hx/0803_live_voice`
@@ -36,7 +36,7 @@ V0 验证的是：这条真实链路能否在受控环境中重复成立，用�
 | 如何从新机器恢复依赖、启动服务和检查健康 | [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md) |
 | 现场展示什么、说什么、失败时如何退场 | [DEMO_SHOWCASE.md](../demo/DEMO_SHOWCASE.md) |
 | 当前已经完成和未完成什么 | [STATUS.md](../STATUS.md) |
-| V0 范围、Shortcut Ledger 和两周计划 | [TWO_WEEK_DEMO.md](../archive/TWO_WEEK_DEMO.md) |
+| V0 范围、Shortcut Ledger 和两周计划 | 已从当前工作树删除；精确历史内容由 Git 保留 |
 | 已接受的路线和技术取舍 | [DECISIONS.md](../decisions/DECISIONS.md) |
 | P1/P2/P3 和最终生产架构 | [FULL_SOLUTION_2026-07-30.md](../architecture/FULL_SOLUTION_2026-07-30.md) |
 

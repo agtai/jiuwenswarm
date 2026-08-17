@@ -7,7 +7,7 @@
 ## 1. 结论
 
 本批次**未关闭 S6**，因此未进入 S7，也未执行 S8。按
-[ALPHA_ACCEPTANCE.md](validation/ALPHA_ACCEPTANCE.md) §8 的定义，本次结果为
+当时的 `validation/ALPHA_ACCEPTANCE.md` §8（现由 Git 历史保留）的定义，本次结果为
 **`BLOCKED` — required external condition is unavailable**。
 
 不受阻的自动化验证已全部完成并绑定到确切候选，其中发现并修复了 1 个 Alpha 引入的

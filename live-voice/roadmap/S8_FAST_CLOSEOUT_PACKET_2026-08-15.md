@@ -2,9 +2,11 @@
 
 > Frozen contract: 2026-08-15. Mode authority: D-079 in
 > [DECISIONS.md](../decisions/DECISIONS.md). Mutable state:
-> [STATUS.md](../STATUS.md) — read it before every phase. Pass/fail authority:
-> [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md). Human journey:
-> [ALPHA_SHOWCASE.md](../demo/ALPHA_SHOWCASE.md). Runner/probes:
+> [STATUS.md](../STATUS.md) — read it before every phase. Historical pass/fail
+> authority: `validation/ALPHA_ACCEPTANCE.md`. Historical human journey:
+> `demo/ALPHA_SHOWCASE.md`. Both are recoverable from Git history for this
+> packet's exact source and are not replaced by current product-readiness files.
+> Runner/probes:
 > `scripts/live_voice/S7_AUTOMATION.md`; S8 helper:
 > `scripts/live_voice/S8_READINESS.md`. Environment:
 > [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md).

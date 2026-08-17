@@ -18,9 +18,9 @@ This candidate delivers the product-facing composition shell, not the missing re
 
 - Current authority/router: [`README.md`](README.md) and [`STATUS.md`](STATUS.md).
 - Stable package route: [`roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md`](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md), X-E2E/X-WEB rows and dependency tree.
-- Delivery and Gate model: [`roadmap/POST_V0_DELIVERY_ROADMAP.md`](roadmap/POST_V0_DELIVERY_ROADMAP.md), cumulative route and Gate sections.
+- Historical delivery/Gate context is retained in this review; current risk tiers and review cadence are in root [`TESTING.md`](../TESTING.md).
 - Current decisions: D-055 and D-058 in [`decisions/DECISIONS.md`](decisions/DECISIONS.md).
-- Acceptance consumers: [`validation/INTEGRATED_DEMO_ACCEPTANCE.md`](validation/INTEGRATED_DEMO_ACCEPTANCE.md), [`validation/ALPHA_ACCEPTANCE.md`](validation/ALPHA_ACCEPTANCE.md), [`demo/INTEGRATED_SHOWCASE.md`](demo/INTEGRATED_SHOWCASE.md) and the Web/Integrated sections of [`runbooks/E2E_RUNBOOK.md`](runbooks/E2E_RUNBOOK.md).
+- Acceptance consumers at this review's exact source: [`validation/INTEGRATED_DEMO_ACCEPTANCE.md`](validation/INTEGRATED_DEMO_ACCEPTANCE.md), historical `validation/ALPHA_ACCEPTANCE.md`, [`demo/INTEGRATED_SHOWCASE.md`](demo/INTEGRATED_SHOWCASE.md) and the Web/Integrated sections of [`runbooks/E2E_RUNBOOK.md`](runbooks/E2E_RUNBOOK.md). The historical Alpha contract is now recoverable from Git and is not replaced retroactively by current product readiness.
 
 The candidate owns cumulative route selection, a shared frontend entry, Session/correlation facts, resource leases and lifecycle concurrency. The eventual product route and release Gate are authority-sensitive Tier 3. The batch therefore follows the D-046 Tier 3 dimensions and D-053 three-pass review even though its default current route is non-mutating and manifest-only.
 

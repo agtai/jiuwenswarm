@@ -3,9 +3,11 @@
 > Status: `S8 READINESS INTEGRATED`; exact A3 entry is fail-closed on the final
 > external S7 report/handoff. S8 human acceptance has not started.
 >
-> Authority: current stage remains [STATUS](STATUS.md); S8 requirements remain
-> [Alpha acceptance](validation/ALPHA_ACCEPTANCE.md) and the
-> [Alpha showcase](demo/ALPHA_SHOWCASE.md).
+> Frozen historical preparation record; it cannot override current
+> [STATUS](STATUS.md). Its exact-source authorities were
+> `validation/ALPHA_ACCEPTANCE.md` and `demo/ALPHA_SHOWCASE.md`, both now
+> recoverable from Git history. Current product-readiness files do not replace
+> those contracts retroactively.
 
 ## 1. Packet identity and boundary
 
@@ -128,4 +130,5 @@ includes:
 
 Only external handoff binding and all runtime/human execution occur after
 S7-04. The shortest command sequence is maintained in
-[the operator guide](../scripts/live_voice/S8_READINESS.md#shortest-s7-04-to-s8-01-sequence).
+the historical S8 operator guide, which has been removed from the current
+working tree and remains recoverable from Git.

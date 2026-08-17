@@ -13,8 +13,9 @@
 | W2 implementation/acceptance regression | D-071/D-072, [W2 acceptance](validation/INTEGRATED_DEMO_ACCEPTANCE.md), [W2 showcase](demo/INTEGRATED_SHOWCASE.md), [D105 product acceptance](D105_W2_PRODUCT_ACCEPTANCE_2026-08-11.md), then only the implicated review below |
 | W3 develop rebaseline/deletion intent | [D107 migration review](D107_W3_DEVELOP_REBASELINE_MIGRATION_2026-08-12.md), D-073, actual source/tests |
 | D-031 compatibility task | [D031 review](D031_IMPLEMENTATION_REVIEW_2026-08-04.md), D-056/D-057, [project-bound evidence](evidence/D031_20260805_PROJECT_BOUND.md), relevant scheduler/Agent source/tests and runbook section 7.4 |
-| Environment/runtime execution | Only the applicable milestone section of the [E2E runbook](runbooks/E2E_RUNBOOK.md); never use a W2/V0 script to sign Alpha |
+| Environment/runtime execution | Only the applicable historical-boundary or current-candidate section of the [E2E runbook](runbooks/E2E_RUNBOOK.md); never use a W2/V0 script to sign the current candidate |
 | 2026-08-17 Post-Alpha hands-free Demo defects | [completed defect-discovery record](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md), then current [STATUS](STATUS.md) and only the implicated D119/source boundary |
+| Current controlled product-candidate acceptance | [product-readiness contract](validation/PRODUCT_READINESS_ACCEPTANCE.md), [complete human Journey](demo/PRODUCT_READINESS_SHOWCASE.md), current [STATUS](STATUS.md) and only the required runbook sections |
 
 ## Module and integration history
 
@@ -31,6 +32,9 @@
 | Product composition | [Product Composition Gate 0](roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md), then only the implicated integration record |
 | Unified hands-free baseline | [D118 pre-D119 candidate snapshot](D118_UNIFIED_HANDS_FREE_LIVE_VOICE_REVIEW_2026-08-16.md) |
 | Running adjustment and terminal notification | [D119 candidate-specific frozen review](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md) |
+| Code duplication and convergence timing | [2026-08-17 duplicate-code audit](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md) |
+| Removable branch content, re-homing and final-merge cleanup | [2026-08-17 branch-retirement audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) |
+| Removable/superseded documents and authority-preserving deletion batches | [2026-08-17 documentation-retirement audit](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) |
 
 The dated Alpha integration sequence is
 [first product integration](ALPHA_PRODUCT_INTEGRATION_REVIEW_2026-08-07.md) →
@@ -51,23 +55,31 @@ Read only the record that owns the regression or source boundary being examined.
 ## Planning and governance history
 
 - Stage/governance audits: [D108](D108_PROJECT_PROGRESS_AND_GOVERNANCE_REVIEW_2026-08-12.md), [D109](D109_STAGE_MODULE_DOCUMENTATION_SYNC_2026-08-12.md).
-- Alpha automated verification and the environment block that keeps S6 open: [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md). Its §6 records the gateway test path that earlier verification runs missed.
+- Alpha automated verification and its historical environment block: [D110](D110_ALPHA_AUTOMATED_VERIFICATION_AND_ENVIRONMENT_BLOCK_2026-08-12.md). Its §6 records the gateway test path that earlier verification runs missed; it does not define current capability status.
 - Stable package relationships: [Web Alpha matrix](roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md).
 - Completed Week 1: [execution packages](roadmap/WEEK_1_EXECUTION_PACKAGES_2026-08-03.md) and [Sol pre-reviews](SOL_MODULE_PRE_REVIEWS_2026-08-03.md).
 - Historical parallel packets: [Alpha parallel plan](roadmap/ALPHA_PARALLEL_EXECUTION_2026-08-06.md), [Wave A+B packet](roadmap/ALPHA_WAVE_AB_EXECUTION_2026-08-07.md), [Wave C packet](roadmap/ALPHA_WAVE_C_EXECUTION_2026-08-07.md), [W2 90% packet](roadmap/DEMO_90_EXECUTION_2026-08-07.md).
-- Superseded product/stash material lives under `archive/` and never overrides current source, STATUS or accepted decisions.
+- Removed superseded product/stash material remains in Git history and never overrides current source, STATUS or accepted decisions.
 
 ## Fresh-clone recovery
 
+The feature branch is published on the configured `agtai` remote, not
+`origin`. Verify that `agtai` resolves to the intended repository before
+fetching; a fresh clone that lacks this remote must configure it explicitly.
+
 ```powershell
-git fetch origin hx/0812_live_voice_w3
-git switch --track -c hx/0812_live_voice_w3 origin/hx/0812_live_voice_w3
+git remote get-url agtai
+git fetch agtai hx/0812_live_voice_w3
+git switch --track -c hx/0812_live_voice_w3 agtai/hx/0812_live_voice_w3
 git status --short --branch
 git rev-parse HEAD
 git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
 git rev-list --left-right --count 'HEAD...@{upstream}'
 ```
 
-Use `scripts/live_voice_snapshot.ps1` for read-only local orientation. Add its
-remote option only when remote state matters; update with `git pull --ff-only`
+The Git commands above and current [STATUS](STATUS.md) are the orientation path.
+Do not use `scripts/live_voice_snapshot.ps1` as current authority: the
+[2026-08-17 cleanup audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md)
+records that its Resume-capsule/Verified-code-base model is stale and that the
+script is a retirement candidate. Update a worktree with `git pull --ff-only`
 only when the user explicitly requests an update and the worktree is safe.

@@ -5,7 +5,7 @@
 > Environment procedure: [E2E_RUNBOOK.md](../runbooks/E2E_RUNBOOK.md)
 > Stable delivery/replacement map: [WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md](../roadmap/WEB_ALPHA_DELIVERY_MATRIX_2026-08-05.md)
 
-This script defines the S3/W2 complete human product journey used by D-071 after automated verification. It does not close Alpha; Alpha A3 uses [ALPHA_SHOWCASE.md](ALPHA_SHOWCASE.md). It is not a second implementation status source: only actually observed behavior may pass, and unavailable or unsupported behavior must remain explicit.
+This script defines the S3/W2 complete human product journey used by D-071 after automated verification. It does not close Alpha; the historical Alpha A3 journey was `ALPHA_SHOWCASE.md`, now recoverable from Git history. The current product-readiness journey does not retroactively replace it. This is not a second implementation status source: only actually observed behavior may pass, and unavailable or unsupported behavior must remain explicit.
 
 ## 1. Showcase claim
 

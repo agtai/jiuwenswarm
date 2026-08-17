@@ -4,14 +4,16 @@
 >
 > Product carrier decision: [D-055](../decisions/DECISIONS.md)
 >
-> Milestones, scoring and risk tiers: [POST_V0_DELIVERY_ROADMAP.md](POST_V0_DELIVERY_ROADMAP.md)
+> Current risk tiers and review cadence: root [TESTING.md](../../TESTING.md). Historical package/milestone mapping below does not define current order.
 >
 > Current implementation state, blockers, tested facts and next action: [STATUS.md](../STATUS.md)
 >
 > Week 2 pass/fail: [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md)
 >
-> Integrated Web Alpha S5–S8 pass/fail: [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md)
-> Current S5–S8 task contract: [ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md)
+> Historical Integrated Web Alpha S5–S8 pass/fail at this matrix's exact
+> source: `validation/ALPHA_ACCEPTANCE.md`, now recoverable from Git history.
+> Historical task contract: [ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md](ALPHA_S5_S8_EXECUTION_PLAN_2026-08-12.md).
+> Neither entry defines the current queue or product-readiness contract.
 >
 > D-071 supersedes Gate-era scoring and signed-evidence completion rules for W2 and later Live Voice milestones. Package identities, dependencies and product requirements remain; acceptance is automated verification plus one complete human product run.
 >
@@ -152,7 +154,7 @@ The `Window` column is historical. Its current D-075 mapping is V0→S0, W1→S1
 | W1 | Shared kernel, formal A-package foundations, deterministic fake verticals and Browser fallback exist | ACG kernel + A packages + W1-X1/X2/P1B | D-046/D-053 and package reviews | see STATUS |
 | W2 | One cumulative route passes applicable automated verification plus one complete human product journey | First real B routes + X-OBS/X-E2E; D-031 remains a declared substitute | [INTEGRATED_DEMO_ACCEPTANCE.md](../validation/INTEGRATED_DEMO_ACCEPTANCE.md) | see STATUS |
 | W3 | Major B/C packages form real Speech/Media/Agent/Executor verticals | Real SR/SS/RM/CR/II/AB/TC/ED/VB paths plus Web integration | Module verification and real-path acceptance | see STATUS |
-| W4 | One identified tested source passes P1/P2/P3alpha, Web platform and joint automated-plus-human acceptance | Required B/C packages + X-OBS/X-E2E/X-WEB | [ALPHA_ACCEPTANCE.md](../validation/ALPHA_ACCEPTANCE.md) | see STATUS |
+| W4 | One identified tested source passes P1/P2/P3alpha, Web platform and joint automated-plus-human acceptance | Required B/C packages + X-OBS/X-E2E/X-WEB | Historical `validation/ALPHA_ACCEPTANCE.md`, recoverable from Git | see STATUS |
 | Later | Full P3, D1/D2, production auth, broader browsers/devices, SLO/privacy/release hardening | Explicit later decisions and packages | Future acceptance contracts | see STATUS |
 
 ## 11. Dependency map

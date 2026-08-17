@@ -26,14 +26,11 @@ Every operation that updates a remote ref still requires separate explicit user 
 
 ## Live Voice bootstrap
 
-For every Live Voice task, first read:
-
-1. `live-voice/README.md` — lightweight router and authority map.
-2. `live-voice/STATUS.md` — the only mutable current-state source.
-
-Then read only the files routed for the task. Do not load every full document for ordinary module work. Documentation-structure or documentation-update work must also read `live-voice/DOCUMENTATION_RULES.md`.
-
-When `STATUS.md` names an active S5–S8 task, read only the execution plan's common rules/dependencies and that task's section; load prerequisite sections only for a missing or conflicting dependency. Read complete acceptance at A2/A3, the showcase/runbook only for runtime acceptance, only the relevant ACG sections for a changed contract, the full design snapshot only when the long-term boundary itself is changing or ambiguous, and `live-voice/REFERENCE_INDEX.md` only for an explicit historical or forensic need.
+For every Live Voice task, first read `live-voice/README.md` and
+`live-voice/STATUS.md`, then follow exactly one README route. Documentation
+structure/update work also reads `live-voice/DOCUMENTATION_RULES.md`. Do not
+load complete acceptance, runbooks, architecture or history unless the selected
+route requires them; numbered delivery plans are not the current queue.
 
 At resume, verify Git before trusting prose: run `git status --short --branch`, `git rev-parse HEAD`, and compare the checked-out branch with its upstream. If Git and `STATUS.md` disagree, Git is the implementation fact; report and repair the documentation rather than silently following stale text.
 
@@ -41,13 +38,15 @@ The Demo must submit committed final speech text to the real JiuwenSwarm Agent a
 
 ## Module and test closure
 
-Live Voice planning follows D-075: `S0`–`S9` are sequential project stages, `A0`–`A3` are Alpha critical nodes, P1/P2/P3alpha/Shared-X are capability tracks, named components are modules, `*-A/B/C` are work packages, and W1/W2/W3/W4 are historical delivery windows rather than current calendar weeks or default queues. Every implementation packet must name its stage, target node, track/module, risk tier, scope and exclusions.
+Current planning follows the D-084 completion boundaries and the capability/
+dependency model in `live-voice/STATUS.md`. Every implementation packet names
+its capability/module, risk tier, dependencies, scope, exclusions and
+acceptance. Historical stages/windows cannot define current priority.
 
-Live Voice verification follows the D-046 risk tiers and D-074 staged review cadence in `live-voice/roadmap/POST_V0_DELIVERY_ROADMAP.md`, not one universal ceremony. Documentation/mechanical work uses affected checks; ordinary feature/Adapter/UI work covers the positive journey, key negative and flag-off cases, and affected regressions; state/concurrency/mutation work covers all applicable scenario dimensions; shared protocol, authority, security and durability work uses the complete applicable D-032 matrix. A design checkpoint is required before introducing or changing a high-risk contract, but not before every correction within an already accepted boundary. Related packages may share one design checkpoint, implementation batch, module review, and commit. Detailed matrices live in review records, while `live-voice/STATUS.md` remains a short current dashboard.
-
-D-071 retires the signed W2 evidence Gate, 38-slot manifest, `w2_gate_cli evaluate` result and Replacement Ledger as milestone completion requirements. D-072 removes that Gate implementation, runtime evidence wiring and Gate-only fault injection from the current source. W2 and later Live Voice milestones close with risk-proportional automated verification plus one complete human product acceptance on the identified tested source. Do not recreate Gate tooling or artifacts unless the user explicitly reinstates an audit-grade certification requirement; frozen historical records remain history only.
-
-D-074 supersedes D-053's per-batch review cadence. During implementation, review the affected diff and run focused checks; a small intermediate commit does not trigger an independent review ceremony. At a coherent module or grouped-batch boundary, perform a cold review of that complete scoped diff, and require an independent `/review` or equivalent for Tier 2/3 boundaries. At a phase or milestone candidate, review the cumulative phase diff and integration seams, run the applicable broad automated verification, and complete the D-071 human product acceptance. A finding requires affected reruns; repeat only the review scope materially changed by the fix. If an independent review entry is required but unavailable, record the substitute and limitation rather than claiming it ran. Tier 0/1 work remains risk-proportional.
+Root `TESTING.md` is the complete authority for D-032/D-046/D-074 risk,
+scenario, review and evidence rules. Read only its applicable sections before
+changing code or tests. D-071/D-072 keep the signed W2 evidence Gate and its
+tooling retired; do not recreate them without an explicit new audit requirement.
 
 Positive business scenarios must succeed. Negative scenarios must be rejected or fail closed, and forbidden side effects must be asserted as zero for any path that can mutate Agent, Tool, Task, audio/history authority, protected state, or another scope. Test counts or line coverage alone do not prove closure. Missing required risk evidence leaves the affected scope `PARTIAL` or `BLOCKED`, but inapplicable matrix dimensions need not be manufactured for low-risk work.
 
