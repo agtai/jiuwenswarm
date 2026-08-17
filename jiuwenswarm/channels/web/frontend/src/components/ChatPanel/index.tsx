@@ -1302,8 +1302,10 @@ export function ChatPanel({
         formalVoiceVisualState = 'speaking';
         break;
       case 'failed':
-      case 'cleanup_pending':
         formalVoiceVisualState = 'error';
+        break;
+      case 'cleanup_pending':
+        formalVoiceVisualState = 'recovering';
         break;
       default:
         formalVoiceVisualState = 'idle';

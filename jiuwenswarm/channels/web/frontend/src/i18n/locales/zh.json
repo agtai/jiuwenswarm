@@ -2350,6 +2350,7 @@
       "thinking": "正在理解并回答",
       "speaking": "正在朗读回答",
       "interrupted": "已打断，等待新要求",
+      "recovering": "正在恢复",
       "error": "语音功能出现问题"
     }
   },

@@ -2352,6 +2352,7 @@
       "thinking": "Understanding and answering",
       "speaking": "Reading the response",
       "interrupted": "Interrupted, waiting for your update",
+      "recovering": "Recovering",
       "error": "Voice is unavailable"
     }
   },

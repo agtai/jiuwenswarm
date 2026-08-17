@@ -2186,6 +2186,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         journal.markActive(binding);
         if (!cancelled && activationOwnerRef.current === owner) {
           setP2Activation(activated);
+          setProductTextReason(null);
         }
       } catch (error) {
         if (owner.snapshot().status === 'active') {
@@ -2385,6 +2386,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
               journal.markActive(successorBinding);
               if (activeSessionRef.current === binding.session_id && activationOwnerRef.current === successor) {
                 setP2Activation(successorSnapshot);
+                setProductTextReason(null);
               }
               return successor;
             },
@@ -2404,7 +2406,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           // settled.  Yield after one idle keepalive so the scheduled capture
           // cannot race a successor long poll or an arriving ASR final.
           if (voiceLoopEnabledRef.current && terminalNotificationCheckRequiredRef.current) return;
-        } catch {
+        } catch (error) {
           const retained = activationOwnerRef.current;
           if (
             !cancelled &&
@@ -2423,12 +2425,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             setP2RecoveryEpoch(epoch => epoch + 1);
           }
           if (!cancelled) {
-            setProductTextReason(PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED);
+            const reason = stableProductTextReason(error, PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED);
+            setProductTextReason(reason);
             setProductTextStatus('failed');
             setP2Activation({
               status: 'unavailable',
               binding: null,
-              reason: PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED,
+              reason,
             });
           }
           return;
@@ -3195,6 +3198,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingBargeInRef.current = retained;
     }
     try {
+      // 先结算尚未完成的旧 presentation ACK。journal 单槽要求 ACK 先 settle,
+      // 否则插话 barge-in 的 checkpoint 会因 pending ACK 冲突抛 'different
+      // operation unresolved',并被误判为需重建整条 P2 路由。有意插话的旧 ACK
+      // 应作为预期 stale 状态结算,而不是触发路由重建。
+      const pendingPresentation = pendingPresentationAttemptRef.current;
+      if (pendingPresentation !== null && pendingPresentation.owner === p2Owner) {
+        await pendingPresentation.playoutSettlement;
+        await settleProductPresentationAck(pendingPresentation);
+      }
       await p2Owner.bargeIn(retained.input);
       if (pendingBargeInRef.current === retained) {
         pendingBargeInRef.current = null;
