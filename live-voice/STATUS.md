@@ -1,15 +1,17 @@
 # Live Voice current status
 
-> Updated: 2026-08-14
+> Updated: 2026-08-17
 > This is the only mutable source for current branch expectations, stage/task,
 > blockers and next actions. Git is the implementation fact; detailed S7 facts
 > are in the linked review record.
 
 ## Resume capsule
 
-- Expected branch/upstream: `codex/live-voice-s8-5-incubator` / none. This
-  isolated worktree was created from clean S8 handoff `a53856de`; all work is
-  local-only and no push is authorized.
+- Expected branch/upstream: `codex/live-voice-s8-5-incubator` /
+  `origin/codex/live-voice-s8-5-incubator`. This isolated worktree was created
+  from clean S8 handoff `a53856de`; its nine S8.5 incubation commits through
+  `c9e7aba6` are pushed and synchronized. Any later remote update still requires
+  separate exact approval.
 - `S6 - Alpha Module Closure` / `A1` remains `CLOSED`. All S6-01 through
   S6-06 rows remain `SATISFIED` and the last physical closure is recorded by
   [D116](D116_S6_02_PHYSICAL_CLOSURE_2026-08-13.md).
@@ -19,9 +21,11 @@
   review. The exact clean documentation-handoff HEAD is recorded by the
   external sanitized `s7-final-report.json` generated after the S7 closeout
   commit.
-- Current stage/node: `S8 - Product Acceptance` / `A3`, `READY / NOT STARTED`.
-  The complete human Alpha journey has not run, so there is no
-  `PASS - INTEGRATED WEB ALPHA` result.
+- Alpha `S8 - Product Acceptance` / `A3` passed on exact source `d33b520e` on
+  2026-08-15. The current main branch later advanced to `507c124b` with a
+  separate post-Alpha running-adjustment/terminal-notification batch whose own
+  physical acceptance remains pending. This incubation branch has not been
+  migrated onto that newer main source.
 - Incubation task: `S8.5-07 candidate integration and Tier 3 closure`,
   `IN PROGRESS / REVIEW PARTIAL`.
   D-079 permits isolated post-Alpha development but does not close, modify or
@@ -50,7 +54,7 @@ its code may migrate only after S8 PASS and a fresh Tier 3 integration review.
 | S8.5-04/05 Executor and verifier | `IMPLEMENTED / REVIEW PARTIAL` | `0c994b1b` fences the predecessor, requires exact cleanup, uses a trusted clean no-remote fixture and persists a registered verifier ACK. |
 | S8.5-06 Web projection | `IMPLEMENTED / REVIEW PARTIAL` | `ab200d2c` adds default-off backend/frontend gates, authenticated Store-truth read projection, strict replica and non-inferred Task UI. |
 | S8.5-07 candidate integration and Tier 3 closure | `IN PROGRESS / REVIEW PARTIAL` | `8be8398a` composes exact committed Voice, confirmation, Store revision/fence, successor dispatch, terminal reconcile, verifier ACK and Web control/recovery. Local affected automation/static/build checks pass; independent review and migrated-candidate verification remain open. |
-| S8.5-08 human product acceptance | `BLOCKED ON S8 PASS + S8.5-07` | Migration, two unchanged rehearsals and the complete user-run showcase have not run. |
+| S8.5-08 human product acceptance | `BLOCKED ON S8.5-07 + MIGRATION` | Alpha S8 passed, but migration onto the newer main source, two unchanged rehearsals and the complete user-run showcase have not run. |
 
 The grouped primary review and exact limitations are recorded in
 [S8.5 incubation implementation review](S8_5_INCUBATION_IMPLEMENTATION_REVIEW_2026-08-13.md).
@@ -98,10 +102,12 @@ The grouped primary review and exact limitations are recorded in
 
 ## Next actions
 
-1. Keep the original S8 worktree unchanged. After S8 PASS, migrate the seven
-   reviewable S8.5 commits through `fc7348f2` in dependency order onto the exact
-   closeout source; exclude this branch-local STATUS/review commit.
-2. Resolve against the migrated source, obtain an independent Tier 3 review and
-   rerun the complete applicable matrix plus the disposable real Executor path.
+1. Re-evaluate D-079/D-080 against the newer main branch's separately developed
+   in-attempt `task.adjust` and terminal-notification behavior; do not blindly
+   migrate an overlapping Task authority.
+2. From the exact selected main source, selectively port only the still-required
+   reviewed S8.5 commits, then obtain an independent Tier 3 review and rerun the
+   complete applicable matrix plus the disposable real Executor path. Exclude
+   branch-local STATUS/review-only commits.
 3. Freeze the machine-private fixture manifest/environment, run two unchanged
    rehearsals, then ask the user to run the complete S8.5 showcase once.
