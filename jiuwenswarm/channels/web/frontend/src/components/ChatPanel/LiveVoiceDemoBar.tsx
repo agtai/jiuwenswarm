@@ -6,7 +6,7 @@ import './LiveVoiceDemoBar.css';
 
 export type { LiveVoiceTaskActivity } from '../../features/live-voice/liveVoiceTaskAdapter';
 
-export type LiveVoiceVisualState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted' | 'error';
+export type LiveVoiceVisualState = 'idle' | 'listening' | 'thinking' | 'speaking' | 'interrupted' | 'recovering' | 'error';
 
 export type LiveVoiceCommandRoute = 'agent' | 'task';
 export type LiveVoiceTaskOperation = 'task.create' | 'task.status' | 'task.cancel';
@@ -59,6 +59,7 @@ export interface LiveVoiceDemoBarProps {
 function VoiceStatusIcon({ status }: { status: LiveVoiceVisualState }) {
   switch (status) {
     case 'thinking':
+    case 'recovering':
       return <LoaderCircle className="live-voice-demo__status-spinner" size={16} strokeWidth={2} />;
     case 'speaking':
       return <Volume2 size={16} strokeWidth={2} />;

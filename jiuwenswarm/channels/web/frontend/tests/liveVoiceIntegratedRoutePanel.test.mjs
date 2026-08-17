@@ -26,6 +26,8 @@ import {
   progressMatchesOwnedBinding,
   resolveProductTaskCreateOrigin,
   retainBoundedPresentedProductResponse,
+  shouldYieldProductP2PollToVoiceCapture,
+  terminalAnnouncementArbitrationAction,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
 import {
@@ -606,10 +608,7 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(replayedPresentation.replayed, true);
   assert.equal(replayedPresentation.task_notification, false);
   assert.equal(replayedPresentation.adjustment_notification, false);
-  assert.equal(
-    replayedPresentation.history_message_id,
-    `live-voice:interaction-1:response-stable:7:text:0:0:${'a'.repeat(64)}`,
-  );
+  assert.equal(replayedPresentation.history_message_id, `live-voice:interaction-1:response-stable:7:text:0:0:${'a'.repeat(64)}`);
   const terminalPresentation = classifyProductP2Notification({
     kind: 'agent.output',
     response: {
@@ -674,6 +673,41 @@ test('P2 notification classification surfaces failures and treats transport keep
     ),
     { kind: 'continue' },
   );
+});
+
+test('terminal announcement arbitration preserves speech and every foreground P1 phase ahead of idle notification work', () => {
+  const input = {
+    queued: true,
+    voice_active: true,
+    connected: true,
+    page_visible: true,
+    foreground_active: false,
+    speech_active: false,
+    p1_status: 'capturing',
+  };
+  assert.equal(terminalAnnouncementArbitrationAction(input), 'suspend_capture');
+  assert.equal(terminalAnnouncementArbitrationAction({ ...input, speech_active: true }), 'defer');
+  for (const p1_status of ['starting', 'recognizing', 'playing']) {
+    assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status }), 'defer', p1_status);
+  }
+  assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized', foreground_active: true }), 'defer');
+  assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized' }), 'fetch');
+  assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'failed' }), 'recover_owner');
+  assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'closed', voice_active: false }), 'defer');
+  assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized', page_visible: false }), 'defer');
+  assert.equal(terminalAnnouncementArbitrationAction({ ...input, p1_status: 'recognized', connected: false }), 'defer');
+});
+
+test('foreground response waiting retains P2 polling ahead of a queued terminal notification check', () => {
+  const input = {
+    voice_loop_enabled: true,
+    terminal_notification_check_required: true,
+    foreground_response_waiting: false,
+  };
+  assert.equal(shouldYieldProductP2PollToVoiceCapture(input), true);
+  assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, foreground_response_waiting: true }), false);
+  assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, voice_loop_enabled: false }), false);
+  assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, terminal_notification_check_required: false }), false);
 });
 
 test('Web response error extraction preserves nested product reason', () => {

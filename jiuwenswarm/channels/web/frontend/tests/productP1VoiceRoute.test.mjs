@@ -297,7 +297,32 @@ function audioEnvironment(createId = () => 'capture-1') {
     },
     createAudioWorkletNode: (_context, _name, options) => {
       const node = new FakeNode();
-      node.port = { onmessage: null, close() {} };
+      let onmessage = null;
+      node.port = { close() {} };
+      Object.defineProperty(node.port, 'onmessage', {
+        get: () => onmessage,
+        set: handler => {
+          onmessage = handler;
+          const samples = environment.nextWorkletFirstFrameSamples;
+          if (typeof handler !== 'function' || samples === null) return;
+          environment.nextWorkletFirstFrameSamples = null;
+          environment.autoFirstFrameScheduled += 1;
+          setTimeout(() => {
+            environment.autoFirstFrameDelivered += 1;
+            handler({
+              data: {
+                kind: 'frame',
+                capture_generation: node.captureGeneration,
+                seq: 0,
+                sample_rate_hz: 48_000,
+                sample_cursor: 0,
+                context_time_s: 0,
+                samples,
+              },
+            });
+          }, 250);
+        },
+      });
       node.onprocessorerror = null;
       node.captureGeneration = options.processorOptions.captureGeneration;
       environment.worklet = node;
@@ -311,6 +336,9 @@ function audioEnvironment(createId = () => 'capture-1') {
     devices: [{ kind: 'audioinput' }],
     initialTrackMuted: false,
     deferSourceEnds: false,
+    nextWorkletFirstFrameSamples: null,
+    autoFirstFrameScheduled: 0,
+    autoFirstFrameDelivered: 0,
   };
   return environment;
 }
@@ -3549,7 +3577,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     (() => {
       let value = 0;
       return () => `capture-${++value}`;
-    })()
+    })(),
   );
   environment.deferSourceEnds = options.deferSourceEndsUntilTransportAck === true;
   const response = {
@@ -4035,6 +4063,7 @@ async function runConcurrentCaptureJourney(options = {}) {
     assert.equal(typeof retainedFrameHandler, 'function');
     const samples = new Float32Array(960);
     const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+    environment.nextWorkletFirstFrameSamples = samples;
     retainedFrameHandler({
       data: {
         kind: 'frame',
@@ -4067,20 +4096,15 @@ async function runConcurrentCaptureJourney(options = {}) {
           samples,
         },
       });
+      if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
     }
-    for (let turn = 0; turn < 3_500; turn += 1) {
+    for (let turn = 0; turn < 3_500 && (activationCount !== 3 || environment.worklet === rotatingWorklet); turn += 1) {
       await new Promise(resolve => setTimeout(resolve, 1));
-      if (activationCount === 3 && environment.worklet !== rotatingWorklet) break;
     }
     assert.equal(
       activationCount,
       3,
       `silent overlap did not rotate: status=${JSON.stringify(owner.status())} methods=${calls.map(([method]) => method).join(',')}`,
-    );
-    await sendFirstFrameToNextWorklet(
-      environment,
-      rotatingWorklet,
-      { samples: new Float32Array(960) },
     );
     for (let turn = 0; turn < 500; turn += 1) {
       if (
@@ -4481,6 +4505,82 @@ test('formal P1 rotates thirty seconds of silent overlap during active long play
     false,
   );
   assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  await journey.owner.close();
+});
+
+test('formal P1 rotates consecutive silent idle captures and pauses without recognition for a notification', async () => {
+  const journey = await runConcurrentCaptureJourney({ silentSuccessorCapture: true });
+  const { owner, calls, environment, sockets } = journey;
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  const silentSamples = new Float32Array(960);
+
+  for (let cycle = 0; cycle < 2; cycle += 1) {
+    const priorWorklet = environment.worklet;
+    const retainedFrameHandler = priorWorklet.port.onmessage;
+    assert.equal(typeof retainedFrameHandler, 'function');
+    environment.nextWorkletFirstFrameSamples = silentSamples;
+    for (let seq = 1; seq < frameCount; seq += 1) {
+      retainedFrameHandler({
+        data: {
+          kind: 'frame',
+          capture_generation: priorWorklet.captureGeneration,
+          seq,
+          sample_rate_hz: 48_000,
+          sample_cursor: seq * 960,
+          context_time_s: seq * 0.02,
+          samples: silentSamples,
+        },
+      });
+      if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+    }
+    for (let turn = 0; turn < 3_500 && environment.worklet === priorWorklet; turn += 1) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.notEqual(
+      environment.worklet,
+      priorWorklet,
+      `silent idle cycle ${cycle + 1} did not rotate; status=${JSON.stringify(owner.status())}; activations=${calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length}; uplinks=${sockets
+        .filter(socket => socket.serverBinding?.direction === 'uplink')
+        .map(socket => `${socket.serverBinding.generation.id}:${socket.sent.filter(value => typeof value !== 'string').length}`)
+        .join(',')}`,
+    );
+    const rotatedSubject = `media-subject-${cycle + 2}`;
+    for (let turn = 0; turn < 500; turn += 1) {
+      if (calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === rotatedSubject)) {
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    assert.equal(
+      calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === rotatedSubject),
+      true,
+    );
+    for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(owner.status(), { status: 'capturing', reason: null }, `auto=${environment.autoFirstFrameScheduled}/${environment.autoFirstFrameDelivered}; current-generation=${environment.worklet?.captureGeneration}; uplinks=${sockets
+      .filter(socket => socket.serverBinding?.direction === 'uplink')
+      .map(socket => `${socket.serverBinding.generation.id}:${socket.sent.filter(value => typeof value !== 'string').length}`)
+      .join(',')}`);
+  }
+
+  const recognitionCallsBeforePause = calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length;
+  assert.equal(await owner.pauseIdleCaptureForNotification(), 'paused');
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: null });
+  assert.equal(calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, recognitionCallsBeforePause);
+  assert.equal(calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length, 4);
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  await owner.close();
+});
+
+test('formal P1 notification pause preserves a capture after real speech energy', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const recognitionCallsBeforePause = journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length;
+
+  assert.equal(await journey.owner.pauseIdleCaptureForNotification(), 'speech_active');
+  assert.deepEqual(journey.owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.calls.filter(([method]) => method === 'live_voice.speech.recognize_batch').length, recognitionCallsBeforePause);
   await journey.owner.close();
 });
 

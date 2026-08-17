@@ -24,6 +24,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     canonical_json_bytes,
 )
 
+from .demo_fixture_contract import DEMO_ITINERARY_TASK_NAME
 from .task_core import TaskCommand, TaskSpec
 
 
@@ -632,10 +633,10 @@ class BoundedAlphaTaskIntentResolver:
                     None if current_task is None else "current_background_task"
                 ),
             )
-        for patterns, name in (
-            (self._UNIFIED_EXPLICIT_CREATE, "Background voice task"),
-            (self._UNIFIED_TRIP_CREATE, "Three-day itinerary"),
-            (self._UNIFIED_ITINERARY_FILE_CREATE, "Itinerary file"),
+        for patterns, name, classify_inner_trip in (
+            (self._UNIFIED_EXPLICIT_CREATE, "Background voice task", True),
+            (self._UNIFIED_TRIP_CREATE, DEMO_ITINERARY_TASK_NAME, False),
+            (self._UNIFIED_ITINERARY_FILE_CREATE, "Itinerary file", False),
         ):
             for pattern in patterns:
                 match = pattern.fullmatch(commit.text)
@@ -654,12 +655,18 @@ class BoundedAlphaTaskIntentResolver:
                     start += 1
                 while end > start and commit.text[end - 1].isspace():
                     end -= 1
+                resolved_name = name
+                if classify_inner_trip and any(
+                    trip_pattern.fullmatch(instruction) is not None
+                    for trip_pattern in self._UNIFIED_TRIP_CREATE
+                ):
+                    resolved_name = DEMO_ITINERARY_TASK_NAME
                 return self._unified_result(
                     commit,
                     current_task,
                     UnifiedCommittedInputRoute.BACKGROUND_CREATE,
                     "BACKGROUND_CREATE_RESOLVED",
-                    name=name,
+                    name=resolved_name,
                     instruction=commit.text[start:end],
                     source_span=TaskIntentSourceSpan(start, end),
                 )

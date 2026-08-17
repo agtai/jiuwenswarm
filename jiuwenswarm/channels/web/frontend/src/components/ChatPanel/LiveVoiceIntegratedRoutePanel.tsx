@@ -132,6 +132,7 @@ export type ProductLiveVoiceSurfaceState = Readonly<{
   task_progress_task_id: string | null;
   task_progress_state: string | null;
   task_progress_delivery_mode: ProductTextProgressEvent['delivery_mode'] | null;
+  terminal_announcement_state: TerminalAnnouncementState;
   terminal_notification: string | null;
   adjustment_notification: string | null;
   task_controls_locked: boolean;
@@ -600,6 +601,36 @@ export type ProductP2NotificationDisposition =
       readonly adjustment_notification: boolean;
     };
 
+export type TerminalAnnouncementState = 'idle' | 'queued' | 'suspending_capture' | 'fetching' | 'playing' | 'acking' | 'recovering';
+
+export function terminalAnnouncementArbitrationAction(
+  input: Readonly<{
+    queued: boolean;
+    voice_active: boolean;
+    connected: boolean;
+    page_visible: boolean;
+    foreground_active: boolean;
+    speech_active: boolean;
+    p1_status: ProductP1VoiceStatus | null;
+  }>,
+): 'defer' | 'recover_owner' | 'suspend_capture' | 'fetch' {
+  if (!input.queued || !input.voice_active || !input.connected || !input.page_visible || input.foreground_active) return 'defer';
+  if (input.p1_status === null || ['failed', 'cleanup_pending', 'closed'].includes(input.p1_status)) return 'recover_owner';
+  if (input.p1_status === 'capturing') return input.speech_active ? 'defer' : 'suspend_capture';
+  if (['idle', 'recognized'].includes(input.p1_status)) return 'fetch';
+  return 'defer';
+}
+
+export function shouldYieldProductP2PollToVoiceCapture(
+  input: Readonly<{
+    voice_loop_enabled: boolean;
+    terminal_notification_check_required: boolean;
+    foreground_response_waiting: boolean;
+  }>,
+): boolean {
+  return input.voice_loop_enabled && input.terminal_notification_check_required && !input.foreground_response_waiting;
+}
+
 function recordValue(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -1049,8 +1080,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const [productInput, setProductInput] = useState('');
   const [productOutput, setProductOutput] = useState<string | null>(null);
   const [terminalNotification, setTerminalNotification] = useState<string | null>(null);
+  const [terminalAnnouncementState, setTerminalAnnouncementState] = useState<TerminalAnnouncementState>('idle');
   const [adjustmentNotification, setAdjustmentNotification] = useState<string | null>(null);
-  const [productTextStatus, setProductTextStatus] = useState<'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'>('idle');
+  const [productTextStatus, setProductTextStatus] = useState<
+    'idle' | 'submitting' | 'waiting' | 'presented' | 'acknowledged' | 'failed'
+  >('idle');
   const [productTextReason, setProductTextReason] = useState<string | null>(null);
   const [p1VoiceStatus, setP1VoiceStatus] = useState<ProductP1VoiceStatus>(FEATURE_LIVE_VOICE_INTEGRATED_P1 ? 'idle' : 'closed');
   const [p1VoiceReason, setP1VoiceReason] = useState<string | null>(null);
@@ -1104,6 +1138,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const createdProgressOrigin = createdProgressRoute?.origin ?? null;
   const createdProgressRouteRef = useRef<typeof createdProgressRoute>(null);
   const terminalNotificationTaskIdRef = useRef<string | null>(null);
+  const terminalAnnouncementStateRef = useRef<TerminalAnnouncementState>('idle');
+  const terminalAnnouncementTaskIdRef = useRef<string | null>(null);
+  const terminalAnnouncementSpeechOwnerRef = useRef<ProductP1VoiceRouteOwner | null>(null);
   const progressTaskTargetRef = useRef<string | null>(null);
   const recoveredP3TaskTargetRef = useRef<string | null>(null);
   const monitorRef = useRef<WebPlatformDiagnosticsMonitor | null>(null);
@@ -1135,6 +1172,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     receipt: string;
     input: UnifiedAuthoritativeFinal;
   }> | null>(null);
+  const foregroundPresentationPendingRef = useRef(false);
   const pendingProductTurnRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: ProductTurnInput;
@@ -1144,8 +1182,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     input: ProductPresentationAckInput & { presented_at: string };
     playoutSettlement: Promise<void>;
     markPlayoutSettled: () => void;
+    task_notification: {
+      task_id: string;
+      disposition: Extract<ProductP2NotificationDisposition, { readonly kind: 'presentation' }>;
+      retry_count: number;
+      retry_pending: boolean;
+    } | null;
     settlement?: Promise<void>;
   } | null>(null);
+  const retryTerminalAnnouncementHandlerRef = useRef<(retained: NonNullable<typeof pendingPresentationAttemptRef.current>) => void>(() => undefined);
   const pendingBargeInRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: {
@@ -1192,11 +1237,27 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const productTurnSequenceRef = useRef(0);
   const bargeInSequenceRef = useRef(0);
   const p3MutationSequenceRef = useRef(0);
+  const updateTerminalAnnouncementState = (state: TerminalAnnouncementState, taskId?: string | null) => {
+    terminalAnnouncementStateRef.current = state;
+    if (taskId !== undefined) terminalAnnouncementTaskIdRef.current = taskId;
+    setTerminalAnnouncementState(state);
+  };
+  const queueTerminalAnnouncement = (taskId: string) => {
+    const route = createdProgressRouteRef.current;
+    if (route?.task_id !== taskId || route.origin?.kind !== 'voice' || terminalNotificationTaskIdRef.current === taskId) {
+      return;
+    }
+    const currentTaskId = terminalAnnouncementTaskIdRef.current;
+    if (currentTaskId !== null && currentTaskId !== taskId && terminalAnnouncementStateRef.current !== 'idle') return;
+    if (terminalAnnouncementStateRef.current === 'idle') updateTerminalAnnouncementState('queued', taskId);
+  };
   const adoptCreatedProgressRoute = (route: typeof createdProgressRoute) => {
     const previousTaskId = createdProgressRouteRef.current?.task_id ?? null;
     const nextTaskId = route?.task_id ?? null;
     if (nextTaskId !== null && nextTaskId !== previousTaskId) {
       terminalNotificationTaskIdRef.current = null;
+      updateTerminalAnnouncementState('idle', null);
+      terminalAnnouncementSpeechOwnerRef.current = null;
       setTerminalNotification(null);
       setAdjustmentNotification(null);
     }
@@ -1239,6 +1300,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const loopGeneration = voiceLoopGenerationRef.current;
     globalThis.setTimeout(() => {
       const voiceOwner = p1VoiceOwnerRef.current;
+      const terminalState = terminalAnnouncementStateRef.current;
       if (
         voiceLoopEnabledRef.current &&
         voiceLoopGenerationRef.current === loopGeneration &&
@@ -1246,6 +1308,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         pendingProductTurnRef.current === null &&
         pendingPresentationAttemptRef.current === null &&
         pendingBargeInRef.current === null &&
+        (terminalState === 'idle' || voiceOwner === null || ['failed', 'cleanup_pending', 'closed'].includes(voiceOwner.status().status)) &&
         (voiceOwner === null || ['idle', 'recognized', 'failed', 'cleanup_pending', 'closed'].includes(voiceOwner.status().status))
       ) {
         void startP1VoiceHandlerRef.current().catch(() => undefined);
@@ -1275,6 +1338,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           currentPresentation === retained &&
           sameProductPresentation(currentPresentation.input, retained.input)
         ) {
+          const terminal = retained.task_notification;
+          if (terminal !== null) {
+            retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, retained.input.response_id);
+            terminalNotificationTaskIdRef.current = terminal.task_id;
+            terminalNotificationCheckRequiredRef.current = false;
+            terminalAnnouncementSpeechOwnerRef.current = null;
+            updateTerminalAnnouncementState('idle', null);
+          }
           pendingPresentationAttemptRef.current = null;
           setPendingPresentationAck(null);
           setProductTextReason(null);
@@ -1319,6 +1390,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     unifiedInputOwnerRef.current = null;
     submittedVoiceFinalsRef.current.clear();
     pendingUnifiedFinalRef.current = null;
+    foregroundPresentationPendingRef.current = false;
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || sessionId === null) {
       setP2JournalState(null);
@@ -1383,20 +1455,35 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const responseId = typeof response?.response_id === 'string' ? response.response_id : null;
     const disposition = classifyProductP2Notification(notification, responseId !== null && presentedProductResponsesRef.current.has(responseId));
     if (disposition.kind === 'failed') {
+      foregroundPresentationPendingRef.current = false;
       setProductTextReason(stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED'));
       setProductTextStatus('failed');
       scheduleProductVoiceLoopCapture();
       return disposition;
     }
     if (disposition.kind !== 'presentation') {
-      if (terminalNotificationCheckRequiredRef.current) scheduleProductVoiceLoopCapture();
+      if (
+        shouldYieldProductP2PollToVoiceCapture({
+          voice_loop_enabled: voiceLoopEnabledRef.current,
+          terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
+          foreground_response_waiting: foregroundPresentationPendingRef.current,
+        })
+      ) {
+        scheduleProductVoiceLoopCapture();
+      }
       return disposition;
+    }
+    if (!disposition.task_notification && terminalAnnouncementStateRef.current === 'fetching' && terminalAnnouncementTaskIdRef.current !== null) {
+      updateTerminalAnnouncementState('queued');
     }
     const pending = pendingPresentationAttemptRef.current;
     if (pending !== null && (pending.owner !== owner || pending.input.response_id !== disposition.response_id)) {
       throw new Error('a previous presentation ACK is still unresolved');
     }
-    retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
+    if (!disposition.task_notification) {
+      foregroundPresentationPendingRef.current = false;
+      retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
+    }
     setProductOutput(disposition.text);
     const presentationBinding = owner.snapshot().binding;
     const presentedAt = new Date().toISOString();
@@ -1414,8 +1501,6 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       );
     }
     if (disposition.task_notification) {
-      terminalNotificationTaskIdRef.current = createdProgressRouteRef.current?.task_id ?? null;
-      terminalNotificationCheckRequiredRef.current = false;
       setTerminalNotification(disposition.text);
     }
     if (disposition.adjustment_notification) setAdjustmentNotification(disposition.text);
@@ -1434,9 +1519,19 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         },
         playoutSettlement,
         markPlayoutSettled,
+        task_notification: disposition.task_notification
+          ? {
+              task_id: createdProgressRouteRef.current?.task_id ?? terminalAnnouncementTaskIdRef.current ?? '',
+              disposition,
+              retry_count: 0,
+              retry_pending: false,
+            }
+          : null,
       };
     }
-    activeVoiceResponseRef.current = disposition.replayed ? null : disposition.response;
+    const presentationAttempt = pendingPresentationAttemptRef.current;
+    if (presentationAttempt === null) throw new Error('presentation ACK owner was not retained');
+    activeVoiceResponseRef.current = disposition.replayed && !disposition.task_notification ? null : disposition.response;
     const retainAck = (playoutFailed = false) => {
       const retained = pendingPresentationAttemptRef.current;
       if (retained?.owner === owner) retained.markPlayoutSettled();
@@ -1450,11 +1545,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         return;
       }
       if (playoutFailed) setProductTextStatus('failed');
+      if (retained?.task_notification != null) updateTerminalAnnouncementState('acking');
       setPendingPresentationAck(disposition.ack);
       if (retained?.owner === owner) void settleProductPresentationAck(retained);
     };
     const voiceOwner = p1VoiceOwnerRef.current;
-    if (voiceOwner !== null && !disposition.replayed) {
+    if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
+      if (disposition.task_notification) updateTerminalAnnouncementState('playing');
       void voiceOwner
         .playAgentText({
           response: disposition.response,
@@ -1467,10 +1564,22 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           }
           retainAck();
         })
-        .catch(() => {
+        .catch(error => {
           if (activeVoiceResponseRef.current?.response_id === disposition.response_id) activeVoiceResponseRef.current = null;
-          retainAck(true);
+          if (disposition.task_notification) {
+            setProductTextReason(stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_RECOVERY_REQUIRED'));
+            setProductTextStatus('failed');
+            updateTerminalAnnouncementState('recovering');
+            retryTerminalAnnouncementHandlerRef.current(presentationAttempt);
+          } else {
+            retainAck(true);
+          }
         });
+    } else if (disposition.task_notification) {
+      setProductTextReason('PRODUCT_TERMINAL_ANNOUNCEMENT_RECOVERY_REQUIRED');
+      setProductTextStatus('failed');
+      updateTerminalAnnouncementState('recovering');
+      if (voiceLoopEnabledRef.current) retryTerminalAnnouncementHandlerRef.current(presentationAttempt);
     } else {
       retainAck();
     }
@@ -1636,9 +1745,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       }
       const leaf = formalTaskControlLeafRef.current;
       const activation = progressActivationOwnerRef.current?.snapshot();
-      if (leaf === null || activation?.status !== 'active' || !activation.binding || !progressMatchesOwnedBinding(parsed, activation.binding, ownedSessionId)) {
+      if (activation?.status !== 'active' || !activation.binding || !progressMatchesOwnedBinding(parsed, activation.binding, ownedSessionId)) {
         return;
       }
+      if (parsed.state === 'terminal') queueTerminalAnnouncement(parsed.task_id);
+      if (leaf === null) return;
       p3ProgressReconciliationGenerationRef.current += 1;
       const reconciliationGeneration = p3ProgressReconciliationGenerationRef.current;
       const ownerEpoch = progressOwnerEpochRef.current;
@@ -1673,7 +1784,10 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             setProgress(adopted);
           }
           const terminalStatus = productP3TerminalStatus(record);
-          if (terminalStatus !== null) setP3MutationStatus(terminalStatus);
+          if (terminalStatus !== null) {
+            setP3MutationStatus(terminalStatus);
+            queueTerminalAnnouncement(parsed.task_id);
+          }
           owner.retain(parsed);
         })
         .catch(() => {
@@ -1818,6 +1932,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     p1VoiceCaptureBindingRef.current = null;
     presentedProductResponsesRef.current.clear();
     terminalNotificationTaskIdRef.current = null;
+    terminalAnnouncementSpeechOwnerRef.current = null;
+    updateTerminalAnnouncementState('idle', null);
     setPendingPresentationAck(null);
     setProductInput('');
     setProductOutput(null);
@@ -2317,6 +2433,72 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   }, [correlationId, p2JournalState, props.activeSessionId, props.agentRouteAvailable]);
 
   useEffect(() => {
+    const owner = p1VoiceOwnerRef.current;
+    const action = terminalAnnouncementArbitrationAction({
+      queued: terminalAnnouncementState === 'queued',
+      voice_active: voiceLoopEnabledRef.current && p2Activation.status === 'active',
+      connected: props.isConnected,
+      page_visible: typeof document === 'undefined' || document.visibilityState === 'visible',
+      foreground_active: Boolean(
+        pendingProductTurnRef.current !== null ||
+        pendingUnifiedFinalRef.current !== null ||
+        pendingPresentationAttemptRef.current !== null ||
+        pendingBargeInRef.current !== null ||
+        activeVoiceResponseRef.current !== null ||
+        productTextStatus === 'waiting' ||
+        activationOwnerRef.current?.hasPendingSubmission() ||
+        activationOwnerRef.current?.hasPendingPresentationAck() ||
+        activationOwnerRef.current?.hasPendingBargeIn(),
+      ),
+      speech_active: owner !== null && terminalAnnouncementSpeechOwnerRef.current === owner,
+      p1_status: owner?.status().status ?? null,
+    });
+    if (action === 'defer') return;
+    if (action === 'recover_owner') {
+      void startP1VoiceHandlerRef.current().catch(() => undefined);
+      return;
+    }
+    if (owner === null) return;
+    if (action === 'suspend_capture') {
+      const taskId = terminalAnnouncementTaskIdRef.current;
+      updateTerminalAnnouncementState('suspending_capture');
+      void owner
+        .pauseIdleCaptureForNotification()
+        .then(outcome => {
+          if (
+            !mountedRef.current ||
+            p1VoiceOwnerRef.current !== owner ||
+            !voiceLoopEnabledRef.current ||
+            terminalAnnouncementTaskIdRef.current !== taskId ||
+            terminalAnnouncementStateRef.current !== 'suspending_capture'
+          ) {
+            return;
+          }
+          if (outcome === 'speech_active') {
+            terminalAnnouncementSpeechOwnerRef.current = owner;
+            updateTerminalAnnouncementState('queued');
+            return;
+          }
+          terminalAnnouncementSpeechOwnerRef.current = null;
+          p1VoiceCaptureBindingRef.current = null;
+          updateTerminalAnnouncementState('fetching');
+        })
+        .catch(error => {
+          if (terminalAnnouncementTaskIdRef.current !== taskId) return;
+          terminalAnnouncementSpeechOwnerRef.current = null;
+          setProductTextReason(stableProductTextReason(error, 'PRODUCT_TERMINAL_CAPTURE_SUSPEND_FAILED'));
+          setProductTextStatus('failed');
+          updateTerminalAnnouncementState('queued');
+        });
+      return;
+    }
+    if (action === 'fetch') {
+      terminalAnnouncementSpeechOwnerRef.current = null;
+      updateTerminalAnnouncementState('fetching');
+    }
+  }, [p1VoiceStatus, p2Activation.status, productTextStatus, props.isConnected, terminalAnnouncementState]);
+
+  useEffect(() => {
     const owner = activationOwnerRef.current;
     const binding = p2Activation.binding;
     const journal = p2ActivationJournalRef.current;
@@ -2329,6 +2511,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       pendingPresentationAck !== null ||
       pendingPresentationAttemptRef.current !== null ||
       activeVoiceResponseRef.current !== null ||
+      (!['idle', 'fetching'].includes(terminalAnnouncementState) && !(terminalAnnouncementState === 'queued' && productTextStatus === 'waiting')) ||
+      (terminalAnnouncementState === 'fetching' && !voiceLoopEnabledRef.current) ||
       ['starting', 'capturing', 'recognizing', 'playing'].includes(p1VoiceStatus)
     )
       return;
@@ -2403,9 +2587,18 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           // notification long-poll and strand that ACK behind it.
           if (disposition.kind === 'presentation' || pendingPresentationAttemptRef.current?.owner === owner) return;
           // A hands-free capture is admitted only after this exact poll has
-          // settled.  Yield after one idle keepalive so the scheduled capture
-          // cannot race a successor long poll or an arriving ASR final.
-          if (voiceLoopEnabledRef.current && terminalNotificationCheckRequiredRef.current) return;
+          // settled. A committed foreground response keeps the P2 lane until
+          // its presentation arrives; the queued Task terminal check cannot
+          // starve that response after an idle keepalive.
+          if (
+            shouldYieldProductP2PollToVoiceCapture({
+              voice_loop_enabled: voiceLoopEnabledRef.current,
+              terminal_notification_check_required: terminalNotificationCheckRequiredRef.current,
+              foreground_response_waiting: foregroundPresentationPendingRef.current,
+            })
+          ) {
+            return;
+          }
         } catch (error) {
           const retained = activationOwnerRef.current;
           if (
@@ -2425,6 +2618,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             setP2RecoveryEpoch(epoch => epoch + 1);
           }
           if (!cancelled) {
+            foregroundPresentationPendingRef.current = false;
             const reason = stableProductTextReason(error, PRODUCT_P2_REFRESH_RECONCILIATION_REQUIRED);
             setProductTextReason(reason);
             setProductTextStatus('failed');
@@ -2442,7 +2636,15 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return () => {
       cancelled = true;
     };
-  }, [correlationId, p1VoiceStatus, p2Activation.binding, p2Activation.status, pendingPresentationAck, props.isConnected]);
+  }, [
+    correlationId,
+    p1VoiceStatus,
+    p2Activation.binding,
+    p2Activation.status,
+    pendingPresentationAck,
+    props.isConnected,
+    terminalAnnouncementState,
+  ]);
 
   useEffect(() => {
     p3ProgressReconciliationGenerationRef.current += 1;
@@ -2811,6 +3013,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         receipt: recognized.voice_commit_receipt,
         input,
       });
+      foregroundPresentationPendingRef.current = true;
       setProductOutput(null);
       setProductTextReason(null);
       setProductTextStatus('submitting');
@@ -2857,6 +3060,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         setProductTextStatus('waiting');
       } catch (error) {
+        foregroundPresentationPendingRef.current = false;
         let settledWithoutPresentation = false;
         if (!owner.hasPending() && pendingUnifiedFinalRef.current?.input === input) {
           pendingUnifiedFinalRef.current = null;
@@ -2884,6 +3088,8 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     updateRecognizedSpeechConfirmation(null);
     p1VoiceCaptureBindingRef.current = null;
     const binding = currentProductP2Binding();
+    const retainedTerminalRecovery =
+      terminalAnnouncementStateRef.current === 'recovering' && pendingPresentationAttemptRef.current?.task_notification?.retry_pending === true;
     const isCurrentBinding = () => {
       const activation = activationOwnerRef.current?.snapshot();
       const current = activation?.binding;
@@ -2911,7 +3117,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       typeof window === 'undefined' ||
       pendingProductTurnRef.current !== null ||
       pendingUnifiedFinalRef.current !== null ||
-      pendingPresentationAttemptRef.current !== null ||
+      (pendingPresentationAttemptRef.current !== null && !retainedTerminalRecovery) ||
       pendingBargeInRef.current !== null ||
       activationOwnerRef.current?.hasPendingSubmission() ||
       (terminalNotificationCheckRequiredRef.current && activationOwnerRef.current?.hasPendingNotification()) ||
@@ -3005,6 +3211,13 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         request: (method, params) => productRequest(method, params),
         on_status: (status, reason) => {
           if (p1VoiceOwnerRef.current === owner) {
+            if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === owner) {
+              terminalAnnouncementSpeechOwnerRef.current = null;
+            }
+            if (status === 'recognized' && terminalAnnouncementStateRef.current === 'suspending_capture') {
+              p1VoiceCaptureBindingRef.current = null;
+              updateTerminalAnnouncementState('fetching');
+            }
             setP1VoiceStatus(status);
             setP1VoiceReason(reason);
           }
@@ -3103,6 +3316,91 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     return retained;
   };
   startP1VoiceHandlerRef.current = startProductVoiceCapture;
+
+  retryTerminalAnnouncementHandlerRef.current = retained => {
+    const terminal = retained.task_notification;
+    if (terminal === null || pendingPresentationAttemptRef.current !== retained || terminal.retry_pending || terminal.retry_count >= 1) {
+      return;
+    }
+    if (
+      !mountedRef.current ||
+      !voiceLoopEnabledRef.current ||
+      !isConnectedRef.current ||
+      activationOwnerRef.current !== retained.owner ||
+      (typeof document !== 'undefined' && document.visibilityState !== 'visible')
+    ) {
+      return;
+    }
+    terminal.retry_count += 1;
+    terminal.retry_pending = true;
+    const activationOwner = retained.owner;
+    void (async () => {
+      const failedOwner = p1VoiceOwnerRef.current;
+      if (failedOwner !== null) {
+        try {
+          await failedOwner.close();
+        } catch (error) {
+          throw Object.assign(new Error('terminal announcement P1 cleanup is incomplete'), {
+            reason: stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_RECOVERY_REQUIRED'),
+          });
+        }
+        if (p1VoiceOwnerRef.current === failedOwner) p1VoiceOwnerRef.current = null;
+      }
+      if (
+        !mountedRef.current ||
+        !voiceLoopEnabledRef.current ||
+        !isConnectedRef.current ||
+        activationOwnerRef.current !== activationOwner ||
+        pendingPresentationAttemptRef.current !== retained
+      ) {
+        terminal.retry_pending = false;
+        return;
+      }
+      await startP1VoiceHandlerRef.current();
+      const retryOwner = p1VoiceOwnerRef.current;
+      if (retryOwner === null || retryOwner.status().status !== 'capturing') {
+        throw Object.assign(new Error('terminal announcement P1 recovery did not restore capture authority'), {
+          reason: 'PRODUCT_TERMINAL_ANNOUNCEMENT_RECOVERY_REQUIRED',
+        });
+      }
+      const pauseOutcome = await retryOwner.pauseIdleCaptureForNotification();
+      if (pauseOutcome === 'speech_active') {
+        terminal.retry_pending = false;
+        terminalAnnouncementSpeechOwnerRef.current = retryOwner;
+        updateTerminalAnnouncementState('queued');
+        return;
+      }
+      p1VoiceCaptureBindingRef.current = null;
+      updateTerminalAnnouncementState('playing');
+      activeVoiceResponseRef.current = terminal.disposition.response;
+      await retryOwner.playAgentText({
+        response: terminal.disposition.response,
+        unit_id: terminal.disposition.unit_id,
+        text: terminal.disposition.text,
+      });
+      if (activationOwnerRef.current !== activationOwner || pendingPresentationAttemptRef.current !== retained) {
+        return;
+      }
+      if (activeVoiceResponseRef.current?.response_id === terminal.disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      terminal.retry_pending = false;
+      retained.markPlayoutSettled();
+      updateTerminalAnnouncementState('acking');
+      setPendingPresentationAck(terminal.disposition.ack);
+      void settleProductPresentationAck(retained);
+    })().catch(error => {
+      terminal.retry_pending = false;
+      if (activeVoiceResponseRef.current?.response_id === terminal.disposition.response_id) {
+        activeVoiceResponseRef.current = null;
+      }
+      if (pendingPresentationAttemptRef.current === retained) {
+        setProductTextReason(stableProductTextReason(error, 'PRODUCT_TERMINAL_ANNOUNCEMENT_AUDIO_FAILED'));
+        setProductTextStatus('failed');
+        updateTerminalAnnouncementState('recovering');
+      }
+    });
+  };
 
   const stopProductVoiceCaptureOwned = async () => {
     const owner = p1VoiceOwnerRef.current;
@@ -4291,6 +4589,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       voiceLoopGenerationRef.current += 1;
       voiceLoopEnabledRef.current = true;
     }
+    const retainedTerminal = pendingPresentationAttemptRef.current;
+    if (retainedTerminal?.task_notification != null && terminalAnnouncementStateRef.current === 'recovering') {
+      retryTerminalAnnouncementHandlerRef.current(retainedTerminal);
+      return;
+    }
     await startProductVoiceCapture();
   };
 
@@ -4319,6 +4622,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         task_progress_task_id: progress?.task_id ?? null,
         task_progress_state: progress?.state ?? null,
         task_progress_delivery_mode: progress?.delivery_mode ?? null,
+        terminal_announcement_state: terminalAnnouncementState,
         terminal_notification: terminalNotification,
         adjustment_notification: adjustmentNotification,
         task_controls_locked: taskControlsLocked,
@@ -4345,6 +4649,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     taskIntentSnapshot,
     taskIntentTaskId,
     adjustmentNotification,
+    terminalAnnouncementState,
     terminalNotification,
   ]);
 

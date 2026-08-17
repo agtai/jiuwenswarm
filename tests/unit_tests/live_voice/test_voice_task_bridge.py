@@ -10,6 +10,9 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ScopeRef,
     TurnCommit,
 )
+from jiuwenswarm.server.live_voice.demo_fixture_contract import (
+    DEMO_ITINERARY_TASK_NAME,
+)
 from jiuwenswarm.server.live_voice.voice_task_bridge import (
     BoundedAlphaTaskIntentResolver,
     CurrentBackgroundTaskContext,
@@ -193,6 +196,19 @@ def test_unified_semantic_routes_cover_closed_protocol(
     }:
         assert resolved.task_id == CURRENT.task_id
         assert resolved.target_binding == "current_background_task"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "帮我根据这些要求制定三天的行程。",
+        "帮我在后台根据这些已经订好的订单规划一份三天上海杭州行程。",
+    ],
+)
+def test_unified_demo_itinerary_create_uses_shared_fixture_name(text: str) -> None:
+    resolved = VoiceTaskBridge().resolve_unified(committed(text), SCOPE, CURRENT)
+    assert resolved.route is UnifiedCommittedInputRoute.BACKGROUND_CREATE
+    assert resolved.name == DEMO_ITINERARY_TASK_NAME
 
 
 @pytest.mark.parametrize(

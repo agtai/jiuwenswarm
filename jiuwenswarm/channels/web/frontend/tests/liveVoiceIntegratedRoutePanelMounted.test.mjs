@@ -229,6 +229,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
   const counts = { getUserMedia: 0, stoppedTracks: 0, enumerateDevices: 0, constraints: [], sinkIds: [], sourceStarts: 0, sourceStops: 0, sourceEnds: 0, socketOpens: 0 };
   let latestWorklet = null;
   let latestSource = null;
+  let nextWorkletFirstFrameSamples = null;
   const sockets = [];
   const speechStartSignals = [];
   const endOfTurnSignals = [];
@@ -323,9 +324,32 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
   class FakeAudioWorkletNode extends FakeAudioNode {
     constructor(_context, _name, options) {
       super();
-      this.port = { onmessage: null, close() {} };
-      this.onprocessorerror = null;
       this.captureGeneration = options.processorOptions.captureGeneration;
+      let onmessage = null;
+      this.port = { close() {} };
+      Object.defineProperty(this.port, 'onmessage', {
+        get: () => onmessage,
+        set: handler => {
+          onmessage = handler;
+          const samples = nextWorkletFirstFrameSamples;
+          if (typeof handler !== 'function' || samples === null) return;
+          nextWorkletFirstFrameSamples = null;
+          setTimeout(() =>
+            handler({
+              data: {
+                kind: 'frame',
+                capture_generation: this.captureGeneration,
+                seq: 0,
+                sample_rate_hz: 48_000,
+                sample_cursor: 0,
+                context_time_s: 0,
+                samples,
+              },
+            }),
+          250);
+        },
+      });
+      this.onprocessorerror = null;
       latestWorklet = this;
     }
   }
@@ -494,7 +518,7 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
     setEnumerateDevices(implementation) {
       enumerateDevices = implementation;
     },
-    async emitFirstFrame() {
+    async emitFirstFrame(sampleValue = 0.25) {
       await waitForMounted(() => typeof latestWorklet?.port.onmessage === 'function', 'mounted P1 worklet did not become ready');
       await new Promise(resolve => setImmediate(resolve));
       latestWorklet.port.onmessage({
@@ -505,9 +529,36 @@ function installP1BrowserEnvironment({ mediaBinding = null, getUserMedia: getUse
           sample_rate_hz: 48_000,
           sample_cursor: 0,
           context_time_s: 0,
-          samples: new Float32Array(960).fill(0.25),
+          samples: new Float32Array(960).fill(sampleValue),
         },
       });
+    },
+    async rotateSilentCaptureWindow() {
+      await waitForMounted(() => typeof latestWorklet?.port.onmessage === 'function', 'mounted silent P1 worklet did not become ready');
+      const priorWorklet = latestWorklet;
+      const handler = priorWorklet.port.onmessage;
+      const frameCount = 30_000 / 20;
+      const samples = new Float32Array(960);
+      nextWorkletFirstFrameSamples = samples;
+      for (let seq = 1; seq < frameCount; seq += 1) {
+        handler({
+          data: {
+            kind: 'frame',
+            capture_generation: priorWorklet.captureGeneration,
+            seq,
+            sample_rate_hz: 48_000,
+            sample_cursor: seq * 960,
+            context_time_s: seq * 0.02,
+            samples,
+          },
+        });
+        if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+      }
+      await waitForMounted(
+        () => latestWorklet !== priorWorklet && typeof latestWorklet?.port.onmessage === 'function',
+        'mounted silent P1 capture did not rotate',
+        4_000,
+      );
     },
     async emitDownlinkFrame() {
       await waitForMounted(
@@ -2578,6 +2629,7 @@ test('mounted auto-submitted speech stays bound to the pre-rollover P2 activatio
         () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 1,
         'rollover recognition was not auto-submitted',
       );
+      for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
     });
     assert.equal(typeof rejectFirstNotification, 'function');
     assert.equal(p2Activations.length, 2, 'explicit media start must revalidate the exact active P2 binding');
@@ -6073,7 +6125,16 @@ test('mounted terminal-response barge converges without voice failure and keeps 
       await browser.emitFirstFrame();
       await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'initial capture did not start');
       await controlRef.current.stop();
-      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'Agent answer did not start playout');
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'playing',
+        `Agent answer did not start playout; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`)
+          .join(',')}; methods=${calls
+          .slice(-16)
+          .map(call => call.method)
+          .join(',')}`,
+      );
       await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.speech.synthesize_batch'),
         'Agent answer did not request authoritative synthesis',
@@ -6086,12 +6147,17 @@ test('mounted terminal-response barge converges without voice failure and keeps 
       try {
         await browser.emitDownlinkFrame();
       } catch (error) {
-        assert.fail(`${error.message}; states=${states.slice(-6).map(state => `${state.p1_status}/${state.p1_reason}`).join(',')}; methods=${calls.slice(-10).map(call => call.method).join(',')}`);
+        assert.fail(
+          `${error.message}; states=${states
+            .slice(-6)
+            .map(state => `${state.p1_status}/${state.p1_reason}`)
+            .join(',')}; methods=${calls
+            .slice(-10)
+            .map(call => call.method)
+            .join(',')}`,
+        );
       }
-      await waitForMounted(
-        () => browser.counts.sourceStarts === 1,
-        'dedicated Agent audio did not begin browser rendering',
-      );
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'dedicated Agent audio did not begin browser rendering');
       await browser.emitSpeechStartDuringPlayout();
       await waitForMounted(
         () => calls.some(call => call.method === 'live_voice.composition.p2.barge_in'),
@@ -6132,7 +6198,10 @@ test('mounted terminal-response barge converges without voice failure and keeps 
     );
     await waitForMounted(
       () => calls.filter(call => call.method === 'live_voice.speech.synthesize_batch').length === 2,
-      `stale predecessor ACK blocked the new answer from reaching TTS; methods=${calls.map(call => call.method).join(',')}; states=${states.slice(-8).map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`).join(',')}`,
+      `stale predecessor ACK blocked the new answer from reaching TTS; methods=${calls.map(call => call.method).join(',')}; states=${states
+        .slice(-8)
+        .map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`)
+        .join(',')}`,
     );
     assert.equal(
       calls.filter(call => call.method === 'live_voice.composition.p2.close').length,
@@ -6374,13 +6443,16 @@ test('mounted stale TTS settlement after Session switch cannot retain predecesso
         await browser.emitDownlinkFrame();
       } catch (error) {
         assert.fail(
-          `${error.message}; states=${states.slice(-6).map(state => `${state.p1_status}/${state.p1_reason}`).join(',')}; methods=${calls.slice(-12).map(call => call.method).join(',')}`,
+          `${error.message}; states=${states
+            .slice(-6)
+            .map(state => `${state.p1_status}/${state.p1_reason}`)
+            .join(',')}; methods=${calls
+            .slice(-12)
+            .map(call => call.method)
+            .join(',')}`,
         );
       }
-      await waitForMounted(
-        () => browser.counts.sourceStarts === 1,
-        'predecessor TTS did not begin browser rendering',
-      );
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'predecessor TTS did not begin browser rendering');
     });
 
     await act(async () => {
@@ -6607,37 +6679,42 @@ test('mounted Exit and immediate re-enable recover after old unified success or 
       const attempt = unifiedAttempt;
       unifiedParams = { ...params };
       return new Promise(resolve => {
-        releaseUnified = () => resolve(attempt !== 2 ? {
-          request_id: options.requestId,
-          ok: true,
-          result: {
-            status: 'round_accepted',
-            session_id: params.session_id,
-            correlation_id: params.correlation_id,
-            interaction_id: params.interaction_id,
-            activation_id: params.activation_id,
-            activation_generation: params.activation_generation,
-            turn_id: params.turn_id,
-            commit_id: params.commit_id,
-            request_id: `mounted-exit-pending-agent-request-${attempt}`,
-            round_id: `mounted-exit-pending-round-${attempt}`,
-            response: {
-              interaction_id: params.interaction_id,
-              response_id: `mounted-exit-pending-response-${attempt}`,
-              response_generation: attempt,
-            },
-          },
-          error: null,
-        } : {
-          request_id: options.requestId,
-          ok: false,
-          result: null,
-          error: {
-            code: 'CAPABILITY_UNAVAILABLE',
-            reason: 'PRODUCT_COMPOSITION_STOPPED',
-            message: 'unavailable',
-          },
-        });
+        releaseUnified = () =>
+          resolve(
+            attempt !== 2
+              ? {
+                  request_id: options.requestId,
+                  ok: true,
+                  result: {
+                    status: 'round_accepted',
+                    session_id: params.session_id,
+                    correlation_id: params.correlation_id,
+                    interaction_id: params.interaction_id,
+                    activation_id: params.activation_id,
+                    activation_generation: params.activation_generation,
+                    turn_id: params.turn_id,
+                    commit_id: params.commit_id,
+                    request_id: `mounted-exit-pending-agent-request-${attempt}`,
+                    round_id: `mounted-exit-pending-round-${attempt}`,
+                    response: {
+                      interaction_id: params.interaction_id,
+                      response_id: `mounted-exit-pending-response-${attempt}`,
+                      response_generation: attempt,
+                    },
+                  },
+                  error: null,
+                }
+              : {
+                  request_id: options.requestId,
+                  ok: false,
+                  result: null,
+                  error: {
+                    code: 'CAPABILITY_UNAVAILABLE',
+                    reason: 'PRODUCT_COMPOSITION_STOPPED',
+                    message: 'unavailable',
+                  },
+                },
+          );
       });
     }
     if (method === 'live_voice.speech.synthesize_batch') {
@@ -7030,10 +7107,7 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
     });
     for (let index = 0; index < utterances.length; index += 1) {
       await act(async () => {
-        await waitForMounted(
-          () => ['starting', 'capturing'].includes(states.at(-1)?.p1_status),
-          `turn ${index + 1} did not prepare listening`,
-        );
+        await waitForMounted(() => ['starting', 'capturing'].includes(states.at(-1)?.p1_status), `turn ${index + 1} did not prepare listening`);
         if (states.at(-1)?.p1_status === 'starting') await browser.emitFirstFrame();
         await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', `turn ${index + 1} did not enter listening`);
         await browser.emitSpeechEndOfTurn();
@@ -7042,10 +7116,7 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
           `turn ${index + 1} was not auto-submitted exactly once`,
         );
         await waitForMounted(() => states.at(-1)?.p1_status === 'playing', `turn ${index + 1} was not read aloud`);
-        await waitForMounted(
-          () => browser.counts.sourceStarts === index + 1,
-          `turn ${index + 1} did not schedule its authoritative browser audio`,
-        );
+        await waitForMounted(() => browser.counts.sourceStarts === index + 1, `turn ${index + 1} did not schedule its authoritative browser audio`);
       });
       await act(async () => {
         browser.endLatestSource();
@@ -7089,6 +7160,662 @@ test('mounted unified hands-free itinerary journey auto-submits and keeps one cu
     });
     assert.equal(browser.counts.getUserMedia, captureCountBeforeExit);
     assert.equal(states.at(-1)?.p1_status, 'closed');
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted intervening dialogue retains P2 polling after a keepalive while a background terminal check is pending', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-terminal-dialogue-session';
+  const taskId = 'mounted-terminal-dialogue-task';
+  const controlRef = { current: null };
+  const states = [];
+  const calls = [];
+  const queuedNotifications = [];
+  const notificationWaiters = [];
+  const recognizedTexts = ['帮我在后台制定一份三天杭州行程。', '上海晚上有什么适合逛逛顺便吃东西的地方？'];
+  let progressListener = null;
+  let progressActivation = null;
+  let p2Binding = null;
+  let activeMediaBinding = null;
+  let recognitionIndex = 0;
+  let keepaliveAfterTaskStart = false;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const progressSubscribe = listener => {
+    progressListener = listener;
+    return () => {
+      if (progressListener === listener) progressListener = null;
+    };
+  };
+  const publishNotification = notification => {
+    const waiter = notificationWaiters.shift();
+    if (waiter) waiter(notification);
+    else queuedNotifications.push(notification);
+  };
+  const keepalive = binding => ({
+    ok: true,
+    result: {
+      status: 'notification',
+      ...binding,
+      kind: 'transport.keepalive',
+      response: null,
+      agent_event: null,
+      progress_event: null,
+      presentation_unit: null,
+    },
+  });
+  const presentation = (binding, responseId, responseGeneration, text) => ({
+    ok: true,
+    result: {
+      status: 'notification',
+      ...binding,
+      kind: 'agent.output',
+      response: {
+        interaction_id: binding.interaction_id,
+        response_id: responseId,
+        response_generation: responseGeneration,
+      },
+      agent_event: { event_type: 'chat.final', text },
+      presentation_unit: {
+        surface: 'text',
+        unit_id: `${responseId}-unit`,
+        seq: 0,
+        content_ref: `sha256:${String(responseGeneration).padStart(64, '0')}`,
+      },
+    },
+  });
+
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (queuedNotifications.length > 0) return queuedNotifications.shift();
+      if (keepaliveAfterTaskStart && p2Binding !== null) {
+        keepaliveAfterTaskStart = false;
+        return keepalive(p2Binding);
+      }
+      return new Promise(resolve => notificationWaiters.push(resolve));
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: 1,
+          history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      progressActivation = { ...params };
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.media.activate') {
+      const index = calls.filter(call => call.method === method).length;
+      activeMediaBinding = mountedMediaBinding(params, index);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-terminal-dialogue-media-${index}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'J'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: `mounted-terminal-dialogue-receipt-${params.response_id}`,
+        ...params,
+        duplex_media_observed: false,
+      };
+    }
+    if (method === 'live_voice.speech.recognize_batch') {
+      const text = recognizedTexts[recognitionIndex];
+      recognitionIndex += 1;
+      if (typeof text !== 'string') throw new Error('unexpected extra mounted recognition');
+      return mountedRecognition(params, text, recognitionIndex);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      const submitIndex = calls.filter(call => call.method === method).length;
+      p2Binding = {
+        session_id: params.session_id,
+        correlation_id: params.correlation_id,
+        interaction_id: params.interaction_id,
+        activation_id: params.activation_id,
+        activation_generation: params.activation_generation,
+      };
+      const response = {
+        interaction_id: params.interaction_id,
+        response_id: submitIndex === 1 ? 'mounted-terminal-dialogue-start' : 'mounted-terminal-dialogue-answer',
+        response_generation: submitIndex,
+      };
+      if (submitIndex === 1) {
+        keepaliveAfterTaskStart = true;
+        publishNotification(presentation(p2Binding, response.response_id, response.response_generation, '已开始处理。'));
+      }
+      const result = {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result:
+          submitIndex === 1
+            ? {
+                status: 'authoritative_presentation_accepted',
+                response,
+                task_id: taskId,
+              }
+            : {
+                status: 'round_accepted',
+                session_id: params.session_id,
+                correlation_id: params.correlation_id,
+                interaction_id: params.interaction_id,
+                activation_id: params.activation_id,
+                activation_generation: params.activation_generation,
+                turn_id: params.turn_id,
+                commit_id: params.commit_id,
+                request_id: 'mounted-terminal-dialogue-agent-request',
+                round_id: 'mounted-terminal-dialogue-round',
+                response,
+              },
+      };
+      return result;
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'wav_pcm16_mono',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            data_base64: mountedWavBase64(),
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
+    }
+    throw new Error(`unexpected mounted terminal dialogue request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          progressSubscribe,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(() => controlRef.current !== null && states.at(-1)?.available === true, 'terminal dialogue route unavailable');
+      void controlRef.current.start();
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'terminal dialogue initial capture unavailable');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'task-start response did not play');
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'task-start audio did not reach the browser');
+      browser.endLatestSource();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-dialogue-start'),
+        'task-start response was not ACKed',
+      );
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'starting',
+        `listening did not restart after task-start; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
+          .join(',')}; methods=${calls
+          .slice(-20)
+          .map(call => call.method)
+          .join(',')}`,
+      );
+      await browser.emitFirstFrame(0);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'intervening dialogue capture unavailable');
+      await waitForMounted(
+        () => progressActivation?.task_id === taskId && typeof progressListener === 'function',
+        'voice-created task did not retain its exact progress wakeup before intervening dialogue',
+      );
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.unified.submit').length === 2,
+        `intervening dialogue was not accepted; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.text_status}/${state.text_reason ?? 'none'}`)
+          .join(',')}; methods=${calls
+          .slice(-20)
+          .map(call => call.method)
+          .join(',')}`,
+      );
+      for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+      await waitForMounted(() => notificationWaiters.length > 0, 'intervening dialogue did not own a pending P2 poll');
+    });
+
+    const pollsBeforeKeepalive = calls.filter(call => call.method === 'live_voice.composition.p2.notification.next').length;
+    await act(async () => {
+      publishNotification(keepalive(p2Binding));
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.notification.next').length > pollsBeforeKeepalive && notificationWaiters.length > 0,
+        `foreground dialogue yielded P2 after keepalive; states=${states
+          .slice(-10)
+          .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}`)
+          .join(',')}`,
+      );
+      assert.equal(states.at(-1)?.text_status, 'waiting');
+      assert.notEqual(states.at(-1)?.p1_status, 'starting');
+      assert.notEqual(states.at(-1)?.p1_status, 'capturing');
+      publishNotification(presentation(p2Binding, 'mounted-terminal-dialogue-answer', 2, '可以去外滩、南京东路和云南南路。'));
+      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'intervening dialogue response did not play');
+      await waitForMounted(() => browser.counts.sourceStarts === 2, 'intervening dialogue audio did not reach the browser');
+      browser.endLatestSource();
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-dialogue-answer').length === 1,
+        'intervening dialogue response was not ACKed exactly once',
+      );
+      await waitForMounted(() => notificationWaiters.length > 0, 'background terminal check did not retain its post-dialogue P2 poll');
+      publishNotification(keepalive(p2Binding));
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'listening did not resume after intervening dialogue');
+      await browser.emitFirstFrame(0);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'intervening dialogue successor capture unavailable');
+    });
+
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 2);
+    assert.deepEqual(
+      calls.filter(call => call.method === 'live_voice.composition.unified.submit').map(call => call.params.text),
+      recognizedTexts,
+    );
+    assert.equal(
+      calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
+      false,
+    );
+  } finally {
+    if (renderer) await act(async () => renderer.unmount());
+    browser.restore();
+  }
+});
+
+test('mounted voice-created terminal notification suspends silent listening, plays once, ACKs once, and resumes', async () => {
+  const i18n = await createI18n();
+  const sessionId = 'mounted-terminal-idle-session';
+  const taskId = 'mounted-terminal-idle-task';
+  const controlRef = { current: null };
+  const states = [];
+  const calls = [];
+  const queuedNotifications = [];
+  const notificationWaiters = [];
+  let progressListener = null;
+  let progressActivation = null;
+  let p2Binding = null;
+  let activeMediaBinding = null;
+  let keepaliveAfterTaskStart = false;
+  let terminalSynthesisFailuresRemaining = 1;
+  let renderer;
+  const browser = installP1BrowserEnvironment({ mediaBinding: () => activeMediaBinding });
+  const activateP2 = createMountedP2ActivationResponder();
+  const progressSubscribe = listener => {
+    progressListener = listener;
+    return () => {
+      if (progressListener === listener) progressListener = null;
+    };
+  };
+  const publishNotification = notification => {
+    const waiter = notificationWaiters.shift();
+    if (waiter) waiter(notification);
+    else queuedNotifications.push(notification);
+  };
+  const presentation = (binding, responseId, responseGeneration, text, taskNotification = false) => ({
+    ok: true,
+    result: {
+      status: 'notification',
+      ...binding,
+      kind: 'agent.output',
+      response: {
+        interaction_id: binding.interaction_id,
+        response_id: responseId,
+        response_generation: responseGeneration,
+      },
+      agent_event: {
+        event_type: 'chat.final',
+        text,
+        ...(taskNotification ? { source_provenance: 'server.task_notification' } : {}),
+      },
+      presentation_unit: {
+        surface: 'text',
+        unit_id: `${responseId}-unit`,
+        seq: 0,
+        content_ref: `sha256:${String(responseGeneration).padStart(64, '0')}`,
+      },
+    },
+  });
+
+  const request = async (method, params, options) => {
+    calls.push({ method, params: { ...params }, requestId: options?.requestId ?? null });
+    if (method === 'live_voice.composition.p2.activate') return activateP2(params);
+    if (method === 'live_voice.composition.p2.close') return { ok: true, result: { status: 'closed', ...params } };
+    if (method === 'live_voice.composition.p2.notification.next') {
+      if (queuedNotifications.length > 0) return queuedNotifications.shift();
+      if (keepaliveAfterTaskStart && p2Binding !== null) {
+        keepaliveAfterTaskStart = false;
+        return {
+          ok: true,
+          result: {
+            status: 'notification',
+            ...p2Binding,
+            kind: 'transport.keepalive',
+            response: null,
+            agent_event: null,
+            progress_event: null,
+            presentation_unit: null,
+          },
+        };
+      }
+      return new Promise(resolve => notificationWaiters.push(resolve));
+    }
+    if (method === 'live_voice.composition.p2.presentation.ack') {
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'presentation_acknowledged',
+          ...params,
+          accepted: true,
+          replayed: false,
+          history_records_written: 1,
+          history_pending: false,
+        },
+      };
+    }
+    if (method === 'live_voice.task.list') return { ok: true, result: { tasks: [] } };
+    if (method === 'live_voice.composition.p3.progress.activate') {
+      progressActivation = { ...params };
+      return { ok: true, result: mountedProgressActivation(params) };
+    }
+    if (method === 'live_voice.composition.p3.progress.close') {
+      return { ok: true, result: { status: 'closed', ...params } };
+    }
+    if (method === 'live_voice.media.activate') {
+      const index = calls.filter(call => call.method === method).length;
+      activeMediaBinding = mountedMediaBinding(params, index);
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: `mounted-terminal-idle-media-${index}`,
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'I'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: {
+          status: 'active',
+          capability_version: 'media.end_of_turn.v1',
+          detector: 'server_vad',
+          create_response: false,
+          interrupt_response: false,
+        },
+        binding: activeMediaBinding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    }
+    if (method === 'live_voice.media.close') return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+    if (method === 'live_voice.media.playout_receipt') {
+      return {
+        status: 'media_playout_acknowledged',
+        reason_id: 'MEDIA_PLAYOUT_RECEIPT_ACCEPTED',
+        receipt_id: `mounted-terminal-idle-receipt-${params.response_id}`,
+        ...params,
+        duplex_media_observed: false,
+      };
+    }
+    if (method === 'live_voice.speech.recognize_batch') {
+      return mountedRecognition(params, '帮我在后台制定一份三天杭州行程。', 1);
+    }
+    if (method === 'live_voice.composition.unified.submit') {
+      p2Binding = {
+        session_id: params.session_id,
+        correlation_id: params.correlation_id,
+        interaction_id: params.interaction_id,
+        activation_id: params.activation_id,
+        activation_generation: params.activation_generation,
+      };
+      const response = {
+        interaction_id: params.interaction_id,
+        response_id: 'mounted-terminal-idle-start',
+        response_generation: 1,
+      };
+      keepaliveAfterTaskStart = true;
+      publishNotification(presentation(p2Binding, response.response_id, response.response_generation, '已开始处理。'));
+      return {
+        request_id: options.requestId,
+        ok: true,
+        error: null,
+        result: {
+          status: 'authoritative_presentation_accepted',
+          response,
+          task_id: taskId,
+        },
+      };
+    }
+    if (method === 'live_voice.speech.synthesize_batch') {
+      if (params.response.response_id === 'mounted-terminal-idle-complete' && terminalSynthesisFailuresRemaining > 0) {
+        terminalSynthesisFailuresRemaining -= 1;
+        throw Object.assign(new Error('mounted first terminal synthesis owner is unavailable'), {
+          reason: 'SPEECH_PROVIDER_UNAVAILABLE',
+        });
+      }
+      return {
+        contract_version: 'live-voice.contract.v2',
+        request_id: params.request_id,
+        operation_id: params.operation_id,
+        ok: true,
+        error: null,
+        result: {
+          operation: 'speech.synthesize.batch',
+          response: params.response,
+          unit_id: params.unit_id,
+          audio: {
+            format: 'wav_pcm16_mono',
+            sample_rate_hz: 48_000,
+            channel_count: 1,
+            data_base64: mountedWavBase64(),
+          },
+          provider: {
+            provider_id: 'mounted-provider',
+            implementation_class: 'formal',
+            fallback_from: null,
+            model: 'mounted-tts',
+            voice: 'mounted-voice',
+          },
+          presented: false,
+        },
+      };
+    }
+    throw new Error(`unexpected mounted terminal idle request: ${method}`);
+  };
+
+  try {
+    await act(async () => {
+      renderer = create(
+        mountedFullyEnabledElement(i18n, sessionId, request, true, {
+          productVoiceControlRef: controlRef,
+          progressSubscribe,
+          onProductVoiceStateChange: state => states.push(state),
+        }),
+      );
+      await waitForMounted(() => controlRef.current !== null && states.at(-1)?.available === true, 'terminal idle route unavailable');
+      void controlRef.current.start();
+      await browser.emitFirstFrame();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'terminal idle initial capture unavailable');
+      await browser.emitSpeechEndOfTurn();
+      await waitForMounted(() => states.at(-1)?.p1_status === 'playing', 'task-start response did not play');
+      await waitForMounted(() => browser.counts.sourceStarts === 1, 'task-start audio did not reach the browser');
+      browser.endLatestSource();
+      await waitForMounted(
+        () => calls.some(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-idle-start'),
+        'task-start response was not ACKed',
+      );
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'idle listening did not restart after task-start');
+      await browser.emitFirstFrame(0);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'silent idle listening did not become ready');
+      await waitForMounted(
+        () => progressActivation?.task_id === taskId && typeof progressListener === 'function',
+        'voice-created task did not activate exact progress wakeup',
+      );
+    });
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      await act(async () => {
+        try {
+          await browser.rotateSilentCaptureWindow();
+        } catch (error) {
+          assert.fail(
+            `silent idle capture ${cycle + 1} did not rotate: ${error.message}; states=${states
+              .slice(-8)
+              .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
+              .join(',')}; activations=${calls.filter(call => call.method === 'live_voice.media.activate').length}`,
+          );
+        }
+        await waitForMounted(
+          () => calls.filter(call => call.method === 'live_voice.media.activate').length === cycle + 3,
+          `silent idle capture ${cycle + 1} did not rotate`,
+        );
+        await waitForMounted(
+          () => calls.some(call => call.method === 'live_voice.media.close' && call.params.subject_id === `mounted-terminal-idle-media-${cycle + 2}`),
+          `silent idle capture ${cycle + 1} did not revoke its predecessor authority`,
+        );
+        for (let turn = 0; turn < 5; turn += 1) await new Promise(resolve => setImmediate(resolve));
+        await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', `silent idle capture ${cycle + 1} lost listening`);
+      });
+    }
+
+    const taskBinding = {
+      subject_id: 'mounted-terminal-idle-subject',
+      session_id: sessionId,
+      project_id: 'mounted-terminal-idle-project',
+      correlation_id: progressActivation.correlation_id,
+      generation: 1,
+    };
+    const progress = mountedTerminalProgress(taskBinding, progressActivation, 'completed', taskId, 'mounted-terminal-idle-attempt');
+    assert.notEqual(parseProductTextProgressEvent(progress), null);
+    await act(async () => {
+      progressListener(progress);
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'recognized',
+        `terminal wakeup did not suspend silent capture; states=${states
+          .slice(-10)
+          .map(state => `${state.p1_status}/${state.p1_reason ?? 'none'}`)
+          .join(',')}`,
+      );
+      publishNotification(presentation(p2Binding, 'mounted-terminal-idle-complete', 2, '后台任务已完成，结果已经准备好。', true));
+      await waitForMounted(
+        () =>
+          calls.filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
+            .length === 1,
+        'terminal notification did not reach its first P1 owner',
+      );
+      await waitForMounted(
+        () => calls.filter(call => call.method === 'live_voice.media.activate').length === 5,
+        `terminal notification did not rebuild one P1 owner; states=${states
+          .slice(-10)
+          .map(state => `${state.p1_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
+          .join(',')}`,
+      );
+      assert.equal(
+        calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-idle-complete')
+          .length,
+        0,
+        'failed first terminal playout must not ACK',
+      );
+      await browser.emitFirstFrame(0);
+      await waitForMounted(
+        () => states.at(-1)?.p1_status === 'playing',
+        `terminal notification did not start playout; states=${states
+          .slice(-12)
+          .map(state => `${state.p1_status}/${state.text_status}/${state.terminal_announcement_state}/${state.text_reason ?? 'none'}`)
+          .join(',')}; methods=${calls
+          .slice(-20)
+          .map(call => call.method)
+          .join(',')}`,
+      );
+      await waitForMounted(() => browser.counts.sourceStarts === 2, 'terminal notification audio did not reach the browser');
+    });
+
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-idle-complete').length,
+      0,
+      'terminal notification ACK must wait for physical playout',
+    );
+    await act(async () => {
+      browser.endLatestSource();
+      await waitForMounted(
+        () =>
+          calls.filter(call => call.method === 'live_voice.composition.p2.presentation.ack' && call.params.response_id === 'mounted-terminal-idle-complete')
+            .length === 1,
+        'terminal notification did not ACK exactly once after playout',
+      );
+      await waitForMounted(() => states.at(-1)?.p1_status === 'starting', 'terminal notification did not resume listening');
+      await browser.emitFirstFrame(0);
+      await waitForMounted(() => states.at(-1)?.p1_status === 'capturing', 'terminal notification successor did not reach listening');
+    });
+
+    assert.equal(
+      calls.filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
+        .length,
+      2,
+    );
+    assert.equal(
+      new Set(
+        calls
+          .filter(call => call.method === 'live_voice.speech.synthesize_batch' && call.params.response.response_id === 'mounted-terminal-idle-complete')
+          .map(call => JSON.stringify([call.params.response.response_id, call.params.response.response_generation, call.params.unit_id])),
+      ).size,
+      1,
+    );
+    assert.equal(calls.filter(call => call.method === 'live_voice.speech.recognize_batch').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.composition.unified.submit').length, 1);
+    assert.equal(calls.filter(call => call.method === 'live_voice.media.activate').length, 6);
+    assert.equal(
+      calls.some(call => call.method.includes('task.cancel') || call.method.includes('task.mutate') || call.method === 'live_voice.composition.p3.mutate'),
+      false,
+    );
   } finally {
     if (renderer) await act(async () => renderer.unmount());
     browser.restore();

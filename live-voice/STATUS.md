@@ -5,14 +5,21 @@
 
 ## Current source, milestone and Demo work
 
-- **Product source:** `f118f51bae9b085fff48ee1ee33df57fda7fc6d2` on
-  `hx/0812_live_voice_w3`; local/upstream matched before these documentation changes.
+- **Product baseline:** `95b26308717b896d820f011defa691243cad58f8` on
+  `hx/0812_live_voice_w3`; local/upstream matched at resume. The combined
+  Post-Alpha repair and Demo-record candidate is the single local commit
+  immediately above that baseline. It has automated verification but has not
+  been pushed or physically rerun as a clean immutable Demo candidate.
 - **Accepted milestone:** `PASS — INTEGRATED WEB ALPHA`; S8/A3 remains closed
   for exact accepted source `d33b520e0d21ae0829d30814d77a01cc18256f09`.
   Post-Alpha changes do not roll back that result or reopen S7/S8.
-- **Current work:** `POST-ALPHA DEMO PREPARATION / BUG REPAIR`, Tier 3,
-  covering unified submit, running adjustment, terminal presentation/ACK and
-  hands-free Web lifecycle. The two bugs below block the new Demo, not Alpha.
+- **Current work:** `POST-ALPHA DEMO EXECUTION COMPLETE / FOLLOW-UP BUG
+  REPAIR`, Tier 3, covering unified submit, semantic routing, running
+  adjustment, Executor terminalization, result truth, terminal
+  presentation/ACK and the hands-free Web lifecycle. The user confirmed that
+  the real microphone/TTS Demo execution is complete. Its result is
+  `COMPLETED — DEFECTS RECORDED`, not an immutable-source PASS; see the
+  sanitized [2026-08-17 Post-Alpha Demo record](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md).
 - **Stage relation:** this bounded Demo stabilization is not S9; S9 has not
   started and remains Later/Beta/Production under [D-081](decisions/DECISIONS.md).
 - **Engineering verification reference:** exact source
@@ -54,26 +61,58 @@
 - **Focused session repairs in `f118f51b`:** overlap capture publishes its
   exact P2 binding before final playout/EOT; failed presentation keeps answer
   text and stable codes; stale/absent predecessor ACK can settle for one successor.
+- **Current working-tree repair:** an accepted foreground `dialogue` retains
+  polling ownership across an intervening Task keepalive, answers and ACKs
+  before capture resumes, then leaves queued terminal presentation to the
+  existing P2/TTS/ACK lifecycle. At the user's direction, `dialogue` now runs
+  with `allow_tools=True`; ordinary foreground questions may use Agent tools,
+  while create/update/query/status/cancel remain the only explicit background
+  Task routes and tool permission alone does not authorize Task mutation.
 
-## Current blockers
+## Recorded product defects
 
-1. **Unified-create completion announcement:** a real voice-created background
-   Task accepted its adjustment and completed with a legal result/artifact, but
-   unified create did not retain and activate the exact Task progress binding.
-   No proactive terminal presentation was constructed. The repair must bind
-   the returned Task, reuse the existing TaskEvent → P2 presentation/TTS/ACK
-   path, announce exactly once after ACK, preserve crash-before-ACK replay,
-   pause only active capture while speaking and resume exactly one capture.
-2. **Completion-adjacent barge/P2 recovery race:** when Task completion,
-   intentional playout interruption and the next utterance occur together, an
-   old ACK can race route recovery and the successor Agent round. One owner
-   must settle normal/recovery ACKs, serialize recovery with next submit, show
-   truthful recovering state, preserve the stable failure reason and keep Task
-   cancel/mutation at zero.
+1. **Executor completion does not reach a terminal Task:** Direct Executor
+   attempt `attempt-26f170d35739445a9a4e3699de50c26f` invoked the real Agent,
+   which wrote the bounded `itinerary.md` in its isolated checkout and reported
+   internal completion. Executor orchestration never persisted
+   `expected_tree`, result/artifact facts or a terminal event; the attempt
+   remains `running` and renews the project lease. Repair the Agent-return →
+   validation → application → immutable result → terminal-event boundary and
+   add bounded timeout/orphan recovery coverage.
+2. **Task admission is presented as execution:** a successor task can remain
+   only `accepted` with `ATTEMPT_NOT_YET_BOUND` while dispatch repeatedly fails
+   with `EXECUTOR_PROJECT_BUSY`, yet unified create says “已开始处理”. Present
+   queued/admitted separately from authoritative `attempt.running`; do not
+   claim execution before the Attempt is bound.
+3. **Chinese semantic routing is too exact:** the natural update without
+   “把/将” resolves to `background.query`, while “可以了,刚才的修改加进去了吗?”
+   fails the adjustment-status full match and falls through to `dialogue`.
+   Broaden only bounded high-confidence update/status forms and add exact
+   positive, ordinary-question, negation, precedence and zero-mutation cases.
+4. **Foreground dialogue can make false Task-state claims:** after the status
+   misroute, the Agent reread seven order files and answered that the change was
+   applied and a final itinerary existed even though the authoritative Task had
+   no bound Executor result. Task status/completion/application claims must be
+   owned by Task Core facts or fail closed; `dialogue` may not infer them from
+   conversation or project files.
+5. **Available result is rejected when dialogue context is full:**
+   `background.query` returns “当前任务结果不可用” whenever the selected context
+   already contains eight entries, even if Task Core returned a legal
+   `task_result`. Reserve a result-context slot or evict the oldest dialogue
+   pair; context capacity must not be reported as result unavailability.
+6. **Recovery state remains insufficiently diagnosable:** repeated visible
+   “正在恢复” coincided with P2/barge and Speech transport cleanup failures, but
+   the UI does not expose enough stable correlation to separate activation,
+   presentation ACK, TTS cleanup and successor-generation recovery. Preserve
+   stable reason/generation diagnostics and add the exact repeated-recovery
+   regression before claiming this closed.
 
-These are product-source gaps, not documentation-only or private-environment
-blocks. They must close before the new Demo, but they do not revoke the accepted
-Alpha result or require another S7/S8 cycle.
+The missed completion notification and missing authoritative final result in
+the last Journey are consequences of items 1–2, not proof that an existing
+terminal notification was lost. P2 `notification_sequence` also includes
+foreground stream events and keepalives; a high sequence is not itself a
+duplicate-notification defect. These Post-Alpha defects do not revoke the
+accepted Alpha result or require another S7/S8 cycle.
 
 ## Verification credit
 
@@ -93,9 +132,26 @@ Alpha result or require another S7/S8 cycle.
   context, product journal/Web owner `85 / 85`, semantic Bridge `52 / 52`,
   `git diff --check` and the `4,642`-module production build passed.
   This is affected-scope credit for the Post-Alpha Demo source.
+- Current combined candidate automated credit: Integrated Web `386 / 386`,
+  including silent idle-capture rotation, terminal capture suspension,
+  retry/physical playout/one ACK/resumed listening and the intervening-dialogue
+  keepalive regression. Affected backend Bridge, Demo Executor and DIALOGUE
+  policy checks passed `60 / 60`; the DIALOGUE assertion now matches
+  `allow_tools=True`. The `4,642`-module production build also passed. The
+  duplicate English/Chinese i18n `empty` key remains a build warning, not a
+  failure or a Task/result root cause.
+- The 2026-08-17 real microphone/TTS Post-Alpha Demo execution is complete by
+  user confirmation. It exercised ordinary dialogue, background create,
+  running adjustment, adjustment-status/result questions and foreground
+  playout/interruption behavior across real Sessions. The run exposed the
+  recorded defects above, retained no immutable exact candidate because the
+  deployed source was the dirty working tree, and therefore receives
+  `COMPLETED — DEFECTS RECORDED`, not PASS or release credit. The sanitized
+  result is frozen in the linked Post-Alpha Demo record.
 - Earlier real STT/TTS, multi-turn dialogue, background create/adjust/result
   and artifact inspection proved the physical paths can run, while exposing
-  the two blockers above. Those observations are Demo discovery evidence.
+  the recorded Task, routing and recovery defects above. Those observations
+  are Demo discovery evidence.
 - Remaining Demo limitations stay explicit: automated browser-origin storage
   inspection was unavailable, and transport duplicate-ID wording is bounded
   but less specific than product-layer conflict results. Human acceptance must
@@ -103,8 +159,19 @@ Alpha result or require another S7/S8 cycle.
 
 ## Environment state and next actions
 
-- The 2026-08-17 one-click local deployment is live on `6173`, `18092`,
-  `19000` and `19001`; production bundle and P2/P3 readiness probes passed.
+- The 2026-08-17 18:02 one-click local deployment from the current working tree
+  remains the tested runtime on `6173`, `18092`, `19000` and `19001`;
+  production bundle `index-Ci1LeMJT.js`, P3 authenticated route and P2/P3
+  composition probes passed with DIALOGUE `allow_tools=True`. The earlier
+  cancellation did clear its exact two attempts, but later Demo Sessions
+  created new non-terminal records. At the 18:48 forensic snapshot,
+  `task-7e8b7b3ef9d44cb69546d96a7ceb4b7a` remained `running` with a renewed
+  Direct Executor owner/lease, while
+  `task-4cf2948ba1834472b304551f5481a5a9` remained `accepted` and its dispatch
+  was still retrying `EXECUTOR_PROJECT_BUSY`; its adjustment outbox had not
+  been delivered. The target `order-test` Git worktree itself remained clean
+  on `6fcfa18e91cbab817e1865283e4a7d25da3e34fe` with no remote. Runtime log:
+  `logs/swarm-20260817-180239.log`.
 - Provider/model settings, Speech credentials, project registration, browser
   permission/devices and isolated runtime data remain machine-private and are
   not restored by Git. Credentials must not enter chat, logs or the repository.
@@ -118,21 +185,29 @@ Alpha result or require another S7/S8 cycle.
 
 Next actions:
 
-1. Repair the unified-create completion-announcement seam and run positive,
-   ACK/replay, flag-off, wrong-scope and zero-mutation focused regressions.
-2. Repair the completion-adjacent barge/P2 recovery race and run the exact
-   interruption-immediate-next-utterance regression.
-3. Physically regress two consecutive Chinese turns, visible history/context,
-   one playout interruption, resumed listening and unchanged background Task.
-4. On the final Demo source, run affected/cumulative Demo-scope checks and the
-   risk-proportional Tier-3 review; do not recreate S7/S8 gates.
-5. Run the seven-step D119-derived microphone/TTS Demo Journey:
-   dialogue, create, intervening dialogue, non-terminal adjustment, adjustment
-   status, applied-before-terminal/current-generation announcement and
-   result-backed artifact query.
-6. Verify artifact content/SHA, ACK refresh suppression, crash-before-ACK
-   replay, service/lease/outbox settlement and bounded fixture/data cleanup,
-   then record the Post-Alpha Demo result and remaining limitations.
+1. Safely settle or cancel the two current non-terminal Demo tasks through
+   Task Core before another mutation run; do not delete runtime rows or the
+   target worktree manually.
+2. Repair Executor terminalization and project-lease orphan recovery first;
+   assert one legal TaskResult/terminal event on success and bounded failure on
+   Agent-return or validation failure.
+3. Separate accepted/queued/running presentation truth, then repair the bounded
+   Chinese update and prefixed adjustment-status grammars with positive,
+   negative, precedence and zero-mutation regressions.
+4. Prevent DIALOGUE from claiming Task application/completion/result truth and
+   repair the eight-entry result-context boundary.
+5. Synchronize DIALOGUE `allow_tools=True` expectations and add bounded
+   tool/reasoning behavior so ordinary answers may use tools without turning a
+   status-like sentence into an unconstrained project reread.
+6. Preserve stable P2/barge/TTS/ACK recovery diagnostics and regress repeated
+   “正在恢复”, completion-adjacent interruption and queued terminal delivery.
+7. Run affected backend/Integrated Web checks, cumulative Tier-3 review and the
+   focused real microphone/TTS paths changed by the repairs. A future PASS
+   claim requires a clean immutable candidate and a new complete successful
+   Journey; this completed defect-discovery run must not be relabeled.
+8. Track the duplicate empty-key i18n warning as low-priority engineering
+   hygiene unless it is shown to drop or overwrite a visible translation; it
+   is not a root cause of Task, result or notification failures.
 
 ## Stable non-goals
 

@@ -46,6 +46,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 )
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
+from .demo_fixture_contract import DEMO_ITINERARY_TASK_NAME
 from .formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
@@ -2903,7 +2904,7 @@ class DirectProjectCodeExecutorAdapter:
             instruction = item.spec.instruction
             demo_itinerary_attempt = (
                 self._demo_itinerary_fixture_enabled
-                and item.spec.name == "Three-day itinerary"
+                and item.spec.name == DEMO_ITINERARY_TASK_NAME
             )
             if demo_itinerary_attempt:
                 instruction = (

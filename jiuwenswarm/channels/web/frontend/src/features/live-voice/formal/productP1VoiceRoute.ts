@@ -305,7 +305,9 @@ export class ProductP1VoiceRouteOwner {
   #bargeInEndOfTurnDelivered = false;
   #stopAndRecognizePromise: Promise<Readonly<ProductP1Recognition>> | null = null;
   #captureRotationPromise: Promise<void> | null = null;
-  #captureRotationStopping = false;
+  #captureRotationSourceId: string | null = null;
+  #idleCapturePausePromise: Promise<'paused' | 'speech_active'> | null = null;
+  #captureStopExpected = false;
 
   constructor(
     input: Readonly<{
@@ -345,7 +347,7 @@ export class ProductP1VoiceRouteOwner {
               reason: 'AUDIO_INPUT_MUTED',
             });
           } else if (['stopping', 'stopped'].includes(event.state)) {
-            if (this.#captureRotationStopping) return;
+            if (this.#captureStopExpected) return;
             failure = Object.assign(new Error('formal browser capture stopped unexpectedly'), {
               reason: stableCaptureStopReason(event.reason),
             });
@@ -600,6 +602,66 @@ export class ProductP1VoiceRouteOwner {
     const operation = this.#stopAndRecognizeOnce();
     this.#stopAndRecognizePromise = operation;
     return operation;
+  }
+
+  pauseIdleCaptureForNotification(): Promise<'paused' | 'speech_active'> {
+    const retained = this.#idleCapturePausePromise;
+    if (retained !== null) return retained;
+    const operation = this.#pauseIdleCaptureForNotificationOnce().finally(() => {
+      if (this.#idleCapturePausePromise === operation) this.#idleCapturePausePromise = null;
+    });
+    this.#idleCapturePausePromise = operation;
+    return operation;
+  }
+
+  async #pauseIdleCaptureForNotificationOnce(): Promise<'paused' | 'speech_active'> {
+    const rotation = this.#captureRotationPromise;
+    if (rotation !== null) await rotation;
+    if (this.#failureCleanupPromise !== null || this.#status !== 'capturing' || this.#route === null || this.#speech === null) {
+      throw new Error('formal P1 idle capture is not active');
+    }
+    if (this.#captureSpeechObserved) return 'speech_active';
+    const operationGeneration = ++this.#operationGeneration;
+    const route = this.#route;
+    try {
+      this.#captureStopExpected = true;
+      try {
+        await this.#audio.stopCapture('formal_notification_idle_capture_pause');
+      } finally {
+        this.#captureStopExpected = false;
+      }
+      this.#requireCurrent(operationGeneration);
+      this.#drainCaptureFrames();
+      const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
+      let pending = route.leaf.flush();
+      while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
+        await waitTurn();
+        this.#requireCurrent(operationGeneration);
+        this.#drainCaptureFrames();
+        pending = route.leaf.flush();
+      }
+      if (this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) {
+        throw Object.assign(new Error('formal idle capture did not drain before notification'), {
+          reason: 'FORMAL_NOTIFICATION_CAPTURE_DRAIN_FAILED',
+        });
+      }
+      this.#captureFramesAcked = this.#mediaSentFrames;
+      await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+      this.#requireCurrent(operationGeneration);
+      this.#frames = [];
+      this.#captureSpeechObserved = false;
+      this.#mediaSentFrames = 0;
+      if (this.#route === route) this.#route = null;
+      this.#endOfTurnHandler = null;
+      this.#pendingSpeechStart = null;
+      this.#pendingEndOfTurn = null;
+      this.#setStatus('recognized', null);
+      return 'paused';
+    } catch (error) {
+      this.#captureStopExpected = false;
+      await this.#fail(error);
+      throw error;
+    }
   }
 
   async #stopAndRecognizeOnce(): Promise<Readonly<ProductP1Recognition>> {
@@ -1111,11 +1173,11 @@ export class ProductP1VoiceRouteOwner {
         reason: 'FORMAL_OVERLAP_CAPTURE_ROTATION_UNAVAILABLE',
       });
     }
-    this.#captureRotationStopping = true;
+    this.#captureStopExpected = true;
     try {
       await this.#audio.stopCapture('formal_overlap_capture_rotation');
     } finally {
-      this.#captureRotationStopping = false;
+      this.#captureStopExpected = false;
     }
     this.#requireCurrent(operationGeneration);
     this.#drainCaptureFrames();
@@ -1144,6 +1206,51 @@ export class ProductP1VoiceRouteOwner {
     this.#requireCurrent(operationGeneration);
     await this.#revokeMediaAuthority(priorAuthority);
     this.#requireCurrent(operationGeneration);
+  }
+
+  async #rotateIdleCapture(operationGeneration: number): Promise<void> {
+    const route = this.#route;
+    const priorAuthority = this.#mediaCloseBinding;
+    if (route === null || priorAuthority === null || this.#status !== 'capturing' || this.#captureSpeechObserved) {
+      throw Object.assign(new Error('formal idle capture rotation lost authority'), {
+        reason: 'FORMAL_IDLE_CAPTURE_ROTATION_UNAVAILABLE',
+      });
+    }
+    this.#captureStopExpected = true;
+    try {
+      await this.#audio.stopCapture('formal_idle_capture_rotation');
+    } finally {
+      this.#captureStopExpected = false;
+    }
+    this.#requireCurrent(operationGeneration);
+    this.#drainCaptureFrames();
+    const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
+    let pending = route.leaf.flush();
+    while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
+      await waitTurn();
+      this.#requireCurrent(operationGeneration);
+      this.#drainCaptureFrames();
+      pending = route.leaf.flush();
+    }
+    if (this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) {
+      throw Object.assign(new Error('formal idle capture did not drain before rotation'), {
+        reason: 'FORMAL_IDLE_CAPTURE_ROTATION_DRAIN_FAILED',
+      });
+    }
+    await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
+    this.#requireCurrent(operationGeneration);
+    this.#frames = [];
+    this.#captureSpeechObserved = false;
+    this.#mediaSentFrames = 0;
+    this.#captureFramesAcked = 0;
+    if (this.#route === route) this.#route = null;
+    this.#speech = null;
+    await this.#startConcurrentCapture(operationGeneration);
+    this.#requireCurrent(operationGeneration);
+    await this.#revokeMediaAuthority(priorAuthority);
+    this.#requireCurrent(operationGeneration);
+    this.#setStatus('capturing', this.#streamingFallbackReason);
+    this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
   }
 
   #openDownlinkRoute(
@@ -1510,12 +1617,11 @@ export class ProductP1VoiceRouteOwner {
         Math.sqrt(energy / frame.samples.length) >= CAPTURE_SPEECH_ENERGY_FLOOR;
     }
     const activePlayout = this.#pendingPlayout ?? this.#settlingPlayout;
-    const canRotateSilentOverlap =
-      this.#frames.length === MAX_CAPTURE_FRAMES - 1
-      && !this.#captureSpeechObserved
-      && this.#status === 'playing'
-      && activePlayout !== null;
-    if (canRotateSilentOverlap) {
+    const canRotateSilentCapture =
+      this.#frames.length === MAX_CAPTURE_FRAMES - 1 &&
+      !this.#captureSpeechObserved &&
+      ((this.#status === 'playing' && activePlayout !== null) || this.#status === 'capturing');
+    if (canRotateSilentCapture) {
       // Keep the exact boundary frame before rotating. Once local speech energy
       // has been observed, the duration bound fails closed instead of clearing
       // an utterance that is still waiting for authoritative server EOT.
@@ -1523,15 +1629,28 @@ export class ProductP1VoiceRouteOwner {
       this.#drainCaptureFrames();
       if (this.#captureRotationPromise === null) {
         const operationGeneration = this.#operationGeneration;
-        const rotation = this.#rotateConcurrentCapture(operationGeneration)
+        const rotationSourceId = frame.capture.capture_id;
+        this.#captureRotationSourceId = rotationSourceId;
+        const rotation = (this.#status === 'playing' ? this.#rotateConcurrentCapture(operationGeneration) : this.#rotateIdleCapture(operationGeneration))
           .catch(async error => {
             if (!this.#closed && this.#operationGeneration === operationGeneration) await this.#fail(error);
           })
           .finally(() => {
             if (this.#captureRotationPromise === rotation) this.#captureRotationPromise = null;
+            if (this.#captureRotationSourceId === rotationSourceId) this.#captureRotationSourceId = null;
           });
         this.#captureRotationPromise = rotation;
       }
+      return;
+    }
+    if (
+      this.#captureRotationPromise !== null &&
+      frame.capture.capture_id === this.#captureRotationSourceId &&
+      !this.#captureSpeechObserved
+    ) {
+      // The exact silent boundary frame is already retained and draining.
+      // Ignore only additional silence emitted while the expected local stop
+      // settles; newly observed speech still takes the fail-closed path below.
       return;
     }
     if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
@@ -1665,7 +1784,7 @@ export class ProductP1VoiceRouteOwner {
     this.#endOfTurnHandler = null;
     this.#endOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
-    this.#captureRotationStopping = false;
+    this.#captureStopExpected = false;
     this.#route?.leaf.close('MEDIA_LOCAL_CLOSE');
     this.#route = null;
     this.#speech = null;
@@ -1688,6 +1807,7 @@ export class ProductP1VoiceRouteOwner {
     // sufficient for an exact retry and must never retain expired audio.
     this.#frames = [];
     this.#captureSpeechObserved = false;
+    this.#captureRotationSourceId = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#playout = null;

@@ -14,6 +14,7 @@
 | W3 develop rebaseline/deletion intent | [D107 migration review](D107_W3_DEVELOP_REBASELINE_MIGRATION_2026-08-12.md), D-073, actual source/tests |
 | D-031 compatibility task | [D031 review](D031_IMPLEMENTATION_REVIEW_2026-08-04.md), D-056/D-057, [project-bound evidence](evidence/D031_20260805_PROJECT_BOUND.md), relevant scheduler/Agent source/tests and runbook section 7.4 |
 | Environment/runtime execution | Only the applicable milestone section of the [E2E runbook](runbooks/E2E_RUNBOOK.md); never use a W2/V0 script to sign Alpha |
+| 2026-08-17 Post-Alpha hands-free Demo defects | [completed defect-discovery record](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md), then current [STATUS](STATUS.md) and only the implicated D119/source boundary |
 
 ## Module and integration history
 
