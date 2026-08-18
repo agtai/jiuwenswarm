@@ -20,10 +20,12 @@
   functionality do not inherit that result.
 - **Latest physical product result:** `COMPLETED — DEFECTS RECORDED`, not PASS.
   See the sanitized [product run](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md).
-- **Current highest priority:** first re-audit all 15 capability/module rows
-  against current source and tests and reconcile this dashboard; then close
-  Executor/application/result/terminal truth, Task admission/routing/context
-  truth and P2 recovery diagnostics before verifying one clean candidate.
+- **Current highest priority:** the fresh 15-domain code-fact audit is now
+  complete (see
+  [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md)); next
+  close the confirmed product-truth defects (result-context capacity, semantic
+  routing, recovery diagnostics) and re-verify Executor terminalization and
+  admission truth on one clean immutable candidate.
 - **Integration:** `origin/develop` integration is deferred until the
   feature-complete boundary below passes. Git must be re-read at that future
   boundary; historical divergence counts are not current facts.
@@ -51,8 +53,10 @@ historical and cannot become the current queue.
 source. `PARTIAL` means useful implementation exists but required behaviour or
 evidence remains. `BLOCKED` means a demonstrated defect prevents the positive
 journey. `NOT STARTED` means no accepted current implementation boundary.
-These rows are evidence-based planning judgements; the fresh D-085 code-fact
-audit is pending, so they cannot grant new module-completion credit yet.
+These rows are evidence-based planning judgements, now grounded in the
+[module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md). That
+audit is documentation, not product progress: it grants no new module-completion
+credit and does not repair defects.
 
 | Capability / module | Status and implemented fact | Remaining for feature complete | Dependency / acceptance |
 |---|---|---|---|
@@ -64,50 +68,59 @@ audit is pending, so they cannot grant new module-completion credit yet.
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL.** Stable Task/Attempt/Event/Command IDs, SQLite schema v3, idempotency, outbox, results, adjustments and one-current-Task recovery exist | Multiple addressed Tasks, target disambiguation, `update/provide_input/pause/resume/reprioritize`, successor revision, replay/unread and one canonical Task model | Executor status resolution, Voice–Task Bridge and restart/concurrency matrix |
-| Executor & Durability | **BLOCKED.** Direct isolated Code Executor, lease/journal and recovery foundations exist | Repair Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 repair; clean terminal/retry/restart/cancel journey |
+| Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
 | Integrated Web product experience | **PARTIAL.** One-click hands-free shell, formal route, progress, TTS and current Task presentation exist | Formal route becomes the only supported default; truthful queued/running/terminal UX; device/privacy/recovery UX; legacy hook/flags removed | All P1/P2/P3 owners plus complete human journey |
 | Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist | Stable activation/generation/ACK/TTS diagnostics; p50/p95 metrics for analysis, timely response and the user-named `article` path; define `article` before measuring | Instrumentation before optimization; fixed corpus/environment |
-| Automated verification and product acceptance | **PARTIAL.** Broad exact-source backend/frontend/build/review credit exists | Fresh 15-domain code-fact audit, affected defect reruns, capability-owned test migration, cumulative feature-complete matrix, clean real Journey, competitor-gap review and independent deep review | Root `TESTING.md`, current acceptance and exact clean source |
+| Automated verification and product acceptance | **PARTIAL.** Broad exact-source backend/frontend/build/review credit exists | Affected defect reruns, capability-owned test migration, cumulative feature-complete matrix, clean real Journey, competitor-gap review and independent deep review | Root `TESTING.md`, current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete | Explicit Demo profile; remove `.env.production` default-on dependency; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
 ## Current blocking defects
 
-1. **Executor terminalization:** Agent completion does not reliably persist
-   application, legal TaskResult and terminal facts; an owner/lease may renew
-   indefinitely.
-2. **Admission truth:** an accepted Task blocked by `EXECUTOR_PROJECT_BUSY` can
-   be described as executing without an authoritative running Attempt.
+Re-verified against the audited source (see
+[module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md) §7).
+
+1. **Executor terminalization — partially closed, clean re-verification open.**
+   The Agent-return → validation → application → result → terminalization path is
+   statically closed and unit-tested on this source; the Post-Alpha dirty-source
+   observation of a missing terminal event / lease renewal must be re-checked on
+   one clean immutable candidate before it is declared fixed.
+2. **Admission truth — backend correct, display wording open.** An accepted Task
+   blocked by `EXECUTOR_PROJECT_BUSY` is not authoritatively running at the
+   backend; the residual risk is user-visible “已开始处理”/running wording, not
+   authoritative state.
 3. **Semantic routing:** valid Chinese adjustments without “把/将” and prefixed
    status questions can route incorrectly.
-4. **Task-truth isolation:** foreground dialogue can infer applied/completed/
-   result truth from conversation or project files instead of Task Core facts.
+4. **Task-truth isolation — downgraded to Low residual.** Five-layer isolation is
+   source-backed; the remaining gap is an end-to-end negative oracle proving a
+   DIALOGUE `chat.final` cannot assert applied/completed/result, plus
+   presentation wording.
 5. **Result-context capacity:** a legal TaskResult can be rejected when dialogue
    context already occupies the selected capacity.
 6. **Recovery diagnostics:** repeated “正在恢复” lacks stable correlation needed
    to identify the failed activation/generation/ACK/TTS seam.
 
-These defects block a new controlled candidate; they do not invalidate the
-historical exact-source Alpha result.
+Items 3, 5 and 6 remain blockers for a new controlled candidate; items 1, 2 and
+4 are re-scoped per the audit and still carry their listed follow-up. These do
+not invalidate the historical exact-source Alpha result.
 
 ## Current execution packet
 
-- **Objective:** establish a fresh code-fact baseline, repair the authoritative
-  product-truth path and produce one clean controlled product-readiness
-  candidate.
+- **Objective:** repair the authoritative product-truth path and produce one
+  clean controlled product-readiness candidate.
 - **Capability/modules:** Executor & Durability, Task Control Core,
   Voice–Task Bridge, Agent Bridge, Conversation Runtime and presentation/TTS.
-- **Preparation:** read-only audit of all 15 capability domains covering actual
-  entrypoints/call chains, formal/legacy/Demo/flag-off routes, implemented
-  behaviour, tests/gaps, hardcodes, duplicates, retirement gates, dependencies
-  and status evidence; reconcile STATUS before granting new completion credit.
+- **Preparation:** the read-only 15-domain audit is complete (see
+  [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md));
+  remaining preparation is defect-repair planning against the reconciled STATUS.
 - **Risk:** the audit is Tier 0 read-only work; confirmed implementation remains
   Tier 3 authority, mutation, durability and cross-module state.
-- **Included:** the fresh audit; the six defects above; bounded timeout/orphan recovery;
-  accepted/queued/running wording; explicit Demo profile replacing production
-  default-on flags; affected positive/negative/flag-off/recovery/concurrency and
-  zero-forbidden-effect tests.
+- **Included:** the six re-scoped defects above; bounded timeout/orphan recovery;
+  accepted/queued/running display wording; explicit Demo profile replacing
+  production default-on flags; affected positive/negative/flag-off/recovery/
+  concurrency and zero-forbidden-effect tests. (The fresh audit itself is now
+  complete and is no longer a packet work item.)
 - **Excluded:** multi-Task/full-P3 expansion, broad duplicate abstraction,
   competitor feature additions, Production work and `develop` integration.
 - **Acceptance:** affected backend and Integrated Web checks, cold scoped review,
@@ -120,9 +133,11 @@ historical exact-source Alpha result.
 
 ## Dependency route to feature complete
 
-1. Audit all 15 capability/module rows against current source/tests, record the
-   code/test/gap/dependency evidence and reconcile STATUS. Focused tests resolve
-   disputed facts; a full suite is not required for the read-only audit.
+1. ~~Audit all 15 capability/module rows against current source/tests~~ **DONE —
+   see [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md).**
+   Remaining disputed facts (Executor clean re-verification, Interaction
+   Intelligence ownership, Realtime Media composition owner) stay recorded as
+   open conditions; a full suite was not required for the read-only audit.
 2. Close the confirmed product-truth defects and replace implicit Demo
    production flags before building the next candidate.
 3. Pass one clean controlled candidate; findings return only to affected owners.
@@ -146,12 +161,13 @@ historical exact-source Alpha result.
 
 ## Tracked cleanup and review work
 
-- **Module code-fact audit — NOT STARTED:** inspect all 15 capability domains on
-  the exact current source; record entrypoints/owners/call chains, formal versus
-  legacy/Demo/flag-off routes, implemented behaviour, tests and missing oracles,
-  hardcodes, duplicates, retirement gates, dependencies and a justified status.
-  Reconcile every mismatch in STATUS before implementation or new completion
-  credit; if code changes during the audit, repeat the affected rows.
+- **Module code-fact audit — COMPLETE (2026-08-17):** see
+  [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md). It
+  audited all 15 capability domains and the six known blockers on HEAD
+  `6e7e82d3` (product code `ca9a9d9a`) and reconciled every mismatch in this
+  STATUS. It is documentation, not product progress: it grants no new
+  module-completion credit and does not repair defects. If code changes, repeat
+  the affected rows.
 - **Tests/code organization:** move every still-applicable old runner oracle to
   its capability owner before deletion; keep test fakes/fault helpers out of the
   apparent production tree.
