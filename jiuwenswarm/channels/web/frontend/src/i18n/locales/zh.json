@@ -2144,7 +2144,17 @@
       "editorLabel": "语音识别文本",
       "recoveryFailed": "语音连接恢复失败",
       "recoveryFailedWithReason": "语音恢复失败（阶段：{{phase}}，原因：{{reason}}）",
+      "recoveryRetryingWithContext": "正在恢复（{{seam}}；关联：{{correlationId}}；代：{{generation}}；原因：{{reason}}）",
+      "recoveryTerminalWithContext": "恢复失败（{{seam}}；关联：{{correlationId}}；代：{{generation}}；原因：{{reason}}）",
+      "recoverySeam": {
+        "activation": "激活",
+        "response_generation": "响应代",
+        "presentation_ack": "呈现确认",
+        "tts": "语音播放"
+      },
       "taskTitle": "后台任务",
+      "taskStateAccepted": "已受理，正在等待执行",
+      "taskStateRunning": "正在执行",
       "taskState": "当前状态：{{state}}",
       "status": {
         "idle": "正式语音已就绪",

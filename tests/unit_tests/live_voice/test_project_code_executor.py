@@ -543,6 +543,18 @@ async def _wait_direct_settled(
     raise AssertionError("direct Executor worker did not settle")
 
 
+async def _wait_direct_terminal(
+    adapter: DirectProjectCodeExecutorAdapter,
+    attempt_id: str = "attempt-1",
+):
+    for _ in range(500):
+        record = adapter._journal.get(attempt_id)
+        if record is not None and record.state is FormalAttemptState.TERMINAL:
+            return record
+        await asyncio.sleep(0.01)
+    raise AssertionError("direct Executor attempt did not become terminal")
+
+
 @pytest.mark.asyncio
 async def test_dispatch_uses_formal_attempt_as_legacy_idempotency_key(
     tmp_path: Path,
@@ -2308,6 +2320,84 @@ async def test_noncooperative_agent_cleanup_is_bounded_and_late_writes_stay_isol
 
 
 @pytest.mark.asyncio
+async def test_attempt_deadline_terminalizes_noncooperative_agent_without_target_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    before_tree = _git(project, "status", "--porcelain=v2")
+    executor = _NonCooperativeExecutor()
+    release_failsafe = asyncio.get_running_loop().call_later(2, executor.release.set)
+    resolver = _Resolver(_direct_binding(project, executor))  # type: ignore[arg-type]
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        tmp_path / "p3.sqlite3",
+        heartbeat_interval=0.005,
+        attempt_timeout=0.5,
+        clock=lambda: (
+            "2026-08-18T10:00:01Z"
+            if executor.started.is_set()
+            else "2026-08-18T10:00:00Z"
+        ),
+    )
+
+    delivered = await adapter.dispatch(_item(project))
+    await asyncio.wait_for(executor.started.wait(), timeout=2)
+    timed_out = await _wait_direct_terminal(adapter)
+    for _ in range(100):
+        if executor.cancel_signals:
+            break
+        await asyncio.sleep(0.001)
+    target_head_at_timeout = _git(project, "rev-parse", "HEAD")
+    target_tree_at_timeout = _git(project, "status", "--porcelain=v2")
+    target_effect_at_timeout = (project / "late-effect.txt").exists()
+    executor.release.set()
+    await _wait_direct_settled(adapter)
+
+    assert delivered.executor_ref == "d0-project:attempt-1"
+    assert timed_out.outcome is TerminalOutcome.INTERRUPTED
+    assert timed_out.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert timed_out.raw_status == "attempt_timeout_cleanup_pending"
+    assert timed_out.owner_id is None
+    assert timed_out.lease_expires_at is None
+    assert timed_out.expected_tree is None
+    assert timed_out.result_text is None
+    assert timed_out.artifacts_json is None
+    assert executor.cancel_signals == 1
+    assert resolver.calls == [True]
+    assert len(executor.requests) == 1
+    assert len(adapter._journal.all_attempts()) == 1
+    assert target_head_at_timeout == before_head
+    assert target_tree_at_timeout == before_tree
+    assert not target_effect_at_timeout
+
+    task, attempt = _direct_task_attempt(project)
+    terminal = await adapter.status(task, attempt)
+    assert isinstance(terminal, ExecutorDeliveryResult)
+    observation = terminal.observations[-1]
+    assert observation.attempt_outcome is TerminalOutcome.INTERRUPTED
+    assert observation.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert observation.result_text is None
+    assert observation.result_artifacts == ()
+    retried = await adapter.dispatch(_item(project))
+    assert retried.observations[-1].error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert resolver.calls == [True]
+    assert len(executor.requests) == 1
+
+    resolved = adapter._journal.get("attempt-1")
+    assert resolved is not None
+    assert resolved.outcome is TerminalOutcome.INTERRUPTED
+    assert resolved.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert resolved.raw_status == "attempt_timeout_cleanup_resolved"
+    assert _git(project, "rev-parse", "HEAD") == before_head
+    assert _git(project, "status", "--porcelain=v2") == before_tree
+    assert not (project / "late-effect.txt").exists()
+    await adapter.close()
+    release_failsafe.cancel()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_close", [False, True])
 async def test_close_is_bounded_and_retains_cleanup_while_patch_is_applying(
     tmp_path: Path,
@@ -2356,7 +2446,7 @@ async def test_close_is_bounded_and_retains_cleanup_while_patch_is_applying(
 
 
 @pytest.mark.asyncio
-async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
+async def test_cancel_and_deadline_cannot_interrupt_applying_itinerary_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2373,6 +2463,7 @@ async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
 
     monkeypatch.setattr(project_code_executor, "_apply_attempt_patch", blocked_apply)
     executor = _DemoItineraryProjectExecutor(project)
+    clock = {"now": "2026-08-18T10:00:00Z"}
     spec = replace(
         _spec(project),
         name="Three-day itinerary",
@@ -2384,6 +2475,8 @@ async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
         tmp_path / "p3.sqlite3",
         heartbeat_interval=0.005,
         cancel_timeout=0.01,
+        attempt_timeout=1,
+        clock=lambda: clock["now"],
         demo_itinerary_fixture_enabled=True,
     )
     delivered = await adapter.dispatch(dispatch_item)
@@ -2397,11 +2490,17 @@ async def test_cancel_heartbeat_cannot_interrupt_applying_itinerary_result(
     with pytest.raises(FormalTaskViolation) as pending:
         await adapter.cancel(cancel_item)
     assert pending.value.reason == "EXECUTOR_CANCEL_PENDING"
+    clock["now"] = "2026-08-18T10:00:02Z"
     await asyncio.sleep(0.03)
     record = adapter._journal.get("attempt-1")
     assert record is not None
     assert record.raw_status == "applying"
+    assert record.state is FormalAttemptState.RUNNING
+    assert record.runtime_deadline_at == "2026-08-18T10:00:01Z"
+    assert record.owner_id == adapter._owner_id
+    assert record.lease_expires_at is not None
     assert "attempt-1" in adapter._running
+    assert not (project / "itinerary.md").exists()
 
     release.set()
     await _wait_direct_settled(adapter)
@@ -2434,6 +2533,200 @@ def test_direct_executor_cleanup_timeouts_are_closed_and_bounded(
             tmp_path / f"{field}.sqlite3",
             **{field: value},
         )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        False,
+        0,
+        float("inf"),
+        project_code_executor._MAX_DIRECT_ATTEMPT_TIMEOUT_SECONDS + 0.01,
+    ],
+)
+def test_direct_executor_attempt_timeout_is_closed_and_bounded(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    with pytest.raises(ValueError, match="attempt_timeout"):
+        DirectProjectCodeExecutorAdapter(
+            _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+            tmp_path / "p3.sqlite3",
+            attempt_timeout=value,  # type: ignore[arg-type]
+        )
+
+
+def test_attempt_deadline_is_absolute_and_heartbeat_expires_at_exact_boundary(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    journal = project_code_executor._DirectProjectAttemptJournal(
+        tmp_path / "p3.sqlite3"
+    )
+    item = _item(project)
+    accepted_at = "2026-08-18T10:00:00Z"
+    deadline = "2026-08-18T10:00:01Z"
+    created, record = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=project_code_executor._project_tree_fingerprint(project),
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=_git(project, "rev-parse", "HEAD"),
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="owner-1",
+        now=accepted_at,
+        runtime_deadline_at=deadline,
+    )
+    assert created
+    assert record.runtime_deadline_at == deadline
+    journal.start(item.attempt_id, owner_id="owner-1", now=accepted_at)
+
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="owner-1",
+        now="2026-08-18T10:00:00.999999Z",
+    ) == (True, False, False)
+    before_boundary = journal.get(item.attempt_id)
+    assert before_boundary is not None
+    assert before_boundary.runtime_deadline_at == deadline
+    assert before_boundary.state is FormalAttemptState.RUNNING
+
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="owner-1",
+        now=deadline,
+    ) == (False, False, True)
+    terminal = journal.get(item.attempt_id)
+    assert terminal is not None
+    assert terminal.state is FormalAttemptState.TERMINAL
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+    assert terminal.runtime_deadline_at == deadline
+    assert terminal.result_text is None
+    assert terminal.artifacts_json is None
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="owner-1",
+        now="2026-08-18T10:00:02Z",
+    ) == (False, False, False)
+
+
+def test_attempt_deadline_migrates_from_last_durable_legacy_lease(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    database = tmp_path / "p3.sqlite3"
+    journal = project_code_executor._DirectProjectAttemptJournal(database)
+    item = _item(project)
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=project_code_executor._project_tree_fingerprint(project),
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=_git(project, "rev-parse", "HEAD"),
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="legacy-owner",
+        now="2026-08-18T10:00:00Z",
+    )
+    assert created
+    journal.start(
+        item.attempt_id,
+        owner_id="legacy-owner",
+        now="2026-08-18T10:00:00Z",
+    )
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="legacy-owner",
+        now="2026-08-18T10:01:00Z",
+    ) == (True, False, False)
+    legacy = journal.get(item.attempt_id)
+    assert legacy is not None
+    legacy_lease = legacy.lease_expires_at
+    assert legacy_lease == "2026-08-18T10:06:00Z"
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            f"ALTER TABLE {project_code_executor._DIRECT_EXECUTOR_TABLE} "
+            "DROP COLUMN runtime_deadline_at"
+        )
+
+    migrated_journal = project_code_executor._DirectProjectAttemptJournal(database)
+    migrated = migrated_journal.get(item.attempt_id)
+    assert migrated is not None
+    assert migrated.runtime_deadline_at == legacy_lease
+    assert migrated_journal.recover_expired(now=legacy_lease) == 1
+    terminal = migrated_journal.get(item.attempt_id)
+    assert terminal is not None
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+
+
+def test_reserve_completion_at_deadline_cannot_publish_or_apply_result(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    journal = project_code_executor._DirectProjectAttemptJournal(
+        tmp_path / "p3.sqlite3"
+    )
+    item = _item(project)
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    deadline = "2026-08-18T10:00:01Z"
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=before_tree,
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=before_head,
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="owner-1",
+        now="2026-08-18T10:00:00Z",
+        runtime_deadline_at=deadline,
+    )
+    assert created
+    journal.start(
+        item.attempt_id,
+        owner_id="owner-1",
+        now="2026-08-18T10:00:00Z",
+    )
+
+    reserved, terminal = journal.reserve_completion(
+        item.attempt_id,
+        owner_id="owner-1",
+        expected_tree="late-expected-tree",
+        now=deadline,
+        result_text="late result",
+        result_artifacts=(
+            project_code_executor.TaskResultArtifact(
+                relative_path="README.md",
+                sha256=hashlib.sha256((project / "README.md").read_bytes()).hexdigest(),
+            ),
+        ),
+    )
+
+    assert not reserved
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.raw_status == "attempt_timeout_cleanup_pending"
+    assert terminal.expected_tree is None
+    assert terminal.result_text is None
+    assert terminal.artifacts_json is None
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+    assert _git(project, "rev-parse", "HEAD") == before_head
+    assert project_code_executor._project_tree_fingerprint(project) == before_tree
 
 
 @pytest.mark.asyncio
@@ -3111,6 +3404,66 @@ async def test_direct_executor_restart_recovers_only_expired_attempt_lease(
 
 
 @pytest.mark.asyncio
+async def test_restart_reuses_deadline_even_when_heartbeat_renewed_later_lease(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _git_project(project)
+    database = tmp_path / "p3.sqlite3"
+    journal = project_code_executor._DirectProjectAttemptJournal(database)
+    item = _item(project)
+    before_head = _git(project, "rev-parse", "HEAD")
+    before_tree = project_code_executor._project_tree_fingerprint(project)
+    deadline = "2026-08-18T10:00:10Z"
+    created, _ = journal.create(
+        item=item,
+        project_root=str(project),
+        before_tree=before_tree,
+        before_content=project_code_executor._project_content_fingerprint(project),
+        before_head=before_head,
+        protected_support=project_code_executor._target_support_fingerprints(project),
+        governance=project_code_executor._runtime_support_governance(project),
+        owner_id="dead-process",
+        now="2026-08-18T10:00:00Z",
+        runtime_deadline_at=deadline,
+    )
+    assert created
+    journal.start(
+        item.attempt_id,
+        owner_id="dead-process",
+        now="2026-08-18T10:00:00Z",
+    )
+    assert journal.heartbeat(
+        item.attempt_id,
+        owner_id="dead-process",
+        now="2026-08-18T10:00:09Z",
+    ) == (True, False, False)
+    renewed = journal.get(item.attempt_id)
+    assert renewed is not None
+    assert renewed.runtime_deadline_at == deadline
+    assert renewed.lease_expires_at == "2026-08-18T10:05:09Z"
+
+    successor = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        database,
+        clock=lambda: deadline,
+    )
+    assert await successor.prepare_startup() == 1
+    terminal = successor._journal.get(item.attempt_id)
+    assert terminal is not None
+    assert terminal.outcome is TerminalOutcome.INTERRUPTED
+    assert terminal.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+    assert terminal.runtime_deadline_at == deadline
+    assert terminal.owner_id is None
+    assert terminal.lease_expires_at is None
+    assert terminal.result_text is None
+    assert terminal.artifacts_json is None
+    assert _git(project, "rev-parse", "HEAD") == before_head
+    assert project_code_executor._project_tree_fingerprint(project) == before_tree
+    await successor.close()
+
+
+@pytest.mark.asyncio
 async def test_successor_never_recovers_or_deletes_while_predecessor_process_owns_lock(
     tmp_path: Path,
 ) -> None:
@@ -3124,7 +3477,7 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
     )
     item = _item(project)
     before_head = _git(project, "rev-parse", "HEAD")
-    created, _record = adapter._journal.create(
+    created, original = adapter._journal.create(
         item=item,
         project_root=str(project),
         before_tree=project_code_executor._project_tree_fingerprint(project),
@@ -3188,6 +3541,7 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
         still_running = adapter._journal.get(item.attempt_id)
         assert still_running is not None
         assert still_running.state is not FormalAttemptState.TERMINAL
+        assert still_running.runtime_deadline_at == original.runtime_deadline_at
         assert checkout.exists()
 
         predecessor.stdin.write("release\n")
@@ -3203,6 +3557,10 @@ async def test_successor_never_recovers_or_deletes_while_predecessor_process_own
         assert recovered is not None
         assert recovered.state is FormalAttemptState.TERMINAL
         assert recovered.outcome is TerminalOutcome.INTERRUPTED
+        assert recovered.error == "EXECUTOR_ATTEMPT_TIMEOUT"
+        assert recovered.runtime_deadline_at == original.runtime_deadline_at
+        assert recovered.owner_id is None
+        assert recovered.lease_expires_at is None
         assert not checkout.exists()
         await successor.close()
     finally:

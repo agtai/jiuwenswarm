@@ -2241,6 +2241,53 @@ async def test_cold_streaming_open_preserves_short_utterance_until_server_vad_eo
 
 
 @pytest.mark.asyncio
+async def test_barge_in_capture_opens_provider_with_wider_prefix_only() -> None:
+    provider = _ServerVadProvider()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        )
+    )
+    registry = DedicatedMediaProductRegistry(enabled=True, end_of_turn_enabled=True)
+    registry.set_provider_available(True)
+    registry.configure_streaming_recognition(
+        owner,
+        receipt_issuer=lambda **_binding: asyncio.sleep(0, result="unused"),
+    )
+    await registry.prepare_streaming_provider()
+    _trust_activation(registry)
+    activation = registry.activate(
+        params={
+            **_activation_params(),
+            "end_of_turn_capability": MEDIA_END_OF_TURN_CAPABILITY,
+        },
+        request_origin="https://voice.example.test",
+        connection_id="connection-1",
+        user_id="user-1",
+    )
+    record = registry.consume_ticket(
+        str(activation["media_ticket"]),
+        request_origin="https://voice.example.test",
+    )
+    assert record is not None
+    assert record.barge_in_capture is False
+    record.barge_in_capture = True
+
+    await registry.begin_streaming_recognition(record)
+    assert provider.request.turn_detection.server_vad is not None
+    assert provider.request.turn_detection.server_vad.prefix_padding_ms == 800
+    assert (
+        RecognitionTurnDetection.server_vad_default().server_vad.prefix_padding_ms
+        == 300
+    )
+
+    registry.abort_route(record)
+    await registry.abort_streaming_recognition(record)
+    await owner.close()
+
+
+@pytest.mark.asyncio
 async def test_slow_streaming_open_never_delays_media_attach_or_omits_early_audio(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

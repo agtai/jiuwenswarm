@@ -103,6 +103,8 @@ from .product_composition_contract import (
     ProductSegment,
     create_product_composition_manifest,
 )
+from .observability_exporter import ExportRecord
+from .observability import create_observation
 from .product_composition_root import (
     ProductCompositionActivationError,
     ProductCompositionContext,
@@ -112,6 +114,13 @@ from .product_composition_root import (
     ProductCompositionRoot,
     ProductSegmentActivation,
     ProductSegmentActivationError,
+)
+from .product_observability_adapter import (
+    ActiveProductObservabilityActivation,
+    ProductObservabilityAdapter,
+    ProductObservabilityActivationError,
+    ProductObservabilityActivationEvidence,
+    activate_product_observability_adapter,
 )
 from .product_p2_interaction_adapter import (
     P2ActivationLease,
@@ -166,6 +175,14 @@ PRODUCT_P3_MUTATION_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENA
 PRODUCT_CRITICAL_INPUT_ENABLE_ENV = "JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED"
 PRODUCT_DEMO_POLICY_BYPASS_ENV = (
     "JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED"
+)
+_FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES = frozenset(
+    {
+        "后台任务怎么样了",
+        "当前后台任务怎么样了",
+        "后台任务什么情况",
+        "当前后台任务什么情况",
+    }
 )
 _PRODUCT_P2_PRESENTATION_ACK_OPERATION = "live_voice.composition.p2.presentation.ack"
 # The only Agent profile whose facade implements the formal Live Voice seam.
@@ -349,6 +366,8 @@ class _P2Route:
     activation_lease: P2ActivationLease
     lease: ProductCompositionLease
     manifest: ProductCompositionManifest
+    observability_context: ProductCompositionContext | None = None
+    observability_adapter: ProductObservabilityAdapter | None = None
     notification_replay_floor: int = 0
     notification_admitted_sequence: int = 0
 
@@ -617,6 +636,9 @@ class AgentServerProductCompositionRegistry:
         commit_ledger: TurnCommitLedger | None = None,
         critical_token_gate: CriticalTokenSafetyGate | None = None,
         unified_journal: SqliteUnifiedCommittedInputJournal | None = None,
+        observability_exporter: (
+            Callable[[ExportRecord], Awaitable[None]] | None
+        ) = None,
     ) -> None:
         if not isinstance(settings, ProductCompositionSettings):
             raise ValueError("product composition settings are required")
@@ -628,6 +650,7 @@ class AgentServerProductCompositionRegistry:
         self._p3_composition = p3_composition
         self._agent_manager = agent_manager
         self._push_text_event = push_text_event
+        self._observability_exporter = observability_exporter
         self._p3_confirmation_owner = p3_confirmation_owner
         self._p3_confirmation_forwarder = p3_confirmation_forwarder
         self._commit_ledger = commit_ledger or TurnCommitLedger(
@@ -756,6 +779,9 @@ class AgentServerProductCompositionRegistry:
             query_owner=p3_composition,
             subscription_factory=p3_composition.create_product_subscription,
             prepared_source_factory=p3_composition.create_product_progress_source,
+            replay_text_from_prepared_source=(
+                p3_composition.product_progress_authority_atomic_replay
+            ),
             generation_is_current=self._generation_is_current,
             arbiter=ProgressNotificationArbiter(enabled=True),
             foreground=lambda: ForegroundSnapshot(
@@ -1365,10 +1391,14 @@ class AgentServerProductCompositionRegistry:
                 "committed_at": event.task_event.occurred_at,
             }
         )
+
         async def register_before_publish(
             handle: AuthoritativePresentationHandle,
         ) -> None:
-            if self._pending_terminal_notifications.get(event.task_event.event_id) is event:
+            if (
+                self._pending_terminal_notifications.get(event.task_event.event_id)
+                is event
+            ):
                 self._terminal_notification_responses[event.task_event.event_id] = (
                     handle.response_ref
                 )
@@ -1576,8 +1606,10 @@ class AgentServerProductCompositionRegistry:
         authority: Callable[
             [ProductCompositionContext], Awaitable[ProductSegmentActivation]
         ],
+        *,
+        observability_holder: dict[str, object] | None = None,
     ) -> list[ProductCompositionRegistration]:
-        return [
+        registrations = [
             self._registration(
                 ProductSegment.AUTHORITY,
                 "agent_server.trusted_authority.v1",
@@ -1594,6 +1626,103 @@ class AgentServerProductCompositionRegistry:
                 self._control_unavailable,
             ),
         ]
+        if (
+            self._observability_exporter is not None
+            and observability_holder is not None
+        ):
+
+            async def activate_observability(
+                context: ProductCompositionContext,
+            ) -> ProductSegmentActivation:
+                return await self._activate_observability(
+                    context,
+                    holder=observability_holder,
+                )
+
+            registrations.append(
+                self._registration(
+                    ProductSegment.OBSERVABILITY,
+                    "agent_server.product_observability.v1",
+                    activate_observability,
+                )
+            )
+        return registrations
+
+    @staticmethod
+    def _issue_observability_route_fact(
+        evidence: ProductObservabilityActivationEvidence,
+    ) -> ProductRouteFact:
+        """Issue a formal X-OBS fact only after the leaf proves its live lease."""
+
+        if type(evidence) is not ProductObservabilityActivationEvidence:
+            raise ValueError("product observability activation evidence is required")
+        return _formal_fact(ProductSegment.OBSERVABILITY)
+
+    async def _activate_observability(
+        self,
+        context: ProductCompositionContext,
+        *,
+        holder: dict[str, object],
+    ) -> ProductSegmentActivation:
+        try:
+            activation = await activate_product_observability_adapter(
+                enabled=True,
+                context=context,
+                exporter=self._observability_exporter,
+                formal_route_fact_issuer=self._issue_observability_route_fact,
+            )
+        except ProductObservabilityActivationError as exc:
+            raise ProductSegmentActivationError(
+                "OBSERVABILITY_ACTIVATION_CLEANUP_PENDING",
+                cleanup_lease=exc.cleanup_lease,
+            ) from exc
+        if not isinstance(activation, ActiveProductObservabilityActivation):
+            return ProductSegmentActivation(activation.route_fact, None)
+        holder["context"] = context
+        holder["adapter"] = activation.adapter
+        return ProductSegmentActivation(activation.route_fact, activation.lease)
+
+    @staticmethod
+    def _observe_p2_activation(route: _P2Route) -> None:
+        """Send one public activation fact through the retained package adapter."""
+
+        context = route.observability_context
+        adapter = route.observability_adapter
+        if context is None or adapter is None:
+            return
+        try:
+            digest = hashlib.sha256(
+                (
+                    f"{route.binding.session_id}\0{route.binding.correlation_id}\0"
+                    f"{route.binding.interaction_id}\0{route.binding.activation_id}\0"
+                    f"{route.binding.activation_generation}"
+                ).encode("utf-8")
+            ).hexdigest()[:32]
+            observation = create_observation(
+                {
+                    "schema_version": "live-voice.observability.v1",
+                    "event_id": f"product-p2-activation-{digest}",
+                    "event_name": "route.selected",
+                    "segment_name": "runtime.queue",
+                    "observed_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+                    "monotonic_ms": asyncio.get_running_loop().time() * 1000.0,
+                    "binding": {
+                        "correlation_id": route.binding.correlation_id,
+                        "interaction_id": route.binding.interaction_id,
+                    },
+                    "route": {
+                        "implementation_class": "formal",
+                        "owner_module": "product.composition.registry",
+                        "capability_provider": "jiuwenswarm-runtime",
+                        "contract_version": CONTRACT_VERSION,
+                        "reason_code": None,
+                    },
+                    "source_component": "product.registry",
+                }
+            )
+            adapter.consume_observation(context=context, observation=observation)
+        except Exception:  # diagnostics can never rewrite activation truth
+            logger.exception("[LiveVoiceProduct] P2 activation observation rejected")
 
     @staticmethod
     def _route_context(
@@ -2046,7 +2175,15 @@ class AgentServerProductCompositionRegistry:
                     None,
                 )
 
-            registrations = self._base_registrations(activate_authority)
+            observability_holder: dict[str, object] = {}
+            composition_context = ProductCompositionContext(
+                routed_session,
+                correlation_id,
+            )
+            registrations = self._base_registrations(
+                activate_authority,
+                observability_holder=observability_holder,
+            )
             registrations.append(
                 self._registration(
                     ProductSegment.P2_AGENT_INTERACTION,
@@ -2058,7 +2195,7 @@ class AgentServerProductCompositionRegistry:
                 activation = await ProductCompositionRoot(
                     enabled=True,
                     registrations=registrations,
-                ).activate(ProductCompositionContext(routed_session, correlation_id))
+                ).activate(composition_context)
             except ProductCompositionActivationError as exc:
                 self._retain_root_cleanup(exc.cleanup_lease)
                 logger.exception("[LiveVoiceProduct] P2 activation failed closed")
@@ -2074,10 +2211,22 @@ class AgentServerProductCompositionRegistry:
                 )
             binding = holder.get("binding")
             activation_lease = holder.get("activation_lease")
+            observability_context = observability_holder.get("context")
+            observability_adapter = observability_holder.get("adapter")
             if (
                 not isinstance(binding, P2InteractionBinding)
                 or not isinstance(activation_lease, P2ActivationLease)
                 or activation.lease is None
+                or (
+                    self._observability_exporter is not None
+                    and (
+                        observability_context is not composition_context
+                        or not isinstance(
+                            observability_adapter,
+                            ProductObservabilityAdapter,
+                        )
+                    )
+                )
             ):
                 reason = state.reason or "PRODUCT_P2_UNAVAILABLE"
                 if activation.lease is not None:
@@ -2093,12 +2242,24 @@ class AgentServerProductCompositionRegistry:
                     reason=reason,
                     manifest=activation.manifest,
                 )
-            self._p2_routes[key] = _P2Route(
+            retained_route = _P2Route(
                 binding=binding,
                 activation_lease=activation_lease,
                 lease=activation.lease,
                 manifest=activation.manifest,
+                observability_context=(
+                    observability_context
+                    if isinstance(observability_context, ProductCompositionContext)
+                    else None
+                ),
+                observability_adapter=(
+                    observability_adapter
+                    if isinstance(observability_adapter, ProductObservabilityAdapter)
+                    else None
+                ),
             )
+            self._p2_routes[key] = retained_route
+            self._observe_p2_activation(retained_route)
             self._closed_p2_routes.pop(key, None)
             return _success_result(
                 request_id,
@@ -3000,6 +3161,67 @@ class AgentServerProductCompositionRegistry:
         }
 
     @staticmethod
+    def _matches_frozen_one_current_task_status(text: str) -> bool:
+        candidate = text.strip()
+        if candidate[-1:] in {"?", "？", ".", "。"}:
+            candidate = candidate[:-1].rstrip()
+        return candidate in _FROZEN_ONE_CURRENT_TASK_STATUS_UTTERANCES
+
+    @classmethod
+    def _bind_frozen_one_current_task_status(
+        cls,
+        resolution: ResolvedUnifiedCommittedInput,
+        *,
+        commit: TurnCommit,
+        current_task: CurrentBackgroundTaskContext | None,
+    ) -> ResolvedUnifiedCommittedInput:
+        """Close only the reproduced one-current-Task status utterances.
+
+        This fallback is intentionally an exact full-utterance list rather than
+        a generalized classifier.  It can only refine a Dialogue decision into
+        the existing read-only status route; Store-derived current-task identity
+        remains the target authority.
+        """
+
+        if (
+            resolution.route is not UnifiedCommittedInputRoute.DIALOGUE
+            or not cls._matches_frozen_one_current_task_status(commit.text)
+        ):
+            return resolution
+        task_id = None if current_task is None else current_task.task_id
+        target_binding = None if current_task is None else "current_background_task"
+        source_span = TaskIntentSourceSpan(0, len(commit.text))
+        reason = "FROZEN_ONE_CURRENT_TASK_STATUS_RESOLVED"
+        identity = {
+            "provider": resolution.provider,
+            "implementation_class": resolution.implementation_class,
+            "commit_sha256": resolution.commit_sha256,
+            "current_task_sha256": resolution.current_task_sha256,
+            "route": UnifiedCommittedInputRoute.BACKGROUND_STATUS.value,
+            "reason": reason,
+            "task_id": task_id,
+            "name": None,
+            "instruction": None,
+            "source_span": {
+                "start": source_span.start,
+                "end": source_span.end,
+            },
+            "target_binding": target_binding,
+        }
+        return ResolvedUnifiedCommittedInput(
+            route=UnifiedCommittedInputRoute.BACKGROUND_STATUS,
+            reason=reason,
+            provider=resolution.provider,
+            implementation_class=resolution.implementation_class,
+            resolution_id=hashlib.sha256(canonical_json_bytes(identity)).hexdigest(),
+            commit_sha256=resolution.commit_sha256,
+            current_task_sha256=resolution.current_task_sha256,
+            task_id=task_id,
+            source_span=source_span,
+            target_binding=target_binding,
+        )
+
+    @staticmethod
     def _restore_unified_semantic_binding(
         binding: Mapping[str, object],
         *,
@@ -3127,6 +3349,32 @@ class AgentServerProductCompositionRegistry:
             source_span=span,
             target_binding=binding["target_binding"],
         )
+
+    @staticmethod
+    def _reserve_task_result_context_slot(
+        context: FormalContextSnapshot,
+    ) -> tuple[FormalContextEntry, ...]:
+        entries = context.entries
+        if len(entries) > 8 or len(entries) % 2 != 0:
+            raise FormalTaskViolation(
+                "TASK_RESULT_CONTEXT_INVALID",
+                "formal dialogue context cannot reserve a TaskResult slot",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
+        for index in range(0, len(entries), 2):
+            if (
+                entries[index].ref.source != "live_voice.cr_committed_user"
+                or entries[index + 1].ref.source != "live_voice.cr_presented_assistant"
+            ):
+                raise FormalTaskViolation(
+                    "TASK_RESULT_CONTEXT_INVALID",
+                    "formal dialogue context lost its complete pair boundary",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        # CR selects complete user/assistant pairs.  At the eight-entry ceiling,
+        # evict the oldest complete pair so the TaskResult remains the final
+        # entry without splitting a conversation pair.
+        return entries[2:] if len(entries) == 8 else entries
 
     @staticmethod
     def _bounded_untrusted_result_context(
@@ -3778,18 +4026,50 @@ class AgentServerProductCompositionRegistry:
             created_task_id: str | None = None
             if result.ok:
                 formal_task_result = result.payload.get("result")
+                created_state: str | None = None
+                created_attempt_id: str | None = None
+                created_outbox_id: str | None = None
+                candidate_task_id: str | None = None
                 if isinstance(formal_task_result, Mapping):
                     created = formal_task_result.get("task_id")
-                    if isinstance(created, str) and created:
-                        created_task_id = created
-                speech = "已开始处理。" if chinese else "Background processing started."
+                    if type(created) is str and created and created == created.strip():
+                        candidate_task_id = created
+                    attempt = formal_task_result.get("attempt_id")
+                    if type(attempt) is str and attempt and attempt == attempt.strip():
+                        created_attempt_id = attempt
+                    state = formal_task_result.get("state")
+                    if isinstance(state, str):
+                        created_state = state
+                    outbox = formal_task_result.get("outbox_id")
+                    if type(outbox) is str and outbox and outbox == outbox.strip():
+                        created_outbox_id = outbox
+                canonical_accepted_receipt = (
+                    isinstance(formal_task_result, Mapping)
+                    and set(formal_task_result)
+                    == {"task_id", "attempt_id", "state", "outbox_id"}
+                    and candidate_task_id is not None
+                    and created_attempt_id is not None
+                    and created_state == FormalTaskState.ACCEPTED.value
+                    and created_outbox_id is not None
+                )
+                if canonical_accepted_receipt:
+                    created_task_id = candidate_task_id
+                speech = (
+                    "后台任务已受理，正在等待执行。开始执行后会显示正在执行。"
+                    if canonical_accepted_receipt and chinese
+                    else "The background task was accepted and is waiting to run; it will show as running after execution starts."
+                    if canonical_accepted_receipt
+                    else "后台任务创建回执不完整，当前状态尚未确认。"
+                    if chinese
+                    else "The background-task creation receipt is incomplete, so its current state is not confirmed."
+                )
             else:
                 error = result.payload.get("error")
                 reason = error.get("reason") if isinstance(error, Mapping) else None
                 speech = (
-                    "当前后台任务仍在运行。"
+                    "当前已有未结束的后台任务，请先查看其权威状态。"
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE" and chinese
-                    else "The current background task is still running."
+                    else "A background task is already non-terminal; check its authoritative status first."
                     if reason == "CURRENT_BACKGROUND_TASK_ACTIVE"
                     else "项目工作区有未提交修改，无法启动后台任务。"
                     if reason == "TASK_CONTEXT_WORKTREE_DIRTY" and chinese
@@ -4073,13 +4353,29 @@ class AgentServerProductCompositionRegistry:
                     if outcome == TerminalOutcome.INTERRUPTED.value
                     else unavailable_text
                 )
-            elif isinstance(state, str):
+            elif state == FormalTaskState.ACCEPTED.value:
+                speech = (
+                    f"后台任务已受理，正在等待执行，已记录 {status_events} 条状态更新。"
+                    if chinese and status_events is not None
+                    else f"The background task is accepted and waiting to run, with {status_events} recorded status updates."
+                    if status_events is not None
+                    else "后台任务已受理，正在等待执行。"
+                    if chinese
+                    else "The background task is accepted and waiting to run."
+                )
+            elif state == FormalTaskState.RUNNING.value:
                 speech = (
                     f"后台任务正在运行，已记录 {status_events} 条状态更新。"
                     if chinese and status_events is not None
                     else f"The background task is running with {status_events} recorded status updates."
                     if status_events is not None
                     else f"当前任务状态是 {state}。"
+                    if chinese
+                    else f"The current task status is {state}."
+                )
+            elif isinstance(state, str):
+                speech = (
+                    f"当前任务状态是 {state}。"
                     if chinese
                     else f"The current task status is {state}."
                 )
@@ -4186,9 +4482,9 @@ class AgentServerProductCompositionRegistry:
             )
             if availability == "not_ready":
                 speech = (
-                    "相关内容尚未生成，后台任务继续运行。"
+                    "相关内容尚未生成；后台任务尚未结束。"
                     if chinese
-                    else "That content is not ready; the background task is still running."
+                    else "That content is not ready; the background task has not reached a terminal state."
                 )
             else:
                 speech = (
@@ -4219,7 +4515,7 @@ class AgentServerProductCompositionRegistry:
                 channel_id=channel_id,
             )
         task_result_record = result_payload.get("task_result")
-        if not isinstance(task_result_record, Mapping) or len(context.entries) >= 8:
+        if not isinstance(task_result_record, Mapping):
             return await self._present_unified_text(
                 retained=retained,
                 voice_identity=voice_identity,
@@ -4234,19 +4530,20 @@ class AgentServerProductCompositionRegistry:
                 ),
                 channel_id=channel_id,
             )
+        dialogue_entries = self._reserve_task_result_context_slot(context)
         ref, entry = self._bounded_untrusted_result_context(
             scope=commit.scope,
             task_result=task_result_record,
         )
         agent_context = FormalContextSnapshot(
             scope=context.scope,
-            entries=(*context.entries, entry),
+            entries=(*dialogue_entries, entry),
         )
         agent_commit = TurnCommit.from_dict(
             {
                 **commit.to_dict(),
                 "context_refs": [
-                    *[item.to_dict() for item in commit.context_refs],
+                    *[item.ref.to_dict() for item in dialogue_entries],
                     ref.to_dict(),
                 ],
             }
@@ -4398,6 +4695,11 @@ class AgentServerProductCompositionRegistry:
                 }
             )
             preliminary = bridge.resolve_unified(commit, commit.scope, None)
+            preliminary = self._bind_frozen_one_current_task_status(
+                preliminary,
+                commit=commit,
+                current_task=None,
+            )
             current: PersistentTaskRecord | None = None
             background_authority_unavailable = False
             if preliminary.route is not UnifiedCommittedInputRoute.DIALOGUE:
@@ -4416,10 +4718,16 @@ class AgentServerProductCompositionRegistry:
                         }:
                             raise
                         background_authority_unavailable = True
+            current_context = self._current_background_context(current)
             resolution = bridge.resolve_unified(
                 commit,
                 commit.scope,
-                self._current_background_context(current),
+                current_context,
+            )
+            resolution = self._bind_frozen_one_current_task_status(
+                resolution,
+                commit=commit,
+                current_task=current_context,
             )
             proposed_semantic_binding = self._unified_semantic_binding(resolution)
             admission = await asyncio.to_thread(
@@ -8546,6 +8854,7 @@ def create_product_composition_registry_from_environment(
     p3_confirmation_forwarder: ProductP3ConfirmationForwarder | None = None,
     commit_ledger: TurnCommitLedger | None = None,
     critical_token_gate: CriticalTokenSafetyGate | None = None,
+    observability_exporter: (Callable[[ExportRecord], Awaitable[None]] | None) = None,
 ) -> AgentServerProductCompositionRegistry | None:
     """Construct no registry or Adapter unless the master gate is explicit."""
 
@@ -8566,6 +8875,7 @@ def create_product_composition_registry_from_environment(
         p3_confirmation_forwarder=p3_confirmation_forwarder,
         commit_ledger=commit_ledger,
         critical_token_gate=critical_token_gate,
+        observability_exporter=observability_exporter,
     )
 
 

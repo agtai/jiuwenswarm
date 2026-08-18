@@ -803,17 +803,14 @@ class TaskProgressReturnBridge:
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.STALE_GENERATION
                 return self._inactive_activation()
-            if (
-                binding.origin_kind is TaskProgressOriginKind.TEXT
-                and not self._subscription_matches(binding)
-            ):
+            if not self._subscription_matches(binding):
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.INVALID_BINDING
                 return self._inactive_activation()
             prepared = self._prepared_source
-            if binding.origin_kind is TaskProgressOriginKind.VOICE and (
-                prepared is None or not self._prepared_source_usable(prepared)
-            ):
+            if (
+                binding.origin_kind is TaskProgressOriginKind.VOICE and prepared is None
+            ) or (prepared is not None and not self._prepared_source_usable(prepared)):
                 self._state = TaskProgressReturnState.UNAVAILABLE
                 self._reason = TaskProgressReturnReason.AUTHORITY_HANDOFF_UNAVAILABLE
                 return self._inactive_activation()
@@ -852,10 +849,7 @@ class TaskProgressReturnBridge:
                 )
                 await self._close_source(binding)
                 return self._inactive_activation()
-            if (
-                binding.origin_kind is TaskProgressOriginKind.VOICE
-                and self._uses_exact_authority_source()
-            ):
+            if self._uses_exact_authority_source():
                 authority_snapshot = self._subscription.snapshot()
                 if (
                     authority_snapshot.segment_start_seq is None
@@ -1138,16 +1132,14 @@ class TaskProgressReturnBridge:
             self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
             return False
         if (
-            binding.origin_kind is TaskProgressOriginKind.VOICE
-            and self._uses_exact_authority_source()
+            self._uses_exact_authority_source()
             and event.attempt_id != self._authority_attempt_id
         ):
             self._last_source_decision = TaskProgressSourceDecision.STALE_ATTEMPT
             self._reject(TaskProgressReturnReason.STALE_ATTEMPT)
             return False
         if (
-            binding.origin_kind is TaskProgressOriginKind.VOICE
-            and self._uses_exact_authority_source()
+            self._uses_exact_authority_source()
             and event.event_type == "task.retry_accepted"
             and event.details.get("attempt_number") != self._authority_attempt_number
         ):
@@ -1179,9 +1171,7 @@ class TaskProgressReturnBridge:
             self._reject(TaskProgressReturnReason.SOURCE_PROTOCOL_VIOLATION)
             return False
         if self._next_seq is None:
-            expected_seq = (
-                0 if binding.origin_kind is TaskProgressOriginKind.VOICE else event.seq
-            )
+            expected_seq = 0 if self._uses_exact_authority_source() else event.seq
         else:
             expected_seq = self._next_seq
         if event.seq != expected_seq:
@@ -1477,32 +1467,28 @@ class TaskProgressReturnBridge:
         )
 
     async def _start_source(self, binding: TaskProgressOriginBinding) -> bool:
-        if binding.origin_kind is TaskProgressOriginKind.TEXT:
-            return await self._subscription.start()
         prepared = self._prepared_source
-        assert prepared is not None
-        return await prepared.start()
+        if prepared is not None:
+            return await prepared.start()
+        return await self._subscription.start()
 
     async def _next_source_event(
         self, binding: TaskProgressOriginBinding
     ) -> PersistentTaskEvent:
-        if binding.origin_kind is TaskProgressOriginKind.TEXT:
-            return await self._subscription.next_event()
         prepared = self._prepared_source
-        assert prepared is not None
-        return await prepared.next_event()
+        if prepared is not None:
+            return await prepared.next_event()
+        return await self._subscription.next_event()
 
     async def _close_source(self, binding: TaskProgressOriginBinding) -> None:
         async with self._source_close_lock:
             if self._source_closed:
                 return
-            if binding.origin_kind is TaskProgressOriginKind.TEXT:
-                await self._subscription.close()
-                self._source_closed = True
-                return
             prepared = self._prepared_source
             if prepared is not None:
                 await prepared.close()
+            else:
+                await self._subscription.close()
             self._source_closed = True
 
     def _authorize(self, binding: TaskProgressOriginBinding) -> bool:

@@ -2146,7 +2146,17 @@
       "editorLabel": "Recognized speech",
       "recoveryFailed": "Voice connection recovery failed",
       "recoveryFailedWithReason": "Voice recovery failed (phase: {{phase}}, reason: {{reason}})",
+      "recoveryRetryingWithContext": "Recovering ({{seam}}; correlation: {{correlationId}}; generation: {{generation}}; reason: {{reason}})",
+      "recoveryTerminalWithContext": "Recovery failed ({{seam}}; correlation: {{correlationId}}; generation: {{generation}}; reason: {{reason}})",
+      "recoverySeam": {
+        "activation": "activation",
+        "response_generation": "response generation",
+        "presentation_ack": "presentation ACK",
+        "tts": "speech playback"
+      },
       "taskTitle": "Background task",
+      "taskStateAccepted": "Accepted; waiting to run",
+      "taskStateRunning": "Running",
       "taskState": "Current state: {{state}}",
       "status": {
         "idle": "Ready for formal speech",

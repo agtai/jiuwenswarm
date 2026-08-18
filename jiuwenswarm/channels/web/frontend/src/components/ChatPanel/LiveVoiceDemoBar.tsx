@@ -2,6 +2,7 @@ import { useId } from 'react';
 import { AlertCircle, LoaderCircle, Mic, Square, Volume2, X } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { LiveVoiceTaskActivity } from '../../features/live-voice/liveVoiceTaskAdapter';
+import { productTaskProgressTranslationKey } from './productTaskProgressPresentation';
 import './LiveVoiceDemoBar.css';
 
 export type { LiveVoiceTaskActivity } from '../../features/live-voice/liveVoiceTaskAdapter';
@@ -54,6 +55,16 @@ export interface LiveVoiceDemoBarProps {
   onExit: () => void;
   onPrimaryAction: () => void;
   onRetryListening?: () => void;
+}
+
+export type FormalProductTaskPresentationState = Readonly<{
+  terminal_notification: string | null;
+  adjustment_notification: string | null;
+  task_progress_state: string | null;
+}>;
+
+export interface FormalProductLiveVoiceDemoBarProps extends Omit<LiveVoiceDemoBarProps, 'taskActivity'> {
+  surfaceState: FormalProductTaskPresentationState | null;
 }
 
 function VoiceStatusIcon({ status }: { status: LiveVoiceVisualState }) {
@@ -409,4 +420,23 @@ export function LiveVoiceDemoBar({
       </div>
     </section>
   );
+}
+
+/** Production adapter from the formal product surface truth to the shared voice bar. */
+export function FormalProductLiveVoiceDemoBar({ surfaceState, ...props }: FormalProductLiveVoiceDemoBarProps) {
+  const { t } = useTranslation();
+  const taskDetail =
+    surfaceState?.terminal_notification ??
+    surfaceState?.adjustment_notification ??
+    (surfaceState?.task_progress_state
+      ? t(productTaskProgressTranslationKey(surfaceState.task_progress_state), { state: surfaceState.task_progress_state })
+      : null);
+  const taskActivity: LiveVoiceDemoBarProps['taskActivity'] = taskDetail
+    ? {
+        level: props.status === 'error' ? 'error' : 'info',
+        title: t('liveVoice.formal.taskTitle'),
+        detail: taskDetail,
+      }
+    : null;
+  return <LiveVoiceDemoBar {...props} taskActivity={taskActivity} />;
 }

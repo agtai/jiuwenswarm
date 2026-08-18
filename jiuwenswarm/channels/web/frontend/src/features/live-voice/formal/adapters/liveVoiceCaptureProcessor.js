@@ -32,6 +32,8 @@ class JiuwenSwarmLiveVoiceCaptureProcessor extends AudioWorkletProcessor {
     this.duplicateRenderFrameCount = 0;
     this.seq = 0;
     this.sampleCursor = 0;
+    this.startupFrame = null;
+    this.inputEstablished = false;
     this.failed = false;
   }
 
@@ -64,18 +66,43 @@ class JiuwenSwarmLiveVoiceCaptureProcessor extends AudioWorkletProcessor {
       this.duplicateRenderFrameCount = 0;
     }
     this.lastRenderFrame = renderFrame;
+    // Chrome can run the worklet for many render quanta while the browser is
+    // still completing microphone permission/device attachment. Those empty
+    // callbacks are not missing microphone audio and must not establish the
+    // capture timeline. The first real input block owns that baseline.
+    const hasInput = Boolean(channels && channels.length > 0 && channels[0].length > 0);
+    if (!hasInput) {
+      if (this.expectedRenderFrame === null) return true;
+    }
     if (this.expectedRenderFrame === null) this.expectedRenderFrame = renderFrame;
     this.pruneInputGapWindow(renderFrame);
-    const missingSamples = Math.max(0, renderFrame - this.expectedRenderFrame);
+    let missingSamples = Math.max(0, renderFrame - this.expectedRenderFrame);
     if (missingSamples > this.maxTransientInputGapSamples || this.recentInputGapSamples + missingSamples > this.maxInputGapPerWindowSamples) {
-      this.port.postMessage({ kind: 'error', reason: 'input_gap_exceeded' });
-      this.failed = true;
-      return false;
+      if (!this.inputEstablished) {
+        // A Chrome permission/device handoff can expose one short input block
+        // before the graph settles, then jump beyond the in-stream gap budget.
+        // Until the first complete 20ms frame is followed by more real input,
+        // that startup prefix has no PCM authority: discard it and require a
+        // new contiguous startup frame.
+        this.pendingLength = 0;
+        this.pendingStartFrame = null;
+        this.startupFrame = null;
+        this.expectedRenderFrame = null;
+        this.recentInputGaps.length = 0;
+        this.recentInputGapSamples = 0;
+        if (!hasInput) return true;
+        this.expectedRenderFrame = renderFrame;
+        missingSamples = 0;
+      } else {
+        this.port.postMessage({ kind: 'error', reason: 'input_gap_exceeded' });
+        this.failed = true;
+        return false;
+      }
     }
     // Web Audio permits an empty input for a render quantum. Wait for a real
     // input before materializing the bounded interval as silence so capture
     // readiness can never be satisfied by an indefinitely disconnected input.
-    if (!channels || channels.length === 0 || channels[0].length === 0) return true;
+    if (!hasInput) return true;
 
     const quantumLength = channels[0].length;
     const overlapSamples = Math.max(0, this.expectedRenderFrame - renderFrame);
@@ -96,6 +123,12 @@ class JiuwenSwarmLiveVoiceCaptureProcessor extends AudioWorkletProcessor {
     }
     const inputStartFrame = renderFrame + overlapSamples;
     const inputSampleCount = quantumLength - overlapSamples;
+    if (!this.inputEstablished && this.startupFrame !== null && inputSampleCount > 0) {
+      const startupFrame = this.startupFrame;
+      this.startupFrame = null;
+      this.inputEstablished = true;
+      this.publishFrame(startupFrame.samples, startupFrame.startFrame);
+    }
     this.expectedRenderFrame = Math.max(this.expectedRenderFrame, renderFrame + quantumLength);
     this.appendSamples(channels, inputStartFrame, inputSampleCount, overlapSamples);
     return true;
@@ -131,24 +164,39 @@ class JiuwenSwarmLiveVoiceCaptureProcessor extends AudioWorkletProcessor {
       if (this.pendingLength !== this.frameSamples) continue;
 
       const samples = this.pending;
-      this.port.postMessage(
-        {
-          kind: 'frame',
-          capture_generation: this.captureGeneration,
-          seq: this.seq,
-          sample_cursor: this.sampleCursor,
-          context_time_s: this.pendingStartFrame / sampleRate,
-          sample_rate_hz: sampleRate,
-          samples,
-        },
-        [samples.buffer]
-      );
-      this.seq += 1;
-      this.sampleCursor += this.frameSamples;
+      const completedStartFrame = this.pendingStartFrame;
       this.pending = new Float32Array(this.frameSamples);
       this.pendingLength = 0;
       this.pendingStartFrame = null;
+      if (!this.inputEstablished) {
+        if (this.startupFrame === null) {
+          this.startupFrame = { samples, startFrame: completedStartFrame };
+          continue;
+        }
+        const startupFrame = this.startupFrame;
+        this.startupFrame = null;
+        this.inputEstablished = true;
+        this.publishFrame(startupFrame.samples, startupFrame.startFrame);
+      }
+      this.publishFrame(samples, completedStartFrame);
     }
+  }
+
+  publishFrame(samples, startFrame) {
+    this.port.postMessage(
+      {
+        kind: 'frame',
+        capture_generation: this.captureGeneration,
+        seq: this.seq,
+        sample_cursor: this.sampleCursor,
+        context_time_s: startFrame / sampleRate,
+        sample_rate_hz: sampleRate,
+        samples,
+      },
+      [samples.buffer],
+    );
+    this.seq += 1;
+    this.sampleCursor += this.frameSamples;
   }
 }
 

@@ -122,30 +122,41 @@ not invalidate the historical exact-source Alpha result.
   [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md) §17);
   no product repair receives credit until its owner-scoped implementation packet
   and applicable tests are executed.
-- **Risk:** the audit is Tier 0 read-only work; confirmed implementation remains
-  Tier 3 authority, mutation, durability and cross-module state.
+- **Risk:** the audit is Tier 0 read-only work. Repair risk is assigned per
+  coherent changed boundary under root `TESTING.md`; the controlled candidate
+  remains cumulative Tier 3, but its tier does not propagate to every repair.
+  B1 durability/timeout is Tier 3. B2 presentation wording is Tier 1; Store/P3
+  receipt compatibility is Tier 2 if touched. B3 Task-mutating semantic routing
+  is Tier 2. B4 test-only regression/presentation work is Tier 1; any new
+  Task-truth authority policy or generalized classifier is a separately scoped
+  Tier-3 design checkpoint. B5 local result-context capacity is Tier 1 unless it
+  changes a shared context contract. B6 recovery state, stale callbacks and
+  identity fencing are Tier 2 unless they change a shared protocol.
 - **Included:** the six re-scoped defects above; bounded D0 timeout/orphan
   settlement and diagnostics needed for truthful candidate state;
   accepted/queued/running display wording; one explicit named Demo profile
   replacing production default-on flags while flag-off preserves the text path;
-  affected positive/negative/flag-off/recovery/concurrency and
-  zero-forbidden-effect tests. (The fresh audit itself is complete and is no
-  longer a packet work item.)
+  each repair's applicable D-032 dimensions and zero-forbidden-effect tests for
+  paths that can mutate authority or another scope. (The fresh audit itself is
+  complete and is no longer a packet work item.)
 - **Excluded:** multi-Task/full-P3 expansion, broad latency optimization, broad
   duplicate abstraction, D1 checkpoint/D2 reconciliation, competitor feature
-  additions, Production work and `develop` integration.
+  additions, generalized semantic classifiers or new product-truth policy not
+  required by a frozen defect, Production work and `develop` integration.
 - **First action and order:** instantiate B6 recovery correlation as the first
-  owner-scoped Tier-3 repair batch, including its recovery-seam test; then B5
+  owner-scoped Tier-2 repair batch, including its recovery-seam test; then B5
   legal result-context capacity, B3 semantic routing, B4/B2 negative-oracle and
   display truth, and finally the B1/B2 clean physical re-verification. Each
   batch names exact source/tests, exclusions and zero-forbidden-effect evidence
   before implementation.
-- **Deliverables:** affected product/test changes, per-batch scoped and
-  independent review evidence, the explicit Demo profile, and one exact clean
+- **Deliverables:** affected product/test changes, per-batch risk-proportional
+  review evidence, the explicit Demo profile, and one exact clean
   candidate with truthful adjustment/result/terminal presentation. A repair
   batch may close only its affected findings; it cannot grant full-P3 credit.
-- **Acceptance:** affected backend and Integrated Web checks, cold scoped review,
-  independent Tier-3 review, cumulative diff review and one clean immutable
+- **Acceptance:** affected backend and Integrated Web checks plus each batch's
+  risk-proportional scoped/independent review. Only at controlled-candidate
+  closure, perform the cumulative Tier-3 diff/integration-seam review and one
+  clean immutable
   [product-readiness acceptance](validation/PRODUCT_READINESS_ACCEPTANCE.md) run
   using the [human journey](demo/PRODUCT_READINESS_SHOWCASE.md).
 - **Contract/evidence inputs:** the

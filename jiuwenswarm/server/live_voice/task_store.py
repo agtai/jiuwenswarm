@@ -1072,7 +1072,7 @@ class SqliteTaskStore:
                 ):
                     raise FormalTaskViolation(
                         "CURRENT_BACKGROUND_TASK_ACTIVE",
-                        "the current background task is still running",
+                        "the current background task is still non-terminal",
                         ErrorCode.CONFLICT,
                     )
             self._hit("create.before_ids")

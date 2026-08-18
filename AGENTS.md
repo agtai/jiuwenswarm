@@ -48,6 +48,8 @@ scenario, review and evidence rules. Read only its applicable sections before
 changing code or tests. D-071/D-072 keep the signed W2 evidence Gate and its
 tooling retired; do not recreate them without an explicit new audit requirement.
 
-Positive business scenarios must succeed. Negative scenarios must be rejected or fail closed, and forbidden side effects must be asserted as zero for any path that can mutate Agent, Tool, Task, audio/history authority, protected state, or another scope. Test counts or line coverage alone do not prove closure. Missing required risk evidence leaves the affected scope `PARTIAL` or `BLOCKED`, but inapplicable matrix dimensions need not be manufactured for low-risk work.
+Positive business scenarios must succeed. Negative scenarios must be rejected or fail closed, and forbidden side effects must be asserted as zero for any path that can mutate Agent, Tool, Task, audio/history authority, protected state, or another scope. Test counts or line coverage alone do not prove closure. Missing required risk evidence leaves the affected scope `PARTIAL` or `BLOCKED`. Root `TESTING.md` assigns risk to each coherent changed boundary: an umbrella packet or candidate tier does not automatically propagate to every child repair, and inapplicable matrix dimensions are scoped out at every tier.
+
+Before implementation, record the intended behaviour, owned product/test surfaces and explicit exclusions. If the work would introduce a new classifier or product policy, shared protocol/schema/migration, another module owner or materially broader behaviour than the recorded acceptance, stop and explicitly re-scope and re-tier that expansion before implementing it. Diff size is a scope-warning signal, not a closure target or a substitute for semantic review.
 
 User instructions and newer accepted decisions take precedence. If code and documents disagree, record the gap instead of treating current code as the intended final design.

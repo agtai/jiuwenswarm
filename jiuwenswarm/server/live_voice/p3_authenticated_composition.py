@@ -1254,6 +1254,15 @@ class P3AuthenticatedComposition:
             task_id=binding.task_id,
         )
 
+    @property
+    def product_progress_authority_atomic_replay(self) -> bool:
+        """Whether text/UI progress can use the same Store cursor handoff."""
+
+        core = getattr(self, "_core", None)
+        return (
+            core is not None and type(getattr(core, "store", None)) is SqliteTaskStore
+        )
+
     async def start(self) -> dict[str, int]:
         async with self._lifecycle_lock:
             if self._accepting:

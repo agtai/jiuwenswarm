@@ -287,6 +287,19 @@ class BoundedAlphaTaskIntentResolver:
     # The unified grammar is deliberately full-utterance and ordered.  In
     # particular, negative cancellation is resolved before affirmative cancel;
     # no ``substring in text`` decision can produce a Task side effect.
+    _UNIFIED_CHINESE_DISCOURSE_PREFIX = (
+        r"(?:(?:可以了|好了|对了|顺便问一下)\s*[，,、;；]\s*|"
+        r"请问\s*[，,]?\s*)?"
+    )
+    _UNIFIED_CHINESE_ITINERARY_TARGET = (
+        r"(?:第[一二三四五六七八九十百两\d]+天(?:的)?"
+        r"(?:早上|上午|中午|下午|傍晚|晚上|全天)?|"
+        r"(?:今天|明天|后天)(?:早上|上午|中午|下午|傍晚|晚上|全天)?|"
+        r"(?:早上|上午|中午|下午|傍晚|晚上))"
+    )
+    _UNIFIED_CHINESE_UPDATE_VERB = (
+        r"(?:(?:改成|改为|调整为|更改为|换成|增加|加入|添加|留出|删除|去掉)(?!的))"
+    )
     _UNIFIED_NEGATED_CANCEL_QUERY = (
         re.compile(
             r"^\s*(?:不用|不要|别)\s*(?:停止|取消|终止)(?:刚才的|当前的|这个)?"
@@ -325,7 +338,8 @@ class BoundedAlphaTaskIntentResolver:
     )
     _UNIFIED_STATUS = (
         re.compile(
-            r"^\s*(?:后台|后台任务|刚才的任务|当前(?:的)?(?:后台)?任务|这个任务|这个行程|行程规划)"
+            rf"^\s*{_UNIFIED_CHINESE_DISCOURSE_PREFIX}"
+            r"(?:后台|后台任务|刚才的任务|当前(?:的)?(?:后台)?任务|这个任务|这个行程|行程规划)"
             r"(?:现在)?(?:做到哪(?:里|儿)?了|进度(?:怎么样|如何|是多少)?|进展(?:怎么样|如何)?|情况(?:怎么样|如何)?|什么状态)\s*[？?。.]?\s*$"
         ),
         re.compile(
@@ -336,7 +350,8 @@ class BoundedAlphaTaskIntentResolver:
     )
     _UNIFIED_ADJUSTMENT_STATUS = (
         re.compile(
-            r"^\s*(?:刚才|之前|上次)(?:的)?(?:修改|调整|改动)"
+            rf"^\s*{_UNIFIED_CHINESE_DISCOURSE_PREFIX}"
+            r"(?:刚才|之前|上次)(?:的)?(?:修改|调整|改动)"
             r"(?:已经|是否|有)?(?:加进去|加入|应用|生效|处理)(?:了|了吗|没有|没)?\s*[？?。.]?\s*$"
         ),
         re.compile(
@@ -349,6 +364,18 @@ class BoundedAlphaTaskIntentResolver:
         re.compile(
             r"^\s*(?:不用|不要|别)\s*(?:修改|调整|改动|更改|更新)(?:刚才的|当前的|这个)?"
             r"(?:后台任务|后台处理|任务|行程)?(?:了|啦|吧)?\s*[。.!！]?\s*$"
+        ),
+        re.compile(
+            rf"^\s*(?=.*{_UNIFIED_CHINESE_UPDATE_VERB})"
+            r"(?=.*(?:不要|不用|不必|别|无需))"
+            r"(?:请)?(?:把|将).+?\s*[。.!！]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            rf"^\s*(?:请)?(?:把|将)?\s*{_UNIFIED_CHINESE_ITINERARY_TARGET}"
+            rf".{{0,96}}?(?:不(?:要|用|必)?|别|无需).{{0,12}}?"
+            rf"{_UNIFIED_CHINESE_UPDATE_VERB}.+?\s*[。.!！]?\s*$",
+            re.S,
         ),
         re.compile(
             r"^\s*(?:do\s+not|don't)\s+(?:change|adjust|modify|update)(?:\s+the)?"
@@ -405,6 +432,60 @@ class BoundedAlphaTaskIntentResolver:
             r"^\s*(?P<instruction>(?:please\s+)?(?:change|adjust|modify|update|add|remove)\s+"
             r"(?:the\s+)?(?:current\s+)?(?:task|itinerary|plan).+?)\s*[.!]?\s*$",
             re.I | re.S,
+        ),
+    )
+    _UNIFIED_NON_ACTIONABLE_UPDATE = (
+        re.compile(
+            rf"^\s*(?=.*{_UNIFIED_CHINESE_UPDATE_VERB})"
+            rf"(?=.*(?:还是|或者|或是|是否|要不要|能不能|可不可以|"
+            rf"怎么样|如何|好不好|行不行|[？?]|"
+            rf"(?:吗|么|嘛)\s*[。.!！]?\s*$))"
+            r"(?:请)?(?:把|将).+?\s*$",
+            re.S,
+        ),
+        re.compile(
+            rf"^\s*(?:请)?(?:把|将).{{1,160}}?"
+            rf"{_UNIFIED_CHINESE_UPDATE_VERB}"
+            r"\s*(?:一下|一点|一些|吧|掉)?\s*[。.!！]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            r"^\s*(?:请)?(?:把|将).{1,160}?"
+            r"(?:改一下|调整一下|修改一下|改改)(?:吧|吗)?\s*[？?。.!！]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            rf"^\s*(?=.*{_UNIFIED_CHINESE_UPDATE_VERB})"
+            rf"(?=.*(?:还是|或者|或是|是否|要不要|能不能|可不可以|"
+            rf"怎么样|如何|好不好|行不行|[？?]|"
+            rf"(?:吗|么|嘛)\s*[。.!！]?\s*$))"
+            rf"(?:请)?(?:把|将)?\s*{_UNIFIED_CHINESE_ITINERARY_TARGET}.+?\s*$",
+            re.S,
+        ),
+        re.compile(
+            rf"^\s*(?:请)?(?:把|将)?\s*{_UNIFIED_CHINESE_ITINERARY_TARGET}"
+            rf".{{0,96}}?{_UNIFIED_CHINESE_UPDATE_VERB}"
+            r"\s*(?:一下|一点|一些|吧|掉)?\s*[。.!！]?\s*$",
+            re.S,
+        ),
+        re.compile(
+            rf"^\s*(?:请)?(?:把|将)?\s*{_UNIFIED_CHINESE_ITINERARY_TARGET}"
+            r".{0,96}?(?:改一下|调整一下|修改一下|改改)(?:吧|吗)?\s*[？?。.!！]?\s*$",
+            re.S,
+        ),
+    )
+    _UNIFIED_IMPLICIT_UPDATE = (
+        re.compile(
+            rf"^\s*(?P<instruction>"
+            rf"(?!.*(?:还是|或者|或是|是否|要不要|能不能|可不可以|"
+            rf"怎么样|如何|好不好|行不行|[？?]))"
+            rf"(?!.*(?:吗|么|嘛)\s*[。.!！]?\s*$)"
+            rf"(?!.*(?:不(?:要|用|必)?|别|无需).{{0,12}}?"
+            rf"{_UNIFIED_CHINESE_UPDATE_VERB})"
+            rf"{_UNIFIED_CHINESE_ITINERARY_TARGET}.{{0,96}}?"
+            rf"{_UNIFIED_CHINESE_UPDATE_VERB}"
+            r"(?=\s*[^\s。.!！?？]).+?)\s*[。.!！]?\s*$",
+            re.S,
         ),
     )
     _UNIFIED_CONTEXT_QUERY = (
@@ -590,6 +671,16 @@ class BoundedAlphaTaskIntentResolver:
             )
         if any(
             pattern.fullmatch(commit.text) is not None
+            for pattern in self._UNIFIED_NON_ACTIONABLE_UPDATE
+        ):
+            return self._unified_result(
+                commit,
+                current_task,
+                UnifiedCommittedInputRoute.DIALOGUE,
+                "AMBIGUOUS_OR_INCOMPLETE_UPDATE",
+            )
+        if any(
+            pattern.fullmatch(commit.text) is not None
             for pattern in self._UNIFIED_CANCEL
         ):
             return self._unified_result(
@@ -670,7 +761,7 @@ class BoundedAlphaTaskIntentResolver:
                     instruction=commit.text[start:end],
                     source_span=TaskIntentSourceSpan(start, end),
                 )
-        for pattern in self._UNIFIED_UPDATE:
+        for pattern in (*self._UNIFIED_UPDATE, *self._UNIFIED_IMPLICIT_UPDATE):
             match = pattern.fullmatch(commit.text)
             if match is None:
                 continue

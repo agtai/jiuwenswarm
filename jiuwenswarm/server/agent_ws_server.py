@@ -1412,9 +1412,27 @@ class AgentWebSocketServer:
             return
         registry: Any = None
         try:
+            from jiuwenswarm.server.live_voice.observability import (
+                LiveVoiceMetric,
+                LiveVoiceObservation,
+                LiveVoiceObservabilityCollector,
+            )
             from jiuwenswarm.server.live_voice.product_composition_registry import (
                 create_product_composition_registry_from_environment,
             )
+
+            collector = LiveVoiceObservabilityCollector()
+
+            async def export_product_observability(record: object) -> None:
+                accepted = (
+                    collector.emit_observation(record)
+                    if type(record) is LiveVoiceObservation
+                    else collector.emit_metric(record)
+                    if type(record) is LiveVoiceMetric
+                    else False
+                )
+                if accepted is not True:
+                    raise RuntimeError("product observability collector rejected record")
 
             registry = create_product_composition_registry_from_environment(
                 p3_composition=self._live_voice_p3_composition,
@@ -1429,16 +1447,13 @@ class AgentWebSocketServer:
                 commit_ledger=getattr(
                     self, "_live_voice_turn_commit_ledger", None
                 ),
+                observability_exporter=export_product_observability,
             )
             if registry is None:
                 logger.info("[LiveVoiceProduct] central composition disabled")
                 return
-            from jiuwenswarm.server.live_voice.observability import (
-                LiveVoiceObservabilityCollector,
-            )
-
             self._live_voice_product_composition = registry
-            self._live_voice_product_observability = LiveVoiceObservabilityCollector()
+            self._live_voice_product_observability = collector
             logger.info(
                 "[LiveVoiceProduct] central composition registered; "
                 "p2=%s p3_text=%s",

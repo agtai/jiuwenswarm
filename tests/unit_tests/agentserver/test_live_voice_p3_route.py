@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 from pathlib import Path
 
@@ -22,6 +23,8 @@ from jiuwenswarm.server.live_voice import product_composition_registry as produc
 from jiuwenswarm.server.live_voice.p3_authenticated_composition import P3RouteResult
 from jiuwenswarm.server.live_voice.observability import (
     LiveVoiceObservabilityCollector,
+    create_metric,
+    create_observation,
 )
 
 
@@ -600,14 +603,30 @@ async def test_agentserver_owns_enabled_product_registry_start_and_stop(
 
     await server._start_live_voice_product_composition()
     collector = server._live_voice_product_observability
+    exporter = captured[0]["observability_exporter"]
+    fixture = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "fixtures"
+            / "live_voice_observability_v1"
+            / "contract.json"
+        ).read_text(encoding="utf-8")
+    )
+    observation = create_observation(fixture["observation"])
+    metric = create_metric(fixture["metric"])
+    await exporter(observation)
+    await exporter(metric)
     await server._stop_live_voice_product_composition()
     await server._stop_live_voice_product_composition()
 
     assert registry.stop_calls == 1
     assert server._live_voice_product_composition is None
     assert isinstance(collector, LiveVoiceObservabilityCollector)
+    assert collector.observations() == (observation,)
+    assert collector.metrics() == (metric,)
     assert server._live_voice_product_observability is None
     assert captured[0]["commit_ledger"] is commit_ledger
+    assert inspect.iscoroutinefunction(exporter)
 
 
 @pytest.mark.asyncio

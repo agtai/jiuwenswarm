@@ -548,6 +548,7 @@ class ProductP3TextAdapter:
         query_owner: ProductP3QueryOwner,
         subscription_factory: ProductP3SubscriptionFactory,
         prepared_source_factory: ProductP3PreparedSourceFactory | None = None,
+        replay_text_from_prepared_source: bool = False,
         generation_is_current: GenerationIsCurrent,
         arbiter: ProgressNotificationArbiter,
         foreground: ForegroundSupplier,
@@ -557,7 +558,10 @@ class ProductP3TextAdapter:
         cleanup_capacity: int = 64,
         clock: Callable[[], str] = utc_now,
     ) -> None:
-        if type(enabled) is not bool:
+        if (
+            type(enabled) is not bool
+            or type(replay_text_from_prepared_source) is not bool
+        ):
             raise ValueError("product P3 text flag must be boolean")
         if not isinstance(authority, P3AuthorityAdapter):
             raise ValueError("product P3 authority adapter is required")
@@ -588,6 +592,7 @@ class ProductP3TextAdapter:
         ):
             raise ValueError("product P3 prepared source factory is invalid")
         self._prepared_source_factory = prepared_source_factory
+        self._replay_text_from_prepared_source = replay_text_from_prepared_source
         self._generation_is_current = generation_is_current
         self._arbiter = arbiter
         self._foreground = foreground
@@ -900,7 +905,10 @@ class ProductP3TextAdapter:
         prepared_source: PreparedTaskProgressSource | None = None
         cleanup: ProductP3ProgressCleanupHandle | None = None
         try:
-            if request.origin_kind is TaskProgressOriginKind.VOICE:
+            if request.origin_kind is TaskProgressOriginKind.VOICE or (
+                self._replay_text_from_prepared_source
+                and self._prepared_source_factory is not None
+            ):
                 assert self._prepared_source_factory is not None
                 prepared_source = self._prepared_source_factory(grant, binding)
                 subscription = prepared_source.subscription

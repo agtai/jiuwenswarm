@@ -20,7 +20,8 @@ $RepoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 $Python = Join-Path $RepoRoot '.venv\Scripts\python.exe'
 $StopCommand = Join-Path $RepoRoot '.venv\Scripts\jiuwenswarm-stop.exe'
 $FrontendRoot = Join-Path $RepoRoot 'jiuwenswarm\channels\web\frontend'
-$FrontendEnv = Join-Path $FrontendRoot '.env.production'
+$ProductionFrontendEnv = Join-Path $FrontendRoot '.env.production'
+$LiveVoiceFrontendEnv = Join-Path $FrontendRoot '.env.live-voice'
 $ExpectedBranch = 'hx/0812_live_voice_w3'
 $ExpectedPorts = [ordered]@{
     FRONTEND_PORT     = 6173
@@ -267,6 +268,11 @@ try {
             Fail "PATH 中找不到 $command。"
         }
     }
+    $npmCommandInfo = Get-Command 'npm.cmd' -ErrorAction SilentlyContinue
+    if ($null -eq $npmCommandInfo) {
+        $npmCommandInfo = Get-Command 'npm' -ErrorAction Stop
+    }
+    $NpmCommand = $npmCommandInfo.Source
     $ChromeExecutable = $null
     if (-not $NoBrowser) {
         $ChromeExecutable = Get-ChromeExecutable
@@ -438,6 +444,8 @@ try {
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_TEXT_ENABLED            = '1'
         JIUWENSWARM_LIVE_VOICE_PRODUCT_P3_MUTATION_ENABLED        = '1'
         JIUWENSWARM_LIVE_VOICE_CRITICAL_INPUT_ENABLED             = '1'
+        # Demo-only runtime exceptions. Keep these out of every frontend
+        # build profile and make the controlled launcher own them explicitly.
         JIUWENSWARM_LIVE_VOICE_PRODUCT_DEMO_POLICY_BYPASS_ENABLED = '1'
         JIUWENSWARM_LIVE_VOICE_DEMO_ADJUSTMENT_CHECKPOINT_ENABLED = '1'
         JIUWENSWARM_LIVE_VOICE_DEDICATED_MEDIA_ENABLED            = '1'
@@ -446,9 +454,6 @@ try {
         LIVE_VOICE_SPEECH_PROVIDER                               = 'openai'
         LIVE_VOICE_FORMAL_BATCH_SPEECH_ENABLED                    = '1'
         LIVE_VOICE_FORMAL_STREAMING_SPEECH_ENABLED                = '1'
-        VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB                    = 'true'
-        VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1                     = 'true'
-        VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION               = 'true'
         PYTHONUTF8                                                = '1'
         PYTHONIOENCODING                                          = 'utf-8'
     }
@@ -465,25 +470,43 @@ try {
     [Environment]::SetEnvironmentVariable('JIUWENSWARM_AGENT_SERVER_PORT', '18092', 'Process')
     [Environment]::SetEnvironmentVariable('JIUWENSWARM_WEB_PORT', '19000', 'Process')
     [Environment]::SetEnvironmentVariable('JIUWENSWARM_GATEWAY_PORT', '19001', 'Process')
-    foreach ($legacyFlag in @('VITE_FEATURE_LIVE_VOICE_TASK_DEMO', 'VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH')) {
-        [Environment]::SetEnvironmentVariable($legacyFlag, $null, 'Process')
+    foreach ($frontendOverride in @(
+        'VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB',
+        'VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1',
+        'VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION',
+        'VITE_FEATURE_LIVE_VOICE_TASK_DEMO',
+        'VITE_FEATURE_LIVE_VOICE_STREAMING_SPEECH'
+    )) {
+        # Vite gives an existing process variable precedence over mode files.
+        # SetEnvironmentVariable(..., $null, 'Process') becomes an empty value
+        # in this PowerShell/.NET runtime, which would still override the
+        # profile. Remove the process entry itself so .env.live-voice can load.
+        Remove-Item -LiteralPath "Env:\$frontendOverride" -ErrorAction SilentlyContinue
     }
     Write-Pass 'P1/P2/P3、统一语义、Demo bypass、调整 checkpoint、Dedicated Media/EOT、Origin 与 Task Store 已绑定'
 
-    if (-not (Test-Path -LiteralPath $FrontendEnv -PathType Leaf)) {
-        Fail "缺少生产前端开关文件：$FrontendEnv"
+    if (-not (Test-Path -LiteralPath $ProductionFrontendEnv -PathType Leaf)) {
+        Fail "缺少普通 production 前端开关文件：$ProductionFrontendEnv"
     }
-    $frontendEnvText = Get-Content -Raw -LiteralPath $FrontendEnv -Encoding UTF8
+    if (-not (Test-Path -LiteralPath $LiveVoiceFrontendEnv -PathType Leaf)) {
+        Fail "缺少 Live Voice 前端构建配置：$LiveVoiceFrontendEnv"
+    }
+    $productionFrontendEnvText = Get-Content -Raw -LiteralPath $ProductionFrontendEnv -Encoding UTF8
+    $liveVoiceFrontendEnvText = Get-Content -Raw -LiteralPath $LiveVoiceFrontendEnv -Encoding UTF8
     foreach ($requiredLine in @(
         'VITE_FEATURE_LIVE_VOICE_INTEGRATED_WEB=true',
         'VITE_FEATURE_LIVE_VOICE_INTEGRATED_P1=true',
         'VITE_FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION=true'
     )) {
-        if ($frontendEnvText -notmatch "(?m)^$([regex]::Escape($requiredLine))\s*$") {
-            Fail "生产构建缺少开关：$requiredLine"
+        if ($liveVoiceFrontendEnvText -notmatch "(?m)^$([regex]::Escape($requiredLine))\s*$") {
+            Fail "Live Voice 构建配置缺少开关：$requiredLine"
+        }
+        $productionLine = $requiredLine -replace '=true$', '=false'
+        if ($productionFrontendEnvText -notmatch "(?m)^$([regex]::Escape($productionLine))\s*$") {
+            Fail "普通 production 构建必须关闭开关：$productionLine"
         }
     }
-    Write-Pass '生产前端开关已版本化；普通 npm run build 不会再漏掉 Live Voice'
+    Write-Pass '普通 production 保持 flag-off；显式 Live Voice 构建配置保持 flag-on'
 
     if ($PreflightOnly) {
         $owners = @(Get-ListeningOwners -Ports @($ExpectedPorts.Values))
@@ -505,7 +528,20 @@ try {
         }
         Stop-ExistingDemoServices
     }
-    & $Python -m jiuwenswarm.start_services debug
+    Push-Location -LiteralPath $FrontendRoot
+    try {
+        & $NpmCommand install
+        if ($LASTEXITCODE -ne 0) {
+            Fail "前端依赖安装失败（exit=$LASTEXITCODE）。"
+        }
+        & $NpmCommand run build:live-voice
+        if ($LASTEXITCODE -ne 0) {
+            Fail "Live Voice 前端构建失败（exit=$LASTEXITCODE）。"
+        }
+    } finally {
+        Pop-Location
+    }
+    & $Python -m jiuwenswarm.start_services debug --skip-build
     if ($LASTEXITCODE -ne 0) {
         Fail "JiuwenSwarm debug 启动失败（exit=$LASTEXITCODE）。"
     }
@@ -521,7 +557,7 @@ try {
     $indexResponse = Invoke-WebRequest -UseBasicParsing -Uri $indexUrl -Headers @{ 'Cache-Control' = 'no-cache' } -TimeoutSec 10
     if ($indexResponse.StatusCode -ne 200) { Fail "前端 HTTP 返回 $($indexResponse.StatusCode)。" }
     $assetMatch = [regex]::Match([string]$indexResponse.Content, 'src="([^"]*index-[^"]+\.js)"')
-    if (-not $assetMatch.Success) { Fail '前端 index.html 没有引用 production bundle。' }
+    if (-not $assetMatch.Success) { Fail '前端 index.html 没有引用 Live Voice profile bundle。' }
     $assetPath = $assetMatch.Groups[1].Value
     $bundle = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:6173${assetPath}?live_voice_build_check=1") -Headers @{ 'Cache-Control' = 'no-cache' } -TimeoutSec 20
     if (-not ([string]$bundle.Content).Contains('live_voice.composition.unified.submit')) {
@@ -537,7 +573,7 @@ try {
     if ($logText -notmatch '\[LiveVoiceP3\] authenticated formal route ready') { Fail 'P3 authenticated formal route 未就绪。' }
     if ($logText -notmatch '\[LiveVoiceProduct\] central composition registered; p2=True p3_text=True') { Fail 'Live Voice 产品组合未完整注册。' }
     if ($logText -match 'LiveVoice(P3|Product).*failed closed') { Fail '启动日志包含 Live Voice fail-closed 错误。' }
-    Write-Pass "最新 production bundle 已加载（$assetPath）"
+    Write-Pass "最新 Live Voice profile bundle 已加载（$assetPath）"
     Write-Pass 'P3 authenticated route 与 P2/P3 product composition 已就绪'
     Write-Pass '四个固定端口均已就绪；未发生静默端口漂移'
 

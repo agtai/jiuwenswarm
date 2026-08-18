@@ -689,8 +689,9 @@ class AgentConversationRuntime:
 
         The formal Agent route deliberately has no implicit Session History.  This
         selector therefore exposes only prior committed user text paired with an
-        assistant TEXT span that CR has actually marked presented.  Tool events,
-        reasoning, raw audio and unacknowledged output never enter the snapshot.
+        Agent-produced assistant TEXT span that CR has actually marked presented.
+        Authoritative Task/control presentations, Tool events, reasoning, raw audio
+        and unacknowledged output never enter the snapshot.
         """
 
         self._require_admission()
@@ -742,6 +743,8 @@ class AgentConversationRuntime:
                 response_ref.interaction_id != interaction_id
                 or state.commit.interaction_id != interaction_id
                 or state.commit.scope != self._scope
+                or state.handle is None
+                or state.source_provenance != "server.agent"
             ):
                 continue
             units = sorted(

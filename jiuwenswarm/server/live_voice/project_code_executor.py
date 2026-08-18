@@ -94,6 +94,8 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _DIRECT_EXECUTOR_LEASE = timedelta(minutes=5)
 _DIRECT_EXECUTOR_REF_PREFIX = DIRECT_PROJECT_EXECUTOR_REF_PREFIX
 _MAX_DIRECT_CLEANUP_TIMEOUT_SECONDS = 5.0
+_DEFAULT_DIRECT_ATTEMPT_TIMEOUT_SECONDS = 30.0 * 60.0
+_MAX_DIRECT_ATTEMPT_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
 _MAX_DIRECT_RUNNING_WORKERS = 32
 _PROTECTED_TARGET_SUPPORT_PATHS = tuple(FORMAL_RUNTIME_SUPPORT_POLICY)
 _EXECUTION_TARGET_FIELDS = {
@@ -299,6 +301,20 @@ def _parse_utc(value: str) -> datetime:
 
 def _lease_expiry(now: str) -> str:
     return (_parse_utc(now) + _DIRECT_EXECUTOR_LEASE).isoformat().replace("+00:00", "Z")
+
+
+def _runtime_deadline(now: str, timeout_seconds: float) -> str:
+    return (
+        (_parse_utc(now) + timedelta(seconds=timeout_seconds))
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _timestamp_due(value: str, now: str) -> bool:
+    """Compare persisted UTC instants without relying on SQLite TEXT ordering."""
+
+    return _parse_utc(value) <= _parse_utc(now)
 
 
 def _git_output(root: Path, *args: str) -> bytes:
@@ -1150,6 +1166,7 @@ class _DirectAttempt:
     governance_json: str
     owner_id: str | None
     lease_expires_at: str | None
+    runtime_deadline_at: str
     cancel_requested: bool
 
 
@@ -1217,6 +1234,7 @@ class _DirectProjectAttemptJournal:
                     governance_json TEXT NOT NULL,
                     owner_id TEXT,
                     lease_expires_at TEXT,
+                    runtime_deadline_at TEXT NOT NULL,
                     cancel_requested INTEGER NOT NULL DEFAULT 0
                         CHECK(cancel_requested IN (0, 1))
                 )
@@ -1244,6 +1262,23 @@ class _DirectProjectAttemptJournal:
                 connection.execute(
                     f"ALTER TABLE {_DIRECT_EXECUTOR_TABLE} ADD COLUMN artifacts_json TEXT"
                 )
+            if "runtime_deadline_at" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {_DIRECT_EXECUTOR_TABLE} "
+                    "ADD COLUMN runtime_deadline_at TEXT"
+                )
+            # Pre-deadline journals did not retain the original runtime budget.
+            # Their last durable lease is the only bounded absolute instant that
+            # can be adopted without inventing a fresh restart-relative window.
+            connection.execute(
+                f"""
+                UPDATE {_DIRECT_EXECUTOR_TABLE}
+                   SET runtime_deadline_at=COALESCE(
+                       lease_expires_at, terminal_at, accepted_at
+                   )
+                 WHERE runtime_deadline_at IS NULL
+                """
+            )
             connection.execute(
                 f"""
                 CREATE TABLE IF NOT EXISTS {_DIRECT_ADJUSTMENT_TABLE} (
@@ -1307,6 +1342,7 @@ class _DirectProjectAttemptJournal:
                 if row["lease_expires_at"] is None
                 else str(row["lease_expires_at"])
             ),
+            runtime_deadline_at=str(row["runtime_deadline_at"]),
             cancel_requested=bool(row["cancel_requested"]),
         )
 
@@ -1317,6 +1353,67 @@ class _DirectProjectAttemptJournal:
                 (attempt_id,),
             ).fetchone()
         return None if row is None else self._from_row(row)
+
+    @staticmethod
+    def _terminalize_runtime_timeout(
+        connection: sqlite3.Connection,
+        record: _DirectAttempt,
+        *,
+        now: str,
+        cleanup_pending: bool,
+    ) -> bool:
+        """CAS a due pre-apply attempt to one immutable timeout outcome.
+
+        ``raw_status='applying'`` is deliberately excluded.  The Git apply
+        worker is an in-process thread and cannot be cancelled safely; its
+        exact applied/unchanged/unknown truth remains restart-recoverable.
+        """
+
+        if (
+            record.state is FormalAttemptState.TERMINAL
+            or record.raw_status == "applying"
+            or record.cancel_requested
+            or not _timestamp_due(record.runtime_deadline_at, now)
+        ):
+            return False
+        raw_status = (
+            "attempt_timeout_cleanup_pending" if cleanup_pending else "attempt_timeout"
+        )
+        summary = (
+            "attempt runtime deadline elapsed; isolated cleanup remains owned"
+            if cleanup_pending
+            else None
+        )
+        return (
+            connection.execute(
+                f"""
+                UPDATE {_DIRECT_EXECUTOR_TABLE}
+                   SET state=?, outcome=?, source_seq=2,
+                       running_at=COALESCE(running_at, ?), terminal_at=?,
+                       raw_status=?, summary=?, error=?, expected_tree=NULL,
+                       result_text=NULL, artifacts_json=NULL, owner_id=NULL,
+                       lease_expires_at=NULL
+                 WHERE attempt_id=? AND state<>? AND owner_id IS ?
+                       AND raw_status=? AND runtime_deadline_at=?
+                       AND cancel_requested=0
+                """,
+                (
+                    FormalAttemptState.TERMINAL.value,
+                    TerminalOutcome.INTERRUPTED.value,
+                    now,
+                    now,
+                    raw_status,
+                    summary,
+                    "EXECUTOR_ATTEMPT_TIMEOUT",
+                    record.attempt_id,
+                    FormalAttemptState.TERMINAL.value,
+                    record.owner_id,
+                    record.raw_status,
+                    record.runtime_deadline_at,
+                ),
+            ).rowcount
+            == 1
+        )
 
     @staticmethod
     def _adjustment_from_row(row: sqlite3.Row) -> _DirectAdjustment:
@@ -1499,9 +1596,15 @@ class _DirectProjectAttemptJournal:
         governance: Mapping[str, object],
         owner_id: str,
         now: str,
+        runtime_deadline_at: str | None = None,
     ) -> tuple[bool, _DirectAttempt]:
         fingerprint = item.spec.fingerprint_bytes()
         executor_ref = f"{_DIRECT_EXECUTOR_REF_PREFIX}{item.attempt_id}"
+        deadline = runtime_deadline_at or _runtime_deadline(
+            now, _DEFAULT_DIRECT_ATTEMPT_TIMEOUT_SECONDS
+        )
+        if _parse_utc(deadline) <= _parse_utc(now):
+            raise ValueError("runtime_deadline_at must be later than accepted_at")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -1547,9 +1650,10 @@ class _DirectProjectAttemptJournal:
                     result_text, artifacts_json,
                     before_tree, before_content, expected_tree, before_head,
                     protected_support_json,
-                    governance_json, owner_id, lease_expires_at, cancel_requested
+                    governance_json, owner_id, lease_expires_at,
+                    runtime_deadline_at, cancel_requested
                 ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, NULL, NULL, ?, NULL,
-                          NULL, NULL, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, 0)
+                          NULL, NULL, NULL, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 0)
                 """,
                 (
                     item.attempt_id,
@@ -1567,6 +1671,7 @@ class _DirectProjectAttemptJournal:
                     json.dumps(dict(governance), sort_keys=True),
                     owner_id,
                     _lease_expiry(now),
+                    deadline,
                 ),
             )
             row = connection.execute(
@@ -1598,6 +1703,18 @@ class _DirectProjectAttemptJournal:
                     "direct Executor attempt is owned by another process",
                     ErrorCode.UNAVAILABLE,
                 )
+            if self._terminalize_runtime_timeout(
+                connection,
+                current,
+                now=now,
+                cleanup_pending=False,
+            ):
+                row = connection.execute(
+                    f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                    (attempt_id,),
+                ).fetchone()
+                assert row is not None
+                return self._from_row(row)
             connection.execute(
                 f"""
                 UPDATE {_DIRECT_EXECUTOR_TABLE}
@@ -1622,9 +1739,24 @@ class _DirectProjectAttemptJournal:
 
     def heartbeat(
         self, attempt_id: str, *, owner_id: str, now: str
-    ) -> tuple[bool, bool]:
+    ) -> tuple[bool, bool, bool]:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} "
+                "WHERE attempt_id=? AND owner_id=? AND state<>?",
+                (attempt_id, owner_id, FormalAttemptState.TERMINAL.value),
+            ).fetchone()
+            if row is None:
+                return False, False, False
+            record = self._from_row(row)
+            if self._terminalize_runtime_timeout(
+                connection,
+                record,
+                now=now,
+                cleanup_pending=True,
+            ):
+                return False, False, True
             changed = connection.execute(
                 f"""
                 UPDATE {_DIRECT_EXECUTOR_TABLE}
@@ -1638,12 +1770,7 @@ class _DirectProjectAttemptJournal:
                     FormalAttemptState.TERMINAL.value,
                 ),
             ).rowcount
-            row = connection.execute(
-                f"SELECT cancel_requested FROM {_DIRECT_EXECUTOR_TABLE} "
-                "WHERE attempt_id=? AND owner_id=? AND state<>?",
-                (attempt_id, owner_id, FormalAttemptState.TERMINAL.value),
-            ).fetchone()
-        return changed == 1, row is not None and bool(row["cancel_requested"])
+        return changed == 1, record.cancel_requested, False
 
     def finish(
         self,
@@ -1901,6 +2028,29 @@ class _DirectProjectAttemptJournal:
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            current_row = connection.execute(
+                f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                (attempt_id,),
+            ).fetchone()
+            if current_row is None:
+                raise FormalTaskViolation(
+                    "ATTEMPT_NOT_FOUND",
+                    "direct Executor attempt is unavailable",
+                    ErrorCode.NOT_FOUND,
+                )
+            current = self._from_row(current_row)
+            if current.owner_id == owner_id and self._terminalize_runtime_timeout(
+                connection,
+                current,
+                now=now,
+                cleanup_pending=True,
+            ):
+                row = connection.execute(
+                    f"SELECT * FROM {_DIRECT_EXECUTOR_TABLE} WHERE attempt_id=?",
+                    (attempt_id,),
+                ).fetchone()
+                assert row is not None
+                return False, self._from_row(row)
             changed = connection.execute(
                 f"""
                 UPDATE {_DIRECT_EXECUTOR_TABLE}
@@ -1936,14 +2086,22 @@ class _DirectProjectAttemptJournal:
             rows = connection.execute(
                 f"""
                 SELECT * FROM {_DIRECT_EXECUTOR_TABLE}
-                 WHERE state<>? AND lease_expires_at IS NOT NULL
-                       AND lease_expires_at<=?
+                 WHERE state<>? AND (
+                       lease_expires_at IS NOT NULL
+                       OR runtime_deadline_at IS NOT NULL
+                 )
                 """,
-                (FormalAttemptState.TERMINAL.value, now),
+                (FormalAttemptState.TERMINAL.value,),
             ).fetchall()
         recovered = 0
         for row in rows:
             candidate = self._from_row(row)
+            lease_expired = candidate.lease_expires_at is not None and _timestamp_due(
+                candidate.lease_expires_at, now
+            )
+            deadline_expired = _timestamp_due(candidate.runtime_deadline_at, now)
+            if not (lease_expired or deadline_expired):
+                continue
             try:
                 root = Path(candidate.project_root)
                 ownership = _AttemptOwnershipLock.try_acquire(
@@ -1968,16 +2126,28 @@ class _DirectProjectAttemptJournal:
                     record = self._from_row(current_row)
                     if (
                         record.state is FormalAttemptState.TERMINAL
-                        or record.lease_expires_at is None
-                        or record.lease_expires_at > now
                         or record.owner_id != candidate.owner_id
                         or record.lease_expires_at != candidate.lease_expires_at
+                        or record.runtime_deadline_at != candidate.runtime_deadline_at
                     ):
                         continue
+                    lease_expired = (
+                        record.lease_expires_at is not None
+                        and _timestamp_due(record.lease_expires_at, now)
+                    )
+                    deadline_expired = _timestamp_due(record.runtime_deadline_at, now)
+                    if not (lease_expired or deadline_expired):
+                        continue
                     outcome = TerminalOutcome.INTERRUPTED
-                    raw_status = "restart_interrupted"
+                    raw_status = (
+                        "attempt_timeout" if deadline_expired else "restart_interrupted"
+                    )
                     summary = None
-                    error = "EXECUTOR_PROCESS_RESTARTED"
+                    error = (
+                        "EXECUTOR_ATTEMPT_TIMEOUT"
+                        if deadline_expired
+                        else "EXECUTOR_PROCESS_RESTARTED"
+                    )
                     if record.raw_status == "applying":
                         outcome = TerminalOutcome.UNKNOWN
                         raw_status = "restart_apply_result_unknown"
@@ -2068,7 +2238,8 @@ class _DirectProjectAttemptJournal:
                                raw_status=?, summary=?, error=?, owner_id=NULL,
                                lease_expires_at=NULL
                          WHERE attempt_id=? AND state<>? AND owner_id IS ?
-                               AND lease_expires_at=?
+                               AND lease_expires_at IS ?
+                               AND runtime_deadline_at=?
                         """,
                         (
                             FormalAttemptState.TERMINAL.value,
@@ -2081,6 +2252,7 @@ class _DirectProjectAttemptJournal:
                             FormalAttemptState.TERMINAL.value,
                             record.owner_id,
                             record.lease_expires_at,
+                            record.runtime_deadline_at,
                         ),
                     ).rowcount
                     recovered += int(changed == 1)
@@ -2155,6 +2327,7 @@ class DirectProjectCodeExecutorAdapter:
         *,
         clock: Callable[[], str] = utc_now,
         heartbeat_interval: float = 1.0,
+        attempt_timeout: float = _DEFAULT_DIRECT_ATTEMPT_TIMEOUT_SECONDS,
         cancel_timeout: float = 1.0,
         close_timeout: float = 5.0,
         demo_itinerary_fixture_enabled: bool = False,
@@ -2168,6 +2341,17 @@ class DirectProjectCodeExecutorAdapter:
             or heartbeat_interval <= 0
         ):
             raise ValueError("heartbeat_interval must be positive")
+        if (
+            isinstance(attempt_timeout, bool)
+            or not isinstance(attempt_timeout, (int, float))
+            or not math.isfinite(attempt_timeout)
+            or attempt_timeout <= 0
+            or attempt_timeout > _MAX_DIRECT_ATTEMPT_TIMEOUT_SECONDS
+        ):
+            raise ValueError(
+                "attempt_timeout must be positive and no greater than "
+                f"{_MAX_DIRECT_ATTEMPT_TIMEOUT_SECONDS} seconds"
+            )
         for field_name, value in (
             ("cancel_timeout", cancel_timeout),
             ("close_timeout", close_timeout),
@@ -2204,6 +2388,7 @@ class DirectProjectCodeExecutorAdapter:
         self._journal = _DirectProjectAttemptJournal(database)
         self._clock = clock
         self._heartbeat_interval = float(heartbeat_interval)
+        self._attempt_timeout = float(attempt_timeout)
         self._cancel_timeout = float(cancel_timeout)
         self._close_timeout = float(close_timeout)
         self._demo_itinerary_fixture_enabled = demo_itinerary_fixture_enabled
@@ -2327,7 +2512,7 @@ class DirectProjectCodeExecutorAdapter:
         return _verdict(ready=True, reason="PREDECESSOR_QUIESCENT")
 
     async def prepare_startup(self) -> int:
-        """Resolve only expired process leases; active foreign work stays pending."""
+        """Resolve expired leases/deadlines only after proving OS ownership."""
 
         recovered = await asyncio.to_thread(
             self._journal.recover_expired,
@@ -2477,6 +2662,7 @@ class DirectProjectCodeExecutorAdapter:
                     ErrorCode.PERMISSION_DENIED,
                 )
             await asyncio.to_thread(_reject_git_visible_symlinks, root)
+            accepted_at = self._clock()
             created, record = await asyncio.to_thread(
                 self._journal.create,
                 item=item,
@@ -2487,7 +2673,10 @@ class DirectProjectCodeExecutorAdapter:
                 protected_support=protected_support,
                 governance=governance,
                 owner_id=self._owner_id,
-                now=self._clock(),
+                now=accepted_at,
+                runtime_deadline_at=_runtime_deadline(
+                    accepted_at, self._attempt_timeout
+                ),
             )
             if not created:
                 self._require_attempt_binding(record, item, root)
@@ -2498,6 +2687,8 @@ class DirectProjectCodeExecutorAdapter:
                 owner_id=self._owner_id,
                 now=self._clock(),
             )
+            if record.state is FormalAttemptState.TERMINAL:
+                return self._delivery(record, after_seq=item.source_seq)
             ownership = await asyncio.to_thread(
                 _AttemptOwnershipLock.try_acquire,
                 root,
@@ -2798,10 +2989,6 @@ class DirectProjectCodeExecutorAdapter:
         adjustment_checkpoint = _AdjustmentCheckpoint({}, asyncio.Event())
         self._adjustment_checkpoints[item.attempt_id] = adjustment_checkpoint
         try:
-            heartbeat = asyncio.create_task(
-                self._heartbeat(item.attempt_id),
-                name=f"live-voice-d0-heartbeat-{item.attempt_id}",
-            )
             record = await asyncio.to_thread(self._journal.get, item.attempt_id)
             assert record is not None
             target_root = Path(record.project_root)
@@ -2813,6 +3000,14 @@ class DirectProjectCodeExecutorAdapter:
             )
             worktree_parent = created_parent
             worktree = created_worktree
+            # Publish the checkout owner before the deadline watchdog may
+            # cancel this coroutine.  A cancelled ``to_thread`` cannot stop a
+            # Git subprocess, so starting earlier could strand an unowned
+            # checkout created after cancellation.
+            heartbeat = asyncio.create_task(
+                self._heartbeat(item.attempt_id),
+                name=f"live-voice-d0-heartbeat-{item.attempt_id}",
+            )
             await asyncio.to_thread(
                 _seed_attempt_worktree,
                 target_root,
@@ -3213,12 +3408,21 @@ class DirectProjectCodeExecutorAdapter:
         try:
             while True:
                 await asyncio.sleep(self._heartbeat_interval)
-                active, cancel_requested = await asyncio.to_thread(
+                active, cancel_requested, timed_out = await asyncio.to_thread(
                     self._journal.heartbeat,
                     attempt_id,
                     owner_id=self._owner_id,
                     now=self._clock(),
                 )
+                if timed_out:
+                    self._interruptions.setdefault(
+                        attempt_id,
+                        ("attempt_timeout", "EXECUTOR_ATTEMPT_TIMEOUT"),
+                    )
+                    task = self._running.get(attempt_id)
+                    if task is not None and not task.done() and task.cancelling() == 0:
+                        task.cancel()
+                    return
                 if not active:
                     return
                 if cancel_requested:

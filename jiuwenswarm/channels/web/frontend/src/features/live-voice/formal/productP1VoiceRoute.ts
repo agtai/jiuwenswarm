@@ -267,6 +267,7 @@ export class ProductP1VoiceRouteOwner {
   #reason: string | null = null;
   #frames: Readonly<CapturedAudioFrame>[] = [];
   #captureSpeechObserved = false;
+  #captureProviderSpeechStartObserved = false;
   #mediaSentFrames = 0;
   #captureFramesAcked = 0;
   #route: ActiveBrowserDedicatedMediaRoute | null = null;
@@ -280,6 +281,7 @@ export class ProductP1VoiceRouteOwner {
   #deviceSelection: Readonly<ProductP1AudioDeviceSelection> = Object.freeze({ selection_generation: 1 });
   #playout: Readonly<BrowserAudioPlayoutMetadata> | null = null;
   #closed = false;
+  #closeRequested = false;
   #operationGeneration = 0;
   #mediaCloseBinding: Readonly<ProductP1MediaCloseBinding> | null = null;
   readonly #retainedMediaAuthorities = new Map<string, Readonly<ProductP1MediaCloseBinding>>();
@@ -352,7 +354,7 @@ export class ProductP1VoiceRouteOwner {
               reason: stableCaptureStopReason(event.reason),
             });
           }
-          if (failure === null || this.#failureCleanupPromise !== null || this.#closed) return;
+          if (failure === null || this.#failureCleanupPromise !== null || this.#closed || this.#closeRequested) return;
           if (this.#captureReadinessPending) {
             if (!['starting', 'playing'].includes(this.#status)) return;
             this.#captureStartupFailure ??= failure;
@@ -386,6 +388,7 @@ export class ProductP1VoiceRouteOwner {
     }>
   ): Promise<void> {
     if (!this.#enabled || this.#closed) throw new Error('formal P1 voice route is disabled');
+    if (this.#closeRequested) throw new Error('formal P1 cleanup is in progress');
     if (this.#closePromise !== null) throw new Error('formal P1 cleanup is in progress');
     if (!['idle', 'recognized'].includes(this.#status)) throw new Error('formal P1 capture is already active');
     const sessionId = requiredText(input.session_id, 'session_id');
@@ -429,6 +432,7 @@ export class ProductP1VoiceRouteOwner {
     this.#failureCleanupReason = null;
     this.#frames = [];
     this.#captureSpeechObserved = false;
+    this.#captureProviderSpeechStartObserved = false;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#route = null;
@@ -620,7 +624,7 @@ export class ProductP1VoiceRouteOwner {
     if (this.#failureCleanupPromise !== null || this.#status !== 'capturing' || this.#route === null || this.#speech === null) {
       throw new Error('formal P1 idle capture is not active');
     }
-    if (this.#captureSpeechObserved) return 'speech_active';
+    if (this.#captureSpeechObserved || this.#captureProviderSpeechStartObserved) return 'speech_active';
     const operationGeneration = ++this.#operationGeneration;
     const route = this.#route;
     try {
@@ -650,6 +654,7 @@ export class ProductP1VoiceRouteOwner {
       this.#requireCurrent(operationGeneration);
       this.#frames = [];
       this.#captureSpeechObserved = false;
+      this.#captureProviderSpeechStartObserved = false;
       this.#mediaSentFrames = 0;
       if (this.#route === route) this.#route = null;
       this.#endOfTurnHandler = null;
@@ -659,6 +664,11 @@ export class ProductP1VoiceRouteOwner {
       return 'paused';
     } catch (error) {
       this.#captureStopExpected = false;
+      if (this.#closeRequested) {
+        throw Object.assign(new Error('formal notification capture pause was cancelled by route close'), {
+          reason: 'FORMAL_P1_CLOSED',
+        });
+      }
       await this.#fail(error);
       throw error;
     }
@@ -731,6 +741,7 @@ export class ProductP1VoiceRouteOwner {
       // fact. Release the browser copy as soon as the exact request settles.
       this.#frames = [];
       this.#captureSpeechObserved = false;
+      this.#captureProviderSpeechStartObserved = false;
       this.#mediaSentFrames = 0;
       this.#route = null;
       this.#requireCurrent(operationGeneration);
@@ -750,6 +761,7 @@ export class ProductP1VoiceRouteOwner {
         // Agent/Tool turn.
         this.#frames = [];
         this.#captureSpeechObserved = false;
+        this.#captureProviderSpeechStartObserved = false;
         this.#mediaSentFrames = 0;
         this.#route = null;
         this.#setStatus('idle', PRODUCT_P1_EMPTY_TRANSCRIPT_REASON);
@@ -767,7 +779,7 @@ export class ProductP1VoiceRouteOwner {
       text: string;
     }>
   ): Promise<void> {
-    if (this.#speech === null || this.#playout === null || this.#closed) {
+    if (this.#speech === null || this.#playout === null || this.#closed || this.#closeRequested) {
       throw new Error('formal P1 synthesis authority is unavailable');
     }
     if (['starting', 'capturing', 'recognizing'].includes(this.#status)) {
@@ -906,6 +918,11 @@ export class ProductP1VoiceRouteOwner {
         this.#deliverEndOfTurn(this.#operationGeneration, this.#route);
         return;
       }
+      if (this.#closeRequested) {
+        throw Object.assign(new Error('formal playout was cancelled by route close'), {
+          reason: 'FORMAL_P1_CLOSED',
+        });
+      }
       const failure =
         playoutResponse !== null && stableFailureReason(error) === 'PAGE_HIDDEN'
           ? Object.assign(new Error('formal browser playout was fenced because the page is hidden'), {
@@ -950,14 +967,14 @@ export class ProductP1VoiceRouteOwner {
   async close(): Promise<void> {
     if (this.#closed) return;
     if (this.#closePromise !== null) return this.#closePromise;
+    this.#closeRequested = true;
     this.#operationGeneration += 1;
     this.#status = 'cleanup_pending';
     this.#reason = 'FORMAL_P1_CLEANUP_IN_PROGRESS';
-    const localAudioClose = this.#audio.close();
     this.#publish();
-    const retained = (async () => {
+    const retained = Promise.resolve().then(async () => {
       try {
-        await localAudioClose;
+        await this.#audio.close();
       } catch {
         /* authoritative release retries below */
       }
@@ -979,7 +996,7 @@ export class ProductP1VoiceRouteOwner {
       await this.#releaseResources('formal_route_close');
       this.#closed = true;
       this.#setStatus('closed', null);
-    })()
+    })
       .catch(error => {
         this.#reason = 'FORMAL_P1_CLEANUP_PENDING';
         this.#status = 'cleanup_pending';
@@ -1026,6 +1043,7 @@ export class ProductP1VoiceRouteOwner {
     }
     this.#frames = [];
     this.#captureSpeechObserved = false;
+    this.#captureProviderSpeechStartObserved = false;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#route = null;
@@ -1163,29 +1181,42 @@ export class ProductP1VoiceRouteOwner {
   async #rotateConcurrentCapture(operationGeneration: number): Promise<void> {
     const route = this.#route;
     const priorAuthority = this.#mediaCloseBinding;
-    if (
-      route === null
-      || priorAuthority === null
-      || (this.#pendingPlayout ?? this.#settlingPlayout) === null
-      || this.#status !== 'playing'
-    ) {
+    if (route === null || priorAuthority === null) {
       throw Object.assign(new Error('formal overlap capture rotation lost authority'), {
         reason: 'FORMAL_OVERLAP_CAPTURE_ROTATION_UNAVAILABLE',
       });
     }
+    const requireSafeRotation = (): void => {
+      this.#requireCurrent(operationGeneration);
+      if (this.#captureProviderSpeechStartObserved) {
+        throw Object.assign(new Error('formal overlap capture observed speech before rotation settled'), {
+          reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+        });
+      }
+      if (
+        route !== this.#route
+        || (this.#pendingPlayout ?? this.#settlingPlayout) === null
+        || this.#status !== 'playing'
+      ) {
+        throw Object.assign(new Error('formal overlap capture rotation lost authority'), {
+          reason: 'FORMAL_OVERLAP_CAPTURE_ROTATION_UNAVAILABLE',
+        });
+      }
+    };
+    requireSafeRotation();
     this.#captureStopExpected = true;
     try {
       await this.#audio.stopCapture('formal_overlap_capture_rotation');
     } finally {
       this.#captureStopExpected = false;
     }
-    this.#requireCurrent(operationGeneration);
+    requireSafeRotation();
     this.#drainCaptureFrames();
     const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
     let pending = route.leaf.flush();
     while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
       await waitTurn();
-      this.#requireCurrent(operationGeneration);
+      requireSafeRotation();
       this.#drainCaptureFrames();
       pending = route.leaf.flush();
     }
@@ -1195,9 +1226,10 @@ export class ProductP1VoiceRouteOwner {
       });
     }
     await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
-    this.#requireCurrent(operationGeneration);
+    requireSafeRotation();
     this.#frames = [];
     this.#captureSpeechObserved = false;
+    this.#captureProviderSpeechStartObserved = false;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     if (this.#route === route) this.#route = null;
@@ -1211,24 +1243,38 @@ export class ProductP1VoiceRouteOwner {
   async #rotateIdleCapture(operationGeneration: number): Promise<void> {
     const route = this.#route;
     const priorAuthority = this.#mediaCloseBinding;
-    if (route === null || priorAuthority === null || this.#status !== 'capturing' || this.#captureSpeechObserved) {
+    if (route === null || priorAuthority === null) {
       throw Object.assign(new Error('formal idle capture rotation lost authority'), {
         reason: 'FORMAL_IDLE_CAPTURE_ROTATION_UNAVAILABLE',
       });
     }
+    const requireSafeRotation = (): void => {
+      this.#requireCurrent(operationGeneration);
+      if (this.#captureProviderSpeechStartObserved) {
+        throw Object.assign(new Error('formal idle capture observed speech before rotation settled'), {
+          reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
+        });
+      }
+      if (route !== this.#route || this.#status !== 'capturing' || this.#captureSpeechObserved) {
+        throw Object.assign(new Error('formal idle capture rotation lost authority'), {
+          reason: 'FORMAL_IDLE_CAPTURE_ROTATION_UNAVAILABLE',
+        });
+      }
+    };
+    requireSafeRotation();
     this.#captureStopExpected = true;
     try {
       await this.#audio.stopCapture('formal_idle_capture_rotation');
     } finally {
       this.#captureStopExpected = false;
     }
-    this.#requireCurrent(operationGeneration);
+    requireSafeRotation();
     this.#drainCaptureFrames();
     const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
     let pending = route.leaf.flush();
     while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
       await waitTurn();
-      this.#requireCurrent(operationGeneration);
+      requireSafeRotation();
       this.#drainCaptureFrames();
       pending = route.leaf.flush();
     }
@@ -1238,9 +1284,10 @@ export class ProductP1VoiceRouteOwner {
       });
     }
     await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
-    this.#requireCurrent(operationGeneration);
+    requireSafeRotation();
     this.#frames = [];
     this.#captureSpeechObserved = false;
+    this.#captureProviderSpeechStartObserved = false;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     if (this.#route === route) this.#route = null;
@@ -1440,6 +1487,7 @@ export class ProductP1VoiceRouteOwner {
       if (
         route === null ||
         this.#closed ||
+        this.#closeRequested ||
         this.#failureCleanupPromise !== null ||
         (this.#pendingPlayout !== pending && this.#settlingPlayout !== pending)
       )
@@ -1461,7 +1509,7 @@ export class ProductP1VoiceRouteOwner {
       event.state === 'failed' && ['audio_output_selection_lost', 'audio_output_selection_unverified'].includes(event.reason)
         ? stableCaptureStopReason(event.reason)
         : null;
-    if (deviceFailure !== null && this.#failureCleanupPromise === null && !this.#closed) {
+    if (deviceFailure !== null && this.#failureCleanupPromise === null && !this.#closed && !this.#closeRequested) {
       const failure = Object.assign(new Error('formal browser output selection failed'), { reason: deviceFailure });
       if (pending !== null) {
         this.#pendingPlayout = null;
@@ -1524,7 +1572,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #observeMediaTerminal(route: ActiveBrowserDedicatedMediaRoute, event: Readonly<DedicatedMediaTerminalEvent>): void {
-    if (event.source === 'local_close' || this.#closed || this.#failureCleanupPromise !== null) return;
+    if (event.source === 'local_close' || this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null) return;
     const pending = this.#pendingPlayout ?? this.#settlingPlayout;
     if (this.#route !== route && pending?.downlinkRoute !== route) return;
     if (event.source === 'expected_completion') {
@@ -1609,22 +1657,27 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
-    if (this.#closed || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
-    if (!this.#captureSpeechObserved) {
+    if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
+    const captureDuringPlayout = this.#status === 'playing';
+    if (!captureDuringPlayout && !this.#captureSpeechObserved) {
       let energy = 0;
       for (const sample of frame.samples) energy += sample * sample;
       this.#captureSpeechObserved =
         Math.sqrt(energy / frame.samples.length) >= CAPTURE_SPEECH_ENERGY_FLOOR;
     }
     const activePlayout = this.#pendingPlayout ?? this.#settlingPlayout;
-    const canRotateSilentCapture =
+    const speechObservedForDurationBound =
+      this.#captureProviderSpeechStartObserved
+      || (!captureDuringPlayout && this.#captureSpeechObserved);
+    const canRotateBoundedCapture =
       this.#frames.length === MAX_CAPTURE_FRAMES - 1 &&
-      !this.#captureSpeechObserved &&
+      !speechObservedForDurationBound &&
       ((this.#status === 'playing' && activePlayout !== null) || this.#status === 'capturing');
-    if (canRotateSilentCapture) {
-      // Keep the exact boundary frame before rotating. Once local speech energy
-      // has been observed, the duration bound fails closed instead of clearing
-      // an utterance that is still waiting for authoritative server EOT.
+    if (canRotateBoundedCapture) {
+      // Keep the exact boundary frame before rotating. During TTS overlap,
+      // loudspeaker echo can cross the local energy floor, so only the current
+      // media lease's authoritative speech-start protects a real utterance.
+      // Outside playout, local energy remains the conservative idle guard.
       this.#frames.push(frame);
       this.#drainCaptureFrames();
       if (this.#captureRotationPromise === null) {
@@ -1646,11 +1699,11 @@ export class ProductP1VoiceRouteOwner {
     if (
       this.#captureRotationPromise !== null &&
       frame.capture.capture_id === this.#captureRotationSourceId &&
-      !this.#captureSpeechObserved
+      !speechObservedForDurationBound
     ) {
-      // The exact silent boundary frame is already retained and draining.
-      // Ignore only additional silence emitted while the expected local stop
-      // settles; newly observed speech still takes the fail-closed path below.
+      // The exact boundary frame is already retained and draining. Ignore only
+      // additional uncommitted frames emitted while the expected local stop
+      // settles; authoritative speech-start still takes the fail-closed path.
       return;
     }
     if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
@@ -1745,6 +1798,7 @@ export class ProductP1VoiceRouteOwner {
       this.#setStatus('closed', null);
       return;
     }
+    if (this.#closeRequested) return;
     // A late continuation from the operation already fenced by the first
     // failure cannot start a second cleanup or replace its exact stable reason.
     if (this.#failureCleanupReason !== null && ['cleanup_pending', 'failed'].includes(this.#status) && this.#failureCleanupPromise === null) return;
@@ -1807,6 +1861,7 @@ export class ProductP1VoiceRouteOwner {
     // sufficient for an exact retry and must never retain expired audio.
     this.#frames = [];
     this.#captureSpeechObserved = false;
+    this.#captureProviderSpeechStartObserved = false;
     this.#captureRotationSourceId = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
@@ -1966,6 +2021,7 @@ export class ProductP1VoiceRouteOwner {
     ) {
       throw new Error('speech-start control escaped its media authority');
     }
+    this.#captureProviderSpeechStartObserved = true;
     this.#pendingSpeechStart = event;
     this.#deliverBargeInSpeechStart(operationGeneration, route);
   }

@@ -499,13 +499,13 @@ async def test_task_notification_allocates_current_generation_and_waits_for_ack(
     await current.start()
     await current.open_interaction("interaction-1")
 
-    dialogue = commit(text="ordinary dialogue")
+    dialogue = commit(text="帮我在后台创建巴黎一日行程.md")
     first = await current.present_authoritative_text(
         request_id="authoritative-request-1",
         response_id="authoritative-response-1",
         correlation_id="correlation-authoritative-1",
         commit=dialogue,
-        text="ordinary answer",
+        text="后台任务已受理，正在等待执行。",
         channel_id="web",
     )
     first_notification = await asyncio.wait_for(current.next_notification(), timeout=1)
@@ -522,6 +522,7 @@ async def test_task_notification_allocates_current_generation_and_waits_for_ack(
     )
     assert first_ack.accepted is True
     assert current.task_notification_foreground_safe() is True
+    assert current.select_formal_context(dialogue.interaction_id).entries == ()
 
     terminal_commit = commit(
         turn_id="turn-task-notification-1",
@@ -568,6 +569,8 @@ async def test_task_notification_allocates_current_generation_and_waits_for_ack(
     )
     assert terminal_ack.accepted is True
     assert current.task_notification_foreground_safe() is True
+    assert current.select_formal_context(dialogue.interaction_id).entries == ()
+    assert lower.calls == 0
     await current.close(timeout_seconds=1)
 
 

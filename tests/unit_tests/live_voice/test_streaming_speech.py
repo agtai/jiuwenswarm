@@ -249,6 +249,21 @@ def test_server_vad_default_tolerates_a_natural_breath_pause() -> None:
     assert detection.server_vad.interrupt_response is False
 
 
+def test_server_vad_barge_in_retains_wider_prefix_without_changing_authority() -> None:
+    detection = RecognitionTurnDetection.server_vad_barge_in()
+
+    assert detection.server_vad is not None
+    assert detection.server_vad.threshold == 0.5
+    assert detection.server_vad.prefix_padding_ms == 800
+    assert detection.server_vad.silence_duration_ms == 1_200
+    assert detection.server_vad.create_response is False
+    assert detection.server_vad.interrupt_response is False
+    assert (
+        RecognitionTurnDetection.server_vad_default().server_vad.prefix_padding_ms
+        == 300
+    )
+
+
 def test_server_vad_boundaries_require_same_item_and_cursorless_final() -> None:
     capability = replace(
         native_capability(),
@@ -1471,9 +1486,7 @@ def test_synthesis_event_timeout_slides_after_each_valid_event() -> None:
         native_capability(), enabled=True, monotonic=lambda: now[0]
     )
     response_ref = response()
-    request = synthesis_request(
-        response_ref=response_ref, event_timeout_seconds=1
-    )
+    request = synthesis_request(response_ref=response_ref, event_timeout_seconds=1)
     runtime.activate_response(response_ref)
     runtime.start_synthesis(request)
 

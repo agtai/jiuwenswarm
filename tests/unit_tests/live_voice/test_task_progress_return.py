@@ -1151,6 +1151,59 @@ async def test_concrete_authority_source_is_the_only_atomic_voice_handoff(
 
 
 @pytest.mark.asyncio
+async def test_concrete_authority_source_replays_store_prefix_for_text_projection(
+    tmp_path: Path,
+) -> None:
+    store, task_id, correlation_id = _authority_task(tmp_path)
+    _advance_authority_task_running(store, task_id)
+    before = store.counts()
+    binding = _binding(
+        TaskProgressOriginKind.TEXT,
+        task_id=task_id,
+        correlation_id=correlation_id,
+    )
+    grant = _grant(task_id=task_id)
+    source = TaskEventAuthorityProgressSource(
+        store=store,
+        authorization=grant,
+        scope=binding.scope,
+        task_id=task_id,
+        poll_interval=0.001,
+        clock=lambda: NOW,
+    )
+    text_events: list[TaskProgressTextEvent] = []
+    bridge = _bridge(
+        origin_kind=TaskProgressOriginKind.TEXT,
+        subscription=cast(_SubscriptionDouble, source.subscription),
+        prepared_source=cast(_PreparedSourceDouble, source),
+        authorization=grant,
+        binding=binding,
+        text_events=text_events,
+    )
+
+    activation = await bridge.activate()
+    assert activation.active is True
+    # Text remains a display projection; the exact Store handoff is internal.
+    assert activation.handoff_kind is None
+    assert activation.handoff_evidence_id is None
+    assert activation.lease is not None
+    await _wait_until(lambda: len(text_events) == 2)
+    assert [item.task_event.seq for item in text_events] == [0, 3]
+    assert [item.task_event.event_type for item in text_events] == [
+        "task.accepted",
+        "task.running",
+    ]
+    snapshot = bridge.snapshot()
+    assert snapshot.unprojected_events == 2
+    assert snapshot.projected_events == 2
+    assert snapshot.text_events == 2
+    assert snapshot.voice_intents == 0
+    assert store.counts() == before
+    await activation.lease.close()
+    assert bridge.snapshot().state is TaskProgressReturnState.CLOSED
+
+
+@pytest.mark.asyncio
 async def test_retry_segment_projects_from_authority_owned_nonzero_baseline(
     tmp_path: Path,
 ) -> None:

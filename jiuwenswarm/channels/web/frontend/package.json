@@ -6,8 +6,11 @@
   "scripts": {
     "predev": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "prebuild": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
+    "prebuild:live-voice": "cd ../../../.. && node ./jiuwenswarm/scripts/generate-agent-folders.js",
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:live-voice": "tsc && vite build --mode live-voice",
+    "test:live-voice-build-profiles": "node --test tests/liveVoiceBuildProfiles.test.mjs",
     "test:code-turn-diff-binding": "tsc src/features/code-mode/codeTurnDiffBinding.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/code-turn-diff-binding --skipLibCheck --noEmitOnError && node --test tests/codeTurnDiffBinding.test.mjs",
     "test:turn-change-state": "tsc src/features/code-mode/turnChangeState.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/turn-change-state --skipLibCheck --noEmitOnError && node --test tests/turnChangeState.test.mjs",
     "test:git-publish-state": "tsc src/features/code-mode/gitPublishState.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/git-publish-state --skipLibCheck --noEmitOnError && node --test tests/gitPublishState.test.mjs",

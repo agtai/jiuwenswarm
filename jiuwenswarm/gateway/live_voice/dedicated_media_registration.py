@@ -552,6 +552,7 @@ class _MediaAuthority:
     issued_at: float
     ticket_expires_at: float
     authority_expires_at: float
+    barge_in_capture: bool = False
     ticket_consumed: bool = False
     route_completed: bool = False
     accepted_frames: int = 0
@@ -1281,6 +1282,22 @@ class DedicatedMediaProductRegistry:
                 raise MediaTransportViolation(
                     "MEDIA_ROUTE_CAPACITY_EXCEEDED", "media route capacity is full"
                 )
+            # Product P1 opens the replacement uplink after the authoritative
+            # response downlink exists and before playout begins. That exact
+            # overlap is the only capture profile that receives the wider VAD
+            # prefix; ordinary turns keep the provider default.
+            record.barge_in_capture = any(
+                candidate.binding.direction is MediaDirection.DOWNLINK
+                and not candidate.route_completed
+                and candidate.binding.session_id == session_id
+                and candidate.binding.interaction_id == interaction_id
+                and candidate.binding.correlation_id == correlation_id
+                and candidate.product_activation_id == activation_id
+                and candidate.product_activation_generation == activation_generation
+                and candidate.downlink_response is not None
+                and now <= candidate.authority_expires_at
+                for candidate in self._records.values()
+            )
             self._records[record_id] = record
             self._pending_tickets[ticket] = record_id
             self._subjects[(session_id, subject_id)] = record_id
@@ -1444,7 +1461,11 @@ class DedicatedMediaProductRegistry:
             handle, fallback = await owner.begin(
                 record.binding,
                 turn_detection=(
-                    RecognitionTurnDetection.server_vad_default()
+                    (
+                        RecognitionTurnDetection.server_vad_barge_in()
+                        if record.barge_in_capture
+                        else RecognitionTurnDetection.server_vad_default()
+                    )
                     if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
                     else RecognitionTurnDetection.manual()
                 ),

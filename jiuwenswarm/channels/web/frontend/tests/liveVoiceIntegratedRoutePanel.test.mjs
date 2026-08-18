@@ -10,6 +10,8 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import {
   LiveVoiceIntegratedRoutePanelView,
   PRODUCT_P2_NOTIFICATION_CLIENT_TIMEOUT_MS,
+  PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS,
+  PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY,
   bindProductVoiceTaskOrigin,
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
@@ -19,11 +21,17 @@ import {
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
+  productP2NotificationRepollDelayMs,
   productP3RetryInspectionFailureReason,
+  productP3ProgressReconciliationRetryDelayMs,
+  productP3ProgressFailureIsQuarantinable,
+  rememberProductP3ProgressExhaustion,
   productVoiceDraftMatchesBinding,
   recognizedSpeechConfirmationMatches,
   productTextBlockedByP1Status,
   progressMatchesOwnedBinding,
+  productRecoveryDiagnosticMatchesClear,
+  productTaskProgressTranslationKey,
   resolveProductTaskCreateOrigin,
   retainBoundedPresentedProductResponse,
   shouldYieldProductP2PollToVoiceCapture,
@@ -520,6 +528,64 @@ test('natural-language task status projects the authoritative terminal result', 
   );
 });
 
+test('accepted and running task progress use distinct localized presentation truth', async () => {
+  assert.equal(productTaskProgressTranslationKey('accepted'), 'liveVoice.formal.taskStateAccepted');
+  assert.equal(productTaskProgressTranslationKey('running'), 'liveVoice.formal.taskStateRunning');
+  assert.equal(productTaskProgressTranslationKey('decision_required'), 'liveVoice.formal.taskState');
+  const [zh, en] = await Promise.all([
+    readFile(new URL('../src/i18n/locales/zh.json', import.meta.url), 'utf8').then(JSON.parse),
+    readFile(new URL('../src/i18n/locales/en.json', import.meta.url), 'utf8').then(JSON.parse),
+  ]);
+  assert.equal(zh.liveVoice.formal.taskStateAccepted, '已受理，正在等待执行');
+  assert.equal(zh.liveVoice.formal.taskStateRunning, '正在执行');
+  assert.equal(en.liveVoice.formal.taskStateAccepted, 'Accepted; waiting to run');
+  assert.equal(en.liveVoice.formal.taskStateRunning, 'Running');
+});
+
+test('activation recovery scope converges only through its exact Session and correlation successor', () => {
+  const scopeDiagnostic = Object.freeze({
+    seam: 'activation',
+    disposition: 'retrying',
+    reason: 'P2_REFRESH_RECONCILIATION_REQUIRED',
+    session_id: 'scope-session',
+    correlation_id: 'scope-correlation',
+    interaction_id: null,
+    activation_id: null,
+    activation_generation: null,
+    response_id: null,
+    response_generation: null,
+  });
+  const successor = Object.freeze({
+    session_id: 'scope-session',
+    correlation_id: 'scope-correlation',
+    interaction_id: 'scope-interaction',
+    activation_id: 'scope-activation',
+    activation_generation: 2,
+  });
+
+  assert.equal(
+    productRecoveryDiagnosticMatchesClear(scopeDiagnostic, {
+      seam: 'activation',
+      binding: successor,
+    }),
+    true,
+  );
+  assert.equal(
+    productRecoveryDiagnosticMatchesClear(scopeDiagnostic, {
+      seam: 'activation',
+      binding: { ...successor, correlation_id: 'foreign-correlation' },
+    }),
+    false,
+  );
+  assert.equal(
+    productRecoveryDiagnosticMatchesClear(
+      { ...scopeDiagnostic, interaction_id: 'old-interaction', activation_id: 'old-activation', activation_generation: 1 },
+      { seam: 'activation', binding: successor },
+    ),
+    false,
+  );
+});
+
 test('recognized Speech confirmation is fenced to its exact Session and displayed text', () => {
   const pending = Object.freeze({
     intent: 'agent',
@@ -609,6 +675,28 @@ test('P2 notification classification surfaces failures and treats transport keep
   assert.equal(replayedPresentation.task_notification, false);
   assert.equal(replayedPresentation.adjustment_notification, false);
   assert.equal(replayedPresentation.history_message_id, `live-voice:interaction-1:response-stable:7:text:0:0:${'a'.repeat(64)}`);
+  const dialogueTaskClaim = classifyProductP2Notification({
+    kind: 'agent.output',
+    task_notification: true,
+    adjustment_notification: true,
+    response: {
+      interaction_id: 'interaction-1',
+      response_id: 'response-dialogue-claim',
+      response_generation: 8,
+    },
+    agent_event: {
+      event_type: 'chat.final',
+      text: '修改已经应用，后台任务已完成，结果已经生成。',
+      source_provenance: '{"source":"formal_speech_recognition"}',
+      task_id: 'task-forged',
+      state: 'terminal',
+      outcome: 'completed',
+    },
+    presentation_unit: { surface: 'text', unit_id: 'unit-dialogue-claim', seq: 0 },
+  });
+  assert.equal(dialogueTaskClaim.kind, 'presentation');
+  assert.equal(dialogueTaskClaim.task_notification, false);
+  assert.equal(dialogueTaskClaim.adjustment_notification, false);
   const terminalPresentation = classifyProductP2Notification({
     kind: 'agent.output',
     response: {
@@ -708,6 +796,23 @@ test('foreground response waiting retains P2 polling ahead of a queued terminal 
   assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, foreground_response_waiting: true }), false);
   assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, voice_loop_enabled: false }), false);
   assert.equal(shouldYieldProductP2PollToVoiceCapture({ ...input, terminal_notification_check_required: false }), false);
+  assert.equal(
+    productP2NotificationRepollDelayMs({
+      disposition: { kind: 'continue' },
+      terminal_notification_check_required: true,
+      foreground_response_waiting: true,
+    }),
+    PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS,
+  );
+  assert.equal(PRODUCT_P2_NOTIFICATION_PENDING_BACKOFF_MS >= 500, true);
+  assert.equal(
+    productP2NotificationRepollDelayMs({
+      disposition: { kind: 'continue' },
+      terminal_notification_check_required: false,
+      foreground_response_waiting: true,
+    }),
+    0,
+  );
 });
 
 test('Web response error extraction preserves nested product reason', () => {
@@ -1176,6 +1281,60 @@ test('P3 progress reconciliation advances accepted UI truth only from exact auth
   }
 });
 
+test('P3 progress reconciliation retry is bounded and cannot become a busy loop', () => {
+  assert.deepEqual(
+    [1, 2, 3, 4, 5, 0, Number.NaN].map(productP3ProgressReconciliationRetryDelayMs),
+    [250, 500, 1000, null, null, null, null],
+  );
+});
+
+test('P3 exhausted-delivery quarantine stays bounded and duplicate bad deliveries do not grow it', () => {
+  assert.equal(
+    productP3ProgressFailureIsQuarantinable(
+      new Error('formal product progress source, state, outcome, or producer mismatch'),
+    ),
+    true,
+  );
+  assert.equal(productP3ProgressFailureIsQuarantinable(Object.assign(new Error('transport timeout'), { reason: 'REQUEST_TIMEOUT' })), false);
+  const exhausted = new Map();
+  for (let index = 0; index < PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 32; index += 1) {
+    rememberProductP3ProgressExhaustion(exhausted, `bad-delivery-${index}`);
+  }
+  assert.equal(exhausted.size, PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY);
+  assert.equal(exhausted.has('bad-delivery-0'), false);
+  assert.equal(exhausted.has(`bad-delivery-${PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 31}`), true);
+  const sizeBeforeDuplicate = exhausted.size;
+  rememberProductP3ProgressExhaustion(exhausted, `bad-delivery-${PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 31}`);
+  rememberProductP3ProgressExhaustion(exhausted, `bad-delivery-${PRODUCT_P3_PROGRESS_EXHAUSTED_CAPACITY + 31}`);
+  assert.equal(exhausted.size, sizeBeforeDuplicate);
+});
+
+test('P3 progress reconciliation authenticates an early delivery when task.events has already advanced to a later head', async () => {
+  const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
+  const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
+  const running = retryEvent(1, {
+    attemptId: 'attempt-a',
+    eventType: 'task.running',
+    state: 'running',
+    sourceEventId: 'executor-a:1',
+    causationId: 'executor-a:1',
+  });
+  adoptTaskEvents(leaf, retryEvents([accepted], 0));
+
+  const record = await reconcileProductP3ProgressEvent({
+    request: async () => retryEvents([accepted, running], 1),
+    leaf,
+    event: productProgressForTaskEvent(accepted),
+    session_id: 'session-1',
+    request_nonce: 'advanced-head',
+    is_current: () => true,
+  });
+
+  assert.equal(record.state, 'running');
+  assert.equal(record.last_event_seq, 1);
+  assert.deepEqual(leaf.snapshot().progress_receipts, []);
+});
+
 test('P3 progress reconciliation works after reconnect with the new connection generation', async () => {
   const leaf = new FormalTaskControlLeaf({ enabled: true, binding: retryBinding });
   const accepted = retryEvent(0, { attemptId: 'attempt-a', eventType: 'task.accepted', state: 'accepted' });
@@ -1369,11 +1528,12 @@ test('actual Live Voice product entry selects the formal P1 owner while compatib
   const barSource = await readFile(new URL('../src/components/ChatPanel/LiveVoiceDemoBar.tsx', import.meta.url), 'utf8');
   const formalProps = source.slice(
     source.indexOf('const formalLiveVoiceDemoProps'),
-    source.indexOf('const liveVoiceDemoProps'),
+    source.indexOf('const liveVoiceDemoBar'),
   );
 
   assert.match(source, /FEATURE_LIVE_VOICE_INTEGRATED_WEB\s*&&\s*FEATURE_LIVE_VOICE_INTEGRATED_P1/);
-  assert.match(source, /const liveVoiceDemoProps = formalProductVoiceEnabled \? formalLiveVoiceDemoProps : legacyLiveVoiceDemoProps/);
+  assert.match(source, /formalProductVoiceEnabled\s*\?\s*\(\s*<FormalProductLiveVoiceDemoBar/);
+  assert.match(source, /surfaceState=\{productVoiceState\}/);
   assert.match(source, /productVoiceControlRef\.current\?\.start\(\)/);
   assert.match(source, /productVoiceControlRef=\{formalProductVoiceEnabled \? productVoiceControlRef : undefined\}/);
   assert.match(source, /addMessageIfAbsent\(event\.session_id/);
@@ -1414,9 +1574,10 @@ test('recognized P1 text can enter P2 while every retained voice operation block
   assert.match(source, /'failed', 'cleanup_pending', 'closed'/);
   assert.match(source, /PRODUCT_PRESENTATION_ACK_RECOVERY_REQUIRED/);
   assert.match(source, /setP2RecoveryEpoch\(epoch => epoch \+ 1\)/);
+  assert.match(source, /isStaleProductResponseError\(error\)/);
   assert.match(
     source,
-    /isStaleProductResponseError\(error\)[\s\S]{0,300}setProductTextReason\(null\)[\s\S]{0,120}setProductTextStatus\('waiting'\)/,
+    /setProductTextReason\(null\)[\s\S]{0,120}setProductTextStatus\(foregroundPresentationPendingRef\.current \? 'waiting' : 'acknowledged'\)/,
   );
 });
 
@@ -1508,6 +1669,17 @@ test('overlap capture publishes its exact binding before playout EOT can race co
   assert.match(handler, /voiceLoopGenerationRef\.current === loopGeneration/);
   assert.match(handler, /p1VoiceOwnerRef\.current === owner/);
   assert.match(handler, /p1VoiceCaptureBindingRef\.current = binding/);
+});
+
+test('explicit Live Voice exit fences old playout settlement without blocking its visible-text ACK', async () => {
+  const source = await readFile(new URL('../src/components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx', import.meta.url), 'utf8');
+  const start = source.indexOf('const playoutLoopGeneration = voiceLoopGenerationRef.current;');
+  const end = source.indexOf('const settleRetainedP2Operations', start);
+  const handler = source.slice(start, end);
+
+  assert.equal(start >= 0 && end > start, true);
+  assert.match(handler, /const isCurrentVoicePlayout = \(\) =>[\s\S]*?voiceLoopEnabledRef\.current[\s\S]*?voiceLoopGenerationRef\.current === playoutLoopGeneration/);
+  assert.match(handler, /if \(!isCurrentVoicePlayout\(\)\) \{[\s\S]*?if \(isCurrentPresentationAttempt\(\)\) retainAck\(\)/);
 });
 
 test('missing Session stays unsupported in the rendered UI rather than inferring a fallback success', async () => {

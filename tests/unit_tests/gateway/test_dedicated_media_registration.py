@@ -1532,6 +1532,8 @@ def test_synthesis_downlink_requires_real_overlapping_uplink_before_duplex_recei
     next_ticket = _media_ticket(next_activation)
     next_uplink = registry.consume_ticket(next_ticket, request_origin=ORIGIN)
     assert next_uplink is not None
+    assert parent.barge_in_capture is False
+    assert next_uplink.barge_in_capture is True
     registry.mark_downlink_started(downlink)
     assert downlink.downlink_overlap_record_id == next_uplink.record_id
     assert downlink.downlink_overlap_observed is False
