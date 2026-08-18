@@ -71,7 +71,7 @@ credit and does not repair defects.
 | Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
 | Integrated Web product experience | **PARTIAL.** One-click hands-free shell, formal route, progress, TTS and current Task presentation exist | Formal route becomes the only supported default; truthful queued/running/terminal UX; device/privacy/recovery UX; legacy hook/flags removed | All P1/P2/P3 owners plus complete human journey |
-| Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist | Stable activation/generation/ACK/TTS diagnostics; p50/p95 metrics for analysis, timely response and the user-named `article` path; define `article` before measuring | Instrumentation before optimization; fixed corpus/environment |
+| Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist | Execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md): fresh physical baseline; stable EOT/Agent/TTS/first-audible diagnostics; low-risk pipeline waits; authoritative ACK; formal sentence-level Agent→TTS overlap; fixed-corpus p50/p95 and no-regression proof | Instrumentation before optimization; fixed corpus/environment; Conversation Runtime and P1 media owners |
 | Automated verification and product acceptance | **PARTIAL.** Broad exact-source backend/frontend/build/review credit exists | Affected defect reruns, capability-owned test migration, cumulative feature-complete matrix, clean real Journey, competitor-gap review and independent deep review | Root `TESTING.md`, current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete | Explicit Demo profile; remove `.env.production` default-on dependency; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
@@ -121,8 +121,9 @@ not invalidate the historical exact-source Alpha result.
   production default-on flags; affected positive/negative/flag-off/recovery/
   concurrency and zero-forbidden-effect tests. (The fresh audit itself is now
   complete and is no longer a packet work item.)
-- **Excluded:** multi-Task/full-P3 expansion, broad duplicate abstraction,
-  competitor feature additions, Production work and `develop` integration.
+- **Excluded:** multi-Task/full-P3 expansion, broad latency optimization, broad
+  duplicate abstraction, competitor feature additions, Production work and
+  `develop` integration.
 - **Acceptance:** affected backend and Integrated Web checks, cold scoped review,
   independent Tier-3 review, cumulative diff review and one clean immutable
   [product-readiness acceptance](validation/PRODUCT_READINESS_ACCEPTANCE.md) run
@@ -144,9 +145,11 @@ not invalidate the historical exact-source Alpha result.
 4. Migrate applicable old test oracles, then perform code placement, duplicate
    consolidation and entrypoint/document retirement without deleting live
    coverage.
-5. Complete P1/P2 quality in parallel with full P3: Speech/Media/Runtime/
-   Interaction latency and recovery on one side; multi-Task, full controls,
-   replay, capability-driven Executor and D1/D2 semantics on the other.
+5. Complete P1/P2 quality in parallel with full P3: execute the
+   [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
+   across Speech/Media/Runtime/Interaction latency and recovery on one side;
+   multi-Task, full controls, replay, capability-driven Executor and D1/D2
+   semantics on the other.
 6. Generalize Provider/Executor/configuration/language/task policy and remove
    the exact itinerary, trusted Demo bypass, one-current-Task assumption and
    legacy product routes.
@@ -181,8 +184,12 @@ not invalidate the historical exact-source Alpha result.
 - **Duplicates:** combine registry generation-index traversal only if its owner
   is touched by the defect repair. Formal validators/snapshots wait for the code
   organization batch; authority handlers remain explicit unless semantics match.
-- **Latency:** define `article`, then benchmark analysis, timely-response and
-  article paths before optimizing.
+- **Latency:** the code-fact diagnosis and implementation approach are now
+  defined in the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md).
+  Establish its current physical baseline first, then execute low-risk pipeline
+  work, truthful acknowledgement and formal sentence-level Agent→TTS overlap.
+  This remains queued P1/P2 quality work, not completion credit or part of the
+  current product-truth repair packet.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.
