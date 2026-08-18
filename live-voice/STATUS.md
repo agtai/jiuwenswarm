@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-17. This is the only mutable source for current product
+> Updated: 2026-08-18. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -26,9 +26,10 @@
   close the confirmed product-truth defects (result-context capacity, semantic
   routing, recovery diagnostics) and re-verify Executor terminalization and
   admission truth on one clean immutable candidate.
-- **Integration:** `origin/develop` integration is deferred until the
-  feature-complete boundary below passes. Git must be re-read at that future
-  boundary; historical divergence counts are not current facts.
+- **Integration:** integration with a `develop` ref is deferred until the
+  feature-complete boundary below passes. At that future boundary, re-read the
+  configured remotes and live ref before any integration; this document assumes
+  no current remote name or divergence count.
 
 ## Completion boundaries
 
@@ -57,6 +58,11 @@ These rows are evidence-based planning judgements, now grounded in the
 [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md). That
 audit is documentation, not product progress: it grants no new module-completion
 credit and does not repair defects.
+
+The detailed complete-P3 workload, P3alpha inheritance and package acceptance
+are defined in the [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md).
+That preparatory contract is not the active queue; this STATUS still activates
+only one coherent packet at a time.
 
 | Capability / module | Status and implemented fact | Remaining for feature complete | Dependency / acceptance |
 |---|---|---|---|
@@ -111,26 +117,43 @@ not invalidate the historical exact-source Alpha result.
   clean controlled product-readiness candidate.
 - **Capability/modules:** Executor & Durability, Task Control Core,
   Voice–Task Bridge, Agent Bridge, Conversation Runtime and presentation/TTS.
-- **Preparation:** the read-only 15-domain audit is complete (see
-  [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md));
-  remaining preparation is defect-repair planning against the reconciled STATUS.
+- **Preparation:** the read-only 15-domain audit and its recommended repair
+  order are complete (see the
+  [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md) §17);
+  no product repair receives credit until its owner-scoped implementation packet
+  and applicable tests are executed.
 - **Risk:** the audit is Tier 0 read-only work; confirmed implementation remains
   Tier 3 authority, mutation, durability and cross-module state.
-- **Included:** the six re-scoped defects above; bounded timeout/orphan recovery;
-  accepted/queued/running display wording; explicit Demo profile replacing
-  production default-on flags; affected positive/negative/flag-off/recovery/
-  concurrency and zero-forbidden-effect tests. (The fresh audit itself is now
-  complete and is no longer a packet work item.)
+- **Included:** the six re-scoped defects above; bounded D0 timeout/orphan
+  settlement and diagnostics needed for truthful candidate state;
+  accepted/queued/running display wording; one explicit named Demo profile
+  replacing production default-on flags while flag-off preserves the text path;
+  affected positive/negative/flag-off/recovery/concurrency and
+  zero-forbidden-effect tests. (The fresh audit itself is complete and is no
+  longer a packet work item.)
 - **Excluded:** multi-Task/full-P3 expansion, broad latency optimization, broad
-  duplicate abstraction, competitor feature additions, Production work and
-  `develop` integration.
+  duplicate abstraction, D1 checkpoint/D2 reconciliation, competitor feature
+  additions, Production work and `develop` integration.
+- **First action and order:** instantiate B6 recovery correlation as the first
+  owner-scoped Tier-3 repair batch, including its recovery-seam test; then B5
+  legal result-context capacity, B3 semantic routing, B4/B2 negative-oracle and
+  display truth, and finally the B1/B2 clean physical re-verification. Each
+  batch names exact source/tests, exclusions and zero-forbidden-effect evidence
+  before implementation.
+- **Deliverables:** affected product/test changes, per-batch scoped and
+  independent review evidence, the explicit Demo profile, and one exact clean
+  candidate with truthful adjustment/result/terminal presentation. A repair
+  batch may close only its affected findings; it cannot grant full-P3 credit.
 - **Acceptance:** affected backend and Integrated Web checks, cold scoped review,
   independent Tier-3 review, cumulative diff review and one clean immutable
   [product-readiness acceptance](validation/PRODUCT_READINESS_ACCEPTANCE.md) run
   using the [human journey](demo/PRODUCT_READINESS_SHOWCASE.md).
-- **Contract/evidence inputs:** D-085, current source/tests, applicable D119
-  boundaries and the completed defect-discovery record; historical stage
-  packets do not define this work.
+- **Contract/evidence inputs:** the
+  [D-085 code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md), current
+  source/tests, applicable frozen boundaries from
+  [D119](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md),
+  and the sanitized [Post-Alpha defect run](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md).
+  Historical stage packets do not define this work.
 
 ## Dependency route to feature complete
 
@@ -145,11 +168,12 @@ not invalidate the historical exact-source Alpha result.
 4. Migrate applicable old test oracles, then perform code placement, duplicate
    consolidation and entrypoint/document retirement without deleting live
    coverage.
-5. Complete P1/P2 quality in parallel with full P3: execute the
+5. Complete P1/P2 quality in parallel with the
+   [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md): execute the
    [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
    across Speech/Media/Runtime/Interaction latency and recovery on one side;
-   multi-Task, full controls, replay, capability-driven Executor and D1/D2
-   semantics on the other.
+   activate owner-scoped packages for multi-Task, full controls, replay,
+   capability-driven Executor and supported D1/D2 semantics on the other.
 6. Generalize Provider/Executor/configuration/language/task policy and remove
    the exact itinerary, trusted Demo bypass, one-current-Task assumption and
    legacy product routes.
@@ -157,7 +181,8 @@ not invalidate the historical exact-source Alpha result.
    then perform independent cross-module deep review.
 8. Pass the feature-complete automated, integration and human acceptance on one
    exact clean source.
-9. Only then audit and integrate `origin/develop`, rerun affected cumulative
+9. Only then audit the configured remotes and live `develop` ref, select and
+   execute the accepted integration strategy, rerun affected cumulative
    verification and form the productized candidate.
 10. Perform RC/Production security, operations, compatibility and release work
    under a separate acceptance boundary.

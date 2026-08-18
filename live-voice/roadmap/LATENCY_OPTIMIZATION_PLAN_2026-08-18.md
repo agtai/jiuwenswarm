@@ -5,11 +5,14 @@
 > of current priority, progress, blockers and completion credit. This document
 > owns the latency diagnosis, implementation shape and acceptance boundary.
 >
-> **Code-fact baseline:** current tree at `c8c2c2493987e808662ab0ad099d445ab918633a`;
+> **Code-fact analysis baseline:** frozen at
+> `c8c2c2493987e808662ab0ad099d445ab918633a`;
 > the latest product-code commit in that tree is
 > `ca9a9d9a3be5f76c4feee980030a1b3ce065b9ab`. The two supplied analyses and the
 > PDF *从 30 秒到 2 秒：一套实时语音 Agent，是怎样不再“傻等”的* are idea
-> sources, not implementation or performance authorities.
+> sources, not implementation or performance authorities. Read current Git and
+> mutable product status from Git and [STATUS](../STATUS.md), not this frozen
+> analysis baseline.
 >
 > Date: 2026-08-18
 
@@ -34,9 +37,9 @@ The first layer is a prerequisite, not observability polish. Without it, a
 smaller queue or VAD value can make the median look faster while increasing
 breath-pause truncation, audio underruns or stale speech.
 
-## 2. Current formal path and corrected baseline
+## 2. Formal path under optimization and corrected baseline
 
-The supported route is:
+The formal route being optimized is:
 
 `AudioWorklet capture → dedicated media WebSocket → OpenAI streaming STT →
 server VAD final → unified committed input → JiuwenSwarm Agent/Task route →
@@ -89,12 +92,16 @@ must not enter metrics. Existing `live_voice.segment_latency_ms` can carry
 server segments, but current product composition and browser timings must be
 wired rather than inferred from the schema's existence.
 
-The baseline uses at least 20 successful rounds per declared profile, records
-sample count/failure/fallback as well as p50/p95, and separates cold and warm
-runs. The corpus must include short no-tool dialogue, tool dialogue, supported
-Task create/status/cancel, Chinese breath pauses, barge-in and one degraded
-network profile. It must measure both speech-end-to-first-audible and complete
-round time; downlink-first-frame is not a substitute for audible output.
+The development diagnostic baseline uses at least 20 successful rounds per
+declared profile, records sample count/failure/fallback as well as p50/p95, and
+separates cold and warm runs. Any critical scenario used for feature-complete
+acceptance must be extended to the
+[stable design](../architecture/FULL_SOLUTION_2026-07-30.md) §5.3 requirement
+of at least 30 runs. The corpus must include short no-tool dialogue, tool
+dialogue, supported Task create/status/cancel, Chinese breath pauses, barge-in
+and one degraded network profile. It must measure both
+speech-end-to-first-audible and complete round time; downlink-first-frame is not
+a substitute for audible output.
 
 This batch is done when the same response can be followed across all owners,
 each missing segment is explicitly `unknown` rather than zero, and a fixed
@@ -269,6 +276,11 @@ frozen. No “2 second” claim is accepted without current physical p50/p95,
 failure rate and quality evidence. Tests must also prove zero Agent, Tool, Task,
 history and stale-audio side effects for partial ASR, stale/wrong generation,
 wrong scope, synthesis failure and cancel races.
+
+The 5–7 second and related bands above are intermediate optimization targets,
+not replacements for the accepted stable-design latency table. Changing a
+feature-complete release threshold requires reconciled current evidence and an
+accepted product decision rather than a plan-only edit.
 
 ## 8. Explicit exclusions and reference judgement
 
