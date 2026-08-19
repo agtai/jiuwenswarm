@@ -688,3 +688,47 @@ def test_gateway_writer_rejects_arbitrary_multiproducer_modes(
 ) -> None:
     with pytest.raises(LatencyProbeViolation):
         LatencyProbeBatchWriter(tmp_path, run_config, "gateway", mode=mode)
+
+
+def test_recorder_accepts_leading_hyphen_url_safe_generated_ids(run_config) -> None:
+    recorder = LatencyProbeRecorder(
+        context=context_for(run_config),
+        component="gateway",
+        phase="gateway_stt",
+        run_config=run_config,
+        source_instance_id_factory=lambda: "-source-generated-id",
+        batch_id_factory=lambda: "-batch-generated-id",
+        clock_domain_id="gateway-process-1",
+        monotonic_ms=lambda: 10.0,
+    )
+
+    batch = recorder.finish("completed")
+    assert batch is not None
+    assert batch.source_instance_id == "-source-generated-id"
+    assert batch.batch_id == "-batch-generated-id"
+
+
+@pytest.mark.parametrize(
+    ("source_instance_id", "batch_id"),
+    [
+        ("../../protected", "batch-id"),
+        ("source-id", "https://private.example/batch"),
+        ("PRIVATE_TRANSCRIPT", "batch-id"),
+        ("", "batch-id"),
+        ("source-id", "x" * 257),
+    ],
+)
+def test_recorder_rejects_unsafe_or_unbounded_generated_ids(
+    run_config, source_instance_id, batch_id
+) -> None:
+    with pytest.raises(LatencyProbeViolation):
+        LatencyProbeRecorder(
+            context=context_for(run_config),
+            component="gateway",
+            phase="gateway_stt",
+            run_config=run_config,
+            source_instance_id_factory=lambda: source_instance_id,
+            batch_id_factory=lambda: batch_id,
+            clock_domain_id="gateway-process-1",
+            monotonic_ms=lambda: 10.0,
+        )

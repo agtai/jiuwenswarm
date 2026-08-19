@@ -158,7 +158,7 @@ FIXED_SEGMENT_IDS: Final = frozenset(
 )
 
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
-_PUBLIC_TOKEN = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._-]{0,255}$")
+_PUBLIC_TOKEN = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,255}$")
 _SENSITIVE_DESCRIPTOR = re.compile(
     r"(?:private|secret|credential|password|transcript|prompt|authorization|bearer|api[_-]?key)",
     re.IGNORECASE,
