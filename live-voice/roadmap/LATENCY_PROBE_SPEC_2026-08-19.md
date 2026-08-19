@@ -152,6 +152,31 @@ Each producer process/page has a random `source_instance_id`, one
 batch has a random `batch_id`; an identical retry is idempotent and conflicting
 bytes under the same `batch_id` are rejected by the probe.
 
+### 5.1 Minimal diagnostic context
+
+The Browser carries one closed diagnostic context across the existing media
+activation, committed-input, and synthesis requests while the probe is enabled:
+
+```text
+LatencyProbeContext {
+  schema_version: "live-voice.latency-context.v0"
+  run_id: bounded opaque string
+  profile_id: closed benchmark profile
+  input_case_id: manifest-declared public token
+  round_index: non-negative integer
+}
+```
+
+This context supplies experiment identity only. It contains no timestamps,
+product payload, authority, arbitrary metadata, or replacement for the existing
+interaction, activation, turn, response, or Task identities. Each receiver
+validates it independently against its immutable `run.json`, retains it only in
+probe-local state, and removes it before closed business-request validation.
+
+Missing, malformed, incompatible, or feature-off context makes the affected
+diagnostic batch incomplete or absent. It must not reject, retry, acknowledge,
+reroute, or otherwise change the product operation.
+
 ## 6. Minimal closed records
 
 ### 6.1 Latency mark
@@ -709,4 +734,7 @@ The approved v0 decisions are:
 9. retain `component`, `phase_tags`, and `primary_capability` as static report
    labels rather than a multidimensional runtime catalog; and
 10. let each experiment declare its target and guardrails while keeping product
-    optimization implementation outside the probe.
+    optimization implementation outside the probe; and
+11. propagate only the closed four-field `LatencyProbeContext` needed to join
+    Browser, Gateway, and Agent Server probe batches to the same attempted
+    benchmark round.
