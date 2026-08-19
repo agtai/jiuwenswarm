@@ -684,7 +684,7 @@ async def test_agentserver_defers_p3_owner_stop_until_product_cleanup_succeeds()
 
 
 @pytest.mark.asyncio
-async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> None:
+async def test_central_registry_owns_queries_but_not_mutations() -> None:
     composition = _Composition()
     registry = _ProductRegistry()
     server = _server(composition)
@@ -709,8 +709,21 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
         req_method=ReqMethod.LIVE_VOICE_TASK_CREATE,
         params={"auth_token": "opaque", "session_id": "session-1"},
     )
+    result_query = AgentRequest(
+        request_id="request-result",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_TASK_RESULT,
+        params={
+            "auth_token": "opaque",
+            "session_id": "session-1",
+            "task_id": "task-1",
+            "agent_ref": {"mode": "agent", "id": "default"},
+        },
+    )
 
     await server._handle_live_voice_p3_request(ws, query, asyncio.Lock())
+    await server._handle_live_voice_p3_request(ws, result_query, asyncio.Lock())
     await server._handle_live_voice_p3_request(ws, mutation, asyncio.Lock())
 
     assert registry.calls == [
@@ -722,7 +735,20 @@ async def test_central_registry_owns_read_only_query_but_not_p3_mutation() -> No
                 "request_id": "request-query",
                 "session_id": "session-1",
             },
-        )
+        ),
+        (
+            "query",
+            {
+                "operation": "task.result",
+                "params": {
+                    "auth_token": "opaque",
+                    "session_id": "session-1",
+                    "task_id": "task-1",
+                },
+                "request_id": "request-result",
+                "session_id": "session-1",
+            },
+        ),
     ]
     assert composition.calls == [
         {

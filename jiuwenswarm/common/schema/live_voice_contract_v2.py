@@ -1122,6 +1122,7 @@ _QUERY_TARGETS: Final = MappingProxyType(
         "task.list": IdentityKind.TASK,
         "task.status": IdentityKind.TASK,
         "task.events": IdentityKind.TASK,
+        "task.result": IdentityKind.TASK,
     }
 )
 _CORE_CAPABILITIES: Final = frozenset(

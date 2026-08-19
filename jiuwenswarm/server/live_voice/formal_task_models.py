@@ -680,7 +680,53 @@ class PersistentTaskRecord:
     outcome: TerminalOutcome | None
     reconciliation_state: ReconciliationState | None
     reconciliation_reason: str | None
+    create_command_id: str
+    predecessor_task_id: str | None
+    revision_number: int
     event_head: int = 0
+
+    def __post_init__(self) -> None:
+        for field_name, value in (
+            ("task.task_id", self.task_id),
+            ("task.create_command_id", self.create_command_id),
+        ):
+            identity = _require_text(value, field_name)
+            if (
+                "\x00" in identity
+                or len(identity) > 256
+                or _utf8_size(identity, field_name) > 1_024
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_FORMAL_TASK_IDENTITY",
+                    "formal Task identity exceeds its closed bound",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if self.predecessor_task_id is not None:
+            predecessor = _require_text(
+                self.predecessor_task_id, "task.predecessor_task_id"
+            )
+            if (
+                predecessor == self.task_id
+                or "\x00" in predecessor
+                or len(predecessor) > 256
+                or _utf8_size(predecessor, "task.predecessor_task_id") > 1_024
+            ):
+                raise FormalTaskViolation(
+                    "INVALID_TASK_REVISION_LINEAGE",
+                    "formal Task predecessor identity is invalid",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
+        if (
+            type(self.revision_number) is not int
+            or self.revision_number < 1
+            or self.revision_number > 1_000_000
+            or (self.revision_number == 1) != (self.predecessor_task_id is None)
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_REVISION_LINEAGE",
+                "formal Task revision must bind one canonical predecessor chain",
+                ErrorCode.PROTOCOL_VIOLATION,
+            )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -701,6 +747,11 @@ class PersistentTaskRecord:
                     "reason": self.reconciliation_reason,
                 }
             ),
+            "revision": {
+                "number": self.revision_number,
+                "predecessor_task_id": self.predecessor_task_id,
+                "create_command_id": self.create_command_id,
+            },
             "event_head": self.event_head,
         }
 

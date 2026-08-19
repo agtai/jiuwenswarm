@@ -19,10 +19,13 @@ from enum import StrEnum
 from typing import Protocol
 
 from jiuwenswarm.common.schema.live_voice_contract_v2 import (
+    ContractViolation,
     ErrorCode,
+    LifecycleKind,
     ScopeRef,
     TerminalOutcome,
     canonical_json_bytes,
+    validate_transition,
 )
 
 from .formal_task_models import (
@@ -46,38 +49,6 @@ _TASK_LIFECYCLE_EVENT_STATES = {
     "task.blocked": FormalTaskState.BLOCKED,
     "task.decision_required": FormalTaskState.DECISION_REQUIRED,
     "task.terminal": FormalTaskState.TERMINAL,
-}
-_TASK_TRANSITIONS = {
-    FormalTaskState.ACCEPTED: frozenset(
-        {
-            FormalTaskState.RUNNING,
-            FormalTaskState.BLOCKED,
-            FormalTaskState.DECISION_REQUIRED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.RUNNING: frozenset(
-        {
-            FormalTaskState.BLOCKED,
-            FormalTaskState.DECISION_REQUIRED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.BLOCKED: frozenset(
-        {
-            FormalTaskState.RUNNING,
-            FormalTaskState.DECISION_REQUIRED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.DECISION_REQUIRED: frozenset(
-        {
-            FormalTaskState.RUNNING,
-            FormalTaskState.BLOCKED,
-            FormalTaskState.TERMINAL,
-        }
-    ),
-    FormalTaskState.TERMINAL: frozenset(),
 }
 _ATTEMPT_LIFECYCLE_EVENT_STATES = {
     "attempt.accepted": FormalAttemptState.ACCEPTED,
@@ -1140,12 +1111,19 @@ class TaskEventSubscription:
                             "TaskEvent type and lifecycle state disagree",
                             ErrorCode.PROTOCOL_VIOLATION,
                         )
-                    if lifecycle_state not in _TASK_TRANSITIONS[task_state]:
+                    try:
+                        validate_transition(
+                            LifecycleKind.TASK,
+                            task_state.value,
+                            lifecycle_state.value,
+                            outcome=event.outcome,
+                        )
+                    except ContractViolation as error:
                         raise _violation(
                             "TASK_EVENT_LIFECYCLE_CONFLICT",
                             "TaskEvent contains a backward or repeated task transition",
                             ErrorCode.PROTOCOL_VIOLATION,
-                        )
+                        ) from error
                     coupled_to_attempt = expected_task_type is not None
                     if coupled_to_attempt and (
                         event.producer not in expected_task_producers

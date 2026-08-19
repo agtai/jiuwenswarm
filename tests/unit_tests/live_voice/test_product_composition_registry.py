@@ -537,6 +537,9 @@ def _background_task(
         outcome=outcome,
         reconciliation_state=None,
         reconciliation_reason=None,
+        create_command_id=f"command-create-{task_id}",
+        predecessor_task_id=None,
+        revision_number=1,
         event_head=3,
     )
 
@@ -4972,6 +4975,46 @@ async def test_p3_query_uses_central_authority_and_real_query_owner(
     assert _route(result.payload, "p3.query")["truth"] == "formal"
     assert _route(result.payload, "p3.progress")["truth"] == "unavailable"
     assert p3.retry_admission_calls == []
+
+
+@pytest.mark.asyncio
+async def test_p3_bounded_list_events_and_result_reach_formal_query_owner(
+    tmp_path: Path,
+) -> None:
+    registry, p3, manager, _pushed = _registry(tmp_path)
+    cases = (
+        (
+            "task.list",
+            {"cursor": "task-anchor", "limit": 7},
+            {"cursor": "task-anchor", "limit": 7},
+        ),
+        (
+            "task.events",
+            {"task_id": "task-1", "after_seq": 4, "limit": 11},
+            {"after_seq": 4, "limit": 11},
+        ),
+        ("task.result", {"task_id": "task-1"}, {}),
+    )
+
+    for index, (operation, operation_params, expected_payload) in enumerate(cases):
+        result = await registry.handle_p3_query(
+            operation=operation,
+            params={
+                "auth_token": "trusted-token",
+                "session_id": "session-product",
+                **operation_params,
+            },
+            request_id=f"request-bounded-query-{index}",
+            session_id="session-product",
+        )
+
+        assert result.ok is True
+        assert p3.query_calls[-1].envelope.query_type == operation
+        assert p3.query_calls[-1].envelope.payload == expected_payload
+
+    assert len(p3.authority_calls) == 3
+    assert len(p3.query_calls) == 3
+    assert manager.get_calls == []
 
 
 @pytest.mark.asyncio

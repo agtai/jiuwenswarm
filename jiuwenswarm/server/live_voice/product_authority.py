@@ -47,6 +47,7 @@ _P3_OPERATIONS = frozenset(
         "task.cancel",
         "task.retry",
         "task.events",
+        "task.result",
     }
 )
 _P3_MUTATIONS = frozenset({"task.create", "task.adjust", "task.cancel", "task.retry"})
@@ -58,6 +59,7 @@ _P3_TARGETED_OPERATIONS = frozenset(
         "task.cancel",
         "task.retry",
         "task.events",
+        "task.result",
     }
 )
 _P3_TASK_RESOURCE_KIND = "task"

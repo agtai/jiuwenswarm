@@ -416,7 +416,7 @@ async def test_prepared_query_uses_exact_grant_without_second_resolution() -> No
     assert len(resolver.calls) == 1
     assert len(owner.calls) == 1
     prepared, _ = owner.calls[0]
-    assert prepared.envelope.payload == {"after_seq": 5}
+    assert prepared.envelope.payload == {"after_seq": 5, "limit": 100}
     assert prepared.authority is context
     assert prepared.authorization is grant
     assert factory.calls == []

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""SQLite authority for formal P3-alpha command/task/event/attempt state."""
+"""SQLite authority for formal P3 command/task/event/attempt state."""
 
 from __future__ import annotations
 
@@ -20,10 +20,12 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandEnvelope,
     ContractViolation,
     ErrorCode,
+    LifecycleKind,
     ResultEnvelope,
     ScopeRef,
     TerminalOutcome,
     canonical_json_bytes,
+    validate_transition,
 )
 
 from .formal_task_models import (
@@ -57,7 +59,11 @@ from .formal_task_models import (
     utc_now,
 )
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
+_DEFAULT_TASK_PAGE_LIMIT = 50
+_MAX_TASK_PAGE_LIMIT = 100
+_DEFAULT_EVENT_PAGE_LIMIT = 100
+_MAX_EVENT_PAGE_LIMIT = 500
 _JOURNAL_MODE_RETRY_SECONDS = 10.0
 _JOURNAL_MODE_RETRY_INTERVAL_SECONDS = 0.01
 _TASK_STORE_TABLES_V2 = frozenset(
@@ -100,6 +106,9 @@ _TASK_STORE_COLUMNS = {
         "reconciliation_reason",
         "created_at",
         "updated_at",
+        "create_command_id",
+        "predecessor_task_id",
+        "revision_number",
     ),
     "attempts": (
         "attempt_id",
@@ -181,6 +190,8 @@ _TASK_STORE_NOT_NULL = {
             "event_head",
             "created_at",
             "updated_at",
+            "create_command_id",
+            "revision_number",
         }
     ),
     "attempts": frozenset(
@@ -253,6 +264,7 @@ _TASK_STORE_INTEGER_COLUMNS = frozenset(
         ("tasks", "cancel_requested"),
         ("tasks", "dispatch_fenced"),
         ("tasks", "event_head"),
+        ("tasks", "revision_number"),
         ("attempts", "attempt_number"),
         ("attempts", "source_seq"),
         ("task_events", "seq"),
@@ -266,10 +278,12 @@ _TASK_STORE_BLOB_COLUMNS = frozenset(
 _TASK_STORE_DEFAULTS = {
     ("tasks", "cancel_requested"): "0",
     ("tasks", "dispatch_fenced"): "0",
+    ("tasks", "create_command_id"): "''",
+    ("tasks", "revision_number"): "1",
     ("attempts", "source_seq"): "-1",
     ("outbox", "delivery_count"): "0",
 }
-_TASK_STORE_NAMED_INDEXES = {
+_TASK_STORE_NAMED_INDEXES_V3 = {
     "idx_tasks_scope": ("tasks", ("scope_key", "task_id")),
     "idx_tasks_state": ("tasks", ("state", "task_id")),
     "idx_outbox_pending": ("outbox", ("state", "created_at", "outbox_id")),
@@ -277,6 +291,10 @@ _TASK_STORE_NAMED_INDEXES = {
         "task_results",
         ("task_id", "attempt_id", "completed_at"),
     ),
+}
+_TASK_STORE_NAMED_INDEXES_V4 = {
+    **_TASK_STORE_NAMED_INDEXES_V3,
+    "idx_tasks_scope_page": ("tasks", ("scope_key", "created_at", "task_id")),
 }
 _TASK_STORE_UNIQUE_KEYS_V3 = {
     "metadata": frozenset({("key",)}),
@@ -289,7 +307,12 @@ _TASK_STORE_UNIQUE_KEYS_V3 = {
     "current_background_tasks": frozenset({("scope_key", "session_id")}),
     "task_results": frozenset({("task_id", "attempt_id", "source_event_id")}),
 }
-_TASK_STORE_FOREIGN_KEYS = {
+_TASK_STORE_UNIQUE_KEYS_V4 = {
+    **_TASK_STORE_UNIQUE_KEYS_V3,
+    "tasks": _TASK_STORE_UNIQUE_KEYS_V3["tasks"]
+    | frozenset({("predecessor_task_id",)}),
+}
+_TASK_STORE_FOREIGN_KEYS_V3 = {
     "metadata": frozenset(),
     "commands": frozenset(),
     "tasks": frozenset(),
@@ -317,6 +340,10 @@ _TASK_STORE_FOREIGN_KEYS = {
             ),
         }
     ),
+}
+_TASK_STORE_FOREIGN_KEYS_V4 = {
+    **_TASK_STORE_FOREIGN_KEYS_V3,
+    "tasks": frozenset({("predecessor_task_id", "tasks", "task_id", "RESTRICT")}),
 }
 _StoredRecordT = TypeVar("_StoredRecordT")
 _OUTBOX_BINDING_SELECT = """
@@ -586,9 +613,11 @@ class SqliteTaskStore:
             }
             task_store_tables = tables & _TASK_STORE_TABLES
             if not task_store_tables:
-                self._create_schema_v3(connection)
-                self._verify_schema_structure(connection, version=3)
+                self._create_schema_v4(connection)
+                self._verify_schema_structure(connection, version=4)
                 self._verify_database(connection)
+                self._verify_v4_lineage(connection)
+                self._verify_v4_semantics(connection)
                 self._hit("initialize.bootstrap.before_metadata")
                 connection.execute(
                     "INSERT INTO metadata(key, value) VALUES('schema_version', ?)",
@@ -623,13 +652,21 @@ class SqliteTaskStore:
                     self._verify_schema_structure(connection, version=1)
                     self._migrate_v1_to_v2(connection)
                     self._migrate_v2_to_v3(connection)
+                    self._migrate_v3_to_v4(connection)
                 elif version == 2:
                     self._verify_schema_structure(connection, version=2)
                     self._verify_database(connection)
                     self._migrate_v2_to_v3(connection)
-                elif version == _SCHEMA_VERSION:
+                    self._migrate_v3_to_v4(connection)
+                elif version == 3:
                     self._verify_schema_structure(connection, version=3)
                     self._verify_database(connection)
+                    self._migrate_v3_to_v4(connection)
+                elif version == _SCHEMA_VERSION:
+                    self._verify_schema_structure(connection, version=4)
+                    self._verify_database(connection)
+                    self._verify_v4_lineage(connection)
+                    self._verify_v4_semantics(connection)
                 else:
                     raise FormalTaskViolation(
                         "TASK_STORE_SCHEMA_UNSUPPORTED",
@@ -739,12 +776,33 @@ class SqliteTaskStore:
                 "formal task Store schema is missing required tables"
             )
 
-        unique_keys = dict(_TASK_STORE_UNIQUE_KEYS_V3)
+        unique_keys = dict(
+            _TASK_STORE_UNIQUE_KEYS_V4 if version >= 4 else _TASK_STORE_UNIQUE_KEYS_V3
+        )
+        foreign_keys = (
+            _TASK_STORE_FOREIGN_KEYS_V4 if version >= 4 else _TASK_STORE_FOREIGN_KEYS_V3
+        )
+        named_indexes = (
+            _TASK_STORE_NAMED_INDEXES_V4
+            if version >= 4
+            else _TASK_STORE_NAMED_INDEXES_V3
+        )
         if version == 1:
             unique_keys["attempts"] = frozenset({("attempt_id",), ("task_id",)})
         for table in sorted(expected_tables):
             rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
             expected_columns = _TASK_STORE_COLUMNS[table]
+            if version < 4 and table == "tasks":
+                expected_columns = tuple(
+                    column
+                    for column in expected_columns
+                    if column
+                    not in {
+                        "create_command_id",
+                        "predecessor_task_id",
+                        "revision_number",
+                    }
+                )
             if version == 1 and table == "attempts":
                 expected_columns = tuple(
                     column for column in expected_columns if column != "attempt_number"
@@ -773,6 +831,11 @@ class SqliteTaskStore:
                         f"formal task Store {table} defaults are unsupported"
                     )
             expected_not_null = _TASK_STORE_NOT_NULL[table]
+            if version < 4 and table == "tasks":
+                expected_not_null = expected_not_null - {
+                    "create_command_id",
+                    "revision_number",
+                }
             if version == 1 and table == "attempts":
                 expected_not_null = expected_not_null - {"attempt_number"}
             if {
@@ -818,12 +881,12 @@ class SqliteTaskStore:
                     f"PRAGMA foreign_key_list({table})"
                 ).fetchall()
             )
-            if actual_foreign_keys != _TASK_STORE_FOREIGN_KEYS[table]:
+            if actual_foreign_keys != foreign_keys[table]:
                 raise cls._schema_unsupported(
                     f"formal task Store {table} foreign keys are unsupported"
                 )
 
-        for index_name, (table, expected_columns) in _TASK_STORE_NAMED_INDEXES.items():
+        for index_name, (table, expected_columns) in named_indexes.items():
             if table not in expected_tables:
                 continue
             indexes = {
@@ -857,8 +920,19 @@ class SqliteTaskStore:
                     "formal task Store attempt bounds are unsupported"
                 )
 
+        if version >= 4:
+            task_sql_row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+            ).fetchone()
+            task_sql = "" if task_sql_row is None else task_sql_row["sql"]
+            normalized = "".join(str(task_sql).upper().split())
+            if "CHECK(REVISION_NUMBERBETWEEN1AND1000000)" not in normalized:
+                raise cls._schema_unsupported(
+                    "formal task Store revision bounds are unsupported"
+                )
+
     @staticmethod
-    def _create_schema_v3(connection: sqlite3.Connection) -> None:
+    def _create_schema_v4(connection: sqlite3.Connection) -> None:
         statements = (
             "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
             """CREATE TABLE commands (
@@ -875,9 +949,16 @@ class SqliteTaskStore:
                 dispatch_fenced INTEGER NOT NULL DEFAULT 0,
                 event_head INTEGER NOT NULL, reconciliation_state TEXT,
                 reconciliation_reason TEXT, created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL)""",
+                updated_at TEXT NOT NULL,
+                create_command_id TEXT NOT NULL DEFAULT '',
+                predecessor_task_id TEXT UNIQUE
+                    REFERENCES tasks(task_id) ON DELETE RESTRICT,
+                revision_number INTEGER NOT NULL DEFAULT 1
+                    CHECK(revision_number BETWEEN 1 AND 1000000))""",
             "CREATE INDEX idx_tasks_scope ON tasks(scope_key, task_id)",
             "CREATE INDEX idx_tasks_state ON tasks(state, task_id)",
+            """CREATE INDEX idx_tasks_scope_page
+                ON tasks(scope_key, created_at, task_id)""",
             """CREATE TABLE attempts (
                 attempt_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
@@ -1007,6 +1088,94 @@ class SqliteTaskStore:
                 ErrorCode.UNSUPPORTED,
             )
 
+    def _migrate_v3_to_v4(self, connection: sqlite3.Connection) -> None:
+        """Add explicit revision/create lineage without rewriting lifecycle truth."""
+
+        self._hit("migration.v3_to_v4.before_columns")
+        connection.execute(
+            "ALTER TABLE tasks ADD COLUMN create_command_id TEXT NOT NULL DEFAULT ''"
+        )
+        connection.execute(
+            """ALTER TABLE tasks ADD COLUMN predecessor_task_id TEXT
+               REFERENCES tasks(task_id) ON DELETE RESTRICT"""
+        )
+        connection.execute(
+            """ALTER TABLE tasks ADD COLUMN revision_number INTEGER NOT NULL DEFAULT 1
+               CHECK(revision_number BETWEEN 1 AND 1000000)"""
+        )
+        self._hit("migration.v3_to_v4.after_columns")
+
+        lineage_rows = connection.execute(
+            """
+            SELECT t.task_id, t.scope_key, e.causation_id AS create_command_id,
+                   e.event_type, e.state AS accepted_state,
+                   e.outcome AS accepted_outcome, e.producer,
+                   c.command_type, c.result_json
+            FROM tasks AS t
+            LEFT JOIN task_events AS e
+              ON e.task_id=t.task_id AND e.seq=0
+            LEFT JOIN commands AS c
+              ON c.scope_key=t.scope_key AND c.command_id=e.causation_id
+            ORDER BY t.task_id
+            """
+        ).fetchall()
+        for row in lineage_rows:
+            try:
+                command_result = _json_load(row["result_json"])
+            except (FormalTaskViolation, TypeError):
+                command_result = None
+            if (
+                type(row["create_command_id"]) is not str
+                or not row["create_command_id"]
+                or row["event_type"] != "task.accepted"
+                or row["accepted_state"] != FormalTaskState.ACCEPTED.value
+                or row["accepted_outcome"] is not None
+                or row["producer"] != "task_core"
+                or row["command_type"] != "task.create"
+                or type(command_result) is not dict
+                or command_result.get("ok") is not True
+                or type(command_result.get("result")) is not dict
+                or command_result["result"].get("task_id") != row["task_id"]
+            ):
+                raise self._schema_unsupported(
+                    "formal task Store v3 create lineage is corrupt"
+                )
+
+        self._hit("migration.v3_to_v4.before_backfill")
+        connection.execute(
+            """
+            UPDATE tasks
+            SET create_command_id=(
+                SELECT e.causation_id FROM task_events AS e
+                WHERE e.task_id=tasks.task_id AND e.seq=0
+            )
+            """
+        )
+        self._hit("migration.v3_to_v4.after_backfill")
+        connection.execute(
+            """CREATE UNIQUE INDEX uq_tasks_predecessor
+               ON tasks(predecessor_task_id)"""
+        )
+        connection.execute(
+            """CREATE INDEX idx_tasks_scope_page
+               ON tasks(scope_key, created_at, task_id)"""
+        )
+        self._hit("migration.v3_to_v4.after_indexes")
+        self._verify_schema_structure(connection, version=4)
+        self._verify_database(connection)
+        self._verify_v4_lineage(connection)
+        self._verify_v4_semantics(connection)
+        self._hit("migration.v3_to_v4.before_metadata")
+        changed = connection.execute(
+            "UPDATE metadata SET value='4' WHERE key='schema_version' AND value='3'"
+        ).rowcount
+        if changed != 1:
+            raise FormalTaskViolation(
+                "TASK_STORE_SCHEMA_UNSUPPORTED",
+                "formal task Store changed during v4 migration",
+                ErrorCode.UNSUPPORTED,
+            )
+
     @staticmethod
     def _verify_database(connection: sqlite3.Connection) -> None:
         integrity = connection.execute("PRAGMA integrity_check").fetchone()
@@ -1022,6 +1191,272 @@ class SqliteTaskStore:
                 "formal Task Store failed its foreign-key check",
                 ErrorCode.INTERNAL,
             )
+
+    @classmethod
+    def _verify_v4_lineage(cls, connection: sqlite3.Connection) -> None:
+        """Fail closed when persisted revision/create relationships are ambiguous."""
+
+        rows = connection.execute(
+            """
+            SELECT t.task_id, t.scope_key, t.state, t.create_command_id,
+                   t.predecessor_task_id, t.revision_number,
+                   e.causation_id AS accepted_command_id,
+                   e.state AS accepted_state,
+                   e.outcome AS accepted_outcome,
+                   e.producer AS accepted_producer,
+                   c.command_type, c.result_json,
+                   p.scope_key AS predecessor_scope_key,
+                   p.state AS predecessor_state,
+                   p.revision_number AS predecessor_revision_number
+            FROM tasks AS t
+            LEFT JOIN task_events AS e
+              ON e.task_id=t.task_id AND e.seq=0 AND e.event_type='task.accepted'
+            LEFT JOIN commands AS c
+              ON c.scope_key=t.scope_key AND c.command_id=t.create_command_id
+            LEFT JOIN tasks AS p ON p.task_id=t.predecessor_task_id
+            ORDER BY t.task_id
+            """
+        ).fetchall()
+        for row in rows:
+            try:
+                command_result = _json_load(row["result_json"])
+            except (FormalTaskViolation, TypeError):
+                command_result = None
+            predecessor_id = row["predecessor_task_id"]
+            revision_number = row["revision_number"]
+            base_revision = predecessor_id is None and revision_number == 1
+            successor_revision = (
+                type(predecessor_id) is str
+                and bool(predecessor_id)
+                and predecessor_id != row["task_id"]
+                and type(revision_number) is int
+                and revision_number > 1
+                and row["predecessor_scope_key"] == row["scope_key"]
+                and row["predecessor_state"] == FormalTaskState.TERMINAL.value
+                and row["predecessor_revision_number"] == revision_number - 1
+            )
+            if (
+                type(row["create_command_id"]) is not str
+                or not row["create_command_id"]
+                or "\x00" in row["create_command_id"]
+                or len(row["create_command_id"]) > 256
+                or row["accepted_command_id"] != row["create_command_id"]
+                or row["accepted_state"] != FormalTaskState.ACCEPTED.value
+                or row["accepted_outcome"] is not None
+                or row["accepted_producer"] != "task_core"
+                or row["command_type"] != "task.create"
+                or type(command_result) is not dict
+                or command_result.get("ok") is not True
+                or type(command_result.get("result")) is not dict
+                or command_result["result"].get("task_id") != row["task_id"]
+                or not (base_revision or successor_revision)
+            ):
+                raise cls._schema_unsupported(
+                    "formal task Store revision lineage is corrupt"
+                )
+
+    @classmethod
+    def _verify_v4_semantics(cls, connection: sqlite3.Connection) -> None:
+        """Reconstruct every durable Task before accepting v4 authority."""
+
+        task_rows = connection.execute(
+            "SELECT * FROM tasks ORDER BY task_id"
+        ).fetchall()
+        for task_row in task_rows:
+            cls._verify_durable_lineage(connection, task_row)
+            if task_row["cancel_requested"] not in {0, 1} or task_row[
+                "dispatch_fenced"
+            ] not in {0, 1}:
+                raise cls._corrupt(
+                    "formal Task control flags are not canonical booleans"
+                )
+            if bool(task_row["cancel_requested"]) != bool(task_row["dispatch_fenced"]):
+                raise cls._corrupt("formal Task cancellation flags disagree")
+
+        command_rows = connection.execute(
+            "SELECT * FROM commands ORDER BY scope_key, command_id"
+        ).fetchall()
+        for command_row in command_rows:
+            command_type = command_row["command_type"]
+            command_id = command_row["command_id"]
+            scope_key = command_row["scope_key"]
+            if command_type == "task.create":
+                command, _result, _spec = cls._command_ledger_from_row(command_row)
+                owner_count = connection.execute(
+                    """SELECT COUNT(*) FROM tasks
+                       WHERE scope_key=? AND create_command_id=?""",
+                    (scope_key, command_id),
+                ).fetchone()[0]
+                if owner_count != 1 or command.target_ref.id != f"create:{command_id}":
+                    raise cls._corrupt(
+                        "task.create command lacks one exact durable Task"
+                    )
+                continue
+            if command_type == "task.retry":
+                command, _result, _spec = cls._command_ledger_from_row(command_row)
+                boundary_count = connection.execute(
+                    """SELECT COUNT(*) FROM task_events AS e
+                       JOIN tasks AS t ON t.task_id=e.task_id
+                       WHERE t.scope_key=? AND e.event_type='task.retry_accepted'
+                         AND e.causation_id=?""",
+                    (scope_key, command_id),
+                ).fetchone()[0]
+                if boundary_count != 1 or command.target_ref.kind != "task":
+                    raise cls._corrupt(
+                        "task.retry command lacks one exact durable boundary"
+                    )
+                continue
+            if command_type not in {"task.cancel", "task.adjust"}:
+                raise cls._corrupt(
+                    "formal Task command ledger contains an unsupported operation"
+                )
+            command, result = cls._control_command_from_row(command_row)
+            request_type = (
+                "task.cancel_requested"
+                if command_type == "task.cancel"
+                else "task.adjust_requested"
+            )
+            request_count = connection.execute(
+                """SELECT COUNT(*) FROM task_events AS e
+                   JOIN tasks AS t ON t.task_id=e.task_id
+                   WHERE t.scope_key=? AND e.event_type=? AND e.causation_id=?""",
+                (scope_key, request_type, command_id),
+            ).fetchone()[0]
+            outbox_count = connection.execute(
+                """SELECT COUNT(*) FROM outbox AS o
+                   JOIN tasks AS t ON t.task_id=o.task_id
+                   WHERE t.scope_key=? AND o.command_id=?""",
+                (scope_key, command_id),
+            ).fetchone()[0]
+            if request_count == 1:
+                allowed_outbox_counts = {0, 1} if command_type == "task.cancel" else {1}
+                if outbox_count not in allowed_outbox_counts:
+                    raise cls._corrupt(
+                        "formal Task control command has ambiguous durable ownership"
+                    )
+                continue
+            value = result.result
+            attempt_row = (
+                None
+                if type(value) is not dict
+                else connection.execute(
+                    "SELECT task_id FROM attempts WHERE attempt_id=?",
+                    (value.get("attempt_id"),),
+                ).fetchone()
+            )
+            task_owner = (
+                None
+                if type(value) is not dict
+                else connection.execute(
+                    "SELECT scope_key FROM tasks WHERE task_id=?",
+                    (value.get("task_id"),),
+                ).fetchone()
+            )
+            try:
+                repeated_state = (
+                    None
+                    if type(value) is not dict
+                    else FormalTaskState(value.get("state"))
+                )
+            except (TypeError, ValueError) as error:
+                raise cls._corrupt(
+                    "repeat Task cancellation result state is invalid"
+                ) from error
+            if (
+                command_type != "task.cancel"
+                or request_count != 0
+                or outbox_count != 0
+                or type(value) is not dict
+                or set(value)
+                != {
+                    "task_id",
+                    "attempt_id",
+                    "cancel_acknowledged",
+                    "applied",
+                    "state",
+                }
+                or value["task_id"] != command.target_ref.id
+                or command.payload
+                or command.required_capabilities != ("task.cancel",)
+                or attempt_row is None
+                or attempt_row["task_id"] != value["task_id"]
+                or task_owner is None
+                or task_owner["scope_key"] != scope_key
+                or value["cancel_acknowledged"] is not True
+                or value["applied"] is not False
+                or repeated_state is FormalTaskState.TERMINAL
+                or result.observed_at != command_row["created_at"]
+            ):
+                raise cls._corrupt(
+                    "formal Task control command lacks canonical durable authority"
+                )
+
+        executor_rows = connection.execute(
+            "SELECT * FROM executor_events ORDER BY source_event_id"
+        ).fetchall()
+        observations_by_source = {
+            row["source_event_id"]: cls._executor_observation_from_row(row)
+            for row in executor_rows
+        }
+        if len(observations_by_source) != len(executor_rows):
+            raise cls._corrupt("formal Task Executor authority is duplicated")
+        result_rows = connection.execute(
+            """SELECT * FROM task_results
+               ORDER BY task_id, attempt_id, source_event_id"""
+        ).fetchall()
+        result_sources: set[str] = set()
+        for row in result_rows:
+            result = cls._task_result_from_row(row)
+            observation = observations_by_source.get(result.source_event_id)
+            attempt_row = connection.execute(
+                "SELECT * FROM attempts WHERE attempt_id=?",
+                (result.attempt_id,),
+            ).fetchone()
+            if (
+                observation is None
+                or attempt_row is None
+                or attempt_row["task_id"] != result.task_id
+                or FormalAttemptState(attempt_row["state"])
+                is not FormalAttemptState.TERMINAL
+                or attempt_row["outcome"] != TerminalOutcome.COMPLETED.value
+                or observation.task_id != result.task_id
+                or observation.attempt_id != result.attempt_id
+                or observation.attempt_state is not FormalAttemptState.TERMINAL
+                or observation.attempt_outcome is not TerminalOutcome.COMPLETED
+                or observation.result_text != result.result_text
+                or observation.result_artifacts != result.artifacts
+                or observation.occurred_at != result.completed_at
+                or result.source_event_id in result_sources
+            ):
+                raise cls._corrupt(
+                    "formal Task result lacks exact completed Executor authority"
+                )
+            result_sources.add(result.source_event_id)
+        published_sources = {
+            str(source_event_id)
+            for source_event_id, observation in observations_by_source.items()
+            if observation.result_text is not None
+        }
+        if result_sources != published_sources:
+            raise cls._corrupt(
+                "formal Task result ledger does not exhaust published Executor truth"
+            )
+
+        selections = connection.execute(
+            """SELECT c.scope_key, c.session_id, t.scope_json
+               FROM current_background_tasks AS c
+               JOIN tasks AS t ON t.task_id=c.task_id
+               ORDER BY c.scope_key, c.session_id"""
+        ).fetchall()
+        for selection in selections:
+            scope = ScopeRef.from_dict(_json_load(selection["scope_json"]))
+            if (
+                selection["scope_key"] != _scope_key(scope)
+                or selection["session_id"] != scope.session_id
+            ):
+                raise cls._corrupt(
+                    "current Task selection crosses its exact Session authority"
+                )
 
     def _hit(self, name: str) -> None:
         if self._failpoint is not None:
@@ -1057,24 +1492,6 @@ class SqliteTaskStore:
             replay = self._command_replay(connection, command, fingerprint)
             if replay is not None:
                 return replay
-            if current_background_session_id is not None:
-                current = connection.execute(
-                    """
-                    SELECT t.* FROM current_background_tasks AS c
-                    JOIN tasks AS t ON t.task_id=c.task_id
-                    WHERE c.scope_key=? AND c.session_id=?
-                    """,
-                    (scope_key, current_background_session_id),
-                ).fetchone()
-                if (
-                    current is not None
-                    and current["state"] != FormalTaskState.TERMINAL.value
-                ):
-                    raise FormalTaskViolation(
-                        "CURRENT_BACKGROUND_TASK_ACTIVE",
-                        "the current background task is still non-terminal",
-                        ErrorCode.CONFLICT,
-                    )
             self._hit("create.before_ids")
             task_id = f"task-{uuid.uuid4().hex}"
             attempt_id = f"attempt-{uuid.uuid4().hex}"
@@ -1085,8 +1502,9 @@ class SqliteTaskStore:
                 """
                 INSERT INTO tasks(
                     task_id, scope_key, scope_json, spec_json, state, outcome,
-                    attempt_id, correlation_id, event_head, created_at, updated_at
-                ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?)
+                    attempt_id, correlation_id, event_head, created_at, updated_at,
+                    create_command_id, predecessor_task_id, revision_number
+                ) VALUES(?, ?, ?, ?, ?, NULL, ?, ?, 0, ?, ?, ?, NULL, 1)
                 """,
                 (
                     task_id,
@@ -1098,6 +1516,7 @@ class SqliteTaskStore:
                     command.correlation_id,
                     now,
                     now,
+                    command.command_id,
                 ),
             )
             self._hit("create.after_task")
@@ -1189,6 +1608,8 @@ class SqliteTaskStore:
     def get_current_background_task(
         self, scope: ScopeRef, *, session_id: str
     ) -> PersistentTaskRecord | None:
+        """Return a UI/conversation selection hint, never mutation authority."""
+
         if (
             type(session_id) is not str
             or not session_id.strip()
@@ -1225,21 +1646,9 @@ class SqliteTaskStore:
         command: CommandEnvelope,
         *,
         observed_at: str,
-        current_background_session_id: str,
     ) -> ResultEnvelope:
-        """Atomically admit one adjustment for the exact current attempt."""
+        """Atomically admit one adjustment for an exact addressed attempt."""
 
-        if (
-            type(current_background_session_id) is not str
-            or not current_background_session_id.strip()
-            or len(current_background_session_id) > 256
-            or command.scope.session_id != current_background_session_id
-        ):
-            raise FormalTaskViolation(
-                "CURRENT_BACKGROUND_SESSION_MISMATCH",
-                "task adjustment requires the exact authorized Session",
-                ErrorCode.PERMISSION_DENIED,
-            )
         payload = command.payload
         if type(payload) is not dict or set(payload) != {"adjustment"}:
             raise FormalTaskViolation(
@@ -1257,20 +1666,6 @@ class SqliteTaskStore:
             replay = self._command_replay(connection, command, fingerprint)
             if replay is not None:
                 return replay
-            current = connection.execute(
-                """
-                SELECT t.* FROM current_background_tasks AS c
-                JOIN tasks AS t ON t.task_id=c.task_id
-                WHERE c.scope_key=? AND c.session_id=?
-                """,
-                (scope_key, current_background_session_id),
-            ).fetchone()
-            if current is None or current["task_id"] != task_id:
-                raise FormalTaskViolation(
-                    "CURRENT_BACKGROUND_TASK_MISMATCH",
-                    "task adjustment must target the exact current background task",
-                    ErrorCode.CONFLICT,
-                )
             task = self._require_task_row(connection, task_id, command.scope)
             attempt = connection.execute(
                 "SELECT * FROM attempts WHERE attempt_id=?",
@@ -1771,6 +2166,9 @@ class SqliteTaskStore:
             task = current.task
             next_seq = task.event_head + 1
             now = observed_at
+            # D-058 retry is a bounded cross-attempt epoch compatibility path,
+            # not a normal Task lifecycle edge.  It deliberately bypasses
+            # ``_append_event``; P3-2 owns successor-Task revision semantics.
             connection.execute(
                 """
                 INSERT INTO attempts(
@@ -2122,6 +2520,380 @@ class SqliteTaskStore:
         return _stored_record("outbox", load)
 
     @classmethod
+    def _control_command_from_row(
+        cls, row: sqlite3.Row
+    ) -> tuple[CommandEnvelope, ResultEnvelope]:
+        """Rebuild one control command without trusting its stored result."""
+
+        def load() -> tuple[CommandEnvelope, ResultEnvelope]:
+            result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
+            fingerprint = _json_load(row["fingerprint"])
+            if (
+                not result.ok
+                or result.command_id != row["command_id"]
+                or type(fingerprint) is not dict
+                or "request_id" in fingerprint
+            ):
+                raise cls._corrupt(
+                    "formal Task control command ledger is not canonical"
+                )
+            command = CommandEnvelope.from_dict(
+                {"request_id": result.request_id, **fingerprint}
+            )
+            if (
+                command.command_id != row["command_id"]
+                or command.command_type != row["command_type"]
+                or _scope_key(command.scope) != row["scope_key"]
+                or command.fingerprint() != row["fingerprint"]
+            ):
+                raise cls._corrupt(
+                    "formal Task control command ledger binding is inconsistent"
+                )
+            return command, result
+
+        return _stored_record("control command ledger", load)
+
+    @classmethod
+    def _executor_observation_from_row(cls, row: sqlite3.Row) -> ExecutorObservation:
+        """Decode the exact canonical Executor fact stored for one source event."""
+
+        def load() -> ExecutorObservation:
+            payload = _json_load(row["canonical"])
+            expected_keys = {
+                "resolution",
+                "executor_id",
+                "executor_ref",
+                "task_id",
+                "attempt_id",
+                "source_event_id",
+                "source_seq",
+                "attempt_state",
+                "attempt_outcome",
+                "occurred_at",
+                "raw_status",
+                "summary",
+                "error",
+                "result_text",
+                "result_artifacts",
+            }
+            if (
+                type(payload) is not dict
+                or set(payload) != expected_keys
+                or type(payload["result_artifacts"]) is not list
+            ):
+                raise cls._corrupt("formal Task Executor authority is not canonical")
+            artifacts = tuple(
+                TaskResultArtifact(
+                    relative_path=item["relative_path"],
+                    sha256=item["sha256"],
+                )
+                for item in payload["result_artifacts"]
+                if type(item) is dict and set(item) == {"relative_path", "sha256"}
+            )
+            if len(artifacts) != len(payload["result_artifacts"]):
+                raise cls._corrupt(
+                    "formal Task Executor result artifacts are not canonical"
+                )
+            observation = ExecutorObservation(
+                resolution=ExecutorResolution(payload["resolution"]),
+                executor_id=payload["executor_id"],
+                executor_ref=payload["executor_ref"],
+                task_id=payload["task_id"],
+                attempt_id=payload["attempt_id"],
+                source_event_id=payload["source_event_id"],
+                source_seq=payload["source_seq"],
+                attempt_state=(
+                    None
+                    if payload["attempt_state"] is None
+                    else FormalAttemptState(payload["attempt_state"])
+                ),
+                attempt_outcome=(
+                    None
+                    if payload["attempt_outcome"] is None
+                    else TerminalOutcome(payload["attempt_outcome"])
+                ),
+                occurred_at=payload["occurred_at"],
+                raw_status=payload["raw_status"],
+                summary=payload["summary"],
+                error=payload["error"],
+                result_text=payload["result_text"],
+                result_artifacts=artifacts,
+            )
+            if (
+                observation.resolution is not ExecutorResolution.KNOWN
+                or observation.source_event_id != row["source_event_id"]
+                or observation.attempt_id != row["attempt_id"]
+                or observation.source_seq != int(row["source_seq"])
+                or canonical_json_bytes(observation.canonical_dict())
+                != row["canonical"]
+            ):
+                raise cls._corrupt(
+                    "formal Task Executor authority binding is inconsistent"
+                )
+            return observation
+
+        return _stored_record("Executor authority", load)
+
+    @classmethod
+    def _task_result_from_row(cls, row: sqlite3.Row) -> TaskResultRecord:
+        """Decode a persisted Task result without consulting mutable files."""
+
+        def load() -> TaskResultRecord:
+            payload = _json_load(row["artifacts_json"])
+            if type(payload) is not list:
+                raise cls._corrupt("formal Task result artifacts are invalid")
+            artifacts = tuple(
+                TaskResultArtifact(
+                    relative_path=item["relative_path"],
+                    sha256=item["sha256"],
+                )
+                for item in payload
+                if type(item) is dict and set(item) == {"relative_path", "sha256"}
+            )
+            if len(artifacts) != len(payload):
+                raise cls._corrupt("formal Task result artifacts are invalid")
+            return TaskResultRecord(
+                task_id=row["task_id"],
+                attempt_id=row["attempt_id"],
+                source_event_id=row["source_event_id"],
+                result_text=row["result_text"],
+                artifacts=artifacts,
+                completed_at=row["completed_at"],
+            )
+
+        return _stored_record("Task result", load)
+
+    @classmethod
+    def _verify_control_authority(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        task: PersistentTaskRecord,
+        attempt: PersistentAttemptRecord,
+        request: PersistentTaskEvent,
+        disposition: PersistentTaskEvent | None = None,
+    ) -> str | None:
+        """Bind a control request, optional settlement, command and outbox."""
+
+        command_id = request.causation_id
+        command_rows = connection.execute(
+            "SELECT * FROM commands WHERE scope_key=? AND command_id=?",
+            (_scope_key(task.scope), command_id),
+        ).fetchall()
+        if len(command_rows) != 1:
+            raise cls._corrupt(
+                "formal Task control event lacks one exact command ledger"
+            )
+        command_row = command_rows[0]
+        command, result = cls._control_command_from_row(command_row)
+        expected_type = (
+            "task.cancel"
+            if request.event_type == "task.cancel_requested"
+            else "task.adjust"
+        )
+        if (
+            command.command_type != expected_type
+            or command.target_ref.id != task.task_id
+            or command.scope != task.scope
+            or command.required_capabilities != (expected_type,)
+            or command_row["created_at"] != request.occurred_at
+        ):
+            raise cls._corrupt(
+                "formal Task control command does not bind its request event"
+            )
+        value = result.result
+        if type(value) is not dict:
+            raise cls._corrupt("formal Task control result is not canonical")
+
+        outbox_rows = connection.execute(
+            """SELECT * FROM outbox
+               WHERE task_id=? AND attempt_id=? AND command_id=?
+                 AND kind IN (?, ?)""",
+            (
+                task.task_id,
+                attempt.attempt_id,
+                command_id,
+                OutboxKind.ATTEMPT_CANCEL.value,
+                OutboxKind.ATTEMPT_ADJUST.value,
+            ),
+        ).fetchall()
+        if expected_type == "task.cancel":
+            if (
+                disposition is not None
+                or command.payload
+                or set(value)
+                != {
+                    "task_id",
+                    "attempt_id",
+                    "cancel_acknowledged",
+                    "applied",
+                    "state",
+                    "outbox_id",
+                }
+            ):
+                raise cls._corrupt("formal Task cancel authority is not canonical")
+            outbox_id = value["outbox_id"]
+            if (
+                value["task_id"] != task.task_id
+                or value["attempt_id"] != attempt.attempt_id
+                or value["cancel_acknowledged"] is not True
+                or value["applied"] is not True
+                or result.observed_at != request.occurred_at
+                or (
+                    outbox_id is None
+                    and (
+                        outbox_rows or value["state"] != FormalTaskState.TERMINAL.value
+                    )
+                )
+                or (
+                    outbox_id is not None
+                    and (
+                        type(outbox_id) is not str
+                        or len(outbox_rows) != 1
+                        or outbox_rows[0]["outbox_id"] != outbox_id
+                        or outbox_rows[0]["kind"] != OutboxKind.ATTEMPT_CANCEL.value
+                        or value["state"] != request.state
+                    )
+                )
+            ):
+                raise cls._corrupt(
+                    "formal Task cancel result does not bind durable control truth"
+                )
+        else:
+            if command.payload.keys() != {"adjustment"} or set(value) != {
+                "task_id",
+                "attempt_id",
+                "adjustment_id",
+                "adjustment_state",
+                "reason",
+                "outbox_id",
+            }:
+                raise cls._corrupt("formal Task adjustment authority is not canonical")
+            if len(outbox_rows) != 1:
+                raise cls._corrupt(
+                    "formal Task adjustment lacks one exact durable outbox"
+                )
+            outbox_id = outbox_rows[0]["outbox_id"]
+            expected_state = (
+                TaskAdjustmentState.PENDING
+                if disposition is None
+                else (
+                    TaskAdjustmentState.APPLIED
+                    if disposition.event_type == "task.adjust_applied"
+                    else TaskAdjustmentState.REJECTED
+                )
+            )
+            expected_reason = (
+                None
+                if expected_state is not TaskAdjustmentState.REJECTED
+                else disposition.details.get("reason")
+            )
+            if (
+                value["task_id"] != task.task_id
+                or value["attempt_id"] != attempt.attempt_id
+                or value["adjustment_id"] != command_id
+                or value["adjustment_state"] != expected_state.value
+                or value["reason"] != expected_reason
+                or value["outbox_id"] != outbox_id
+                or result.observed_at
+                != (
+                    request.occurred_at
+                    if disposition is None
+                    else disposition.occurred_at
+                )
+                or outbox_rows[0]["kind"] != OutboxKind.ATTEMPT_ADJUST.value
+            ):
+                raise cls._corrupt(
+                    "formal Task adjustment result does not bind durable control truth"
+                )
+
+        if outbox_rows:
+            outbox = outbox_rows[0]
+            scope, spec, executor_ref, adjustment = cls._outbox_payload(
+                outbox["payload_json"]
+            )
+            dispatch_rows = connection.execute(
+                """SELECT payload_json FROM outbox
+                   WHERE task_id=? AND attempt_id=? AND kind=?""",
+                (
+                    task.task_id,
+                    attempt.attempt_id,
+                    OutboxKind.ATTEMPT_DISPATCH.value,
+                ),
+            ).fetchall()
+            if len(dispatch_rows) != 1:
+                raise cls._corrupt(
+                    "formal Task control outbox lacks dispatch specification authority"
+                )
+            _dispatch_scope, dispatch_spec, _dispatch_ref, _dispatch_adjustment = (
+                cls._outbox_payload(dispatch_rows[0]["payload_json"])
+            )
+            try:
+                outbox_state = OutboxState(outbox["state"])
+                delivery_count = int(outbox["delivery_count"])
+            except (TypeError, ValueError) as error:
+                raise cls._corrupt(
+                    "formal Task control outbox lifecycle is invalid"
+                ) from error
+            claimed = outbox_state is OutboxState.CLAIMED
+            claim_fields = (
+                outbox["claimed_by"],
+                outbox["claimed_at"],
+                outbox["claim_token"],
+            )
+            if (
+                scope != task.scope
+                or spec.context.scope != task.scope
+                or spec != dispatch_spec
+                or spec.executor_id != attempt.executor_id
+                or executor_ref != attempt.executor_ref
+                or delivery_count < 0
+                or claimed != all(value is not None for value in claim_fields)
+                or (not claimed and any(value is not None for value in claim_fields))
+                or (claimed and delivery_count < 1)
+            ):
+                raise cls._corrupt(
+                    "formal Task control outbox binding is not canonical"
+                )
+            if expected_type == "task.cancel":
+                if adjustment is not None:
+                    raise cls._corrupt(
+                        "formal Task cancel outbox carries adjustment authority"
+                    )
+            else:
+                if (
+                    adjustment is None
+                    or adjustment.adjustment_id != command_id
+                    or adjustment.adjustment != command.payload["adjustment"]
+                    or adjustment.requested_seq != request.seq
+                ):
+                    raise cls._corrupt(
+                        "formal Task adjustment outbox does not bind its request"
+                    )
+                if disposition is None:
+                    if outbox_state not in {OutboxState.PENDING, OutboxState.CLAIMED}:
+                        raise cls._corrupt(
+                            "pending Task adjustment has a terminal outbox"
+                        )
+                elif expected_state is TaskAdjustmentState.APPLIED:
+                    if (
+                        outbox_state is not OutboxState.DELIVERED
+                        or outbox["last_error"] is not None
+                    ):
+                        raise cls._corrupt(
+                            "applied Task adjustment lacks delivered authority"
+                        )
+                elif (
+                    outbox_state not in {OutboxState.DELIVERED, OutboxState.SUPPRESSED}
+                    or outbox["last_error"] != expected_reason
+                ):
+                    raise cls._corrupt(
+                        "rejected Task adjustment lacks exact outbox authority"
+                    )
+            return str(outbox["outbox_id"])
+        return None
+
+    @classmethod
     def _verify_durable_lineage(
         cls, connection: sqlite3.Connection, task_row: sqlite3.Row
     ) -> None:
@@ -2226,6 +2998,553 @@ class SqliteTaskStore:
                 ):
                     raise cls._corrupt(
                         "formal Task admission boundary is not canonical"
+                    )
+                dispatch_rows = connection.execute(
+                    """SELECT * FROM outbox
+                       WHERE task_id=? AND attempt_id=? AND kind=?""",
+                    (
+                        task.task_id,
+                        attempt.attempt_id,
+                        OutboxKind.ATTEMPT_DISPATCH.value,
+                    ),
+                ).fetchall()
+                if len(dispatch_rows) != 1:
+                    raise cls._corrupt(
+                        "formal Task attempt lacks one exact dispatch authority"
+                    )
+                dispatch_row = dispatch_rows[0]
+                try:
+                    dispatch_state = OutboxState(dispatch_row["state"])
+                    dispatch_delivery_count = int(dispatch_row["delivery_count"])
+                except (TypeError, ValueError) as error:
+                    raise cls._corrupt(
+                        "formal Task dispatch lifecycle is invalid"
+                    ) from error
+                dispatch_claim_fields = (
+                    dispatch_row["claimed_by"],
+                    dispatch_row["claimed_at"],
+                    dispatch_row["claim_token"],
+                )
+                dispatch_claim_clear = all(
+                    value is None for value in dispatch_claim_fields
+                )
+                if (
+                    dispatch_delivery_count < 0
+                    or (
+                        dispatch_state is OutboxState.CLAIMED
+                        and (
+                            any(value is None for value in dispatch_claim_fields)
+                            or dispatch_delivery_count < 1
+                        )
+                    )
+                    or (
+                        dispatch_state is not OutboxState.CLAIMED
+                        and not dispatch_claim_clear
+                    )
+                ):
+                    raise cls._corrupt(
+                        "formal Task dispatch claim lifecycle is invalid"
+                    )
+                executor_rows = connection.execute(
+                    """SELECT * FROM executor_events
+                       WHERE attempt_id=? ORDER BY source_seq, source_event_id""",
+                    (attempt.attempt_id,),
+                ).fetchall()
+                observations = tuple(
+                    cls._executor_observation_from_row(row) for row in executor_rows
+                )
+                if (
+                    tuple(item.source_seq for item in observations)
+                    != tuple(range(len(observations)))
+                    or attempt.source_seq != len(observations) - 1
+                ):
+                    raise cls._corrupt(
+                        "formal Task Executor authority is not one contiguous prefix"
+                    )
+                observations_by_source = {
+                    item.source_event_id: item for item in observations
+                }
+                if None in observations_by_source or len(observations_by_source) != len(
+                    observations
+                ):
+                    raise cls._corrupt(
+                        "formal Task Executor authority contains duplicate identity"
+                    )
+                for observation in observations:
+                    if (
+                        observation.task_id != task.task_id
+                        or observation.attempt_id != attempt.attempt_id
+                        or observation.executor_id != attempt.executor_id
+                        or observation.executor_ref != attempt.executor_ref
+                    ):
+                        raise cls._corrupt(
+                            "formal Task Executor authority crosses its attempt binding"
+                        )
+                task_segment_state = FormalTaskState.ACCEPTED.value
+                task_segment_outcome: str | None = None
+                attempt_segment_state = FormalAttemptState.ACCEPTED.value
+                attempt_segment_outcome: str | None = None
+                cancel_command_id: str | None = None
+                cancel_request: PersistentTaskEvent | None = None
+                adjustment_requests: dict[str, PersistentTaskEvent] = {}
+                adjustment_dispositions: dict[str, PersistentTaskEvent] = {}
+                verified_control_outbox_ids: set[str] = set()
+                executor_attempt_sources: set[str] = set()
+                executor_task_sources: set[str] = set()
+                store_owned_attempt_terminal: PersistentTaskEvent | None = None
+                for event in segment[1:]:
+                    if task_segment_state == FormalTaskState.TERMINAL.value:
+                        raise cls._corrupt(
+                            "formal Task event appeared after terminal truth"
+                        )
+                    if event.event_type in {
+                        "task.running",
+                        "task.blocked",
+                        "task.decision_required",
+                        "task.terminal",
+                    }:
+                        expected_state = event.event_type.removeprefix("task.")
+                        if event.state != expected_state:
+                            raise cls._corrupt(
+                                "formal Task event type disagrees with its state"
+                            )
+                        if event.producer not in {
+                            "task_core",
+                            "task_core.delivery",
+                            "task_core.reconciliation",
+                        } or (
+                            event.event_type != "task.terminal"
+                            and event.producer != "task_core"
+                        ):
+                            raise cls._corrupt(
+                                "formal Task lifecycle event has no canonical producer"
+                            )
+                        if event.source_event_id is not None:
+                            observation = observations_by_source.get(
+                                event.source_event_id
+                            )
+                            expected_attempt_state = (
+                                FormalAttemptState.RUNNING
+                                if event.event_type == "task.running"
+                                else (
+                                    FormalAttemptState.TERMINAL
+                                    if event.event_type == "task.terminal"
+                                    else None
+                                )
+                            )
+                            expected_details = (
+                                None
+                                if observation is None
+                                else {
+                                    "raw_status": observation.raw_status,
+                                    "summary": observation.summary,
+                                    "error": observation.error,
+                                }
+                            )
+                            if (
+                                observation is None
+                                or expected_attempt_state is None
+                                or observation.attempt_state
+                                is not expected_attempt_state
+                                or event.producer != "task_core"
+                                or event.causation_id != event.source_event_id
+                                or event.state != observation.attempt_state.value
+                                or event.outcome
+                                != (
+                                    None
+                                    if observation.attempt_outcome is None
+                                    else observation.attempt_outcome.value
+                                )
+                                or event.occurred_at != observation.occurred_at
+                                or event.details != expected_details
+                                or event.source_event_id in executor_task_sources
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task lifecycle event lacks exact Executor authority"
+                                )
+                            executor_task_sources.add(event.source_event_id)
+                        elif event.event_type == "task.running":
+                            raise cls._corrupt(
+                                "formal Task running event lacks Executor authority"
+                            )
+                        elif event.event_type == "task.terminal":
+                            expected_producer = (
+                                "task_core"
+                                if store_owned_attempt_terminal is not None
+                                and store_owned_attempt_terminal.outcome
+                                == TerminalOutcome.CANCELLED.value
+                                and store_owned_attempt_terminal.details
+                                == {"reason": "CANCELLED_BEFORE_DISPATCH"}
+                                else (
+                                    None
+                                    if store_owned_attempt_terminal is None
+                                    else store_owned_attempt_terminal.producer
+                                )
+                            )
+                            if (
+                                store_owned_attempt_terminal is None
+                                or event.producer != expected_producer
+                                or event.causation_id
+                                != store_owned_attempt_terminal.causation_id
+                                or event.occurred_at
+                                != store_owned_attempt_terminal.occurred_at
+                                or event.details != store_owned_attempt_terminal.details
+                                or event.outcome != store_owned_attempt_terminal.outcome
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task terminal event lacks exact Store authority"
+                                )
+                        validate_transition(
+                            LifecycleKind.TASK,
+                            task_segment_state,
+                            event.state,
+                            outcome=event.outcome,
+                        )
+                        if (
+                            event.state
+                            in {
+                                FormalTaskState.RUNNING.value,
+                                FormalTaskState.BLOCKED.value,
+                                FormalTaskState.DECISION_REQUIRED.value,
+                            }
+                            and attempt_segment_state
+                            != FormalAttemptState.RUNNING.value
+                        ) or (
+                            event.state == FormalTaskState.TERMINAL.value
+                            and (
+                                attempt_segment_state
+                                != FormalAttemptState.TERMINAL.value
+                                or event.outcome != attempt_segment_outcome
+                            )
+                        ):
+                            raise cls._corrupt(
+                                "formal Task lifecycle disagrees with its attempt"
+                            )
+                        task_segment_state = event.state
+                        task_segment_outcome = event.outcome
+                    elif event.event_type in {
+                        "task.cancel_requested",
+                        "task.adjust_requested",
+                        "task.adjust_applied",
+                        "task.adjust_rejected",
+                    }:
+                        if (
+                            event.producer != "task_core.control"
+                            or event.source_event_id is not None
+                            or event.state != task_segment_state
+                            or event.outcome != task_segment_outcome
+                        ):
+                            raise cls._corrupt(
+                                "formal Task control event is not state preserving"
+                            )
+                        command_id_value = event.details.get("command_id")
+                        expected_details = (
+                            {"command_id", "reason"}
+                            if event.event_type == "task.adjust_rejected"
+                            else {"command_id"}
+                        )
+                        reason = event.details.get("reason")
+                        if (
+                            set(event.details) != expected_details
+                            or type(command_id_value) is not str
+                            or not command_id_value.strip()
+                            or command_id_value != event.causation_id
+                            or (
+                                event.event_type == "task.adjust_rejected"
+                                and (
+                                    type(reason) is not str
+                                    or not reason
+                                    or len(reason) > 128
+                                    or any(
+                                        character
+                                        not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+                                        for character in reason
+                                    )
+                                )
+                            )
+                        ):
+                            raise cls._corrupt(
+                                "formal Task control event has invalid authority evidence"
+                            )
+                        if event.event_type == "task.cancel_requested":
+                            if cancel_request is not None:
+                                raise cls._corrupt(
+                                    "formal Task attempt has duplicate cancel requests"
+                                )
+                            cancel_command_id = command_id_value
+                            cancel_request = event
+                        elif event.event_type == "task.adjust_requested":
+                            if (
+                                command_id_value in adjustment_requests
+                                or command_id_value in adjustment_dispositions
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task adjustment request is duplicated"
+                                )
+                            adjustment_requests[command_id_value] = event
+                        else:
+                            if (
+                                command_id_value not in adjustment_requests
+                                or command_id_value in adjustment_dispositions
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task adjustment disposition is unpaired"
+                                )
+                            adjustment_dispositions[command_id_value] = event
+                    elif event.event_type in {
+                        "attempt.accepted",
+                        "attempt.running",
+                        "attempt.terminal",
+                    }:
+                        expected_state = event.event_type.removeprefix("attempt.")
+                        if event.state != expected_state:
+                            raise cls._corrupt(
+                                "formal Task attempt event type disagrees with its state"
+                            )
+                        producer_is_executor = event.producer == attempt.executor_id
+                        if producer_is_executor:
+                            if (
+                                event.source_event_id is None
+                                or event.causation_id != event.source_event_id
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task attempt lacks Executor source evidence"
+                                )
+                            observation = observations_by_source.get(
+                                event.source_event_id
+                            )
+                            expected_details = (
+                                None
+                                if observation is None
+                                else {
+                                    "raw_status": observation.raw_status,
+                                    "summary": observation.summary,
+                                    "error": observation.error,
+                                }
+                            )
+                            if (
+                                observation is None
+                                or observation.attempt_state is None
+                                or event.state != observation.attempt_state.value
+                                or event.outcome
+                                != (
+                                    None
+                                    if observation.attempt_outcome is None
+                                    else observation.attempt_outcome.value
+                                )
+                                or event.occurred_at != observation.occurred_at
+                                or event.details != expected_details
+                                or event.source_event_id in executor_attempt_sources
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task attempt event lacks exact Executor authority"
+                                )
+                            executor_attempt_sources.add(event.source_event_id)
+                        elif (
+                            event.producer
+                            not in {"task_core.delivery", "task_core.reconciliation"}
+                            or event.source_event_id is not None
+                            or event.state != FormalAttemptState.TERMINAL.value
+                        ):
+                            raise cls._corrupt(
+                                "formal Task attempt event has no canonical producer"
+                            )
+                        if event.state == FormalAttemptState.ACCEPTED.value:
+                            if (
+                                attempt_segment_state
+                                != FormalAttemptState.ACCEPTED.value
+                                or not producer_is_executor
+                                or event.outcome is not None
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task attempt acceptance is not canonical"
+                                )
+                        elif (
+                            attempt_segment_state == FormalAttemptState.ACCEPTED.value
+                            and event.state == FormalAttemptState.TERMINAL.value
+                        ):
+                            dispatch_rejection = (
+                                event.producer == "task_core.delivery"
+                                and event.outcome == TerminalOutcome.FAILED.value
+                                and set(event.details) == {"reason", "error"}
+                                and all(
+                                    type(event.details[key]) is str
+                                    and bool(event.details[key])
+                                    for key in ("reason", "error")
+                                )
+                                and dispatch_row["outbox_id"] == event.causation_id
+                                and dispatch_state is OutboxState.SUPPRESSED
+                                and dispatch_delivery_count >= 1
+                                and dispatch_claim_clear
+                                and dispatch_row["last_error"]
+                                == (
+                                    f"{event.details['reason']}: "
+                                    f"{event.details['error']}"
+                                )[:1000]
+                                and dispatch_row["updated_at"] == event.occurred_at
+                            )
+                            cancelled_before_dispatch = (
+                                event.producer == "task_core.reconciliation"
+                                and event.outcome == TerminalOutcome.CANCELLED.value
+                                and event.details
+                                == {"reason": "CANCELLED_BEFORE_DISPATCH"}
+                                and cancel_command_id == event.causation_id
+                                and attempt.executor_ref is None
+                                and attempt.source_seq == -1
+                                and dispatch_state is OutboxState.SUPPRESSED
+                                and dispatch_delivery_count == 0
+                                and dispatch_claim_clear
+                                and dispatch_row["last_error"] is None
+                                and dispatch_row["updated_at"] == event.occurred_at
+                            )
+                            lost_reconciliation = (
+                                event.producer == "task_core.reconciliation"
+                                and event.outcome == TerminalOutcome.INTERRUPTED.value
+                                and event.causation_id
+                                == f"reconciliation:{attempt.attempt_id}"
+                                and set(event.details) == {"reason"}
+                                and type(event.details.get("reason")) is str
+                                and dispatch_state is OutboxState.SUPPRESSED
+                                and dispatch_claim_clear
+                                and dispatch_row["last_error"]
+                                == "EXECUTOR_ATTEMPT_LOST"
+                                and dispatch_row["updated_at"] == event.occurred_at
+                            )
+                            if not (
+                                dispatch_rejection
+                                or cancelled_before_dispatch
+                                or lost_reconciliation
+                            ):
+                                raise cls._corrupt(
+                                    "formal Task accepted attempt terminal is not canonical"
+                                )
+                        else:
+                            if (
+                                not producer_is_executor
+                                and event.state == FormalAttemptState.TERMINAL.value
+                            ):
+                                lost_reconciliation = (
+                                    attempt_segment_state
+                                    == FormalAttemptState.RUNNING.value
+                                    and event.producer == "task_core.reconciliation"
+                                    and event.outcome
+                                    == TerminalOutcome.INTERRUPTED.value
+                                    and event.causation_id
+                                    == f"reconciliation:{attempt.attempt_id}"
+                                    and set(event.details) == {"reason"}
+                                    and type(event.details.get("reason")) is str
+                                    and bool(event.details["reason"])
+                                    and dispatch_state is OutboxState.DELIVERED
+                                    and dispatch_claim_clear
+                                    and connection.execute(
+                                        """SELECT 1 FROM outbox
+                                           WHERE task_id=? AND attempt_id=?
+                                             AND state IN (?, ?) LIMIT 1""",
+                                        (
+                                            task.task_id,
+                                            attempt.attempt_id,
+                                            OutboxState.PENDING.value,
+                                            OutboxState.CLAIMED.value,
+                                        ),
+                                    ).fetchone()
+                                    is None
+                                )
+                                if not lost_reconciliation:
+                                    raise cls._corrupt(
+                                        "formal Task running attempt terminal lacks exact Store authority"
+                                    )
+                            validate_transition(
+                                LifecycleKind.ATTEMPT,
+                                attempt_segment_state,
+                                event.state,
+                                outcome=event.outcome,
+                            )
+                        if (
+                            not producer_is_executor
+                            and event.state == FormalAttemptState.TERMINAL.value
+                        ):
+                            if store_owned_attempt_terminal is not None:
+                                raise cls._corrupt(
+                                    "formal Task attempt has duplicate Store terminal truth"
+                                )
+                            store_owned_attempt_terminal = event
+                        attempt_segment_state = event.state
+                        attempt_segment_outcome = event.outcome
+                    else:
+                        raise cls._corrupt("formal Task event type is not canonical")
+                if cancel_request is not None:
+                    outbox_id = cls._verify_control_authority(
+                        connection,
+                        task=task,
+                        attempt=attempt,
+                        request=cancel_request,
+                    )
+                    if outbox_id is not None:
+                        verified_control_outbox_ids.add(outbox_id)
+                for adjustment_id, request_event in adjustment_requests.items():
+                    outbox_id = cls._verify_control_authority(
+                        connection,
+                        task=task,
+                        attempt=attempt,
+                        request=request_event,
+                        disposition=adjustment_dispositions.get(adjustment_id),
+                    )
+                    if outbox_id is None:
+                        raise cls._corrupt(
+                            "formal Task adjustment authority lost its outbox"
+                        )
+                    verified_control_outbox_ids.add(outbox_id)
+                actual_control_outbox_ids = {
+                    str(row["outbox_id"])
+                    for row in connection.execute(
+                        """SELECT outbox_id FROM outbox
+                           WHERE task_id=? AND attempt_id=? AND kind IN (?, ?)""",
+                        (
+                            task.task_id,
+                            attempt.attempt_id,
+                            OutboxKind.ATTEMPT_CANCEL.value,
+                            OutboxKind.ATTEMPT_ADJUST.value,
+                        ),
+                    ).fetchall()
+                }
+                if actual_control_outbox_ids != verified_control_outbox_ids:
+                    raise cls._corrupt(
+                        "formal Task control outbox lacks exact event authority"
+                    )
+                attempt_outbox_ids = {
+                    str(row["outbox_id"])
+                    for row in connection.execute(
+                        "SELECT outbox_id FROM outbox WHERE task_id=? AND attempt_id=?",
+                        (task.task_id, attempt.attempt_id),
+                    ).fetchall()
+                }
+                if attempt_outbox_ids != {
+                    str(dispatch_row["outbox_id"]),
+                    *actual_control_outbox_ids,
+                }:
+                    raise cls._corrupt(
+                        "formal Task attempt contains an unknown durable outbox"
+                    )
+                expected_task_sources = {
+                    str(item.source_event_id)
+                    for item in observations
+                    if item.attempt_state
+                    in {FormalAttemptState.RUNNING, FormalAttemptState.TERMINAL}
+                }
+                if (
+                    executor_attempt_sources != set(observations_by_source)
+                    or executor_task_sources != expected_task_sources
+                ):
+                    raise cls._corrupt(
+                        "formal Task events do not exhaust exact Executor authority"
+                    )
+                if (
+                    attempt_segment_state != attempt.state.value
+                    or attempt_segment_outcome
+                    != (None if attempt.outcome is None else attempt.outcome.value)
+                ):
+                    raise cls._corrupt(
+                        "formal Task attempt row disagrees with its event history"
                     )
                 command_rows = connection.execute(
                     """
@@ -2454,18 +3773,13 @@ class SqliteTaskStore:
                             "formal Task retry predecessor lacks exact terminal truth"
                         )
 
-                attempt_events = tuple(
-                    event
-                    for event in segment
-                    if event.event_type.startswith("attempt.")
-                )
-                if attempt_events and (
-                    attempt_events[-1].state != attempt.state.value
-                    or attempt_events[-1].outcome
-                    != (None if attempt.outcome is None else attempt.outcome.value)
+                if ordinal == len(attempts) and (
+                    task_segment_state != task.state.value
+                    or task_segment_outcome
+                    != (None if task.outcome is None else task.outcome.value)
                 ):
                     raise cls._corrupt(
-                        "formal Task attempt row disagrees with its event history"
+                        "formal Task row disagrees with its event history"
                     )
 
             current_task_events = tuple(
@@ -2725,6 +4039,22 @@ class SqliteTaskStore:
             )
             row = None
             for candidate in candidates:
+                if (
+                    candidate["canonical_attempt_id"] is None
+                    or candidate["canonical_task_id"] is None
+                    or candidate["attempt_task_id"] != candidate["task_id"]
+                    or candidate["task_attempt_id"] != candidate["attempt_id"]
+                ):
+                    self._outbox_from_row(candidate)
+                    raise self._corrupt(
+                        "formal Task outbox binding validation returned unexpectedly"
+                    )
+                if (
+                    candidate["bound_task_state"] == FormalTaskState.TERMINAL.value
+                    or candidate["bound_attempt_state"]
+                    == FormalAttemptState.TERMINAL.value
+                ):
+                    continue
                 item = self._outbox_from_row(candidate)
                 if (
                     item.kind is OutboxKind.ATTEMPT_DISPATCH
@@ -2788,6 +4118,16 @@ class SqliteTaskStore:
                     "outbox release targets an old task attempt",
                     ErrorCode.STALE,
                 )
+            attempt = connection.execute(
+                "SELECT state FROM attempts WHERE attempt_id=?",
+                (item.attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                raise self._corrupt("released outbox lost its durable attempt binding")
+            terminal = (
+                task["state"] == FormalTaskState.TERMINAL.value
+                or attempt["state"] == FormalAttemptState.TERMINAL.value
+            )
             return (
                 connection.execute(
                     """
@@ -2796,8 +4136,12 @@ class SqliteTaskStore:
                 WHERE outbox_id=? AND state=? AND claim_token=?
                 """,
                     (
-                        OutboxState.PENDING.value,
-                        error[:1000],
+                        (
+                            OutboxState.SUPPRESSED.value
+                            if terminal
+                            else OutboxState.PENDING.value
+                        ),
+                        ("TASK_TERMINAL_BEFORE_DELIVERY" if terminal else error[:1000]),
                         utc_now(),
                         item.outbox_id,
                         OutboxState.CLAIMED.value,
@@ -3694,31 +5038,7 @@ class SqliteTaskStore:
                     None,
                     "TASK_RESULT_NOT_CAPTURED",
                 )
-            row = rows[0]
-            raw_artifacts = _json_load(row["artifacts_json"])
-            if type(raw_artifacts) is not list:
-                raise self._corrupt("formal Task result artifacts are invalid")
-            try:
-                artifacts = tuple(
-                    TaskResultArtifact(
-                        relative_path=item["relative_path"],
-                        sha256=item["sha256"],
-                    )
-                    for item in raw_artifacts
-                    if type(item) is dict and set(item) == {"relative_path", "sha256"}
-                )
-                if len(artifacts) != len(raw_artifacts):
-                    raise ValueError("artifact shape mismatch")
-                result = TaskResultRecord(
-                    task_id=row["task_id"],
-                    attempt_id=row["attempt_id"],
-                    source_event_id=row["source_event_id"],
-                    result_text=row["result_text"],
-                    artifacts=artifacts,
-                    completed_at=row["completed_at"],
-                )
-            except (FormalTaskViolation, KeyError, TypeError, ValueError) as exc:
-                raise self._corrupt("formal Task result record is invalid") from exc
+            result = self._task_result_from_row(rows[0])
             if not self._result_artifacts_match(task, result.artifacts):
                 return (
                     TaskResultAvailability.UNAVAILABLE,
@@ -3801,6 +5121,20 @@ class SqliteTaskStore:
         details: Mapping[str, object],
         update_task: bool = False,
     ) -> PersistentTaskEvent:
+        if update_task:
+            try:
+                validate_transition(
+                    LifecycleKind.TASK,
+                    str(task["state"]),
+                    state,
+                    outcome=outcome,
+                )
+            except ContractViolation as error:
+                raise FormalTaskViolation(
+                    error.reason,
+                    str(error),
+                    error.code,
+                ) from error
         event_details = dict(details)
         seq = int(task["event_head"]) + 1
         event_id = f"event-{uuid.uuid4().hex}"
@@ -3854,7 +5188,32 @@ class SqliteTaskStore:
 
     def reset_expired_outbox_claims(self, *, claimed_before: str) -> int:
         with self._transaction() as connection:
-            return connection.execute(
+            now = utc_now()
+            suppressed = connection.execute(
+                """
+                UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
+                    claim_token=NULL,
+                    last_error=COALESCE(last_error, ?), updated_at=?
+                WHERE state=? AND claimed_at IS NOT NULL AND claimed_at<=?
+                  AND EXISTS (
+                    SELECT 1 FROM tasks AS t
+                    JOIN attempts AS a ON a.attempt_id=outbox.attempt_id
+                    WHERE t.task_id=outbox.task_id
+                      AND (t.attempt_id<>outbox.attempt_id
+                           OR t.state=? OR a.state=?)
+                  )
+                """,
+                (
+                    OutboxState.SUPPRESSED.value,
+                    "TASK_TERMINAL_BEFORE_DELIVERY",
+                    now,
+                    OutboxState.CLAIMED.value,
+                    claimed_before,
+                    FormalTaskState.TERMINAL.value,
+                    FormalAttemptState.TERMINAL.value,
+                ),
+            ).rowcount
+            reset = connection.execute(
                 """
                 UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
                     claim_token=NULL, updated_at=?
@@ -3862,11 +5221,12 @@ class SqliteTaskStore:
                 """,
                 (
                     OutboxState.PENDING.value,
-                    utc_now(),
+                    now,
                     OutboxState.CLAIMED.value,
                     claimed_before,
                 ),
             ).rowcount
+            return suppressed + reset
 
     def mark_reconciliation_pending(
         self,
@@ -4040,8 +5400,9 @@ class SqliteTaskStore:
             )
             connection.execute(
                 """
-                UPDATE outbox SET state=?, last_error=?, updated_at=?
-                WHERE task_id=? AND state=?
+                UPDATE outbox SET state=?, claimed_by=NULL, claimed_at=NULL,
+                    claim_token=NULL, last_error=?, updated_at=?
+                WHERE task_id=? AND state IN (?, ?)
                 """,
                 (
                     OutboxState.SUPPRESSED.value,
@@ -4049,6 +5410,7 @@ class SqliteTaskStore:
                     now,
                     task_id,
                     OutboxState.PENDING.value,
+                    OutboxState.CLAIMED.value,
                 ),
             )
             frozen_attempt = connection.execute(
@@ -4075,6 +5437,68 @@ class SqliteTaskStore:
                 (_scope_key(scope),),
             ).fetchall()
             return tuple(self._task_from_row(row) for row in rows)
+
+    def list_tasks_page(
+        self,
+        scope: ScopeRef,
+        *,
+        cursor: str | None = None,
+        limit: int = _DEFAULT_TASK_PAGE_LIMIT,
+    ) -> tuple[tuple[PersistentTaskRecord, ...], str | None, bool]:
+        """Read one bounded, restart-stable keyset page in exact Task scope."""
+
+        if type(limit) is not int or not 1 <= limit <= _MAX_TASK_PAGE_LIMIT:
+            raise FormalTaskViolation(
+                "INVALID_TASK_PAGE_LIMIT",
+                f"task.list limit must be between 1 and {_MAX_TASK_PAGE_LIMIT}",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if cursor is not None and (
+            type(cursor) is not str
+            or not cursor.strip()
+            or "\x00" in cursor
+            or len(cursor) > 256
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_LIST_CURSOR",
+                "task.list cursor must be one bounded Task identity",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        scope_key = _scope_key(scope)
+        with self._reader() as connection:
+            if cursor is None:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE scope_key=?
+                    ORDER BY created_at, task_id
+                    LIMIT ?
+                    """,
+                    (scope_key, limit + 1),
+                ).fetchall()
+            else:
+                anchor = self._require_task_row(connection, cursor, scope)
+                rows = connection.execute(
+                    """
+                    SELECT * FROM tasks
+                    WHERE scope_key=?
+                      AND (created_at>? OR (created_at=? AND task_id>?))
+                    ORDER BY created_at, task_id
+                    LIMIT ?
+                    """,
+                    (
+                        scope_key,
+                        anchor["created_at"],
+                        anchor["created_at"],
+                        anchor["task_id"],
+                        limit + 1,
+                    ),
+                ).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            tasks = tuple(self._task_from_row(row) for row in page_rows)
+            next_cursor = tasks[-1].task_id if has_more and tasks else None
+            return tasks, next_cursor, has_more
 
     def get_attempt(self, attempt_id: str) -> PersistentAttemptRecord:
         with self._reader() as connection:
@@ -4133,6 +5557,52 @@ class SqliteTaskStore:
                     (task_id, attempt_id, after_seq),
                 ).fetchall()
             return tuple(self._event_from_row(row) for row in rows)
+
+    def events_page(
+        self,
+        task_id: str,
+        scope: ScopeRef,
+        *,
+        after_seq: int = -1,
+        limit: int = _DEFAULT_EVENT_PAGE_LIMIT,
+    ) -> tuple[tuple[PersistentTaskEvent, ...], int, int | None, bool]:
+        """Read one prefix-bounded event page against a frozen durable head."""
+
+        if type(after_seq) is not int or after_seq < -1:
+            raise FormalTaskViolation(
+                "INVALID_EVENT_CURSOR",
+                "after_seq must be an integer at least -1",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if type(limit) is not int or not 1 <= limit <= _MAX_EVENT_PAGE_LIMIT:
+            raise FormalTaskViolation(
+                "INVALID_EVENT_PAGE_LIMIT",
+                f"task.events limit must be between 1 and {_MAX_EVENT_PAGE_LIMIT}",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        with self._reader() as connection:
+            task = self._require_task_row(connection, task_id, scope)
+            head_seq = int(task["event_head"])
+            if after_seq > head_seq:
+                raise FormalTaskViolation(
+                    "TASK_EVENT_CURSOR_STALE",
+                    "task.events cursor is beyond the authoritative event head",
+                    ErrorCode.STALE,
+                )
+            rows = connection.execute(
+                """
+                SELECT * FROM task_events
+                WHERE task_id=? AND seq>? AND seq<=?
+                ORDER BY seq
+                LIMIT ?
+                """,
+                (task_id, after_seq, head_seq, limit + 1),
+            ).fetchall()
+            has_more = len(rows) > limit
+            page_rows = rows[:limit]
+            events = tuple(self._event_from_row(row) for row in page_rows)
+            next_after_seq = events[-1].seq if has_more and events else None
+            return events, head_seq, next_after_seq, has_more
 
     def event_authority_snapshot(
         self, task_id: str, scope: ScopeRef, *, max_events: int
@@ -4338,6 +5808,9 @@ class SqliteTaskStore:
                     else ReconciliationState(reconciliation_state)
                 ),
                 reconciliation_reason=row["reconciliation_reason"],
+                create_command_id=row["create_command_id"],
+                predecessor_task_id=row["predecessor_task_id"],
+                revision_number=int(row["revision_number"]),
                 event_head=int(row["event_head"]),
             )
 
@@ -4790,8 +6263,7 @@ class SqliteTaskStore:
                         or row["cancel_event_attempt_id"] != row["attempt_id"]
                         or cancel_event_scope != scope
                         or row["cancel_event_type"] != "task.cancel_requested"
-                        or cancel_event_state
-                        not in {FormalTaskState.ACCEPTED, FormalTaskState.RUNNING}
+                        or cancel_event_state is FormalTaskState.TERMINAL
                         or command_result["state"] != cancel_event_state.value
                         or row["cancel_event_outcome"] is not None
                         or row["cancel_event_producer"] != "task_core.control"
@@ -4831,8 +6303,7 @@ class SqliteTaskStore:
                         or row["adjust_event_attempt_id"] != row["attempt_id"]
                         or adjust_scope != scope
                         or row["adjust_event_type"] != "task.adjust_requested"
-                        or adjust_state
-                        not in {FormalTaskState.ACCEPTED, FormalTaskState.RUNNING}
+                        or adjust_state is FormalTaskState.TERMINAL
                         or row["adjust_event_outcome"] is not None
                         or row["adjust_event_producer"] != "task_core.control"
                         or row["adjust_event_source_event_id"] is not None
@@ -4884,8 +6355,10 @@ class SqliteTaskStore:
                         or not bool(dispatch_fenced)
                         or (task_state is FormalTaskState.ACCEPTED)
                         != (attempt_state is FormalAttemptState.ACCEPTED)
-                        or (task_state is FormalTaskState.RUNNING)
-                        != (attempt_state is FormalAttemptState.RUNNING)
+                        or (
+                            task_state is not FormalTaskState.ACCEPTED
+                            and attempt_state is not FormalAttemptState.RUNNING
+                        )
                     ):
                         raise FormalTaskViolation(
                             "OUTBOX_LIFECYCLE_MISMATCH",
@@ -4894,8 +6367,9 @@ class SqliteTaskStore:
                         )
                 elif (task_state is FormalTaskState.ACCEPTED) != (
                     attempt_state is FormalAttemptState.ACCEPTED
-                ) or (task_state is FormalTaskState.RUNNING) != (
-                    attempt_state is FormalAttemptState.RUNNING
+                ) or (
+                    task_state is not FormalTaskState.ACCEPTED
+                    and attempt_state is not FormalAttemptState.RUNNING
                 ):
                     raise FormalTaskViolation(
                         "OUTBOX_LIFECYCLE_MISMATCH",

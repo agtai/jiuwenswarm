@@ -300,6 +300,9 @@ def _record(
         outcome=outcome,
         reconciliation_state=None,
         reconciliation_reason=None,
+        create_command_id="command-create-1",
+        predecessor_task_id=None,
+        revision_number=1,
         event_head=event_head,
     )
 

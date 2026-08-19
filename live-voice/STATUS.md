@@ -27,8 +27,9 @@
   PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
   sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
   Gate without changing the immutable candidate result.
-- **Current highest priority:** execute P3-1 canonical multi-Task identity,
-  state, Store and migration. The deferred P1/P2 issue is recorded in the
+- **Current highest priority:** execute P3-2 complete command, adjustment and
+  successor-revision semantics on the accepted P3-1 canonical Task model. The
+  deferred P1/P2 issue is recorded in the
   [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
   and must close before a later controlled-candidate or feature-complete claim.
 - **Integration:** integration with a `develop` ref is deferred until the
@@ -81,12 +82,12 @@ risks, dependencies, acceptance and integration order.
 | Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing and playout-time barge-in exist; manual retry admitted a second turn | Automatic continuation without recurrent recovery failure; interruption during Agent generation, complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
-| Task Control Core and Store | **PARTIAL.** Stable Task/Attempt/Event/Command IDs, SQLite schema v3, idempotency, outbox, results, adjustments and one-current-Task recovery exist | Multiple addressed Tasks, target disambiguation, `update/provide_input/pause/resume/reprioritize`, successor revision, replay/unread and one canonical Task model | Executor status resolution, Voice–Task Bridge and restart/concurrency matrix |
-| Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Cumulative physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | P3-1 shared identity first, then P3-3/P3-4 and P3-9 real-path closure |
+| Task Control Core and Store | **PARTIAL overall; P3-1 PASS.** SQLite schema v4, multiple non-terminal Tasks, explicit create/revision lineage, shared transition validation, addressed list/events/result/adjust behavior and fail-closed durable-authority reconstruction passed current-source Tier-3 review with no remaining P1/P2 | Execute P3-2 full controls and successor creation, then P3-5 unread/presentation ACK, P3-6 target disambiguation, final legacy-fake relocation and one product Task model | Executor status resolution, Voice–Task Bridge and restart/concurrency matrix; exact evidence in the [P3-1 review](reviews/P3_1_CANONICAL_MULTI_TASK_IMPLEMENTATION_REVIEW_2026-08-19.md) |
+| Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
-| Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses and is deferred from P3-1 | Complete P3 controls/projections while preserving profile semantics; later close capture recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-1 through P3-9 plus deferred P1/P2 completion |
+| Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses. A broader P3-1 diagnostic also reproduced the unchanged mounted Exit/immediate-re-enable presentation-ACK timing failure at 406/407; both remain outside the accepted Core/Store package | Complete P3 controls/projections while preserving profile semantics; later close capture/Exit recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-2 through P3-9 plus deferred P1/P2 completion |
 | Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist | Execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md): fresh physical baseline; stable EOT/Agent/TTS/first-audible diagnostics; low-risk pipeline waits; authoritative ACK; formal sentence-level Agent→TTS overlap; fixed-corpus p50/p95 and no-regression proof | Instrumentation before optimization; fixed corpus/environment; Conversation Runtime and P1 media owners |
-| Automated verification and product acceptance | **PARTIAL.** Exact-source affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review have current credit; the physical candidate remains FAIL | Migrate capability-owned oracles with the first owning P3 package; run P3 package evidence; later repair/rerun the P1 seam and complete the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, current acceptance and exact clean source |
+| Automated verification and product acceptance | **PARTIAL.** Exact-source G0 affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review retain their source-bound credit; P3-1 affected automation/build/static and independent Tier-3 review pass, while its extra full-Web diagnostic is 406/407 on the unchanged deferred Runtime/Web seam. The physical candidate remains FAIL | Run each P3 package's affected evidence; later repair/rerun the P1/P2 seam and complete the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
@@ -132,46 +133,42 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** P3-1 — canonical multi-Task model, Store and migration.
-- **Objective:** support multiple independently addressable Tasks in one
-  authorized project/scope, freeze one canonical identity/state/relationship
-  model, and migrate current schema-v3 truth without allowing a UI, Session or
-  “current Task” hint to become mutation authority.
-- **Capability/modules:** Task Control Core and Store are primary; only the
-  narrow Executor status-resolution, structured command, Voice–Task Bridge and
-  Integrated Web selection/query seams required to freeze the shared contract
-  are included.
-- **Risk:** Tier 3 under root `TESTING.md` because this package changes shared
-  Task identity, canonical state, persistence and migration. Re-scope before
-  implementation if it requires speech/media authority, a new Task owner or a
-  broader command/execution policy.
-- **Included:** multiple nonterminal Tasks; exact Task/Attempt/Command/Event/
-  TaskResult and predecessor/successor relationships; canonical state and legal
-  transition vocabulary; addressed list/status/events/result queries; durable
-  cursor/pagination where required; restart-safe reconstruction; atomic,
-  idempotent, fail-closed migration; exact `task_id` validation for structured
-  mutation; removal of one-current-Task authority; migration of still-applicable
-  historical oracles into current capability ownership.
-- **Excluded:** the deferred P1/P2 post-TTS continuation repair; P3-2's complete
-  update/provide-input/pause/resume/reprioritize and successor command semantics;
-  P3-3 Executor capability/admission expansion; D1/D2 implementation; generalized
-  Voice routing or Integrated Web productization; Production work, `develop`
-  integration and remote updates.
-- **First action:** record intended behaviour, owned source/test surfaces and
-  exclusions; inspect the live schema-v3 Store/reducer/query/migration paths and
-  every “current Task” selection use; then freeze queued/paused/state and
-  relationship decisions before implementation.
-- **Deliverables:** accepted owner/state/relationship decision; versioned Store
-  migration; addressed multi-Task Core/query behaviour; positive, negative,
-  boundary, state-transition, concurrency, recovery/idempotency and fault
-  evidence required by root `TESTING.md`; complete-diff and independent Tier-3
-  review; synchronized STATUS/evidence on the exact source.
-- **Acceptance:** two or more Tasks remain independently addressable across
-  foreground dialogue, refresh and restart; wrong/stale/foreign/ambiguous
-  identity has zero Task/Attempt/Executor/file/presentation mutation; duplicate
-  or conflicting command identity cannot allocate another Task/Attempt; Store
-  reconstruction is exact or fails closed without partial promotion; a
-  “current Task” convenience cannot redirect another Task's command.
+- **Packet:** P3-2 — complete command, adjustment and successor-revision
+  semantics.
+- **Objective:** add one coherent, versioned command model for `update`,
+  `provide_input`, supported `pause/resume/reprioritize`, exact cancel outcomes
+  and explicit successor revision without rewriting terminal Task/TaskResult
+  truth.
+- **Capability/modules:** Task Control Core/Store own command admission,
+  idempotency, event/outbox/result truth and successor creation; the selected
+  Executor seam owns only operations backed by a proven capability. Text and
+  Voice callers consume the same command results.
+- **Risk:** Tier 3 under root `TESTING.md` because the packet changes shared
+  command/state/transaction semantics and Executor effects. Re-scope before
+  adding a new operation, scheduler policy, recovery model or product owner.
+- **Included:** immutable command fingerprint and exact scope/target/expected
+  state; atomic admission plus outbox/replay facts; accepted/applied/rejected/
+  unsupported/conflict/timeout/unknown separation; operation-specific legal
+  states and terminal races; ordered adjustments/inputs; capability-truthful
+  pause/resume/priority; idempotent successor Task creation with immutable
+  predecessor/result preservation.
+- **Excluded:** the deferred P1/P2 post-TTS/Exit continuation repair; P3-3
+  Executor capability/admission expansion; P3-4 D1/D2 implementation; P3-5
+  unread/presentation ACK; generalized Voice targeting/UI work; Production,
+  `develop` integration and remote updates.
+- **First action:** record the P3-2 acceptance and exact owned surfaces; map the
+  accepted P3-1 command/event/outbox model and current Executor capabilities;
+  freeze each operation's state/race/result contract before implementation.
+- **Deliverables:** versioned command schema and durable transaction path;
+  supported-operation Executor adapters; explicit successor creation; positive,
+  negative, boundary, concurrency, restart/idempotency, unsupported and
+  zero-effect evidence; complete-diff and independent Tier-3 review; synchronized
+  STATUS/evidence.
+- **Acceptance:** every declared operation has exact state, target,
+  duplicate/conflict, concurrent-terminal, restart and unsupported-capability
+  evidence; ordered effects apply once; unsupported controls never appear
+  successful; successor creation preserves predecessor and result byte-for-byte;
+  text and Voice observe the same authoritative result and TaskEvent truth.
 
 ## Dependency route to feature complete
 
@@ -188,19 +185,22 @@ exact-source Alpha result.
    controlled-candidate fact remains immutable; its P1/P2 continuation defect
    and combined physical Journey are transferred to later cumulative
    acceptance without granting physical credit.
-4. Execute P3-1 canonical multi-Task model, Store and migration. Migrate each
-   still-applicable historical oracle with its first owning package; perform
-   code placement, duplicate consolidation and entrypoint/document retirement
-   only after replacement without deleting live coverage.
-5. Complete P1/P2 quality in parallel with the
+4. ~~Execute P3-1 canonical multi-Task model, Store and migration~~ **DONE —
+   current-source affected evidence and independent Tier-3 review pass with no
+   remaining package P1/P2.**
+5. Execute P3-2 complete commands and successor revisions. Continue migrating
+   each still-applicable historical oracle with its first owning package;
+   perform code placement, duplicate consolidation and entrypoint/document
+   retirement only after replacement without deleting live coverage. Complete
+   P1/P2 quality in parallel with the
    [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md): execute the
    [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
    across Speech/Media/Runtime/Interaction latency and recovery on one side;
    activate owner-scoped packages for multi-Task, full controls, replay,
    capability-driven Executor and supported D1/D2 semantics on the other.
 6. Generalize Provider/Executor/configuration/language/task policy and remove
-   the exact itinerary, trusted Demo bypass, one-current-Task assumption and
-   legacy product routes.
+   the exact itinerary, trusted Demo bypass, remaining product/UI current-Task
+   assumptions and legacy product routes.
 7. Run evidence-backed competitor gap analysis; implement only accepted gaps,
    then perform independent cross-module deep review.
 8. Pass the feature-complete automated, integration and human acceptance on one
@@ -224,7 +224,8 @@ exact-source Alpha result.
   2026-08-19):** see the
   [P3 implementation coverage and historical reuse audit](reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md).
   Its estimates remain a committed pre-G0 nine-package coverage snapshot; its
-  current routing records the P3-G0 scoped PASS and active P3-1 package. It also
+  current routing records the P3-G0 scoped PASS, accepted P3-1 package and
+  active P3-2 package. It also
   records the wave-to-asset migration overlay and per-commit extraction gates
   for the old 3A/3B/reader/S8.5 lines. Its companion
   [source-asset manifest](reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md)
@@ -267,14 +268,21 @@ exact-source Alpha result.
 
 ## Verification and runtime truth
 
+- `P3-1` current-source affected automated/static/build evidence and independent
+  Tier-3 review pass with no remaining package P1/P2, as recorded in the
+  [P3-1 implementation review](reviews/P3_1_CANONICAL_MULTI_TASK_IMPLEMENTATION_REVIEW_2026-08-19.md).
+  Its extra full-Web diagnostic reproduced one unchanged P1/P2 Exit/re-enable
+  timing failure at 406/407; that broader Runtime/Web defect is disclosed and
+  excluded, not counted as P3-1 credit. The review is Core/Store source
+  evidence, not a physical microphone/TTS or `P3-G0` acceptance rerun.
 - Historical automated counts and review details remain in their exact-source
   records. They are regression evidence, not current candidate credit.
 - Exact product source `f24dd17d` has current affected backend/frontend/profile/
   build/static and clean-deployment credit recorded in the
   [P3-G0 evidence](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md),
   but its repeated physical continuation failure prevents immutable PASS.
-- D-086 records P3-G0 PASS only for the expansion-foundation Gate and activates
-  P3-1. It
+- D-086 records P3-G0 PASS only for the expansion-foundation Gate and originally
+  activated P3-1; P3-1 now passes its own scoped evidence and activates P3-2. It
   explicitly transfers, rather than passes, the missing physical Journey and
   [P1/P2 continuation defect](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
 - A documentation-only commit never upgrades product readiness.

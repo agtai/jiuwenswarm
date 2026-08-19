@@ -54,7 +54,9 @@ from .task_progress_return import (
 from .voice_task_policy import FormalTaskPolicyAdapter, FormalTaskPolicyInput
 
 
-_QUERY_OPERATIONS = frozenset({"task.get", "task.list", "task.status", "task.events"})
+_QUERY_OPERATIONS = frozenset(
+    {"task.get", "task.list", "task.status", "task.events", "task.result"}
+)
 _MUTATION_OPERATIONS = frozenset({"task.create", "task.adjust", "task.cancel"})
 
 
@@ -142,6 +144,8 @@ class ProductP3QueryRequest:
     request_id: str
     task_id: str | None = None
     after_seq: int = -1
+    cursor: str | None = None
+    limit: int | None = None
     resource: AuthorityResourceBinding | None = None
 
 
@@ -742,6 +746,8 @@ class ProductP3TextAdapter:
                     authorization=grant,
                     task_id=request.task_id,
                     after_seq=request.after_seq,
+                    cursor=request.cursor,
+                    limit=request.limit,
                 )
             )
             if not isinstance(invocation.envelope, QueryEnvelope):
@@ -1008,8 +1014,33 @@ class ProductP3TextAdapter:
         ):
             return False
         if request.operation == "task.events":
-            return type(request.after_seq) is int and request.after_seq >= -1
-        return request.after_seq == -1
+            return (
+                type(request.after_seq) is int
+                and request.after_seq >= -1
+                and request.cursor is None
+                and (
+                    request.limit is None
+                    or type(request.limit) is int
+                    and 1 <= request.limit <= 500
+                )
+            )
+        if request.operation == "task.list":
+            return (
+                request.after_seq == -1
+                and (
+                    request.cursor is None
+                    or _valid_text(request.cursor)
+                    and len(request.cursor) <= 256
+                )
+                and (
+                    request.limit is None
+                    or type(request.limit) is int
+                    and 1 <= request.limit <= 100
+                )
+            )
+        return (
+            request.after_seq == -1 and request.cursor is None and request.limit is None
+        )
 
     @staticmethod
     def _valid_progress_request(request: ProductP3ProgressRequest) -> bool:

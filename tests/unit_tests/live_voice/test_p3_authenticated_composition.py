@@ -597,10 +597,13 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
             2,
             3,
         ]
-        assert result_result.ok is False
-        assert result_result.payload["error"]["reason"] == (
-            "CURRENT_BACKGROUND_TASK_MISMATCH"
-        )
+        assert result_result.ok is True
+        assert result_result.payload["result"] == {
+            "availability": "not_ready",
+            "reason": "TASK_RESULT_NOT_READY",
+            "task_id": task_id,
+            "task_result": None,
+        }
 
         wrong_scope = await harness.composition.handle(
             operation="task.get",
@@ -635,6 +638,61 @@ async def test_authenticated_six_operation_journey_is_exactly_scoped_and_idempot
     finally:
         await harness.composition.stop()
     assert harness.closer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_authenticated_task_list_preserves_page_continuation_metadata(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_ids: set[str] = set()
+        for suffix in ("one", "two"):
+            created = await harness.composition.handle(
+                operation="task.create",
+                params=_issued_create_params(harness, f"command-page-{suffix}"),
+                request_id=f"request-page-create-{suffix}",
+                session_id="session-1",
+            )
+            assert created.ok is True
+            task_ids.add(str(created.payload["result"]["task_id"]))
+
+        first = await harness.composition.handle(
+            operation="task.list",
+            params={**_base(), "limit": 1},
+            request_id="request-page-one",
+            session_id="session-1",
+        )
+        assert first.ok is True
+        first_page = first.payload["result"]
+        assert first_page["cursor"] is None
+        assert first_page["limit"] == 1
+        assert first_page["has_more"] is True
+        assert first_page["next_cursor"] == first_page["tasks"][0]["task_id"]
+
+        second = await harness.composition.handle(
+            operation="task.list",
+            params={
+                **_base(),
+                "cursor": first_page["next_cursor"],
+                "limit": 1,
+            },
+            request_id="request-page-two",
+            session_id="session-1",
+        )
+        assert second.ok is True
+        second_page = second.payload["result"]
+        assert second_page["cursor"] == first_page["next_cursor"]
+        assert second_page["limit"] == 1
+        assert second_page["has_more"] is False
+        assert second_page["next_cursor"] is None
+        assert {
+            first_page["tasks"][0]["task_id"],
+            second_page["tasks"][0]["task_id"],
+        } == task_ids
+    finally:
+        await harness.composition.stop()
 
 
 @pytest.mark.asyncio
@@ -863,6 +921,71 @@ async def test_trusted_demo_bypass_requires_unified_voice_current_binding(
             harness.composition._core.store.get_task(task_id, _scope()).cancel_requested
             is True
         )
+    finally:
+        await harness.composition.stop()
+
+
+@pytest.mark.asyncio
+async def test_authenticated_addressed_adjust_can_target_noncurrent_task(
+    tmp_path: Path,
+) -> None:
+    harness = _harness(tmp_path)
+    await harness.composition.start()
+    try:
+        task_ids: list[str] = []
+        for suffix in ("first", "current"):
+            created = await harness.composition.handle(
+                operation="task.create",
+                params=_issued_create_params(
+                    harness, f"command-create-adjust-{suffix}"
+                ),
+                request_id=f"request-create-adjust-{suffix}",
+                session_id="session-1",
+                current_background_session_id="session-1",
+            )
+            assert created.ok is True
+            task_ids.append(str(created.payload["result"]["task_id"]))
+        await _wait_until(lambda: len(harness.executor.dispatches) == 2)
+
+        store = harness.composition._core.store
+        noncurrent_task_id, current_task_id = task_ids
+        selection = store.get_current_background_task(_scope(), session_id="session-1")
+        assert selection is not None and selection.task_id == current_task_id
+        current_before = store.get_task(current_task_id, _scope())
+        assert current_before is not None
+
+        params = _issue_confirmation(
+            harness,
+            _adjust_params(noncurrent_task_id, "command-adjust-addressed"),
+            operation="task.adjust",
+        )
+        adjusted = await harness.composition.handle(
+            operation="task.adjust",
+            params=params,
+            request_id="request-adjust-addressed",
+            session_id="session-1",
+        )
+
+        assert adjusted.ok is True
+        assert adjusted.payload["result"]["task_id"] == noncurrent_task_id
+        await _wait_until(
+            lambda: harness.executor.adjustments == ["command-adjust-addressed"]
+        )
+        noncurrent_events = store.events(noncurrent_task_id, _scope(), after_seq=-1)
+        assert [
+            event.event_type
+            for event in noncurrent_events
+            if event.event_type.startswith("task.adjust_")
+        ] == ["task.adjust_requested", "task.adjust_applied"]
+        current_after = store.get_task(current_task_id, _scope())
+        assert current_after is not None
+        assert current_after.event_head == current_before.event_head
+        assert not any(
+            event.event_type.startswith("task.adjust_")
+            for event in store.events(current_task_id, _scope(), after_seq=-1)
+        )
+        selection = store.get_current_background_task(_scope(), session_id="session-1")
+        assert selection is not None and selection.task_id == current_task_id
     finally:
         await harness.composition.stop()
 

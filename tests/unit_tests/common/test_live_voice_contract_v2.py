@@ -1201,6 +1201,34 @@ def test_task_adjust_command_has_one_exact_bounded_payload() -> None:
             CommandEnvelope.from_dict(rejected)
 
 
+def test_task_result_is_a_core_exact_task_query() -> None:
+    query = QueryEnvelope.from_dict(
+        {
+            "contract_version": CONTRACT_VERSION,
+            "request_id": "request-result",
+            "query_type": "task.result",
+            "issued_at": "2026-08-05T12:00:00Z",
+            "scope": {
+                "subject_id": "user-1",
+                "project_id": "project-1",
+                "session_id": "session-1",
+                "assurance": "authenticated",
+            },
+            "correlation_id": "correlation-result",
+            "causation_id": None,
+            "target_ref": {"kind": "task", "id": "task-1"},
+            "context_refs": [],
+            "required_capabilities": ["task.result"],
+            "payload": {},
+            "extensions": {},
+        }
+    )
+
+    assert query.query_type == "task.result"
+    assert query.target_ref == IdentityRef(IdentityKind.TASK, "task-1")
+    assert query.required_capabilities == ("task.result",)
+
+
 def test_event_gap_reorders_duplicate_and_conflicting_sequence_fail_closed() -> None:
     fixture = _load("critical_kernel.valid.json")
     tracker = EventSequenceTracker()

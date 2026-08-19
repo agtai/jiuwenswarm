@@ -212,7 +212,7 @@ PRODUCT_COMPOSITION_METHODS = frozenset(
     }
 )
 PRODUCT_P3_QUERY_OPERATIONS = frozenset(
-    {"task.get", "task.list", "task.status", "task.events"}
+    {"task.get", "task.list", "task.status", "task.events", "task.result"}
 )
 
 
@@ -7643,6 +7643,10 @@ class AgentServerProductCompositionRegistry:
                 allowed_fields.add("task_id")
             if operation == "task.events":
                 allowed_fields.add("after_seq")
+                allowed_fields.add("limit")
+            elif operation == "task.list":
+                allowed_fields.add("cursor")
+                allowed_fields.add("limit")
             _require_exact_params(
                 params,
                 frozenset(allowed_fields),
@@ -7667,6 +7671,18 @@ class AgentServerProductCompositionRegistry:
                     "after_seq must be an integer at least -1",
                     ErrorCode.INVALID_ARGUMENT,
                 )
+            cursor = params.get("cursor")
+            if cursor is not None:
+                cursor = _required_text(cursor, "cursor", maximum=256)
+            limit = params.get("limit")
+            if limit is not None:
+                maximum = 100 if operation == "task.list" else 500
+                if type(limit) is not int or not 1 <= limit <= maximum:
+                    raise FormalTaskViolation(
+                        "INVALID_PRODUCT_COMPOSITION_ARGUMENT",
+                        f"{operation} limit must be between 1 and {maximum}",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
             correlation_id = request_id
             route = self._route_context(
                 session_id=routed_session,
@@ -7725,6 +7741,8 @@ class AgentServerProductCompositionRegistry:
                     request_id=request_id,
                     task_id=task_id,
                     after_seq=after_seq,
+                    cursor=cursor,
+                    limit=limit,
                     resource=canonical.resource,
                 ),
                 p3_authority,

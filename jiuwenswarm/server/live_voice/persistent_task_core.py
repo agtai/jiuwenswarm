@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Formal persistent P3-alpha Task Core and durable outbox orchestration."""
+"""Formal persistent P3 Task Core and durable outbox orchestration."""
 
 from __future__ import annotations
 
@@ -40,6 +40,7 @@ from .formal_task_models import (
     TaskAuthorizationGrant,
     TaskMutationDisposition,
     TaskMutationResult,
+    TaskResultAvailability,
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
     canonical_task_adjustment_rejection_reason,
@@ -345,16 +346,9 @@ class PersistentTaskCore:
                     frozenset({"adjustment"}),
                     field_name="task.adjust payload",
                 )
-                if current_background_session_id is None:
-                    raise FormalTaskViolation(
-                        "CURRENT_BACKGROUND_SESSION_REQUIRED",
-                        "task.adjust requires the current authorized Session",
-                        ErrorCode.PERMISSION_DENIED,
-                    )
                 return self.store.adjust(
                     command,
                     observed_at=observed_at,
-                    current_background_session_id=current_background_session_id,
                 )
             if command.command_type == "task.retry":
                 authority_or_replay = self.store.read_retry_authority(command)
@@ -557,13 +551,26 @@ class PersistentTaskCore:
                         "task.list requires its canonical collection target",
                         ErrorCode.INVALID_ARGUMENT,
                     )
-                require_exact_payload(
-                    query.payload, frozenset(), field_name="task.list payload"
+                payload = query.payload
+                if set(payload) - {"cursor", "limit"}:
+                    raise FormalTaskViolation(
+                        "INVALID_TASK_LIST_QUERY",
+                        "task.list query has unknown payload fields",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                cursor = payload.get("cursor")
+                limit = payload.get("limit", 50)
+                tasks, next_cursor, has_more = self.store.list_tasks_page(
+                    query.scope,
+                    cursor=cursor,
+                    limit=limit,
                 )
                 result: Mapping[str, object] = {
-                    "tasks": [
-                        task.to_dict() for task in self.store.list_tasks(query.scope)
-                    ]
+                    "tasks": [task.to_dict() for task in tasks],
+                    "cursor": cursor,
+                    "next_cursor": next_cursor,
+                    "has_more": has_more,
+                    "limit": limit,
                 }
             elif query.query_type in {"task.get", "task.status"}:
                 require_exact_payload(
@@ -578,24 +585,51 @@ class PersistentTaskCore:
                 }
             elif query.query_type == "task.events":
                 payload = query.payload
-                if set(payload) - {"after_seq"}:
+                if set(payload) - {"after_seq", "limit"}:
                     raise FormalTaskViolation(
                         "INVALID_TASK_EVENTS_QUERY",
                         "task.events query has unknown payload fields",
                         ErrorCode.INVALID_ARGUMENT,
                     )
                 after_seq = payload.get("after_seq", -1)
-                task = self.store.get_task(query.target_ref.id, query.scope)
-                events = self.store.events(
-                    query.target_ref.id, query.scope, after_seq=after_seq
+                limit = payload.get("limit", 100)
+                events, head_seq, next_after_seq, has_more = self.store.events_page(
+                    query.target_ref.id,
+                    query.scope,
+                    after_seq=after_seq,
+                    limit=limit,
                 )
                 result = {
                     "task_id": query.target_ref.id,
                     "after_seq": after_seq,
                     "events": [event.to_dict() for event in events],
-                    "head_seq": task.event_head,
-                    "truncated": False,
-                    "cursor_replay_supported": False,
+                    "head_seq": head_seq,
+                    "next_after_seq": next_after_seq,
+                    "has_more": has_more,
+                    "limit": limit,
+                    "truncated": has_more,
+                    "cursor_replay_supported": True,
+                }
+            elif query.query_type == "task.result":
+                require_exact_payload(
+                    query.payload,
+                    frozenset(),
+                    field_name="task.result payload",
+                )
+                availability, record, reason = self.store.task_result(
+                    query.target_ref.id,
+                    query.scope,
+                )
+                result = {
+                    "task_id": query.target_ref.id,
+                    "availability": availability.value,
+                    "reason": reason,
+                    "task_result": (
+                        record.to_dict()
+                        if availability is TaskResultAvailability.AVAILABLE
+                        and record is not None
+                        else None
+                    ),
                 }
             else:
                 raise FormalTaskViolation(

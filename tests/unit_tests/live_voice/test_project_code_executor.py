@@ -517,6 +517,9 @@ def _direct_task_attempt(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         attempt_id,
@@ -614,6 +617,9 @@ async def test_reconciliation_reports_unchanged_lost_and_unavailable_without_ret
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -817,6 +823,9 @@ async def test_status_uses_immutable_binding_after_revision_and_path_change(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -894,6 +903,9 @@ async def test_status_rejects_a_different_legacy_attempt_reference(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -934,6 +946,9 @@ async def test_status_rejects_mismatched_persisted_attempt_provenance(
         None,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         "attempt-1",
@@ -4091,6 +4106,9 @@ def _cancelled_before_dispatch(
         TerminalOutcome.CANCELLED,
         None,
         None,
+        "command-create-1",
+        None,
+        1,
     )
     attempt = PersistentAttemptRecord(
         attempt_id,

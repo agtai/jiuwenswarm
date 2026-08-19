@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Authenticated, server-resolved P3-alpha product composition.
+"""Authenticated, server-resolved P3 product composition.
 
 The formal Task Core intentionally does not authenticate callers or resolve
 projects.  This module supplies that missing product boundary.  Browser input
@@ -1089,8 +1089,6 @@ class P3AuthenticatedComposition:
                 task_id=str(task_id),
                 now=now,
             )
-        elif operation == "task.list":
-            self._require_list_task_contexts(authority=authority, now=now)
 
         resource = (
             None
@@ -1166,18 +1164,31 @@ class P3AuthenticatedComposition:
                 now=observed_at,
             )
         elif operation == "task.list":
-            self._require_list_task_contexts(authority=current, now=observed_at)
+            payload = query.envelope.payload
+            self._require_list_task_contexts(
+                authority=current,
+                now=observed_at,
+                cursor=payload.get("cursor"),
+                limit=payload.get("limit", 50),
+            )
         else:
             raise FormalTaskViolation(
                 "UNSUPPORTED_FORMAL_TASK_INTENT",
                 "formal task operation is unsupported",
                 ErrorCode.UNSUPPORTED,
             )
-        return self._core.query(
+        result = self._core.query(
             query.envelope,
             query.authorization,
             now=observed_at,
         )
+        if operation == "task.list":
+            self._require_list_result_contexts(
+                authority=current,
+                result=result,
+                now=observed_at,
+            )
+        return result
 
     def create_product_subscription(
         self,
@@ -1451,12 +1462,59 @@ class P3AuthenticatedComposition:
         *,
         authority: ResolvedAuthority,
         now: str,
+        cursor: str | None = None,
+        limit: int = 50,
     ) -> None:
-        for task in self._core.store.list_tasks(authority.scope):
+        tasks, _next_cursor, _has_more = self._core.store.list_tasks_page(
+            authority.scope,
+            cursor=cursor,
+            limit=limit,
+        )
+        for task in tasks:
             self._require_task_context(
                 authority=authority,
                 operation="task.list",
                 context=task.spec.context,
+                now=now,
+            )
+
+    def _require_list_result_contexts(
+        self,
+        *,
+        authority: ResolvedAuthority,
+        result: ResultEnvelope,
+        now: str,
+    ) -> None:
+        """Revalidate the exact returned page after its authoritative read."""
+
+        if not result.ok:
+            return
+        payload = result.result
+        tasks = None if not isinstance(payload, Mapping) else payload.get("tasks")
+        if not isinstance(tasks, list):
+            raise FormalTaskViolation(
+                "FORMAL_TASK_LIST_RESULT_INVALID",
+                "formal task list result is malformed",
+                ErrorCode.INTERNAL,
+            )
+        for raw_task in tasks:
+            if not isinstance(raw_task, Mapping):
+                raise FormalTaskViolation(
+                    "FORMAL_TASK_LIST_RESULT_INVALID",
+                    "formal task list result is malformed",
+                    ErrorCode.INTERNAL,
+                )
+            task_id = raw_task.get("task_id")
+            if type(task_id) is not str or not task_id:
+                raise FormalTaskViolation(
+                    "FORMAL_TASK_LIST_RESULT_INVALID",
+                    "formal task list result is malformed",
+                    ErrorCode.INTERNAL,
+                )
+            self._require_exact_task_context(
+                authority=authority,
+                operation="task.list",
+                task_id=task_id,
                 now=now,
             )
 
@@ -2172,13 +2230,14 @@ class P3AuthenticatedComposition:
                     "trusted Demo policy requires the unified voice current-task route",
                     ErrorCode.PERMISSION_DENIED,
                 )
-            if operation == "task.adjust" and (
-                current_background_session_id != clean.get("session_id")
-                or trusted_current_task_id is None
+            if (
+                operation == "task.adjust"
+                and trusted_current_task_id is not None
+                and current_background_session_id != clean.get("session_id")
             ):
                 raise FormalTaskViolation(
                     "CURRENT_BACKGROUND_TASK_BINDING_REQUIRED",
-                    "task.adjust requires the exact current background Session and Task",
+                    "voice current-task adjustment requires its exact background Session",
                     ErrorCode.PERMISSION_DENIED,
                 )
             authority = await self._run_blocking(
@@ -2221,6 +2280,8 @@ class P3AuthenticatedComposition:
                     self._require_list_task_contexts,
                     authority=authority,
                     now=now,
+                    cursor=clean.get("cursor"),
+                    limit=clean.get("limit", 50),
                 )
             retry_snapshot: _PreparedRetrySnapshot | None = None
             if operation == "task.retry":
@@ -2307,54 +2368,6 @@ class P3AuthenticatedComposition:
                 ),
                 policy_bypass=policy_bypass,
             )
-            if operation == "task.result":
-                current_background = await self._run_blocking(
-                    self._core.store.get_current_background_task,
-                    authority.scope,
-                    session_id=str(clean["session_id"]),
-                )
-                if current_background is None or current_background.task_id != str(
-                    clean["task_id"]
-                ):
-                    raise FormalTaskViolation(
-                        "CURRENT_BACKGROUND_TASK_MISMATCH",
-                        "task result is available only for the exact current task",
-                        ErrorCode.NOT_FOUND,
-                    )
-                grant.authorize(
-                    scope=authority.scope,
-                    operation=operation,
-                    command_id=None,
-                    target_task_id=str(clean["task_id"]),
-                    required_capabilities=frozenset({operation}),
-                    destructive=False,
-                    now=now,
-                )
-                availability, record, result_reason = await self._run_blocking(
-                    self._core.store.task_result,
-                    str(clean["task_id"]),
-                    authority.scope,
-                )
-                outcome = "accepted"
-                return P3RouteResult(
-                    True,
-                    {
-                        "request_id": request_id,
-                        "ok": True,
-                        "result": {
-                            "task_id": str(clean["task_id"]),
-                            "availability": availability.value,
-                            "reason": result_reason,
-                            "task_result": (
-                                record.to_dict()
-                                if availability is TaskResultAvailability.AVAILABLE
-                                and record is not None
-                                else None
-                            ),
-                        },
-                        "error": None,
-                    },
-                )
             intent = FormalTaskPolicyInput(
                 state=InputCommitState.COMMITTED,
                 source=str(clean["source"]),
@@ -2400,6 +2413,8 @@ class P3AuthenticatedComposition:
                 policy_bypass=policy_bypass,
                 current_task_binding=current_task_binding,
                 after_seq=int(clean.get("after_seq", -1)),
+                cursor=clean.get("cursor"),
+                limit=clean.get("limit"),
                 retry_precondition=(
                     None if retry_snapshot is None else retry_snapshot.precondition
                 ),
@@ -2417,7 +2432,7 @@ class P3AuthenticatedComposition:
                     now=now,
                     current_background_session_id=(
                         current_background_session_id
-                        if operation in {"task.create", "task.adjust"}
+                        if operation == "task.create"
                         else None
                     ),
                 )
@@ -2429,6 +2444,13 @@ class P3AuthenticatedComposition:
                     invocation.authorization,
                     now=now,
                 )
+                if operation == "task.list":
+                    await self._run_blocking(
+                        self._require_list_result_contexts,
+                        authority=authority,
+                        result=result,
+                        now=now,
+                    )
             if result.ok and destructive:
                 self._wake.set()
             outcome = "accepted" if result.ok else "rejected"
@@ -2607,11 +2629,11 @@ class P3AuthenticatedComposition:
             ),
             "task.list": (
                 frozenset({"auth_token", "session_id"}),
-                frozenset(),
+                frozenset({"cursor", "limit"}),
             ),
             "task.events": (
                 frozenset({"auth_token", "session_id", "task_id"}),
-                frozenset({"after_seq"}),
+                frozenset({"after_seq", "limit"}),
             ),
             "task.get": (
                 frozenset({"auth_token", "session_id", "task_id"}),
@@ -2798,6 +2820,17 @@ class P3AuthenticatedComposition:
                     ErrorCode.INVALID_ARGUMENT,
                 )
             clean["after_seq"] = params["after_seq"]
+        if "cursor" in params:
+            clean["cursor"] = _required_text(params["cursor"], "cursor", maximum=256)
+        if "limit" in params:
+            maximum = 100 if operation == "task.list" else 500
+            if type(params["limit"]) is not int or not 1 <= params["limit"] <= maximum:
+                raise FormalTaskViolation(
+                    "INVALID_P3_ROUTE_ARGUMENT",
+                    f"{operation} limit must be between 1 and {maximum}",
+                    ErrorCode.INVALID_ARGUMENT,
+                )
+            clean["limit"] = params["limit"]
         return clean
 
 

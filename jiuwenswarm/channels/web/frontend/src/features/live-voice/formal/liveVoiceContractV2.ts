@@ -668,6 +668,7 @@ export class IdentityRegistry {
 
 const COMMAND_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'task.create': 'task',
+  'task.adjust': 'task',
   'playback.stop': 'response',
   'response.cancel': 'response',
   'round.cancel': 'round',
@@ -679,6 +680,7 @@ const QUERY_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'task.list': 'task',
   'task.status': 'task',
   'task.events': 'task',
+  'task.result': 'task',
 });
 const CORE_CAPABILITIES = new Set([
   ...Object.keys(COMMAND_TARGETS),
@@ -746,6 +748,16 @@ function commandPayload(commandType: string, value: unknown): Readonly<JsonObjec
     const number = unsignedInteger(data.attempt_number, 'command.payload.attempt_number');
     if (number !== 2 && number !== 3) {
       throw violation('TASK_RETRY_ATTEMPT_NUMBER_INVALID', 'task.retry attempt_number must be 2 or 3', 'INVALID_ARGUMENT');
+    }
+  } else if (commandType === 'task.adjust') {
+    exactKeys(data, ['adjustment'], 'command.payload');
+    const adjustment = requiredText(data.adjustment, 'command.payload.adjustment');
+    if (adjustment.includes('\0') || new TextEncoder().encode(adjustment).byteLength > 4_096) {
+      throw violation(
+        'INVALID_TASK_ADJUSTMENT',
+        'task.adjust payload exceeds its closed content bound',
+        'INVALID_ARGUMENT'
+      );
     }
   }
   return cloneObject(data, 'command.payload');

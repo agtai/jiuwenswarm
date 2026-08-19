@@ -248,7 +248,7 @@ _CODE_MODE_SYNC_METHODS = frozenset({
 # ── 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃 --
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
-from jiuwenswarm.server.wire_truncate import (  # noqa: F401  — re-exported for tests / handlers
+from jiuwenswarm.server.wire_truncate import (  # noqa: E402, F401 — test/handler re-export
     _HISTORY_PAGE_SIZE,
     _HISTORY_WIRE_STRING_LIMIT,
     _HISTORY_WIRE_METADATA_STRING_LIMIT,
@@ -9081,7 +9081,13 @@ class AgentWebSocketServer:
                 registry is not None
                 and registry.p3_text_enabled
                 and operation
-                in {"task.get", "task.list", "task.status", "task.events"}
+                in {
+                    "task.get",
+                    "task.list",
+                    "task.status",
+                    "task.events",
+                    "task.result",
+                }
             ):
                 result = await registry.handle_p3_query(
                     operation=operation,

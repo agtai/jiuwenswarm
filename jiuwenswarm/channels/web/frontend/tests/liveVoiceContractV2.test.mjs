@@ -95,6 +95,20 @@ test('shared valid fixture round-trips with immutable snapshots', () => {
   }, TypeError);
 });
 
+test('task.result is an exact core Task query', () => {
+  const raw = clone(load('critical_kernel.valid.json').query);
+  raw.request_id = 'request-result';
+  raw.query_type = 'task.result';
+  raw.required_capabilities = ['task.result'];
+  raw.payload = {};
+
+  const query = parseQueryEnvelope(raw);
+
+  assert.equal(query.query_type, 'task.result');
+  assert.deepEqual(query.target_ref, { kind: 'task', id: raw.target_ref.id });
+  assert.deepEqual(query.required_capabilities, ['task.result']);
+});
+
 test('shared canonical JSON cases have exact bytes', () => {
   const fixture = load('critical_kernel.valid.json');
   for (const scenario of fixture.canonical_cases) {
@@ -881,6 +895,32 @@ test('task.retry accepts only exact server-derived bounded predecessor facts', (
     { ...retry.payload, context: {} },
   ]) {
     assert.throws(() => parseCommandEnvelope({ ...retry, payload }), ContractViolation);
+  }
+});
+
+test('task.adjust accepts only the exact bounded adjustment payload', () => {
+  const fixture = load('critical_kernel.valid.json');
+  const adjust = clone(fixture.command);
+  adjust.command_type = 'task.adjust';
+  adjust.target_ref = { kind: 'task', id: 'task-1' };
+  adjust.required_capabilities = ['task.adjust'];
+  adjust.payload = { adjustment: 'Keep the introduction to one sentence.' };
+
+  const parsed = parseCommandEnvelope(adjust);
+  assert.deepEqual(parsed.payload, adjust.payload);
+  assert.equal(Object.isFrozen(parsed.payload), true);
+
+  for (const [payload, reason] of [
+    [{}, 'MISSING_REQUIRED_FIELD'],
+    [{ adjustment: '' }, 'INVALID_REQUIRED_TEXT'],
+    [{ adjustment: 'valid', task_id: 'task-other' }, 'UNKNOWN_FIELD'],
+    [{ adjustment: 'invalid\0content' }, 'INVALID_TASK_ADJUSTMENT'],
+    [{ adjustment: 'a'.repeat(4_097) }, 'INVALID_TASK_ADJUSTMENT'],
+  ]) {
+    assert.throws(
+      () => parseCommandEnvelope({ ...adjust, payload }),
+      error => error instanceof ContractViolation && error.error.reason === reason
+    );
   }
 });
 

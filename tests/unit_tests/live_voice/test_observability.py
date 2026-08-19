@@ -1169,6 +1169,9 @@ def test_task_outbox_mapper_uses_public_identity_state_and_never_reads_spec() ->
         outcome=None,
         reconciliation_state=None,
         reconciliation_reason=None,
+        create_command_id="command-create-1",
+        predecessor_task_id=None,
+        revision_number=1,
     )
     item = PersistentOutboxItem(
         outbox_id="outbox-1",
