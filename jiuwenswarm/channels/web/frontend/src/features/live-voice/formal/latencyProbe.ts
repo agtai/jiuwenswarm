@@ -80,6 +80,43 @@ const IDENTITY_KEYS = new Set([
   'task_id',
 ]);
 const OBSERVATION_KEYS = new Set(['uncertainty_ms', 'outcome', 'reason_code']);
+const BATCH_KEYS = new Set([
+  'schema_version',
+  'batch_id',
+  'run_id',
+  'profile_id',
+  'input_case_id',
+  'round_index',
+  'source_instance_id',
+  'component',
+  'phase',
+  'terminal_outcome',
+  'marks',
+]);
+const MARK_KEYS = new Set([
+  'schema_version',
+  'run_id',
+  'profile_id',
+  'input_case_id',
+  'round_index',
+  'source_instance_id',
+  'mark_index',
+  'component',
+  'clock_domain_id',
+  'point',
+  'monotonic_ms',
+  'uncertainty_ms',
+  'outcome',
+  'reason_code',
+  'correlation_id',
+  'interaction_id',
+  'activation_id',
+  'activation_generation',
+  'turn_id',
+  'response_id',
+  'response_generation',
+  'task_id',
+]);
 
 export type LatencyProfileId = (typeof LATENCY_PROFILE_IDS)[number];
 export type BrowserLatencyPoint = (typeof BROWSER_LATENCY_CORE_POINTS)[number] | string;
@@ -193,15 +230,44 @@ type Selection = Readonly<{
   input_case_id: string;
 }>;
 
-function hasOnlyKeys(value: unknown, allowed: ReadonlySet<string>): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  let keys: (string | symbol)[];
+function snapshotExactDataRecord(value: unknown, allowed: ReadonlySet<string>): Readonly<Record<string, unknown>> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   try {
-    keys = Reflect.ownKeys(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const keys = Reflect.ownKeys(value);
+    const snapshot: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (typeof key !== 'string' || !allowed.has(key)) return null;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) return null;
+      snapshot[key] = descriptor.value;
+    }
+    return Object.freeze(snapshot);
   } catch {
-    return false;
+    return null;
   }
-  return keys.every(key => typeof key === 'string' && allowed.has(key));
+}
+
+function snapshotExactArray(value: unknown, maximumLength: number): readonly unknown[] | null {
+  if (!Array.isArray(value)) return null;
+  try {
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+    if (lengthDescriptor === undefined || !('value' in lengthDescriptor)) return null;
+    const length = lengthDescriptor.value;
+    if (!nonnegativeSafeInteger(length) || length > maximumLength) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== length + 1 || !keys.includes('length')) return null;
+    const snapshot: unknown[] = [];
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined || !descriptor.enumerable || !('value' in descriptor)) return null;
+      snapshot.push(descriptor.value);
+    }
+    return Object.freeze(snapshot);
+  } catch {
+    return null;
+  }
 }
 
 function hasUnpairedSurrogate(value: string): boolean {
@@ -269,58 +335,70 @@ function storageKey(selection: Selection): string {
   return `${STORAGE_PREFIX}:${encodeURIComponent(selection.run_id)}:${encodeURIComponent(selection.profile_id)}:${encodeURIComponent(selection.input_case_id)}`;
 }
 
-function allocateRoundIndex(storage: LatencyProbeStorage, key: string): number | null {
+type RoundAllocation = Readonly<{ status: 'allocated'; roundIndex: number }> | Readonly<{ status: 'safe_failure' }> | Readonly<{ status: 'unknown_write' }>;
+
+function allocateRoundIndex(storage: LatencyProbeStorage, key: string): RoundAllocation {
+  let raw: string | null;
   try {
-    const raw = storage.getItem(key);
-    let current: number;
-    if (raw === null) {
-      current = 0;
-    } else {
-      if (!/^(?:0|[1-9][0-9]{0,2})$/.test(raw)) return null;
-      current = Number(raw);
-      if (!nonnegativeSafeInteger(current) || current >= MAX_ROUNDS) return null;
-    }
-    const next = String(current + 1);
-    storage.setItem(key, next);
-    if (storage.getItem(key) !== next) return null;
-    return current;
+    raw = storage.getItem(key);
   } catch {
-    return null;
+    return Object.freeze({ status: 'safe_failure' });
   }
+  let current: number;
+  if (raw === null) {
+    current = 0;
+  } else {
+    if (!/^(?:0|[1-9][0-9]{0,2})$/.test(raw)) return Object.freeze({ status: 'safe_failure' });
+    current = Number(raw);
+    if (!nonnegativeSafeInteger(current) || current >= MAX_ROUNDS) return Object.freeze({ status: 'safe_failure' });
+  }
+  const next = String(current + 1);
+  try {
+    storage.setItem(key, next);
+  } catch {
+    return Object.freeze({ status: 'unknown_write' });
+  }
+  try {
+    if (storage.getItem(key) !== next) return Object.freeze({ status: 'unknown_write' });
+  } catch {
+    return Object.freeze({ status: 'unknown_write' });
+  }
+  return Object.freeze({ status: 'allocated', roundIndex: current });
 }
 
-function rollbackRoundIndex(storage: LatencyProbeStorage, key: string, roundIndex: number): void {
+function rollbackRoundIndex(storage: LatencyProbeStorage, key: string, roundIndex: number): boolean {
   try {
     const allocatedNext = String(roundIndex + 1);
-    if (storage.getItem(key) !== allocatedNext) return;
+    if (storage.getItem(key) !== allocatedNext) return false;
     const restoredNext = String(roundIndex);
     storage.setItem(key, restoredNext);
-    storage.getItem(key);
+    return storage.getItem(key) === restoredNext;
   } catch {
-    // Rollback is best-effort and can only affect this diagnostic allocator.
+    return false;
   }
 }
 
 function parseIdentity(value: unknown, current: Identity | null): Identity | null {
   try {
-    if (!hasOnlyKeys(value, IDENTITY_KEYS)) return null;
-    if (!boundedToken(value.correlation_id) || !boundedToken(value.interaction_id)) return null;
-    if (current !== null && (value.correlation_id !== current.correlation_id || value.interaction_id !== current.interaction_id)) return null;
+    const raw = snapshotExactDataRecord(value, IDENTITY_KEYS);
+    if (raw === null) return null;
+    if (!boundedToken(raw.correlation_id) || !boundedToken(raw.interaction_id)) return null;
+    if (current !== null && (raw.correlation_id !== current.correlation_id || raw.interaction_id !== current.interaction_id)) return null;
 
     const next: Record<string, string | number | null> = {
-      correlation_id: value.correlation_id,
-      interaction_id: value.interaction_id,
+      correlation_id: raw.correlation_id,
+      interaction_id: raw.interaction_id,
     };
     for (const field of ['activation_id', 'turn_id', 'response_id', 'task_id'] as const) {
-      const supplied = Object.prototype.hasOwnProperty.call(value, field);
-      const candidate = supplied ? value[field] : (current?.[field] ?? null);
+      const supplied = Object.prototype.hasOwnProperty.call(raw, field);
+      const candidate = supplied ? raw[field] : (current?.[field] ?? null);
       if (candidate !== null && !boundedToken(candidate)) return null;
       if (current?.[field] !== null && current?.[field] !== undefined && candidate !== current[field]) return null;
       next[field] = candidate;
     }
     for (const field of ['activation_generation', 'response_generation'] as const) {
-      const supplied = Object.prototype.hasOwnProperty.call(value, field);
-      const candidate = supplied ? value[field] : (current?.[field] ?? null);
+      const supplied = Object.prototype.hasOwnProperty.call(raw, field);
+      const candidate = supplied ? raw[field] : (current?.[field] ?? null);
       if (candidate !== null && !nonnegativeSafeInteger(candidate)) return null;
       if (current?.[field] !== null && current?.[field] !== undefined && candidate !== current[field]) return null;
       next[field] = candidate;
@@ -334,10 +412,11 @@ function parseIdentity(value: unknown, current: Identity | null): Identity | nul
 function parseObservation(point: string, value: unknown): Readonly<Required<LatencyObservation>> | null {
   try {
     if (value === undefined) return Object.freeze({ uncertainty_ms: null, outcome: 'observed', reason_code: null });
-    if (!hasOnlyKeys(value, OBSERVATION_KEYS)) return null;
-    const uncertainty = Object.prototype.hasOwnProperty.call(value, 'uncertainty_ms') ? value.uncertainty_ms : null;
-    const outcome = Object.prototype.hasOwnProperty.call(value, 'outcome') ? value.outcome : 'observed';
-    const reason = Object.prototype.hasOwnProperty.call(value, 'reason_code') ? value.reason_code : null;
+    const raw = snapshotExactDataRecord(value, OBSERVATION_KEYS);
+    if (raw === null) return null;
+    const uncertainty = Object.prototype.hasOwnProperty.call(raw, 'uncertainty_ms') ? raw.uncertainty_ms : null;
+    const outcome = Object.prototype.hasOwnProperty.call(raw, 'outcome') ? raw.outcome : 'observed';
+    const reason = Object.prototype.hasOwnProperty.call(raw, 'reason_code') ? raw.reason_code : null;
     if (uncertainty !== null && (!finiteNonnegative(uncertainty) || point !== 'browser.playout_first_frame_started_estimate')) return null;
     if (typeof outcome !== 'string' || !MARK_OUTCOMES.has(outcome)) return null;
     if (reason !== null && (typeof reason !== 'string' || !REASON_CODES.has(reason))) return null;
@@ -373,51 +452,46 @@ function deepFreezeBatch(batch: LatencyBatch): Readonly<LatencyBatch> {
   return Object.freeze(batch);
 }
 
-function validateProducedBatch(batch: unknown, selection: Selection, points: ReadonlySet<string>): batch is Readonly<LatencyBatch> {
+function validateProducedBatch(
+  batch: unknown,
+  selection: Selection,
+  points: ReadonlySet<string>,
+  provenance: LatencyProbeContext,
+): batch is Readonly<LatencyBatch> {
+  const raw = snapshotExactDataRecord(batch, BATCH_KEYS);
+  if (raw === null) return false;
+  const marks = snapshotExactArray(raw.marks, 64);
+  if (marks === null) return false;
   if (
-    !hasOnlyKeys(
-      batch,
-      new Set([
-        'schema_version',
-        'batch_id',
-        'run_id',
-        'profile_id',
-        'input_case_id',
-        'round_index',
-        'source_instance_id',
-        'component',
-        'phase',
-        'terminal_outcome',
-        'marks',
-      ]),
-    )
-  )
-    return false;
-  if (
-    batch.schema_version !== LATENCY_BATCH_SCHEMA_VERSION ||
-    !boundedToken(batch.batch_id) ||
-    batch.run_id !== selection.run_id ||
-    batch.profile_id !== selection.profile_id ||
-    batch.input_case_id !== selection.input_case_id ||
-    !nonnegativeSafeInteger(batch.round_index) ||
-    !boundedToken(batch.source_instance_id) ||
-    batch.component !== 'browser' ||
-    batch.phase !== 'browser_round' ||
-    !TERMINAL_OUTCOMES.has(String(batch.terminal_outcome)) ||
-    !Array.isArray(batch.marks) ||
-    batch.marks.length > 64
+    raw.schema_version !== LATENCY_BATCH_SCHEMA_VERSION ||
+    !boundedToken(raw.batch_id) ||
+    raw.run_id !== selection.run_id ||
+    raw.profile_id !== selection.profile_id ||
+    raw.input_case_id !== selection.input_case_id ||
+    raw.run_id !== provenance.run_id ||
+    raw.profile_id !== provenance.profile_id ||
+    raw.input_case_id !== provenance.input_case_id ||
+    raw.round_index !== provenance.round_index ||
+    !nonnegativeSafeInteger(raw.round_index) ||
+    !boundedToken(raw.source_instance_id) ||
+    raw.component !== 'browser' ||
+    raw.phase !== 'browser_round' ||
+    typeof raw.terminal_outcome !== 'string' ||
+    !TERMINAL_OUTCOMES.has(raw.terminal_outcome)
   )
     return false;
   let capacityCount = 0;
+  let lastPoint: string | null = null;
   const seen = new Set<string>();
-  for (let index = 0; index < batch.marks.length; index += 1) {
-    const mark = batch.marks[index];
-    if (!validateMark(mark, batch, index, points, seen)) return false;
-    if (mark.point === 'probe.capacity') capacityCount += 1;
+  for (let index = 0; index < marks.length; index += 1) {
+    const mark = validateMark(marks[index], raw, index, points, seen);
+    if (mark === null) return false;
+    lastPoint = mark.point as string;
+    if (lastPoint === 'probe.capacity') capacityCount += 1;
   }
   if (capacityCount > 1) return false;
-  if (capacityCount === 1 && (batch.marks.length !== 64 || batch.marks[63]?.point !== 'probe.capacity')) return false;
-  if (batch.marks.length === 64 && capacityCount !== 1) return false;
+  if (capacityCount === 1 && (marks.length !== 64 || lastPoint !== 'probe.capacity')) return false;
+  if (marks.length === 64 && capacityCount !== 1) return false;
   return true;
 }
 
@@ -427,70 +501,43 @@ function validateMark(
   index: number,
   points: ReadonlySet<string>,
   seen: Set<string>,
-): mark is Readonly<LatencyMark> {
+): Readonly<Record<string, unknown>> | null {
+  const raw = snapshotExactDataRecord(mark, MARK_KEYS);
+  if (raw === null) return null;
+  if (!boundedToken(raw.point) || seen.has(raw.point)) return null;
+  const capacity = raw.point === 'probe.capacity';
+  if (!capacity && !points.has(raw.point)) return null;
   if (
-    !hasOnlyKeys(
-      mark,
-      new Set([
-        'schema_version',
-        'run_id',
-        'profile_id',
-        'input_case_id',
-        'round_index',
-        'source_instance_id',
-        'mark_index',
-        'component',
-        'clock_domain_id',
-        'point',
-        'monotonic_ms',
-        'uncertainty_ms',
-        'outcome',
-        'reason_code',
-        'correlation_id',
-        'interaction_id',
-        'activation_id',
-        'activation_generation',
-        'turn_id',
-        'response_id',
-        'response_generation',
-        'task_id',
-      ]),
-    )
+    raw.schema_version !== LATENCY_MARK_SCHEMA_VERSION ||
+    raw.run_id !== batch.run_id ||
+    raw.profile_id !== batch.profile_id ||
+    raw.input_case_id !== batch.input_case_id ||
+    raw.round_index !== batch.round_index ||
+    raw.source_instance_id !== batch.source_instance_id ||
+    raw.mark_index !== index ||
+    raw.component !== 'browser' ||
+    !boundedToken(raw.clock_domain_id) ||
+    !finiteNonnegative(raw.monotonic_ms) ||
+    typeof raw.outcome !== 'string' ||
+    !MARK_OUTCOMES.has(raw.outcome) ||
+    (raw.reason_code !== null && (typeof raw.reason_code !== 'string' || !REASON_CODES.has(raw.reason_code))) ||
+    !boundedToken(raw.correlation_id) ||
+    !boundedToken(raw.interaction_id)
   )
-    return false;
-  if (!boundedToken(mark.point) || seen.has(mark.point)) return false;
-  const capacity = mark.point === 'probe.capacity';
-  if (!capacity && !points.has(mark.point)) return false;
+    return null;
+  if (capacity && (index !== 63 || raw.outcome !== 'unknown' || raw.reason_code !== 'CAPACITY')) return null;
+  if (raw.uncertainty_ms !== null && (!finiteNonnegative(raw.uncertainty_ms) || raw.point !== 'browser.playout_first_frame_started_estimate')) return null;
   if (
-    mark.schema_version !== LATENCY_MARK_SCHEMA_VERSION ||
-    mark.run_id !== batch.run_id ||
-    mark.profile_id !== batch.profile_id ||
-    mark.input_case_id !== batch.input_case_id ||
-    mark.round_index !== batch.round_index ||
-    mark.source_instance_id !== batch.source_instance_id ||
-    mark.mark_index !== index ||
-    mark.component !== 'browser' ||
-    !boundedToken(mark.clock_domain_id) ||
-    !finiteNonnegative(mark.monotonic_ms) ||
-    !MARK_OUTCOMES.has(String(mark.outcome)) ||
-    (mark.reason_code !== null && !REASON_CODES.has(String(mark.reason_code))) ||
-    !boundedToken(mark.correlation_id) ||
-    !boundedToken(mark.interaction_id)
+    !optionalToken(raw.activation_id) ||
+    !optionalInteger(raw.activation_generation) ||
+    !optionalToken(raw.turn_id) ||
+    !optionalToken(raw.response_id) ||
+    !optionalInteger(raw.response_generation) ||
+    !optionalToken(raw.task_id)
   )
-    return false;
-  if (capacity && (index !== 63 || mark.outcome !== 'unknown' || mark.reason_code !== 'CAPACITY')) return false;
-  if (mark.uncertainty_ms !== null && (!finiteNonnegative(mark.uncertainty_ms) || mark.point !== 'browser.playout_first_frame_started_estimate')) return false;
-  if (
-    !optionalToken(mark.activation_id) ||
-    !optionalInteger(mark.activation_generation) ||
-    !optionalToken(mark.turn_id) ||
-    !optionalToken(mark.response_id) ||
-    !optionalInteger(mark.response_generation) ||
-    !optionalToken(mark.task_id)
-  )
-    return false;
-  seen.add(mark.point);
-  return true;
+    return null;
+  seen.add(raw.point);
+  return raw;
 }
 
 function optionalToken(value: unknown): boolean {
@@ -502,18 +549,19 @@ function optionalInteger(value: unknown): boolean {
 }
 
 class ActiveBrowserLatencyRound implements BrowserLatencyRound {
-  readonly context: LatencyProbeContext;
+  readonly #context: LatencyProbeContext;
   readonly #sourceInstanceId: string;
   readonly #clockDomainId: string;
   readonly #batchId: string;
   readonly #monotonicMs: () => number;
   readonly #points: ReadonlySet<string>;
-  readonly #onFinish: (batch: Readonly<LatencyBatch>) => void;
+  readonly #onFinish: (batch: Readonly<LatencyBatch>, context: LatencyProbeContext) => void;
   readonly #marks: LatencyMark[] = [];
   readonly #seen = new Set<string>();
   #identity: Identity;
   #finished = false;
   #capacityRecorded = false;
+  #busy = false;
 
   constructor(input: {
     context: LatencyProbeContext;
@@ -523,9 +571,9 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
     batchId: string;
     monotonicMs: () => number;
     points: ReadonlySet<string>;
-    onFinish: (batch: Readonly<LatencyBatch>) => void;
+    onFinish: (batch: Readonly<LatencyBatch>, context: LatencyProbeContext) => void;
   }) {
-    this.context = input.context;
+    this.#context = input.context;
     this.#identity = input.identity;
     this.#sourceInstanceId = input.sourceInstanceId;
     this.#clockDomainId = input.clockDomainId;
@@ -533,15 +581,21 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
     this.#monotonicMs = input.monotonicMs;
     this.#points = input.points;
     this.#onFinish = input.onFinish;
+    Object.preventExtensions(this);
+  }
+
+  get context(): LatencyProbeContext {
+    return this.#context;
   }
 
   mark(point: BrowserLatencyPoint, identity: LatencyIdentityPatch, observation?: LatencyObservation): boolean {
-    if (this.#finished || this.#capacityRecorded) return false;
-    if (this.#marks.length >= MAX_ORDINARY_MARKS) {
-      this.#recordCapacity();
-      return false;
-    }
+    if (this.#busy || this.#finished || this.#capacityRecorded) return false;
+    this.#busy = true;
     try {
+      if (this.#marks.length >= MAX_ORDINARY_MARKS) {
+        this.#recordCapacity();
+        return false;
+      }
       if (!boundedToken(point) || this.#seen.has(point) || !this.#points.has(point)) return false;
       const nextIdentity = parseIdentity(identity, this.#identity);
       const normalizedObservation = parseObservation(point, observation);
@@ -550,10 +604,10 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
       if (!finiteNonnegative(monotonicMs)) return false;
       const mark = Object.freeze({
         schema_version: LATENCY_MARK_SCHEMA_VERSION,
-        run_id: this.context.run_id,
-        profile_id: this.context.profile_id,
-        input_case_id: this.context.input_case_id,
-        round_index: this.context.round_index,
+        run_id: this.#context.run_id,
+        profile_id: this.#context.profile_id,
+        input_case_id: this.#context.input_case_id,
+        round_index: this.#context.round_index,
         source_instance_id: this.#sourceInstanceId,
         mark_index: this.#marks.length,
         component: 'browser' as const,
@@ -571,6 +625,8 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
       return true;
     } catch {
       return false;
+    } finally {
+      this.#busy = false;
     }
   }
 
@@ -583,10 +639,10 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
       this.#marks.push(
         Object.freeze({
           schema_version: LATENCY_MARK_SCHEMA_VERSION,
-          run_id: this.context.run_id,
-          profile_id: this.context.profile_id,
-          input_case_id: this.context.input_case_id,
-          round_index: this.context.round_index,
+          run_id: this.#context.run_id,
+          profile_id: this.#context.profile_id,
+          input_case_id: this.#context.input_case_id,
+          round_index: this.#context.round_index,
           source_instance_id: this.#sourceInstanceId,
           mark_index: MAX_ORDINARY_MARKS,
           component: 'browser' as const,
@@ -612,23 +668,30 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
   }
 
   finish(outcome: LatencyTerminalOutcome): Readonly<LatencyBatch> | null {
-    if (this.#finished || !TERMINAL_OUTCOMES.has(outcome)) return null;
-    this.#finished = true;
-    const batch = deepFreezeBatch({
-      schema_version: LATENCY_BATCH_SCHEMA_VERSION,
-      batch_id: this.#batchId,
-      run_id: this.context.run_id,
-      profile_id: this.context.profile_id,
-      input_case_id: this.context.input_case_id,
-      round_index: this.context.round_index,
-      source_instance_id: this.#sourceInstanceId,
-      component: 'browser',
-      phase: 'browser_round',
-      terminal_outcome: outcome,
-      marks: this.#marks,
-    });
-    this.#onFinish(batch);
-    return batch;
+    if (this.#busy || this.#finished || !TERMINAL_OUTCOMES.has(outcome)) return null;
+    this.#busy = true;
+    try {
+      this.#finished = true;
+      const batch = deepFreezeBatch({
+        schema_version: LATENCY_BATCH_SCHEMA_VERSION,
+        batch_id: this.#batchId,
+        run_id: this.#context.run_id,
+        profile_id: this.#context.profile_id,
+        input_case_id: this.#context.input_case_id,
+        round_index: this.#context.round_index,
+        source_instance_id: this.#sourceInstanceId,
+        component: 'browser',
+        phase: 'browser_round',
+        terminal_outcome: outcome,
+        marks: this.#marks,
+      });
+      this.#onFinish(batch, this.#context);
+      return batch;
+    } catch {
+      return null;
+    } finally {
+      this.#busy = false;
+    }
   }
 }
 
@@ -643,7 +706,9 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
   readonly #request: (method: string, params: Record<string, unknown>) => unknown;
   readonly #points: ReadonlySet<string>;
   readonly #ownedBatches = new WeakSet<object>();
+  readonly #batchContexts = new WeakMap<object, LatencyProbeContext>();
   readonly #settledExports = new WeakSet<object>();
+  #allocatorUncertain = false;
 
   constructor(input: {
     selection: Selection;
@@ -667,19 +732,25 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
   }
 
   beginRound(identity: LatencyIdentityPatch): BrowserLatencyRound {
+    if (this.#allocatorUncertain) return inertRound(this.#selection);
     const parsedIdentity = parseIdentity(identity, null);
     if (parsedIdentity === null) return inertRound(this.#selection);
-    const roundIndex = allocateRoundIndex(this.#storage, this.#storageKey);
-    if (roundIndex === null) return inertRound(this.#selection);
+    const allocation = allocateRoundIndex(this.#storage, this.#storageKey);
+    if (allocation.status === 'unknown_write') {
+      this.#allocatorUncertain = true;
+      return inertRound(this.#selection);
+    }
+    if (allocation.status === 'safe_failure') return inertRound(this.#selection);
+    const roundIndex = allocation.roundIndex;
     let batchId: string;
     try {
       batchId = this.#randomId();
     } catch {
-      rollbackRoundIndex(this.#storage, this.#storageKey, roundIndex);
+      if (!rollbackRoundIndex(this.#storage, this.#storageKey, roundIndex)) this.#allocatorUncertain = true;
       return inertRound(this.#selection);
     }
     if (!boundedToken(batchId)) {
-      rollbackRoundIndex(this.#storage, this.#storageKey, roundIndex);
+      if (!rollbackRoundIndex(this.#storage, this.#storageKey, roundIndex)) this.#allocatorUncertain = true;
       return inertRound(this.#selection);
     }
     return new ActiveBrowserLatencyRound({
@@ -690,7 +761,10 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
       batchId,
       monotonicMs: this.#monotonicMs,
       points: this.#points,
-      onFinish: batch => this.#ownedBatches.add(batch),
+      onFinish: (batch, context) => {
+        this.#ownedBatches.add(batch);
+        this.#batchContexts.set(batch, context);
+      },
     });
   }
 
@@ -698,7 +772,8 @@ class DefaultBrowserLatencyProbe implements BrowserLatencyProbe {
     try {
       if (!boundedToken(sessionId) || batch === null || typeof batch !== 'object') return;
       if (!this.#ownedBatches.has(batch) || this.#settledExports.has(batch)) return;
-      if (!validateProducedBatch(batch, this.#selection, this.#points)) return;
+      const provenance = this.#batchContexts.get(batch);
+      if (provenance === undefined || !validateProducedBatch(batch, this.#selection, this.#points, provenance)) return;
       this.#settledExports.add(batch);
       await this.#request(LATENCY_PROBE_BATCH_METHOD, { session_id: sessionId, batch });
     } catch {

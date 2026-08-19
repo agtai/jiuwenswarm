@@ -480,3 +480,210 @@ test('invalid initial identity yields an inert round before storage, batch rando
   assert.deepEqual(h.counts(), before);
   assert.equal(h.requestCalls.length, 0);
 });
+
+test('unknown storage write outcomes permanently latch one probe allocator inert', () => {
+  const adapters = [
+    (() => {
+      let value = null;
+      let reads = 0;
+      return {
+        getItem() {
+          reads += 1;
+          if (reads === 2) throw new Error('PRIVATE verification failure');
+          return value;
+        },
+        setItem(_key, next) {
+          value = next;
+        },
+      };
+    })(),
+    (() => {
+      let value = null;
+      return {
+        getItem() {
+          return value;
+        },
+        setItem(_key, next) {
+          value = next;
+          throw new Error('PRIVATE write-then-throw');
+        },
+      };
+    })(),
+    (() => {
+      let value = null;
+      let reads = 0;
+      return {
+        getItem() {
+          reads += 1;
+          if (reads === 2) return 'conflicting-next-index';
+          return value;
+        },
+        setItem(_key, next) {
+          value = next;
+        },
+      };
+    })(),
+    (() => {
+      let value = null;
+      let writes = 0;
+      return {
+        getItem() {
+          return value;
+        },
+        setItem(_key, next) {
+          writes += 1;
+          value = next;
+          if (writes === 2) throw new Error('PRIVATE rollback unknown');
+        },
+      };
+    })(),
+  ];
+
+  adapters.forEach((storage, index) => {
+    const h = harness({
+      storage,
+      ids: index === 3 ? ['source-instance-1', 'browser-clock-1', new Error('PRIVATE batch random'), 'forbidden-batch'] : undefined,
+    });
+    const probe = createBrowserLatencyProbe(h.dependencies);
+    const failed = probe.beginRound(initialIdentity);
+    assert.equal(failed.finish('failed'), null);
+    const afterFailure = h.counts();
+
+    const later = probe.beginRound(initialIdentity);
+    assert.equal(later.mark('browser.eot_received', initialIdentity), false);
+    assert.equal(later.finish('completed'), null);
+    assert.deepEqual(h.counts(), afterFailure);
+    assert.equal(h.requestCalls.length, 0);
+  });
+});
+
+test('monotonic clock reentrancy cannot insert a conflicting mark or finish an in-flight mark', () => {
+  let markRound;
+  let nestedMarkResult = null;
+  let markReentered = false;
+  const markHarness = harness();
+  markHarness.dependencies.monotonicMs = () => {
+    if (!markReentered) {
+      markReentered = true;
+      nestedMarkResult = markRound.mark('browser.stt_final_received', {
+        ...initialIdentity,
+        activation_id: 'activation-conflict',
+      });
+    }
+    return 10;
+  };
+  const markProbe = createBrowserLatencyProbe(markHarness.dependencies);
+  markRound = markProbe.beginRound(initialIdentity);
+  assert.equal(markRound.mark('browser.eot_received', { ...initialIdentity, activation_id: 'activation-authoritative' }), true);
+  assert.equal(nestedMarkResult, false);
+  const markedBatch = markRound.finish('completed');
+  assert.deepEqual(
+    markedBatch.marks.map(mark => [mark.point, mark.mark_index, mark.activation_id]),
+    [['browser.eot_received', 0, 'activation-authoritative']],
+  );
+
+  let finishRound;
+  let nestedFinishResult = 'not-called';
+  let finishReentered = false;
+  const finishHarness = harness();
+  finishHarness.dependencies.monotonicMs = () => {
+    if (!finishReentered) {
+      finishReentered = true;
+      nestedFinishResult = finishRound.finish('failed');
+    }
+    return 20;
+  };
+  const finishProbe = createBrowserLatencyProbe(finishHarness.dependencies);
+  finishRound = finishProbe.beginRound(initialIdentity);
+  assert.equal(finishRound.mark('browser.eot_received', initialIdentity), true);
+  assert.equal(nestedFinishResult, null);
+  const finishedBatch = finishRound.finish('completed');
+  assert.equal(finishedBatch.terminal_outcome, 'completed');
+  assert.deepEqual(
+    finishedBatch.marks.map(mark => mark.point),
+    ['browser.eot_received'],
+  );
+});
+
+test('identity and observation inputs require own plain data properties and never evaluate accessors', () => {
+  const inherited = Object.create(initialIdentity);
+  const inheritedHarness = harness();
+  const inheritedProbe = createBrowserLatencyProbe(inheritedHarness.dependencies);
+  assert.equal(inheritedProbe.beginRound(inherited).finish('failed'), null);
+  assert.equal(inheritedHarness.storage.calls.length, 0);
+
+  let identityGetterReads = 0;
+  const accessorIdentity = {};
+  Object.defineProperties(accessorIdentity, {
+    correlation_id: {
+      enumerable: true,
+      get() {
+        identityGetterReads += 1;
+        return identityGetterReads === 1 ? 'corr-1' : 'PRIVATE_CHANGED';
+      },
+    },
+    interaction_id: { enumerable: true, value: 'interaction-1' },
+  });
+  const accessorHarness = harness();
+  const accessorProbe = createBrowserLatencyProbe(accessorHarness.dependencies);
+  assert.equal(accessorProbe.beginRound(accessorIdentity).finish('failed'), null);
+  assert.equal(identityGetterReads, 0);
+  assert.equal(accessorHarness.storage.calls.length, 0);
+
+  const proxyIdentity = new Proxy(
+    { ...initialIdentity },
+    {
+      getOwnPropertyDescriptor() {
+        throw new Error('PRIVATE descriptor trap');
+      },
+    },
+  );
+  const proxyHarness = harness();
+  const proxyProbe = createBrowserLatencyProbe(proxyHarness.dependencies);
+  assert.equal(proxyProbe.beginRound(proxyIdentity).finish('failed'), null);
+  assert.equal(proxyHarness.storage.calls.length, 0);
+
+  const symbolHarness = harness();
+  const symbolProbe = createBrowserLatencyProbe(symbolHarness.dependencies);
+  assert.equal(symbolProbe.beginRound({ ...initialIdentity, [Symbol('private-metadata')]: 'PRIVATE' }).finish('failed'), null);
+  assert.equal(symbolHarness.storage.calls.length, 0);
+
+  let observationGetterReads = 0;
+  const observation = {};
+  Object.defineProperty(observation, 'outcome', {
+    enumerable: true,
+    get() {
+      observationGetterReads += 1;
+      return observationGetterReads === 1 ? 'observed' : 'failed';
+    },
+  });
+  const markHarness = harness();
+  const markProbe = createBrowserLatencyProbe(markHarness.dependencies);
+  const round = markProbe.beginRound(initialIdentity);
+  const before = markHarness.counts();
+  assert.equal(round.mark('browser.eot_received', initialIdentity, observation), false);
+  assert.equal(observationGetterReads, 0);
+  assert.equal(markHarness.counts().clockCalls, before.clockCalls);
+  assert.deepEqual(round.finish('unknown').marks, []);
+});
+
+test('round context is non-shadowable and export remains bound to private allocated provenance', async () => {
+  const h = harness();
+  const probe = createBrowserLatencyProbe(h.dependencies);
+  const round = probe.beginRound(initialIdentity);
+  const replacement = Object.freeze({ ...round.context, round_index: 99 });
+
+  assert.throws(() => {
+    round.context = replacement;
+  }, TypeError);
+  assert.throws(() => Object.defineProperty(round, 'context', { value: replacement }), TypeError);
+  assert.equal(round.context.round_index, 0);
+
+  assert.equal(round.mark('browser.eot_received', initialIdentity), true);
+  const batch = round.finish('completed');
+  await probe.exportBatch('session-1', { ...batch, round_index: 99 });
+  assert.equal(h.requestCalls.length, 0);
+  await probe.exportBatch('session-1', batch);
+  assert.equal(h.requestCalls.length, 1);
+  assert.equal(h.requestCalls[0][1].batch.round_index, 0);
+});
