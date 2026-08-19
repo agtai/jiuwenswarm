@@ -1,6 +1,6 @@
 # Live Voice current project status
 
-> Updated: 2026-08-18. This is the only mutable source for current product
+> Updated: 2026-08-19. This is the only mutable source for current product
 > judgement, capability completion, remaining scope, dependency order and the
 > next execution packet. Read live branch/HEAD/upstream state from Git; do not
 > copy transient ahead/behind, dirty-tree or “uncommitted” claims into this file.
@@ -8,24 +8,22 @@
 ## Project judgement
 
 - **Last product-code baseline assessed:**
-  `ca9a9d9a3be5f76c4feee980030a1b3ce065b9ab`. Documentation-only commits after
+  `f24dd17d336c8266954f2d7299ca13bd0314d424`. Documentation-only commits after
   that source do not change its product credit.
-- **Current product status:** **PARTIAL — controlled Demo capable, not a clean
-  product-readiness candidate and not feature-complete.** Speech, realtime,
-  Task, authority, Executor and Integrated Web foundations exist, but the
-  expanded hands-free/background-Task journey still has authoritative truth
-  defects.
+- **Current product status:** **BLOCKED — the clean P3-G0 candidate failed the
+  real hands-free continuation gate and is not feature-complete.** The six
+  recorded product-truth repair groups and explicit build profile have useful
+  source/automated evidence, but automatic capture failed after each of two real
+  Agent/TTS turns before the background-Task journey could begin.
 - **Accepted historical baseline:** `PASS — INTEGRATED WEB ALPHA` remains bound
   only to `d33b520e0d21ae0829d30814d77a01cc18256f09`. Later source and broader
   functionality do not inherit that result.
-- **Latest physical product result:** `COMPLETED — DEFECTS RECORDED`, not PASS.
-  See the sanitized [product run](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md).
-- **Current highest priority:** the fresh 15-domain code-fact audit is now
-  complete (see
-  [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md)); next
-  close the confirmed product-truth defects (result-context capacity, semantic
-  routing, recovery diagnostics) and re-verify Executor terminalization and
-  admission truth on one clean immutable candidate.
+- **Latest physical product result:** `FAIL — P3-G0 CONTROLLED CANDIDATE NOT
+  ACCEPTED` on exact clean product source `f24dd17d336c8266954f2d7299ca13bd0314d424`.
+  See the sanitized [P3-G0 attempt](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md).
+- **Current highest priority:** execute the bounded P3-G0 repair packet below
+  for recurrent P1 capture-duration/rotation failure after TTS, then rerun the
+  complete controlled-candidate acceptance. P3-1 remains gated on that PASS.
 - **Integration:** integration with a `develop` ref is deferred until the
   feature-complete boundary below passes. At that future boundary, re-read the
   configured remotes and live ref before any integration; this document assumes
@@ -66,105 +64,95 @@ only one coherent packet at a time.
 
 | Capability / module | Status and implemented fact | Remaining for feature complete | Dependency / acceptance |
 |---|---|---|---|
-| Audio Device & browser I/O | **PARTIAL.** Browser capture/playout, lifecycle fencing and dedicated media wiring exist | Default formal route; device/permission recovery; AEC/NS/AGC and double-talk behaviour; measured first-frame/loss/stop targets | P2 media/runtime integration plus declared browser/device matrix |
-| Speech Recognition | **PARTIAL.** Controlled OpenAI Streaming/Batch STT and browser fallback work | Provider-neutral configuration, fixed accuracy/latency corpus, robust fallback/cancel and broader device/network validation | Audio I/O, media route and benchmark owner |
+| Audio Device & browser I/O | **BLOCKED for the controlled candidate.** Browser capture/playout, lifecycle fencing and dedicated media wiring exist, but `f24dd17d` twice entered `AUDIO_CAPTURE_DURATION_EXCEEDED` after TTS instead of continuing automatically | Repair and physically verify overlap/idle capture rotation; device/permission recovery; AEC/NS/AGC and double-talk behaviour; measured first-frame/loss/stop targets | Current P3-G0 repair packet, then P2 media/runtime integration and declared browser/device matrix |
+| Speech Recognition | **PARTIAL.** Two real microphone finals reached the Agent, but each post-TTS failure also produced streaming-route abort, cleanup timeout and unacknowledged cancel | Exact capture/provider-speech-start attribution, robust fallback/cancel, Provider-neutral configuration, fixed accuracy/latency corpus and broader device/network validation | Audio I/O, media route and benchmark owner |
 | Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist | Provider-neutral configuration, first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation |
-| Realtime Media | **PARTIAL.** Dedicated transport, media registration, receipts/ACK and bounded close behaviour exist | Backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; real network/device verification |
-| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing and playout-time barge-in exist | Interruption during Agent generation, complete `ask_user` voice loop, cross-load arbitration and recovery without repeated ambiguous state | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
+| Realtime Media | **BLOCKED for the controlled candidate.** Dedicated transport, media registration and presentation ACK worked, but repeated post-TTS capture rotation did not preserve a usable media loop | Repair the exact rotation/cancel seam; backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; real network/device verification |
+| Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing and playout-time barge-in exist; manual retry admitted a second turn | Automatic continuation without recurrent recovery failure; interruption during Agent generation, complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
 | Task Control Core and Store | **PARTIAL.** Stable Task/Attempt/Event/Command IDs, SQLite schema v3, idempotency, outbox, results, adjustments and one-current-Task recovery exist | Multiple addressed Tasks, target disambiguation, `update/provide_input/pause/resume/reprioritize`, successor revision, replay/unread and one canonical Task model | Executor status resolution, Voice–Task Bridge and restart/concurrency matrix |
 | Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
-| Integrated Web product experience | **PARTIAL.** One-click hands-free shell, formal route, progress, TTS and current Task presentation exist | Formal route becomes the only supported default; truthful queued/running/terminal UX; device/privacy/recovery UX; legacy hook/flags removed | All P1/P2/P3 owners plus complete human journey |
+| Integrated Web product experience | **BLOCKED for the controlled candidate.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses | Close recurrent capture recovery, then prove truthful queued/running/terminal UX, device/privacy/recovery UX and complete human journey; later remove legacy hooks/flags | Current P3-G0 repair, then all P1/P2/P3 owners |
 | Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist | Execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md): fresh physical baseline; stable EOT/Agent/TTS/first-audible diagnostics; low-risk pipeline waits; authoritative ACK; formal sentence-level Agent→TTS overlap; fixed-corpus p50/p95 and no-regression proof | Instrumentation before optimization; fixed corpus/environment; Conversation Runtime and P1 media owners |
-| Automated verification and product acceptance | **PARTIAL.** Broad exact-source backend/frontend/build/review credit exists | Affected defect reruns, capability-owned test migration, cumulative feature-complete matrix, clean real Journey, competitor-gap review and independent deep review | Root `TESTING.md`, current acceptance and exact clean source |
-| Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete | Explicit Demo profile; remove `.env.production` default-on dependency; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
+| Automated verification and product acceptance | **BLOCKED.** Exact-source affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review have current credit | Repair/rerun the affected P1 seam and complete the clean real Journey; then capability-owned test migration, cumulative feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, current acceptance and exact clean source |
+| Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
 ## Current blocking defects
 
-Re-verified against the audited source (see
-[module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md) §7).
+The six audit-derived repair groups are implemented and have affected automated
+credit on `f24dd17d`, but the physical run stopped before their full combined
+Task journey. They therefore remain **source-repaired, candidate acceptance
+open**, rather than being closed by an incomplete positive path:
 
-1. **Executor terminalization — partially closed, clean re-verification open.**
-   The Agent-return → validation → application → result → terminalization path is
-   statically closed and unit-tested on this source; the Post-Alpha dirty-source
-   observation of a missing terminal event / lease renewal must be re-checked on
-   one clean immutable candidate before it is declared fixed.
-2. **Admission truth — backend correct, display wording open.** An accepted Task
-   blocked by `EXECUTOR_PROJECT_BUSY` is not authoritatively running at the
-   backend; the residual risk is user-visible “已开始处理”/running wording, not
-   authoritative state.
-3. **Semantic routing:** valid Chinese adjustments without “把/将” and prefixed
-   status questions can route incorrectly.
-4. **Task-truth isolation — downgraded to Low residual.** Five-layer isolation is
-   source-backed; the remaining gap is an end-to-end negative oracle proving a
-   DIALOGUE `chat.final` cannot assert applied/completed/result, plus
-   presentation wording.
-5. **Result-context capacity:** a legal TaskResult can be rejected when dialogue
-   context already occupies the selected capacity.
-6. **Recovery diagnostics:** repeated “正在恢复” lacks stable correlation needed
-   to identify the failed activation/generation/ACK/TTS seam.
+1. **Executor terminalization:** bounded deadline/orphan settlement and tests
+   are present; the clean physical Agent-return → application → result → terminal
+   path was not reached.
+2. **Admission truth:** backend and queued/running presentation regressions pass;
+   the real create/admission step was not reached.
+3. **Semantic routing:** bounded no-“把/将” adjustments and prefixed status forms
+   pass affected positive/negative tests; no real running adjustment was issued.
+4. **Task-truth isolation:** the end-to-end negative oracle and presentation
+   guards pass automation; the combined dialogue/Task physical path was not run.
+5. **Result-context capacity:** reserved legal TaskResult capacity passes its
+   tests; no physical result query was reached.
+6. **Recovery diagnostics:** stable visible correlation/reason fields are now
+   present. The failed run identified activation and
+   `AUDIO_CAPTURE_DURATION_EXCEEDED`, but available logs still do not distinguish
+   provider speech-start/echo from the exact rotation race.
 
-Items 3, 5 and 6 remain blockers for a new controlled candidate; items 1, 2 and
-4 are re-scoped per the audit and still carry their listed follow-up. These do
-not invalidate the historical exact-source Alpha result.
+A new blocking defect was demonstrated twice on the clean candidate:
+
+7. **P1 post-TTS capture continuation — BLOCKER.** The 30-second capture bound
+   begins during overlapping TTS. After each of two real Agent responses, the
+   route entered `AUDIO_CAPTURE_DURATION_EXCEEDED`, streaming recognition aborted
+   and speech cancel/cleanup did not acknowledge cleanly. Manual `重新监听` admitted
+   one more turn but the same failure recurred. See the
+   [P3-G0 evidence](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md).
+
+The explicit build profile and ordinary-production flag-off behaviour are
+source/build/deploy verified, but they cannot upgrade the failed candidate. None
+of these findings invalidates the historical exact-source Alpha result.
 
 ## Current execution packet
 
-- **Objective:** repair the authoritative product-truth path and produce one
-  clean controlled product-readiness candidate.
-- **Capability/modules:** Executor & Durability, Task Control Core,
-  Voice–Task Bridge, Agent Bridge, Conversation Runtime and presentation/TTS.
-- **Preparation:** the read-only 15-domain audit and its recommended repair
-  order are complete (see the
-  [module code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md) §17);
-  no product repair receives credit until its owner-scoped implementation packet
-  and applicable tests are executed.
-- **Risk:** the audit is Tier 0 read-only work. Repair risk is assigned per
-  coherent changed boundary under root `TESTING.md`; the controlled candidate
-  remains cumulative Tier 3, but its tier does not propagate to every repair.
-  B1 durability/timeout is Tier 3. B2 presentation wording is Tier 1; Store/P3
-  receipt compatibility is Tier 2 if touched. B3 Task-mutating semantic routing
-  is Tier 2. B4 test-only regression/presentation work is Tier 1; any new
-  Task-truth authority policy or generalized classifier is a separately scoped
-  Tier-3 design checkpoint. B5 local result-context capacity is Tier 1 unless it
-  changes a shared context contract. B6 recovery state, stale callbacks and
-  identity fencing are Tier 2 unless they change a shared protocol.
-- **Included:** the six re-scoped defects above; bounded D0 timeout/orphan
-  settlement and diagnostics needed for truthful candidate state;
-  accepted/queued/running display wording; one explicit named Demo profile
-  replacing production default-on flags while flag-off preserves the text path;
-  each repair's applicable D-032 dimensions and zero-forbidden-effect tests for
-  paths that can mutate authority or another scope. (The fresh audit itself is
-  complete and is no longer a packet work item.)
-- **Excluded:** multi-Task/full-P3 expansion, broad latency optimization, broad
-  duplicate abstraction, D1 checkpoint/D2 reconciliation, competitor feature
-  additions, generalized semantic classifiers or new product-truth policy not
-  required by a frozen defect, Production work and `develop` integration.
-- **First action and order:** instantiate B6 recovery correlation as the first
-  owner-scoped Tier-2 repair batch, including its recovery-seam test; then B5
-  legal result-context capacity, B3 semantic routing, B4/B2 negative-oracle and
-  display truth, and finally the B1/B2 clean physical re-verification. Each
-  batch names exact source/tests, exclusions and zero-forbidden-effect evidence
-  before implementation.
-- **Deliverables:** affected product/test changes, per-batch risk-proportional
-  review evidence, the explicit Demo profile, and one exact clean
-  candidate with truthful adjustment/result/terminal presentation. A repair
-  batch may close only its affected findings; it cannot grant full-P3 credit.
-- **Acceptance:** affected backend and Integrated Web checks plus each batch's
-  risk-proportional scoped/independent review. Only at controlled-candidate
-  closure, perform the cumulative Tier-3 diff/integration-seam review and one
-  clean immutable
-  [product-readiness acceptance](validation/PRODUCT_READINESS_ACCEPTANCE.md) run
+- **Packet:** P3-G0R — post-TTS capture continuation repair and candidate rerun.
+- **Objective:** remove the recurrent `AUDIO_CAPTURE_DURATION_EXCEEDED` failure
+  without truncating a real utterance or weakening authority, then rerun P3-G0
+  on one exact clean immutable candidate.
+- **Capability/modules:** Audio Device & browser I/O, Speech Recognition,
+  Realtime Media, Conversation Runtime, Integrated Web presentation/recovery.
+- **Risk:** provisionally Tier 2 recovery/concurrency work under root
+  `TESTING.md`; re-scope to Tier 3 before implementation if the solution changes
+  shared media protocol, speech authority or security. The eventual candidate
+  closure remains cumulative Tier 3.
+- **Included:** reproduce the long-TTS overlap with current-provider
+  speech-start and rotation races; define whether the 30-second bound applies to
+  an overlap lease or post-playout listening; repair rotation/cancel/cleanup and
+  the minimum diagnostics needed to identify the seam; assert zero duplicate
+  commit, stale audio/history, wrong-generation and Task side effects; preserve
+  ordinary-production flag-off and the explicit Live Voice profile.
+- **Excluded:** blind threshold-only tuning without a recorded contract;
+  unrelated six-repair expansion; multi-Task/full-P3 or P3-1 work; broad latency
+  optimization; generalized routing/product policy; D1/D2 expansion;
+  Production work, `develop` integration and remote updates.
+- **First action:** freeze the two-turn reproduction from the
+  [P3-G0 evidence](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md),
+  add a deterministic real-seam-equivalent regression that distinguishes TTS
+  echo/current-provider speech-start from post-playout user speech, then choose
+  the smallest owner-scoped fix and re-tier it before source modification.
+- **Deliverables:** intended-behaviour/exclusion record, affected P1/media tests,
+  risk-proportional complete-diff and independent review, affected backend/Formal
+  Web/profile/build/static reruns, clean deployment, and one full successful
+  [product-readiness acceptance](validation/PRODUCT_READINESS_ACCEPTANCE.md)
   using the [human journey](demo/PRODUCT_READINESS_SHOWCASE.md).
-- **Contract/evidence inputs:** the
-  [D-085 code-fact audit](reviews/MODULE_CODE_FACT_AUDIT_2026-08-17.md), current
-  source/tests, applicable frozen boundaries from
-  [D119](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md),
-  and the sanitized [Post-Alpha defect run](evidence/POST_ALPHA_DEMO_20260817_95b26308_WORKTREE.md).
-  Historical stage packets do not define this work.
+- **Acceptance:** short and long real TTS must both transition automatically to
+  usable listening with no visible recovery error or manual retry; Exit must
+  settle capture/playout/timers/reconnect. Only then run and prove the complete
+  background create/running-adjustment/status/result/terminal/reopen journey.
+  A successful P3-G0 rerun, not this packet's code landing, unlocks P3-1.
 
 ## Dependency route to feature complete
 
@@ -173,12 +161,15 @@ not invalidate the historical exact-source Alpha result.
    Remaining disputed facts (Executor clean re-verification, Interaction
    Intelligence ownership, Realtime Media composition owner) stay recorded as
    open conditions; a full suite was not required for the read-only audit.
-2. Close the confirmed product-truth defects and replace implicit Demo
-   production flags before building the next candidate.
-3. Pass one clean controlled candidate; findings return only to affected owners.
-4. Migrate applicable old test oracles, then perform code placement, duplicate
-   consolidation and entrypoint/document retirement without deleting live
-   coverage.
+2. `f24dd17d` implements the six product-truth repair groups and explicit Demo
+   profile/default-off production semantics with affected automated/build
+   evidence, but its clean P3-G0 physical run failed post-TTS capture
+   continuation before the Task journey.
+3. Execute P3-G0R and pass one clean controlled candidate; findings return only
+   to affected owners. **P3-1 remains blocked until this step passes.**
+4. After that PASS, migrate applicable old test oracles, then perform code
+   placement, duplicate consolidation and entrypoint/document retirement
+   without deleting live coverage.
 5. Complete P1/P2 quality in parallel with the
    [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md): execute the
    [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
@@ -214,9 +205,12 @@ not invalidate the historical exact-source Alpha result.
   manifest until regression/contract extraction; the planned interim set is 20
   Live Voice documents. Audit-time line counts are historical metrics, not
   mutable status facts.
-- **Hardcodes:** explicit Demo profile is part of the current packet. Exact
+- **Hardcodes:** the explicit Demo profile and production-default flag-off are
+  implemented and verified on `f24dd17d`; P3-G0R must preserve them. Exact
   itinerary/checkpoint/bypass and other launcher scenario values retire after a
-  clean journey during generalization. Protocol constants and safety bounds stay.
+  clean journey during generalization. Protocol constants and accepted safety
+  bounds stay; the capture-duration contract must be decided before changing its
+  value.
 - **Duplicates:** combine registry generation-index traversal only if its owner
   is touched by the defect repair. Formal validators/snapshots wait for the code
   organization batch; authority handlers remain explicit unless semantics match.
@@ -236,8 +230,10 @@ not invalidate the historical exact-source Alpha result.
 
 - Historical automated counts and review details remain in their exact-source
   records. They are regression evidence, not current candidate credit.
-- The last assessed product-code baseline has useful backend/frontend/build
-  credit, but its physical run ended with defects and no immutable PASS.
+- Exact product source `f24dd17d` has current affected backend/frontend/profile/
+  build/static and clean-deployment credit recorded in the
+  [P3-G0 evidence](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md),
+  but its repeated physical continuation failure prevents immutable PASS.
 - A documentation-only commit never upgrades product readiness.
 - Runtime credentials, Provider settings, registered projects, device/browser
   state, Task databases and network state are machine-private. At the next
