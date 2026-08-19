@@ -5932,8 +5932,8 @@ export function LiveVoiceIntegratedRoutePanelView({
                 Dedicated same-origin PCM route → Gateway batch Speech → committed Agent text → Gateway synthesis.
               </span>
               <span className="live-voice-integrated__progress-note">
-                This turn retains at most {PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 1000} seconds of captured audio. During continuous capture this is approximately{' '}
-                {PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 1000} seconds; audio captured during overlapping playback counts toward the limit. Speak and press Stop
+                One spoken utterance retains at most {PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 1000} seconds of captured audio, measured from the recognized start
+                of speech. Silent listening and overlapping playback rotate the capture automatically and do not count toward the limit. Speak and press Stop
                 and recognize before the limit.
               </span>
               {p1VoiceStatus === 'capturing' || p1VoiceStatus === 'playing' ? (
@@ -5957,7 +5957,8 @@ export function LiveVoiceIntegratedRoutePanelView({
               {p1VoiceReason !== null && <DiagnosticsFact label="P1 reason" value={p1VoiceReason} />}
               {p1VoiceReason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON && (
                 <span className="live-voice-integrated__progress-note">
-                  The expired capture was discarded without a new Speech or Agent submission. Refresh to start again.
+                  The utterance exceeded its 30-second budget; the expired capture was discarded without a new Speech or Agent submission. Refresh to start
+                  again.
                 </span>
               )}
             </div>

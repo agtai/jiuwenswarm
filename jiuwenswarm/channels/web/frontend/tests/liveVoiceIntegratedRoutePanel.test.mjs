@@ -372,11 +372,11 @@ test('formal P1 discloses the 30-second capture bound and disables restart on te
     },
   });
 
-  assert.equal(html.includes('This turn retains at most 30 seconds of captured audio.'), true);
-  assert.equal(html.includes('audio captured during overlapping playback counts toward the limit.'), true);
+  assert.equal(html.includes('One spoken utterance retains at most 30 seconds of captured audio, measured from the recognized start'), true);
+  assert.equal(html.includes('Silent listening and overlapping playback rotate the capture automatically and do not count toward the limit.'), true);
   assert.equal(html.includes('Speak and press Stop and recognize before the limit.'), true);
   assert.equal(html.includes('AUDIO_CAPTURE_DURATION_EXCEEDED'), true);
-  assert.equal(html.includes('The expired capture was discarded without a new Speech or Agent submission. Refresh to start again.'), true);
+  assert.equal(html.includes('The utterance exceeded its 30-second budget; the expired capture was discarded without a new Speech or Agent submission.'), true);
   assert.match(html, /<button type="button" disabled="">Start formal voice turn<\/button>/);
 });
 
