@@ -1005,6 +1005,12 @@ class OpenAIStreamingSpeechProvider:
                 asyncio.shield(session.ready),
                 timeout=min(self._config.connect_timeout_seconds, remaining),
             )
+            _log_openai_transport(
+                operation="recognition",
+                phase="provider_ready",
+                endpoint=url,
+                latency_ms=max(0, int((self._monotonic() - started_at) * 1000)),
+            )
         except BaseException as exc:
             failure = _safe_boundary_exception(exc)
         finally:
@@ -1697,6 +1703,7 @@ class OpenAIStreamingSpeechProvider:
     async def _open_synthesis_stream(
         self, session: _SynthesisSession
     ) -> SpeechSseStream:
+        endpoint = f"{self._config.api_base}/audio/speech"
         headers: Mapping[str, str] = {
             "Accept": "text/event-stream",
             "Accept-Encoding": "identity",
@@ -1712,9 +1719,15 @@ class OpenAIStreamingSpeechProvider:
         }
         failure: BaseException | None = None
         stream: SpeechSseStream | None = None
+        _log_openai_transport(
+            operation="synthesis",
+            phase="connect_attempt",
+            endpoint=endpoint,
+            timeout_ms=max(0, int(self._config.connect_timeout_seconds * 1000)),
+        )
         try:
             stream = await self._sse_factory(
-                f"{self._config.api_base}/audio/speech",
+                endpoint,
                 headers,
                 payload,
                 self._config.connect_timeout_seconds,
@@ -1725,12 +1738,29 @@ class OpenAIStreamingSpeechProvider:
         payload = {}
         session = None  # type: ignore[assignment]  # clear spoken text before raise
         if failure is not None:
+            _log_openai_transport(
+                operation="synthesis",
+                phase="connect_failed",
+                endpoint=endpoint,
+                reason=_safe_log_reason(failure),
+            )
             raise failure
         if stream is None:
+            _log_openai_transport(
+                operation="synthesis",
+                phase="connect_failed",
+                endpoint=endpoint,
+                reason="SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+            )
             raise OpenAIStreamingSpeechError(
                 "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
                 "synthesis Provider transport is unavailable",
             )
+        _log_openai_transport(
+            operation="synthesis",
+            phase="transport_open",
+            endpoint=endpoint,
+        )
         return stream
 
     async def _consume_synthesis_stream(self, session: _SynthesisSession) -> bool:
@@ -2020,6 +2050,12 @@ class OpenAIStreamingSpeechProvider:
         headers: Mapping[str, str] = {"Authorization": f"Bearer {self._config.api_key}"}
         failure: BaseException | None = None
         socket: RealtimeSocket | None = None
+        _log_openai_transport(
+            operation="recognition",
+            phase="connect_attempt",
+            endpoint=url,
+            timeout_ms=max(0, int(timeout_seconds * 1000)),
+        )
         try:
             socket = await asyncio.wait_for(
                 self._socket_factory(url, headers, timeout_seconds),
@@ -2029,12 +2065,29 @@ class OpenAIStreamingSpeechProvider:
             failure = _safe_transport_exception(exc)
         headers = {}
         if failure is not None:
+            _log_openai_transport(
+                operation="recognition",
+                phase="connect_failed",
+                endpoint=url,
+                reason=_safe_log_reason(failure),
+            )
             raise failure
         if socket is None:
+            _log_openai_transport(
+                operation="recognition",
+                phase="connect_failed",
+                endpoint=url,
+                reason="SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
+            )
             raise OpenAIStreamingSpeechError(
                 "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE",
                 "recognition Provider transport is unavailable",
             )
+        _log_openai_transport(
+            operation="recognition",
+            phase="transport_open",
+            endpoint=url,
+        )
         return socket
 
     async def _send_recognition_wire(
@@ -2084,14 +2137,40 @@ class OpenAIStreamingSpeechProvider:
         return fact
 
     async def _close_socket(self, socket: RealtimeSocket) -> bool:
-        return await self._transport_cleanup_tasks.attempt(
+        endpoint = _realtime_url(self._config.api_base)
+        _log_openai_transport(
+            operation="recognition",
+            phase="close_requested",
+            endpoint=endpoint,
+        )
+        complete = await self._transport_cleanup_tasks.attempt(
             kind="socket", resource=socket, cleanup=socket.close
         )
+        _log_openai_transport(
+            operation="recognition",
+            phase="close_attempt_complete",
+            endpoint=endpoint,
+            complete=complete,
+        )
+        return complete
 
     async def _close_stream(self, stream: SpeechSseStream) -> bool:
-        return await self._transport_cleanup_tasks.attempt(
+        endpoint = f"{self._config.api_base}/audio/speech"
+        _log_openai_transport(
+            operation="synthesis",
+            phase="close_requested",
+            endpoint=endpoint,
+        )
+        complete = await self._transport_cleanup_tasks.attempt(
             kind="sse-stream", resource=stream, cleanup=stream.aclose
         )
+        _log_openai_transport(
+            operation="synthesis",
+            phase="close_attempt_complete",
+            endpoint=endpoint,
+            complete=complete,
+        )
+        return complete
 
     async def _finalize_cleanup_owners(self) -> None:
         failure: BaseException | None = None
@@ -2340,6 +2419,50 @@ def _log_transport_cleanup(*, kind: str, reason: str, retained_count: int) -> No
         reason,
         retained_count,
     )
+
+
+def _log_openai_transport(
+    *,
+    operation: str,
+    phase: str,
+    endpoint: str,
+    reason: str | None = None,
+    timeout_ms: int | None = None,
+    latency_ms: int | None = None,
+    complete: bool | None = None,
+) -> None:
+    """Emit temporary Provider transport diagnostics without private payloads."""
+
+    fields = [
+        "live_voice_openai_transport",
+        f"operation={operation}",
+        f"phase={phase}",
+        f"endpoint={endpoint}",
+    ]
+    if reason is not None:
+        fields.append(f"reason={reason}")
+    if timeout_ms is not None:
+        fields.append(f"timeout_ms={timeout_ms}")
+    if latency_ms is not None:
+        fields.append(f"latency_ms={latency_ms}")
+    if complete is not None:
+        fields.append(f"complete={str(complete).lower()}")
+    level = logging.ERROR if phase == "connect_failed" else logging.INFO
+    _LOGGER.log(level, " ".join(fields))
+
+
+def _safe_log_reason(exc: BaseException) -> str:
+    """Return a bounded category only; never render an untrusted exception."""
+
+    if isinstance(exc, (TimeoutError, asyncio.TimeoutError, httpx.TimeoutException)):
+        return "SPEECH_PROVIDER_TIMEOUT"
+    if isinstance(exc, asyncio.CancelledError):
+        return "CANCELLED"
+    if isinstance(exc, OpenAIStreamingSpeechError):
+        return exc.reason
+    if _is_process_control(exc):
+        return type(exc).__name__.upper()
+    return "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
 
 
 def _safe_transport_exception(exc: BaseException) -> BaseException:

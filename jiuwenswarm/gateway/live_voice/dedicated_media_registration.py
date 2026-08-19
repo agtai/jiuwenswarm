@@ -3605,6 +3605,15 @@ async def handle_registered_media_socket(
         except Exception:
             pass
         return True
+    trace_ref = hashlib.sha256(record.record_id.encode("utf-8")).hexdigest()[:16]
+    _LOGGER.info(
+        "live_voice_media_trace phase=authenticated trace_ref=%s "
+        "session_id=%s direction=%s generation=%d",
+        trace_ref,
+        record.binding.session_id,
+        record.binding.direction.value,
+        record.binding.generation.value,
+    )
     request = DedicatedMediaRouteRequest(
         enabled=registry.enabled,
         expected_origin=record.expected_origin,
@@ -3649,6 +3658,12 @@ async def handle_registered_media_socket(
             # Give an immediately-ready Provider one scheduling turn, but never
             # put its network connect deadline in front of browser media attach.
             await asyncio.sleep(0)
+            _LOGGER.info(
+                "live_voice_media_trace phase=uplink_leaf_enter trace_ref=%s "
+                "session_id=%s",
+                trace_ref,
+                record.binding.session_id,
+            )
 
             def retain_uplink_completion(
                 leaf_result: DedicatedMediaSocketLeafResult,
@@ -3669,6 +3684,18 @@ async def handle_registered_media_socket(
                     )
                 registry.complete_route(record, leaf_result)
                 route_completion_retained = True
+                _LOGGER.info(
+                    "live_voice_media_trace phase=route_complete trace_ref=%s "
+                    "session_id=%s attach_sent=%s accepted_frames=%d "
+                    "reason=%s cleanup_complete=%s",
+                    trace_ref,
+                    record.binding.session_id,
+                    str(bool(getattr(leaf_result, "attach_sent", False))).lower(),
+                    int(getattr(leaf_result, "accepted_frames", 0)),
+                    getattr(getattr(leaf_result, "reason_id", None), "value", None)
+                    or str(getattr(leaf_result, "reason_id", "unknown")),
+                    str(bool(getattr(leaf_result, "cleanup_complete", False))).lower(),
+                )
 
             def retain_uplink_frame(frame: MediaAudioFrame) -> None:
                 # Batch fallback retains only its existing bounded digest path;
@@ -3676,6 +3703,15 @@ async def handle_registered_media_socket(
                 # interrupt capture if it degrades.
                 registry.accept_frame(record, frame)
                 registry.accept_streaming_frame(record, frame)
+                if record.accepted_frames == 1:
+                    _LOGGER.info(
+                        "live_voice_media_trace phase=first_frame_accepted "
+                        "trace_ref=%s session_id=%s seq=%d sample_cursor=%d",
+                        trace_ref,
+                        record.binding.session_id,
+                        frame.seq,
+                        frame.sample_cursor,
+                    )
 
             result = await run_dedicated_media_socket_leaf(
                 request,
@@ -3712,6 +3748,14 @@ async def handle_registered_media_socket(
                 "media route completion callback was not retained",
             )
     except BaseException:
+        _LOGGER.warning(
+            "live_voice_media_trace phase=route_aborted trace_ref=%s "
+            "session_id=%s completion_retained=%s accepted_frames=%d",
+            trace_ref,
+            record.binding.session_id,
+            str(route_completion_retained).lower(),
+            record.accepted_frames,
+        )
         if record.binding.direction is MediaDirection.UPLINK:
             await asyncio.shield(registry.abort_streaming_recognition(record))
         if not route_completion_retained:

@@ -388,6 +388,100 @@ async def test_capability_is_truthful_and_secret_stays_out_of_repr() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recognition_transport_diagnostics_show_open_ready_and_close_without_secret() -> (
+    None
+):
+    socket = FakeSocket((session_updated_event(),))
+    logs = CapturingLogHandler()
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    provider = OpenAIStreamingSpeechProvider(config(), socket_factory=socket_factory)
+    ref = recognition_ref()
+    _LOGGER.addHandler(logs)
+    try:
+        await provider.open_recognition(ref, timeout_seconds=1)
+        await provider.cancel_recognition(ref)
+        await provider.close()
+    finally:
+        _LOGGER.removeHandler(logs)
+
+    safe_logs = "\n".join(logs.messages)
+    endpoint = "wss://api.openai.com/v1/realtime?intent=transcription"
+    assert (
+        "operation=recognition phase=connect_attempt "
+        f"endpoint={endpoint} timeout_ms=" in safe_logs
+    )
+    assert (
+        f"operation=recognition phase=transport_open endpoint={endpoint}" in safe_logs
+    )
+    assert (
+        f"operation=recognition phase=provider_ready endpoint={endpoint} "
+        "latency_ms=" in safe_logs
+    )
+    assert (
+        f"operation=recognition phase=close_requested endpoint={endpoint}" in safe_logs
+    )
+    assert "phase=close_attempt_complete" in safe_logs
+    assert "complete=true" in safe_logs
+    assert "private-test-key" not in safe_logs
+
+
+@pytest.mark.asyncio
+async def test_synthesis_transport_diagnostics_show_open_and_close_without_private_text() -> (
+    None
+):
+    pcm = struct.pack("<hhhh", 0, 1000, -1000, 0)
+    stream = FakeSseStream(
+        (
+            "data: "
+            + json.dumps(
+                {
+                    "type": "speech.audio.delta",
+                    "audio": base64.b64encode(pcm).decode("ascii"),
+                }
+            ),
+            "",
+            'data: {"type":"speech.audio.done","usage":{}}',
+            "",
+        )
+    )
+    logs = CapturingLogHandler()
+
+    async def sse_factory(*_args) -> FakeSseStream:
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    _LOGGER.addHandler(logs)
+    try:
+        await provider.open_synthesis(request)
+        events = [
+            await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+            for _ in range(4)
+        ]
+        assert events[-1].kind is SynthesisEventKind.COMPLETED
+        await provider.close()
+    finally:
+        _LOGGER.removeHandler(logs)
+
+    safe_logs = "\n".join(logs.messages)
+    endpoint = "https://api.openai.com/v1/audio/speech"
+    assert (
+        "operation=synthesis phase=connect_attempt "
+        f"endpoint={endpoint} timeout_ms=" in safe_logs
+    )
+    assert f"operation=synthesis phase=transport_open endpoint={endpoint}" in safe_logs
+    assert f"operation=synthesis phase=close_requested endpoint={endpoint}" in safe_logs
+    assert "phase=close_attempt_complete" in safe_logs
+    assert "complete=true" in safe_logs
+    assert "private-test-key" not in safe_logs
+    assert request.spoken_text not in safe_logs
+
+
+@pytest.mark.asyncio
 async def test_server_vad_fences_input_and_final_uses_provider_time_truth() -> None:
     socket = FakeSocket((session_updated_event(server_vad_wire()),))
 
@@ -1307,6 +1401,7 @@ async def test_x_obs_sink_failure_does_not_hide_retained_visible_fact() -> None:
 @pytest.mark.asyncio
 async def test_untrusted_connect_exception_drops_secret_traceback_and_chain() -> None:
     private_provider_value = "private-connect-provider-value"
+    logs = CapturingLogHandler()
 
     async def failing_socket_factory(_url, headers, _timeout):
         raise RuntimeError(f"{headers['Authorization']}:{private_provider_value}")
@@ -1314,8 +1409,12 @@ async def test_untrusted_connect_exception_drops_secret_traceback_and_chain() ->
     provider = OpenAIStreamingSpeechProvider(
         config(), socket_factory=failing_socket_factory
     )
-    with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
-        await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+    _LOGGER.addHandler(logs)
+    try:
+        with pytest.raises(OpenAIStreamingSpeechError) as exc_info:
+            await provider.open_recognition(recognition_ref(), timeout_seconds=1)
+    finally:
+        _LOGGER.removeHandler(logs)
     assert exc_info.value.reason == "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
@@ -1323,6 +1422,14 @@ async def test_untrusted_connect_exception_drops_secret_traceback_and_chain() ->
     assert "private-test-key" not in formatted
     assert private_provider_value not in formatted
     assert "Authorization" not in formatted
+    assert (
+        "operation=recognition phase=connect_failed "
+        "endpoint=wss://api.openai.com/v1/realtime?intent=transcription "
+        "reason=SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
+    ) in "\n".join(logs.messages)
+    assert "private-test-key" not in "\n".join(logs.messages)
+    assert private_provider_value not in "\n".join(logs.messages)
+    assert "Authorization" not in "\n".join(logs.messages)
     assert_zero_business_effects(provider)
     await provider.close()
 

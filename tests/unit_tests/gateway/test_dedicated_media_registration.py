@@ -885,6 +885,13 @@ async def test_exceptional_media_socket_exit_clears_every_raw_audio_byte(
 async def test_completed_media_socket_retains_recognition_content(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    messages: list[str] = []
+
+    class _CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _CaptureHandler()
     registry = _active_registry()
     activation = _activate(
         registry,
@@ -911,10 +918,21 @@ async def test_completed_media_socket_retains_recognition_content(
     )
     ws = _AuthOnlySocket(activation)
 
-    assert await handle_registered_media_socket(registry, ws, endpoint_path)
+    dedicated_media_registration._LOGGER.addHandler(handler)
+    try:
+        assert await handle_registered_media_socket(registry, ws, endpoint_path)
+    finally:
+        dedicated_media_registration._LOGGER.removeHandler(handler)
 
     assert record.route_completed is True
     assert record.recognition_content_sha256 is not None
+    safe_logs = "\n".join(messages)
+    assert "phase=authenticated" in safe_logs
+    assert "phase=uplink_leaf_enter" in safe_logs
+    assert "phase=first_frame_accepted" in safe_logs
+    assert "phase=route_complete" in safe_logs
+    assert "accepted_frames=1" in safe_logs
+    assert "0.25" not in safe_logs
 
 
 @pytest.mark.asyncio
