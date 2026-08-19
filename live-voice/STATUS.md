@@ -135,6 +135,20 @@ exact-source Alpha result.
 
 ## Current execution packet
 
+Under the D-060/D-062 bounded multi-package batch form, this STATUS activates
+one batch with three child packages: `P3-2` (unchanged, first below),
+`P1/P2-T1` (post-TTS capture continuation repair) and `P1/P2-T2` (latency
+optimization, delegated owner). Child file sets are disjoint and each child
+carries its own owner, risk, dependencies, acceptance and exclusions below.
+`STATUS`/`DECISIONS` editing and batch integration remain single-writer.
+Integration order: `P1/P2-T1` lands as one production commit before any
+`P1/P2-T2` frontend work; `P3-2` integrates independently under its own
+owner. `P1/P2-T1` has no dependency on any P3 package (per the D-086 route,
+P1/P2 quality proceeds in parallel); `P1/P2-T2` frontend work depends on the
+integrated `P1/P2-T1`. Activation grants no implementation credit.
+
+### Batch member P3-2 — complete command semantics (unchanged)
+
 - **Packet:** P3-2 — complete command, adjustment and successor-revision
   semantics.
 - **Frozen contract:** [D-087](decisions/DECISIONS.md) and the
@@ -181,6 +195,63 @@ exact-source Alpha result.
   appear successful; successor creation preserves predecessor and result
   byte-for-byte; text and Voice observe the same authoritative result and
   TaskEvent truth.
+
+### Batch member P1/P2-T1 — post-TTS capture continuation repair
+
+- **Packet:** P1/P2-T1 — repair the deferred post-TTS capture continuation
+  defect on the formal Web route.
+- **Contract:** the six repair directions and later-acceptance criteria in the
+  [deferred issue record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
+  Changing only the 30-second value is not an accepted repair; changing the
+  capture-duration contract itself requires its own prior decision.
+- **Scope:** transparent post-TTS capture rotation; a decaying local-activity
+  observation instead of a sticky lease-lifetime flag; separation of
+  capture-lease age from active-utterance duration; preserved provider
+  speech-start/EOT, barge-in, generation fencing and stale-lease isolation
+  including speech-start/rotation races; sanitized capture diagnostics
+  (phase/generation, frame counts, recent local activity, rotation reason,
+  actual AEC/NS/AGC settings — no raw audio, credentials or private device
+  identity). Streaming cancel/cleanup is rechecked after the primary repair
+  and repaired here only if it persists independently and stays bounded;
+  otherwise it returns as its own affected packet.
+- **Owner/files:** formal P1 voice route and capture adapters —
+  `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts`,
+  `formal/adapters/browserAudioIOAdapter.ts`,
+  `formal/adapters/liveVoiceCaptureProcessor.js`, minimal integration in
+  `components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx`, their test
+  suites, and the streaming-speech seam only if the cancel/cleanup recheck
+  confirms an independent bounded defect.
+- **Risk:** Tier 3 under root `TESTING.md` (capture/media/runtime seams).
+- **Excluded:** any `task_store.py`/`persistent_task_core.py`, P3 command or
+  result/consumer schema, or central product-composition registry change — a
+  required wiring change returns as a minimal separate integration patch;
+  latency optimization work; physical PASS claims.
+- **Acceptance:** a deterministic regression proving one post-playout
+  high-energy frame followed by silence rotates transparently across the
+  lease boundary with no visible error and zero forbidden
+  Agent/Tool/Task/audio/history effects; decaying local activity; silent
+  multi-boundary rotation; preserved speech-start/EOT/barge-in/fencing/
+  stale-lease races; affected frontend/backend automation; independent
+  Tier-3 cold review; synchronized STATUS/evidence. The physical continuation
+  criteria remain owned by the deferred record and close only on a later real
+  microphone/TTS run; this packet grants no physical credit.
+
+### Batch member P1/P2-T2 — latency optimization (delegated)
+
+- **Packet:** P1/P2-T2 — execute the
+  [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
+  in its §7 delivery order (measurement contract and fresh baseline first)
+  under a delegated owner.
+- **Constraint:** L1 server-side instrumentation may start immediately; all
+  frontend work in `productP1VoiceRoute.ts`/`browserAudioIOAdapter.ts` waits
+  for the integrated `P1/P2-T1` commit or explicit coordination. No
+  Provider/model/billing change, persistent speech cache, new retention
+  policy or raw-audio storage; ideas rejected in the plan's §8 stay rejected.
+- **Risk:** per-batch tier under root `TESTING.md`; the pipeline and
+  sentence-overlap batches are Tier 3.
+- **Acceptance:** per the plan's §§3–7 measured evidence relative to the
+  fresh baseline; targets become release gates only after environment, corpus
+  and sample size are frozen.
 
 ## Dependency route to feature complete
 
