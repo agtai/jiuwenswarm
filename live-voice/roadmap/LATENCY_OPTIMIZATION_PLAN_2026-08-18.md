@@ -1,7 +1,7 @@
 # Live Voice latency optimization plan
 
-> **Plan status:** APPROACH DEFINED — implementation and current-source
-> measurement are not complete. [STATUS](../STATUS.md) remains the only owner
+> **Plan status:** MINIMAL PROBE IMPLEMENTED — accepted current-source warm/cold
+> measurement is not complete. [STATUS](../STATUS.md) remains the only owner
 > of current priority, progress, blockers and completion credit. This document
 > owns the latency diagnosis, implementation shape and acceptance boundary.
 >
@@ -15,6 +15,15 @@
 > analysis baseline.
 >
 > Date: 2026-08-18
+
+> **2026-08-20 measurement note:** the default-off minimal v0 implementation
+> landed through `a1b0435dae6c19f9d4aaa58d5a96af2d2ce9af77`. Its contract and
+> executable implementation packet are
+> [LATENCY_PROBE_SPEC_2026-08-19.md](LATENCY_PROBE_SPEC_2026-08-19.md) and
+> [LATENCY_PROBE_IMPLEMENTATION_PLAN_2026-08-19.md](LATENCY_PROBE_IMPLEMENTATION_PLAN_2026-08-19.md).
+> Automated evidence does not establish physical latency. The real warm/cold
+> baseline remains deliberately unclaimed until the runbook protocol is
+> executed on clean source.
 
 ## 1. Outcome and judgement
 
@@ -72,6 +81,32 @@ any unmeasured successor-capture delay, but this is an estimate, not a current
 PASS or an SLO baseline.
 
 ## 3. Measurement contract
+
+### 3.1 Preliminary-source boundary
+
+The Hongxing materials reviewed before the current baseline are useful as
+hypothesis sources, not as measurements for this branch:
+
+- the PDF *从 30 秒到 2 秒：一套实时语音 Agent，是怎样不再“傻等”的* describes
+  general pipeline overlap, bounded TTS prefetch, one WebSocket writer,
+  generation fencing, backpressure and streaming-ASR fallback from another
+  project narrative; it does not bind a JiuwenSwarm commit, current config or
+  raw run population;
+- the accompanying preliminary notes reuse five D112 rounds from an older VAD
+  and playout boundary, then project later constants to estimate roughly
+  11.5 seconds speech-end-to-first-audible; this is a diagnosis to test, not an
+  observed current-source p50;
+- those notes also describe a manual Send boundary that is stale for the
+  current formal hands-free route, confirming why current code and current
+  probes must outrank prose projections.
+
+The working hypotheses remain sensible: waiting for full `chat.final`, the
+fixed Browser startup lead, VAD tail and serial EOT settlement may dominate
+more than STT final retrieval. The minimal probe must decide their actual
+stage-by-stage and total contribution before any optimization or local-model
+substitution receives credit.
+
+### 3.2 Implemented minimal v0 boundary
 
 The first implementation batch adds one correlated timeline across browser,
 Gateway and Agent runtime. Every observation must carry the applicable
