@@ -147,48 +147,87 @@ exact-source Alpha result.
 
 ## Current execution packet
 
-- **Packet:** D-089 bounded Wave 3 — P3-4 durability/recovery, P3-5B
-  presentation consumption and P3-6 multi-Task intent resolution; **closed
-  locally with scoped source/automation/review/private-evidence PASS**.
-- **Authority:** clean activation baseline
-  `cfff0c43aa599c009ab9517397566fec5c1bdd95`, [D-089 and D-090](decisions/DECISIONS.md),
-  the [Wave-3 execution packet](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EXECUTION_PACKET_2026-08-20.md),
-  the [P3-4 preparation](reviews/P3_4_DURABILITY_RECOVERY_ACTIVATION_PREPARATION_2026-08-18.md)
-  and [P3-5B/P3-6 preparation](reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
-  The scoped P3-5B source and affected-automation verdict is recorded in the
-  [P3-5B implementation review](reviews/P3_5B_PRESENTATION_CONSUMPTION_IMPLEMENTATION_REVIEW_2026-08-21.md).
-  The scoped P3-4 source and affected-automation verdict is recorded in the
-  [P3-4 implementation review](reviews/P3_4_DURABILITY_RECOVERY_IMPLEMENTATION_REVIEW_2026-08-21.md).
-  Final integration/review and private evidence are in the
-  [Wave-3 implementation review](reviews/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_IMPLEMENTATION_REVIEW_2026-08-21.md)
-  and [evidence](evidence/P3_WAVE3_DURABILITY_PRESENTATION_INTENT_EVIDENCE_20260821.md).
-  Every remote-ref update remains separately excluded until exact user
-  approval.
-- **Source state:** D-088 Wave-2 P3-2/P3-3/P3-5A source and physical evidence
-  remain accepted on their exact sources. The W3 branch contains review-clean
-  P3-4 schema-v6/Direct recovery, P3-5B presentation consumption and P3-6 real
-  classifier/authenticated Store/Core invocation. D-090 reuses the existing
-  Task-wide consumer cursor authority and adds no schema or second ledger.
-- **Execution:** the final affected Python set, one fresh broad Python Gate,
-  Formal Web, strict contracts, production build, S8 readiness and static
-  checks completed. Two independently reviewed baseline failures remain
-  disclosed: D-087 cancelled-only retry versus an old completed-retry test, and
-  the P1/P2 mounted Exit/immediate-re-enable ACK timing case. A fresh
-  ACL-private current-source production run validated real Agent/file-Tool,
-  Direct admission/control, Store reopen and cleanup with zero observation
-  loss. P3-5B browser/audio and the full P3-6 operation set retain their exact
-  product-path automation credit rather than fabricated physical credit.
-- **Next action:** no new implementation packet is activated. Preserve the
-  closed local Wave-3 line, obtain exact approval before any remote update, and
-  select the next bounded packet from the deferred P1/P2 repair/quality route or
-  P3-7 formal carrier.
-- **Excluded/non-claims:** deferred P1/P2 capture/Exit repair; unsupported
-  controls without real primitives; P3-7 UI; P3-8B retirement; P3-9 cumulative
-  acceptance; complete P3, feature complete, controlled-candidate PASS,
-  Production, `develop` integration and every remote update.
-- **Inherited Wave-2 evidence:** its sanitized facts, zero-effect matrix,
-  physical dispositions and explicit unknowns remain recorded in the
-  [Wave-2 evidence](evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md).
+- **Packet:** integrate the accepted P1/P2-T1 capture repair and bounded
+  P1/P2-T2 playout/latency findings into the closed W3 line.
+- **Authority:** the deferred continuation contract, the scoped source and
+  evidence carried by `7814c147..046ecac0`, and root `TESTING.md`. The accepted
+  D-088 Wave-2 and D-089/D-090 Wave-3 source/evidence remain unchanged.
+- **Objective:** preserve the W3 Task presentation and consumer authorities
+  while integrating transparent post-TTS capture continuation, successor-capture
+  ACK decoupling, post-playout receipt truth and hands-free playout controls.
+- **Risk:** Tier 3 for capture/media/runtime ordering, cancellation and ACK
+  fencing. Documentation synchronization is Tier 0 but cannot upgrade the
+  source or physical verdict.
+- **Source state:** P3-2 through P3-6 retain their previously accepted scoped
+  source, automation, review and exact real-path credit. This integration adds
+  no Task schema, ledger, presentation ACK or intent authority.
+- **Next action:** migrate the six commits in order, resolve only the overlapping
+  W3 presentation seams, rerun affected Formal Web/gateway checks and reconcile
+  STATUS against the exact integrated source.
+- **Excluded/non-claims:** generation-time barge-in, mounted Exit/immediate-
+  re-enable closure, fixed-corpus p50/p95, latency-target PASS, a new controlled
+  candidate, P3-7/P3-8B/P3-9, Production, `develop` integration and every remote
+  update.
+- **Inherited evidence:** the exact Wave-2 and Wave-3 records remain authoritative
+  for their own boundaries; the P1/P2 evidence must retain its exact original
+  tested-source attribution after migration.
+
+### Batch member P1/P2-T1 — post-TTS capture continuation repair
+
+- **Packet:** P1/P2-T1 — repair the deferred post-TTS capture continuation
+  defect on the formal Web route.
+- **Contract:** the six repair directions and later-acceptance criteria in the
+  [deferred issue record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
+  Changing only the 30-second value is not an accepted repair; changing the
+  capture-duration contract itself requires its own prior decision.
+- **Scope:** transparent post-TTS capture rotation; a decaying local-activity
+  observation instead of a sticky lease-lifetime flag; separation of
+  capture-lease age from active-utterance duration; preserved provider
+  speech-start/EOT, barge-in, generation fencing and stale-lease isolation
+  including speech-start/rotation races; sanitized capture diagnostics
+  (phase/generation, frame counts, recent local activity, rotation reason,
+  actual AEC/NS/AGC settings — no raw audio, credentials or private device
+  identity). Streaming cancel/cleanup is rechecked after the primary repair
+  and repaired here only if it persists independently and stays bounded;
+  otherwise it returns as its own affected packet.
+- **Owner/files:** formal P1 voice route and capture adapters —
+  `jiuwenswarm/channels/web/frontend/src/features/live-voice/formal/productP1VoiceRoute.ts`,
+  `formal/adapters/browserAudioIOAdapter.ts`,
+  `formal/adapters/liveVoiceCaptureProcessor.js`, minimal integration in
+  `components/ChatPanel/LiveVoiceIntegratedRoutePanel.tsx`, their test
+  suites, and the streaming-speech seam only if the cancel/cleanup recheck
+  confirms an independent bounded defect.
+- **Risk:** Tier 3 under root `TESTING.md` (capture/media/runtime seams).
+- **Excluded:** any `task_store.py`/`persistent_task_core.py`, P3 command or
+  result/consumer schema, or central product-composition registry change — a
+  required wiring change returns as a minimal separate integration patch;
+  latency optimization work; physical PASS claims.
+- **Acceptance:** a deterministic regression proving one post-playout
+  high-energy frame followed by silence rotates transparently across the
+  lease boundary with no visible error and zero forbidden
+  Agent/Tool/Task/audio/history effects; decaying local activity; silent
+  multi-boundary rotation; preserved speech-start/EOT/barge-in/fencing/
+  stale-lease races; affected frontend/backend automation; independent
+  Tier-3 cold review; synchronized STATUS/evidence. The physical continuation
+  criteria remain owned by the deferred record and close only on a later real
+  microphone/TTS run; this packet grants no physical credit.
+
+### Batch member P1/P2-T2 — latency optimization (delegated)
+
+- **Packet:** P1/P2-T2 — execute the
+  [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md)
+  in its §7 delivery order (measurement contract and fresh baseline first)
+  under a delegated owner.
+- **Constraint:** L1 server-side instrumentation may start immediately; all
+  frontend work in `productP1VoiceRoute.ts`/`browserAudioIOAdapter.ts` waits
+  for the integrated `P1/P2-T1` commit or explicit coordination. No
+  Provider/model/billing change, persistent speech cache, new retention
+  policy or raw-audio storage; ideas rejected in the plan's §8 stay rejected.
+- **Risk:** per-batch tier under root `TESTING.md`; the pipeline and
+  sentence-overlap batches are Tier 3.
+- **Acceptance:** per the plan's §§3–7 measured evidence relative to the
+  fresh baseline; targets become release gates only after environment, corpus
+  and sample size are frozen.
 
 ## Dependency route to feature complete
 
