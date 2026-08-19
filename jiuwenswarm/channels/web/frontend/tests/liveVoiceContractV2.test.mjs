@@ -9,6 +9,7 @@ import {
   ContractViolation,
   EventSequenceTracker,
   IdentityRegistry,
+  MAX_SAFE_INTEGER,
   ResponseFence,
   TurnCommitLedger,
   canonicalJson,
@@ -18,6 +19,7 @@ import {
   defaultBargeInScopes,
   dispatchCancel,
   dispatchCommittedInput,
+  failureResult,
   parseCapabilityDescriptor,
   parseCommandEnvelope,
   parseConnectionEpochRef,
@@ -42,6 +44,143 @@ function load(name) {
 
 function clone(value) {
   return structuredClone(value);
+}
+
+const wave2CommandCases = [
+  {
+    commandType: 'task.update',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      instruction: 'Use the revised plan.',
+      constraints: [],
+    },
+    changedField: 'instruction',
+    changedValue: 'Use the final revised plan.',
+  },
+  {
+    commandType: 'task.provide_input',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      responds_to_event_id: 'event-decision-7',
+      text: 'Choose the safe option.',
+    },
+    changedField: 'text',
+    changedValue: 'Choose the audited option.',
+  },
+  {
+    commandType: 'task.pause',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      reason: 'Wait for review.',
+    },
+    changedField: 'reason',
+    changedValue: 'Wait for approval.',
+  },
+  {
+    commandType: 'task.resume',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      reason: 'Review completed.',
+    },
+    changedField: 'reason',
+    changedValue: 'Approval completed.',
+  },
+  {
+    commandType: 'task.reprioritize',
+    payload: {
+      attempt_id: 'attempt-1',
+      expected_event_head: 7,
+      priority: 'normal',
+      reason: null,
+    },
+    changedField: 'priority',
+    changedValue: 'urgent',
+  },
+  {
+    commandType: 'task.create_successor',
+    payload: {
+      expected_predecessor_revision_number: 2,
+      expected_predecessor_event_head: 7,
+      predecessor_terminal_event_id: 'event-terminal-7',
+      predecessor_outcome: 'completed',
+      predecessor_result_sha256: 'a'.repeat(64),
+      name: 'Continue inventory check',
+      instruction: 'Verify the remaining inventory.',
+      constraints: ['Do not modify unrelated files.'],
+      executor_id: 'project-code',
+      side_effect_class: 'project_mutation',
+      attributes: {
+        model_config_version: 'v1',
+        model_identity: 'agent-1',
+      },
+    },
+    changedField: 'name',
+    changedValue: 'Continue audited inventory check',
+  },
+  {
+    commandType: 'task.ack_events',
+    payload: {
+      presentation_class: 'text',
+      acked_through_seq: 7,
+      acked_event_id: 'event-7',
+      expected_event_head: 9,
+    },
+    changedField: 'acked_through_seq',
+    changedValue: 8,
+  },
+];
+
+function wave2CommandRaw(commandType, payload) {
+  const fixture = load('critical_kernel.valid.json');
+  const suffix = commandType.replaceAll('.', '-').replaceAll('_', '-');
+  return {
+    ...clone(fixture.command),
+    request_id: `request-${suffix}`,
+    command_id: `command-${suffix}`,
+    command_type: commandType,
+    target_ref: { kind: 'task', id: 'task-1' },
+    required_capabilities: [commandType],
+    payload: clone(payload),
+    extensions: {},
+  };
+}
+
+function wave2QueryRaw(payload) {
+  const fixture = load('critical_kernel.valid.json');
+  return {
+    ...clone(fixture.query),
+    request_id: 'request-unread-events',
+    query_type: 'task.unread_events',
+    target_ref: { kind: 'task', id: 'task-1' },
+    required_capabilities: ['task.unread_events'],
+    payload: clone(payload),
+    extensions: {},
+  };
+}
+
+function resultError(code) {
+  return {
+    code,
+    reason: `TEST_${code}`,
+    message: 'sanitized command result',
+    retriable: code === 'TIMEOUT',
+    correlation_id: 'correlation-1',
+    details: {},
+  };
+}
+
+function commandResultExtension(disposition) {
+  return {
+    'live_voice.command': {
+      disposition,
+      admission_event_id: 'event-admission-1',
+      settlement_event_id: 'event-settlement-1',
+    },
+  };
 }
 
 function registry(fixture) {
@@ -920,6 +1059,359 @@ test('task.adjust accepts only the exact bounded adjustment payload', () => {
     assert.throws(
       () => parseCommandEnvelope({ ...adjust, payload }),
       error => error instanceof ContractViolation && error.error.reason === reason
+    );
+  }
+});
+
+test('Wave 2 commands close task payloads, capabilities, and fingerprints', () => {
+  for (const { commandType, payload, changedField, changedValue } of wave2CommandCases) {
+    const raw = wave2CommandRaw(commandType, payload);
+    const command = parseCommandEnvelope(raw);
+    assert.deepEqual(command.target_ref, { kind: 'task', id: 'task-1' });
+    assert.deepEqual(command.required_capabilities, [commandType]);
+    assert.deepEqual(command.payload, payload);
+
+    const replayRaw = clone(raw);
+    replayRaw.request_id = `${raw.request_id}-replay`;
+    assert.deepEqual(
+      [...commandFingerprint(parseCommandEnvelope(replayRaw))],
+      [...commandFingerprint(command)],
+    );
+
+    const changed = clone(raw);
+    changed.payload[changedField] = changedValue;
+    assert.notDeepEqual(
+      [...commandFingerprint(parseCommandEnvelope(changed))],
+      [...commandFingerprint(command)],
+    );
+
+    const unknown = clone(raw);
+    unknown.payload.unknown = true;
+    assert.throws(
+      () => parseCommandEnvelope(unknown),
+      error => error instanceof ContractViolation && error.error.reason === 'UNKNOWN_FIELD',
+    );
+
+    const wrongKind = clone(raw);
+    wrongKind.target_ref = { kind: 'attempt', id: 'attempt-1' };
+    assert.throws(
+      () => parseCommandEnvelope(wrongKind),
+      error => error instanceof ContractViolation && error.error.reason === 'IDENTITY_KIND_MISMATCH',
+    );
+
+    for (const capabilities of [[], [commandType, 'task.result']]) {
+      const wrongCapability = clone(raw);
+      wrongCapability.required_capabilities = capabilities;
+      assert.throws(
+        () => parseCommandEnvelope(wrongCapability),
+        error => error instanceof ContractViolation && error.error.reason === 'REQUIRED_CAPABILITY_MISMATCH',
+      );
+    }
+  }
+});
+
+test('Wave 2 update, input, reason, and constraints enforce UTF-8 bounds', () => {
+  const updatePayload = clone(wave2CommandCases[0].payload);
+  updatePayload.instruction = `${'界'.repeat(1_365)}a`;
+  assert.equal(new TextEncoder().encode(updatePayload.instruction).byteLength, 4_096);
+  assert.equal(
+    parseCommandEnvelope(wave2CommandRaw('task.update', updatePayload)).payload.instruction,
+    updatePayload.instruction,
+  );
+
+  const clearPayload = { ...updatePayload, instruction: null, constraints: [] };
+  assert.deepEqual(
+    parseCommandEnvelope(wave2CommandRaw('task.update', clearPayload)).payload,
+    clearPayload,
+  );
+
+  const invalidUpdates = [
+    { ...clearPayload, constraints: null },
+    { ...updatePayload, instruction: '界'.repeat(1_366) },
+    { ...updatePayload, instruction: 'contains\0nul' },
+    { ...updatePayload, instruction: '\ud800' },
+    { ...updatePayload, constraints: Array.from({ length: 17 }, (_, index) => `constraint-${index}`) },
+    { ...updatePayload, constraints: ['duplicate', 'duplicate'] },
+    { ...updatePayload, constraints: [''] },
+    { ...updatePayload, constraints: ['contains\0nul'] },
+    { ...updatePayload, constraints: ['界'.repeat(342)] },
+    {
+      ...updatePayload,
+      constraints: ['a'.repeat(1_024), 'b'.repeat(1_024), 'c'.repeat(1_024), 'd'.repeat(1_023), 'ee'],
+    },
+  ];
+  for (const payload of invalidUpdates) {
+    assert.throws(() => parseCommandEnvelope(wave2CommandRaw('task.update', payload)), ContractViolation);
+  }
+
+  const exactConstraints = {
+    ...updatePayload,
+    constraints: ['a'.repeat(1_024), 'b'.repeat(1_024), 'c'.repeat(1_024), 'd'.repeat(1_024)],
+  };
+  assert.deepEqual(
+    parseCommandEnvelope(wave2CommandRaw('task.update', exactConstraints)).payload.constraints,
+    exactConstraints.constraints,
+  );
+  parseCommandEnvelope(wave2CommandRaw('task.update', {
+    ...updatePayload,
+    constraints: Array.from({ length: 16 }, (_, index) => `constraint-${index}`),
+  }));
+
+  const inputPayload = clone(wave2CommandCases[1].payload);
+  inputPayload.text = `${'界'.repeat(1_365)}a`;
+  parseCommandEnvelope(wave2CommandRaw('task.provide_input', inputPayload));
+  for (const invalidText of ['界'.repeat(1_366), 'contains\0nul', '\ud800']) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.provide_input', { ...inputPayload, text: invalidText })),
+      ContractViolation,
+    );
+  }
+
+  for (const commandType of ['task.pause', 'task.resume', 'task.reprioritize']) {
+    const reasonPayload = clone(wave2CommandCases.find(item => item.commandType === commandType).payload);
+    reasonPayload.reason = `${'界'.repeat(341)}a`;
+    parseCommandEnvelope(wave2CommandRaw(commandType, reasonPayload));
+    reasonPayload.reason = null;
+    parseCommandEnvelope(wave2CommandRaw(commandType, reasonPayload));
+    for (const invalidReason of ['界'.repeat(342), 'contains\0nul', '\ud800']) {
+      assert.throws(
+        () => parseCommandEnvelope(wave2CommandRaw(commandType, { ...reasonPayload, reason: invalidReason })),
+        ContractViolation,
+      );
+    }
+  }
+});
+
+test('Wave 2 unsigned integers, enums, digest, and successor spec are closed', () => {
+  const updatePayload = { ...clone(wave2CommandCases[0].payload), expected_event_head: MAX_SAFE_INTEGER };
+  parseCommandEnvelope(wave2CommandRaw('task.update', updatePayload));
+  for (const invalidHead of [-1, true, MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.update', { ...updatePayload, expected_event_head: invalidHead })),
+      ContractViolation,
+    );
+  }
+
+  const reprioritize = clone(wave2CommandCases[4].payload);
+  for (const priority of ['low', 'normal', 'high', 'urgent']) {
+    assert.equal(
+      parseCommandEnvelope(wave2CommandRaw('task.reprioritize', { ...reprioritize, priority })).payload.priority,
+      priority,
+    );
+  }
+  for (const priority of ['critical', 1, null]) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.reprioritize', { ...reprioritize, priority })),
+      ContractViolation,
+    );
+  }
+
+  const successor = {
+    ...clone(wave2CommandCases[5].payload),
+    expected_predecessor_revision_number: MAX_SAFE_INTEGER,
+    expected_predecessor_event_head: MAX_SAFE_INTEGER,
+  };
+  for (const sideEffectClass of ['read_only', 'project_mutation']) {
+    parseCommandEnvelope(wave2CommandRaw('task.create_successor', {
+      ...successor,
+      side_effect_class: sideEffectClass,
+    }));
+  }
+
+  const invalidSuccessors = [
+    { ...successor, expected_predecessor_revision_number: -1 },
+    { ...successor, expected_predecessor_event_head: MAX_SAFE_INTEGER + 1 },
+    { ...successor, predecessor_result_sha256: 'A'.repeat(64) },
+    { ...successor, predecessor_result_sha256: 'a'.repeat(63) },
+    { ...successor, predecessor_result_sha256: null },
+    { ...successor, side_effect_class: 'network_mutation' },
+    { ...successor, instruction: '界'.repeat(1_366) },
+    { ...successor, constraints: ['duplicate', 'duplicate'] },
+    { ...successor, attributes: [] },
+    { ...successor, attributes: { model_identity: 7 } },
+    { ...successor, attributes: { '': 'agent-1' } },
+  ];
+  for (const payload of invalidSuccessors) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.create_successor', payload)),
+      ContractViolation,
+    );
+  }
+
+  for (const outcome of ['failed', 'cancelled', 'interrupted', 'unknown']) {
+    const withoutResult = {
+      ...successor,
+      predecessor_outcome: outcome,
+      predecessor_result_sha256: null,
+    };
+    const raw = wave2CommandRaw('task.create_successor', withoutResult);
+    const command = parseCommandEnvelope(raw);
+    if (outcome === 'unknown') {
+      const replayRaw = clone(raw);
+      replayRaw.request_id = 'request-successor-unknown-replay';
+      assert.deepEqual(
+        [...commandFingerprint(parseCommandEnvelope(replayRaw))],
+        [...commandFingerprint(command)],
+      );
+      assert.equal(command.payload.predecessor_outcome, 'unknown');
+      assert.equal(command.payload.predecessor_result_sha256, null);
+    }
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.create_successor', {
+        ...withoutResult,
+        predecessor_result_sha256: 'b'.repeat(64),
+      })),
+      ContractViolation,
+    );
+  }
+});
+
+test('unread and ACK payloads close presentation class and safe integers', () => {
+  for (const presentationClass of ['text', 'voice']) {
+    for (const limit of [1, 500]) {
+      const raw = wave2QueryRaw({ presentation_class: presentationClass, limit });
+      const query = parseQueryEnvelope(raw);
+      assert.deepEqual(query.target_ref, { kind: 'task', id: 'task-1' });
+      assert.deepEqual(query.required_capabilities, ['task.unread_events']);
+      assert.deepEqual(query.payload, raw.payload);
+    }
+  }
+
+  for (const payload of [
+    { presentation_class: 'browser', limit: 10 },
+    { presentation_class: 'text', limit: 0 },
+    { presentation_class: 'text', limit: 501 },
+    { presentation_class: 'text', limit: true },
+    { presentation_class: 'text', limit: 10, cursor: 3 },
+  ]) {
+    assert.throws(() => parseQueryEnvelope(wave2QueryRaw(payload)), ContractViolation);
+  }
+
+  const wrongCapability = wave2QueryRaw({ presentation_class: 'text', limit: 10 });
+  wrongCapability.required_capabilities = [];
+  assert.throws(
+    () => parseQueryEnvelope(wrongCapability),
+    error => error instanceof ContractViolation && error.error.reason === 'REQUIRED_CAPABILITY_MISMATCH',
+  );
+  const wrongKind = wave2QueryRaw({ presentation_class: 'text', limit: 10 });
+  wrongKind.target_ref = { kind: 'attempt', id: 'attempt-1' };
+  assert.throws(
+    () => parseQueryEnvelope(wrongKind),
+    error => error instanceof ContractViolation && error.error.reason === 'IDENTITY_KIND_MISMATCH',
+  );
+
+  const ack = {
+    ...clone(wave2CommandCases[6].payload),
+    acked_through_seq: MAX_SAFE_INTEGER,
+    expected_event_head: MAX_SAFE_INTEGER,
+  };
+  for (const presentationClass of ['text', 'voice']) {
+    parseCommandEnvelope(wave2CommandRaw('task.ack_events', { ...ack, presentation_class: presentationClass }));
+  }
+  for (const [field, value] of [
+    ['presentation_class', 'browser'],
+    ['acked_through_seq', -1],
+    ['acked_through_seq', true],
+    ['expected_event_head', MAX_SAFE_INTEGER + 1],
+    ['acked_event_id', ''],
+  ]) {
+    assert.throws(
+      () => parseCommandEnvelope(wave2CommandRaw('task.ack_events', { ...ack, [field]: value })),
+      ContractViolation,
+    );
+  }
+});
+
+test('command result extension is exact while legacy and query results stay unchanged', () => {
+  const command = parseCommandEnvelope(wave2CommandRaw('task.update', wave2CommandCases[0].payload));
+  const query = parseQueryEnvelope(wave2QueryRaw({ presentation_class: 'text', limit: 10 }));
+  const applied = successResult(
+    command,
+    { task_id: 'task-1' },
+    '2026-08-19T12:00:00Z',
+    commandResultExtension('applied'),
+  );
+  assert.deepEqual(applied.extensions, commandResultExtension('applied'));
+  assert.deepEqual(parseResultEnvelope(applied, command), applied);
+
+  const legacy = successResult(command, { accepted: true }, '2026-08-19T12:00:01Z');
+  assert.deepEqual(legacy.extensions, {});
+  assert.deepEqual(parseResultEnvelope(legacy, command), legacy);
+
+  const queryResult = successResult(query, { events: [] }, '2026-08-19T12:00:02Z');
+  assert.equal(queryResult.command_id, null);
+  assert.deepEqual(queryResult.extensions, {});
+  assert.throws(
+    () => successResult(
+      query,
+      { events: [] },
+      '2026-08-19T12:00:03Z',
+      commandResultExtension('applied'),
+    ),
+    error => error instanceof ContractViolation && error.error.reason === 'COMMAND_RESULT_EXTENSION_FORBIDDEN',
+  );
+  assert.throws(
+    () => parseResultEnvelope({ ...queryResult, extensions: commandResultExtension('applied') }, query),
+    error => error instanceof ContractViolation && error.error.reason === 'COMMAND_RESULT_EXTENSION_FORBIDDEN',
+  );
+
+  const malformed = commandResultExtension('applied');
+  malformed['live_voice.command'].extra = true;
+  assert.throws(
+    () => successResult(command, { task_id: 'task-1' }, '2026-08-19T12:00:04Z', malformed),
+    error => error instanceof ContractViolation && error.error.reason === 'UNKNOWN_FIELD',
+  );
+  assert.throws(
+    () => successResult(
+      command,
+      { task_id: 'task-1' },
+      '2026-08-19T12:00:05Z',
+      commandResultExtension('unsupported'),
+    ),
+    ContractViolation,
+  );
+  assert.throws(
+    () => failureResult(
+      command,
+      resultError('UNSUPPORTED'),
+      '2026-08-19T12:00:06Z',
+      commandResultExtension('applied'),
+    ),
+    ContractViolation,
+  );
+});
+
+test('negative command dispositions require their exact error families', () => {
+  const command = parseCommandEnvelope(wave2CommandRaw('task.update', wave2CommandCases[0].payload));
+  for (const [disposition, code] of [
+    ['rejected', 'INVALID_ARGUMENT'],
+    ['rejected', 'UNAUTHENTICATED'],
+    ['rejected', 'PERMISSION_DENIED'],
+    ['rejected', 'NOT_FOUND'],
+    ['unsupported', 'UNSUPPORTED'],
+    ['unsupported', 'CAPABILITY_UNAVAILABLE'],
+    ['conflict', 'CONFLICT'],
+    ['conflict', 'STALE'],
+    ['timeout', 'TIMEOUT'],
+    ['unknown', 'RESULT_UNKNOWN'],
+  ]) {
+    const result = failureResult(
+      command,
+      resultError(code),
+      '2026-08-19T12:01:00Z',
+      commandResultExtension(disposition),
+    );
+    assert.deepEqual(result.extensions, commandResultExtension(disposition));
+
+    const wrongCode = disposition === 'unknown' ? 'TIMEOUT' : 'RESULT_UNKNOWN';
+    assert.throws(
+      () => failureResult(
+        command,
+        resultError(wrongCode),
+        '2026-08-19T12:01:01Z',
+        commandResultExtension(disposition),
+      ),
+      error => error instanceof ContractViolation && error.error.reason === 'COMMAND_DISPOSITION_ERROR_MISMATCH',
     );
   }
 });

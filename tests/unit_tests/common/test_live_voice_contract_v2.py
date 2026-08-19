@@ -22,6 +22,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     CommandResultLedger,
     ConnectionEpochRef,
     ContextRef,
+    ContractError,
     ContractViolation,
     ErrorCode,
     EventApplyStatus,
@@ -105,6 +106,133 @@ def _event(
     raw["stream_ref"]["id"] = stream_id
     raw["payload"] = {"state": event_type.split(".", 1)[1]}
     return EventEnvelope.from_dict(raw)
+
+
+_P3_WAVE2_COMMAND_CASES: tuple[
+    tuple[str, dict[str, object], str, object], ...
+] = (
+    (
+        "task.update",
+        {
+            "attempt_id": "attempt-1",
+            "expected_event_head": 7,
+            "instruction": "Use the revised plan.",
+            "constraints": [],
+        },
+        "instruction",
+        "Use the final revised plan.",
+    ),
+    (
+        "task.provide_input",
+        {
+            "attempt_id": "attempt-1",
+            "expected_event_head": 7,
+            "responds_to_event_id": "event-decision-7",
+            "text": "Choose the safe option.",
+        },
+        "text",
+        "Choose the audited option.",
+    ),
+    (
+        "task.pause",
+        {
+            "attempt_id": "attempt-1",
+            "expected_event_head": 7,
+            "reason": "Wait for review.",
+        },
+        "reason",
+        "Wait for approval.",
+    ),
+    (
+        "task.resume",
+        {
+            "attempt_id": "attempt-1",
+            "expected_event_head": 7,
+            "reason": "Review completed.",
+        },
+        "reason",
+        "Approval completed.",
+    ),
+    (
+        "task.reprioritize",
+        {
+            "attempt_id": "attempt-1",
+            "expected_event_head": 7,
+            "priority": "normal",
+            "reason": None,
+        },
+        "priority",
+        "urgent",
+    ),
+    (
+        "task.create_successor",
+        {
+            "expected_predecessor_revision_number": 2,
+            "expected_predecessor_event_head": 7,
+            "predecessor_terminal_event_id": "event-terminal-7",
+            "predecessor_outcome": "completed",
+            "predecessor_result_sha256": "a" * 64,
+            "name": "Continue inventory check",
+            "instruction": "Verify the remaining inventory.",
+            "constraints": ["Do not modify unrelated files."],
+            "executor_id": "project-code",
+            "side_effect_class": "project_mutation",
+            "attributes": {
+                "model_config_version": "v1",
+                "model_identity": "agent-1",
+            },
+        },
+        "name",
+        "Continue audited inventory check",
+    ),
+    (
+        "task.ack_events",
+        {
+            "presentation_class": "text",
+            "acked_through_seq": 7,
+            "acked_event_id": "event-7",
+            "expected_event_head": 9,
+        },
+        "acked_through_seq",
+        8,
+    ),
+)
+
+
+def _wave2_command_raw(
+    command_type: str, payload: dict[str, object]
+) -> dict[str, object]:
+    fixture = _load("critical_kernel.valid.json")
+    raw = copy.deepcopy(fixture["command"])
+    suffix = command_type.replace(".", "-").replace("_", "-")
+    raw.update(
+        {
+            "request_id": f"request-{suffix}",
+            "command_id": f"command-{suffix}",
+            "command_type": command_type,
+            "target_ref": {"kind": "task", "id": "task-1"},
+            "required_capabilities": [command_type],
+            "payload": copy.deepcopy(payload),
+            "extensions": {},
+        }
+    )
+    return raw
+
+
+def _wave2_query_raw(payload: dict[str, object]) -> dict[str, object]:
+    fixture = _load("critical_kernel.valid.json")
+    raw = copy.deepcopy(fixture["query"])
+    raw.update(
+        {
+            "request_id": "request-unread-events",
+            "query_type": "task.unread_events",
+            "target_ref": {"kind": "task", "id": "task-1"},
+            "required_capabilities": ["task.unread_events"],
+            "payload": copy.deepcopy(payload),
+            "extensions": {},
+        }
+    )
+    return raw
 
 
 def test_shared_valid_fixture_round_trips_and_is_immutable() -> None:
@@ -1199,6 +1327,414 @@ def test_task_adjust_command_has_one_exact_bounded_payload() -> None:
         rejected["payload"] = payload
         with pytest.raises(ContractViolation):
             CommandEnvelope.from_dict(rejected)
+
+
+@pytest.mark.parametrize(
+    ("command_type", "payload", "changed_field", "changed_value"),
+    _P3_WAVE2_COMMAND_CASES,
+    ids=[case[0] for case in _P3_WAVE2_COMMAND_CASES],
+)
+def test_wave2_commands_have_closed_task_payloads_capabilities_and_fingerprints(
+    command_type: str,
+    payload: dict[str, object],
+    changed_field: str,
+    changed_value: object,
+) -> None:
+    raw = _wave2_command_raw(command_type, payload)
+    command = CommandEnvelope.from_dict(raw)
+
+    assert command.target_ref == IdentityRef(IdentityKind.TASK, "task-1")
+    assert command.required_capabilities == (command_type,)
+    assert command.payload == payload
+
+    replay_raw = copy.deepcopy(raw)
+    replay_raw["request_id"] = f"{raw['request_id']}-replay"
+    assert CommandEnvelope.from_dict(replay_raw).fingerprint() == command.fingerprint()
+
+    changed = copy.deepcopy(raw)
+    changed["payload"][changed_field] = changed_value
+    assert CommandEnvelope.from_dict(changed).fingerprint() != command.fingerprint()
+
+    unknown = copy.deepcopy(raw)
+    unknown["payload"]["unknown"] = True
+    with pytest.raises(ContractViolation) as unknown_field:
+        CommandEnvelope.from_dict(unknown)
+    assert unknown_field.value.reason == "UNKNOWN_FIELD"
+
+    wrong_kind = copy.deepcopy(raw)
+    wrong_kind["target_ref"] = {"kind": "attempt", "id": "attempt-1"}
+    with pytest.raises(ContractViolation) as target:
+        CommandEnvelope.from_dict(wrong_kind)
+    assert target.value.reason == "IDENTITY_KIND_MISMATCH"
+
+    for capabilities in ([], [command_type, "task.result"]):
+        wrong_capability = copy.deepcopy(raw)
+        wrong_capability["required_capabilities"] = capabilities
+        with pytest.raises(ContractViolation) as capability:
+            CommandEnvelope.from_dict(wrong_capability)
+        assert capability.value.reason == "REQUIRED_CAPABILITY_MISMATCH"
+
+
+def test_wave2_update_input_reason_and_constraints_enforce_utf8_bounds() -> None:
+    update_payload = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[0][1])
+    update_payload["instruction"] = "界" * 1_365 + "a"
+    assert len(update_payload["instruction"].encode("utf-8")) == 4_096
+    assert CommandEnvelope.from_dict(
+        _wave2_command_raw("task.update", update_payload)
+    ).payload["instruction"] == update_payload["instruction"]
+
+    clear_payload = copy.deepcopy(update_payload)
+    clear_payload.update({"instruction": None, "constraints": []})
+    assert CommandEnvelope.from_dict(
+        _wave2_command_raw("task.update", clear_payload)
+    ).payload == clear_payload
+
+    invalid_updates = (
+        {**clear_payload, "constraints": None},
+        {**update_payload, "instruction": "界" * 1_366},
+        {**update_payload, "instruction": "contains\x00nul"},
+        {**update_payload, "instruction": "\ud800"},
+        {**update_payload, "constraints": [f"constraint-{index}" for index in range(17)]},
+        {**update_payload, "constraints": ["duplicate", "duplicate"]},
+        {**update_payload, "constraints": [""]},
+        {**update_payload, "constraints": ["contains\x00nul"]},
+        {**update_payload, "constraints": ["界" * 342]},
+        {
+            **update_payload,
+            "constraints": ["a" * 1_024, "b" * 1_024, "c" * 1_024, "d" * 1_023, "ee"],
+        },
+    )
+    for payload in invalid_updates:
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(_wave2_command_raw("task.update", payload))
+
+    exact_constraints = copy.deepcopy(update_payload)
+    exact_constraints["constraints"] = [
+        "a" * 1_024,
+        "b" * 1_024,
+        "c" * 1_024,
+        "d" * 1_024,
+    ]
+    assert CommandEnvelope.from_dict(
+        _wave2_command_raw("task.update", exact_constraints)
+    ).payload["constraints"] == exact_constraints["constraints"]
+
+    sixteen_constraints = copy.deepcopy(update_payload)
+    sixteen_constraints["constraints"] = [
+        f"constraint-{index}" for index in range(16)
+    ]
+    CommandEnvelope.from_dict(_wave2_command_raw("task.update", sixteen_constraints))
+
+    input_payload = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[1][1])
+    input_payload["text"] = "界" * 1_365 + "a"
+    CommandEnvelope.from_dict(_wave2_command_raw("task.provide_input", input_payload))
+    for invalid_text in ("界" * 1_366, "contains\x00nul", "\ud800"):
+        rejected = {**input_payload, "text": invalid_text}
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(
+                _wave2_command_raw("task.provide_input", rejected)
+            )
+
+    for command_type in ("task.pause", "task.resume", "task.reprioritize"):
+        case = next(case for case in _P3_WAVE2_COMMAND_CASES if case[0] == command_type)
+        reason_payload = copy.deepcopy(case[1])
+        reason_payload["reason"] = "界" * 341 + "a"
+        CommandEnvelope.from_dict(_wave2_command_raw(command_type, reason_payload))
+        reason_payload["reason"] = None
+        CommandEnvelope.from_dict(_wave2_command_raw(command_type, reason_payload))
+        for invalid_reason in ("界" * 342, "contains\x00nul", "\ud800"):
+            rejected = {**reason_payload, "reason": invalid_reason}
+            with pytest.raises(ContractViolation):
+                CommandEnvelope.from_dict(
+                    _wave2_command_raw(command_type, rejected)
+                )
+
+
+def test_wave2_unsigned_enums_digest_and_successor_spec_are_closed() -> None:
+    update_payload = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[0][1])
+    update_payload["expected_event_head"] = MAX_SAFE_INTEGER
+    CommandEnvelope.from_dict(_wave2_command_raw("task.update", update_payload))
+    for invalid_head in (-1, True, MAX_SAFE_INTEGER + 1):
+        rejected = {**update_payload, "expected_event_head": invalid_head}
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(_wave2_command_raw("task.update", rejected))
+
+    reprioritize = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[4][1])
+    for priority in ("low", "normal", "high", "urgent"):
+        candidate = {**reprioritize, "priority": priority}
+        assert CommandEnvelope.from_dict(
+            _wave2_command_raw("task.reprioritize", candidate)
+        ).payload["priority"] == priority
+    for invalid_priority in ("critical", 1, None):
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(
+                _wave2_command_raw(
+                    "task.reprioritize",
+                    {**reprioritize, "priority": invalid_priority},
+                )
+            )
+
+    successor = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[5][1])
+    successor.update(
+        {
+            "expected_predecessor_revision_number": MAX_SAFE_INTEGER,
+            "expected_predecessor_event_head": MAX_SAFE_INTEGER,
+        }
+    )
+    for side_effect_class in ("read_only", "project_mutation"):
+        candidate = {**successor, "side_effect_class": side_effect_class}
+        CommandEnvelope.from_dict(
+            _wave2_command_raw("task.create_successor", candidate)
+        )
+
+    invalid_successors = (
+        {**successor, "expected_predecessor_revision_number": -1},
+        {**successor, "expected_predecessor_event_head": MAX_SAFE_INTEGER + 1},
+        {**successor, "predecessor_result_sha256": "A" * 64},
+        {**successor, "predecessor_result_sha256": "a" * 63},
+        {**successor, "predecessor_result_sha256": None},
+        {**successor, "side_effect_class": "network_mutation"},
+        {**successor, "instruction": "界" * 1_366},
+        {**successor, "constraints": ["duplicate", "duplicate"]},
+        {**successor, "attributes": []},
+        {**successor, "attributes": {"model_identity": 7}},
+        {**successor, "attributes": {"": "agent-1"}},
+    )
+    for payload in invalid_successors:
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(
+                _wave2_command_raw("task.create_successor", payload)
+            )
+
+    for outcome in ("failed", "cancelled", "interrupted", "unknown"):
+        without_result = {
+            **successor,
+            "predecessor_outcome": outcome,
+            "predecessor_result_sha256": None,
+        }
+        raw = _wave2_command_raw("task.create_successor", without_result)
+        command = CommandEnvelope.from_dict(raw)
+        if outcome == "unknown":
+            replay_raw = copy.deepcopy(raw)
+            replay_raw["request_id"] = "request-successor-unknown-replay"
+            assert (
+                CommandEnvelope.from_dict(replay_raw).fingerprint()
+                == command.fingerprint()
+            )
+            assert command.payload["predecessor_outcome"] == "unknown"
+            assert command.payload["predecessor_result_sha256"] is None
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(
+                _wave2_command_raw(
+                    "task.create_successor",
+                    {**without_result, "predecessor_result_sha256": "b" * 64},
+                )
+            )
+
+
+def test_unread_and_ack_payloads_close_presentation_class_and_safe_integers() -> None:
+    for presentation_class in ("text", "voice"):
+        for limit in (1, 500):
+            query_raw = _wave2_query_raw(
+                {"presentation_class": presentation_class, "limit": limit}
+            )
+            query = QueryEnvelope.from_dict(query_raw)
+            assert query.target_ref == IdentityRef(IdentityKind.TASK, "task-1")
+            assert query.required_capabilities == ("task.unread_events",)
+            assert query.payload == query_raw["payload"]
+
+    for invalid_payload in (
+        {"presentation_class": "browser", "limit": 10},
+        {"presentation_class": "text", "limit": 0},
+        {"presentation_class": "text", "limit": 501},
+        {"presentation_class": "text", "limit": True},
+        {"presentation_class": "text", "limit": 10, "cursor": 3},
+    ):
+        with pytest.raises(ContractViolation):
+            QueryEnvelope.from_dict(_wave2_query_raw(invalid_payload))
+
+    wrong_capability = _wave2_query_raw(
+        {"presentation_class": "text", "limit": 10}
+    )
+    wrong_capability["required_capabilities"] = []
+    with pytest.raises(ContractViolation) as capability:
+        QueryEnvelope.from_dict(wrong_capability)
+    assert capability.value.reason == "REQUIRED_CAPABILITY_MISMATCH"
+
+    wrong_kind = _wave2_query_raw({"presentation_class": "text", "limit": 10})
+    wrong_kind["target_ref"] = {"kind": "attempt", "id": "attempt-1"}
+    with pytest.raises(ContractViolation) as target:
+        QueryEnvelope.from_dict(wrong_kind)
+    assert target.value.reason == "IDENTITY_KIND_MISMATCH"
+
+    ack = copy.deepcopy(_P3_WAVE2_COMMAND_CASES[6][1])
+    ack.update(
+        {
+            "acked_through_seq": MAX_SAFE_INTEGER,
+            "expected_event_head": MAX_SAFE_INTEGER,
+        }
+    )
+    for presentation_class in ("text", "voice"):
+        candidate = {**ack, "presentation_class": presentation_class}
+        CommandEnvelope.from_dict(_wave2_command_raw("task.ack_events", candidate))
+    for field, value in (
+        ("presentation_class", "browser"),
+        ("acked_through_seq", -1),
+        ("acked_through_seq", True),
+        ("expected_event_head", MAX_SAFE_INTEGER + 1),
+        ("acked_event_id", ""),
+    ):
+        rejected = {**ack, field: value}
+        with pytest.raises(ContractViolation):
+            CommandEnvelope.from_dict(
+                _wave2_command_raw("task.ack_events", rejected)
+            )
+
+
+def _result_error(code: ErrorCode) -> ContractError:
+    return ContractError.from_dict(
+        {
+            "code": code.value,
+            "reason": f"TEST_{code.value}",
+            "message": "sanitized command result",
+            "retriable": code is ErrorCode.TIMEOUT,
+            "correlation_id": "correlation-1",
+            "details": {},
+        }
+    )
+
+
+def _command_result_extension(disposition: str) -> dict[str, object]:
+    return {
+        "live_voice.command": {
+            "disposition": disposition,
+            "admission_event_id": "event-admission-1",
+            "settlement_event_id": "event-settlement-1",
+        }
+    }
+
+
+def test_command_result_extension_is_exact_and_legacy_results_stay_unchanged() -> None:
+    command = CommandEnvelope.from_dict(
+        _wave2_command_raw("task.update", _P3_WAVE2_COMMAND_CASES[0][1])
+    )
+    query = QueryEnvelope.from_dict(
+        _wave2_query_raw({"presentation_class": "text", "limit": 10})
+    )
+
+    applied = ResultEnvelope.success(
+        owner=command,
+        result={"task_id": "task-1"},
+        observed_at="2026-08-19T12:00:00Z",
+        extensions=_command_result_extension("applied"),
+    )
+    assert applied.extensions == _command_result_extension("applied")
+    assert ResultEnvelope.from_dict(applied.to_dict(), owner=command) == applied
+
+    legacy = ResultEnvelope.success(
+        owner=command,
+        result={"accepted": True},
+        observed_at="2026-08-19T12:00:01Z",
+    )
+    assert legacy.extensions == {}
+    assert ResultEnvelope.from_dict(legacy.to_dict(), owner=command).to_dict() == legacy.to_dict()
+
+    query_result = ResultEnvelope.success(
+        owner=query,
+        result={"events": []},
+        observed_at="2026-08-19T12:00:02Z",
+    )
+    assert query_result.command_id is None
+    assert query_result.extensions == {}
+
+    with pytest.raises(ContractViolation) as query_disposition:
+        ResultEnvelope.success(
+            owner=query,
+            result={"events": []},
+            observed_at="2026-08-19T12:00:03Z",
+            extensions=_command_result_extension("applied"),
+        )
+    assert query_disposition.value.reason == "COMMAND_RESULT_EXTENSION_FORBIDDEN"
+
+    query_wire = query_result.to_dict()
+    query_wire["extensions"] = _command_result_extension("applied")
+    with pytest.raises(ContractViolation) as parsed_query_disposition:
+        ResultEnvelope.from_dict(query_wire, owner=query)
+    assert (
+        parsed_query_disposition.value.reason
+        == "COMMAND_RESULT_EXTENSION_FORBIDDEN"
+    )
+
+    malformed_extension = _command_result_extension("applied")
+    malformed_extension["live_voice.command"]["extra"] = True
+    with pytest.raises(ContractViolation) as malformed:
+        ResultEnvelope.success(
+            owner=command,
+            result={"task_id": "task-1"},
+            observed_at="2026-08-19T12:00:04Z",
+            extensions=malformed_extension,
+        )
+    assert malformed.value.reason == "UNKNOWN_FIELD"
+
+    with pytest.raises(ContractViolation):
+        ResultEnvelope.success(
+            owner=command,
+            result={"task_id": "task-1"},
+            observed_at="2026-08-19T12:00:05Z",
+            extensions=_command_result_extension("unsupported"),
+        )
+
+    with pytest.raises(ContractViolation):
+        ResultEnvelope.failure(
+            owner=command,
+            error=_result_error(ErrorCode.UNSUPPORTED),
+            observed_at="2026-08-19T12:00:06Z",
+            extensions=_command_result_extension("applied"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("disposition", "code"),
+    [
+        ("rejected", ErrorCode.INVALID_ARGUMENT),
+        ("rejected", ErrorCode.UNAUTHENTICATED),
+        ("rejected", ErrorCode.PERMISSION_DENIED),
+        ("rejected", ErrorCode.NOT_FOUND),
+        ("unsupported", ErrorCode.UNSUPPORTED),
+        ("unsupported", ErrorCode.CAPABILITY_UNAVAILABLE),
+        ("conflict", ErrorCode.CONFLICT),
+        ("conflict", ErrorCode.STALE),
+        ("timeout", ErrorCode.TIMEOUT),
+        ("unknown", ErrorCode.RESULT_UNKNOWN),
+    ],
+)
+def test_negative_command_dispositions_require_their_error_family(
+    disposition: str, code: ErrorCode
+) -> None:
+    command = CommandEnvelope.from_dict(
+        _wave2_command_raw("task.update", _P3_WAVE2_COMMAND_CASES[0][1])
+    )
+    result = ResultEnvelope.failure(
+        owner=command,
+        error=_result_error(code),
+        observed_at="2026-08-19T12:01:00Z",
+        extensions=_command_result_extension(disposition),
+    )
+    assert result.extensions == _command_result_extension(disposition)
+
+    wrong_code = (
+        ErrorCode.TIMEOUT
+        if disposition == "unknown"
+        else ErrorCode.RESULT_UNKNOWN
+    )
+    with pytest.raises(ContractViolation) as mismatch:
+        ResultEnvelope.failure(
+            owner=command,
+            error=_result_error(wrong_code),
+            observed_at="2026-08-19T12:01:01Z",
+            extensions=_command_result_extension(disposition),
+        )
+    assert mismatch.value.reason == "COMMAND_DISPOSITION_ERROR_MISMATCH"
 
 
 def test_task_result_is_a_core_exact_task_query() -> None:

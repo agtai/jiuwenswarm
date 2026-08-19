@@ -248,6 +248,7 @@ _ValueT = TypeVar("_ValueT")
 _FactT = TypeVar("_FactT")
 _NAMESPACE_RE = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9][a-z0-9_-]*)+$")
 _REASON_RE = re.compile(r"^[A-Z][A-Z0-9_]*$")
+_LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _UTC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$")
 _URI_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 _CONTEXT_WHITESPACE: Final = frozenset(
@@ -1109,6 +1110,13 @@ _COMMAND_TARGETS: Final = MappingProxyType(
     {
         "task.create": IdentityKind.TASK,
         "task.adjust": IdentityKind.TASK,
+        "task.update": IdentityKind.TASK,
+        "task.provide_input": IdentityKind.TASK,
+        "task.pause": IdentityKind.TASK,
+        "task.resume": IdentityKind.TASK,
+        "task.reprioritize": IdentityKind.TASK,
+        "task.create_successor": IdentityKind.TASK,
+        "task.ack_events": IdentityKind.TASK,
         "task.retry": IdentityKind.TASK,
         CancelScope.PLAYBACK_STOP.value: IdentityKind.RESPONSE,
         CancelScope.RESPONSE_CANCEL.value: IdentityKind.RESPONSE,
@@ -1123,6 +1131,51 @@ _QUERY_TARGETS: Final = MappingProxyType(
         "task.status": IdentityKind.TASK,
         "task.events": IdentityKind.TASK,
         "task.result": IdentityKind.TASK,
+        "task.unread_events": IdentityKind.TASK,
+    }
+)
+_WAVE2_COMMAND_TYPES: Final = frozenset(
+    {
+        "task.update",
+        "task.provide_input",
+        "task.pause",
+        "task.resume",
+        "task.reprioritize",
+        "task.create_successor",
+        "task.ack_events",
+    }
+)
+_TASK_PRIORITIES: Final = frozenset({"low", "normal", "high", "urgent"})
+_PRESENTATION_CLASSES: Final = frozenset({"text", "voice"})
+_TASK_SIDE_EFFECT_CLASSES: Final = frozenset({"read_only", "project_mutation"})
+_COMMAND_DISPOSITIONS: Final = frozenset(
+    {
+        "accepted",
+        "applied",
+        "rejected",
+        "unsupported",
+        "conflict",
+        "timeout",
+        "unknown",
+    }
+)
+_POSITIVE_COMMAND_DISPOSITIONS: Final = frozenset({"accepted", "applied"})
+_COMMAND_DISPOSITION_ERROR_CODES: Final = MappingProxyType(
+    {
+        "rejected": frozenset(
+            {
+                ErrorCode.INVALID_ARGUMENT,
+                ErrorCode.UNAUTHENTICATED,
+                ErrorCode.PERMISSION_DENIED,
+                ErrorCode.NOT_FOUND,
+            }
+        ),
+        "unsupported": frozenset(
+            {ErrorCode.UNSUPPORTED, ErrorCode.CAPABILITY_UNAVAILABLE}
+        ),
+        "conflict": frozenset({ErrorCode.CONFLICT, ErrorCode.STALE}),
+        "timeout": frozenset({ErrorCode.TIMEOUT}),
+        "unknown": frozenset({ErrorCode.RESULT_UNKNOWN}),
     }
 )
 _CORE_CAPABILITIES: Final = frozenset(
@@ -1182,6 +1235,127 @@ def _capability_list(value: object, field_name: str) -> tuple[str, ...]:
     return tuple(parsed)
 
 
+def _require_operation_capability(
+    values: tuple[str, ...], operation: str, field_name: str
+) -> None:
+    if values != (operation,):
+        raise _violation(
+            "REQUIRED_CAPABILITY_MISMATCH",
+            f"{field_name} must contain only {operation!r}",
+            code=ErrorCode.PERMISSION_DENIED,
+        )
+
+
+def _bounded_text(
+    value: object,
+    field_name: str,
+    *,
+    max_utf8_bytes: int | None,
+) -> str:
+    text = _required_text(value, field_name)
+    if "\x00" in text or (
+        max_utf8_bytes is not None
+        and len(text.encode("utf-8")) > max_utf8_bytes
+    ):
+        raise _violation(
+            "INVALID_BOUNDED_TEXT",
+            f"{field_name} contains NUL or exceeds its UTF-8 byte bound",
+        )
+    return text
+
+
+def _optional_bounded_text(
+    value: object,
+    field_name: str,
+    *,
+    max_utf8_bytes: int,
+) -> str | None:
+    if value is None:
+        return None
+    return _bounded_text(value, field_name, max_utf8_bytes=max_utf8_bytes)
+
+
+def _constraint_list(
+    value: object,
+    field_name: str,
+    *,
+    nullable: bool,
+) -> list[str] | None:
+    if value is None:
+        if nullable:
+            return None
+        raise _violation(
+            "INVALID_TASK_CONSTRAINTS",
+            f"{field_name} must be an array",
+        )
+    values = _strict_array(value, field_name=field_name)
+    if len(values) > 16:
+        raise _violation(
+            "INVALID_TASK_CONSTRAINTS",
+            f"{field_name} cannot contain more than 16 entries",
+        )
+    parsed = [
+        _bounded_text(
+            item,
+            f"{field_name}[{index}]",
+            max_utf8_bytes=1_024,
+        )
+        for index, item in enumerate(values)
+    ]
+    if len(set(parsed)) != len(parsed):
+        raise _violation(
+            "INVALID_TASK_CONSTRAINTS",
+            f"{field_name} entries must be unique",
+        )
+    if sum(len(item.encode("utf-8")) for item in parsed) > 4_096:
+        raise _violation(
+            "INVALID_TASK_CONSTRAINTS",
+            f"{field_name} exceeds its aggregate UTF-8 byte bound",
+        )
+    return parsed
+
+
+def _closed_string_map(value: object, field_name: str) -> dict[str, str]:
+    data = _strict_object(value, field_name=field_name)
+    parsed: dict[str, str] = {}
+    for key, item in data.items():
+        parsed[
+            _bounded_text(key, f"{field_name} key", max_utf8_bytes=None)
+        ] = _bounded_text(item, f"{field_name}.{key}", max_utf8_bytes=None)
+    return parsed
+
+
+def _closed_value(
+    value: object, field_name: str, *, values: frozenset[str]
+) -> str:
+    if type(value) is not str or value not in values:
+        raise _violation(
+            "INVALID_ENUM",
+            f"unknown {field_name} {value!r}",
+        )
+    return value
+
+
+def _successor_outcome_and_digest(data: Mapping[str, object]) -> None:
+    outcome = _enum(
+        TerminalOutcome,
+        data["predecessor_outcome"],
+        "command.payload.predecessor_outcome",
+    )
+    digest = data["predecessor_result_sha256"]
+    if outcome is TerminalOutcome.COMPLETED:
+        if type(digest) is not str or not _LOWER_SHA256_RE.fullmatch(digest):
+            raise _violation(
+                "INVALID_PREDECESSOR_RESULT_DIGEST",
+                "completed predecessor requires a lowercase SHA-256 digest",
+            )
+    elif digest is not None:
+        raise _violation(
+            "INVALID_PREDECESSOR_RESULT_DIGEST",
+            "non-completed predecessor forbids a result digest",
+        )
+
+
 def _command_payload(command_type: str, value: object) -> _FrozenObject:
     data = _strict_object(value, field_name="command.payload")
     if command_type in {
@@ -1238,7 +1412,268 @@ def _command_payload(command_type: str, value: object) -> _FrozenObject:
                 "INVALID_TASK_ADJUSTMENT",
                 "task.adjust payload exceeds its closed content bound",
             )
+    elif command_type == "task.update":
+        _require_exact_keys(
+            data,
+            required={
+                "attempt_id",
+                "expected_event_head",
+                "instruction",
+                "constraints",
+            },
+            field_name="command.payload",
+        )
+        _required_text(data["attempt_id"], "command.payload.attempt_id")
+        _uint(data["expected_event_head"], "command.payload.expected_event_head")
+        instruction = data["instruction"]
+        constraints = data["constraints"]
+        if instruction is None and constraints is None:
+            raise _violation(
+                "EMPTY_TASK_UPDATE",
+                "task.update requires instruction or constraints",
+            )
+        if instruction is not None:
+            _bounded_text(
+                instruction,
+                "command.payload.instruction",
+                max_utf8_bytes=4_096,
+            )
+        _constraint_list(
+            constraints,
+            "command.payload.constraints",
+            nullable=True,
+        )
+    elif command_type == "task.provide_input":
+        _require_exact_keys(
+            data,
+            required={
+                "attempt_id",
+                "expected_event_head",
+                "responds_to_event_id",
+                "text",
+            },
+            field_name="command.payload",
+        )
+        _required_text(data["attempt_id"], "command.payload.attempt_id")
+        _uint(data["expected_event_head"], "command.payload.expected_event_head")
+        _required_text(
+            data["responds_to_event_id"],
+            "command.payload.responds_to_event_id",
+        )
+        _bounded_text(
+            data["text"],
+            "command.payload.text",
+            max_utf8_bytes=4_096,
+        )
+    elif command_type in {"task.pause", "task.resume"}:
+        _require_exact_keys(
+            data,
+            required={"attempt_id", "expected_event_head", "reason"},
+            field_name="command.payload",
+        )
+        _required_text(data["attempt_id"], "command.payload.attempt_id")
+        _uint(data["expected_event_head"], "command.payload.expected_event_head")
+        _optional_bounded_text(
+            data["reason"],
+            "command.payload.reason",
+            max_utf8_bytes=1_024,
+        )
+    elif command_type == "task.reprioritize":
+        _require_exact_keys(
+            data,
+            required={
+                "attempt_id",
+                "expected_event_head",
+                "priority",
+                "reason",
+            },
+            field_name="command.payload",
+        )
+        _required_text(data["attempt_id"], "command.payload.attempt_id")
+        _uint(data["expected_event_head"], "command.payload.expected_event_head")
+        _closed_value(
+            data["priority"],
+            "command.payload.priority",
+            values=_TASK_PRIORITIES,
+        )
+        _optional_bounded_text(
+            data["reason"],
+            "command.payload.reason",
+            max_utf8_bytes=1_024,
+        )
+    elif command_type == "task.create_successor":
+        _require_exact_keys(
+            data,
+            required={
+                "expected_predecessor_revision_number",
+                "expected_predecessor_event_head",
+                "predecessor_terminal_event_id",
+                "predecessor_outcome",
+                "predecessor_result_sha256",
+                "name",
+                "instruction",
+                "constraints",
+                "executor_id",
+                "side_effect_class",
+                "attributes",
+            },
+            field_name="command.payload",
+        )
+        _uint(
+            data["expected_predecessor_revision_number"],
+            "command.payload.expected_predecessor_revision_number",
+        )
+        _uint(
+            data["expected_predecessor_event_head"],
+            "command.payload.expected_predecessor_event_head",
+        )
+        _required_text(
+            data["predecessor_terminal_event_id"],
+            "command.payload.predecessor_terminal_event_id",
+        )
+        _successor_outcome_and_digest(data)
+        _bounded_text(
+            data["name"],
+            "command.payload.name",
+            max_utf8_bytes=None,
+        )
+        _bounded_text(
+            data["instruction"],
+            "command.payload.instruction",
+            max_utf8_bytes=4_096,
+        )
+        _constraint_list(
+            data["constraints"],
+            "command.payload.constraints",
+            nullable=False,
+        )
+        _bounded_text(
+            data["executor_id"],
+            "command.payload.executor_id",
+            max_utf8_bytes=None,
+        )
+        _closed_value(
+            data["side_effect_class"],
+            "command.payload.side_effect_class",
+            values=_TASK_SIDE_EFFECT_CLASSES,
+        )
+        _closed_string_map(data["attributes"], "command.payload.attributes")
+    elif command_type == "task.ack_events":
+        _require_exact_keys(
+            data,
+            required={
+                "presentation_class",
+                "acked_through_seq",
+                "acked_event_id",
+                "expected_event_head",
+            },
+            field_name="command.payload",
+        )
+        _closed_value(
+            data["presentation_class"],
+            "command.payload.presentation_class",
+            values=_PRESENTATION_CLASSES,
+        )
+        _uint(data["acked_through_seq"], "command.payload.acked_through_seq")
+        _required_text(data["acked_event_id"], "command.payload.acked_event_id")
+        _uint(data["expected_event_head"], "command.payload.expected_event_head")
     return _freeze_object(data, "command.payload")
+
+
+def _query_payload(query_type: str, value: object) -> _FrozenObject:
+    data = _strict_object(value, field_name="query.payload")
+    if query_type == "task.unread_events":
+        _require_exact_keys(
+            data,
+            required={"presentation_class", "limit"},
+            field_name="query.payload",
+        )
+        _closed_value(
+            data["presentation_class"],
+            "query.payload.presentation_class",
+            values=_PRESENTATION_CLASSES,
+        )
+        limit = _uint(data["limit"], "query.payload.limit")
+        if not 1 <= limit <= 500:
+            raise _violation(
+                "INVALID_UNREAD_LIMIT",
+                "query.payload.limit must be between 1 and 500",
+            )
+    return _freeze_object(data, "query.payload")
+
+
+def _result_extensions(
+    value: object,
+    *,
+    command_result: bool,
+    ok: bool,
+    error: ContractError | None,
+) -> _FrozenObject:
+    field_name = "result.extensions"
+    data = _strict_object(value, field_name=field_name)
+    for key in data:
+        _namespaced(key, f"{field_name} key")
+    if "live_voice.command" not in data:
+        return _freeze_object(data, field_name)
+    if not command_result:
+        raise _violation(
+            "COMMAND_RESULT_EXTENSION_FORBIDDEN",
+            "query results cannot carry a command disposition",
+            code=ErrorCode.PROTOCOL_VIOLATION,
+        )
+    command = _strict_object(
+        data["live_voice.command"],
+        field_name="result.extensions.live_voice.command",
+    )
+    _require_exact_keys(
+        command,
+        required={
+            "disposition",
+            "admission_event_id",
+            "settlement_event_id",
+        },
+        field_name="result.extensions.live_voice.command",
+    )
+    disposition_value = command["disposition"]
+    if (
+        type(disposition_value) is not str
+        or disposition_value not in _COMMAND_DISPOSITIONS
+    ):
+        raise _violation(
+            "INVALID_COMMAND_DISPOSITION",
+            "result command disposition is unknown",
+            code=ErrorCode.PROTOCOL_VIOLATION,
+        )
+    _optional_id(
+        command["admission_event_id"],
+        "result.extensions.live_voice.command.admission_event_id",
+    )
+    _optional_id(
+        command["settlement_event_id"],
+        "result.extensions.live_voice.command.settlement_event_id",
+    )
+    if disposition_value in _POSITIVE_COMMAND_DISPOSITIONS:
+        if not ok or error is not None:
+            raise _violation(
+                "COMMAND_DISPOSITION_RESULT_MISMATCH",
+                "accepted/applied command disposition requires ok=true",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+    else:
+        if ok or error is None:
+            raise _violation(
+                "COMMAND_DISPOSITION_RESULT_MISMATCH",
+                "negative command disposition requires ok=false",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+        allowed_codes = _COMMAND_DISPOSITION_ERROR_CODES[disposition_value]
+        if error.code not in allowed_codes:
+            raise _violation(
+                "COMMAND_DISPOSITION_ERROR_MISMATCH",
+                "command disposition does not match its error family",
+                code=ErrorCode.PROTOCOL_VIOLATION,
+            )
+    return _freeze_object(data, field_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1311,6 +1746,15 @@ class CommandEnvelope:
         target_ref = IdentityRef.from_dict(
             data["target_ref"], expected_kind=expected_kind
         )
+        required_capabilities = _capability_list(
+            data["required_capabilities"], "command.required_capabilities"
+        )
+        if command_type in _WAVE2_COMMAND_TYPES:
+            _require_operation_capability(
+                required_capabilities,
+                command_type,
+                "command.required_capabilities",
+            )
         result = cls(
             request_id=_required_text(data["request_id"], "command.request_id"),
             command_id=_required_text(data["command_id"], "command.command_id"),
@@ -1326,9 +1770,7 @@ class CommandEnvelope:
             context_refs=_context_refs(
                 data["context_refs"], "command.context_refs", scope=scope
             ),
-            required_capabilities=_capability_list(
-                data["required_capabilities"], "command.required_capabilities"
-            ),
+            required_capabilities=required_capabilities,
             _payload=_command_payload(command_type, data["payload"]),
             _extensions=_extensions(data["extensions"], "command.extensions"),
         )
@@ -1441,6 +1883,15 @@ class QueryEnvelope:
         target_ref = IdentityRef.from_dict(
             data["target_ref"], expected_kind=expected_kind
         )
+        required_capabilities = _capability_list(
+            data["required_capabilities"], "query.required_capabilities"
+        )
+        if query_type == "task.unread_events":
+            _require_operation_capability(
+                required_capabilities,
+                query_type,
+                "query.required_capabilities",
+            )
         result = cls(
             request_id=_required_text(data["request_id"], "query.request_id"),
             query_type=query_type,
@@ -1454,10 +1905,8 @@ class QueryEnvelope:
             context_refs=_context_refs(
                 data["context_refs"], "query.context_refs", scope=scope
             ),
-            required_capabilities=_capability_list(
-                data["required_capabilities"], "query.required_capabilities"
-            ),
-            _payload=_freeze_object(data["payload"], "query.payload"),
+            required_capabilities=required_capabilities,
+            _payload=_query_payload(query_type, data["payload"]),
             _extensions=_extensions(data["extensions"], "query.extensions"),
         )
         if identities is not None:
@@ -1518,7 +1967,12 @@ class ResultEnvelope:
             _result=_freeze_object(dict(result), "result.result"),
             error=None,
             observed_at=_timestamp(observed_at, "result.observed_at"),
-            _extensions=_extensions(dict(extensions or {}), "result.extensions"),
+            _extensions=_result_extensions(
+                dict(extensions or {}),
+                command_result=isinstance(owner, CommandEnvelope),
+                ok=True,
+                error=None,
+            ),
         )
 
     @classmethod
@@ -1539,7 +1993,12 @@ class ResultEnvelope:
             _result=None,
             error=error,
             observed_at=_timestamp(observed_at, "result.observed_at"),
-            _extensions=_extensions(dict(extensions or {}), "result.extensions"),
+            _extensions=_result_extensions(
+                dict(extensions or {}),
+                command_result=isinstance(owner, CommandEnvelope),
+                ok=False,
+                error=error,
+            ),
         )
 
     @classmethod
@@ -1591,14 +2050,26 @@ class ResultEnvelope:
                 "failed result requires error and forbids result",
                 code=ErrorCode.PROTOCOL_VIOLATION,
             )
+        request_id = _required_text(data["request_id"], "result.request_id")
+        command_id = _optional_id(data["command_id"], "result.command_id")
+        command_result = (
+            isinstance(owner, CommandEnvelope)
+            if owner is not None
+            else command_id is not None
+        )
         result = cls(
-            request_id=_required_text(data["request_id"], "result.request_id"),
-            command_id=_optional_id(data["command_id"], "result.command_id"),
+            request_id=request_id,
+            command_id=command_id,
             ok=ok,
             _result=result_value,
             error=error_value,
             observed_at=_timestamp(data["observed_at"], "result.observed_at"),
-            _extensions=_extensions(data["extensions"], "result.extensions"),
+            _extensions=_result_extensions(
+                data["extensions"],
+                command_result=command_result,
+                ok=ok,
+                error=error_value,
+            ),
         )
         if owner is not None:
             expected_command_id = (

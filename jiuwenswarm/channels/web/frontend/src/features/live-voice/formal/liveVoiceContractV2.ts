@@ -669,6 +669,13 @@ export class IdentityRegistry {
 const COMMAND_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'task.create': 'task',
   'task.adjust': 'task',
+  'task.update': 'task',
+  'task.provide_input': 'task',
+  'task.pause': 'task',
+  'task.resume': 'task',
+  'task.reprioritize': 'task',
+  'task.create_successor': 'task',
+  'task.ack_events': 'task',
   'playback.stop': 'response',
   'response.cancel': 'response',
   'round.cancel': 'round',
@@ -681,6 +688,36 @@ const QUERY_TARGETS: Readonly<Record<string, IdentityKind>> = Object.freeze({
   'task.status': 'task',
   'task.events': 'task',
   'task.result': 'task',
+  'task.unread_events': 'task',
+});
+const WAVE2_COMMAND_TYPES = new Set([
+  'task.update',
+  'task.provide_input',
+  'task.pause',
+  'task.resume',
+  'task.reprioritize',
+  'task.create_successor',
+  'task.ack_events',
+]);
+const TASK_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent']);
+const PRESENTATION_CLASSES = new Set(['text', 'voice']);
+const TASK_SIDE_EFFECT_CLASSES = new Set(['read_only', 'project_mutation']);
+const COMMAND_DISPOSITIONS = new Set([
+  'accepted',
+  'applied',
+  'rejected',
+  'unsupported',
+  'conflict',
+  'timeout',
+  'unknown',
+]);
+const POSITIVE_COMMAND_DISPOSITIONS = new Set(['accepted', 'applied']);
+const COMMAND_DISPOSITION_ERROR_CODES: Readonly<Record<string, ReadonlySet<ErrorCode>>> = Object.freeze({
+  rejected: new Set<ErrorCode>(['INVALID_ARGUMENT', 'UNAUTHENTICATED', 'PERMISSION_DENIED', 'NOT_FOUND']),
+  unsupported: new Set<ErrorCode>(['UNSUPPORTED', 'CAPABILITY_UNAVAILABLE']),
+  conflict: new Set<ErrorCode>(['CONFLICT', 'STALE']),
+  timeout: new Set<ErrorCode>(['TIMEOUT']),
+  unknown: new Set<ErrorCode>(['RESULT_UNKNOWN']),
 });
 const CORE_CAPABILITIES = new Set([
   ...Object.keys(COMMAND_TARGETS),
@@ -726,6 +763,90 @@ function capabilityList(value: unknown, fieldName: string): readonly string[] {
   return Object.freeze(result);
 }
 
+function requireOperationCapability(values: readonly string[], operation: string, fieldName: string): void {
+  if (values.length !== 1 || values[0] !== operation) {
+    throw violation(
+      'REQUIRED_CAPABILITY_MISMATCH',
+      `${fieldName} must contain only ${operation}`,
+      'PERMISSION_DENIED'
+    );
+  }
+}
+
+function boundedText(value: unknown, fieldName: string, maxUtf8Bytes: number | null): string {
+  const text = requiredText(value, fieldName);
+  if (
+    text.includes('\0')
+    || (maxUtf8Bytes !== null && new TextEncoder().encode(text).byteLength > maxUtf8Bytes)
+  ) {
+    throw violation(
+      'INVALID_BOUNDED_TEXT',
+      `${fieldName} contains NUL or exceeds its UTF-8 byte bound`,
+      'INVALID_ARGUMENT'
+    );
+  }
+  return text;
+}
+
+function optionalBoundedText(value: unknown, fieldName: string, maxUtf8Bytes: number): string | null {
+  return value === null ? null : boundedText(value, fieldName, maxUtf8Bytes);
+}
+
+function constraintList(value: unknown, fieldName: string, nullable: boolean): readonly string[] | null {
+  if (value === null) {
+    if (nullable) return null;
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} must be an array`, 'INVALID_ARGUMENT');
+  }
+  const values = strictArray(value, fieldName);
+  if (values.length > 16) {
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} cannot contain more than 16 entries`, 'INVALID_ARGUMENT');
+  }
+  const parsed = values.map((item, index) => boundedText(item, `${fieldName}[${index}]`, 1_024));
+  if (new Set(parsed).size !== parsed.length) {
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} entries must be unique`, 'INVALID_ARGUMENT');
+  }
+  const byteLength = parsed.reduce((total, item) => total + new TextEncoder().encode(item).byteLength, 0);
+  if (byteLength > 4_096) {
+    throw violation('INVALID_TASK_CONSTRAINTS', `${fieldName} exceeds its aggregate UTF-8 byte bound`, 'INVALID_ARGUMENT');
+  }
+  return Object.freeze(parsed);
+}
+
+function closedStringMap(value: unknown, fieldName: string): void {
+  const data = strictRecord(value, fieldName);
+  for (const [key, item] of Object.entries(data)) {
+    boundedText(key, `${fieldName} key`, null);
+    boundedText(item, `${fieldName}.${key}`, null);
+  }
+}
+
+function closedValue(value: unknown, fieldName: string, values: ReadonlySet<string>): string {
+  if (typeof value !== 'string' || !values.has(value)) {
+    throw violation('INVALID_ENUM', `unknown ${fieldName} ${String(value)}`, 'INVALID_ARGUMENT');
+  }
+  return value;
+}
+
+function successorOutcomeAndDigest(data: Record<string, unknown>): void {
+  const outcome = enumeration(TERMINAL_OUTCOMES, data.predecessor_outcome, 'command.payload.predecessor_outcome');
+  const digest = data.predecessor_result_sha256;
+  if (outcome === 'completed') {
+    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw violation(
+        'INVALID_PREDECESSOR_RESULT_DIGEST',
+        'completed predecessor requires a lowercase SHA-256 digest',
+        'INVALID_ARGUMENT'
+      );
+    }
+  } else if (digest !== null) {
+    throw violation(
+      'INVALID_PREDECESSOR_RESULT_DIGEST',
+      'non-completed predecessor forbids a result digest',
+      'INVALID_ARGUMENT'
+    );
+  }
+}
+
 function commandPayload(commandType: string, value: unknown): Readonly<JsonObject> {
   const data = strictRecord(value, 'command.payload');
   if (commandType === 'playback.stop' || commandType === 'response.cancel') {
@@ -759,8 +880,94 @@ function commandPayload(commandType: string, value: unknown): Readonly<JsonObjec
         'INVALID_ARGUMENT'
       );
     }
+  } else if (commandType === 'task.update') {
+    exactKeys(data, ['attempt_id', 'expected_event_head', 'instruction', 'constraints'], 'command.payload');
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    if (data.instruction === null && data.constraints === null) {
+      throw violation('EMPTY_TASK_UPDATE', 'task.update requires instruction or constraints', 'INVALID_ARGUMENT');
+    }
+    if (data.instruction !== null) {
+      boundedText(data.instruction, 'command.payload.instruction', 4_096);
+    }
+    constraintList(data.constraints, 'command.payload.constraints', true);
+  } else if (commandType === 'task.provide_input') {
+    exactKeys(
+      data,
+      ['attempt_id', 'expected_event_head', 'responds_to_event_id', 'text'],
+      'command.payload'
+    );
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    requiredText(data.responds_to_event_id, 'command.payload.responds_to_event_id');
+    boundedText(data.text, 'command.payload.text', 4_096);
+  } else if (commandType === 'task.pause' || commandType === 'task.resume') {
+    exactKeys(data, ['attempt_id', 'expected_event_head', 'reason'], 'command.payload');
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    optionalBoundedText(data.reason, 'command.payload.reason', 1_024);
+  } else if (commandType === 'task.reprioritize') {
+    exactKeys(data, ['attempt_id', 'expected_event_head', 'priority', 'reason'], 'command.payload');
+    requiredText(data.attempt_id, 'command.payload.attempt_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
+    closedValue(data.priority, 'command.payload.priority', TASK_PRIORITIES);
+    optionalBoundedText(data.reason, 'command.payload.reason', 1_024);
+  } else if (commandType === 'task.create_successor') {
+    exactKeys(
+      data,
+      [
+        'expected_predecessor_revision_number',
+        'expected_predecessor_event_head',
+        'predecessor_terminal_event_id',
+        'predecessor_outcome',
+        'predecessor_result_sha256',
+        'name',
+        'instruction',
+        'constraints',
+        'executor_id',
+        'side_effect_class',
+        'attributes',
+      ],
+      'command.payload'
+    );
+    unsignedInteger(
+      data.expected_predecessor_revision_number,
+      'command.payload.expected_predecessor_revision_number'
+    );
+    unsignedInteger(data.expected_predecessor_event_head, 'command.payload.expected_predecessor_event_head');
+    requiredText(data.predecessor_terminal_event_id, 'command.payload.predecessor_terminal_event_id');
+    successorOutcomeAndDigest(data);
+    boundedText(data.name, 'command.payload.name', null);
+    boundedText(data.instruction, 'command.payload.instruction', 4_096);
+    constraintList(data.constraints, 'command.payload.constraints', false);
+    boundedText(data.executor_id, 'command.payload.executor_id', null);
+    closedValue(data.side_effect_class, 'command.payload.side_effect_class', TASK_SIDE_EFFECT_CLASSES);
+    closedStringMap(data.attributes, 'command.payload.attributes');
+  } else if (commandType === 'task.ack_events') {
+    exactKeys(
+      data,
+      ['presentation_class', 'acked_through_seq', 'acked_event_id', 'expected_event_head'],
+      'command.payload'
+    );
+    closedValue(data.presentation_class, 'command.payload.presentation_class', PRESENTATION_CLASSES);
+    unsignedInteger(data.acked_through_seq, 'command.payload.acked_through_seq');
+    requiredText(data.acked_event_id, 'command.payload.acked_event_id');
+    unsignedInteger(data.expected_event_head, 'command.payload.expected_event_head');
   }
   return cloneObject(data, 'command.payload');
+}
+
+function queryPayload(queryType: string, value: unknown): Readonly<JsonObject> {
+  const data = strictRecord(value, 'query.payload');
+  if (queryType === 'task.unread_events') {
+    exactKeys(data, ['presentation_class', 'limit'], 'query.payload');
+    closedValue(data.presentation_class, 'query.payload.presentation_class', PRESENTATION_CLASSES);
+    const limit = unsignedInteger(data.limit, 'query.payload.limit');
+    if (limit < 1 || limit > 500) {
+      throw violation('INVALID_UNREAD_LIMIT', 'query.payload.limit must be between 1 and 500', 'INVALID_ARGUMENT');
+    }
+  }
+  return cloneObject(data, 'query.payload');
 }
 
 interface EnvelopeBase {
@@ -816,6 +1023,10 @@ export function parseCommandEnvelope(value: unknown, identities?: IdentityRegist
   const scope = parseScopeRef(data.scope);
   const origin = parseOriginRef(data.origin);
   const targetRef = parseIdentityRef(data.target_ref, expectedKind);
+  const requiredCapabilities = capabilityList(data.required_capabilities, 'command.required_capabilities');
+  if (WAVE2_COMMAND_TYPES.has(commandType)) {
+    requireOperationCapability(requiredCapabilities, commandType, 'command.required_capabilities');
+  }
   const result = Object.freeze({
     contract_version: CONTRACT_VERSION,
     request_id: requiredText(data.request_id, 'command.request_id'),
@@ -828,7 +1039,7 @@ export function parseCommandEnvelope(value: unknown, identities?: IdentityRegist
     origin,
     target_ref: targetRef,
     context_refs: contextRefs(data.context_refs, 'command.context_refs', scope),
-    required_capabilities: capabilityList(data.required_capabilities, 'command.required_capabilities'),
+    required_capabilities: requiredCapabilities,
     payload: commandPayload(commandType, data.payload),
     extensions: extensions(data.extensions, 'command.extensions'),
   });
@@ -893,6 +1104,10 @@ export function parseQueryEnvelope(value: unknown, identities?: IdentityRegistry
   }
   const scope = parseScopeRef(data.scope);
   const targetRef = parseIdentityRef(data.target_ref, expectedKind);
+  const requiredCapabilities = capabilityList(data.required_capabilities, 'query.required_capabilities');
+  if (queryType === 'task.unread_events') {
+    requireOperationCapability(requiredCapabilities, queryType, 'query.required_capabilities');
+  }
   const result = Object.freeze({
     contract_version: CONTRACT_VERSION,
     request_id: requiredText(data.request_id, 'query.request_id'),
@@ -903,8 +1118,8 @@ export function parseQueryEnvelope(value: unknown, identities?: IdentityRegistry
     causation_id: optionalId(data.causation_id, 'query.causation_id'),
     target_ref: targetRef,
     context_refs: contextRefs(data.context_refs, 'query.context_refs', scope),
-    required_capabilities: capabilityList(data.required_capabilities, 'query.required_capabilities'),
-    payload: cloneObject(data.payload, 'query.payload'),
+    required_capabilities: requiredCapabilities,
+    payload: queryPayload(queryType, data.payload),
     extensions: extensions(data.extensions, 'query.extensions'),
   });
   if (identities !== undefined) identities.require(targetRef, { scope });
@@ -946,6 +1161,69 @@ function errorToWire(error: Readonly<ContractErrorValue>): Readonly<JsonObject> 
   });
 }
 
+function resultExtensions(
+  value: unknown,
+  commandResult: boolean,
+  ok: boolean,
+  error: Readonly<ContractErrorValue> | null,
+): Readonly<JsonObject> {
+  const fieldName = 'result.extensions';
+  const data = strictRecord(value, fieldName);
+  for (const key of Object.keys(data)) namespaced(key, `${fieldName} key`);
+  if (!Object.prototype.hasOwnProperty.call(data, 'live_voice.command')) {
+    return cloneObject(data, fieldName);
+  }
+  if (!commandResult) {
+    throw violation(
+      'COMMAND_RESULT_EXTENSION_FORBIDDEN',
+      'query results cannot carry a command disposition',
+      'PROTOCOL_VIOLATION'
+    );
+  }
+  const command = strictRecord(data['live_voice.command'], 'result.extensions.live_voice.command');
+  exactKeys(
+    command,
+    ['disposition', 'admission_event_id', 'settlement_event_id'],
+    'result.extensions.live_voice.command'
+  );
+  const dispositionValue = command.disposition;
+  if (typeof dispositionValue !== 'string' || !COMMAND_DISPOSITIONS.has(dispositionValue)) {
+    throw violation(
+      'INVALID_COMMAND_DISPOSITION',
+      'result command disposition is unknown',
+      'PROTOCOL_VIOLATION'
+    );
+  }
+  optionalId(command.admission_event_id, 'result.extensions.live_voice.command.admission_event_id');
+  optionalId(command.settlement_event_id, 'result.extensions.live_voice.command.settlement_event_id');
+  if (POSITIVE_COMMAND_DISPOSITIONS.has(dispositionValue)) {
+    if (!ok || error !== null) {
+      throw violation(
+        'COMMAND_DISPOSITION_RESULT_MISMATCH',
+        'accepted/applied command disposition requires ok=true',
+        'PROTOCOL_VIOLATION'
+      );
+    }
+  } else {
+    if (ok || error === null) {
+      throw violation(
+        'COMMAND_DISPOSITION_RESULT_MISMATCH',
+        'negative command disposition requires ok=false',
+        'PROTOCOL_VIOLATION'
+      );
+    }
+    const allowedCodes = COMMAND_DISPOSITION_ERROR_CODES[dispositionValue];
+    if (allowedCodes === undefined || !allowedCodes.has(error.code)) {
+      throw violation(
+        'COMMAND_DISPOSITION_ERROR_MISMATCH',
+        'command disposition does not match its error family',
+        'PROTOCOL_VIOLATION'
+      );
+    }
+  }
+  return cloneObject(data, fieldName);
+}
+
 export function parseResultEnvelope(value: unknown, owner?: Readonly<CommandEnvelope | QueryEnvelope>): Readonly<ResultEnvelope> {
   const normalizedOwner = owner === undefined ? undefined : normalizeOwner(owner);
   const data = strictRecord(value, 'result');
@@ -959,15 +1237,20 @@ export function parseResultEnvelope(value: unknown, owner?: Readonly<CommandEnve
   if (ok ? resultValue === null || errorValue !== null : resultValue !== null || errorValue === null) {
     throw violation('INVALID_RESULT_EXCLUSIVITY', 'success requires result only; failure requires error only', 'PROTOCOL_VIOLATION');
   }
+  const requestId = requiredText(data.request_id, 'result.request_id');
+  const commandId = optionalId(data.command_id, 'result.command_id');
+  const commandResult = normalizedOwner === undefined
+    ? commandId !== null
+    : Object.prototype.hasOwnProperty.call(normalizedOwner, 'command_id');
   const parsed = Object.freeze({
     contract_version: CONTRACT_VERSION,
-    request_id: requiredText(data.request_id, 'result.request_id'),
-    command_id: optionalId(data.command_id, 'result.command_id'),
+    request_id: requestId,
+    command_id: commandId,
     ok,
     result: resultValue,
     error: errorValue,
     observed_at: timestamp(data.observed_at, 'result.observed_at'),
-    extensions: extensions(data.extensions, 'result.extensions'),
+    extensions: resultExtensions(data.extensions, commandResult, ok, errorValue),
   });
   if (normalizedOwner !== undefined) {
     const expectedCommandId = 'command_id' in normalizedOwner ? normalizedOwner.command_id : null;
@@ -983,7 +1266,12 @@ function normalizeOwner(owner: Readonly<CommandEnvelope | QueryEnvelope>): Reado
   return Object.prototype.hasOwnProperty.call(data, 'command_id') ? parseCommandEnvelope(data) : parseQueryEnvelope(data);
 }
 
-export function successResult(owner: Readonly<CommandEnvelope | QueryEnvelope>, result: JsonObject, observedAt: string): Readonly<ResultEnvelope> {
+export function successResult(
+  owner: Readonly<CommandEnvelope | QueryEnvelope>,
+  result: JsonObject,
+  observedAt: string,
+  resultExtensionValue: JsonObject = {},
+): Readonly<ResultEnvelope> {
   const normalizedOwner = normalizeOwner(owner);
   return parseResultEnvelope(
     {
@@ -994,7 +1282,7 @@ export function successResult(owner: Readonly<CommandEnvelope | QueryEnvelope>, 
       result,
       error: null,
       observed_at: observedAt,
-      extensions: {},
+      extensions: resultExtensionValue,
     },
     normalizedOwner
   );
@@ -1003,7 +1291,8 @@ export function successResult(owner: Readonly<CommandEnvelope | QueryEnvelope>, 
 export function failureResult(
   owner: Readonly<CommandEnvelope | QueryEnvelope>,
   error: Readonly<ContractErrorValue>,
-  observedAt: string
+  observedAt: string,
+  resultExtensionValue: JsonObject = {},
 ): Readonly<ResultEnvelope> {
   const normalizedOwner = normalizeOwner(owner);
   return parseResultEnvelope(
@@ -1015,7 +1304,7 @@ export function failureResult(
       result: null,
       error: errorToWire(error),
       observed_at: observedAt,
-      extensions: {},
+      extensions: resultExtensionValue,
     },
     normalizedOwner
   );
