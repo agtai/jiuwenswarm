@@ -443,6 +443,18 @@ def _compatible(left: LatencyRunConfig, right: LatencyRunConfig) -> bool:
     return all(getattr(left, field) == getattr(right, field) for field in fields)
 
 
+def _catalog(run: LatencyRunConfig) -> tuple[tuple[object, ...], ...]:
+    """Return every fixed and declared experiment definition for comparison."""
+    return tuple(
+        (
+            definition.segment_id, definition.start_point, definition.end_point,
+            definition.component, definition.phase_tags, definition.primary_capability,
+            definition.applicable_profiles,
+        )
+        for definition in _segment_definitions(run)
+    )
+
+
 def _comparison_rows(baseline: LatencyRunReport, candidate: LatencyRunReport) -> tuple[SegmentComparison, ...]:
     rows: list[SegmentComparison] = []
     for profile in baseline.profiles:
@@ -476,14 +488,17 @@ def _statistic_relative_delta(item: SegmentComparison, statistic: str) -> float 
 def compare_latency_reports(baseline: LatencyRunReport, candidate: LatencyRunReport) -> LatencyComparison:
     if not isinstance(baseline, LatencyRunReport) or not isinstance(candidate, LatencyRunReport):
         raise LatencyProbeViolation("INVALID_REPORT")
-    rows = _comparison_rows(baseline, candidate)
+    empty_rows: tuple[SegmentComparison, ...] = ()
     if baseline.run.source_state == "product_code_dirty" or candidate.run.source_state == "product_code_dirty":
-        return _inconclusive(baseline, candidate, rows, "DIRTY_SOURCE")
+        return _inconclusive(baseline, candidate, empty_rows, "DIRTY_SOURCE")
+    if candidate.run.experiment is None:
+        return _inconclusive(baseline, candidate, empty_rows, "NO_EXPERIMENT")
     if not _compatible(baseline.run, candidate.run):
-        return _inconclusive(baseline, candidate, rows, "INCOMPATIBLE_RUN")
+        return _inconclusive(baseline, candidate, empty_rows, "INCOMPATIBLE_RUN")
     experiment = candidate.run.experiment
-    if experiment is None:
-        return _inconclusive(baseline, candidate, rows, "NO_EXPERIMENT")
+    if _catalog(baseline.run) != _catalog(candidate.run):
+        return _inconclusive(baseline, candidate, empty_rows, "INCOMPATIBLE_RUN")
+    rows = _comparison_rows(baseline, candidate)
     statistic = experiment.target_statistic
     if any(
         item.baseline_successful_samples < baseline.run.required_successes

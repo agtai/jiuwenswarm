@@ -295,7 +295,10 @@ def complete_report_with_statistics(run, *, p50, p95, failed=0):
     profiles = []
     for profile in report.profiles:
         summaries = tuple(
-            replace(summary, p50_ms=p50, p95_ms=p95, failed=failed)
+            replace(
+                summary, minimum_ms=min(p50, p95), p50_ms=p50, p95_ms=p95,
+                maximum_ms=max(p50, p95), failed=failed,
+            )
             for summary in profile.segments
         )
         profiles.append(replace(profile, segments=summaries))
@@ -498,3 +501,50 @@ def test_report_artifacts_and_cli_output_are_exact_and_complete(run_config, tmp_
         compare_latency_reports(report, report).to_dict(), sort_keys=True, separators=(",", ":"),
     ) + "\n"
     assert (result.returncode, result.stdout, result.stderr) == (0, expected, "")
+
+
+def _experiment_declaration(segment_id: str, point: str) -> list[dict[str, object]]:
+    return [{
+        "point": point, "component": "browser", "paired_segment_id": segment_id,
+        "start_point": "browser.eot_received", "end_point": point,
+    }]
+
+
+def test_compare_closes_experiment_catalog_asymmetries_before_building_rows(tmp_path) -> None:
+    plain_path = tmp_path / "plain.json"
+    plain_path.write_text(json.dumps(run_payload()), encoding="utf-8")
+    plain = complete_report_with_statistics(load_latency_run_config(plain_path), p50=100.0, p95=200.0)
+    baseline_only = complete_report_with_statistics(
+        configured_run(tmp_path, experiment_points=_experiment_declaration("baseline_only", "experiment.latency-tune.baseline")),
+        p50=100.0, p95=200.0,
+    )
+    candidate_only = complete_report_with_statistics(
+        configured_run(tmp_path, experiment_points=_experiment_declaration("candidate_only", "experiment.latency-tune.candidate")),
+        p50=80.0, p95=160.0,
+    )
+
+    assert compare_latency_reports(baseline_only, plain).reason == "NO_EXPERIMENT"
+    assert compare_latency_reports(plain, candidate_only).reason == "INCOMPATIBLE_RUN"
+    assert compare_latency_reports(baseline_only, candidate_only).reason == "INCOMPATIBLE_RUN"
+
+
+def test_cli_compare_closes_serialized_experiment_catalog_asymmetry(tmp_path) -> None:
+    plain_path = tmp_path / "cli-plain.json"
+    plain_path.write_text(json.dumps(run_payload()), encoding="utf-8")
+    candidate = complete_report_with_statistics(load_latency_run_config(plain_path), p50=80.0, p95=160.0)
+    baseline = complete_report_with_statistics(
+        configured_run(tmp_path, experiment_points=_experiment_declaration("baseline_only", "experiment.latency-tune.baseline")),
+        p50=100.0, p95=200.0,
+    )
+    baseline_dir, candidate_dir = tmp_path / "baseline", tmp_path / "candidate"
+    write_latency_report(baseline, baseline_dir)
+    write_latency_report(candidate, candidate_dir)
+    command = [sys.executable, "-m", "jiuwenswarm.server.live_voice.latency_probe_report"]
+    result = subprocess.run(
+        [*command, "compare", "--baseline", str(baseline_dir / "report.json"), "--candidate", str(candidate_dir / "report.json")],
+        check=False, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["reason"] == "NO_EXPERIMENT"
+    assert result.stderr == ""
