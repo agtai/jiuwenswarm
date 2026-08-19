@@ -84,7 +84,7 @@ risks, dependencies, acceptance and integration order.
 | Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing and playout-time barge-in exist; manual retry admitted a second turn | Automatic continuation without recurrent recovery failure; interruption during Agent generation, complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
-| Task Control Core and Store | **PARTIAL overall; P3-1 PASS.** SQLite schema v4, multiple non-terminal Tasks, explicit create/revision lineage, shared transition validation, addressed list/events/result/adjust behavior and fail-closed durable-authority reconstruction passed current-source Tier-3 review with no remaining P1/P2 | Execute P3-2 full controls and successor creation, then P3-5 unread/presentation ACK, P3-6 target disambiguation, final legacy-fake relocation and one product Task model | Executor status resolution, Voice–Task Bridge and restart/concurrency matrix; exact evidence in the [P3-1 review](reviews/P3_1_CANONICAL_MULTI_TASK_IMPLEMENTATION_REVIEW_2026-08-19.md) |
+| Task Control Core and Store | **PARTIAL overall; P3-1 PASS; P3-2 contract frozen.** SQLite schema v4, multiple non-terminal Tasks, explicit create/revision lineage, shared transition validation, addressed list/events/result/adjust behavior and fail-closed durable-authority reconstruction passed current-source Tier-3 review with no remaining P1/P2. D-087 now freezes the P3-2 six-item command contract without implementation credit | Implement P3-2 closed command dispositions, pre-dispatch update, truthful unsupported controls and successor creation; then P3-5 unread/presentation ACK, P3-6 target disambiguation, final legacy-fake relocation and one product Task model | Executor status resolution, Voice–Task Bridge and restart/concurrency matrix; exact evidence in the [P3-1 review](reviews/P3_1_CANONICAL_MULTI_TASK_IMPLEMENTATION_REVIEW_2026-08-19.md) and [P3-2 contract freeze](reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md) |
 | Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
 | Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses. A broader P3-1 diagnostic also reproduced the unchanged mounted Exit/immediate-re-enable presentation-ACK timing failure at 406/407; both remain outside the accepted Core/Store package | Complete P3 controls/projections while preserving profile semantics; later close capture/Exit recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-2 through P3-9 plus deferred P1/P2 completion |
@@ -137,21 +137,23 @@ exact-source Alpha result.
 
 - **Packet:** P3-2 — complete command, adjustment and successor-revision
   semantics.
-- **Activation preparation:** use the
+- **Frozen contract:** [D-087](decisions/DECISIONS.md) and the
   [P3-2/P3-5A Core/Store design and oracle map](reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md)
-  for the P3-2 contract freeze. P3-5A remains inactive unless STATUS records a
-  separate assignment or bounded multi-package batch.
+  freeze the P3-2 six-item contract on the accepted P3-1 model. P3-5A remains
+  inactive unless STATUS records a separate assignment or bounded multi-package
+  batch.
 - **Objective:** add one coherent, versioned command model for `update`,
-  `provide_input`, supported `pause/resume/reprioritize`, exact cancel outcomes
-  and explicit successor revision without rewriting terminal Task/TaskResult
-  truth.
+  `provide_input`, capability-truthful `pause/resume/reprioritize` (currently
+  unsupported), exact cancel outcomes and explicit successor revision without
+  rewriting terminal Task/TaskResult truth.
 - **Capability/modules:** Task Control Core/Store own command admission,
   idempotency, event/outbox/result truth and successor creation; the selected
   Executor seam owns only operations backed by a proven capability. Text and
   Voice callers consume the same command results.
 - **Risk:** Tier 3 under root `TESTING.md` because the packet changes shared
-  command/state/transaction semantics and Executor effects. Re-scope before
-  adding a new operation, scheduler policy, recovery model or product owner.
+  command/state/transaction semantics and Executor effects. D-087 keeps the
+  Store at schema v4; stop before DDL or before adding a new operation,
+  scheduler policy, recovery model or product owner and re-scope that expansion.
 - **Included:** immutable command fingerprint and exact scope/target/expected
   state; atomic admission plus outbox/replay facts; accepted/applied/rejected/
   unsupported/conflict/timeout/unknown separation; operation-specific legal
@@ -162,19 +164,23 @@ exact-source Alpha result.
   Executor capability/admission expansion; P3-4 D1/D2 implementation; P3-5
   unread/presentation ACK; generalized Voice targeting/UI work; Production,
   `develop` integration and remote updates.
-- **First action:** record the P3-2 acceptance and exact owned surfaces; map the
-  accepted P3-1 command/event/outbox model and current Executor capabilities;
-  freeze each operation's state/race/result contract before implementation.
-- **Deliverables:** versioned command schema and durable transaction path;
-  supported-operation Executor adapters; explicit successor creation; positive,
-  negative, boundary, concurrency, restart/idempotency, unsupported and
-  zero-effect evidence; complete-diff and independent Tier-3 review; synchronized
-  STATUS/evidence.
+- **Next action:** write failing Python/TypeScript closed-contract tests for the
+  frozen payload/disposition matrix, then implement the schema-v4 Core/Store
+  transaction paths in this order: pre-dispatch `task.update`, narrowed
+  `task.adjust`/`task.retry` compatibility, zero-effect unsupported controls,
+  and one-winner `task.create_successor`.
+- **Deliverables:** versioned command/disposition schema and durable transaction
+  path; current proven `task.adjust` checkpoint compatibility plus truthful
+  unsupported results for controls awaiting P3-3; explicit successor creation;
+  positive, negative, boundary, concurrency, restart/idempotency, unsupported
+  and zero-effect evidence; complete-diff and independent Tier-3 review;
+  synchronized STATUS/evidence.
 - **Acceptance:** every declared operation has exact state, target,
   duplicate/conflict, concurrent-terminal, restart and unsupported-capability
-  evidence; ordered effects apply once; unsupported controls never appear
-  successful; successor creation preserves predecessor and result byte-for-byte;
-  text and Voice observe the same authoritative result and TaskEvent truth.
+  evidence; ordered supported effects apply once; unsupported controls never
+  appear successful; successor creation preserves predecessor and result
+  byte-for-byte; text and Voice observe the same authoritative result and
+  TaskEvent truth.
 
 ## Dependency route to feature complete
 

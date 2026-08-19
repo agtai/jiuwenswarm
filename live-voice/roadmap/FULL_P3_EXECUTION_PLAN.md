@@ -17,9 +17,10 @@
 > transfers the failed post-TTS hands-free continuation and combined physical
 > candidate Journey to later cumulative P1/P2/P3 acceptance. P3-1 is accepted
 > at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`; current
-> [STATUS](../STATUS.md) activates P3-2 in Wave 2 and records the additive
-> P3-8A asset boundary separately. This does not convert `f24dd17d` into a
-> controlled-candidate PASS.
+> [STATUS](../STATUS.md) activates P3-2 in Wave 2; D-087 freezes its six-item
+> command contract and records the additive P3-8A asset boundary separately.
+> This does not convert `f24dd17d` into a controlled-candidate PASS or grant
+> P3-2 implementation credit.
 
 ## 1. Purpose and required product outcome
 
@@ -419,8 +420,8 @@ remain single-owner.
 
 ### 7.3 `P3-2` — complete command, adjustment and revision semantics
 
-Activation preparation: [P3-2 and P3-5A Core/Store contract and oracle
-map](../reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md).
+Frozen D-087 contract and activation map: [P3-2 and P3-5A Core/Store contract
+and oracle map](../reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md).
 
 #### Do
 
@@ -918,32 +919,33 @@ The packet describes a coherent product result, not a list of files or
 functions. Exact files and commands are discovered from the current checkout
 when the packet starts.
 
-## 12. Design checkpoints still requiring settlement
+## 12. Settled and remaining design checkpoints
 
-The accepted design fixes the product boundary but does not fully choose every
-implementation semantic below. D-085 evidence and the first affected package
-must settle them before code diverges:
+The accepted design fixes the product boundary. P3-1 and D-087 settle the
+foundation and P3-2 command semantics below; later capability/recovery/result
+packages still own their explicitly remaining choices before their code
+diverges:
 
 Accepted P3-1 source `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`
 already settles two foundation facts: `queued` is only a projection of an
 accepted Task without authoritative running evidence, and current-Task state is
 only a replaceable selection hint. It also freezes successor lineage as a new
-Task identity with predecessor/revision fields; P3-2 still owns the command,
-eligibility and atomic creation transaction.
+Task identity with predecessor/revision fields. D-087 now fixes the P3-2
+command, eligibility and atomic creation transaction on that lineage.
 
-| Question | Recommended default for review | Blocks |
+| Question | Current accepted decision | Remaining block |
 |---|---|---|
-| If pause/resume is supported, how is `paused` represented? | P3-1 keeps it non-canonical and unsupported. Add a representation only with a proven Executor pause boundary; never relabel blocked/accepted | `P3-2`, `P3-3`, `P3-4`, `P3-7` |
+| If pause/resume is supported, how is `paused` represented? | D-087 keeps it non-canonical and freezes P3-2 pause/resume as zero-effect `unsupported`; never relabel blocked/accepted/decision-required | Positive support still requires `P3-3`, `P3-4`, `P3-7`; no longer blocks P3-2 implementation |
 | Does D1 resume the same Attempt? | Preserve `task_id`; choose same or linked recovery `attempt_id` explicitly with checkpoint/retry accounting and provenance | `P3-4` |
 | Which adapters must prove D1/D2? | Every declared capability needs a real path; do not claim a level from interface support alone | `P3-3`, `P3-4`, `P3-9` |
-| What does reprioritize control? | Bind to a real scheduler/admission policy; if none exists, return unsupported | `P3-2`, `P3-3` |
-| How are decision-required answers represented? | Use a bounded, exact `provide_input` contract unless a separately accepted command is required | `P3-2`, `P3-6` |
+| What does reprioritize control? | D-087 freezes `low/normal/high/urgent` wire values but zero-effect `unsupported` until a real scheduler/admission owner exists | Positive support requires `P3-3`; no longer blocks P3-2 implementation |
+| How are decision-required answers represented? | D-087 binds bounded untrusted input to the exact current `task.decision_required` event; ordinary `blocked` is not input-required | Positive Executor application requires `P3-3`; natural-language routing remains `P3-6` |
 | What is unread/replay retention? | Define bounded cursor/retention and ACK semantics for the supported product profile without importing Production retention/SLO scope | `P3-5`, `P3-7` |
-| Which terminal outcomes and command contract may create a successor? | Use the P3-1 new-Task predecessor/revision lineage; freeze eligibility, result/version binding and idempotent atomic creation without mutating predecessor/result | `P3-2`, `P3-7` |
+| Which terminal outcomes and command contract may create a successor? | D-087 fixes `task.create_successor`, exact predecessor/result binding, one direct successor, eligible `completed/failed/cancelled/interrupted` outcomes and immutable predecessor truth | Contract settled; P3-2 implements it and P3-7 later composes it |
 
-These recommendations are not new accepted decisions. A material change to the
-accepted authority, durability or product semantics is recorded through the
-decision process before implementation.
+D-087 rows are accepted P3-2 decisions; the D1/D2 and unread rows remain later
+package checkpoints. Any material change to accepted authority, durability or
+product semantics still goes through the decision process before implementation.
 
 ## 13. Complete-P3 definition of done
 
