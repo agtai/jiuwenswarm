@@ -155,9 +155,13 @@ No DDL is permitted.
 
 Implement a single Store-owned decision path for `provide_input`, pause, resume, and reprioritize before P3-3 composition. It may persist only sanitized command fingerprint/result after canonical authorization. Nonterminal unsupported and terminal/state conflict paths must add no Task/Attempt/Event/outbox changes and call no Executor. `provide_input` must additionally require the exact current `task.decision_required` event; absence of a real input primitive remains `unsupported`.
 
+For these negative decision rows, “sanitized fingerprint” does not mean the reversible canonical bytes returned by the shared wire `CommandEnvelope.fingerprint()`. Within the existing v4 BLOB, persist a closed version-1 decision binding containing an irreversible lowercase SHA-256 of the canonical command plus only the non-sensitive target/attempt/event-head/outcome authority needed for exact replay and command-specific reopen verification. Instruction, input, reason, adjustment, constraints, and successor-spec text may appear only as one-way digests/closed metadata. Malformed binding/version/digest, a reason not provable from the bound durable history, or a wire-invalid command fails closed without gaining replay authority.
+
 **Step 4: Narrow compatibility operations.**
 
 Keep `task.adjust` positive only for running exact Attempt and current event head via its existing payload compatibility. Narrow new `task.retry` admission to cancelled predecessor only while preserving replay/reopen of already-applied historical completed retry ledgers. Correct cancel result semantics so durable request is `accepted`; only authoritative cancelled settlement is `applied`; terminal race is exact replay or `conflict`, never a false applied terminal.
+
+Grandfathered completed-retry compatibility accepts only the exact pre-Wave-2 result carrier/bytes; a newly forged disposition-bearing completed retry is corrupt and receives no compatibility credit.
 
 **Step 5: Add RED successor matrix and failpoints.**
 
