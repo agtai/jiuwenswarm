@@ -4094,6 +4094,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                task_id=current.task_id,
             )
 
         if route is UnifiedCommittedInputRoute.BACKGROUND_CANCEL:
@@ -4163,6 +4164,7 @@ class AgentServerProductCompositionRegistry:
                 commit=commit,
                 text=speech,
                 channel_id=channel_id,
+                task_id=current.task_id,
             )
 
         assert route is UnifiedCommittedInputRoute.BACKGROUND_QUERY

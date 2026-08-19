@@ -145,6 +145,49 @@ test('panel real latency seams bind unified response before B3 and cross B3 befo
   assert.deepEqual(events, ['bind', 'foreign-effect', 'B3', 'recovered-effect']);
 });
 
+test('unified latency submit binding retains the first exact P1 owner across retry and ref replacement', async () => {
+  const panelModule = await import('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs');
+  assert.equal(typeof panelModule.createProductLatencyUnifiedSubmitBinding, 'function');
+  const events = [];
+  const context = Object.freeze({ schema_version: 'live-voice.latency-context.v0', round_index: 0 });
+  const oldOwner = {
+    prepareUnifiedSubmitLatency(turnId) {
+      events.push(`old:prepare:${turnId}`);
+      return context;
+    },
+    bindUnifiedSubmitLatency(response, taskId) {
+      events.push(`old:bind:${response.response_id}:${taskId}`);
+      return true;
+    },
+  };
+  const replacementOwner = {
+    prepareUnifiedSubmitLatency() {
+      events.push('replacement:prepare');
+      return null;
+    },
+    bindUnifiedSubmitLatency() {
+      events.push('replacement:bind');
+      return true;
+    },
+  };
+  const binding = panelModule.createProductLatencyUnifiedSubmitBinding('turn-owner-race');
+  assert.equal(binding.prepare(oldOwner), context);
+  assert.equal(binding.prepare(replacementOwner), context);
+  assert.equal(binding.bind({
+    ok: true,
+    error: null,
+    result: {
+      status: 'authoritative_presentation_accepted',
+      response: { interaction_id: 'interaction-1', response_id: 'response-owner-race', response_generation: 1 },
+      task_id: 'task-owner-race',
+    },
+  }), true);
+  assert.deepEqual(events, [
+    'old:prepare:turn-owner-race',
+    'old:bind:response-owner-race:task-owner-race',
+  ]);
+});
+
 test('panel latency profiles retain dialogue and foreground Task create/status/cancel without notification donation', async () => {
   for (const profile of ['dialogue_no_tool', 'task_create', 'task_status', 'task_cancel']) {
     const storage = new Map();

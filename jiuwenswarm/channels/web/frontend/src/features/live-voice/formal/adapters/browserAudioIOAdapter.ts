@@ -2311,13 +2311,18 @@ export class BrowserAudioIOAdapter {
     } catch {
       quantumMs = null;
     }
-    const latencyMs: number[] = [];
+    let platformLatencyMs = 0;
+    let platformLatencyObserved = false;
     for (const key of ['outputLatency', 'baseLatency'] as const) {
       try {
         const value = context[key];
-        if (Number.isFinite(value) && Number(value) >= 0) latencyMs.push(Number(value) * 1_000);
+        if (Number.isFinite(value) && Number(value) >= 0) {
+          platformLatencyMs = Number(value) * 1_000;
+          platformLatencyObserved = true;
+          break;
+        }
       } catch {
-        // One optional latency getter cannot hide the other timing evidence.
+        // outputLatency is preferred; an unavailable getter falls back to baseLatency.
       }
     }
     if (
@@ -2326,7 +2331,7 @@ export class BrowserAudioIOAdapter {
       && estimatedStart >= 0
       && quantumMs !== null
     ) {
-      uncertainty = Math.max(quantumMs, ...latencyMs);
+      uncertainty = Math.max(quantumMs, platformLatencyObserved ? platformLatencyMs : 0);
     } else {
       estimatedStart = null;
     }

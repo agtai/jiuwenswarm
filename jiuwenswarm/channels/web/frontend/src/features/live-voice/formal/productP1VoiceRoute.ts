@@ -311,12 +311,16 @@ export class ProductP1VoiceRouteOwner {
   readonly #onBargeInSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
   readonly #onBargeInEndOfTurn?: (event: Readonly<MediaEndOfTurn>) => void;
   readonly #latencyProbe: BrowserLatencyProbe | null;
+  readonly #latencyMonotonicMs: (() => number) | null;
   readonly #audio: BrowserAudioIOAdapter;
   #status: ProductP1VoiceStatus;
   #reason: string | null = null;
   #frames: Readonly<CapturedAudioFrame>[] = [];
   #captureSpeechObserved = false;
   #mediaSentFrames = 0;
+  #captureLastFrameSentMonotonicMs: number | null = null;
+  #captureSendClockInvalid = false;
+  #captureLastFrameMarked = false;
   #captureFramesAcked = 0;
   #route: ActiveBrowserDedicatedMediaRoute | null = null;
   #speech: GatewayBatchSpeechClient | null = null;
@@ -372,6 +376,7 @@ export class ProductP1VoiceRouteOwner {
       on_barge_in_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
       on_barge_in_end_of_turn?: (event: Readonly<MediaEndOfTurn>) => void;
       latency_probe?: BrowserLatencyProbe | null;
+      latency_monotonic_ms?: () => number;
     }>
   ) {
     this.#enabled = input.enabled === true;
@@ -383,6 +388,9 @@ export class ProductP1VoiceRouteOwner {
     this.#onBargeInSpeechStart = input.on_barge_in_speech_start;
     this.#onBargeInEndOfTurn = input.on_barge_in_end_of_turn;
     this.#latencyProbe = input.latency_probe ?? null;
+    this.#latencyMonotonicMs = this.#latencyProbe === null || typeof input.latency_monotonic_ms !== 'function'
+      ? null
+      : input.latency_monotonic_ms;
     this.#status = this.#enabled ? 'idle' : 'closed';
     this.#audio = new BrowserAudioIOAdapter({
       enabled: this.#enabled,
@@ -556,6 +564,7 @@ export class ProductP1VoiceRouteOwner {
     this.#frames = [];
     this.#captureSpeechObserved = false;
     this.#mediaSentFrames = 0;
+    this.#resetCaptureSendLatency();
     this.#captureFramesAcked = 0;
     this.#route = null;
     this.#speech = null;
@@ -664,6 +673,7 @@ export class ProductP1VoiceRouteOwner {
           transport_available: typeof WebSocket === 'function',
           socket_factory: this.#socketFactory,
           on_audio_frame: () => undefined,
+          on_attached: () => this.#markCaptureLatencyAttached(latencyRound),
           on_terminal: event => {
             if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
           },
@@ -685,7 +695,6 @@ export class ProductP1VoiceRouteOwner {
       if (!route.active) throw new Error(route.reason_id);
       ownedRoute = route;
       this.#route = route;
-      this.#markCaptureLatencyAttached(latencyRound);
       this.#speech = new GatewayBatchSpeechClient({
         enabled: true,
         transport: {
@@ -814,13 +823,15 @@ export class ProductP1VoiceRouteOwner {
       await this.#audio.stopCapture('formal_recognition_requested');
       this.#markLatency(latencyRound, 'browser.capture_stopped');
       this.#requireCurrent(operationGeneration);
-      this.#drainCaptureFrames(latencyRound);
+      this.#drainCaptureFrames();
+      this.#markLastCaptureFrameSent(latencyRound);
       const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
       let pending = route.leaf.flush();
       while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
         await waitTurn();
         this.#requireCurrent(operationGeneration);
-        this.#drainCaptureFrames(latencyRound);
+        this.#drainCaptureFrames();
+        this.#markLastCaptureFrameSent(latencyRound);
         pending = route.leaf.flush();
       }
       if (this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) {
@@ -1196,6 +1207,7 @@ export class ProductP1VoiceRouteOwner {
     this.#frames = [];
     this.#captureSpeechObserved = false;
     this.#mediaSentFrames = 0;
+    this.#resetCaptureSendLatency();
     this.#captureFramesAcked = 0;
     this.#route = null;
     this.#speech = null;
@@ -1302,6 +1314,7 @@ export class ProductP1VoiceRouteOwner {
         transport_available: true,
         socket_factory: this.#socketFactory,
         on_audio_frame: () => undefined,
+        on_attached: () => this.#markCaptureLatencyAttached(latencyRound),
         on_terminal: event => {
           if (ownedRoute !== null) this.#observeMediaTerminal(ownedRoute, event);
         },
@@ -1323,7 +1336,6 @@ export class ProductP1VoiceRouteOwner {
     if (!route.active) throw new Error(route.reason_id);
     ownedRoute = route;
     this.#route = route;
-    this.#markCaptureLatencyAttached(latencyRound);
     this.#speech = new GatewayBatchSpeechClient({
       enabled: true,
       transport: {
@@ -1483,13 +1495,13 @@ export class ProductP1VoiceRouteOwner {
       transport_available: true,
       socket_factory: this.#socketFactory,
       on_audio_frame: onFrame,
+      on_attached: () => this.#markLatency(latencyRound, 'browser.downlink_attached'),
       on_terminal: onTerminal,
       max_pending_frames: downlink.max_pending_frames,
       max_pending_bytes: downlink.max_pending_bytes,
       defer_downlink_ack: true,
     });
     if (!route.active) throw new Error(route.reason_id);
-    this.#markLatency(latencyRound, 'browser.downlink_attached');
     return route;
   }
 
@@ -1964,7 +1976,7 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  #drainCaptureFrames(finalRound: OwnedLatencyRound | null = null): void {
+  #drainCaptureFrames(): void {
     const route = this.#route;
     if (route === null || !route.leaf.attached || route.leaf.closed) return;
     while (this.#mediaSentFrames < this.#frames.length) {
@@ -1976,10 +1988,52 @@ export class ProductP1VoiceRouteOwner {
         });
       }
       this.#mediaSentFrames += 1;
+      this.#observeCaptureFrameSentLatency();
       if (this.#mediaSentFrames === 1) this.#markLatency(this.#captureLatencyRound, 'browser.capture_first_frame_sent');
     }
-    if (finalRound !== null && this.#mediaSentFrames === this.#frames.length) {
-      this.#markLatency(finalRound, 'browser.uplink_last_frame_sent');
+  }
+
+  #resetCaptureSendLatency(): void {
+    this.#captureLastFrameSentMonotonicMs = null;
+    this.#captureSendClockInvalid = false;
+    this.#captureLastFrameMarked = false;
+  }
+
+  #observeCaptureFrameSentLatency(): void {
+    if (this.#captureLatencyRound === null || this.#captureLastFrameMarked) return;
+    const clock = this.#latencyMonotonicMs;
+    if (clock === null) {
+      this.#captureSendClockInvalid = true;
+      return;
+    }
+    try {
+      const monotonicMs = clock();
+      if (!Number.isFinite(monotonicMs) || monotonicMs < 0) {
+        this.#captureSendClockInvalid = true;
+        return;
+      }
+      this.#captureLastFrameSentMonotonicMs = monotonicMs;
+    } catch {
+      this.#captureSendClockInvalid = true;
+    }
+  }
+
+  #markLastCaptureFrameSent(owned: OwnedLatencyRound | null): void {
+    if (
+      owned === null
+      || owned.finished
+      || this.#captureLastFrameMarked
+      || this.#frames.length === 0
+      || this.#mediaSentFrames !== this.#frames.length
+    ) return;
+    this.#captureLastFrameMarked = true;
+    const monotonicMs = this.#captureLastFrameSentMonotonicMs;
+    if (this.#captureSendClockInvalid || monotonicMs === null) {
+      this.#finishLatencyRound(owned, 'unknown');
+      return;
+    }
+    if (!this.#markLatency(owned, 'browser.uplink_last_frame_sent', {}, { monotonic_ms: monotonicMs })) {
+      this.#finishLatencyRound(owned, 'unknown');
     }
   }
 

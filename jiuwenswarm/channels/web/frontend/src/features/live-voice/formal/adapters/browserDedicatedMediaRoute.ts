@@ -130,6 +130,7 @@ export interface BrowserDedicatedMediaRouteRequest {
   readonly transport_available: boolean;
   readonly socket_factory: DedicatedMediaSocketFactory;
   readonly on_audio_frame: (frame: MediaAudioFrame) => void;
+  readonly on_attached?: () => void;
   readonly on_terminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly end_of_turn_capability?: 'media.end_of_turn.v1';
   readonly on_speech_start?: (event: Readonly<MediaSpeechStart>) => void;
@@ -485,6 +486,9 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
   if (request.on_terminal !== undefined && typeof request.on_terminal !== 'function') {
     throw new TypeError('on_terminal must be a function');
   }
+  if (request.on_attached !== undefined && typeof request.on_attached !== 'function') {
+    throw new TypeError('on_attached must be a function');
+  }
   if (
     (request.end_of_turn_capability === undefined) !== (request.on_speech_start === undefined) ||
     (request.end_of_turn_capability === undefined) !== (request.on_end_of_turn === undefined) ||
@@ -555,6 +559,7 @@ export function createBrowserDedicatedMediaRoute(request: BrowserDedicatedMediaR
       customDrainCanceller ?? cancelDefaultDrainRetry,
       request.defer_downlink_ack === true,
       authenticationFrame,
+      request.on_attached,
       request.on_terminal,
       request.end_of_turn_capability,
       request.on_speech_start,
@@ -593,6 +598,7 @@ export class BrowserDedicatedMediaSocketLeaf {
   readonly #cancelDrainRetry: DedicatedMediaDrainRetryCanceller;
   readonly #deferDownlinkAck: boolean;
   #pendingAuthenticationFrame: string | null;
+  readonly #onAttached?: () => void;
   readonly #onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void;
   readonly #endOfTurnCapability?: 'media.end_of_turn.v1';
   readonly #onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void;
@@ -624,6 +630,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     cancelDrainRetry: DedicatedMediaDrainRetryCanceller,
     deferDownlinkAck: boolean,
     authenticationFrame: string | null,
+    onAttached?: () => void,
     onTerminal?: (event: Readonly<DedicatedMediaTerminalEvent>) => void,
     endOfTurnCapability?: 'media.end_of_turn.v1',
     onSpeechStart?: (event: Readonly<MediaSpeechStart>) => void,
@@ -645,6 +652,7 @@ export class BrowserDedicatedMediaSocketLeaf {
     this.#cancelDrainRetry = cancelDrainRetry;
     this.#deferDownlinkAck = deferDownlinkAck;
     this.#pendingAuthenticationFrame = authenticationFrame;
+    this.#onAttached = onAttached;
     this.#onTerminal = onTerminal;
     this.#endOfTurnCapability = endOfTurnCapability;
     this.#onSpeechStart = onSpeechStart;
@@ -1004,6 +1012,11 @@ export class BrowserDedicatedMediaSocketLeaf {
         return;
       }
       this.#attached = true;
+      try {
+        this.#onAttached?.();
+      } catch {
+        // Diagnostic observers cannot own or interrupt the media transport.
+      }
       return;
     }
     if (!this.#attached) {

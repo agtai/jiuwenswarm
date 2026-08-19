@@ -658,6 +658,11 @@ type ProductLatencyOwner = Pick<
   'bindUnifiedSubmitLatency' | 'observeForegroundPresentationLatency'
 >;
 
+type ProductLatencySubmitOwner = Pick<
+  ProductP1VoiceRouteOwner,
+  'prepareUnifiedSubmitLatency' | 'bindUnifiedSubmitLatency'
+>;
+
 export function bindProductLatencyUnifiedResult(
   owner: Pick<ProductLatencyOwner, 'bindUnifiedSubmitLatency'> | null,
   submitResult: unknown,
@@ -689,6 +694,33 @@ export function bindProductLatencyUnifiedResult(
   } catch {
     return false;
   }
+}
+
+export function createProductLatencyUnifiedSubmitBinding(turnId: string): Readonly<{
+  prepare(owner: ProductLatencySubmitOwner | null): Readonly<LatencyProbeContext> | null;
+  bind(submitResult: unknown): boolean;
+}> {
+  let retainedOwner: ProductLatencySubmitOwner | null | undefined;
+  let retainedContext: Readonly<LatencyProbeContext> | null | undefined;
+  return Object.freeze({
+    prepare(owner: ProductLatencySubmitOwner | null): Readonly<LatencyProbeContext> | null {
+      if (retainedContext !== undefined) return retainedContext;
+      retainedOwner = owner;
+      try {
+        retainedContext = owner?.prepareUnifiedSubmitLatency(turnId) ?? null;
+      } catch {
+        retainedContext = null;
+      }
+      if (retainedContext === null) retainedOwner = null;
+      return retainedContext;
+    },
+    bind(submitResult: unknown): boolean {
+      if (retainedContext === undefined || retainedContext === null || retainedOwner === undefined || retainedOwner === null) {
+        return false;
+      }
+      return bindProductLatencyUnifiedResult(retainedOwner, submitResult);
+    },
+  });
 }
 
 export function runProductLatencyPresentationBoundary(
@@ -3153,19 +3185,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setProductTextReason(null);
       setProductTextStatus('submitting');
       try {
-        let latencyContext: Readonly<LatencyProbeContext> | null | undefined;
+        const latencyBinding = createProductLatencyUnifiedSubmitBinding(input.turn_id);
         const submitResult = await retryRetainedProductOperation({
-          operation: () => {
-            if (latencyContext === undefined) {
-              latencyContext = p1VoiceOwnerRef.current?.prepareUnifiedSubmitLatency(input.turn_id) ?? null;
-            }
-            return owner!.submit(binding, input, latencyContext);
-          },
+          operation: () => owner!.submit(binding, input, latencyBinding.prepare(p1VoiceOwnerRef.current)),
           is_current: () =>
             activationOwnerRef.current?.snapshot().status === 'active' &&
             activeSessionRef.current === binding.session_id,
         });
-        bindProductLatencyUnifiedResult(p1VoiceOwnerRef.current, submitResult);
+        latencyBinding.bind(submitResult);
         if (pendingUnifiedFinalRef.current?.input === input) {
           pendingUnifiedFinalRef.current = null;
         }
@@ -3354,6 +3381,9 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         expected_origin: window.location.origin,
         request: (method, params) => productRequest(method, params),
         latency_probe: latencyProbeRef.current,
+        ...(latencyProbeRef.current === null
+          ? {}
+          : { latency_monotonic_ms: () => window.performance.now() }),
         on_status: (status, reason) => {
           if (p1VoiceOwnerRef.current === owner) {
             if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === owner) {

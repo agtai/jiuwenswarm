@@ -3267,6 +3267,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
     )
 
     assert status.ok
+    assert cast(dict[str, object], status.payload["result"])["task_id"] == composition.current.task_id
     assert manager.agent.calls == 0
     assert [call[0] for call in composition.handle_calls] == ["task.status"]
     presentation_sequence = await _ack_unified_presentation(
@@ -3294,6 +3295,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         channel_id="web",
     )
     assert terminal_status.ok
+    assert cast(dict[str, object], terminal_status.payload["result"])["task_id"] == composition.current.task_id
     await _ack_unified_presentation(
         registry, sequence=presentation_sequence, stem="status-cancelled"
     )
@@ -3335,6 +3337,7 @@ async def test_unified_default_cancel_keeps_confirmation_boundary_and_zero_mutat
     )
 
     assert result.ok
+    assert cast(dict[str, object], result.payload["result"])["task_id"] == original.task_id
     assert composition.current == original
     assert manager.agent.calls == 0
     assert len(composition.handle_calls) == 1
@@ -3374,6 +3377,7 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
     )
 
     assert result.ok
+    assert cast(dict[str, object], result.payload["result"])["task_id"] == composition.current.task_id
     assert manager.agent.calls == 0
     assert len(composition.handle_calls) == 1
     operation, params, policy = composition.handle_calls[0]
@@ -3470,6 +3474,7 @@ async def test_unified_cancel_recovery_keeps_its_durable_original_task_target(
     )
 
     assert recovered.ok
+    assert cast(dict[str, object], recovered.payload["result"])["task_id"] == original.task_id
     cancel_calls = [
         call for call in composition.handle_calls if call[0] == "task.cancel"
     ]

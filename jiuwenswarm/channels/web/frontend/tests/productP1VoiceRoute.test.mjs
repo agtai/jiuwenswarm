@@ -3727,6 +3727,8 @@ async function runConcurrentCaptureJourney(options = {}) {
   let captureRotationSnapshot = null;
   let captureAttachBeforeFirstAckSnapshot = null;
   let captureLastFrameBeforeAckSnapshot = null;
+  let captureBeforeControlAttachSnapshot = null;
+  let downlinkBeforeControlAttachSnapshot = null;
   let finalDownlinkAckResolve;
   const finalDownlinkAckObserved = new Promise(resolve => {
     finalDownlinkAckResolve = resolve;
@@ -3879,6 +3881,9 @@ async function runConcurrentCaptureJourney(options = {}) {
   const owner = new ProductP1VoiceRouteOwner({
     enabled: true,
     ...(options.latencyProbe === undefined ? {} : { latency_probe: options.latencyProbe }),
+    ...(options.latencyProbe === undefined
+      ? {}
+      : { latency_monotonic_ms: options.latencyMonotonicMs ?? (() => 100) }),
     expected_origin: 'https://voice.example.test',
     on_status: status => statuses.push(status),
     on_concurrent_capture_started: () => {
@@ -3913,6 +3918,14 @@ async function runConcurrentCaptureJourney(options = {}) {
         // before this queued fake open runs. That is a valid cancelled route,
         // not a missing authority on an active route.
         if (binding === null) return;
+        if (typeof options.latencyProbeSnapshot === 'function') {
+          const snapshot = options.latencyProbeSnapshot();
+          if (binding.direction === 'uplink' && binding.generation.id === 'capture-1') {
+            captureBeforeControlAttachSnapshot = snapshot;
+          } else if (binding.direction === 'downlink') {
+            downlinkBeforeControlAttachSnapshot = snapshot;
+          }
+        }
         socket.onmessage?.({
           data: serializeMediaControl({ type: 'media.attach', binding }),
         });
@@ -4177,6 +4190,7 @@ async function runConcurrentCaptureJourney(options = {}) {
       }),
     });
   }
+  options.beforeFirstStop?.();
   if (options.observeCaptureLatencyBoundaries === true) {
     const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-1');
     assert.ok(uplinkSocket);
@@ -4213,7 +4227,19 @@ async function runConcurrentCaptureJourney(options = {}) {
   if (options.prepareLatencyPresentation === true) {
     latencyContext = owner.prepareUnifiedSubmitLatency('turn-duplex-1');
     const latencyTaskId = options.latencyTaskId ?? null;
-    assert.equal(owner.bindUnifiedSubmitLatency(response, latencyTaskId), true);
+    if (typeof options.bindLatencyUnifiedResult === 'function') {
+      assert.equal(options.bindLatencyUnifiedResult(owner, {
+        ok: true,
+        error: null,
+        result: {
+          status: 'authoritative_presentation_accepted',
+          response,
+          ...(latencyTaskId === null ? {} : { task_id: latencyTaskId }),
+        },
+      }), true);
+    } else {
+      assert.equal(owner.bindUnifiedSubmitLatency(response, latencyTaskId), true);
+    }
     const foreignResponse = Object.freeze({
       interaction_id: response.interaction_id,
       response_id: 'response-concurrent-foreign',
@@ -4651,6 +4677,8 @@ async function runConcurrentCaptureJourney(options = {}) {
     captureRotationSnapshot,
     captureAttachBeforeFirstAckSnapshot,
     captureLastFrameBeforeAckSnapshot,
+    captureBeforeControlAttachSnapshot,
+    downlinkBeforeControlAttachSnapshot,
     environment,
     latencyContext,
   };
@@ -4670,6 +4698,64 @@ test('capture latency separates owned media attach, first ACK, final send, and f
   assert.equal(journey.captureAttachBeforeFirstAckSnapshot.includes('browser.capture_first_ack_received'), false);
   assert.equal(journey.captureLastFrameBeforeAckSnapshot.includes('browser.uplink_last_frame_sent'), true);
   assert.equal(journey.captureLastFrameBeforeAckSnapshot.includes('browser.uplink_last_ack_received'), false);
+  await journey.owner.close();
+});
+
+test('capture and downlink attach marks wait for exact accepted control attach', async () => {
+  const latency = latencyProbeHarness();
+  const journey = await runConcurrentCaptureJourney({
+    latencyProbe: latency.probe,
+    negotiatedEot: true,
+    firstCaptureEot: true,
+    prepareLatencyPresentation: true,
+    latencyProbeSnapshot: () => latency.rounds[0]?.marks.map(mark => mark.point) ?? [],
+    synchronousDownlinkDetachAfterFinalRender: true,
+  });
+
+  assert.equal(journey.captureBeforeControlAttachSnapshot.includes('browser.media_socket_attached'), false);
+  assert.equal(journey.downlinkBeforeControlAttachSnapshot.includes('browser.downlink_attach_started'), true);
+  assert.equal(journey.downlinkBeforeControlAttachSnapshot.includes('browser.downlink_attached'), false);
+  const points = latency.rounds[0].marks.map(mark => mark.point);
+  assert.ok(points.indexOf('browser.media_socket_attached') < points.indexOf('browser.capture_first_ack_received'));
+  assert.ok(points.indexOf('browser.downlink_attached') < points.indexOf('browser.downlink_first_frame_received'));
+  await journey.owner.close();
+});
+
+test('uplink last-frame mark retains the accepted-send monotonic timestamp across delayed stop', async () => {
+  const latency = latencyProbeHarness();
+  let now = 125;
+  let calls = 0;
+  const journey = await runConcurrentCaptureJourney({
+    latencyProbe: latency.probe,
+    latencyMonotonicMs() {
+      calls += 1;
+      return now;
+    },
+    beforeFirstStop() {
+      now = 9_000;
+    },
+    sendSecondFrame: false,
+    synchronousDownlinkDetachAfterFinalRender: true,
+  });
+
+  const lastSent = latency.rounds[0].marks.find(mark => mark.point === 'browser.uplink_last_frame_sent');
+  assert.equal(lastSent.observation.monotonic_ms, 125);
+  assert.ok(calls >= 1);
+  await journey.owner.close();
+});
+
+test('invalid accepted-send diagnostic clock terminalizes the round without changing product behavior', async () => {
+  const latency = latencyProbeHarness();
+  const journey = await runConcurrentCaptureJourney({
+    latencyProbe: latency.probe,
+    latencyMonotonicMs: () => Number.NaN,
+    synchronousDownlinkDetachAfterFinalRender: true,
+  });
+
+  assert.equal(journey.playError, null);
+  assert.equal(latency.rounds[0].batch.terminal_outcome, 'unknown');
+  assert.equal(latency.rounds[0].marks.some(mark => mark.point === 'browser.uplink_last_frame_sent'), false);
+  assert.equal(journey.owner.status().status, 'capturing');
   await journey.owner.close();
 });
 
@@ -4810,6 +4896,7 @@ test('real Panel boundary and recorder retain exact Task create/status/cancel ta
       firstCaptureEot: true,
       prepareLatencyPresentation: true,
       latencyTaskId: taskId,
+      bindLatencyUnifiedResult: panelModule.bindProductLatencyUnifiedResult,
       presentationBoundary: panelModule.runProductLatencyPresentationBoundary,
       synchronousDownlinkDetachAfterFinalRender: true,
     });

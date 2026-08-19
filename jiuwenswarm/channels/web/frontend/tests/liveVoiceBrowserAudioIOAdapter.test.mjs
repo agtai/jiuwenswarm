@@ -396,6 +396,30 @@ test('throwing timestamp fallback isolates timestamp and latency getters while r
   }
 });
 
+test('first schedule uncertainty prefers valid output latency and falls back to valid base latency', async () => {
+  for (const scenario of [
+    { outputLatency: 0.01, baseLatency: 0.1, expected: 10 },
+    { outputLatency: Number.NaN, baseLatency: 0.03, expected: 30 },
+  ]) {
+    const fake = fakeEnvironment();
+    const timings = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      environment: fake.environment,
+      monotonicNowMs: () => 100,
+      observer: { onPlayoutTiming: event => timings.push(event) },
+    });
+    await adapter.unlockPlayout();
+    const context = fake.contexts[0];
+    context.outputLatency = scenario.outputLatency;
+    context.baseLatency = scenario.baseLatency;
+    adapter.beginPlayout(firstResponse);
+
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    assert.equal(timings[0].uncertainty_ms, scenario.expected);
+  }
+});
+
 test('first-schedule observer throw and reentrant enqueue cannot duplicate or fail playout', async () => {
   const throwingFake = fakeEnvironment();
   const throwing = new BrowserAudioIOAdapter({
