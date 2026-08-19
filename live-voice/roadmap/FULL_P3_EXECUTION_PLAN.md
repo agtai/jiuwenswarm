@@ -12,10 +12,10 @@
 >
 > Date: 2026-08-18
 >
-> Sequencing update (2026-08-19): [D-086](../decisions/DECISIONS.md) closes
-> P3-G0 as the audited/source-verified P3 authority foundation, transfers the
-> failed post-TTS hands-free continuation and combined physical candidate
-> Journey to later cumulative P1/P2/P3 acceptance, and allows P3-1 to start.
+> Sequencing update (2026-08-19): [D-086](../decisions/DECISIONS.md) records
+> P3-G0 PASS for the audited/source-verified P3 authority-foundation Gate,
+> transfers the failed post-TTS hands-free continuation and combined physical
+> candidate Journey to later cumulative P1/P2/P3 acceptance, and allows P3-1 to start.
 > This does not convert `f24dd17d` into a controlled-candidate PASS.
 
 ## 1. Purpose and required product outcome
@@ -81,6 +81,16 @@ Historical W2 and P3 records are used narrowly:
   preserves Store/Core/Executor authority and fault scenarios that remain
   applicable.
 
+The dated
+[P3 implementation/reuse audit](../reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md)
+and its
+[source-asset manifest](../reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md)
+are the extraction index for the 33 specifically requested historical commits.
+The manifest also records the exact legacy-checkout refs needed to recover
+historical objects absent from this repository. These records prevent repeated
+branch forensics, but they do not activate an old patch or replace the
+current-HEAD mapping required when a package starts.
+
 Their old stage names, pass counts, source candidates, timeboxes, signed Gate,
 rehearsal runner and next action are historical only. They must not define the
 current queue or receive current product credit.
@@ -97,15 +107,19 @@ are true:
    the audit repeats the affected audit row before completion credit.
 3. The confirmed product-truth blockers in the current packet have been closed
    or explicitly transferred to a package below with no false candidate claim.
-4. P3-G0 has closed under D-086 without inventing controlled-candidate credit;
+4. P3-G0 has passed its scoped authoritative-foundation Gate under D-086 without
+   inventing controlled-candidate credit;
    its deferred physical Journey remains a declared input to P3-9 and the later
    cumulative product decision.
 5. Applicable W2/S7/S8 or rehearsal oracles needed by the first P3 packages are
    identified and move with their first current capability owner; no old runner
    is retired before its remaining oracles move.
 6. STATUS activates one coherent P3 package with its capability, risk,
-   dependencies, scope, exclusions and acceptance rather than activating this
-   entire document as one undifferentiated change.
+   dependencies, scope, exclusions and acceptance. When D-060/D-062 parallel
+   execution applies, one STATUS packet may instead activate an explicitly
+   bounded multi-package batch, but every child package still names its owner,
+   files, risk, dependencies, acceptance and integration order. This document
+   is never activated as one undifferentiated change.
 
 Design clarification and audit-to-package mapping may occur before this Gate.
 Product implementation must not use this preparatory plan to bypass D-085,
@@ -158,15 +172,15 @@ code fact may reduce, expand or reorder a package before that package starts.
 
 | Package | Outcome | Primary owner(s) | Risk | Relative size | Hard dependency |
 |---|---|---|---:|---:|---|
-| `P3-G0` | Audited authoritative P3 foundation with deferred cumulative candidate acceptance | Integration Owner plus affected truth owners | Tier 0 audit / Tier 3 repair | XL composite | D-085 complete; D-086 scope closure |
+| `P3-G0` | Audited authoritative P3 foundation with deferred cumulative candidate acceptance | Integration Owner plus affected truth owners | Tier 0 audit / Tier 3 repair | XL composite | PASS under D-086 for this scoped Gate only |
 | `P3-1` | Canonical multi-Task identity, state, Store and migration | Task Control Core/Store | Tier 3 | XL | `P3-G0` |
 | `P3-2` | Complete command, adjustment and successor-revision semantics | Task Core/Store plus Executor seam | Tier 3 | XL | `P3-1` |
 | `P3-3` | Capability-driven Executor admission and Attempt lifecycle | Executor & Durability plus Task Core | Tier 3 | XL | `P3-1` |
 | `P3-4` | Truthful D0, supported D1 and supported D2 recovery semantics | Executor & Durability plus Store | Tier 3 | XL | `P3-3` |
 | `P3-5` | Result, event replay, unread and terminal-notification durability | Task Core/Store, Runtime and Web projection | Tier 3 | L | `P3-1`, `P3-G0` |
-| `P3-6` | Generalized multi-Task Voice–Task Bridge and text/voice parity | Voice–Task Bridge plus Task Core | Tier 3 | XL | `P3-1`, `P3-2`, `P3-5` |
-| `P3-7` | Formal Integrated Web P3 control and recovery experience | Web composition, Runtime and P3 owners | Tier 2/3 | L | `P3-2` through `P3-6` as applicable |
-| `P3-8` | Observability, configuration, privacy and authority retirement | Shared composition/operations owners | Tier 2/3 | M | Starts with `P3-1`; retires after `P3-7` |
+| `P3-6` | Generalized multi-Task Voice–Task Bridge and text/voice parity | Voice–Task Bridge plus Task Core | Tier 3 | XL | `P3-1`, integrated/accepted `P3-2` implementation and `P3-5A` persistence tranche |
+| `P3-7` | Formal Integrated Web P3 control and recovery experience | Web composition, Runtime and P3 owners | Tier 2/3 | L | Integrated/accepted applicable `P3-2` through `P3-6` implementations |
+| `P3-8` | Observability, configuration, privacy and authority retirement | Shared composition/operations owners | Tier 2/3 | M | Additive work after `P3-1`; final composition/retirement after `P3-7` |
 | `P3-9` | Cumulative complete-P3 verification, review and human acceptance | Integration Owner and independent reviewers | Tier 3 | XL | All applicable packages |
 
 The provisional workload is therefore ten packages: including the composite
@@ -174,8 +188,36 @@ The provisional workload is therefore ten packages: including the composite
 after current boundaries are applied. This is a substantial capability program
 rather than a single defect batch. The packages overlap in calendar time after
 their shared contracts are frozen, so the sizes must not be added as days.
+`P3-5A/B` and `P3-8A/B` are internal scheduling tranches defined below; they do
+not change the nine-package completion denominator.
 
-## 6. Dependency graph and execution waves
+## 6. Dependency graph, critical path and dispatch waves
+
+The schedule distinguishes three Gates:
+
+- **Contract/schema freeze** allows current-source inspection, manifest-asset
+  selection, packet drafting and test preparation. It grants no implementation
+  or package credit.
+- **Integrated tranche acceptance** allows dependent production implementation
+  or composition only after the hard dependency named below is integrated and
+  its focused contract evidence passes. A branch existing or a schema merely
+  being frozen does not open this Gate.
+- **Package closure** requires focused, affected, seam and applicable real-path
+  evidence after integration. Later packages may prepare against a frozen
+  contract, but they cannot compose a real product path or close against an
+  unaccepted dependency.
+
+Thus P3-6 may prepare against frozen P3-2/P3-5A contracts, but its production
+integration waits for both implementations/tranches to be accepted. P3-7 may
+prepare its replica against frozen schemas, but real product composition waits
+for every applicable P3-2 through P3-6 implementation to be accepted.
+
+`P3-5A` and `P3-5B` below are scheduling tranches inside one package, not new
+completion units. `P3-5A` owns canonical result/event/cursor/unread persistence;
+`P3-5B` owns Runtime/Web delivery, consumption and presentation ACK. Likewise,
+`P3-8A` is additive diagnostics/configuration/privacy foundation and `P3-8B` is
+final composition plus authority/entrypoint/runner retirement after formal
+replacement exists.
 
 ```mermaid
 flowchart TD
@@ -184,47 +226,92 @@ flowchart TD
     C["P3-2: complete commands + revision"]
     E["P3-3: Executor capability + Attempt truth"]
     D["P3-4: D0/D1/D2 durability"]
-    R["P3-5: result + replay + unread"]
+    RA["P3-5A: result/event/replay storage"]
+    RB["P3-5B: unread delivery + presentation ACK"]
     B["P3-6: Voice–Task Bridge"]
     W["P3-7: Integrated Web P3"]
-    O["P3-8: observability + retirement"]
+    OA["P3-8A: additive diagnostics + config/privacy"]
+    OB["P3-8B: final composition + retirement"]
     A["P3-9: complete-P3 acceptance"]
 
     G0 --> M
     M --> C
     M --> E
-    M --> R
+    M --> RA
+    M --> OA
     E --> D
+    RA --> RB
     C --> B
-    R --> B
+    RA --> B
     C --> W
+    E --> W
     D --> W
-    R --> W
+    RB --> W
     B --> W
-    M --> O
-    W --> O
-    C --> A
-    D --> A
-    R --> A
-    B --> A
+    OA --> OB
+    W --> OB
     W --> A
-    O --> A
+    OB --> A
 ```
 
-Execution waves are:
+The critical path, with the scoped `P3-G0` foundation Gate already PASS under
+D-086, is:
 
-1. **Foundation wave:** consume the synchronized D-085 findings, land and
-   verify the authoritative P3 truth repairs, and record any deferred cumulative
-   candidate condition without a false PASS (`P3-G0`).
-2. **Shared-contract wave:** freeze multi-Task identity, state, migration and
-   capability vocabulary, then implement `P3-1`.
-3. **Core parallel wave:** execute `P3-2`, `P3-3` and the storage part of
-   `P3-5` in non-overlapping ownership lanes after their common contract is
-   stable.
-4. **Recovery and carrier wave:** execute `P3-4`, `P3-6`, the presentation part
-   of `P3-5` and `P3-7`; integrate each real seam before broadening the next.
-5. **Closure wave:** finish `P3-8`, migrate/retire old authority and run
-   `P3-9` on one exact clean source.
+```text
+P3-G0 → P3-1
+      → max(
+          max(P3-3 → P3-4,
+              max(P3-2, P3-5A) → P3-6,
+              P3-5A → P3-5B) → P3-7,
+          P3-8A)
+      → P3-8B → P3-9
+```
+
+`max(P3-2, P3-5A)` expresses logical dependency, not guaranteed concurrency:
+those tranches serialize under one Core/Store owner whenever they touch the same
+schema or transaction. `P3-8A` spans the middle waves without owning Task truth.
+Package-owned tests, review and evidence accumulation also run continuously;
+that work is not a substitute for the final exact-source `P3-9` execution.
+
+### 6.1 Dispatch waves
+
+| Wave | Production work | Work that may run in parallel | Exit condition |
+|---|---|---|---|
+| **0 — passed foundation** | `P3-G0` consumed the six product-truth repair groups and explicit profile work; the clean `f24dd17d` physical run remains FAIL and its post-TTS continuation plus combined Journey are deferred | No G0 production lane remains active; only package-owned historical-oracle selection may continue, with no 3A/3B/S8.5 production import | D-086 records scoped foundation PASS without controlled-candidate credit and activates `P3-1` |
+| **1 — active canonical spine** | `P3-1` freezes Task/Attempt/Command/Event/Result/successor identity, state and migration | After the semantic contract freezes, model/reducer, Store migration/read path and compatibility-oracle work may use separate non-overlapping lanes; one owner still integrates the schema | Multi-Task Store and migration contract is accepted; current-Task is only a hint |
+| **2 — core fan-out** | `P3-2`, `P3-3`, `P3-5A` and additive `P3-8A` | Command/revision, Executor/admission, result/event persistence and telemetry/configuration/privacy foundations may proceed in separate worktrees after their shared identities freeze | Each implementation/tranche needed by Wave 3 reaches its integrated acceptance checkpoint; shared Store changes are integrated by the single Core/Store owner |
+| **3 — durability and product semantics** | `P3-4` after accepted `P3-3`; `P3-6` after integrated/accepted `P3-2` plus `P3-5A`; `P3-5B` after accepted `P3-5A`; continue `P3-8A` | Executor/Durability, Bridge, Runtime presentation and additive operations lanes may run concurrently when their files and semantic ownership do not overlap | `P3-4`, `P3-6` and `P3-5B` reach their integrated acceptance checkpoints; real D0/D1/D2 claims remain bounded |
+| **4 — formal carrier** | `P3-7` composes the accepted backend implementations into the formal Integrated Web carrier | Backend closure reviews and non-invasive `P3-8A` telemetry may overlap; unstable backend API work may not | Two-Task controls, recovery, unread/result and revision work through the real formal route |
+| **5 — retirement and acceptance** | Finish `P3-8B`, then run `P3-9` | `P3-9` command/environment preparation may overlap retirement review, but the acceptance run waits for the exact clean integrated source | Legacy authority is retired, cumulative automated/real-path/review/human evidence passes |
+
+### 6.2 Parallel eligibility and collision rules
+
+The table answers whether two logical packages are actually safe to dispatch at
+the same time. “Conditional” means separate worktrees are insufficient by
+themselves: the Integration Owner must also prove non-overlapping files and
+one already-frozen shared contract.
+
+| Activity | Earliest production Gate | Safe concurrent activity | Must remain serialized or centrally owned |
+|---|---|---|---|
+| `P3-G0` | Scoped foundation Gate PASS under D-086 | No active G0 production lane; applicable oracles move only with their first owning package | Reopening controlled-candidate acceptance or the deferred P1/P2 seam requires its later accepted packet |
+| `P3-1` | `P3-G0` scoped foundation Gate PASS | Internal model, migration/read and oracle lanes after the state/schema checkpoint | Task identity, state vocabulary, successor semantics and schema integration |
+| `P3-2` | `P3-1` accepted | `P3-3`; `P3-5A` conditionally; additive `P3-8A` | Any overlapping `task_core.py`/`task_store.py` transaction or command-result semantic |
+| `P3-3` | `P3-1` accepted | `P3-2`, `P3-5A`, additive `P3-8A` | Attempt/capability/lease vocabulary and product admission composition |
+| `P3-5A` | `P3-1` accepted | `P3-3`; `P3-2` conditionally; additive `P3-8A` | Store schema/migration and terminal settlement transaction |
+| `P3-8A` | `P3-1` accepted | `P3-2`, `P3-3`, `P3-5A`; later `P3-4`, `P3-6`, `P3-5B` | Central composition/profile activation is serialized with the package owning that entrypoint; this lane is additive only |
+| `P3-4` | `P3-3` accepted | `P3-6`, `P3-5B`, additive `P3-8A` | Executor/Store recovery transaction, selected Adapter and same-versus-linked Attempt decision |
+| `P3-6` | `P3-2` and `P3-5A` implementations integrated/accepted; preparation may start at contract freeze | `P3-4`, `P3-5B`, additive `P3-8A` | Core command authority, result truth and Web presentation |
+| `P3-5B` | `P3-5A` accepted | `P3-4`, `P3-6`, additive `P3-8A` | Runtime generation/ACK owner if another lane touches the same presentation path |
+| `P3-7` | Applicable `P3-2` through `P3-6` implementations integrated/accepted; replica preparation may start at schema freeze | Late dependency review and non-invasive telemetry only | Registry/AgentServer/formal-route/Panel product composition and wire-schema changes |
+| `P3-8B` | `P3-7` and `P3-8A` accepted | Final acceptance preparation | Deletion/retirement versus any worker still depending on the legacy path |
+| `P3-9` | All packages accepted | No product mutation; independent review and evidence runners may be parallel | Findings return to the affected owner, then the exact candidate is rebuilt and rerun |
+
+Practical maximum concurrency is therefore determined by ownership, not by the
+number of package labels. Wave 2 has up to four useful lanes, but `P3-2` and
+`P3-5A` collapse into one Core/Store lane whenever they touch the same schema or
+transaction. Wave 3 has up to four useful lanes. Wave 4 has one product
+composition writer. The Shared semantic lane and integration history always
+remain single-owner.
 
 ## 7. Package contracts
 
@@ -616,8 +703,9 @@ D0 carrier.
   identities without collapsing their scopes.
 - Add bounded diagnostics for admission, queue, lease, outbox, checkpoint,
   recovery, reconciliation, result and presentation latency/failure.
-- Replace Demo-default production flags and exact itinerary/task policy with an
-  explicit profile and general configuration owned by the applicable module.
+- Preserve the explicit named Live Voice profile and ordinary-production
+  default-off semantics proven on `f24dd17d`; generalize the remaining exact
+  itinerary/task policy, trusted Demo bypass and module-owned configuration.
 - Redact command input, blocking answers, TaskResult content, artifact details
   and credentials from ordinary logs while preserving useful identifiers and
   error classification.
@@ -760,8 +848,11 @@ Parallel lanes are ownership boundaries, not a fixed worker count:
   Integration Owner.
 
 Before parallel implementation, the Integration Owner freezes the shared
-contract and allocates non-overlapping files or worktrees. Workers may not
-resolve cross-module semantic conflicts locally. Each return contains:
+contract and allocates non-overlapping files or worktrees. Under D-060/D-062,
+one active STATUS packet may carry a bounded multi-package batch only when each
+child package has its own owner, files, risk, dependencies, acceptance and
+integration order; otherwise only one coherent package is active. Workers may
+not resolve cross-module semantic conflicts locally. Each return contains:
 
 - exact baseline and owned scope;
 - changed contract/behaviour and explicit exclusions;
@@ -792,6 +883,13 @@ evidence must state:
 11. review boundary and evidence destination;
 12. retirement Gate for any temporary flag, hardcode, duplicate or legacy
     entrypoint.
+
+When historical reuse applies, the same packet also records the selected
+`asset_ids`, verified `source_repository_ref` and commit/range, `current_head`,
+current target mapping, preserve/rewrite/drop decisions, test destinations,
+forbidden claims and retirement return from the
+[source-asset manifest](../reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md).
+These fields are conditional; they do not require a standalone G0 delta record.
 
 The packet describes a coherent product result, not a list of files or
 functions. Exact files and commands are discovered from the current checkout

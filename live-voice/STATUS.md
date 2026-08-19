@@ -10,8 +10,8 @@
 - **Last product-code baseline assessed:**
   `f24dd17d336c8266954f2d7299ca13bd0314d424`. Documentation-only commits after
   that source do not change its product credit.
-- **Current product status:** **P3 EXPANSION ACTIVE — P3-G0 is scope-closed as
-  the authoritative P3 foundation under D-086; controlled product readiness
+- **Current product status:** **P3 EXPANSION ACTIVE — P3-G0 passed its scoped
+  authoritative-foundation Gate under D-086; controlled product readiness
   remains unpassed.** The six recorded P3 product-truth repair groups and
   explicit build profile retain their source/automated evidence. The failed
   post-TTS continuation is deferred to P1/P2 completion and the unrun combined
@@ -23,10 +23,10 @@
 - **Latest physical product result:** `FAIL — P3-G0 CONTROLLED CANDIDATE NOT
   ACCEPTED` on exact clean product source `f24dd17d336c8266954f2d7299ca13bd0314d424`.
   See the sanitized [P3-G0 attempt](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md).
-- **P3-G0 status:** **CLOSED — AUTHORITATIVE P3 FOUNDATION; PRODUCT-READINESS
-  DEFERRED.** [D-086](decisions/DECISIONS.md) accepts the sequencing risk and
-  removes the failed P1/P2 hands-free condition as a P3-1 Gate without changing
-  the immutable candidate result.
+- **P3-G0 status:** **PASS — AUTHORITATIVE P3 FOUNDATION; CONTROLLED
+  PRODUCT-READINESS REMAINS FAIL.** [D-086](decisions/DECISIONS.md) accepts the
+  sequencing risk and removes the failed P1/P2 hands-free condition as a P3-1
+  Gate without changing the immutable candidate result.
 - **Current highest priority:** execute P3-1 canonical multi-Task identity,
   state, Store and migration. The deferred P1/P2 issue is recorded in the
   [post-TTS continuation record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)
@@ -64,10 +64,13 @@ These rows are evidence-based planning judgements, now grounded in the
 audit is documentation, not product progress: it grants no new module-completion
 credit and does not repair defects.
 
-The detailed complete-P3 workload, P3alpha inheritance and package acceptance
-are defined in the [complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md).
-That preparatory contract is not the active queue; this STATUS still activates
-only one coherent packet at a time.
+The detailed complete-P3 workload, P3alpha inheritance, package acceptance,
+critical path and parallel collision rules are defined in the
+[complete P3 execution plan](roadmap/FULL_P3_EXECUTION_PLAN.md). That
+preparatory contract is not the active queue. By default this STATUS activates
+one coherent packet; a D-060/D-062 packet may instead activate one explicitly
+bounded multi-package batch whose child packages have separate owners, files,
+risks, dependencies, acceptance and integration order.
 
 | Capability / module | Status and implemented fact | Remaining for feature complete | Dependency / acceptance |
 |---|---|---|---|
@@ -87,11 +90,11 @@ only one coherent packet at a time.
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
 
-## P3-G0 closure and deferred gaps
+## P3-G0 scoped PASS and deferred gaps
 
 The six audit-derived repair groups are implemented and have affected automated
-credit on `f24dd17d`. Under D-086 they close P3-G0 as the authoritative source
-foundation for P3 expansion. The physical run stopped before their full
+credit on `f24dd17d`. Under D-086 they pass P3-G0 only as the authoritative
+source foundation for P3 expansion. The physical run stopped before their full
 combined Task journey, so that missing observation is transferred to P3-9 and
 cumulative product acceptance; it grants no physical or candidate credit:
 
@@ -123,7 +126,7 @@ deferred from the P3-1 sequencing Gate:
    acceptance are in the [deferred issue record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
 
 The explicit build profile and ordinary-production flag-off behaviour are
-source/build/deploy verified. D-086 closes only the P3 expansion prerequisite;
+source/build/deploy verified. D-086 passes only the P3 expansion prerequisite;
 it cannot upgrade the failed candidate or invalidate the historical
 exact-source Alpha result.
 
@@ -181,7 +184,7 @@ exact-source Alpha result.
    profile/default-off production semantics with affected automated/build
    evidence, but its clean P3-G0 physical run failed post-TTS capture
    continuation before the Task journey.
-3. **P3-G0 authoritative foundation is scope-closed under D-086.** The failed
+3. **P3-G0 authoritative-foundation Gate is PASS under D-086.** The failed
    controlled-candidate fact remains immutable; its P1/P2 continuation defect
    and combined physical Journey are transferred to later cumulative
    acceptance without granting physical credit.
@@ -217,6 +220,22 @@ exact-source Alpha result.
   STATUS. It is documentation, not product progress: it grants no new
   module-completion credit and does not repair defects. If code changes, repeat
   the affected rows.
+- **P3 implementation/reuse audit — COMPLETE (2026-08-18, routing rebased
+  2026-08-19):** see the
+  [P3 implementation coverage and historical reuse audit](reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md).
+  Its estimates remain a committed pre-G0 nine-package coverage snapshot; its
+  current routing records the P3-G0 scoped PASS and active P3-1 package. It also
+  records the wave-to-asset migration overlay and per-commit extraction gates
+  for the old 3A/3B/reader/S8.5 lines. Its companion
+  [source-asset manifest](reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md)
+  centralizes 57 file/symbol/test/dependency-level assets so execution workers
+  validate a bounded activation-time mapping instead of repeating branch
+  forensics. It also records the verified legacy-checkout refs for the 24 objects
+  absent from this repository and the D2-reader branch-name trap. No standalone
+  G0 delta or aggregate re-score is required: at P3-1 and every later affected
+  package activation, record the current HEAD/relevant Git range and validate
+  only the selected rows. The inventory grants no package or acceptance credit;
+  never integrate an old branch merely because its content is inventoried.
 - **Tests/code organization:** move every still-applicable old runner oracle to
   its capability owner before deletion; keep test fakes/fault helpers out of the
   apparent production tree.
@@ -254,7 +273,8 @@ exact-source Alpha result.
   build/static and clean-deployment credit recorded in the
   [P3-G0 evidence](evidence/P3_G0_PRODUCT_READINESS_FAIL_20260819_f24dd17d.md),
   but its repeated physical continuation failure prevents immutable PASS.
-- D-086 closes P3-G0 only as the expansion foundation and activates P3-1. It
+- D-086 records P3-G0 PASS only for the expansion-foundation Gate and activates
+  P3-1. It
   explicitly transfers, rather than passes, the missing physical Journey and
   [P1/P2 continuation defect](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
 - A documentation-only commit never upgrades product readiness.

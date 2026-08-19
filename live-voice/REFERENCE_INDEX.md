@@ -32,6 +32,7 @@
 | Product composition | [Product Composition Gate 0](roadmap/PRODUCT_COMPOSITION_GATE_0_2026-08-06.md), then only the implicated integration record |
 | Unified hands-free baseline | [D118 pre-D119 candidate snapshot](D118_UNIFIED_HANDS_FREE_LIVE_VOICE_REVIEW_2026-08-16.md) |
 | Running adjustment and terminal notification | [D119 candidate-specific frozen review](D119_RUNNING_TASK_ADJUSTMENT_AND_TERMINAL_NOTIFICATION_REVIEW_2026-08-16.md) |
+| Complete-P3 historical coverage, source recovery and activation-time reuse | [2026-08-18 P3 implementation/reuse audit](reviews/P3_IMPLEMENTATION_COVERAGE_AND_HISTORICAL_REUSE_AUDIT_2026-08-18.md) and its [implementation-level source-asset manifest](reviews/P3_HISTORICAL_SOURCE_ASSET_EXTRACTION_MANIFEST_2026-08-18.md); coverage estimates remain bound to the pre-G0 baseline, while the manifest records exact legacy refs and current-HEAD mapping rules; use current [STATUS](STATUS.md) and the [complete P3 plan](roadmap/FULL_P3_EXECUTION_PLAN.md) for live package gates |
 | Code duplication and convergence timing | [2026-08-17 duplicate-code audit](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md) |
 | Removable branch content, re-homing and final-merge cleanup | [2026-08-17 branch-retirement audit](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) |
 | Removable/superseded documents and authority-preserving deletion batches | [2026-08-17 documentation-retirement audit](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) |
