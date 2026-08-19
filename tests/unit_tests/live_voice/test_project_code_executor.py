@@ -392,6 +392,18 @@ class _Resolver:
         return self.binding
 
 
+class _MappedResolver:
+    def __init__(self, bindings: dict[Path, ProjectExecutionBinding]) -> None:
+        self.bindings = bindings
+        self.calls: list[Path] = []
+
+    async def resolve(self, spec, *, for_dispatch: bool):
+        assert for_dispatch is True
+        root = Path(spec.context.file_path).resolve()
+        self.calls.append(root)
+        return self.bindings[root]
+
+
 async def _clean_dispatch_fence() -> None:
     return None
 
@@ -998,6 +1010,78 @@ def test_chat_final_with_nul_is_never_publishable_result_content() -> None:
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_direct_capability_profile_is_stable_truthful_and_runtime_free(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "profile-project"
+    _git_project(project)
+    first = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        tmp_path / "first-private.sqlite3",
+    )
+    second = DirectProjectCodeExecutorAdapter(
+        _Resolver(_direct_binding(project, _DirectProjectExecutor(project))),
+        tmp_path / "second-private.sqlite3",
+        attempt_timeout=60,
+        demo_itinerary_fixture_enabled=True,
+        demo_itinerary_adjustment_checkpoint_enabled=True,
+    )
+
+    try:
+        first_profile = first.capability_profile()
+        second_profile = second.capability_profile()
+
+        assert first_profile is second_profile
+        assert first_profile.profile_id == "live-voice.direct-project-code.d0.v1"
+        assert first_profile.executor_id == "jiuwenswarm_code_agent.project_code"
+        assert first_profile.adapter_id == "live-voice.direct-project-code"
+        assert (
+            first_profile.adapter_protocol_version
+            == "live-voice.direct-project-code.v1"
+        )
+        assert first_profile.operation_versions == (
+            ("adjust.demo-itinerary-checkpoint", "v1"),
+            ("cancel", "v1"),
+            ("dispatch", "v1"),
+            ("reconcile.d0", "v1"),
+            ("status", "v1"),
+        )
+        assert first_profile.durability_level == "D0"
+        assert first_profile.durability_version == "live-voice.direct-d0.v1"
+        assert first_profile.project_serialization == "exclusive"
+        assert first_profile.max_live_attempts == 32
+        assert first_profile.enforcement_facts == (
+            "direct-journal.d0",
+            "direct-lease.generation",
+            "direct-runtime-deadline.absolute",
+            "os-ownership-lock.cross-process",
+            "side-effect.project-mutation",
+        )
+        unsupported = {
+            "checkpoint.d1",
+            "pause",
+            "provide_input",
+            "reconcile.d2",
+            "reprioritize.running",
+            "resume",
+            "update.generic-running",
+        }
+        assert unsupported.isdisjoint(
+            operation for operation, _version in first_profile.operation_versions
+        )
+        canonical = first_profile.canonical_bytes().decode("ascii")
+        assert tmp_path.name not in canonical
+        assert "sqlite" not in canonical
+        assert first._owner_id not in canonical
+        assert second._owner_id not in canonical
+        assert "secret" not in canonical.casefold()
+        assert len(first_profile.digest_sha256()) == 64
+    finally:
+        await first.close()
+        await second.close()
 
 
 @pytest.mark.asyncio
@@ -2267,6 +2351,132 @@ async def test_direct_executor_serializes_one_project_and_cannot_borrow_another_
         "attempt-1",
         "attempt-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_runs_two_distinct_projects_concurrently(
+    tmp_path: Path,
+) -> None:
+    first_project = tmp_path / "first-project"
+    second_project = tmp_path / "second-project"
+    _git_project(first_project)
+    _git_project(second_project)
+    first_executor = _DirectProjectExecutor(first_project, behavior="wait")
+    second_executor = _DirectProjectExecutor(second_project, behavior="wait")
+    first_binding = _direct_binding(first_project, first_executor)
+    second_binding = replace(
+        _direct_binding(second_project, second_executor),
+        execution_target={
+            "project_dir": str(second_project.resolve()),
+            "project_id": "project-2",
+            "origin_session_id": "session-1",
+            "origin_channel_id": "web",
+        },
+    )
+    resolver = _MappedResolver(
+        {
+            first_project.resolve(): first_binding,
+            second_project.resolve(): second_binding,
+        }
+    )
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,  # type: ignore[arg-type]
+        tmp_path / "p3.sqlite3",
+    )
+    first_item = _item(first_project)
+    second_scope = ScopeRef(
+        "user-1",
+        "project-2",
+        "session-1",
+        Assurance.AUTHENTICATED,
+    )
+    second_spec = _spec(second_project)
+    second_spec = replace(
+        second_spec,
+        context=replace(
+            second_spec.context,
+            stable_id="project-2",
+            scope=second_scope,
+        ),
+    )
+    second_item = replace(
+        _item(second_project),
+        outbox_id="outbox-2",
+        task_id="task-2",
+        attempt_id="attempt-2",
+        command_id="command-2",
+        scope=second_scope,
+        spec=second_spec,
+    )
+
+    first_delivery = await adapter.dispatch(first_item)
+    second_delivery = await adapter.dispatch(second_item)
+    await asyncio.wait_for(first_executor.started.wait(), timeout=2)
+    await asyncio.wait_for(second_executor.started.wait(), timeout=2)
+
+    assert set(adapter._running) == {"attempt-1", "attempt-2"}
+    assert resolver.calls == [first_project.resolve(), second_project.resolve()]
+    assert len(first_executor.requests) == 1
+    assert len(second_executor.requests) == 1
+
+    await adapter.cancel(
+        replace(
+            first_item,
+            outbox_id="outbox-cancel-1",
+            kind=OutboxKind.ATTEMPT_CANCEL,
+            executor_ref=first_delivery.executor_ref,
+            source_seq=1,
+        )
+    )
+    await adapter.cancel(
+        replace(
+            second_item,
+            outbox_id="outbox-cancel-2",
+            kind=OutboxKind.ATTEMPT_CANCEL,
+            executor_ref=second_delivery.executor_ref,
+            source_seq=1,
+        )
+    )
+    await _wait_direct_settled(adapter)
+
+    assert _git(first_project, "status", "--porcelain") == ""
+    assert _git(second_project, "status", "--porcelain") == ""
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_executor_capacity_exhaustion_precedes_resolver_and_project_effect(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "capacity-project"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    adapter = DirectProjectCodeExecutorAdapter(resolver, tmp_path / "p3.sqlite3")
+    blocker = asyncio.Event()
+    retained = {
+        f"retained-{index}": asyncio.create_task(blocker.wait())
+        for index in range(adapter.capability_profile().max_live_attempts)
+    }
+    adapter._running.update(retained)
+    before = _git(project, "status", "--porcelain")
+
+    try:
+        with pytest.raises(FormalTaskViolation) as exhausted:
+            await adapter.dispatch(_item(project))
+
+        assert exhausted.value.reason == "EXECUTOR_CAPACITY_EXHAUSTED"
+        assert exhausted.value.code is ErrorCode.UNAVAILABLE
+        assert resolver.calls == []
+        assert executor.requests == []
+        assert adapter._journal.get("attempt-1") is None
+        assert _git(project, "status", "--porcelain") == before
+    finally:
+        for worker in retained.values():
+            worker.cancel()
+        await asyncio.gather(*retained.values(), return_exceptions=True)
+        adapter._running.clear()
+        await adapter.close()
 
 
 @pytest.mark.asyncio

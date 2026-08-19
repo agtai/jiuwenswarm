@@ -47,6 +47,10 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 from .demo_fixture_contract import DEMO_ITINERARY_TASK_NAME
+from .executor_capabilities import (
+    EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
+    ExecutorCapabilityProfile,
+)
 from .formal_task_models import (
     ExecutorDeliveryResult,
     ExecutorObservation,
@@ -97,6 +101,31 @@ _MAX_DIRECT_CLEANUP_TIMEOUT_SECONDS = 5.0
 _DEFAULT_DIRECT_ATTEMPT_TIMEOUT_SECONDS = 30.0 * 60.0
 _MAX_DIRECT_ATTEMPT_TIMEOUT_SECONDS = 24.0 * 60.0 * 60.0
 _MAX_DIRECT_RUNNING_WORKERS = 32
+_DIRECT_CAPABILITY_PROFILE = ExecutorCapabilityProfile(
+    schema_version=EXECUTOR_CAPABILITY_PROFILE_SCHEMA_VERSION,
+    profile_id="live-voice.direct-project-code.d0.v1",
+    executor_id=FORMAL_PROJECT_EXECUTOR_ID,
+    adapter_id="live-voice.direct-project-code",
+    adapter_protocol_version="live-voice.direct-project-code.v1",
+    operation_versions=(
+        ("dispatch", "v1"),
+        ("status", "v1"),
+        ("cancel", "v1"),
+        ("adjust.demo-itinerary-checkpoint", "v1"),
+        ("reconcile.d0", "v1"),
+    ),
+    durability_level="D0",
+    durability_version="live-voice.direct-d0.v1",
+    project_serialization="exclusive",
+    max_live_attempts=_MAX_DIRECT_RUNNING_WORKERS,
+    enforcement_facts=(
+        "direct-journal.d0",
+        "direct-lease.generation",
+        "direct-runtime-deadline.absolute",
+        "os-ownership-lock.cross-process",
+        "side-effect.project-mutation",
+    ),
+)
 _PROTECTED_TARGET_SUPPORT_PATHS = tuple(FORMAL_RUNTIME_SUPPORT_POLICY)
 _EXECUTION_TARGET_FIELDS = {
     "project_dir",
@@ -2319,6 +2348,12 @@ class DirectProjectCodeExecutorAdapter:
     """
 
     executor_id = FORMAL_PROJECT_EXECUTOR_ID
+
+    @classmethod
+    def capability_profile(cls) -> ExecutorCapabilityProfile:
+        """Return the immutable protocol/build declaration for Direct D0."""
+
+        return _DIRECT_CAPABILITY_PROFILE
 
     def __init__(
         self,
