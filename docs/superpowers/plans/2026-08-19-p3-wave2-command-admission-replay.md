@@ -256,7 +256,7 @@ It must not declare provide-input, pause, resume, generic update, running priori
 
 **Step 3: Prove selection and Direct boundaries.**
 
-Add tests for stable digest, exact supported selection, mismatch before Adapter/project effect, no fallback after accepted/unknown, status/cancel/adjust version truth, same-project serialization, two distinct-project concurrent workers, capacity exhaustion reason, late generation/lock fences, and explicit unsupported declarations. Fakes may cover negative/race cases only.
+Add leaf tests for stable digest, exact supported selection, pure static mismatch with zero selector effect, status/cancel/adjust version truth, same-project serialization, two distinct-project concurrent workers, capacity exhaustion reason, late generation/lock fences, and explicit unsupported declarations. This Executor-only tranche has no product lifecycle caller: the real pre-Store/Adapter/project mismatch ordering and no-fallback-after-accepted/unknown proofs are blocking Task 6 integration-seam acceptance, not claims of this leaf commit. Fakes may cover negative/race cases only.
 
 **Step 4: Run GREEN and affected Executor tests.**
 
@@ -439,7 +439,7 @@ Review the full Executor diff against Task 3 and D-088, including truthful unsup
 
 **Step 3: Add RED seam tests.**
 
-The product factory must obtain the Direct profile, construct requirements from the resolved Task spec, select before Store creation, persist exact selection, and reuse that persisted digest for delivery/reconcile. Test static mismatch with zero Store/Adapter/project effects, successful Direct selection, restart with the same digest, changed current profile not rewriting an old Attempt, and no fallback after acceptance/unknown.
+The product factory must obtain the Direct profile, construct requirements from the resolved Task spec, select before Store creation, persist exact selection, and reuse that persisted digest for delivery/reconcile. Test static mismatch with zero Store/Adapter/project effects, successful Direct selection, restart with the same digest, changed current profile not rewriting an old Attempt, and no fallback after acceptance/unknown. This step is the sole owner that closes those two lifecycle-level requirements; the Executor leaf must not invent an unowned duplicate caller to simulate them.
 
 **Step 4: Implement the minimum typed seam.**
 
