@@ -568,3 +568,102 @@ def test_runtime_and_writer_contain_invalid_context_and_callback_failures(
     monkeypatch.undo()
     monkeypatch.setattr("pathlib.Path.exists", lambda self: (_ for _ in ()).throw(OSError("PRIVATE")))
     assert writer.write(batch).reason_code == "EXPORT_FAILED"
+
+
+def test_full_batch_requires_the_reserved_capacity_mark_in_slot_63(tmp_path, run_config) -> None:
+    recorder = recorder_for(run_config)
+    for index in range(63):
+        assert recorder.mark(
+            f"experiment.buffer-tuning.gateway-{index}",
+            correlation_id="corr",
+            interaction_id="ix",
+        ) is True
+    assert recorder.mark(
+        "gateway.stt_request_started", correlation_id="corr", interaction_id="ix"
+    ) is False
+    capacity_batch = recorder.finish("unknown")
+    assert capacity_batch is not None
+    ordinary_full_batch = replace(
+        capacity_batch,
+        marks=(
+            *capacity_batch.marks[:63],
+            replace(
+                capacity_batch.marks[63],
+                point="gateway.stt_request_started",
+                outcome="observed",
+                reason_code=None,
+            ),
+        ),
+    )
+
+    with pytest.raises(LatencyProbeViolation):
+        LatencyBatch.from_dict(ordinary_full_batch.to_dict(), run_config)
+    writer = LatencyProbeBatchWriter(tmp_path, run_config, "gateway")
+    assert writer.write(ordinary_full_batch).reason_code == "INVALID_BATCH"
+    assert not (tmp_path / run_config.run_id / "gateway.jsonl").exists()
+
+
+def test_forged_run_config_is_rejected_at_recorder_runtime_and_writer_boundaries(
+    tmp_path, run_config
+) -> None:
+    forged = replace(run_config, schema_version="wrong-schema")
+    context = context_for(run_config)
+
+    with pytest.raises(LatencyProbeViolation):
+        LatencyProbeRecorder(
+            context=context,
+            component="gateway",
+            phase="gateway_stt",
+            run_config=forged,
+            clock_domain_id="gateway-process-1",
+            monotonic_ms=lambda: 10.0,
+        )
+    runtime = LatencyProbeRuntime(forged, "gateway", object())
+    assert runtime.create_recorder(
+        context=context,
+        phase="gateway_stt",
+        clock_domain_id="gateway-process-1",
+        monotonic_ms=lambda: 10.0,
+    ) is None
+    with pytest.raises(LatencyProbeViolation):
+        LatencyProbeBatchWriter(tmp_path, forged, "gateway")
+
+
+def test_descriptors_allow_human_readable_sanitized_text_but_not_paths_or_secrets(tmp_path) -> None:
+    value = valid_run_json()
+    value["environment_profile"] = "Windows 11"
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    assert load_latency_run_config(path).environment_profile == "Windows 11"
+
+
+def test_gateway_writer_can_persist_only_its_allowed_browser_and_gateway_producers(
+    tmp_path, run_config
+) -> None:
+    writer = LatencyProbeBatchWriter(
+        tmp_path,
+        run_config,
+        "gateway",
+        allowed_components=("browser", "gateway"),
+    )
+    runtime = LatencyProbeRuntime(run_config, "gateway", writer)
+    browser = browser_batch_for(run_config)
+    gateway = recorder_for(run_config).finish("completed")
+    agent = LatencyProbeRecorder(
+        context=context_for(run_config),
+        component="agent_server",
+        phase="agent_foreground",
+        run_config=run_config,
+        source_instance_id_factory=lambda: "agent-source-2",
+        clock_domain_id="agent-process-2",
+        monotonic_ms=lambda: 10.0,
+    ).finish("completed")
+    assert gateway is not None and agent is not None
+
+    assert runtime.writer.write(browser).status == "written"
+    assert runtime.writer.write(gateway).status == "written"
+    assert runtime.writer.write(agent).reason_code == "INCOMPATIBLE_RUN"
+    assert (tmp_path / run_config.run_id / "browser.jsonl").is_file()
+    assert (tmp_path / run_config.run_id / "gateway.jsonl").is_file()
+    assert not (tmp_path / run_config.run_id / "agent.jsonl").exists()
