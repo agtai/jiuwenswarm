@@ -22,6 +22,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     ContractViolation,
     ErrorCode,
     LifecycleKind,
+    MAX_SAFE_INTEGER,
     ResultEnvelope,
     ScopeRef,
     TerminalOutcome,
@@ -69,6 +70,8 @@ _DEFAULT_EVENT_PAGE_LIMIT = 100
 _MAX_EVENT_PAGE_LIMIT = 500
 _JOURNAL_MODE_RETRY_SECONDS = 10.0
 _JOURNAL_MODE_RETRY_INTERVAL_SECONDS = 0.01
+_DECISION_BINDING_TYPE = "live_voice.task_business_decision"
+_DECISION_BINDING_VERSION = 1
 _RETRY_BUSINESS_DECISIONS = {
     "TASK_RETRY_LIMIT_EXCEEDED": (
         TaskCommandDisposition.CONFLICT,
@@ -92,6 +95,16 @@ _UPDATE_BUSINESS_DECISIONS = {
         TaskCommandDisposition.CONFLICT,
         frozenset({ErrorCode.STALE}),
     )
+}
+_SUCCESSOR_BUSINESS_DECISIONS = {
+    "TASK_SUCCESSOR_PRECONDITION_CONFLICT": (
+        TaskCommandDisposition.CONFLICT,
+        frozenset({ErrorCode.CONFLICT}),
+    ),
+    "TASK_SUCCESSOR_RESULT_CONFLICT": (
+        TaskCommandDisposition.CONFLICT,
+        frozenset({ErrorCode.CONFLICT}),
+    ),
 }
 _CONTROL_BUSINESS_DECISIONS = {
     "TASK_CONTROL_UNSUPPORTED": (
@@ -1352,6 +1365,21 @@ class SqliteTaskStore:
                 )
                 continue
             if command_type == "task.create_successor":
+                try:
+                    stored_result = ResultEnvelope.from_dict(
+                        _json_load(command_row["result_json"])
+                    )
+                except (ContractViolation, FormalTaskViolation) as error:
+                    raise cls._corrupt(
+                        "task.create_successor command result is not canonical"
+                    ) from error
+                if not stored_result.ok:
+                    cls._verify_business_decision(
+                        connection,
+                        command_row,
+                        expected=_SUCCESSOR_BUSINESS_DECISIONS,
+                    )
+                    continue
                 command, result, resolved_spec = cls._command_ledger_from_row(
                     command_row
                 )
@@ -1361,53 +1389,6 @@ class SqliteTaskStore:
                     (scope_key, command_id),
                 ).fetchall()
                 value = result.result
-                if not result.ok:
-                    predecessor = connection.execute(
-                        "SELECT * FROM tasks WHERE task_id=? AND scope_key=?",
-                        (command.target_ref.id, scope_key),
-                    ).fetchone()
-                    caused_events = connection.execute(
-                        """SELECT COUNT(*) FROM task_events AS e
-                           JOIN tasks AS t ON t.task_id=e.task_id
-                           WHERE t.scope_key=? AND e.causation_id=?""",
-                        (scope_key, command_id),
-                    ).fetchone()[0]
-                    owned_outbox = connection.execute(
-                        """SELECT COUNT(*) FROM outbox AS o
-                           JOIN tasks AS t ON t.task_id=o.task_id
-                           WHERE t.scope_key=? AND o.command_id=?""",
-                        (scope_key, command_id),
-                    ).fetchone()[0]
-                    error = result.error
-                    if (
-                        owners
-                        or predecessor is None
-                        or resolved_spec is None
-                        or command.target_ref.kind.value != "task"
-                        or command.required_capabilities
-                        != ("task.create_successor",)
-                        or command.scope
-                        != ScopeRef.from_dict(_json_load(predecessor["scope_json"]))
-                        or value is not None
-                        or error is None
-                        or error.code is not ErrorCode.CONFLICT
-                        or error.reason
-                        not in {
-                            "TASK_SUCCESSOR_PRECONDITION_CONFLICT",
-                            "TASK_SUCCESSOR_RESULT_CONFLICT",
-                        }
-                        or dict(result.extensions)
-                        != command_result_extensions(
-                            TaskCommandDisposition.CONFLICT
-                        )
-                        or result.observed_at != command_row["created_at"]
-                        or caused_events != 0
-                        or owned_outbox != 0
-                    ):
-                        raise cls._corrupt(
-                            "task.create_successor conflict is not canonical"
-                        )
-                    continue
                 if (
                     len(owners) != 1
                     or resolved_spec is None
@@ -1495,15 +1476,17 @@ class SqliteTaskStore:
                 "task.resume",
                 "task.reprioritize",
             }:
-                command, result = cls._verify_business_decision(
+                binding, result = cls._verify_business_decision(
                     connection,
                     command_row,
                     expected=_CONTROL_BUSINESS_DECISIONS,
                 )
                 value = result.error
+                authority = binding["authority"]
+                payload_authority = authority["payload"]
                 attempt_row = connection.execute(
                     "SELECT task_id FROM attempts WHERE attempt_id=?",
-                    (command.payload.get("attempt_id"),),
+                    (payload_authority.get("attempt_id"),),
                 ).fetchone()
                 if (
                     value is None
@@ -1511,7 +1494,7 @@ class SqliteTaskStore:
                         value.reason != "TASK_CONTROL_PRECONDITION_STALE"
                         and (
                             attempt_row is None
-                            or attempt_row["task_id"] != command.target_ref.id
+                            or attempt_row["task_id"] != binding["target_task_id"]
                         )
                     )
                 ):
@@ -1943,6 +1926,7 @@ class SqliteTaskStore:
     ) -> ResultEnvelope:
         """Atomically create one immutable Task revision after a terminal Task."""
 
+        self._validate_successor_command(command)
         fingerprint = canonical_json_bytes(
             {
                 "command": json.loads(command.fingerprint()),
@@ -2208,6 +2192,35 @@ class SqliteTaskStore:
             )
             self._hit("successor.after_outbox")
             return result
+
+    @staticmethod
+    def _validate_successor_command(command: CommandEnvelope) -> None:
+        """Re-prove the successor wire shape at the direct Store boundary."""
+
+        try:
+            if not isinstance(command, CommandEnvelope):
+                raise TypeError("successor command must be a CommandEnvelope")
+            reparsed = CommandEnvelope.from_dict(command.to_dict())
+            payload = reparsed.payload
+            revision_number = payload["expected_predecessor_revision_number"]
+            event_head = payload["expected_predecessor_event_head"]
+            if (
+                reparsed.command_type != "task.create_successor"
+                or reparsed.required_capabilities != ("task.create_successor",)
+                or type(revision_number) is not int
+                or revision_number < 1
+                or revision_number > MAX_SAFE_INTEGER
+                or type(event_head) is not int
+                or event_head < 0
+                or event_head > MAX_SAFE_INTEGER
+            ):
+                raise ValueError("successor command authority is not canonical")
+        except (ContractViolation, KeyError, TypeError, ValueError, UnicodeError) as error:
+            raise FormalTaskViolation(
+                "TASK_SUCCESSOR_INVALID",
+                "task.create_successor command is not canonical",
+                ErrorCode.INVALID_ARGUMENT,
+            ) from error
 
     def update(
         self,
@@ -2905,17 +2918,32 @@ class SqliteTaskStore:
                 raise self._corrupt(
                     "retry command result is not canonical"
                 ) from error
-            if stored_result.ok:
-                original_command, original_result, resolved_spec = (
-                    self._command_ledger_from_row(row)
-                )
-            else:
-                original_command, original_result = self._verify_business_decision(
+            if not stored_result.ok:
+                binding, _original_result = self._verify_business_decision(
                     connection,
                     row,
                     expected=_RETRY_BUSINESS_DECISIONS,
                 )
-                resolved_spec = None
+                authority = binding["authority"]
+                payload_authority = authority["payload"]
+                if (
+                    row["command_type"] != "task.retry"
+                    or binding["command_type"] != "task.retry"
+                    or binding["target_task_id"] != task_id
+                    or payload_authority.get("product_request_sha256")
+                    != product_request.sha256
+                ):
+                    raise FormalTaskViolation(
+                        "IDEMPOTENCY_CONFLICT",
+                        "command_id is already bound to different retry facts",
+                        ErrorCode.CONFLICT,
+                    )
+                task_row = self._require_task_row(connection, task_id, scope)
+                self._verify_durable_lineage(connection, task_row)
+                return None
+            original_command, original_result, resolved_spec = (
+                self._command_ledger_from_row(row)
+            )
             if (
                 row["command_type"] != "task.retry"
                 or original_command.command_type != "task.retry"
@@ -2953,8 +2981,6 @@ class SqliteTaskStore:
                     "retry command ledger contains create-only specification facts",
                     ErrorCode.INTERNAL,
                 )
-            if not original_result.ok:
-                return None
             result = original_result.result
             if result is None or result.get("task_id") != task_id:
                 raise FormalTaskViolation(
@@ -3485,38 +3511,344 @@ class SqliteTaskStore:
 
         return _stored_record("control command ledger", load)
 
-    @classmethod
-    def _decision_command_from_row(
-        cls, row: sqlite3.Row
-    ) -> tuple[CommandEnvelope, ResultEnvelope]:
-        """Rebuild a negative control decision from its canonical fingerprint."""
+    @staticmethod
+    def _sha256_hex(value: bytes) -> str:
+        return hashlib.sha256(value).hexdigest()
 
-        def load() -> tuple[CommandEnvelope, ResultEnvelope]:
+    @classmethod
+    def _json_value_sha256(cls, value: object) -> str:
+        return cls._sha256_hex(canonical_json_bytes(value))
+
+    @classmethod
+    def _decision_payload_authority(
+        cls, command: CommandEnvelope
+    ) -> dict[str, object]:
+        """Reduce a canonical command payload to closed non-content authority."""
+
+        payload = command.payload
+        authority: dict[str, object] = {}
+        if command.command_type == "task.update":
+            authority.update(
+                {
+                    "attempt_id": payload.get("attempt_id"),
+                    "expected_event_head": payload.get("expected_event_head"),
+                    "instruction_sha256": (
+                        None
+                        if payload.get("instruction") is None
+                        else cls._json_value_sha256(payload["instruction"])
+                    ),
+                    "constraints_sha256": (
+                        None
+                        if payload.get("constraints") is None
+                        else cls._json_value_sha256(payload["constraints"])
+                    ),
+                }
+            )
+        elif command.command_type in {
+            "task.provide_input",
+        }:
+            authority.update(
+                {
+                    "attempt_id": payload.get("attempt_id"),
+                    "expected_event_head": payload.get("expected_event_head"),
+                    "responds_to_event_id": payload.get("responds_to_event_id"),
+                    "text_sha256": (
+                        None
+                        if payload.get("text") is None
+                        else cls._json_value_sha256(payload["text"])
+                    ),
+                }
+            )
+        elif command.command_type in {"task.pause", "task.resume"}:
+            authority.update(
+                {
+                    "attempt_id": payload.get("attempt_id"),
+                    "expected_event_head": payload.get("expected_event_head"),
+                    "reason_sha256": (
+                        None
+                        if payload.get("reason") is None
+                        else cls._json_value_sha256(payload["reason"])
+                    ),
+                }
+            )
+        elif command.command_type == "task.reprioritize":
+            authority.update(
+                {
+                    "attempt_id": payload.get("attempt_id"),
+                    "expected_event_head": payload.get("expected_event_head"),
+                    "priority": payload.get("priority"),
+                    "reason_sha256": (
+                        None
+                        if payload.get("reason") is None
+                        else cls._json_value_sha256(payload["reason"])
+                    ),
+                }
+            )
+        elif command.command_type == "task.adjust":
+            authority["adjustment_sha256"] = cls._json_value_sha256(
+                payload.get("adjustment")
+            )
+        elif command.command_type == "task.cancel":
+            if payload:
+                raise cls._corrupt("task.cancel decision payload is not empty")
+        elif command.command_type == "task.retry":
+            product_request = TaskRetryProductRequestFingerprint.from_extensions(
+                command.extensions
+            )
+            authority.update(
+                {
+                    "previous_attempt_id": payload.get("previous_attempt_id"),
+                    "previous_outcome": payload.get("previous_outcome"),
+                    "attempt_number": payload.get("attempt_number"),
+                    "product_request_sha256": product_request.sha256,
+                }
+            )
+        elif command.command_type == "task.create_successor":
+            authority.update(
+                {
+                    "expected_predecessor_revision_number": payload.get(
+                        "expected_predecessor_revision_number"
+                    ),
+                    "expected_predecessor_event_head": payload.get(
+                        "expected_predecessor_event_head"
+                    ),
+                    "predecessor_terminal_event_id": payload.get(
+                        "predecessor_terminal_event_id"
+                    ),
+                    "predecessor_outcome": payload.get("predecessor_outcome"),
+                    "predecessor_result_sha256": payload.get(
+                        "predecessor_result_sha256"
+                    ),
+                    "name_sha256": cls._json_value_sha256(payload.get("name")),
+                    "instruction_sha256": cls._json_value_sha256(
+                        payload.get("instruction")
+                    ),
+                    "constraints_sha256": cls._json_value_sha256(
+                        payload.get("constraints")
+                    ),
+                    "executor_id": payload.get("executor_id"),
+                    "side_effect_class": payload.get("side_effect_class"),
+                    "attributes_sha256": cls._json_value_sha256(
+                        payload.get("attributes")
+                    ),
+                }
+            )
+        else:
+            raise cls._corrupt(
+                "formal Task business decision operation is not supported"
+            )
+        return {
+            "payload_sha256": cls._json_value_sha256(authority),
+            **authority,
+        }
+
+    @classmethod
+    def _decision_observed_authority(
+        cls,
+        connection: sqlite3.Connection,
+        command: CommandEnvelope,
+        *,
+        reason: str,
+    ) -> dict[str, object]:
+        """Capture only immutable or monotonic facts used for the decision."""
+
+        task_row = connection.execute(
+            "SELECT * FROM tasks WHERE task_id=? AND scope_key=?",
+            (command.target_ref.id, _scope_key(command.scope)),
+        ).fetchone()
+        if task_row is None:
+            raise cls._corrupt("formal Task business decision lost its target")
+        attempt_row = connection.execute(
+            "SELECT * FROM attempts WHERE attempt_id=?",
+            (task_row["attempt_id"],),
+        ).fetchone()
+        head_row = connection.execute(
+            "SELECT * FROM task_events WHERE task_id=? AND seq=?",
+            (task_row["task_id"], task_row["event_head"]),
+        ).fetchone()
+        dispatch_rows = connection.execute(
+            """SELECT outbox_id, state, delivery_count FROM outbox
+               WHERE task_id=? AND attempt_id=? AND kind=?
+               ORDER BY outbox_id""",
+            (
+                task_row["task_id"],
+                task_row["attempt_id"],
+                OutboxKind.ATTEMPT_DISPATCH.value,
+            ),
+        ).fetchall()
+        successor_rows = connection.execute(
+            """SELECT task_id FROM tasks WHERE predecessor_task_id=?
+               ORDER BY task_id""",
+            (task_row["task_id"],),
+        ).fetchall()
+        result_rows = connection.execute(
+            """SELECT * FROM task_results WHERE task_id=? AND attempt_id=?
+               ORDER BY source_event_id""",
+            (task_row["task_id"], task_row["attempt_id"]),
+        ).fetchall()
+        return {
+            "reason": reason,
+            "payload": cls._decision_payload_authority(command),
+            "task": {
+                "task_id": task_row["task_id"],
+                "attempt_id": task_row["attempt_id"],
+                "event_head": task_row["event_head"],
+                "state": task_row["state"],
+                "outcome": task_row["outcome"],
+                "revision_number": task_row["revision_number"],
+                "correlation_id": task_row["correlation_id"],
+                "cancel_requested": task_row["cancel_requested"],
+                "dispatch_fenced": task_row["dispatch_fenced"],
+            },
+            "attempt": (
+                None
+                if attempt_row is None
+                else {
+                    "attempt_id": attempt_row["attempt_id"],
+                    "attempt_number": attempt_row["attempt_number"],
+                    "state": attempt_row["state"],
+                    "outcome": attempt_row["outcome"],
+                }
+            ),
+            "head_event": (
+                None
+                if head_row is None
+                else {
+                    "event_id": head_row["event_id"],
+                    "attempt_id": head_row["attempt_id"],
+                    "seq": head_row["seq"],
+                    "event_type": head_row["event_type"],
+                    "state": head_row["state"],
+                    "outcome": head_row["outcome"],
+                    "occurred_at": head_row["occurred_at"],
+                }
+            ),
+            "dispatch": [
+                {
+                    "outbox_id": row["outbox_id"],
+                    "state": row["state"],
+                    "delivery_count": row["delivery_count"],
+                }
+                for row in dispatch_rows
+            ],
+            "successor_task_ids": [row["task_id"] for row in successor_rows],
+            "result_sha256s": [
+                cls._json_value_sha256(cls._task_result_from_row(row).to_dict())
+                for row in result_rows
+            ],
+        }
+
+    @classmethod
+    def _business_decision_fingerprint(
+        cls,
+        connection: sqlite3.Connection,
+        command: CommandEnvelope,
+        replay_fingerprint: bytes,
+        *,
+        reason: str,
+    ) -> bytes:
+        authority = cls._decision_observed_authority(
+            connection,
+            command,
+            reason=reason,
+        )
+        binding: dict[str, object] = {
+            "binding_type": _DECISION_BINDING_TYPE,
+            "version": _DECISION_BINDING_VERSION,
+            "command_sha256": cls._sha256_hex(command.fingerprint()),
+            "replay_sha256": cls._sha256_hex(replay_fingerprint),
+            "scope_sha256": cls._json_value_sha256(command.scope.to_dict()),
+            "command_type": command.command_type,
+            "target_task_id": command.target_ref.id,
+            "correlation_id": command.correlation_id,
+            "authority": authority,
+            "authority_sha256": cls._json_value_sha256(authority),
+        }
+        binding["binding_sha256"] = cls._json_value_sha256(binding)
+        return canonical_json_bytes(binding)
+
+    @classmethod
+    def _decision_binding_from_row(
+        cls, row: sqlite3.Row
+    ) -> tuple[dict[str, object], ResultEnvelope]:
+        """Decode a v1 sanitized negative decision without rebuilding its command."""
+
+        def load() -> tuple[dict[str, object], ResultEnvelope]:
             result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
-            fingerprint = _json_load(row["fingerprint"])
+            binding = _json_load(row["fingerprint"])
+            expected_fields = {
+                "binding_type",
+                "version",
+                "command_sha256",
+                "replay_sha256",
+                "scope_sha256",
+                "command_type",
+                "target_task_id",
+                "correlation_id",
+                "authority",
+                "authority_sha256",
+                "binding_sha256",
+            }
+            digest_fields = (
+                "command_sha256",
+                "replay_sha256",
+                "scope_sha256",
+                "authority_sha256",
+                "binding_sha256",
+            )
             if (
                 result.ok
                 or result.error is None
                 or result.command_id != row["command_id"]
-                or type(fingerprint) is not dict
-                or "request_id" in fingerprint
+                or type(binding) is not dict
+                or set(binding) != expected_fields
+                or binding["binding_type"] != _DECISION_BINDING_TYPE
+                or type(binding["version"]) is not int
+                or binding["version"] != _DECISION_BINDING_VERSION
+                or binding["command_type"] != row["command_type"]
+                or type(binding["target_task_id"]) is not str
+                or not binding["target_task_id"]
+                or type(binding["correlation_id"]) is not str
+                or not binding["correlation_id"]
+                or type(binding["authority"]) is not dict
+                or any(
+                    type(binding[field]) is not str
+                    or len(binding[field]) != 64
+                    or any(
+                        character not in "0123456789abcdef"
+                        for character in binding[field]
+                    )
+                    for field in digest_fields
+                )
+                or binding["authority_sha256"]
+                != cls._json_value_sha256(binding["authority"])
+                or binding["binding_sha256"]
+                != cls._json_value_sha256(
+                    {
+                        key: value
+                        for key, value in binding.items()
+                        if key != "binding_sha256"
+                    }
+                )
             ):
                 raise cls._corrupt(
-                    "formal Task decision command ledger is not canonical"
+                    "formal Task decision binding is not canonical"
                 )
-            command = CommandEnvelope.from_dict(
-                {"request_id": result.request_id, **fingerprint}
-            )
-            if (
-                command.command_id != row["command_id"]
-                or command.command_type != row["command_type"]
-                or _scope_key(command.scope) != row["scope_key"]
-                or command.fingerprint() != row["fingerprint"]
-            ):
+            authority = binding["authority"]
+            if set(authority) != {
+                "reason",
+                "payload",
+                "task",
+                "attempt",
+                "head_event",
+                "dispatch",
+                "successor_task_ids",
+                "result_sha256s",
+            } or not isinstance(authority["payload"], dict):
                 raise cls._corrupt(
-                    "formal Task decision command binding is inconsistent"
+                    "formal Task decision authority is not canonical"
                 )
-            return command, result
+            return binding, result
 
         return _stored_record("decision command ledger", load)
 
@@ -3529,45 +3861,587 @@ class SqliteTaskStore:
         expected: Mapping[
             str, tuple[TaskCommandDisposition, frozenset[ErrorCode]]
         ],
-    ) -> tuple[CommandEnvelope, ResultEnvelope]:
-        """Verify one negative command row with no Task authority effects."""
+    ) -> tuple[dict[str, object], ResultEnvelope]:
+        """Verify one negative row against closed immutable decision evidence."""
 
-        command, result = cls._decision_command_from_row(row)
+        binding, result = cls._decision_binding_from_row(row)
         error = result.error
         if error is None or error.reason not in expected:
             raise cls._corrupt("formal Task business decision reason is not canonical")
         disposition, codes = expected[error.reason]
         task_row = connection.execute(
             "SELECT * FROM tasks WHERE task_id=? AND scope_key=?",
-            (command.target_ref.id, row["scope_key"]),
+            (binding["target_task_id"], row["scope_key"]),
         ).fetchone()
         caused_events = connection.execute(
             """SELECT COUNT(*) FROM task_events AS e
                JOIN tasks AS t ON t.task_id=e.task_id
                WHERE t.scope_key=? AND e.causation_id=?""",
-            (row["scope_key"], command.command_id),
+            (row["scope_key"], row["command_id"]),
         ).fetchone()[0]
         owned_outbox = connection.execute(
             """SELECT COUNT(*) FROM outbox AS o
                JOIN tasks AS t ON t.task_id=o.task_id
                WHERE t.scope_key=? AND o.command_id=?""",
-            (row["scope_key"], command.command_id),
+            (row["scope_key"], row["command_id"]),
         ).fetchone()[0]
         if (
             task_row is None
-            or command.target_ref.kind.value != "task"
-            or command.scope
-            != ScopeRef.from_dict(_json_load(task_row["scope_json"]))
-            or command.required_capabilities != (command.command_type,)
+            or binding["command_type"] != row["command_type"]
+            or binding["scope_sha256"]
+            != cls._json_value_sha256(
+                ScopeRef.from_dict(_json_load(task_row["scope_json"])).to_dict()
+            )
             or result.result is not None
             or error.code not in codes
+            or binding["authority"]["reason"] != error.reason
             or dict(result.extensions) != command_result_extensions(disposition)
             or result.observed_at != row["created_at"]
             or caused_events != 0
             or owned_outbox != 0
         ):
             raise cls._corrupt("formal Task business decision is not canonical")
-        return command, result
+        payload = binding["authority"]["payload"]
+        cls._verify_decision_payload_authority(row["command_type"], payload)
+        task, attempt, head, dispatch, successor_ids = (
+            cls._verify_decision_history(connection, row, binding, task_row)
+        )
+        cls._verify_business_decision_reason(
+            connection,
+            row,
+            binding,
+            error.reason,
+            payload,
+            task,
+            attempt,
+            head,
+            dispatch,
+            successor_ids,
+        )
+        return binding, result
+
+    @staticmethod
+    def _is_lower_sha256(value: object) -> bool:
+        return (
+            type(value) is str
+            and len(value) == 64
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    @classmethod
+    def _verify_decision_payload_authority(
+        cls,
+        command_type: str,
+        payload: object,
+    ) -> None:
+        """Validate the closed, content-free authority shape for one operation."""
+
+        expected_fields = {
+            "task.update": {
+                "payload_sha256",
+                "attempt_id",
+                "expected_event_head",
+                "instruction_sha256",
+                "constraints_sha256",
+            },
+            "task.provide_input": {
+                "payload_sha256",
+                "attempt_id",
+                "expected_event_head",
+                "responds_to_event_id",
+                "text_sha256",
+            },
+            "task.pause": {
+                "payload_sha256",
+                "attempt_id",
+                "expected_event_head",
+                "reason_sha256",
+            },
+            "task.resume": {
+                "payload_sha256",
+                "attempt_id",
+                "expected_event_head",
+                "reason_sha256",
+            },
+            "task.reprioritize": {
+                "payload_sha256",
+                "attempt_id",
+                "expected_event_head",
+                "priority",
+                "reason_sha256",
+            },
+            "task.adjust": {"payload_sha256", "adjustment_sha256"},
+            "task.cancel": {"payload_sha256"},
+            "task.retry": {
+                "payload_sha256",
+                "previous_attempt_id",
+                "previous_outcome",
+                "attempt_number",
+                "product_request_sha256",
+            },
+            "task.create_successor": {
+                "payload_sha256",
+                "expected_predecessor_revision_number",
+                "expected_predecessor_event_head",
+                "predecessor_terminal_event_id",
+                "predecessor_outcome",
+                "predecessor_result_sha256",
+                "name_sha256",
+                "instruction_sha256",
+                "constraints_sha256",
+                "executor_id",
+                "side_effect_class",
+                "attributes_sha256",
+            },
+        }.get(command_type)
+        if type(payload) is not dict or expected_fields is None:
+            raise cls._corrupt("formal Task decision payload authority is invalid")
+        unsigned = {key: value for key, value in payload.items() if key != "payload_sha256"}
+        if (
+            set(payload) != expected_fields
+            or payload["payload_sha256"] != cls._json_value_sha256(unsigned)
+        ):
+            raise cls._corrupt("formal Task decision payload authority is invalid")
+
+        def text(field: str) -> bool:
+            value = payload[field]
+            return type(value) is str and bool(value.strip()) and "\x00" not in value
+
+        def uint(field: str, *, positive: bool = False) -> bool:
+            value = payload[field]
+            return (
+                type(value) is int
+                and (value > 0 if positive else value >= 0)
+                and value <= MAX_SAFE_INTEGER
+            )
+
+        def digest(field: str, *, optional: bool = False) -> bool:
+            value = payload[field]
+            return (optional and value is None) or cls._is_lower_sha256(value)
+
+        valid = True
+        if command_type == "task.update":
+            valid = (
+                text("attempt_id")
+                and uint("expected_event_head")
+                and digest("instruction_sha256", optional=True)
+                and digest("constraints_sha256", optional=True)
+                and not (
+                    payload["instruction_sha256"] is None
+                    and payload["constraints_sha256"] is None
+                )
+            )
+        elif command_type == "task.provide_input":
+            valid = (
+                text("attempt_id")
+                and uint("expected_event_head")
+                and text("responds_to_event_id")
+                and digest("text_sha256")
+            )
+        elif command_type in {"task.pause", "task.resume"}:
+            valid = (
+                text("attempt_id")
+                and uint("expected_event_head")
+                and digest("reason_sha256", optional=True)
+            )
+        elif command_type == "task.reprioritize":
+            valid = (
+                text("attempt_id")
+                and uint("expected_event_head")
+                and payload["priority"] in {"low", "normal", "high"}
+                and digest("reason_sha256", optional=True)
+            )
+        elif command_type == "task.adjust":
+            valid = digest("adjustment_sha256")
+        elif command_type == "task.cancel":
+            valid = True
+        elif command_type == "task.retry":
+            valid = (
+                text("previous_attempt_id")
+                and payload["previous_outcome"]
+                in {TerminalOutcome.CANCELLED.value, TerminalOutcome.COMPLETED.value}
+                and type(payload["attempt_number"]) is int
+                and payload["attempt_number"] in {2, 3}
+                and digest("product_request_sha256")
+            )
+        elif command_type == "task.create_successor":
+            try:
+                predecessor_outcome = TerminalOutcome(payload["predecessor_outcome"])
+            except (TypeError, ValueError):
+                valid = False
+            else:
+                requested_digest = payload["predecessor_result_sha256"]
+                valid = (
+                    uint("expected_predecessor_revision_number", positive=True)
+                    and uint("expected_predecessor_event_head")
+                    and text("predecessor_terminal_event_id")
+                    and (
+                        cls._is_lower_sha256(requested_digest)
+                        if predecessor_outcome is TerminalOutcome.COMPLETED
+                        else requested_digest is None
+                    )
+                    and digest("name_sha256")
+                    and digest("instruction_sha256")
+                    and digest("constraints_sha256")
+                    and text("executor_id")
+                    and payload["side_effect_class"]
+                    in {"read_only", "project_mutation"}
+                    and digest("attributes_sha256")
+                )
+        if not valid:
+            raise cls._corrupt("formal Task decision payload authority is invalid")
+
+    @classmethod
+    def _verify_decision_history(
+        cls,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        binding: dict[str, object],
+        task_row: sqlite3.Row,
+    ) -> tuple[
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+        tuple[str, ...],
+    ]:
+        """Bind a decision snapshot to its immutable event-head prefix."""
+
+        authority = binding["authority"]
+        task = authority["task"]
+        attempt = authority["attempt"]
+        head = authority["head_event"]
+        dispatches = authority["dispatch"]
+        successor_task_ids = authority["successor_task_ids"]
+        result_sha256s = authority["result_sha256s"]
+        task_fields = {
+            "task_id",
+            "attempt_id",
+            "event_head",
+            "state",
+            "outcome",
+            "revision_number",
+            "correlation_id",
+            "cancel_requested",
+            "dispatch_fenced",
+        }
+        attempt_fields = {"attempt_id", "attempt_number", "state", "outcome"}
+        head_fields = {
+            "event_id",
+            "attempt_id",
+            "seq",
+            "event_type",
+            "state",
+            "outcome",
+            "occurred_at",
+        }
+        dispatch_fields = {"outbox_id", "state", "delivery_count"}
+        if (
+            type(task) is not dict
+            or set(task) != task_fields
+            or type(attempt) is not dict
+            or set(attempt) != attempt_fields
+            or type(head) is not dict
+            or set(head) != head_fields
+            or type(dispatches) is not list
+            or len(dispatches) != 1
+            or type(dispatches[0]) is not dict
+            or set(dispatches[0]) != dispatch_fields
+            or type(successor_task_ids) is not list
+            or any(type(item) is not str or not item for item in successor_task_ids)
+            or successor_task_ids != sorted(set(successor_task_ids))
+            or type(result_sha256s) is not list
+            or any(not cls._is_lower_sha256(item) for item in result_sha256s)
+            or task["task_id"] != binding["target_task_id"]
+            or task["task_id"] != task_row["task_id"]
+            or task["revision_number"] != task_row["revision_number"]
+            or task["correlation_id"] != task_row["correlation_id"]
+            or task["correlation_id"] != binding["correlation_id"]
+            or type(task["event_head"]) is not int
+            or task["event_head"] < 0
+            or type(task["cancel_requested"]) is not int
+            or task["cancel_requested"] not in {0, 1}
+            or type(task["dispatch_fenced"]) is not int
+            or task["dispatch_fenced"] not in {0, 1}
+        ):
+            raise cls._corrupt("formal Task decision history is not canonical")
+        head_row = connection.execute(
+            "SELECT * FROM task_events WHERE task_id=? AND seq=?",
+            (task["task_id"], task["event_head"]),
+        ).fetchone()
+        if head_row is None:
+            raise cls._corrupt("formal Task decision lost its event-head evidence")
+        expected_head = {
+            "event_id": head_row["event_id"],
+            "attempt_id": head_row["attempt_id"],
+            "seq": head_row["seq"],
+            "event_type": head_row["event_type"],
+            "state": head_row["state"],
+            "outcome": head_row["outcome"],
+            "occurred_at": head_row["occurred_at"],
+        }
+        if (
+            head != expected_head
+            or task["attempt_id"] != head["attempt_id"]
+            or task["state"] != head["state"]
+            or task["outcome"] != head["outcome"]
+        ):
+            raise cls._corrupt("formal Task decision event-head binding changed")
+        attempt_row = connection.execute(
+            "SELECT * FROM attempts WHERE attempt_id=? AND task_id=?",
+            (task["attempt_id"], task["task_id"]),
+        ).fetchone()
+        if attempt_row is None:
+            raise cls._corrupt("formal Task decision lost its attempt evidence")
+        attempt_state = FormalAttemptState.ACCEPTED.value
+        attempt_outcome: str | None = None
+        event_rows = connection.execute(
+            """SELECT event_type, state, outcome FROM task_events
+               WHERE task_id=? AND attempt_id=? AND seq<=? ORDER BY seq""",
+            (task["task_id"], task["attempt_id"], task["event_head"]),
+        ).fetchall()
+        for event_row in event_rows:
+            if event_row["event_type"] in {
+                "attempt.accepted",
+                "attempt.running",
+                "attempt.terminal",
+            }:
+                attempt_state = event_row["state"]
+                attempt_outcome = event_row["outcome"]
+        expected_attempt = {
+            "attempt_id": attempt_row["attempt_id"],
+            "attempt_number": attempt_row["attempt_number"],
+            "state": attempt_state,
+            "outcome": attempt_outcome,
+        }
+        cancel_before_head = connection.execute(
+            """SELECT 1 FROM task_events WHERE task_id=? AND attempt_id=?
+               AND seq<=? AND event_type='task.cancel_requested' LIMIT 1""",
+            (task["task_id"], task["attempt_id"], task["event_head"]),
+        ).fetchone()
+        if (
+            attempt != expected_attempt
+            or task["cancel_requested"] != int(cancel_before_head is not None)
+            or task["dispatch_fenced"] != int(cancel_before_head is not None)
+        ):
+            raise cls._corrupt("formal Task decision attempt history changed")
+
+        dispatch = dispatches[0]
+        dispatch_row = connection.execute(
+            """SELECT outbox_id, state, delivery_count FROM outbox
+               WHERE task_id=? AND attempt_id=? AND kind=?""",
+            (
+                task["task_id"],
+                task["attempt_id"],
+                OutboxKind.ATTEMPT_DISPATCH.value,
+            ),
+        ).fetchone()
+        try:
+            bound_state = OutboxState(dispatch["state"])
+            current_state = OutboxState(dispatch_row["state"])
+            bound_delivery = dispatch["delivery_count"]
+            current_delivery = dispatch_row["delivery_count"]
+        except (TypeError, ValueError) as error:
+            raise cls._corrupt("formal Task decision dispatch evidence is invalid") from error
+        allowed_current = {
+            OutboxState.PENDING: set(OutboxState),
+            OutboxState.CLAIMED: set(OutboxState),
+            OutboxState.DELIVERED: {OutboxState.DELIVERED},
+            OutboxState.SUPPRESSED: {OutboxState.SUPPRESSED},
+        }[bound_state]
+        if (
+            dispatch_row is None
+            or type(bound_delivery) is not int
+            or type(current_delivery) is not int
+            or bound_delivery < 0
+            or current_delivery < bound_delivery
+            or current_state not in allowed_current
+            or dispatch["outbox_id"] != dispatch_row["outbox_id"]
+            or (bound_state is OutboxState.PENDING and bound_delivery != 0)
+            or (bound_state in {OutboxState.CLAIMED, OutboxState.DELIVERED} and bound_delivery < 1)
+        ):
+            raise cls._corrupt("formal Task decision dispatch history changed")
+
+        decision_rowid = connection.execute(
+            "SELECT rowid FROM commands WHERE scope_key=? AND command_id=?",
+            (row["scope_key"], row["command_id"]),
+        ).fetchone()
+        successor_rows = connection.execute(
+            """SELECT s.task_id, c.rowid AS command_rowid
+               FROM tasks AS s
+               JOIN task_events AS e ON e.task_id=s.task_id AND e.seq=0
+               JOIN commands AS c
+                 ON c.scope_key=s.scope_key AND c.command_id=e.causation_id
+               WHERE s.predecessor_task_id=? ORDER BY s.task_id""",
+            (task["task_id"],),
+        ).fetchall()
+        if decision_rowid is None:
+            raise cls._corrupt("formal Task decision lost its command identity")
+        historical_successors = tuple(
+            item["task_id"]
+            for item in successor_rows
+            if item["command_rowid"] < decision_rowid["rowid"]
+        )
+        if tuple(successor_task_ids) != historical_successors:
+            raise cls._corrupt("formal Task decision successor history changed")
+        return task, attempt, head, dispatch, historical_successors
+
+    @classmethod
+    def _verify_business_decision_reason(
+        cls,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        binding: dict[str, object],
+        reason: str,
+        payload: dict[str, object],
+        task: dict[str, object],
+        attempt: dict[str, object],
+        head: dict[str, object],
+        dispatch: dict[str, object],
+        successor_ids: tuple[str, ...],
+    ) -> None:
+        """Re-evaluate the persisted reason from its bound historical prefix."""
+
+        command_type = row["command_type"]
+        valid_reason = False
+        if command_type == "task.update":
+            valid_reason = reason == "TASK_UPDATE_PRECONDITION_STALE" and (
+                task["state"] != FormalTaskState.ACCEPTED.value
+                or bool(task["cancel_requested"])
+                or bool(task["dispatch_fenced"])
+                or attempt["state"] != FormalAttemptState.ACCEPTED.value
+                or payload["attempt_id"] != task["attempt_id"]
+                or payload["expected_event_head"] != task["event_head"]
+                or dispatch["state"] != OutboxState.PENDING.value
+                or dispatch["delivery_count"] != 0
+            )
+        elif command_type in {
+            "task.provide_input",
+            "task.pause",
+            "task.resume",
+            "task.reprioritize",
+        }:
+            stale = (
+                payload["attempt_id"] != task["attempt_id"]
+                or payload["expected_event_head"] != task["event_head"]
+                or head["attempt_id"] != task["attempt_id"]
+            )
+            state_conflict = task["state"] == FormalTaskState.TERMINAL.value
+            if command_type == "task.provide_input" and not stale:
+                state_conflict = state_conflict or (
+                    task["state"] != FormalTaskState.DECISION_REQUIRED.value
+                    or head["event_type"] != "task.decision_required"
+                    or payload["responds_to_event_id"] != head["event_id"]
+                )
+            expected_reason = (
+                "TASK_CONTROL_PRECONDITION_STALE"
+                if stale
+                else (
+                    "TASK_CONTROL_STATE_CONFLICT"
+                    if state_conflict
+                    else "TASK_CONTROL_UNSUPPORTED"
+                )
+            )
+            valid_reason = reason == expected_reason
+        elif command_type == "task.adjust":
+            valid_reason = reason == "TASK_ADJUSTMENT_STATE_CONFLICT" and (
+                task["state"] != FormalTaskState.RUNNING.value
+                or attempt["state"] != FormalAttemptState.RUNNING.value
+            )
+        elif command_type == "task.cancel":
+            valid_reason = (
+                reason == "TASK_ALREADY_TERMINAL"
+                and task["state"] == FormalTaskState.TERMINAL.value
+                and head["event_type"] == "task.terminal"
+            )
+        elif command_type == "task.retry":
+            if binding["correlation_id"] != task["correlation_id"]:
+                expected_reason = None
+            elif (
+                task["state"] == FormalTaskState.TERMINAL.value
+                and attempt["state"] == FormalAttemptState.TERMINAL.value
+                and attempt["attempt_number"] >= 3
+            ):
+                expected_reason = "TASK_RETRY_LIMIT_EXCEEDED"
+            elif (
+                payload["previous_attempt_id"] != attempt["attempt_id"]
+                or payload["attempt_number"] != attempt["attempt_number"] + 1
+            ):
+                expected_reason = "TASK_RETRY_PRECONDITION_STALE"
+            elif task["state"] != FormalTaskState.TERMINAL.value:
+                expected_reason = "TASK_RETRY_REQUIRES_TERMINAL"
+            elif (
+                attempt["state"] != FormalAttemptState.TERMINAL.value
+                or task["outcome"] != attempt["outcome"]
+            ):
+                expected_reason = None
+            elif task["outcome"] != TerminalOutcome.CANCELLED.value:
+                expected_reason = "TASK_RETRY_OUTCOME_NOT_ELIGIBLE"
+            elif payload["previous_outcome"] != task["outcome"]:
+                expected_reason = "TASK_RETRY_PRECONDITION_STALE"
+            else:
+                expected_reason = None
+            valid_reason = reason == expected_reason
+        elif command_type == "task.create_successor":
+            eligible = {
+                TerminalOutcome.COMPLETED.value,
+                TerminalOutcome.FAILED.value,
+                TerminalOutcome.CANCELLED.value,
+                TerminalOutcome.INTERRUPTED.value,
+            }
+            precondition_conflict = (
+                task["state"] != FormalTaskState.TERMINAL.value
+                or task["outcome"] not in eligible
+                or attempt["state"] != FormalAttemptState.TERMINAL.value
+                or attempt["outcome"] != task["outcome"]
+                or head["event_type"] != "task.terminal"
+                or payload["predecessor_terminal_event_id"] != head["event_id"]
+                or payload["expected_predecessor_revision_number"]
+                != task["revision_number"]
+                or payload["expected_predecessor_event_head"] != task["event_head"]
+                or payload["predecessor_outcome"] != task["outcome"]
+                or bool(successor_ids)
+            )
+            result_rows = connection.execute(
+                """SELECT * FROM task_results WHERE task_id=? AND attempt_id=?
+                   ORDER BY source_event_id""",
+                (task["task_id"], task["attempt_id"]),
+            ).fetchall()
+            result_digests = tuple(
+                cls._json_value_sha256(cls._task_result_from_row(item).to_dict())
+                for item in result_rows
+            )
+            if tuple(binding["authority"]["result_sha256s"]) != result_digests:
+                raise cls._corrupt("successor decision result history changed")
+            result_conflict = not precondition_conflict and (
+                (
+                    task["outcome"] == TerminalOutcome.COMPLETED.value
+                    and (
+                        len(result_digests) != 1
+                        or payload["predecessor_result_sha256"]
+                        != result_digests[0]
+                    )
+                )
+                or (
+                    task["outcome"] != TerminalOutcome.COMPLETED.value
+                    and (
+                        payload["predecessor_result_sha256"] is not None
+                        or bool(result_digests)
+                    )
+                )
+            )
+            expected_reason = (
+                "TASK_SUCCESSOR_PRECONDITION_CONFLICT"
+                if precondition_conflict
+                else (
+                    "TASK_SUCCESSOR_RESULT_CONFLICT" if result_conflict else None
+                )
+            )
+            valid_reason = reason == expected_reason
+        if not valid_reason:
+            raise cls._corrupt(
+                "formal Task business decision lacks closed historical evidence"
+            )
 
     @classmethod
     def _verify_update_authority(
@@ -3659,8 +4533,10 @@ class SqliteTaskStore:
                     settlement_event_id=settlement.event_id,
                 )
                 or connection.execute(
-                    "SELECT COUNT(*) FROM outbox WHERE command_id=?",
-                    (command_id,),
+                    """SELECT COUNT(*) FROM outbox AS o
+                       JOIN tasks AS t ON t.task_id=o.task_id
+                       WHERE t.scope_key=? AND o.task_id=? AND o.command_id=?""",
+                    (_scope_key(task.scope), task.task_id, command_id),
                 ).fetchone()[0]
                 != 0
             ):
@@ -5094,6 +5970,18 @@ class SqliteTaskStore:
                         command.extensions
                     )
                     precondition = TaskRetryPrecondition.from_payload(command.payload)
+                    legacy_retry_extensions = {
+                        "live_voice.store": {"durability": "sqlite_outbox"}
+                    }
+                    current_retry_extensions = {
+                        **command_result_extensions(
+                            TaskCommandDisposition.APPLIED,
+                            admission_event_id=boundary.event_id,
+                            settlement_event_id=boundary.event_id,
+                        ),
+                        "live_voice.store": {"durability": "sqlite_outbox"},
+                    }
+                    result_extensions = dict(result.extensions)
                     if (
                         boundary.details.get("retry_of_attempt_id")
                         != predecessor.attempt_id
@@ -5113,6 +6001,15 @@ class SqliteTaskStore:
                             TerminalOutcome.CANCELLED,
                             TerminalOutcome.COMPLETED,
                         }
+                        or (
+                            predecessor.outcome is TerminalOutcome.COMPLETED
+                            and result_extensions != legacy_retry_extensions
+                        )
+                        or (
+                            predecessor.outcome is TerminalOutcome.CANCELLED
+                            and result_extensions != legacy_retry_extensions
+                            and result_extensions != current_retry_extensions
+                        )
                         or unsettled_predecessor is not None
                         or set(result_value)
                         != {
@@ -5213,19 +6110,13 @@ class SqliteTaskStore:
     ) -> ResultEnvelope | None:
         row = connection.execute(
             """
-            SELECT fingerprint, result_json FROM commands
+            SELECT * FROM commands
             WHERE scope_key=? AND command_id=?
             """,
             (_scope_key(command.scope), command.command_id),
         ).fetchone()
         if row is None:
             return None
-        if row["fingerprint"] != fingerprint:
-            raise FormalTaskViolation(
-                "IDEMPOTENCY_CONFLICT",
-                "command_id is already bound to different task facts",
-                ErrorCode.CONFLICT,
-            )
         try:
             result = ResultEnvelope.from_dict(_json_load(row["result_json"]))
         except ContractViolation as error:
@@ -5234,7 +6125,78 @@ class SqliteTaskStore:
                 "formal Task Store contains an invalid command result",
                 ErrorCode.INTERNAL,
             ) from error
+        try:
+            stored_fingerprint = _json_load(row["fingerprint"])
+        except FormalTaskViolation:
+            stored_fingerprint = None
+        decision_binding = type(stored_fingerprint) is dict and any(
+            field in stored_fingerprint
+            for field in {
+                "binding_type",
+                "binding_sha256",
+                "authority_sha256",
+                "replay_sha256",
+            }
+        )
+        if not result.ok and decision_binding:
+            binding, result = self._decision_binding_from_row(row)
+            command_sha256 = self._sha256_hex(command.fingerprint())
+            replay_sha256 = self._sha256_hex(fingerprint)
+            if (
+                binding["command_sha256"] != command_sha256
+                or binding["replay_sha256"] != replay_sha256
+            ):
+                raise FormalTaskViolation(
+                    "IDEMPOTENCY_CONFLICT",
+                    "command_id is already bound to different task facts",
+                    ErrorCode.CONFLICT,
+                )
+            authority = binding["authority"]
+            if (
+                binding["scope_sha256"]
+                != self._json_value_sha256(command.scope.to_dict())
+                or binding["command_type"] != command.command_type
+                or binding["target_task_id"] != command.target_ref.id
+                or binding["correlation_id"] != command.correlation_id
+                or authority["payload"]
+                != self._decision_payload_authority(command)
+            ):
+                raise self._corrupt(
+                    "formal Task decision binding disagrees with its command digest"
+                )
+            expected = self._business_decisions_for_type(row["command_type"])
+            self._verify_business_decision(connection, row, expected=expected)
+            return result.for_request(command.request_id)
+        if row["fingerprint"] != fingerprint:
+            raise FormalTaskViolation(
+                "IDEMPOTENCY_CONFLICT",
+                "command_id is already bound to different task facts",
+                ErrorCode.CONFLICT,
+            )
         return result.for_request(command.request_id)
+
+    @classmethod
+    def _business_decisions_for_type(
+        cls, command_type: str
+    ) -> Mapping[str, tuple[TaskCommandDisposition, frozenset[ErrorCode]]]:
+        if command_type == "task.update":
+            return _UPDATE_BUSINESS_DECISIONS
+        if command_type == "task.create_successor":
+            return _SUCCESSOR_BUSINESS_DECISIONS
+        if command_type == "task.retry":
+            return _RETRY_BUSINESS_DECISIONS
+        if command_type in {
+            "task.provide_input",
+            "task.pause",
+            "task.resume",
+            "task.reprioritize",
+        }:
+            return _CONTROL_BUSINESS_DECISIONS
+        if command_type == "task.adjust":
+            return _ADJUST_BUSINESS_DECISIONS
+        if command_type == "task.cancel":
+            return _CANCEL_BUSINESS_DECISIONS
+        raise cls._corrupt("formal Task decision operation is unsupported")
 
     @classmethod
     def _persist_business_decision(
@@ -5276,10 +6238,16 @@ class SqliteTaskStore:
             observed_at=observed_at,
             extensions=command_result_extensions(disposition),
         )
-        cls._insert_command(
+        sanitized_fingerprint = cls._business_decision_fingerprint(
             connection,
             command,
             fingerprint,
+            reason=reason,
+        )
+        cls._insert_command(
+            connection,
+            command,
+            sanitized_fingerprint,
             _scope_key(command.scope),
             result,
             observed_at,

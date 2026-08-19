@@ -21,6 +21,7 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     InputCommitState,
     LifecycleKind,
     QueryEnvelope,
+    ResultEnvelope,
     ScopeRef,
     TerminalOutcome,
     TurnCommit,
@@ -56,7 +57,6 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     TaskResultAvailability,
     TaskResultRecord,
     TaskRetryAuthoritySnapshot,
-    TaskRetryPrecondition,
     TaskRetryProductRequestFingerprint,
     utc_now,
 )
@@ -385,6 +385,25 @@ def _wave2_command(
         CommandEnvelope.from_dict(base),
         _grant(command_type, command_id=command_id, target=task_id),
     )
+
+
+def _forge_command_payload_scalar(
+    command: CommandEnvelope,
+    field: str,
+    value: object,
+) -> CommandEnvelope:
+    """Bypass the wire parser to pressure-test a direct Store trust boundary."""
+
+    forged = replace(command)
+    frozen_payload = command._payload  # type: ignore[attr-defined]
+    items = dict(frozen_payload.items)
+    items[field] = value
+    object.__setattr__(
+        forged,
+        "_payload",
+        type(frozen_payload)(tuple(sorted(items.items()))),
+    )
+    return forged
 
 
 def _successor_command(
@@ -720,6 +739,45 @@ def _task_authority_dump(database: Path) -> tuple[tuple[str, tuple[tuple, ...]],
             (table, tuple(connection.execute(f"SELECT * FROM {table} ORDER BY rowid")))
             for table in tables
         )
+
+
+def _database_authority_bytes(database: Path) -> bytes:
+    """Return every persisted SQLite cell as bytes for privacy assertions."""
+
+    with sqlite3.connect(database) as connection:
+        tables = tuple(
+            row[0]
+            for row in connection.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                   ORDER BY name"""
+            )
+        )
+        values: list[bytes] = []
+        for table in tables:
+            for row in connection.execute(f'SELECT * FROM "{table}" ORDER BY rowid'):
+                values.extend(
+                    value if isinstance(value, bytes) else str(value).encode("utf-8")
+                    for value in row
+                    if value is not None
+                )
+    return b"\x00".join(values)
+
+
+def _rehash_decision_binding(binding: dict[str, object]) -> bytes:
+    authority = binding["authority"]
+    assert type(authority) is dict
+    binding["authority_sha256"] = hashlib.sha256(
+        canonical_json_bytes(authority)
+    ).hexdigest()
+    if "binding_sha256" in binding:
+        unsigned = {
+            key: value for key, value in binding.items() if key != "binding_sha256"
+        }
+        binding["binding_sha256"] = hashlib.sha256(
+            canonical_json_bytes(unsigned)
+        ).hexdigest()
+    return canonical_json_bytes(binding)
 
 
 def _predecessor_dump(database: Path, task_id: str) -> tuple[tuple[str, tuple], ...]:
@@ -3150,6 +3208,93 @@ def test_predispatch_update_replays_but_changed_fingerprint_is_zero_effect(
     assert _database_dump(database) == before_conflict
 
 
+def test_update_verifier_ignores_same_command_id_outbox_in_another_scope(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "update-cross-scope-command.sqlite"
+    store = SqliteTaskStore(database)
+    core = PersistentTaskCore(store, _Executor())
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    attempt_id = str(created.result["attempt_id"])
+    shared_command_id = "command-update-cross-scope"
+    update, update_grant = _wave2_command(
+        task_id,
+        "task.update",
+        {
+            "attempt_id": attempt_id,
+            "expected_event_head": 0,
+            "instruction": "Scope-local revised instruction.",
+            "constraints": None,
+        },
+        command_id=shared_command_id,
+    )
+    applied = core.execute(update, update_grant, now=NOW)
+    assert applied.ok
+
+    foreign_scope = ScopeRef(
+        "user-2", "project-2", "session-2", Assurance.AUTHENTICATED
+    )
+    foreign_base = _create(tmp_path, identity_suffix="-cross-scope")
+    foreign_raw = foreign_base.envelope.to_dict()
+    foreign_raw.update(
+        {
+            "request_id": "request-create-cross-scope",
+            "command_id": shared_command_id,
+            "scope": foreign_scope.to_dict(),
+            "correlation_id": "correlation-cross-scope",
+            "target_ref": {
+                "kind": "task",
+                "id": f"create:{shared_command_id}",
+            },
+        }
+    )
+    foreign_command = CommandEnvelope.from_dict(foreign_raw)
+    foreign_context = replace(
+        _context(tmp_path),
+        stable_id="project-2",
+        scope=foreign_scope,
+    )
+    foreign_spec = FormalTaskSpec(
+        name=foreign_command.payload["name"],
+        instruction=foreign_command.payload["instruction"],
+        origin=foreign_command.origin,
+        context=foreign_context,
+        executor_id=foreign_command.payload["executor_id"],
+        required_capabilities=tuple(foreign_command.required_capabilities),
+        side_effect_class=foreign_command.payload["side_effect_class"],
+        attributes=tuple(sorted(foreign_command.payload["attributes"].items())),
+    )
+    foreign_created = store.create(foreign_command, foreign_spec, observed_at=NOW)
+    assert foreign_created.ok and foreign_created.result is not None
+    foreign_task_id = str(foreign_created.result["task_id"])
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM outbox WHERE command_id=?",
+            (shared_command_id,),
+        ).fetchone() == (1,)
+    before = _database_dump(database)
+
+    reopened = SqliteTaskStore(database)
+
+    assert reopened.get_task(task_id, _scope()).spec.instruction == (
+        "Scope-local revised instruction."
+    )
+    claimed = [reopened.claim_outbox(f"cross-scope-{index}") for index in range(2)]
+    assert {item.task_id for item in claimed if item is not None} == {
+        task_id,
+        foreign_task_id,
+    }
+    assert _database_dump(database) != before
+
+
 @pytest.mark.parametrize(
     "payload_change",
     [
@@ -3270,7 +3415,15 @@ def test_predispatch_update_rejects_claimed_dispatch_without_effects(
     assert executor.dispatches == []
     assert executor.cancels == []
     assert executor.adjustments == []
-    SqliteTaskStore(database)
+    assert store.release_outbox(claimed, "retry later") is True
+    reopened = SqliteTaskStore(database)
+    replay = PersistentTaskCore(reopened, executor).execute(
+        replace(command, request_id="request-update-claimed-replay"),
+        grant,
+        now=NOW,
+    )
+    assert replay.error == rejected.error
+    assert replay.observed_at == rejected.observed_at
 
 
 @pytest.mark.parametrize(
@@ -3547,6 +3700,296 @@ def test_unimplemented_running_controls_are_durable_unsupported_zero_effects(
     assert replay.error == decision.error
     assert replay.extensions == decision.extensions
     assert SqliteTaskStore(database).get_task(task.task_id, _scope()) == task
+
+
+@pytest.mark.parametrize(
+    ("command_type", "expected_reason"),
+    [
+        ("task.provide_input", "TASK_CONTROL_STATE_CONFLICT"),
+        ("task.update", "TASK_UPDATE_PRECONDITION_STALE"),
+        ("task.adjust", "TASK_ADJUSTMENT_STATE_CONFLICT"),
+        ("task.create_successor", "TASK_SUCCESSOR_PRECONDITION_CONFLICT"),
+    ],
+)
+def test_durable_negative_binding_never_persists_sensitive_command_content(
+    tmp_path: Path,
+    command_type: str,
+    expected_reason: str,
+) -> None:
+    """Removing negative-ledger sanitization must expose the sentinel and fail."""
+
+    database = tmp_path / f"redacted-{command_type}.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    task = store.get_task(str(created.result["task_id"]), _scope())
+    sentinel = f"PRIVATE_{command_type.replace('.', '_').upper()}_7B91C2"
+    payloads: dict[str, dict[str, object]] = {
+        "task.provide_input": {
+            "attempt_id": task.attempt_id,
+            "expected_event_head": task.event_head,
+            "responds_to_event_id": "event-not-current",
+            "text": sentinel,
+        },
+        "task.update": {
+            "attempt_id": task.attempt_id,
+            "expected_event_head": task.event_head + 1,
+            "instruction": sentinel,
+            "constraints": [sentinel],
+        },
+        "task.adjust": {"adjustment": sentinel},
+        "task.create_successor": {
+            "expected_predecessor_revision_number": task.revision_number,
+            "expected_predecessor_event_head": task.event_head,
+            "predecessor_terminal_event_id": "event-not-terminal",
+            "predecessor_outcome": TerminalOutcome.CANCELLED.value,
+            "predecessor_result_sha256": None,
+            "name": "Successor revision",
+            "instruction": sentinel,
+            "constraints": [sentinel],
+            "executor_id": FORMAL_PROJECT_EXECUTOR_ID,
+            "side_effect_class": "project_mutation",
+            "attributes": {
+                "model_identity": "default#0",
+                "model_config_version": "catalog-v1",
+            },
+        },
+    }
+    command, grant = _wave2_command(
+        task.task_id,
+        command_type,
+        payloads[command_type],
+        command_id=f"command-redacted-{command_type}",
+    )
+    context = _context(tmp_path) if command_type == "task.create_successor" else None
+    before = _task_authority_dump(database)
+
+    decision = core.execute(command, grant, context=context, now=NOW)
+
+    assert not decision.ok and decision.error is not None
+    assert decision.error.reason == expected_reason
+    assert _task_authority_dump(database) == before
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT fingerprint, result_json FROM commands WHERE command_id=?",
+            (command.command_id,),
+        ).fetchone()
+    assert row is not None
+    assert sentinel.encode("utf-8") not in row[0]
+    assert sentinel not in row[1]
+    assert sentinel.encode("utf-8") not in _database_authority_bytes(database)
+    assert sentinel not in json.dumps(decision.to_dict())
+
+    reopened_core = PersistentTaskCore(SqliteTaskStore(database), executor)
+    replay = reopened_core.execute(
+        replace(command, request_id=f"request-redacted-replay-{command_type}"),
+        grant,
+        context=context,
+        now=NOW,
+    )
+    assert replay.error == decision.error
+    assert replay.observed_at == decision.observed_at
+    assert _task_authority_dump(database) == before
+
+    changed_payload = command.payload
+    if command_type == "task.provide_input":
+        changed_payload["text"] = f"{sentinel}_CHANGED"
+    elif command_type == "task.update":
+        changed_payload["instruction"] = f"{sentinel}_CHANGED"
+    elif command_type == "task.adjust":
+        changed_payload["adjustment"] = f"{sentinel}_CHANGED"
+    else:
+        changed_payload["instruction"] = f"{sentinel}_CHANGED"
+    changed = CommandEnvelope.from_dict(
+        {
+            **command.to_dict(),
+            "request_id": f"request-redacted-changed-{command_type}",
+            "payload": changed_payload,
+        }
+    )
+    changed_result = reopened_core.execute(
+        changed,
+        grant,
+        context=context,
+        now=NOW,
+    )
+    assert not changed_result.ok and changed_result.error is not None
+    assert changed_result.error.reason == "IDEMPOTENCY_CONFLICT"
+    assert f"{sentinel}_CHANGED".encode("utf-8") not in _database_authority_bytes(
+        database
+    )
+    assert _task_authority_dump(database) == before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "authority_reason",
+        "authority_state",
+        "payload_authority",
+        "binding_type",
+        "version",
+        "digest",
+        "malformed",
+    ],
+)
+def test_durable_negative_binding_tampering_fails_closed_on_reopen(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    store, executor, core, task_id, _attempt_id = _terminal_task(tmp_path)
+    database = store.database_path
+    cancel = _cancel(task_id)
+    decision = core.execute(
+        cancel.envelope,
+        cancel.authorization,
+        now=NOW,
+    )
+    assert not decision.ok and decision.error is not None
+    assert decision.error.reason == "TASK_ALREADY_TERMINAL"
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT fingerprint FROM commands WHERE command_id=?",
+            (cancel.envelope.command_id,),
+        ).fetchone()
+        assert row is not None
+        binding = json.loads(row[0])
+        authority = binding["authority"]
+        if corruption == "authority_reason":
+            authority["reason"] = "TASK_CONTROL_UNSUPPORTED"
+            fingerprint = _rehash_decision_binding(binding)
+        elif corruption == "authority_state":
+            authority["task"]["state"] = FormalTaskState.RUNNING.value
+            fingerprint = _rehash_decision_binding(binding)
+        elif corruption == "payload_authority":
+            authority["payload"]["payload_sha256"] = "0" * 64
+            fingerprint = _rehash_decision_binding(binding)
+        elif corruption == "binding_type":
+            binding["binding_type"] = "live_voice.unknown_binding"
+            fingerprint = canonical_json_bytes(binding)
+        elif corruption == "version":
+            binding["version"] = 2
+            fingerprint = canonical_json_bytes(binding)
+        elif corruption == "digest":
+            binding["command_sha256"] = "A" * 64
+            fingerprint = canonical_json_bytes(binding)
+        else:
+            fingerprint = b'{"malformed":true}'
+        connection.execute(
+            "UPDATE commands SET fingerprint=? WHERE command_id=?",
+            (fingerprint, cancel.envelope.command_id),
+        )
+        connection.commit()
+    before_dump = _database_dump(database)
+    before_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before_dump
+    assert database.read_bytes() == before_bytes
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+
+
+def test_forged_terminal_cancel_decision_over_running_history_fails_closed(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "forged-terminal-cancel.sqlite"
+    store = SqliteTaskStore(database)
+    executor = _Executor()
+    core = PersistentTaskCore(store, executor)
+    invocation = _create(tmp_path)
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+    )
+    assert created.ok and created.result is not None
+    dispatch = store.claim_outbox("forged-terminal-cancel")
+    assert dispatch is not None
+    store.complete_outbox(
+        dispatch,
+        executor_ref=f"legacy:{dispatch.attempt_id}",
+        observations=_observations(dispatch),
+    )
+    running = store.get_task(dispatch.task_id, _scope())
+    assert running.state is FormalTaskState.RUNNING
+    pause, pause_grant = _wave2_command(
+        running.task_id,
+        "task.pause",
+        {
+            "attempt_id": running.attempt_id,
+            "expected_event_head": running.event_head,
+            "reason": None,
+        },
+        command_id="command-forged-terminal-cancel",
+    )
+    unsupported = core.execute(pause, pause_grant, now=NOW)
+    assert not unsupported.ok and unsupported.error is not None
+    assert unsupported.error.reason == "TASK_CONTROL_UNSUPPORTED"
+    cancel, _cancel_grant = _wave2_command(
+        running.task_id,
+        "task.cancel",
+        {},
+        command_id=pause.command_id,
+    )
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT fingerprint, result_json FROM commands WHERE command_id=?",
+            (pause.command_id,),
+        ).fetchone()
+        assert row is not None
+        binding = json.loads(row[0])
+        result = json.loads(row[1])
+        binding["command_type"] = "task.cancel"
+        binding["command_sha256"] = hashlib.sha256(
+            cancel.fingerprint()
+        ).hexdigest()
+        binding["replay_sha256"] = binding["command_sha256"]
+        authority = binding["authority"]
+        authority["reason"] = "TASK_ALREADY_TERMINAL"
+        authority["payload"] = SqliteTaskStore._decision_payload_authority(cancel)
+        result["error"] = ContractViolation(
+            ErrorCode.CONFLICT,
+            "TASK_ALREADY_TERMINAL",
+            "terminal tasks cannot accept cancellation",
+        ).error.to_dict()
+        result["extensions"]["live_voice.command"]["disposition"] = "conflict"
+        connection.execute(
+            """UPDATE commands SET command_type=?, fingerprint=?, result_json=?
+               WHERE command_id=?""",
+            (
+                "task.cancel",
+                _rehash_decision_binding(binding),
+                json.dumps(result, sort_keys=True),
+                pause.command_id,
+            ),
+        )
+        connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before
+    assert executor.cancels == []
+    assert executor.adjustments == []
 
 
 def test_provide_input_requires_exact_current_decision_event_then_is_unsupported(
@@ -4077,6 +4520,74 @@ def test_successor_ineligible_or_stale_predecessor_has_zero_effects(
     SqliteTaskStore(database)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("predecessor_outcome", "not-a-terminal-outcome"),
+        ("predecessor_outcome", 1),
+        ("expected_predecessor_revision_number", True),
+        ("expected_predecessor_revision_number", 0),
+        ("expected_predecessor_event_head", True),
+        ("expected_predecessor_event_head", -1),
+        ("predecessor_terminal_event_id", ""),
+        ("predecessor_result_sha256", 42),
+        ("predecessor_result_sha256", "A" * 64),
+        ("name", ""),
+        ("instruction", ""),
+        ("constraints", "not-an-array"),
+        ("executor_id", ""),
+        ("side_effect_class", "not-a-side-effect-class"),
+        ("attributes", "not-an-object"),
+    ],
+)
+def test_direct_store_rejects_malformed_successor_before_transaction_or_ledger(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    """Removing Store-local shape validation must admit a forged wire object."""
+
+    database, store, executor, _core, predecessor, event, digest = (
+        _successor_fixture(tmp_path, f"successor-malformed-{field}-{type(value).__name__}.sqlite")
+    )
+    command, _grant_value = _successor_command(
+        predecessor,
+        event,
+        result_sha256=digest,
+        command_id=f"command-successor-malformed-{field}-{type(value).__name__}",
+    )
+    forged = _forge_command_payload_scalar(command, field, value)
+    spec = FormalTaskSpec(
+        name=command.payload["name"],
+        instruction=command.payload["instruction"],
+        origin=command.origin,
+        context=_context(tmp_path),
+        executor_id=command.payload["executor_id"],
+        required_capabilities=tuple(command.required_capabilities),
+        side_effect_class=command.payload["side_effect_class"],
+        constraints=tuple(command.payload["constraints"]),
+        attributes=tuple(sorted(command.payload["attributes"].items())),
+    )
+    before_dump = _database_dump(database)
+    before_bytes = database.read_bytes()
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        store.create_successor(forged, spec, observed_at=NOW)
+
+    assert rejected.value.code is ErrorCode.INVALID_ARGUMENT
+    assert rejected.value.reason == "TASK_SUCCESSOR_INVALID"
+    assert _database_dump(database) == before_dump
+    assert database.read_bytes() == before_bytes
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM commands WHERE command_id=?",
+            (forged.command_id,),
+        ).fetchone() == (0,)
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+
+
 def test_unknown_successor_predecessor_conflict_is_durable_and_replays_after_reopen(
     tmp_path: Path,
 ) -> None:
@@ -4180,6 +4691,91 @@ def test_completed_successor_predecessor_without_result_is_durable_conflict(
     assert executor.cancels == []
     assert executor.adjustments == []
     SqliteTaskStore(database)
+
+
+def test_forged_successor_conflict_over_exact_eligible_history_fails_closed(
+    tmp_path: Path,
+) -> None:
+    database, store, executor, core, predecessor, event, digest = _successor_fixture(
+        tmp_path,
+        "successor-forged-conflict.sqlite",
+        outcome=TerminalOutcome.COMPLETED,
+    )
+    assert digest is not None
+    command_id = "command-successor-forged-conflict"
+    wrong, grant = _successor_command(
+        predecessor,
+        event,
+        result_sha256="0" * 64,
+        command_id=command_id,
+    )
+    conflict = core.execute(wrong, grant, context=_context(tmp_path), now=NOW)
+    assert not conflict.ok and conflict.error is not None
+    assert conflict.error.reason == "TASK_SUCCESSOR_RESULT_CONFLICT"
+    exact, _exact_grant = _successor_command(
+        predecessor,
+        event,
+        result_sha256=digest,
+        command_id=command_id,
+    )
+    exact_spec = FormalTaskSpec(
+        name=exact.payload["name"],
+        instruction=exact.payload["instruction"],
+        origin=exact.origin,
+        context=_context(tmp_path),
+        executor_id=exact.payload["executor_id"],
+        required_capabilities=tuple(exact.required_capabilities),
+        side_effect_class=exact.payload["side_effect_class"],
+        constraints=tuple(exact.payload["constraints"]),
+        attributes=tuple(sorted(exact.payload["attributes"].items())),
+    )
+    exact_replay_fingerprint = canonical_json_bytes(
+        {
+            "command": json.loads(exact.fingerprint()),
+            "resolved_spec": exact_spec.to_dict(),
+        }
+    )
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT fingerprint, result_json FROM commands WHERE command_id=?",
+            (command_id,),
+        ).fetchone()
+        assert row is not None
+        binding = json.loads(row[0])
+        result = json.loads(row[1])
+        binding["command_sha256"] = hashlib.sha256(
+            exact.fingerprint()
+        ).hexdigest()
+        binding["replay_sha256"] = hashlib.sha256(
+            exact_replay_fingerprint
+        ).hexdigest()
+        authority = binding["authority"]
+        authority["reason"] = "TASK_SUCCESSOR_PRECONDITION_CONFLICT"
+        authority["payload"] = SqliteTaskStore._decision_payload_authority(exact)
+        result["error"] = ContractViolation(
+            ErrorCode.CONFLICT,
+            "TASK_SUCCESSOR_PRECONDITION_CONFLICT",
+            "successor requires exact eligible immutable predecessor truth",
+        ).error.to_dict()
+        connection.execute(
+            "UPDATE commands SET fingerprint=?, result_json=? WHERE command_id=?",
+            (
+                _rehash_decision_binding(binding),
+                json.dumps(result, sort_keys=True),
+                command_id,
+            ),
+        )
+        connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(database)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(database) == before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
 
 
 def test_successor_rejects_corrupt_predecessor_lineage_with_zero_effects(
@@ -5605,38 +6201,93 @@ def test_negative_retry_ledger_is_not_misreported_as_an_applied_replay(
     assert executor.retry_readiness_calls == []
 
 
+def _rewrite_retry_as_completed_legacy_fixture(
+    database: Path,
+    *,
+    predecessor_attempt_id: str,
+    retry_attempt_id: str,
+    legacy_command: CommandEnvelope,
+    preserve_current_disposition: bool,
+) -> ResultEnvelope:
+    """Rewrite a valid cancelled retry into the exact pre-P3-2 completed shape."""
+
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        executor_rows = connection.execute(
+            "SELECT source_event_id, canonical FROM executor_events WHERE attempt_id=?",
+            (predecessor_attempt_id,),
+        ).fetchall()
+        for row in executor_rows:
+            canonical = json.loads(row["canonical"])
+            if canonical["attempt_state"] == FormalAttemptState.TERMINAL.value:
+                canonical["attempt_outcome"] = TerminalOutcome.COMPLETED.value
+                connection.execute(
+                    "UPDATE executor_events SET canonical=? WHERE source_event_id=?",
+                    (canonical_json_bytes(canonical), row["source_event_id"]),
+                )
+        connection.execute(
+            "UPDATE attempts SET outcome=? WHERE attempt_id=?",
+            (TerminalOutcome.COMPLETED.value, predecessor_attempt_id),
+        )
+        connection.execute(
+            """UPDATE task_events SET outcome=?
+               WHERE attempt_id=? AND event_type IN ('attempt.terminal', 'task.terminal')""",
+            (TerminalOutcome.COMPLETED.value, predecessor_attempt_id),
+        )
+        boundary = connection.execute(
+            """SELECT details_json FROM task_events
+               WHERE attempt_id=? AND event_type='task.retry_accepted'""",
+            (retry_attempt_id,),
+        ).fetchone()
+        assert boundary is not None
+        details = json.loads(boundary["details_json"])
+        details["previous_outcome"] = TerminalOutcome.COMPLETED.value
+        connection.execute(
+            """UPDATE task_events SET details_json=?
+               WHERE attempt_id=? AND event_type='task.retry_accepted'""",
+            (
+                canonical_json_bytes(details).decode("utf-8"),
+                retry_attempt_id,
+            ),
+        )
+        command_row = connection.execute(
+            "SELECT result_json FROM commands WHERE command_id=?",
+            (legacy_command.command_id,),
+        ).fetchone()
+        assert command_row is not None
+        result_payload = json.loads(command_row["result_json"])
+        if not preserve_current_disposition:
+            result_payload["extensions"] = {
+                "live_voice.store": {"durability": "sqlite_outbox"}
+            }
+        result_bytes = canonical_json_bytes(result_payload)
+        connection.execute(
+            """UPDATE commands SET fingerprint=?, result_json=?
+               WHERE command_id=?""",
+            (
+                legacy_command.fingerprint(),
+                result_bytes.decode("utf-8"),
+                legacy_command.command_id,
+            ),
+        )
+        connection.commit()
+    return ResultEnvelope.from_dict(json.loads(result_bytes))
+
+
 def test_historical_completed_retry_replay_survives_reopen_without_new_admission(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, executor, core, task_id, attempt_a = _terminal_task(
-        tmp_path, outcome=TerminalOutcome.COMPLETED
-    )
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
     retry_b_command_id = "command-retry-2"
     retry_b, grant_b = _retry(
         task_id,
         attempt_a,
-        TerminalOutcome.COMPLETED,
+        TerminalOutcome.CANCELLED,
         2,
         command_id=retry_b_command_id,
     )
     context_b = replace(_context(tmp_path), revision_value="clean-revision-b")
-    historical_authority = TaskRetryAuthoritySnapshot(
-        task=store.get_task(task_id, _scope()),
-        attempt=store.get_attempt(attempt_a),
-        precondition=TaskRetryPrecondition(
-            previous_attempt_id=attempt_a,
-            previous_outcome=TerminalOutcome.COMPLETED,
-            attempt_number=2,
-        ),
-    )
-    with monkeypatch.context() as historical_policy:
-        historical_policy.setattr(
-            store,
-            "_current_retry_authority_from_state",
-            lambda connection, *, task, attempt: historical_authority,
-        )
-        result_b = core.execute(retry_b, grant_b, context=context_b, now=NOW)
+    result_b = core.execute(retry_b, grant_b, context=context_b, now=NOW)
     assert result_b.ok and result_b.result is not None
     item_b = store.claim_outbox("replay-b")
     assert item_b is not None
@@ -5650,6 +6301,31 @@ def test_historical_completed_retry_replay_survives_reopen_without_new_admission
     result_c = core.execute(retry_c, grant_c, context=context_c, now=NOW)
     assert result_c.ok
     database = store.database_path
+    legacy_retry_b, legacy_grant_b = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.COMPLETED,
+        2,
+        command_id=retry_b_command_id,
+    )
+    legacy_result_b = _rewrite_retry_as_completed_legacy_fixture(
+        database,
+        predecessor_attempt_id=attempt_a,
+        retry_attempt_id=item_b.attempt_id,
+        legacy_command=legacy_retry_b,
+        preserve_current_disposition=False,
+    )
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT fingerprint, result_json FROM commands WHERE command_id=?",
+            (retry_b_command_id,),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == legacy_retry_b.fingerprint()
+    assert json.loads(row[1])["extensions"] == {
+        "live_voice.store": {"durability": "sqlite_outbox"}
+    }
+    assert b"live_voice.command" not in row[1].encode("utf-8")
     product_request = _retry_product_request_fingerprint(
         command_id=retry_b_command_id,
         task_id=task_id,
@@ -5676,7 +6352,7 @@ def test_historical_completed_retry_replay_survives_reopen_without_new_admission
         "previous_outcome": TerminalOutcome.COMPLETED.value,
         "attempt_number": 2,
     }
-    assert replay.original_result == result_b
+    assert replay.original_result == legacy_result_b
     assert replay.precondition.previous_attempt_id == attempt_a
     assert replay.precondition.attempt_number == 2
     assert replay.resulting_spec.context.revision_value == "clean-revision-b"
@@ -5690,12 +6366,12 @@ def test_historical_completed_retry_replay_survives_reopen_without_new_admission
     assert restarted_executor.cancels == []
 
     exact_replay = restarted_core.execute(
-        retry_b,
-        grant_b,
+        legacy_retry_b,
+        legacy_grant_b,
         context=None,
         now=NOW,
     )
-    assert exact_replay == result_b
+    assert exact_replay == legacy_result_b
     assert _database_dump(database) == before_dump
 
     assert (
@@ -5728,6 +6404,50 @@ def test_historical_completed_retry_replay_survives_reopen_without_new_admission
     assert restarted_executor.retry_readiness_calls == []
     assert restarted_executor.dispatches == []
     assert restarted_executor.cancels == []
+
+
+def test_current_disposition_cannot_grandfather_a_completed_retry(
+    tmp_path: Path,
+) -> None:
+    store, executor, core, task_id, attempt_a = _terminal_task(tmp_path)
+    retry_b, grant_b = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.CANCELLED,
+        2,
+        command_id="command-current-completed-retry",
+    )
+    result_b = core.execute(
+        retry_b,
+        grant_b,
+        context=replace(_context(tmp_path), revision_value="clean-revision-b"),
+        now=NOW,
+    )
+    assert result_b.ok and result_b.result is not None
+    retry_attempt_id = str(result_b.result["attempt_id"])
+    completed_retry, _completed_grant = _retry(
+        task_id,
+        attempt_a,
+        TerminalOutcome.COMPLETED,
+        2,
+        command_id=retry_b.command_id,
+    )
+    _rewrite_retry_as_completed_legacy_fixture(
+        store.database_path,
+        predecessor_attempt_id=attempt_a,
+        retry_attempt_id=retry_attempt_id,
+        legacy_command=completed_retry,
+        preserve_current_disposition=True,
+    )
+    before = _database_dump(store.database_path)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        SqliteTaskStore(store.database_path)
+
+    assert rejected.value.reason == "TASK_STORE_CORRUPT"
+    assert _database_dump(store.database_path) == before
+    assert executor.dispatches == []
+    assert executor.cancels == []
 
 
 @pytest.mark.parametrize(
