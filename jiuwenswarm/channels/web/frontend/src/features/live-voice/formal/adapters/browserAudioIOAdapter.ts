@@ -2266,40 +2266,69 @@ export class BrowserAudioIOAdapter {
     if (scheduledAt === null) return;
     let estimatedStart: number | null = null;
     let uncertainty: number | null = null;
+    let timestamp: Readonly<{ contextTime: number; performanceTime: number }> | undefined;
     try {
-      const timestamp = context.getOutputTimestamp?.();
-      if (
-        timestamp !== undefined
-        && Number.isFinite(timestamp.contextTime)
-        && timestamp.contextTime >= 0
-        && Number.isFinite(timestamp.performanceTime)
-        && timestamp.performanceTime >= 0
-      ) {
-        estimatedStart = timestamp.performanceTime + (startAt - timestamp.contextTime) * 1_000;
-      } else if (Number.isFinite(context.currentTime) && context.currentTime >= 0) {
-        estimatedStart = scheduledAt + Math.max(0, startAt - context.currentTime) * 1_000;
-      }
-      const quantumMs = 128_000 / context.sampleRate;
-      const latencyMs = [context.outputLatency, context.baseLatency]
-        .filter((value): value is number => Number.isFinite(value) && Number(value) >= 0)
-        .map(value => value * 1_000);
-      if (estimatedStart !== null && Number.isFinite(estimatedStart) && estimatedStart >= 0) {
-        uncertainty = Math.max(quantumMs, ...latencyMs);
-      } else {
-        estimatedStart = null;
+      timestamp = context.getOutputTimestamp?.();
+    } catch {
+      timestamp = undefined;
+    }
+    let timestampContextTime: number | null = null;
+    let timestampPerformanceTime: number | null = null;
+    try {
+      if (timestamp !== undefined) {
+        const contextTime = timestamp.contextTime;
+        const performanceTime = timestamp.performanceTime;
+        if (
+          Number.isFinite(contextTime)
+          && contextTime >= 0
+          && Number.isFinite(performanceTime)
+          && performanceTime >= 0
+        ) {
+          timestampContextTime = contextTime;
+          timestampPerformanceTime = performanceTime;
+        }
       }
     } catch {
+      timestampContextTime = null;
+      timestampPerformanceTime = null;
+    }
+    if (timestampContextTime !== null && timestampPerformanceTime !== null) {
+      estimatedStart = timestampPerformanceTime + (startAt - timestampContextTime) * 1_000;
+    } else {
       try {
         const currentTime = context.currentTime;
-        const sampleRate = context.sampleRate;
-        if (Number.isFinite(currentTime) && currentTime >= 0 && Number.isFinite(sampleRate) && sampleRate > 0) {
+        if (Number.isFinite(currentTime) && currentTime >= 0) {
           estimatedStart = scheduledAt + Math.max(0, startAt - currentTime) * 1_000;
-          uncertainty = 128_000 / sampleRate;
         }
       } catch {
         estimatedStart = null;
-        uncertainty = null;
       }
+    }
+    let quantumMs: number | null = null;
+    try {
+      const sampleRate = context.sampleRate;
+      if (Number.isFinite(sampleRate) && sampleRate > 0) quantumMs = 128_000 / sampleRate;
+    } catch {
+      quantumMs = null;
+    }
+    const latencyMs: number[] = [];
+    for (const key of ['outputLatency', 'baseLatency'] as const) {
+      try {
+        const value = context[key];
+        if (Number.isFinite(value) && Number(value) >= 0) latencyMs.push(Number(value) * 1_000);
+      } catch {
+        // One optional latency getter cannot hide the other timing evidence.
+      }
+    }
+    if (
+      estimatedStart !== null
+      && Number.isFinite(estimatedStart)
+      && estimatedStart >= 0
+      && quantumMs !== null
+    ) {
+      uncertainty = Math.max(quantumMs, ...latencyMs);
+    } else {
+      estimatedStart = null;
     }
     try {
       observer(Object.freeze({

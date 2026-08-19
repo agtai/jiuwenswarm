@@ -84,6 +84,112 @@ test('only a fresh foreground PresentationUnit can donate B3 response identity',
     assert.equal(productLatencyForegroundPresentation(ignored), null);
   }
 });
+
+test('panel real latency seams bind unified response before B3 and cross B3 before local effects', async () => {
+  const panelModule = await import('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs');
+  assert.equal(typeof panelModule.bindProductLatencyUnifiedResult, 'function');
+  assert.equal(typeof panelModule.runProductLatencyPresentationBoundary, 'function');
+  const expected = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-expected', response_generation: 2 });
+  const events = [];
+  let bound = null;
+  const owner = {
+    bindUnifiedSubmitLatency(response, taskId) {
+      events.push('bind');
+      bound = { response, taskId };
+      return true;
+    },
+    observeForegroundPresentationLatency(response, taskId) {
+      const matches = bound !== null
+        && response.interaction_id === bound.response.interaction_id
+        && response.response_id === bound.response.response_id
+        && response.response_generation === bound.response.response_generation
+        && taskId === bound.taskId;
+      if (matches) events.push('B3');
+      return matches;
+    },
+  };
+  const submitResult = Object.freeze({
+    request_id: 'unified-request-1',
+    ok: true,
+    error: null,
+    result: Object.freeze({ status: 'authoritative_presentation_accepted', response: expected, task_id: 'task-1' }),
+  });
+  assert.equal(panelModule.bindProductLatencyUnifiedResult(owner, submitResult), true);
+  const foreground = Object.freeze({
+    kind: 'presentation',
+    response: expected,
+    replayed: false,
+    task_notification: false,
+    adjustment_notification: false,
+  });
+  const concurrent = Object.freeze({ ...foreground, response: Object.freeze({ ...expected, response_id: 'response-foreign' }) });
+  let retainedTaskId = 'task-1';
+  const foreignAccepted = panelModule.runProductLatencyPresentationBoundary(
+    owner,
+    concurrent,
+    retainedTaskId,
+    () => events.push('foreign-effect'),
+  );
+  if (foreignAccepted) retainedTaskId = null;
+  assert.equal(foreignAccepted, false);
+  assert.equal(retainedTaskId, 'task-1');
+  const recovered = panelModule.runProductLatencyPresentationBoundary(
+    owner,
+    foreground,
+    retainedTaskId,
+    () => events.push('recovered-effect'),
+  );
+  if (recovered) retainedTaskId = null;
+  assert.equal(recovered, true);
+  assert.equal(retainedTaskId, null);
+  assert.deepEqual(events, ['bind', 'foreign-effect', 'B3', 'recovered-effect']);
+});
+
+test('panel latency profiles retain dialogue and foreground Task create/status/cancel without notification donation', async () => {
+  for (const profile of ['dialogue_no_tool', 'task_create', 'task_status', 'task_cancel']) {
+    const storage = new Map();
+    let random = 0;
+    const probe = createProductLatencyProbe({
+      enabled: true,
+      browser: {
+        location: { search: `?lv_latency_run=run-panel&lv_latency_profile=${profile}&lv_latency_case=foreground` },
+        sessionStorage: {
+          getItem: key => storage.get(key) ?? null,
+          setItem: (key, value) => storage.set(key, value),
+        },
+        performance: { now: () => 1 },
+        crypto: { randomUUID: () => `panel-id-${++random}` },
+      },
+      request() {},
+    });
+    assert.notEqual(probe, null);
+    const round = probe.beginRound({ correlation_id: 'correlation-1', interaction_id: 'interaction-1' });
+    assert.equal(round.context.profile_id, profile);
+  }
+
+  const panelModule = await import('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs');
+  let observations = 0;
+  const owner = {
+    observeForegroundPresentationLatency() {
+      observations += 1;
+      return true;
+    },
+  };
+  const response = Object.freeze({ interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 1 });
+  const foreground = Object.freeze({ kind: 'presentation', response, replayed: false, task_notification: false, adjustment_notification: false });
+  for (const taskId of [null, 'task-create-1', 'task-status-1', 'task-cancel-1']) {
+    panelModule.runProductLatencyPresentationBoundary(owner, foreground, taskId, () => undefined);
+  }
+  for (const ignored of [
+    Object.freeze({ ...foreground, replayed: true }),
+    Object.freeze({ ...foreground, task_notification: true }),
+    Object.freeze({ ...foreground, adjustment_notification: true }),
+    Object.freeze({ kind: 'continue' }),
+  ]) {
+    panelModule.runProductLatencyPresentationBoundary(owner, ignored, 'task-ignored', () => undefined);
+  }
+  assert.equal(observations, 4);
+});
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,

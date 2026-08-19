@@ -352,6 +352,7 @@ test('first schedule fallback never estimates before scheduling when currentTime
     const context = fake.contexts[0];
     if (timestampThrows) {
       context.getOutputTimestamp = () => { throw new Error('timestamp unavailable'); };
+      context.baseLatency = 0.025;
     }
     context.onBufferSourceStart = startAt => {
       context.currentTime = startAt + 1;
@@ -361,6 +362,37 @@ test('first schedule fallback never estimates before scheduling when currentTime
     assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
     assert.equal(timings[0].scheduled_at_monotonic_ms, 100);
     assert.equal(timings[0].estimated_start_monotonic_ms, 100);
+    assert.equal(timings[0].uncertainty_ms, timestampThrows ? 25 : 128_000 / 48_000);
+  }
+});
+
+test('throwing timestamp fallback isolates timestamp and latency getters while retaining valid latency', async () => {
+  for (const accessorThrows of [false, true]) {
+    const fake = fakeEnvironment();
+    const timings = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      environment: fake.environment,
+      monotonicNowMs: () => 100,
+      observer: { onPlayoutTiming: event => timings.push(event) },
+    });
+    await adapter.unlockPlayout();
+    const context = fake.contexts[0];
+    context.getOutputTimestamp = accessorThrows
+      ? () => Object.defineProperties({}, {
+          contextTime: { get() { throw new Error('timestamp context unavailable'); } },
+          performanceTime: { get() { throw new Error('timestamp performance unavailable'); } },
+        })
+      : () => { throw new Error('timestamp unavailable'); };
+    Object.defineProperty(context, 'outputLatency', {
+      get() { throw new Error('output latency unavailable'); },
+    });
+    context.baseLatency = 0.03;
+    adapter.beginPlayout(firstResponse);
+
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    assert.equal(timings[0].estimated_start_monotonic_ms, 1_100);
+    assert.equal(timings[0].uncertainty_ms, 30);
   }
 });
 

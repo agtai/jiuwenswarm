@@ -104,9 +104,34 @@ interface OwnedLatencyRound {
   turnId: string | null;
   response: Readonly<AudioResponseRef> | null;
   taskId: string | null;
-  successorReady: boolean;
-  playoutAckReceived: boolean;
+  successorRequested: boolean;
+  successorRound: OwnedLatencyRound | null;
+  readonly completionJoin: ProductLatencyCompletionJoin;
   finished: boolean;
+}
+
+export class ProductLatencyCompletionJoin {
+  #successorReady = false;
+  #playoutAckReceived = false;
+  #settled = false;
+
+  observeSuccessorReady(): boolean {
+    if (this.#settled) return false;
+    this.#successorReady = true;
+    return this.#settleIfComplete();
+  }
+
+  observePlayoutAck(): boolean {
+    if (this.#settled) return false;
+    this.#playoutAckReceived = true;
+    return this.#settleIfComplete();
+  }
+
+  #settleIfComplete(): boolean {
+    if (!this.#successorReady || !this.#playoutAckReceived) return false;
+    this.#settled = true;
+    return true;
+  }
 }
 
 interface ProductP1MediaCloseBinding {
@@ -419,7 +444,7 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  observeForegroundPresentationLatency(response: Readonly<AudioResponseRef>, taskId: string | null = null): boolean {
+  bindUnifiedSubmitLatency(response: Readonly<AudioResponseRef>, taskId: string | null = null): boolean {
     const owned = this.#responseLatencyRound;
     if (owned === null || owned.finished) return false;
     try {
@@ -431,23 +456,44 @@ export class ProductP1VoiceRouteOwner {
       if (!Number.isSafeInteger(normalized.response_generation) || normalized.response_generation < 0) return false;
       if (normalized.interaction_id !== this.#interactionId) return false;
       const normalizedTaskId = taskId === null ? null : requiredText(taskId, 'task_id');
+      if (owned.response !== null) {
+        return owned.response.interaction_id === normalized.interaction_id
+          && owned.response.response_id === normalized.response_id
+          && owned.response.response_generation === normalized.response_generation
+          && owned.taskId === normalizedTaskId;
+      }
+      owned.response = normalized;
+      owned.taskId = normalizedTaskId;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  observeForegroundPresentationLatency(response: Readonly<AudioResponseRef>, taskId: string | null = null): boolean {
+    const owned = this.#responseLatencyRound;
+    if (owned === null || owned.finished || owned.response === null) return false;
+    try {
+      const normalized = Object.freeze({
+        interaction_id: requiredText(response.interaction_id, 'response.interaction_id'),
+        response_id: requiredText(response.response_id, 'response.response_id'),
+        response_generation: response.response_generation,
+      });
+      if (!Number.isSafeInteger(normalized.response_generation) || normalized.response_generation < 0) return false;
+      if (normalized.interaction_id !== this.#interactionId) return false;
+      const normalizedTaskId = taskId === null ? null : requiredText(taskId, 'task_id');
       if (
-        owned.response !== null
-        && (owned.response.interaction_id !== normalized.interaction_id
+        owned.response.interaction_id !== normalized.interaction_id
           || owned.response.response_id !== normalized.response_id
-          || owned.response.response_generation !== normalized.response_generation)
+          || owned.response.response_generation !== normalized.response_generation
       ) return false;
-      if (owned.taskId !== null && owned.taskId !== normalizedTaskId) return false;
+      if (owned.taskId !== normalizedTaskId) return false;
       const marked = this.#markLatency(owned, 'browser.presentation_received', {
         response_id: normalized.response_id,
         response_generation: normalized.response_generation,
         ...(normalizedTaskId === null ? {} : { task_id: normalizedTaskId }),
       });
-      if (marked || owned.response !== null) {
-        owned.response = normalized;
-        owned.taskId = normalizedTaskId;
-        return true;
-      }
+      if (marked) return true;
     } catch {
       // Presentation diagnostics never own the product presentation.
     }
@@ -639,6 +685,7 @@ export class ProductP1VoiceRouteOwner {
       if (!route.active) throw new Error(route.reason_id);
       ownedRoute = route;
       this.#route = route;
+      this.#markCaptureLatencyAttached(latencyRound);
       this.#speech = new GatewayBatchSpeechClient({
         enabled: true,
         transport: {
@@ -652,7 +699,7 @@ export class ProductP1VoiceRouteOwner {
         },
       });
       await this.#awaitCaptureReadiness(route, operationGeneration);
-      this.#markCaptureLatencyReady(latencyRound);
+      this.#markCaptureLatencyFirstAck(latencyRound);
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
       this.#mediaTerminalFailure = null;
@@ -767,19 +814,18 @@ export class ProductP1VoiceRouteOwner {
       await this.#audio.stopCapture('formal_recognition_requested');
       this.#markLatency(latencyRound, 'browser.capture_stopped');
       this.#requireCurrent(operationGeneration);
-      this.#drainCaptureFrames();
+      this.#drainCaptureFrames(latencyRound);
       const deadline = Date.now() + ROUTE_DRAIN_TIMEOUT_MS;
       let pending = route.leaf.flush();
       while ((this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) && !route.leaf.closed && Date.now() < deadline) {
         await waitTurn();
         this.#requireCurrent(operationGeneration);
-        this.#drainCaptureFrames();
+        this.#drainCaptureFrames(latencyRound);
         pending = route.leaf.flush();
       }
       if (this.#mediaSentFrames !== this.#frames.length || pending.pending_frames !== 0) {
         throw new Error('dedicated media route did not acknowledge the complete capture');
       }
-      this.#markLatency(latencyRound, 'browser.uplink_last_frame_sent');
       this.#captureFramesAcked = this.#mediaSentFrames;
       this.#markLatency(latencyRound, 'browser.uplink_last_ack_received');
       await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
@@ -918,14 +964,19 @@ export class ProductP1VoiceRouteOwner {
       if (result.downlink !== null) {
         if (captureDuringPlayout) {
           this.#markLatency(latencyRound, 'browser.successor_capture_requested');
-          await this.#startConcurrentCapture(operationGeneration);
+          if (latencyRound !== null) latencyRound.successorRequested = true;
+          const successorRound = await this.#startConcurrentCapture(operationGeneration, latencyRound);
           this.#requireCurrent(operationGeneration);
+          if (latencyRound !== null && successorRound === null) {
+            this.#finishLatencyRound(latencyRound, 'unknown');
+          }
         }
         downlinkRoute = this.#openDownlinkRoute(
           result.downlink,
           result.provider,
           result.response,
           result.unit_id,
+          latencyRound,
           frame => {
             if (pendingRef === null) throw new Error('downlink arrived before playout ownership');
             this.#acceptDownlinkFrame(pendingRef, frame, result.provider);
@@ -1104,17 +1155,21 @@ export class ProductP1VoiceRouteOwner {
     return retained;
   }
 
-  async #startConcurrentCapture(operationGeneration: number): Promise<void> {
+  async #startConcurrentCapture(
+    operationGeneration: number,
+    requestedBy: OwnedLatencyRound | null = null,
+  ): Promise<OwnedLatencyRound | null> {
     this.#captureStartupAudioReady = false;
     this.#captureStartupFailure = null;
     this.#mediaTerminalFailure = null;
     this.#captureReadinessPending = true;
     try {
-      await this.#startConcurrentCaptureOwned(operationGeneration);
+      const latencyRound = await this.#startConcurrentCaptureOwned(operationGeneration, requestedBy);
       this.#captureStartupAudioReady = false;
       this.#captureStartupFailure = null;
       this.#mediaTerminalFailure = null;
       this.#captureReadinessPending = false;
+      return latencyRound;
     } catch (error) {
       const failure = this.#captureStartupFailure ?? this.#mediaTerminalFailure ?? error;
       this.#captureStartupAudioReady = false;
@@ -1125,7 +1180,10 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  async #startConcurrentCaptureOwned(operationGeneration: number): Promise<void> {
+  async #startConcurrentCaptureOwned(
+    operationGeneration: number,
+    requestedBy: OwnedLatencyRound | null,
+  ): Promise<OwnedLatencyRound | null> {
     const sessionId = requiredText(this.#sessionId, 'session_id');
     const interactionId = requiredText(this.#interactionId, 'interaction_id');
     const correlationId = requiredText(this.#correlationId, 'correlation_id');
@@ -1149,6 +1207,14 @@ export class ProductP1VoiceRouteOwner {
     this.#bargeInEndOfTurnDelivered = false;
     this.#stopAndRecognizePromise = null;
     const latencyRound = this.#beginCaptureLatencyRound();
+    if (
+      requestedBy !== null
+      && !requestedBy.finished
+      && requestedBy.successorRequested
+      && requestedBy.successorRound === null
+    ) {
+      requestedBy.successorRound = latencyRound;
+    }
     const metadata = await this.#audio.startCapture(
       this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
     );
@@ -1257,6 +1323,7 @@ export class ProductP1VoiceRouteOwner {
     if (!route.active) throw new Error(route.reason_id);
     ownedRoute = route;
     this.#route = route;
+    this.#markCaptureLatencyAttached(latencyRound);
     this.#speech = new GatewayBatchSpeechClient({
       enabled: true,
       transport: {
@@ -1271,8 +1338,9 @@ export class ProductP1VoiceRouteOwner {
     });
     await this.#awaitCaptureReadiness(route, operationGeneration);
     this.#requireCurrent(operationGeneration);
-    this.#markCaptureLatencyReady(latencyRound);
+    this.#markCaptureLatencyFirstAck(latencyRound);
     this.#onConcurrentCaptureStarted?.();
+    return latencyRound;
   }
 
   async #rotateConcurrentCapture(operationGeneration: number): Promise<void> {
@@ -1373,6 +1441,7 @@ export class ProductP1VoiceRouteOwner {
     provider: Readonly<GatewaySpeechProvider>,
     response: Readonly<AudioResponseRef>,
     unitId: string,
+    latencyRound: OwnedLatencyRound | null,
     onFrame: (frame: Readonly<MediaAudioFrame>) => void,
     onTerminal: (event: Readonly<DedicatedMediaTerminalEvent>) => void
   ): ActiveBrowserDedicatedMediaRoute {
@@ -1403,6 +1472,7 @@ export class ProductP1VoiceRouteOwner {
     // Provider is checked by the Speech client and carried into every browser
     // audio chunk; reading it here keeps the downlink composition explicit.
     requiredText(provider.provider_id, 'provider.provider_id');
+    this.#markLatency(latencyRound, 'browser.downlink_attach_started');
     const route = createBrowserDedicatedMediaRoute({
       enabled: true,
       expected_origin: this.#origin,
@@ -1419,6 +1489,7 @@ export class ProductP1VoiceRouteOwner {
       defer_downlink_ack: true,
     });
     if (!route.active) throw new Error(route.reason_id);
+    this.#markLatency(latencyRound, 'browser.downlink_attached');
     return route;
   }
 
@@ -1545,8 +1616,9 @@ export class ProductP1VoiceRouteOwner {
     )
       throw new Error('media playout receipt binding mismatch');
     this.#markLatency(pending.latencyRound, 'browser.playout_ack_received');
-    if (pending.latencyRound !== null) pending.latencyRound.playoutAckReceived = true;
-    this.#settleCompletedLatencyRound(pending.latencyRound);
+    if (pending.latencyRound?.completionJoin.observePlayoutAck() === true) {
+      this.#settleCompletedLatencyRound(pending.latencyRound);
+    }
   }
 
   #scheduleDownlinkAck(pending: PendingProductPlayout, throughSeq: number): void {
@@ -1892,7 +1964,7 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  #drainCaptureFrames(): void {
+  #drainCaptureFrames(finalRound: OwnedLatencyRound | null = null): void {
     const route = this.#route;
     if (route === null || !route.leaf.attached || route.leaf.closed) return;
     while (this.#mediaSentFrames < this.#frames.length) {
@@ -1905,6 +1977,9 @@ export class ProductP1VoiceRouteOwner {
       }
       this.#mediaSentFrames += 1;
       if (this.#mediaSentFrames === 1) this.#markLatency(this.#captureLatencyRound, 'browser.capture_first_frame_sent');
+    }
+    if (finalRound !== null && this.#mediaSentFrames === this.#frames.length) {
+      this.#markLatency(finalRound, 'browser.uplink_last_frame_sent');
     }
   }
 
@@ -2238,7 +2313,7 @@ export class ProductP1VoiceRouteOwner {
     try {
       const priorCapture = this.#captureLatencyRound;
       if (priorCapture !== null && priorCapture !== this.#responseLatencyRound) {
-        if (this.#responseLatencyRound?.successorReady === true) {
+        if (this.#responseLatencyRound?.successorRound === priorCapture) {
           this.#finishLatencyRound(this.#responseLatencyRound, 'unknown');
         }
         this.#finishLatencyRound(priorCapture, 'cancelled');
@@ -2257,8 +2332,9 @@ export class ProductP1VoiceRouteOwner {
         turnId: null,
         response: null,
         taskId: null,
-        successorReady: false,
-        playoutAckReceived: false,
+        successorRequested: false,
+        successorRound: null,
+        completionJoin: new ProductLatencyCompletionJoin(),
         finished: false,
       };
       this.#captureLatencyRound = owned;
@@ -2298,15 +2374,24 @@ export class ProductP1VoiceRouteOwner {
     }
   }
 
-  #markCaptureLatencyReady(owned: OwnedLatencyRound | null): void {
+  #markCaptureLatencyAttached(owned: OwnedLatencyRound | null): void {
     if (owned === null || owned !== this.#captureLatencyRound) return;
     this.#markLatency(owned, 'browser.media_socket_attached');
+  }
+
+  #markCaptureLatencyFirstAck(owned: OwnedLatencyRound | null): void {
+    if (owned === null || owned !== this.#captureLatencyRound) return;
     this.#markLatency(owned, 'browser.capture_first_ack_received');
     const response = this.#responseLatencyRound;
-    if (response !== null && response !== owned && !response.finished) {
+    if (
+      response !== null
+      && response !== owned
+      && !response.finished
+      && response.successorRequested
+      && response.successorRound === owned
+    ) {
       this.#markLatency(response, 'browser.successor_capture_ready');
-      response.successorReady = true;
-      this.#settleCompletedLatencyRound(response);
+      if (response.completionJoin.observeSuccessorReady()) this.#settleCompletedLatencyRound(response);
     }
   }
 
@@ -2321,7 +2406,7 @@ export class ProductP1VoiceRouteOwner {
   }
 
   #settleCompletedLatencyRound(owned: OwnedLatencyRound | null): void {
-    if (owned === null || owned.finished || !owned.successorReady || !owned.playoutAckReceived) return;
+    if (owned === null || owned.finished) return;
     this.#markLatency(owned, 'browser.next_turn_capture_activated');
     this.#finishLatencyRound(owned, 'completed');
   }

@@ -653,6 +653,63 @@ export function productLatencyForegroundPresentation(
   return Object.freeze({ response: disposition.response, task_id: taskId });
 }
 
+type ProductLatencyOwner = Pick<
+  ProductP1VoiceRouteOwner,
+  'bindUnifiedSubmitLatency' | 'observeForegroundPresentationLatency'
+>;
+
+export function bindProductLatencyUnifiedResult(
+  owner: Pick<ProductLatencyOwner, 'bindUnifiedSubmitLatency'> | null,
+  submitResult: unknown,
+): boolean {
+  if (owner === null) return false;
+  try {
+    const envelope = recordValue(submitResult);
+    const result = recordValue(envelope?.result);
+    const response = recordValue(result?.response);
+    if (
+      envelope?.ok !== true
+      || envelope.error !== null
+      || !['authoritative_presentation_accepted', 'round_accepted'].includes(String(result?.status))
+      || response === null
+      || typeof response.interaction_id !== 'string'
+      || typeof response.response_id !== 'string'
+      || !Number.isSafeInteger(response.response_generation)
+      || (response.response_generation as number) < 0
+    ) return false;
+    const taskId = typeof result?.task_id === 'string' && result.task_id.trim() ? result.task_id : null;
+    return owner.bindUnifiedSubmitLatency(
+      Object.freeze({
+        interaction_id: response.interaction_id,
+        response_id: response.response_id,
+        response_generation: response.response_generation as number,
+      }),
+      taskId,
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function runProductLatencyPresentationBoundary(
+  owner: Pick<ProductLatencyOwner, 'observeForegroundPresentationLatency'> | null,
+  disposition: ProductP2NotificationDisposition,
+  taskId: string | null,
+  effect: () => void,
+): boolean {
+  let accepted = false;
+  try {
+    const presentation = productLatencyForegroundPresentation(disposition, taskId);
+    if (owner !== null && presentation !== null) {
+      accepted = owner.observeForegroundPresentationLatency(presentation.response, presentation.task_id) === true;
+    }
+  } catch {
+    // Diagnostics never own or delay product presentation effects.
+  }
+  effect();
+  return accepted;
+}
+
 export type TerminalAnnouncementState = 'idle' | 'queued' | 'suspending_capture' | 'fetching' | 'playing' | 'acking' | 'recovering';
 
 export function terminalAnnouncementArbitrationAction(
@@ -1550,6 +1607,14 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     if (pending !== null && (pending.owner !== owner || pending.input.response_id !== disposition.response_id)) {
       throw new Error('a previous presentation ACK is still unresolved');
     }
+    const voiceOwner = p1VoiceOwnerRef.current;
+    const latencyAccepted = runProductLatencyPresentationBoundary(
+      voiceOwner,
+      disposition,
+      latencyForegroundTaskIdRef.current,
+      () => undefined,
+    );
+    if (latencyAccepted) latencyForegroundTaskIdRef.current = null;
     if (!disposition.task_notification) {
       foregroundPresentationPendingRef.current = false;
       retainBoundedPresentedProductResponse(presentedProductResponsesRef.current, disposition.response_id);
@@ -1619,13 +1684,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
       setPendingPresentationAck(disposition.ack);
       if (retained?.owner === owner) void settleProductPresentationAck(retained);
     };
-    const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
-      const latencyPresentation = productLatencyForegroundPresentation(disposition, latencyForegroundTaskIdRef.current);
-      if (latencyPresentation !== null) {
-        voiceOwner.observeForegroundPresentationLatency(latencyPresentation.response, latencyPresentation.task_id);
-        latencyForegroundTaskIdRef.current = null;
-      }
       if (disposition.task_notification) updateTerminalAnnouncementState('playing');
       void voiceOwner
         .playAgentText({
@@ -3106,6 +3165,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
             activationOwnerRef.current?.snapshot().status === 'active' &&
             activeSessionRef.current === binding.session_id,
         });
+        bindProductLatencyUnifiedResult(p1VoiceOwnerRef.current, submitResult);
         if (pendingUnifiedFinalRef.current?.input === input) {
           pendingUnifiedFinalRef.current = null;
         }

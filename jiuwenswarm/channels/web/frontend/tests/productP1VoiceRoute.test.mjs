@@ -3663,7 +3663,7 @@ function latencyProbeHarness({ rejectExport = false } = {}) {
   return { probe, rounds, exports };
 }
 
-function realLatencyProbeHarness() {
+function realLatencyProbeHarness({ profile = 'dialogue_no_tool', inputCase = 'overlap-identity' } = {}) {
   const values = new Map();
   const exports = [];
   let clock = 0;
@@ -3671,7 +3671,7 @@ function realLatencyProbeHarness() {
   const probe = createBrowserLatencyProbe({
     enabled: true,
     location: {
-      search: '?lv_latency_run=run-product-p1&lv_latency_profile=dialogue_no_tool&lv_latency_case=overlap-identity',
+      search: `?lv_latency_run=run-product-p1&lv_latency_profile=${profile}&lv_latency_case=${inputCase}`,
     },
     storage: {
       getItem(key) {
@@ -3725,6 +3725,8 @@ async function runConcurrentCaptureJourney(options = {}) {
   let bargeInEotCalls = 0;
   let bargeInStopped = null;
   let captureRotationSnapshot = null;
+  let captureAttachBeforeFirstAckSnapshot = null;
+  let captureLastFrameBeforeAckSnapshot = null;
   let finalDownlinkAckResolve;
   const finalDownlinkAckObserved = new Promise(resolve => {
     finalDownlinkAckResolve = resolve;
@@ -3808,7 +3810,17 @@ async function runConcurrentCaptureJourney(options = {}) {
       if (this.serverBinding.direction === 'uplink' && typeof value !== 'string') {
         if (options.ackSecondCapture !== false || this.serverBinding.generation.id !== 'capture-2') {
           const throughSeq = decodeAudioFrame(this.serverBinding, value).seq;
-          queueMicrotask(() =>
+          queueMicrotask(() => {
+            if (
+              options.observeCaptureLatencyBoundaries === true
+              && this.serverBinding.generation.id === 'capture-1'
+            ) {
+              if (throughSeq === 0) {
+                captureAttachBeforeFirstAckSnapshot = options.latencyProbeSnapshot();
+              } else if (throughSeq === 1) {
+                captureLastFrameBeforeAckSnapshot = options.latencyProbeSnapshot();
+              }
+            }
             this.onmessage?.({
               data: serializeMediaControl({
                 type: 'media.ack',
@@ -3816,8 +3828,8 @@ async function runConcurrentCaptureJourney(options = {}) {
                 generation: this.serverBinding.generation.value,
                 through_seq: throughSeq,
               }),
-            })
-          );
+            });
+          });
         }
       } else if (this.serverBinding.direction === 'uplink' && typeof value === 'string') {
         const control = JSON.parse(value);
@@ -4165,7 +4177,27 @@ async function runConcurrentCaptureJourney(options = {}) {
       }),
     });
   }
-  await owner.stopAndRecognize();
+  if (options.observeCaptureLatencyBoundaries === true) {
+    const uplinkSocket = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-1');
+    assert.ok(uplinkSocket);
+    uplinkSocket.bufferedAmount = 1_000_000;
+    environment.worklet.port.onmessage?.({
+      data: {
+        kind: 'frame',
+        capture_generation: environment.worklet.captureGeneration,
+        seq: 1,
+        sample_rate_hz: 48_000,
+        sample_cursor: 960,
+        context_time_s: 0.02,
+        samples: new Float32Array(960).fill(0.125),
+      },
+    });
+    const recognizing = owner.stopAndRecognize();
+    uplinkSocket.bufferedAmount = 0;
+    await recognizing;
+  } else {
+    await owner.stopAndRecognize();
+  }
   if (options.advanceActivationBeforePlayout === true) {
     await startCaptureWithFirstFrame(owner, environment, {
       session_id: 'session-1',
@@ -4180,7 +4212,44 @@ async function runConcurrentCaptureJourney(options = {}) {
   let latencyContext = null;
   if (options.prepareLatencyPresentation === true) {
     latencyContext = owner.prepareUnifiedSubmitLatency('turn-duplex-1');
-    assert.equal(owner.observeForegroundPresentationLatency(response, null), true);
+    const latencyTaskId = options.latencyTaskId ?? null;
+    assert.equal(owner.bindUnifiedSubmitLatency(response, latencyTaskId), true);
+    const foreignResponse = Object.freeze({
+      interaction_id: response.interaction_id,
+      response_id: 'response-concurrent-foreign',
+      response_generation: response.response_generation,
+    });
+    if (typeof options.presentationBoundary === 'function') {
+      let retainedTaskId = latencyTaskId;
+      let effects = 0;
+      const foreground = Object.freeze({
+        kind: 'presentation',
+        response,
+        replayed: false,
+        task_notification: false,
+        adjustment_notification: false,
+      });
+      for (const ignored of [
+        Object.freeze({ ...foreground, response: foreignResponse }),
+        Object.freeze({ ...foreground, task_notification: true }),
+        Object.freeze({ ...foreground, adjustment_notification: true }),
+        Object.freeze({ ...foreground, replayed: true }),
+        Object.freeze({ kind: 'continue' }),
+      ]) {
+        const accepted = options.presentationBoundary(owner, ignored, retainedTaskId, () => { effects += 1; });
+        if (accepted) retainedTaskId = null;
+        assert.equal(accepted, false);
+        assert.equal(retainedTaskId, latencyTaskId);
+      }
+      const accepted = options.presentationBoundary(owner, foreground, retainedTaskId, () => { effects += 1; });
+      if (accepted) retainedTaskId = null;
+      assert.equal(accepted, true);
+      assert.equal(retainedTaskId, null);
+      assert.equal(effects, 6);
+    } else {
+      assert.equal(owner.observeForegroundPresentationLatency(foreignResponse, latencyTaskId), false);
+      assert.equal(owner.observeForegroundPresentationLatency(response, latencyTaskId), true);
+    }
   }
   const capturingBeforeConcurrent = statuses.filter(status => status === 'capturing').length;
   const priorWorklet = environment.worklet;
@@ -4580,10 +4649,29 @@ async function runConcurrentCaptureJourney(options = {}) {
     bargeInEotCalls,
     bargeInStopped,
     captureRotationSnapshot,
+    captureAttachBeforeFirstAckSnapshot,
+    captureLastFrameBeforeAckSnapshot,
     environment,
     latencyContext,
   };
 }
+
+test('capture latency separates owned media attach, first ACK, final send, and final ACK boundaries', async () => {
+  const latency = latencyProbeHarness();
+  const journey = await runConcurrentCaptureJourney({
+    latencyProbe: latency.probe,
+    observeCaptureLatencyBoundaries: true,
+    latencyProbeSnapshot: () => latency.rounds[0]?.marks.map(mark => mark.point) ?? [],
+    sendSecondFrame: false,
+    synchronousDownlinkDetachAfterFinalRender: true,
+  });
+
+  assert.equal(journey.captureAttachBeforeFirstAckSnapshot.includes('browser.media_socket_attached'), true);
+  assert.equal(journey.captureAttachBeforeFirstAckSnapshot.includes('browser.capture_first_ack_received'), false);
+  assert.equal(journey.captureLastFrameBeforeAckSnapshot.includes('browser.uplink_last_frame_sent'), true);
+  assert.equal(journey.captureLastFrameBeforeAckSnapshot.includes('browser.uplink_last_ack_received'), false);
+  await journey.owner.close();
+});
 
 test('latency probe owns exact N/N+1 rounds, joins B9 with successor readiness, and exports B0-B10 once', async () => {
   const latency = latencyProbeHarness({ rejectExport: true });
@@ -4610,6 +4698,8 @@ test('latency probe owns exact N/N+1 rounds, joins B9 with successor readiness, 
     'browser.commit_submit_started',
     'browser.presentation_received',
     'browser.tts_request_started',
+    'browser.downlink_attach_started',
+    'browser.downlink_attached',
     'browser.downlink_first_frame_received',
     'browser.playout_first_frame_scheduled',
     'browser.playout_first_frame_started_estimate',
@@ -4660,8 +4750,8 @@ test('real latency recorder retains response N capture identity through overlapp
     [
       'browser.capture_start_requested',
       'browser.capture_device_started',
-      'browser.capture_first_frame_sent',
       'browser.media_socket_attached',
+      'browser.capture_first_frame_sent',
       'browser.capture_first_ack_received',
       'browser.eot_received',
       'browser.capture_stop_requested',
@@ -4670,11 +4760,13 @@ test('real latency recorder retains response N capture identity through overlapp
       'browser.uplink_last_ack_received',
       'browser.uplink_closed',
       'browser.stt_final_received',
-      'browser.successor_capture_ready',
       'browser.commit_submit_started',
       'browser.presentation_received',
       'browser.tts_request_started',
       'browser.successor_capture_requested',
+      'browser.successor_capture_ready',
+      'browser.downlink_attach_started',
+      'browser.downlink_attached',
       'browser.downlink_first_frame_received',
       'browser.playout_first_frame_scheduled',
       'browser.playout_first_frame_started_estimate',
@@ -4707,6 +4799,33 @@ test('real latency recorder retains response N capture identity through overlapp
   await journey.owner.close();
 });
 
+test('real Panel boundary and recorder retain exact Task create/status/cancel task_id after ignored and foreign presentations', async () => {
+  const panelModule = await import('../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs');
+  for (const profile of ['task_create', 'task_status', 'task_cancel']) {
+    const latency = realLatencyProbeHarness({ profile, inputCase: 'exact-task-b3' });
+    const taskId = `task-${profile}`;
+    const journey = await runConcurrentCaptureJourney({
+      latencyProbe: latency.probe,
+      negotiatedEot: true,
+      firstCaptureEot: true,
+      prepareLatencyPresentation: true,
+      latencyTaskId: taskId,
+      presentationBoundary: panelModule.runProductLatencyPresentationBoundary,
+      synchronousDownlinkDetachAfterFinalRender: true,
+    });
+    await new Promise(resolve => setImmediate(resolve));
+
+    assert.equal(journey.playError, null);
+    const completed = latency.exports.find(([, params]) => params.batch.terminal_outcome === 'completed');
+    assert.notEqual(completed, undefined);
+    const presentationMarks = completed[1].batch.marks.filter(mark => mark.point === 'browser.presentation_received');
+    assert.equal(presentationMarks.length, 1);
+    assert.equal(presentationMarks[0].task_id, taskId);
+    assert.equal(completed[1].batch.profile_id, profile);
+    await journey.owner.close();
+  }
+});
+
 test('latency observation preserves product request/result parity apart from diagnostic export', async () => {
   const disabled = await runConcurrentCaptureJourney({ synchronousDownlinkDetachAfterFinalRender: true });
   const latency = latencyProbeHarness();
@@ -4730,6 +4849,55 @@ test('latency observation preserves product request/result parity apart from dia
   );
   assert.equal(latency.exports.length, 1);
   await Promise.all([disabled.owner.close(), enabled.owner.close()]);
+});
+
+test('latency completion join settles exactly once in successor-first and ACK-first order', async () => {
+  const productModule = await import('../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productP1VoiceRoute.js');
+  assert.equal(typeof productModule.ProductLatencyCompletionJoin, 'function');
+  for (const order of [
+    ['successor', 'ack'],
+    ['ack', 'successor'],
+  ]) {
+    const join = new productModule.ProductLatencyCompletionJoin();
+    const outcomes = order.map(event => event === 'successor'
+      ? join.observeSuccessorReady()
+      : join.observePlayoutAck());
+    assert.deepEqual(outcomes, [false, true]);
+    assert.equal(join.observeSuccessorReady(), false);
+    assert.equal(join.observePlayoutAck(), false);
+  }
+});
+
+test('missing requested successor diagnostic round terminalizes response N unknown without donating ready or B10', async () => {
+  const latency = latencyProbeHarness();
+  let beginCalls = 0;
+  const probe = {
+    ...latency.probe,
+    beginRound(identity) {
+      beginCalls += 1;
+      if (beginCalls === 2) throw new Error('PRIVATE successor diagnostic allocation failure');
+      return latency.probe.beginRound(identity);
+    },
+  };
+  const journey = await runConcurrentCaptureJourney({
+    latencyProbe: probe,
+    negotiatedEot: true,
+    firstCaptureEot: true,
+    prepareLatencyPresentation: true,
+    synchronousDownlinkDetachAfterFinalRender: true,
+  });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(journey.playError, null);
+  assert.equal(journey.owner.status().status, 'capturing');
+  assert.equal(latency.rounds.length, 1);
+  assert.equal(latency.rounds[0].batch?.terminal_outcome, 'unknown');
+  assert.equal(latency.exports.length, 1);
+  const points = latency.rounds[0].marks.map(mark => mark.point);
+  assert.equal(points.includes('browser.successor_capture_requested'), true);
+  assert.equal(points.includes('browser.successor_capture_ready'), false);
+  assert.equal(points.includes('browser.next_turn_capture_activated'), false);
+  await journey.owner.close();
 });
 
 test('capture/playout failure terminalizes each active diagnostic round without changing stable product failure', async () => {
