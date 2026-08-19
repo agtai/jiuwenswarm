@@ -465,6 +465,17 @@ Stage any minimum shared seam files actually changed and report them explicitly.
 
 **Files:**
 
+- Modify: `jiuwenswarm/server/live_voice/project_code_executor.py`
+- Modify: `jiuwenswarm/server/live_voice/p3_authenticated_composition.py`
+- Modify: `jiuwenswarm/server/live_voice/__init__.py` only if the observer type needs an existing public export owner
+- Modify: `tests/unit_tests/live_voice/test_project_code_executor.py`
+- Modify: `tests/unit_tests/live_voice/test_p3_authenticated_composition.py`
+- Create: `scripts/live_voice/p3_wave2_real_evidence_producer.py`
+- Create: `scripts/live_voice/p3_wave2_real_evidence_validator.py`
+- Create: `scripts/live_voice/p3_wave2_real_evidence.schema.json`
+- Create: `tests/unit_tests/live_voice/test_p3_wave2_real_evidence_producer.py`
+- Create: `tests/unit_tests/live_voice/test_p3_wave2_real_evidence_validator.py`
+- Create: `live-voice/evidence/P3_WAVE2_REAL_EVIDENCE_V1_20260819.json`
 - Create: `live-voice/evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md`
 - Create: `live-voice/reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md`
 - Modify: `live-voice/STATUS.md`
@@ -486,36 +497,49 @@ git diff --check
 
 Use the repository's narrower documented Ruff target if the broad test-directory invocation surfaces unrelated pre-existing debt; record exclusions with evidence, never hide a changed-file violation.
 
-**Step 3: Run bounded real Direct/Agent/Tool proof.**
+**Step 3: Add a default-off content-free Direct observation seam and strict evidence tooling.**
 
-Create a disposable absolute task data directory and a disposable no-remote Git project. Secret-safely copy only the required existing model/provider configuration into that private directory; never print, diff, stage, upload, or include values in evidence. Through the current product factory and selected Direct profile, execute one bounded project mutation requiring a real JiuwenSwarm Agent and real Tool, then prove:
+Under TDD, add one optional `stream_observer` to the Direct Adapter and one explicit factory argument that passes it through. The normal product path defaults to `None`; there is no environment switch, profile/digest change, lifecycle mutation, stream rewrite, or test-only AgentManager proxy. At the existing initial and adjustment stream-consumption points, synchronously emit immutable closed observations containing only server-owned task/attempt/run references, a per-stream sequence, `initial|adjustment`, closed file-tool kind, one-way tool-name/call-ID digests, closed result status, and an internal timestamp. Never expose or read into the callback raw arguments, content, result/output, prompt/query, provider/model, authorization, error text, or host paths.
+
+Observer invocation is O(1), lock-serialized and exception-isolated. A raised exception, returned awaitable, overflow, sequence gap, unknown/unpaired event, or dropped observation cannot affect execution but makes evidence fail closed. Test default-off/profile stability, initial and adjustment ordering, call/result pairing, two-project isolation, sentinel redaction across dataclass/JSON/repr, unknown/error mapping, observer failure/coroutine/overflow, and factory passthrough.
+
+Add a producer, validator, closed JSON Schema and focused tests. Every object uses `additionalProperties:false`; JSON is at most 64 KiB; stdout is one sanitized aggregate line; failures expose only closed machine reasons. The committed JSON contains IDs, booleans, counts, basenames and `sha256:` digests only, with no raw model configuration or instruction/tool payload. Automated tests may inject clock/capacity for max-32, priority/backoff/deadline, stale/late/fence, no-fallback, observer and schema boundaries, but may not claim physical Agent/Tool credit.
+
+After task-scoped review, commit the observer, factory passthrough, producer, validator, schema and their focused tests as one coherent evidence-tooling implementation commit before running the private environment.
+
+**Step 4: Run bounded real Direct/Agent/Tool proof.**
+
+Create a disposable absolute task data directory plus two disposable no-remote Git projects and three independently bound Sessions (`A1`/`A2` on project A, `B1` on project B). Before any JiuwenSwarm import, bind both data/config roots; secret-safely copy only the two required existing configuration basenames into that ACL-restricted private directory without parsing, printing, hashing, diffing, staging, uploading, or including values in evidence. Register projects/Sessions through production APIs, never the UI. Through the current product factory and selected Direct profile, run the bounded sequence `A1+B1 concurrent -> A2 same-project queued -> exact cancel A1 -> same A2 Attempt dequeues -> checkpoint adjust A2 -> exact cancel B1`, then reopen the same private Store read-only and prove:
 
 - selected profile id/version/digest and requirements persisted;
-- dispatch/start observation, running, real Tool mutation, validation/application, result and terminal facts bind the exact Task/Attempt;
+- dispatch/start observation, running, at least one paired real file-write/edit Tool call/result, validation/application, result and terminal facts bind the exact Task/Attempt;
 - exact status and cancel semantics remain truthful;
 - real checkpoint `task.adjust` is positive only at its existing legal checkpoint;
-- two different disposable project roots can run concurrently;
-- same project serializes; capacity/busy queues with persisted priority/deadline;
+- two different disposable project roots are simultaneously running;
+- same project queues with `EXECUTOR_PROJECT_BUSY`, zero pre-release Executor/Tool effect, persisted priority/deadline, and later runs using the same Attempt;
+- profile/requirements digest survives reopen and cleanup leaves no live worker/Agent owner;
 - no secrets appear in logs/evidence and the source repository is untouched by target effects.
 
-If an external Provider/model is unavailable after the bounded retries, keep the automated batch complete, record the exact environment-only blocker and sanitized diagnostics, and do not fabricate physical credit.
+Use bounded monotonic stage deadlines, a 12-minute in-process/15-minute supervisor limit, and at most one fresh-root retry for a closed transient Provider failure. If configuration ACL, Provider/model/network, real file-tool emission, Agent initialization, or cleanup ownership is unavailable after that bound, keep the automated batch complete, record only the exact closed environment-only blocker, and do not fabricate physical credit. Delete only exact-parent-validated disposable roots after complete cleanup; otherwise retain them under private ACL and report only a basename plus `CLEANUP_PENDING`.
 
-**Step 4: Map D-032 evidence.**
+**Step 5: Map D-032 evidence.**
 
 For each of P3-2, P3-3, and P3-5A, explicitly map P/N/B/S/T/C/R/I/F/K/X, positive business paths, negative fail-closed paths, and zero forbidden effects. Mark inapplicable dimensions with owner/reason; do not use counts or coverage alone.
 
-**Step 5: Dispatch the final independent complete-diff review.**
+**Step 6: Dispatch the final independent complete-diff review.**
 
 Review from the activation commit through candidate HEAD. Require no unresolved Critical/Important issues, no P1/P2 for the owned batch, migration backward compatibility, truthful unsupported operations, no D1/D2 leakage, secret safety, and exact non-claims. Fix, re-run focused/affected checks, and re-review before documentation closure.
 
-**Step 6: Synchronize STATUS and commit evidence.**
+**Step 7: Synchronize STATUS and commit evidence.**
 
 Record exact accepted local source, commits, tests, real-path strength, exclusions, review findings, and remaining downstream work. Keep overall P3/product readiness `PARTIAL`; do not claim feature-complete, controlled-candidate PASS, Production, P1/P2 closure, P3-4, P3-5B, P3-6, or P3-7.
 
 ```powershell
-git add live-voice/STATUS.md live-voice/evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md live-voice/reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md
+git add live-voice/STATUS.md live-voice/evidence/P3_WAVE2_REAL_EVIDENCE_V1_20260819.json live-voice/evidence/P3_WAVE2_COMMAND_ADMISSION_REPLAY_EVIDENCE_20260819.md live-voice/reviews/P3_WAVE2_COMMAND_ADMISSION_REPLAY_REVIEW_2026-08-19.md
 git commit -m "docs(live-voice): record P3 wave 2 evidence"
 ```
+
+Never mix a secret-bearing private runtime artifact into either commit.
 
 ## Task 8: Produce the clean local candidate and exact push packet
 
