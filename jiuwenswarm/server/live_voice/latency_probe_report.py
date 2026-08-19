@@ -12,15 +12,16 @@ from __future__ import annotations
 import argparse
 import csv
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 import json
+import math
 from pathlib import Path
 from typing import Final
 
 from .latency_probe import (
-    BATCH_SCHEMA_VERSION,
     COMPONENT_OUTPUT_FILES,
+    CORE_POINTS_BY_COMPONENT,
     FIXED_SEGMENT_IDS,
     LatencyBatch,
     LatencyMark,
@@ -179,10 +180,13 @@ class SegmentComparison:
     candidate_p95_ms: float | None
     p50_delta_ms: float | None
     p95_delta_ms: float | None
+    p50_relative_delta: float | None
+    p95_relative_delta: float | None
     baseline_attempts: int
     candidate_attempts: int
     baseline_successful_samples: int
     candidate_successful_samples: int
+    count_changes: tuple[tuple[str, int], ...]
     rate_changes: tuple[tuple[str, float], ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -191,9 +195,12 @@ class SegmentComparison:
             "baseline_p50_ms": self.baseline_p50_ms, "candidate_p50_ms": self.candidate_p50_ms,
             "baseline_p95_ms": self.baseline_p95_ms, "candidate_p95_ms": self.candidate_p95_ms,
             "p50_delta_ms": self.p50_delta_ms, "p95_delta_ms": self.p95_delta_ms,
+            "p50_relative_delta": self.p50_relative_delta,
+            "p95_relative_delta": self.p95_relative_delta,
             "baseline_attempts": self.baseline_attempts, "candidate_attempts": self.candidate_attempts,
             "baseline_successful_samples": self.baseline_successful_samples,
             "candidate_successful_samples": self.candidate_successful_samples,
+            "count_changes": dict(self.count_changes),
             "rate_changes": dict(self.rate_changes),
         }
 
@@ -215,11 +222,54 @@ class LatencyComparison:
         }
 
 
-def _identity(mark: LatencyMark) -> tuple[object, ...]:
-    return (
-        mark.correlation_id, mark.interaction_id, mark.activation_id, mark.activation_generation,
-        mark.turn_id, mark.response_id, mark.response_generation, mark.task_id,
+def _same_identity(start: LatencyMark, end: LatencyMark) -> bool:
+    """Require stable producer bindings while allowing later identity enrichment."""
+    required = (
+        "run_id", "profile_id", "input_case_id", "round_index", "component",
+        "clock_domain_id", "source_instance_id", "correlation_id", "interaction_id",
     )
+    optional = (
+        "activation_id", "activation_generation", "turn_id", "response_id",
+        "response_generation", "task_id",
+    )
+    return all(getattr(start, field) == getattr(end, field) for field in required) and all(
+        getattr(start, field) is None or getattr(end, field) is None
+        or getattr(start, field) == getattr(end, field)
+        for field in optional
+    )
+
+
+def _experiment_segments(run: LatencyRunConfig) -> tuple[SegmentDefinition, ...]:
+    if run.experiment is None:
+        return ()
+    components = {point: component for component, points in CORE_POINTS_BY_COMPONENT.items() for point in points}
+    components.update({point.point: point.component for point in run.experiment.declared_experiment_points})
+    result: list[SegmentDefinition] = []
+    seen: set[str] = set()
+    for point in run.experiment.declared_experiment_points:
+        values = (point.paired_segment_id, point.start_point, point.end_point)
+        if values == (None, None, None):
+            continue
+        if any(value is None for value in values):
+            raise LatencyProbeViolation("INVALID_EXPERIMENT_POINT")
+        segment_id, start_point, end_point = values
+        assert segment_id is not None and start_point is not None and end_point is not None
+        if (
+            segment_id in FIXED_SEGMENT_IDS or segment_id in seen
+            or components.get(start_point) != point.component
+            or components.get(end_point) != point.component
+        ):
+            raise LatencyProbeViolation("INVALID_EXPERIMENT_POINT")
+        seen.add(segment_id)
+        result.append(SegmentDefinition(
+            segment_id, start_point, end_point, point.component, ("experiment",),
+            "experiment", PROFILE_IDS,
+        ))
+    return tuple(result)
+
+
+def _segment_definitions(run: LatencyRunConfig) -> tuple[SegmentDefinition, ...]:
+    return (*FIXED_SEGMENTS, *_experiment_segments(run))
 
 
 def _nearest_rank(samples: Sequence[float], percentile: int) -> float | None:
@@ -246,11 +296,15 @@ def _summary(definition: SegmentDefinition, groups: Iterable[tuple[tuple[Latency
         fallback += int(fallback_here)
         starts = [mark for mark in points if mark.point == definition.start_point]
         ends = [mark for mark in points if mark.point == definition.end_point]
-        if failed_here or cancelled_here or fallback_here or len(starts) != 1 or len(ends) != 1:
+        unknown_here = any(
+            batch.terminal_outcome == "unknown" or mark.outcome == "unknown"
+            for batch in batches for mark in batch.marks
+        )
+        if failed_here or cancelled_here or fallback_here or unknown_here or len(starts) != 1 or len(ends) != 1:
             unknown += 1
             continue
         start, end = starts[0], ends[0]
-        if _identity(start) != _identity(end) or start.clock_domain_id != end.clock_domain_id or end.monotonic_ms < start.monotonic_ms:
+        if not _same_identity(start, end) or end.monotonic_ms < start.monotonic_ms:
             unknown += 1
             continue
         samples.append(end.monotonic_ms - start.monotonic_ms)
@@ -266,9 +320,10 @@ def _validated_batches(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -
     seen: dict[str, bytes] = {}
     valid: list[LatencyBatch] = []
     for batch in batches:
-        if not isinstance(batch, LatencyBatch) or batch.schema_version != BATCH_SCHEMA_VERSION or batch.run_id != run.run_id:
+        if not isinstance(batch, LatencyBatch):
             raise LatencyProbeViolation("INCOMPATIBLE_RUN")
         try:
+            batch = LatencyBatch.from_dict(batch.to_dict(), run)
             encoded = batch.canonical_bytes()
         except Exception:
             raise LatencyProbeViolation("INVALID_BATCH") from None
@@ -300,7 +355,7 @@ def reduce_latency_run(run: LatencyRunConfig, batches: Iterable[LatencyBatch]) -
         )
         summaries = tuple(
             _summary(definition, profile_groups)
-            for definition in FIXED_SEGMENTS if profile_id in definition.applicable_profiles
+            for definition in _segment_definitions(run) if profile_id in definition.applicable_profiles
         )
         profiles.append(ProfileLatencyReport(profile_id, summaries))
     return LatencyRunReport(REPORT_SCHEMA_VERSION, run, tuple(profiles))
@@ -365,6 +420,19 @@ def _rate(summary: SegmentSummary, field: str) -> float:
     return 0.0 if summary.attempts == 0 else getattr(summary, field) / summary.attempts
 
 
+_COUNT_FIELDS: Final = (
+    "attempts", "successful_samples", "unknown", "failed", "cancelled", "fallback",
+    "underrun", "rebuffer",
+)
+_RATE_FIELDS: Final = ("failed", "fallback", "underrun", "rebuffer", "cancelled")
+
+
+def _relative_delta(baseline: float | None, candidate: float | None) -> float | None:
+    if baseline is None or candidate is None or baseline == 0:
+        return None
+    return (candidate - baseline) / baseline
+
+
 def _compatible(left: LatencyRunConfig, right: LatencyRunConfig) -> bool:
     fields = (
         "schema_version", "environment_profile", "browser_family_and_version", "browser_os_class",
@@ -381,18 +449,28 @@ def _comparison_rows(baseline: LatencyRunReport, candidate: LatencyRunReport) ->
         candidate_profile = candidate.profile(profile.profile_id)
         for base in profile.segments:
             current = candidate_profile.segment(base.segment.segment_id)
-            rates = tuple((field, _rate(current, field) - _rate(base, field)) for field in ("failed", "fallback", "underrun", "rebuffer", "cancelled"))
+            rates = tuple((field, _rate(current, field) - _rate(base, field)) for field in _RATE_FIELDS)
+            counts = tuple((field, getattr(current, field) - getattr(base, field)) for field in _COUNT_FIELDS)
             rows.append(SegmentComparison(
                 profile.profile_id, base.segment.segment_id, base.p50_ms, current.p50_ms, base.p95_ms, current.p95_ms,
                 None if base.p50_ms is None or current.p50_ms is None else current.p50_ms - base.p50_ms,
                 None if base.p95_ms is None or current.p95_ms is None else current.p95_ms - base.p95_ms,
-                base.attempts, current.attempts, base.successful_samples, current.successful_samples, rates,
+                _relative_delta(base.p50_ms, current.p50_ms), _relative_delta(base.p95_ms, current.p95_ms),
+                base.attempts, current.attempts, base.successful_samples, current.successful_samples, counts, rates,
             ))
     return tuple(rows)
 
 
 def _inconclusive(baseline: LatencyRunReport, candidate: LatencyRunReport, rows: tuple[SegmentComparison, ...], reason: str) -> LatencyComparison:
     return LatencyComparison(COMPARISON_SCHEMA_VERSION, "inconclusive", reason, baseline.run.run_id, candidate.run.run_id, rows)
+
+
+def _statistic_delta(item: SegmentComparison, statistic: str) -> float | None:
+    return item.p50_delta_ms if statistic == "p50_ms" else item.p95_delta_ms
+
+
+def _statistic_relative_delta(item: SegmentComparison, statistic: str) -> float | None:
+    return item.p50_relative_delta if statistic == "p50_ms" else item.p95_relative_delta
 
 
 def compare_latency_reports(baseline: LatencyRunReport, candidate: LatencyRunReport) -> LatencyComparison:
@@ -403,17 +481,28 @@ def compare_latency_reports(baseline: LatencyRunReport, candidate: LatencyRunRep
         return _inconclusive(baseline, candidate, rows, "DIRTY_SOURCE")
     if not _compatible(baseline.run, candidate.run):
         return _inconclusive(baseline, candidate, rows, "INCOMPATIBLE_RUN")
-    if any(item.baseline_successful_samples < baseline.run.required_successes or item.candidate_successful_samples < candidate.run.required_successes or item.baseline_p50_ms is None or item.candidate_p50_ms is None for item in rows):
-        return _inconclusive(baseline, candidate, rows, "INSUFFICIENT_SAMPLES")
     experiment = candidate.run.experiment
     if experiment is None:
         return _inconclusive(baseline, candidate, rows, "NO_EXPERIMENT")
+    statistic = experiment.target_statistic
+    if any(
+        item.baseline_successful_samples < baseline.run.required_successes
+        or item.candidate_successful_samples < candidate.run.required_successes
+        or _statistic_delta(item, statistic) is None
+        for item in rows
+    ):
+        return _inconclusive(baseline, candidate, rows, "INSUFFICIENT_SAMPLES")
     target = tuple(item for item in rows if item.segment_id == experiment.target_segment)
     total = tuple(item for item in rows if item.segment_id == "response_total")
-    if not target or not total or any(item.p50_delta_ms is None for item in (*target, *total)):
+    if not target or not total or any(_statistic_delta(item, statistic) is None for item in (*target, *total)):
         return _inconclusive(baseline, candidate, rows, "UNKNOWN_SEGMENT")
-    target_gain = min(-item.p50_delta_ms for item in target if item.p50_delta_ms is not None)
-    total_gain = min(-item.p50_delta_ms for item in total if item.p50_delta_ms is not None)
+    if any(
+        _statistic_relative_delta(item, statistic) is None
+        for item in (*target, *total)
+    ):
+        return _inconclusive(baseline, candidate, rows, "ZERO_BASELINE")
+    target_gain = min(-_statistic_delta(item, statistic) for item in target if _statistic_delta(item, statistic) is not None)
+    total_gain = min(-_statistic_delta(item, statistic) for item in total if _statistic_delta(item, statistic) is not None)
     guardrail_failed = False
     for guardrail in experiment.guardrails:
         for item in rows:
@@ -431,29 +520,110 @@ def compare_latency_reports(baseline: LatencyRunReport, candidate: LatencyRunRep
         status = "regressed"
     elif target_gain >= experiment.minimum_improvement_ms and total_gain >= experiment.response_total_minimum_improvement_ms:
         status = "improved"
-    elif target_gain > 0 and any(item.segment_id != "response_total" and item.segment_id in {definition.segment_id for definition in FIXED_SEGMENTS if definition.component == "browser"} and (item.p50_delta_ms or 0) > 0 for item in rows):
+    elif target_gain > 0 and any(item.segment_id != "response_total" and item.segment_id in {definition.segment_id for definition in FIXED_SEGMENTS if definition.component == "browser"} and (_statistic_delta(item, statistic) or 0) > 0 for item in rows):
         status = "shifted"
     else:
         status = "inconclusive"
     return LatencyComparison(COMPARISON_SCHEMA_VERSION, status, None, baseline.run.run_id, candidate.run.run_id, rows)
 
 
+_REPORT_KEYS: Final = frozenset({"schema_version", "run", "profiles"})
+_PROFILE_REPORT_KEYS: Final = frozenset({"profile_id", "segments"})
+_SEGMENT_REPORT_KEYS: Final = frozenset({
+    "segment_id", "start_point", "end_point", "component", "phase_tags",
+    "primary_capability", "applicable_profiles", "attempts", "successful_samples",
+    "unknown", "failed", "cancelled", "fallback", "underrun", "rebuffer",
+    "minimum_ms", "p50_ms", "p95_ms", "maximum_ms",
+})
+_SUMMARY_COUNT_FIELDS: Final = (
+    "attempts", "successful_samples", "unknown", "failed", "cancelled", "fallback",
+    "underrun", "rebuffer",
+)
+_SUMMARY_VALUE_FIELDS: Final = ("minimum_ms", "p50_ms", "p95_ms", "maximum_ms")
+
+
+def _exact_mapping(value: object, keys: frozenset[str]) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise ValueError
+    return value
+
+
+def _report_count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError
+    return value
+
+
+def _report_number(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise ValueError
+    return number
+
+
+def _parse_summary(value: object, definition: SegmentDefinition) -> SegmentSummary:
+    raw = _exact_mapping(value, _SEGMENT_REPORT_KEYS)
+    expected = {
+        "segment_id": definition.segment_id, "start_point": definition.start_point,
+        "end_point": definition.end_point, "component": definition.component,
+        "phase_tags": list(definition.phase_tags), "primary_capability": definition.primary_capability,
+        "applicable_profiles": list(definition.applicable_profiles),
+    }
+    if any(raw[key] != expected_value for key, expected_value in expected.items()):
+        raise ValueError
+    counts = tuple(_report_count(raw[field]) for field in _SUMMARY_COUNT_FIELDS)
+    attempts, successful, unknown, failed, cancelled, fallback, underrun, rebuffer = counts
+    if any(value > attempts for value in counts[1:]) or successful + unknown > attempts:
+        raise ValueError
+    values = tuple(raw[field] for field in _SUMMARY_VALUE_FIELDS)
+    if successful == 0:
+        if any(value is not None for value in values):
+            raise ValueError
+        parsed_values: tuple[float | None, ...] = (None, None, None, None)
+    else:
+        if any(value is None for value in values):
+            raise ValueError
+        parsed_values = tuple(_report_number(value) for value in values)
+        minimum, p50, p95, maximum = parsed_values
+        assert minimum is not None and p50 is not None and p95 is not None and maximum is not None
+        if not minimum <= p50 <= p95 <= maximum:
+            raise ValueError
+    return SegmentSummary(definition, attempts, successful, unknown, failed, cancelled, fallback, underrun, rebuffer, *parsed_values)
+
+
 def _load_report(path: Path) -> LatencyRunReport:
     try:
-        raw = json.loads(Path(path).read_text(encoding="utf-8"))
-        if not isinstance(raw, dict) or raw.get("schema_version") != REPORT_SCHEMA_VERSION:
+        raw = _exact_mapping(json.loads(Path(path).read_text(encoding="utf-8")), _REPORT_KEYS)
+        if raw["schema_version"] != REPORT_SCHEMA_VERSION or not isinstance(raw["profiles"], list):
             raise ValueError
         run = _parse_latency_run_config(raw["run"])
+        definitions = _segment_definitions(run)
+        expected_by_profile = {
+            profile_id: tuple(item for item in definitions if profile_id in item.applicable_profiles)
+            for profile_id in run.profile_ids
+        }
+        if len(raw["profiles"]) != len(run.profile_ids):
+            raise ValueError
         profiles: list[ProfileLatencyReport] = []
-        by_id = {definition.segment_id: definition for definition in FIXED_SEGMENTS}
+        seen_profiles: set[str] = set()
         for profile_raw in raw["profiles"]:
-            summaries = []
-            for item in profile_raw["segments"]:
-                definition = by_id[item["segment_id"]]
-                summaries.append(SegmentSummary(definition, *(item[key] for key in ("attempts", "successful_samples", "unknown", "failed", "cancelled", "fallback", "underrun", "rebuffer", "minimum_ms", "p50_ms", "p95_ms", "maximum_ms"))))
-            profiles.append(ProfileLatencyReport(profile_raw["profile_id"], tuple(summaries)))
+            profile = _exact_mapping(profile_raw, _PROFILE_REPORT_KEYS)
+            profile_id = profile["profile_id"]
+            if not isinstance(profile_id, str) or profile_id in seen_profiles or profile_id not in expected_by_profile:
+                raise ValueError
+            seen_profiles.add(profile_id)
+            segments_raw = profile["segments"]
+            expected_segments = expected_by_profile[profile_id]
+            if not isinstance(segments_raw, list) or len(segments_raw) != len(expected_segments):
+                raise ValueError
+            summaries = tuple(_parse_summary(item, definition) for item, definition in zip(segments_raw, expected_segments, strict=True))
+            profiles.append(ProfileLatencyReport(profile_id, summaries))
+        if tuple(item.profile_id for item in profiles) != run.profile_ids:
+            raise ValueError
         return LatencyRunReport(REPORT_SCHEMA_VERSION, run, tuple(profiles))
-    except (OSError, UnicodeError, ValueError, KeyError, TypeError, LatencyProbeViolation):
+    except (OSError, UnicodeError, ValueError, KeyError, TypeError, OverflowError, LatencyProbeViolation):
         raise LatencyProbeViolation("INVALID_REPORT") from None
 
 
