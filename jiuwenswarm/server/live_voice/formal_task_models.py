@@ -95,6 +95,16 @@ class TaskAdjustmentState(StrEnum):
     REJECTED = "rejected"
 
 
+class TaskCommandDisposition(StrEnum):
+    ACCEPTED = "accepted"
+    APPLIED = "applied"
+    REJECTED = "rejected"
+    UNSUPPORTED = "unsupported"
+    CONFLICT = "conflict"
+    TIMEOUT = "timeout"
+    UNKNOWN = "unknown"
+
+
 _MAX_TASK_ADJUSTMENT_BYTES = 4096
 _TASK_ADJUSTMENT_REASON_ALPHABET = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
@@ -156,6 +166,35 @@ def _parse_utc(value: object, field_name: str) -> datetime:
             ErrorCode.INVALID_ARGUMENT,
         )
     return parsed.astimezone(UTC)
+
+
+def command_result_extensions(
+    disposition: TaskCommandDisposition,
+    *,
+    admission_event_id: str | None = None,
+    settlement_event_id: str | None = None,
+) -> dict[str, object]:
+    """Return the closed command result carrier without command content."""
+
+    if not isinstance(disposition, TaskCommandDisposition):
+        raise FormalTaskViolation(
+            "INVALID_TASK_COMMAND_DISPOSITION",
+            "task command disposition is not canonical",
+            ErrorCode.INVALID_ARGUMENT,
+        )
+    for field_name, event_id in (
+        ("admission_event_id", admission_event_id),
+        ("settlement_event_id", settlement_event_id),
+    ):
+        if event_id is not None:
+            _require_text(event_id, f"command_result.{field_name}")
+    return {
+        "live_voice.command": {
+            "disposition": disposition.value,
+            "admission_event_id": admission_event_id,
+            "settlement_event_id": settlement_event_id,
+        }
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +566,7 @@ class FormalTaskSpec:
     executor_id: str
     required_capabilities: tuple[str, ...]
     side_effect_class: str
+    constraints: tuple[str, ...] = ()
     attributes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
@@ -578,6 +618,43 @@ class FormalTaskSpec:
             "required_capabilities",
             tuple(sorted(self.required_capabilities)),
         )
+        if (
+            type(self.constraints) is not tuple
+            or any(
+                type(constraint) is not str or not constraint.strip()
+                for constraint in self.constraints
+            )
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONSTRAINTS",
+                "task constraints must be unique non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        if len(set(self.constraints)) != len(self.constraints):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONSTRAINTS",
+                "task constraints must be unique non-empty strings",
+                ErrorCode.INVALID_ARGUMENT,
+            )
+        constraint_sizes = tuple(
+            _utf8_size(constraint, "task.constraint")
+            for constraint in self.constraints
+        )
+        if (
+            len(self.constraints) > 16
+            or any(
+                "\x00" in constraint or size > 1_024
+                for constraint, size in zip(
+                    self.constraints, constraint_sizes, strict=True
+                )
+            )
+            or sum(constraint_sizes) > 4_096
+        ):
+            raise FormalTaskViolation(
+                "INVALID_TASK_CONSTRAINTS",
+                "task constraints exceed their closed UTF-8 bounds",
+                ErrorCode.INVALID_ARGUMENT,
+            )
         if type(self.attributes) is not tuple:
             raise FormalTaskViolation(
                 "INVALID_TASK_ATTRIBUTES",
@@ -614,12 +691,13 @@ class FormalTaskSpec:
             "executor_id": self.executor_id,
             "required_capabilities": list(self.required_capabilities),
             "side_effect_class": self.side_effect_class,
+            "constraints": list(self.constraints),
             "attributes": dict(self.attributes),
         }
 
     @classmethod
     def from_dict(cls, payload: object) -> FormalTaskSpec:
-        if type(payload) is not dict or set(payload) != {
+        required_fields = {
             "name",
             "instruction",
             "origin",
@@ -628,7 +706,12 @@ class FormalTaskSpec:
             "required_capabilities",
             "side_effect_class",
             "attributes",
-        }:
+        }
+        payload_fields = set(payload) if type(payload) is dict else set()
+        if type(payload) is not dict or payload_fields not in (
+            required_fields,
+            required_fields | {"constraints"},
+        ):
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_SPEC",
                 "formal task spec fields are incomplete or unknown",
@@ -636,7 +719,12 @@ class FormalTaskSpec:
             )
         capabilities = payload["required_capabilities"]
         attributes = payload["attributes"]
-        if type(capabilities) is not list or type(attributes) is not dict:
+        constraints = payload.get("constraints", [])
+        if (
+            type(capabilities) is not list
+            or type(constraints) is not list
+            or type(attributes) is not dict
+        ):
             raise FormalTaskViolation(
                 "INVALID_FORMAL_TASK_SPEC",
                 "task capabilities and attributes have invalid types",
@@ -660,6 +748,7 @@ class FormalTaskSpec:
             side_effect_class=_require_text(
                 payload["side_effect_class"], "task.side_effect_class"
             ),
+            constraints=tuple(constraints),
             attributes=tuple(sorted(attributes.items())),
         )
 
@@ -1740,6 +1829,7 @@ __all__ = [
     "TaskAdjustmentRequest",
     "TaskAdjustmentSettlement",
     "TaskAdjustmentState",
+    "TaskCommandDisposition",
     "TaskEventAuthoritySnapshot",
     "TaskMutationDisposition",
     "TaskMutationResult",
@@ -1751,6 +1841,7 @@ __all__ = [
     "TaskRetryProductRequestFingerprint",
     "TASK_RETRY_PRODUCT_REQUEST_EXTENSION",
     "canonical_task_adjustment_rejection_reason",
+    "command_result_extensions",
     "require_exact_payload",
     "safe_json_value",
     "utc_now",

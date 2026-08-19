@@ -38,12 +38,14 @@ from .formal_task_models import (
     TaskAdjustmentSettlement,
     TaskAdjustmentState,
     TaskAuthorizationGrant,
+    TaskCommandDisposition,
     TaskMutationDisposition,
     TaskMutationResult,
     TaskResultAvailability,
     TaskRetryAuthoritySnapshot,
     TaskRetryProductRequestFingerprint,
     canonical_task_adjustment_rejection_reason,
+    command_result_extensions,
     require_exact_payload,
     utc_now,
 )
@@ -108,10 +110,37 @@ def _failure(
     *,
     observed_at: str,
 ) -> ResultEnvelope:
+    extensions: Mapping[str, object] | None = None
+    contract_error = error
+    if isinstance(owner, CommandEnvelope):
+        if error.code in {ErrorCode.UNSUPPORTED, ErrorCode.CAPABILITY_UNAVAILABLE}:
+            disposition = TaskCommandDisposition.UNSUPPORTED
+        elif error.code in {ErrorCode.CONFLICT, ErrorCode.STALE}:
+            disposition = TaskCommandDisposition.CONFLICT
+        elif error.code is ErrorCode.TIMEOUT:
+            disposition = TaskCommandDisposition.TIMEOUT
+        elif error.code is ErrorCode.RESULT_UNKNOWN:
+            disposition = TaskCommandDisposition.UNKNOWN
+        elif error.code in {
+            ErrorCode.UNAVAILABLE,
+            ErrorCode.CANCELLED,
+            ErrorCode.PROTOCOL_VIOLATION,
+            ErrorCode.INTERNAL,
+        }:
+            disposition = TaskCommandDisposition.UNKNOWN
+            contract_error = FormalTaskViolation(
+                error.reason,
+                str(error),
+                ErrorCode.RESULT_UNKNOWN,
+            )
+        else:
+            disposition = TaskCommandDisposition.REJECTED
+        extensions = command_result_extensions(disposition)
     return ResultEnvelope.failure(
         owner=owner,
-        error=_contract_error(error).error,
+        error=_contract_error(contract_error).error,
         observed_at=observed_at,
+        extensions=extensions,
     )
 
 
@@ -180,6 +209,21 @@ class PersistentTaskCore:
         {
             "name",
             "instruction",
+            "executor_id",
+            "side_effect_class",
+            "attributes",
+        }
+    )
+    _SUCCESSOR_PAYLOAD: ClassVar[frozenset[str]] = frozenset(
+        {
+            "expected_predecessor_revision_number",
+            "expected_predecessor_event_head",
+            "predecessor_terminal_event_id",
+            "predecessor_outcome",
+            "predecessor_result_sha256",
+            "name",
+            "instruction",
+            "constraints",
             "executor_id",
             "side_effect_class",
             "attributes",
@@ -293,6 +337,12 @@ class PersistentTaskCore:
                 "task.cancel",
                 "task.retry",
                 "task.adjust",
+                "task.update",
+                "task.provide_input",
+                "task.pause",
+                "task.resume",
+                "task.reprioritize",
+                "task.create_successor",
             }:
                 raise FormalTaskViolation(
                     "UNSUPPORTED_FORMAL_TASK_COMMAND",
@@ -340,6 +390,114 @@ class PersistentTaskCore:
                     command.payload, frozenset(), field_name="task.cancel payload"
                 )
                 return self.store.cancel(command, observed_at=observed_at)
+            if command.command_type in {
+                "task.provide_input",
+                "task.pause",
+                "task.resume",
+                "task.reprioritize",
+            }:
+                expected_payload = {
+                    "task.provide_input": frozenset(
+                        {
+                            "attempt_id",
+                            "expected_event_head",
+                            "responds_to_event_id",
+                            "text",
+                        }
+                    ),
+                    "task.pause": frozenset(
+                        {"attempt_id", "expected_event_head", "reason"}
+                    ),
+                    "task.resume": frozenset(
+                        {"attempt_id", "expected_event_head", "reason"}
+                    ),
+                    "task.reprioritize": frozenset(
+                        {"attempt_id", "expected_event_head", "priority", "reason"}
+                    ),
+                }[command.command_type]
+                require_exact_payload(
+                    command.payload,
+                    expected_payload,
+                    field_name=f"{command.command_type} payload",
+                )
+                return self.store.decide_unsupported_control(
+                    command, observed_at=observed_at
+                )
+            if command.command_type == "task.create_successor":
+                require_exact_payload(
+                    command.payload,
+                    self._SUCCESSOR_PAYLOAD,
+                    field_name="task.create_successor payload",
+                )
+                if context is None:
+                    raise FormalTaskViolation(
+                        "FORMAL_TASK_CONTEXT_REQUIRED",
+                        "task.create_successor requires server-resolved context",
+                        ErrorCode.PERMISSION_DENIED,
+                    )
+                context.require_usable(
+                    scope=command.scope,
+                    required_permissions=frozenset(
+                        {"task.execute", "project.write"}
+                    ),
+                    destructive=True,
+                    now=observed_at,
+                )
+                attributes = command.payload["attributes"]
+                if (
+                    type(attributes) is not dict
+                    or set(attributes)
+                    != {"model_identity", "model_config_version"}
+                    or any(
+                        type(key) is not str or type(value) is not str
+                        for key, value in attributes.items()
+                    )
+                ):
+                    raise FormalTaskViolation(
+                        "INVALID_FORMAL_TASK_ATTRIBUTES",
+                        "successor requires an exact resolved model binding",
+                        ErrorCode.INVALID_ARGUMENT,
+                    )
+                spec = FormalTaskSpec(
+                    name=command.payload["name"],
+                    instruction=command.payload["instruction"],
+                    origin=command.origin,
+                    context=context,
+                    executor_id=command.payload["executor_id"],
+                    required_capabilities=tuple(command.required_capabilities),
+                    side_effect_class=command.payload["side_effect_class"],
+                    constraints=tuple(command.payload["constraints"]),
+                    attributes=tuple(sorted(attributes.items())),
+                )
+                if spec.executor_id != self.executor.executor_id:
+                    raise FormalTaskViolation(
+                        "EXECUTOR_CAPABILITY_UNAVAILABLE",
+                        "requested Executor is not available in this Task Core",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                if spec.side_effect_class != "project_mutation":
+                    raise FormalTaskViolation(
+                        "EXECUTOR_SIDE_EFFECT_CLASS_MISMATCH",
+                        "project Code Agent tasks require project_mutation side effects",
+                        ErrorCode.CAPABILITY_UNAVAILABLE,
+                    )
+                return self.store.create_successor(
+                    command, spec, observed_at=observed_at
+                )
+            if command.command_type == "task.update":
+                require_exact_payload(
+                    command.payload,
+                    frozenset(
+                        {
+                            "attempt_id",
+                            "expected_event_head",
+                            "instruction",
+                            "constraints",
+                        }
+                    ),
+                    field_name="task.update payload",
+                )
+                return self.store.update(command, observed_at=observed_at)
             if command.command_type == "task.adjust":
                 require_exact_payload(
                     command.payload,
@@ -351,7 +509,9 @@ class PersistentTaskCore:
                     observed_at=observed_at,
                 )
             if command.command_type == "task.retry":
-                authority_or_replay = self.store.read_retry_authority(command)
+                authority_or_replay = self.store.read_retry_authority(
+                    command, observed_at=observed_at
+                )
                 if isinstance(authority_or_replay, ResultEnvelope):
                     return authority_or_replay
                 authority = authority_or_replay
