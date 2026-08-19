@@ -200,6 +200,7 @@ class FakeSocket {
   binding = null;
   closeOnFirstBinary = false;
   acknowledgeBinary = true;
+  acknowledgementLagFrames = 0;
   binarySendCount = 0;
   deferDetachReceipt = false;
   pendingDetachReceipt = null;
@@ -221,19 +222,11 @@ class FakeSocket {
       }
     }
     if (typeof value !== 'string' && this.binding !== null && this.acknowledgeBinary) {
-      const throughSeq = this.binarySendCount;
       this.binarySendCount += 1;
-      queueMicrotask(() =>
-        this.onmessage?.({
-          data: JSON.stringify({
-            type: 'media.ack',
-            contract_version: 'live-voice.media.v1',
-            lease_id: this.binding.lease_id,
-            generation: this.binding.generation.value,
-            through_seq: throughSeq,
-          }),
-        })
-      );
+      const throughSeq = this.binarySendCount - 1 - this.acknowledgementLagFrames;
+      if (throughSeq >= 0) {
+        queueMicrotask(() => this.acknowledgeThrough(throughSeq));
+      }
       if (this.closeOnFirstBinary) {
         this.closeOnFirstBinary = false;
         queueMicrotask(() => {
@@ -245,6 +238,17 @@ class FakeSocket {
   }
   close() {
     this.readyState = 3;
+  }
+  acknowledgeThrough(throughSeq) {
+    this.onmessage?.({
+      data: JSON.stringify({
+        type: 'media.ack',
+        contract_version: 'live-voice.media.v1',
+        lease_id: this.binding.lease_id,
+        generation: this.binding.generation.value,
+        through_seq: throughSeq,
+      }),
+    });
   }
   releaseDetachReceipt(overrides = {}) {
     if (this.pendingDetachReceipt === null) return;
@@ -959,6 +963,76 @@ test('formal P1 rejects a first frame that the Gateway never acknowledges', asyn
     environment.contexts.every(context => context.state === 'closed'),
     true
   );
+});
+
+test('formal P1 becomes ready after the first ACK while a healthy rolling frame remains pending', async () => {
+  const binding = serverBinding();
+  const socket = new FakeSocket();
+  socket.acknowledgementLagFrames = 1;
+  const environment = audioEnvironment();
+  let releaseActivation;
+  const activationGate = new Promise(resolve => {
+    releaseActivation = resolve;
+  });
+  const owner = new ProductP1VoiceRouteOwner({
+    enabled: true,
+    expected_origin: 'https://voice.example.test',
+    audio_environment: environment,
+    socket_factory: () => {
+      queueMicrotask(() => socket.open(binding));
+      return socket;
+    },
+    request: async (method, params) => {
+      if (method === PRODUCT_P1_MEDIA_CLOSE_METHOD) {
+        return { status: 'closed', reason_id: 'MEDIA_ROUTE_REVOKED', ...params };
+      }
+      await activationGate;
+      return {
+        status: 'active',
+        reason_id: 'MEDIA_ROUTE_TICKET_ISSUED',
+        subject_id: 'media-subject-1',
+        endpoint_path: '/ws/live-voice/media',
+        media_ticket: 'P'.repeat(43),
+        subprotocol: 'live-voice.media.v1',
+        ticket_ttl_ms: 30_000,
+        end_of_turn: MANUAL_EOT_FALLBACK,
+        binding,
+        privacy: { raw_audio_persisted: false, raw_audio_logged: false, memory_only: true },
+      };
+    },
+  });
+
+  const starting = owner.startCapture({
+    session_id: 'session-1',
+    interaction_id: 'interaction-1',
+    correlation_id: 'correlation-1',
+    activation_id: 'activation-1',
+    activation_generation: 7,
+  });
+  for (let turn = 0; turn < 100 && typeof environment.worklet?.port.onmessage !== 'function'; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  for (let seq = 0; seq < 2; seq += 1) {
+    environment.worklet.port.onmessage({
+      data: {
+        kind: 'frame',
+        capture_generation: environment.worklet.captureGeneration,
+        seq,
+        sample_rate_hz: 48_000,
+        sample_cursor: seq * 960,
+        context_time_s: seq * 0.02,
+        samples: new Float32Array(960).fill(0.25),
+      },
+    });
+  }
+  releaseActivation();
+
+  await starting;
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(socket.binarySendCount, 2);
+
+  socket.acknowledgeThrough(1);
+  await owner.close();
 });
 
 test('formal P1 rejects an initially muted input before media or Speech effects', async () => {

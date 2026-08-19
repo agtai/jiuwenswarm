@@ -134,10 +134,12 @@ class FakePermissions {
 
 class FakeNode {
   connected = [];
+  connectThrows = false;
   disconnectCount = 0;
   disconnectThrows = false;
 
   connect(destination) {
+    if (this.connectThrows) throw new Error('node connect failed');
     this.connected.push(destination);
     return destination;
   }
@@ -286,8 +288,9 @@ function fakeEnvironment(overrides = {}) {
       contexts.push(context);
       return context;
     },
-    createAudioWorkletNode(_context, _name, _options) {
+    createAudioWorkletNode(context, name, options) {
       const worklet = new FakeWorkletNode();
+      worklet.creation = { context, name, options };
       worklets.push(worklet);
       return worklet;
     },
@@ -562,6 +565,12 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(fake.mediaDevices.constraints[0].audio.deviceId.exact, 'mic-1');
   assert.equal(fake.mediaDevices.constraints[0].audio.echoCancellation.ideal, true);
   assert.equal(fake.contexts[0].addModuleUrls[0], 'capture-worklet.js');
+  assert.equal(fake.worklets[0].creation.name, 'jiuwenswarm-live-voice-capture-v1');
+  assert.equal(fake.worklets[0].creation.options.numberOfInputs, 1);
+  assert.equal(fake.worklets[0].creation.options.numberOfOutputs, 1);
+  assert.deepEqual(fake.worklets[0].creation.options.outputChannelCount, [1]);
+  assert.deepEqual(fake.worklets[0].connected, [fake.contexts[0].destination]);
+  assert.deepEqual(fake.contexts[0].sourceNode.connected, [fake.worklets[0]]);
 
   const samples = new Float32Array(960).fill(0.25);
   fake.worklets[0].port.emit({
@@ -584,6 +593,26 @@ test('capture requests explicit processing, reports actual settings, and emits c
   assert.equal(fake.contexts[0].state, 'closed');
   assert.equal(fake.document.listenerCount('visibilitychange'), 0);
   assert.equal(adapter.businessCancelCount(), 0);
+});
+
+test('capture fails closed and releases all resources when the silent keep-alive graph cannot connect', async () => {
+  const worklet = new FakeWorkletNode();
+  worklet.connectThrows = true;
+  const fake = fakeEnvironment({ createAudioWorkletNode: () => worklet });
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+
+  await assert.rejects(
+    () => adapter.startCapture(),
+    error => error instanceof BrowserAudioIOViolation && error.reason === 'CAPTURE_START_FAILED'
+  );
+
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.equal(fake.contexts[0].sourceNode.connected.length, 0);
+  assert.equal(fake.contexts[0].sourceNode.disconnectCount, 1);
+  assert.equal(worklet.disconnectCount, 1);
+  assert.equal(worklet.port.closeCount, 1);
+  assert.equal(fake.contexts[0].state, 'closed');
+  assert.equal(fake.document.listenerCount('visibilitychange'), 0);
 });
 
 test('capture handoff rejects an input track that is already muted and releases every resource', async () => {
@@ -1334,7 +1363,8 @@ test('sequence gaps, hidden page, and stale worklet callbacks never revive captu
 });
 
 test('AudioWorklet failures retain exact bounded-gap reasons and fence stale callbacks', async () => {
-  const fake = fakeEnvironment();
+  const diagnostics = [];
+  const fake = fakeEnvironment({ reportCaptureDiagnostic: diagnostic => diagnostics.push(diagnostic) });
   const states = [];
   const frames = [];
   const adapter = new BrowserAudioIOAdapter({
@@ -1348,13 +1378,65 @@ test('AudioWorklet failures retain exact bounded-gap reasons and fence stale cal
   const metadata = await adapter.startCapture();
   const staleCallback = fake.worklets[0].port.onmessage;
 
-  fake.worklets[0].port.emit({ kind: 'error', reason: 'input_gap_exceeded' });
+  fake.worklets[0].port.emit({
+    kind: 'error',
+    reason: 'input_gap_exceeded',
+    diagnostic: {
+      trigger: 'rolling_budget',
+      single_gap_exceeded: false,
+      rolling_budget_exceeded: true,
+      missing_samples: 128,
+      recent_gap_samples: 2816,
+      rolling_gap_candidate_samples: 2944,
+      max_transient_gap_samples: 720,
+      max_rolling_gap_samples: 2880,
+      render_frame: 48000,
+      expected_render_frame: 47872,
+      render_delta_samples: 256,
+      input_quantum_samples: 128,
+      previous_input_quantum_samples: 128,
+      input_empty: false,
+      context_sample_rate_hz: 48000,
+      ignored_private_value: 'must-not-propagate',
+    },
+  });
   await nextTask();
 
   assert.equal(adapter.captureState(), 'stopped');
   assert.ok(states.some(([state, reason]) => state === 'stopping' && reason === 'audio_input_gap_exceeded'));
   assert.ok(states.some(([state, reason]) => state === 'stopped' && reason === 'audio_input_gap_exceeded'));
   assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
+  assert.deepEqual(diagnostics, [
+    {
+      event: 'audio_input_gap_exceeded',
+      trigger: 'rolling_budget',
+      single_gap_exceeded: false,
+      rolling_budget_exceeded: true,
+      missing_samples: 128,
+      recent_gap_samples: 2816,
+      rolling_gap_candidate_samples: 2944,
+      max_transient_gap_samples: 720,
+      max_rolling_gap_samples: 2880,
+      render_frame: 48000,
+      expected_render_frame: 47872,
+      render_delta_samples: 256,
+      input_quantum_samples: 128,
+      previous_input_quantum_samples: 128,
+      input_empty: false,
+      context_sample_rate_hz: 48000,
+      track_sample_rate_hz: 48000,
+      capture_generation: metadata.capture_generation,
+      process_call_count: null,
+      initial_render_frame: null,
+      emitted_frame_count: null,
+      sample_cursor: null,
+      output_count: null,
+      output_channel_count: null,
+      output_quantum_samples: null,
+      context_state: 'running',
+      playout_active: false,
+    },
+  ]);
   staleCallback?.({
     data: {
       kind: 'frame',
@@ -1367,6 +1449,22 @@ test('AudioWorklet failures retain exact bounded-gap reasons and fence stale cal
     },
   });
   assert.equal(frames.length, 0);
+});
+
+test('capture diagnostics cannot weaken exact input-gap cleanup', async () => {
+  const fake = fakeEnvironment({
+    reportCaptureDiagnostic() {
+      throw new Error('diagnostic sink unavailable');
+    },
+  });
+  const adapter = new BrowserAudioIOAdapter({ enabled: true, environment: fake.environment });
+  await adapter.startCapture();
+
+  fake.worklets[0].port.emit({ kind: 'error', reason: 'input_gap_exceeded', diagnostic: { trigger: 'single_gap' } });
+  await nextTask();
+
+  assert.equal(adapter.captureState(), 'stopped');
+  assert.equal(fake.mediaDevices.stream.track.stopCount, 1);
 });
 
 test('unknown AudioWorklet errors retain the generic stable gap reason', async () => {

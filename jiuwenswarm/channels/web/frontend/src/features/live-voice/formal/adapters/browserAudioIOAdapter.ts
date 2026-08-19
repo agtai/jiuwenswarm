@@ -120,6 +120,37 @@ export interface BrowserAudioEnvironment {
     | null;
   readonly createId: (() => string) | null;
   readonly outputDeviceSelection?: boolean;
+  readonly reportCaptureDiagnostic?: (diagnostic: Readonly<BrowserAudioInputGapDiagnostic>) => void;
+}
+
+export interface BrowserAudioInputGapDiagnostic {
+  readonly event: 'audio_input_gap_exceeded';
+  readonly trigger: 'single_gap' | 'rolling_budget' | 'single_and_rolling' | 'unknown';
+  readonly single_gap_exceeded: boolean | null;
+  readonly rolling_budget_exceeded: boolean | null;
+  readonly missing_samples: number | null;
+  readonly recent_gap_samples: number | null;
+  readonly rolling_gap_candidate_samples: number | null;
+  readonly max_transient_gap_samples: number | null;
+  readonly max_rolling_gap_samples: number | null;
+  readonly render_frame: number | null;
+  readonly expected_render_frame: number | null;
+  readonly render_delta_samples: number | null;
+  readonly input_quantum_samples: number | null;
+  readonly previous_input_quantum_samples: number | null;
+  readonly input_empty: boolean | null;
+  readonly context_sample_rate_hz: number | null;
+  readonly track_sample_rate_hz: number | null;
+  readonly capture_generation: number;
+  readonly process_call_count: number | null;
+  readonly initial_render_frame: number | null;
+  readonly emitted_frame_count: number | null;
+  readonly sample_cursor: number | null;
+  readonly output_count: number | null;
+  readonly output_channel_count: number | null;
+  readonly output_quantum_samples: number | null;
+  readonly context_state: string;
+  readonly playout_active: boolean;
 }
 
 export interface BrowserAudioPlatformCapability {
@@ -355,6 +386,7 @@ interface PlaybackSourceCleanupSummary {
 }
 
 const CAPTURE_PROCESSOR_NAME = 'jiuwenswarm-live-voice-capture-v1';
+const CAPTURE_DIAGNOSTIC_STORAGE_KEY = 'jiuwenswarm.liveVoice.captureDiagnostic';
 // OpenAI streaming TTS can emit a short seed chunk and then pause before the
 // first sustained burst.  Schedule the browser graph slightly ahead so that
 // ordered 20 ms sources remain contiguous instead of exposing that Provider
@@ -388,6 +420,47 @@ const DISABLED_BROWSER_AUDIO_CAPABILITY: Readonly<BrowserAudioPlatformCapability
   reasons: Object.freeze(['FEATURE_DISABLED']),
 });
 
+function reportBrowserCaptureDiagnostic(diagnostic: Readonly<BrowserAudioInputGapDiagnostic>): void {
+  const serialized = JSON.stringify(diagnostic);
+  console.error(`[LiveVoiceAudioIO] capture diagnostic ${serialized}`);
+  try {
+    window.sessionStorage.setItem(CAPTURE_DIAGNOSTIC_STORAGE_KEY, serialized);
+  } catch {
+    // Private-mode/storage policy must not alter the fail-closed capture path.
+  }
+  if (!['localhost', '127.0.0.1', '::1'].includes(window.location.hostname)) return;
+  const query = new URLSearchParams({
+    trigger: diagnostic.trigger,
+    single_gap_exceeded: String(diagnostic.single_gap_exceeded),
+    rolling_budget_exceeded: String(diagnostic.rolling_budget_exceeded),
+    missing_samples: String(diagnostic.missing_samples),
+    recent_gap_samples: String(diagnostic.recent_gap_samples),
+    rolling_gap_candidate_samples: String(diagnostic.rolling_gap_candidate_samples),
+    max_transient_gap_samples: String(diagnostic.max_transient_gap_samples),
+    max_rolling_gap_samples: String(diagnostic.max_rolling_gap_samples),
+    render_delta_samples: String(diagnostic.render_delta_samples),
+    input_quantum_samples: String(diagnostic.input_quantum_samples),
+    previous_input_quantum_samples: String(diagnostic.previous_input_quantum_samples),
+    input_empty: String(diagnostic.input_empty),
+    context_sample_rate_hz: String(diagnostic.context_sample_rate_hz),
+    track_sample_rate_hz: String(diagnostic.track_sample_rate_hz),
+    capture_generation: String(diagnostic.capture_generation),
+    process_call_count: String(diagnostic.process_call_count),
+    initial_render_frame: String(diagnostic.initial_render_frame),
+    emitted_frame_count: String(diagnostic.emitted_frame_count),
+    sample_cursor: String(diagnostic.sample_cursor),
+    output_count: String(diagnostic.output_count),
+    output_channel_count: String(diagnostic.output_channel_count),
+    output_quantum_samples: String(diagnostic.output_quantum_samples),
+    context_state: diagnostic.context_state,
+    playout_active: String(diagnostic.playout_active),
+  });
+  void fetch(`/__live_voice_capture_diagnostic__?${query.toString()}`, {
+    cache: 'no-store',
+    keepalive: true,
+  }).catch(() => undefined);
+}
+
 function defaultBrowserAudioEnvironment(): BrowserAudioEnvironment {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') {
     return Object.freeze({
@@ -419,6 +492,7 @@ function defaultBrowserAudioEnvironment(): BrowserAudioEnvironment {
       : null,
     createId: typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? () => crypto.randomUUID() : null,
     outputDeviceSelection: Boolean(audioContextConstructor && 'setSinkId' in audioContextConstructor.prototype),
+    reportCaptureDiagnostic: reportBrowserCaptureDiagnostic,
   });
 }
 
@@ -496,6 +570,49 @@ function safeBoolean(value: unknown): boolean | null {
 
 function safePositiveInteger(value: unknown): number | null {
   return Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : null;
+}
+
+function safeNonNegativeInteger(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? (value as number) : null;
+}
+
+function inputGapDiagnostic(
+  message: Readonly<Record<string, unknown>>,
+  session: Readonly<CaptureSession>,
+  playoutActive: boolean
+): Readonly<BrowserAudioInputGapDiagnostic> {
+  const raw = typeof message.diagnostic === 'object' && message.diagnostic !== null ? (message.diagnostic as Record<string, unknown>) : {};
+  const trigger =
+    raw.trigger === 'single_gap' || raw.trigger === 'rolling_budget' || raw.trigger === 'single_and_rolling' ? raw.trigger : 'unknown';
+  return Object.freeze({
+    event: 'audio_input_gap_exceeded',
+    trigger,
+    single_gap_exceeded: safeBoolean(raw.single_gap_exceeded),
+    rolling_budget_exceeded: safeBoolean(raw.rolling_budget_exceeded),
+    missing_samples: safeNonNegativeInteger(raw.missing_samples),
+    recent_gap_samples: safeNonNegativeInteger(raw.recent_gap_samples),
+    rolling_gap_candidate_samples: safeNonNegativeInteger(raw.rolling_gap_candidate_samples),
+    max_transient_gap_samples: safeNonNegativeInteger(raw.max_transient_gap_samples),
+    max_rolling_gap_samples: safeNonNegativeInteger(raw.max_rolling_gap_samples),
+    render_frame: safeNonNegativeInteger(raw.render_frame),
+    expected_render_frame: safeNonNegativeInteger(raw.expected_render_frame),
+    render_delta_samples: safeNonNegativeInteger(raw.render_delta_samples),
+    input_quantum_samples: safeNonNegativeInteger(raw.input_quantum_samples),
+    previous_input_quantum_samples: safeNonNegativeInteger(raw.previous_input_quantum_samples),
+    input_empty: safeBoolean(raw.input_empty),
+    context_sample_rate_hz: safePositiveInteger(raw.context_sample_rate_hz),
+    track_sample_rate_hz: session.metadata.actual_processing.track_sample_rate_hz,
+    capture_generation: session.metadata.capture_generation,
+    process_call_count: safeNonNegativeInteger(raw.process_call_count),
+    initial_render_frame: safeNonNegativeInteger(raw.initial_render_frame),
+    emitted_frame_count: safeNonNegativeInteger(raw.emitted_frame_count),
+    sample_cursor: safeNonNegativeInteger(raw.sample_cursor),
+    output_count: safeNonNegativeInteger(raw.output_count),
+    output_channel_count: safeNonNegativeInteger(raw.output_channel_count),
+    output_quantum_samples: safeNonNegativeInteger(raw.output_quantum_samples),
+    context_state: ['running', 'suspended', 'closed'].includes(session.context.state) ? session.context.state : 'unknown',
+    playout_active: playoutActive,
+  });
 }
 
 function errorName(error: unknown): string {
@@ -815,7 +932,8 @@ export class BrowserAudioIOAdapter {
       const sampleRateHz = context.sampleRate;
       worklet = createWorkletNode(context, CAPTURE_PROCESSOR_NAME, {
         numberOfInputs: 1,
-        numberOfOutputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [1],
         channelCount: 1,
         channelCountMode: 'explicit',
         processorOptions: Object.freeze({
@@ -913,6 +1031,11 @@ export class BrowserAudioIOAdapter {
       pending.deviceListenerAttached = false;
       this.#pendingCaptureToken = null;
       this.#pendingCaptureResources = null;
+      // Chrome may stop pulling a zero-output capture-only graph even while the
+      // input track and AudioContext remain live. The processor writes explicit
+      // silence to this destination-bound output, keeping render callbacks alive
+      // without routing microphone samples to speakers.
+      worklet.connect(context.destination);
       source.connect(worklet);
       this.#emitCaptureState('active', 'capture_started', metadata);
       if (this.#capture !== session || token !== this.#captureToken) {
@@ -1560,8 +1683,15 @@ export class BrowserAudioIOAdapter {
       const message = data as Record<string, unknown>;
       if (message.kind === 'error') {
         switch (message.reason) {
-          case 'input_gap_exceeded':
+          case 'input_gap_exceeded': {
+            const diagnostic = inputGapDiagnostic(message, session, this.#playback !== null);
+            try {
+              this.#environment.reportCaptureDiagnostic?.(diagnostic);
+            } catch {
+              // Diagnostics must never alter the fail-closed capture outcome.
+            }
             throw new BrowserAudioIOViolation('AUDIO_INPUT_GAP_EXCEEDED', 'AudioWorklet input remained unavailable beyond the bounded transient window');
+          }
           case 'render_frame_regressed':
             throw new BrowserAudioIOViolation('AUDIO_RENDER_FRAME_REGRESSED', 'AudioWorklet render clock moved backwards');
           case 'render_frame_not_advanced':
@@ -1887,7 +2017,7 @@ export class BrowserAudioIOAdapter {
     try {
       session.worklet.disconnect();
     } catch {
-      // A zero-output worklet may already be disconnected.
+      // Continue releasing the device and context.
     }
     try {
       session.worklet.port.close();

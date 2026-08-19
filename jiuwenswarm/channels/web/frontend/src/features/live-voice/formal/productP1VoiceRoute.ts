@@ -1692,8 +1692,14 @@ export class ProductP1VoiceRouteOwner {
     this.#drainCaptureFrames();
     const firstFrameDeadline = Date.now() + CAPTURE_FIRST_FRAME_TIMEOUT_MS;
     let pending = route.leaf.flush();
+    // Capture is continuous, so a healthy sender can always have a rolling
+    // frame in flight. Windows Chrome talking to a Gateway in WSL made that
+    // latency visible: ACKs advanced and backpressure stayed bounded, but the
+    // queue never became momentarily empty. Readiness therefore proves the
+    // first Gateway ACK instead of requiring quiescence from a live stream.
+    let acknowledgedFrames = this.#mediaSentFrames - pending.pending_frames;
     while (
-      (this.#frames.length === 0 || this.#mediaSentFrames === 0 || pending.pending_frames !== 0) &&
+      (this.#frames.length === 0 || this.#mediaSentFrames === 0 || acknowledgedFrames === 0) &&
       !route.leaf.closed &&
       Date.now() < firstFrameDeadline
     ) {
@@ -1701,6 +1707,7 @@ export class ProductP1VoiceRouteOwner {
       this.#requireHealthyCaptureReadiness(operationGeneration);
       this.#drainCaptureFrames();
       pending = route.leaf.flush();
+      acknowledgedFrames = this.#mediaSentFrames - pending.pending_frames;
     }
     this.#requireHealthyCaptureReadiness(operationGeneration);
     if (this.#audio.captureState() !== 'active') {
@@ -1718,7 +1725,7 @@ export class ProductP1VoiceRouteOwner {
         reason: 'AUDIO_CAPTURE_NO_FRAMES',
       });
     }
-    if (pending.pending_frames !== 0) {
+    if (acknowledgedFrames === 0) {
       throw Object.assign(new Error('formal media route did not acknowledge capture readiness'), {
         reason: 'AUDIO_CAPTURE_MEDIA_NOT_ACKNOWLEDGED',
       });

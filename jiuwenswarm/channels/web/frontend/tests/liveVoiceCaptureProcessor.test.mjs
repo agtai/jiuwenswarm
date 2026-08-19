@@ -59,6 +59,19 @@ test('AudioWorklet downmixes and aggregates render quanta into exact 20ms PCM fr
   assert.equal(transfer[0], message.samples.buffer);
 });
 
+test('AudioWorklet emits explicit silence on its destination-bound keep-alive output', () => {
+  const { processor, sandbox } = loadProcessor();
+  for (let index = 0; index < 8; index += 1) {
+    const outputChannel = new Float32Array(128).fill(1);
+    assert.equal(processor.process(stereoQuantum(0.2, 0.4), [[outputChannel]]), true);
+    assert.equal(outputChannel.every(sample => sample === 0), true);
+    sandbox.currentFrame += 128;
+  }
+
+  assert.equal(processor.port.messages.length, 1);
+  assert.ok(Math.abs(processor.port.messages[0].message.samples[0] - 0.3) < 1e-6);
+});
+
 test('AudioWorklet preserves contiguous cursor across multiple non-quantum-aligned frames', () => {
   const { processor, sandbox } = loadProcessor(44100);
   for (let index = 0; index < 14; index += 1) {
@@ -88,6 +101,47 @@ test('AudioWorklet starts from a reused running context frame and follows fixed 
   assert.deepEqual([output.seq, output.sample_cursor, output.context_time_s], [0, 0, 8192 / 48000]);
   assert.equal(output.samples.length, 960);
   assert.equal(processor.failed, false);
+});
+
+test('AudioWorklet performs one bounded pre-frame rebase after Chrome startup device reconfiguration', () => {
+  const { processor, sandbox } = loadProcessor();
+  sandbox.currentFrame = 9216;
+  assert.equal(processor.process(stereoQuantum(0.1, 0.1)), true);
+
+  sandbox.currentFrame = 14592;
+  assert.equal(processor.process(stereoQuantum(0.75, 0.75)), true);
+  assert.equal(processor.startupRebaseUsed, true);
+  assert.equal(processor.port.messages.length, 0);
+  for (let index = 0; index < 7; index += 1) {
+    sandbox.currentFrame += 128;
+    assert.equal(processor.process(stereoQuantum(0.75, 0.75)), true);
+  }
+
+  assert.equal(processor.port.messages.length, 1);
+  const frame = processor.port.messages[0].message;
+  assert.equal(frame.context_time_s, 14592 / 48000);
+  assert.equal(frame.samples.every(sample => Math.abs(sample - 0.75) < 1e-6), true);
+  assert.equal(processor.recentInputGapSamples, 0);
+  assert.equal(processor.failed, false);
+});
+
+test('AudioWorklet permits only one bounded startup rebase and retains oversized startup failure', () => {
+  const repeated = loadProcessor();
+  repeated.sandbox.currentFrame = 9216;
+  assert.equal(repeated.processor.process(stereoQuantum(0.1, 0.1)), true);
+  repeated.sandbox.currentFrame = 14592;
+  assert.equal(repeated.processor.process(stereoQuantum(0.2, 0.2)), true);
+  repeated.sandbox.currentFrame = 19968;
+  assert.equal(repeated.processor.process(stereoQuantum(0.3, 0.3)), false);
+  assert.equal(repeated.processor.port.messages.at(-1).message.reason, 'input_gap_exceeded');
+  assert.equal(repeated.processor.port.messages.at(-1).message.diagnostic.emitted_frame_count, 0);
+
+  const oversized = loadProcessor();
+  assert.equal(oversized.processor.process(stereoQuantum(0.1, 0.1)), true);
+  oversized.sandbox.currentFrame = 24001;
+  assert.equal(oversized.processor.process(stereoQuantum(0.2, 0.2)), false);
+  assert.equal(oversized.processor.startupRebaseUsed, false);
+  assert.equal(oversized.processor.port.messages.at(-1).message.reason, 'input_gap_exceeded');
 });
 
 test('AudioWorklet supports a fixed non-128 render quantum without duplicate or missing samples', () => {
@@ -377,11 +431,41 @@ test('AudioWorklet initial empty input cannot publish readiness without later re
 
 test('AudioWorklet fails closed after a single-gap bound, rolling budget, or clock regression', () => {
   const overBound = loadProcessor();
-  assert.equal(overBound.processor.process(stereoQuantum(0, 0)), true);
-  overBound.sandbox.currentFrame = 128 + 721;
+  for (let index = 0; index < 8; index += 1) {
+    assert.equal(overBound.processor.process(stereoQuantum(0, 0)), true);
+    overBound.sandbox.currentFrame += 128;
+  }
+  overBound.sandbox.currentFrame = overBound.processor.expectedRenderFrame + 721;
   assert.equal(overBound.processor.process([[]]), false);
-  assert.equal(overBound.processor.port.messages[0].message.kind, 'error');
-  assert.equal(overBound.processor.port.messages[0].message.reason, 'input_gap_exceeded');
+  assert.equal(overBound.processor.port.messages.at(-1).message.kind, 'error');
+  assert.equal(overBound.processor.port.messages.at(-1).message.reason, 'input_gap_exceeded');
+  assert.deepEqual(
+    { ...overBound.processor.port.messages.at(-1).message.diagnostic },
+    {
+      trigger: 'single_gap',
+      single_gap_exceeded: true,
+      rolling_budget_exceeded: false,
+      missing_samples: 721,
+      recent_gap_samples: 0,
+      rolling_gap_candidate_samples: 721,
+      max_transient_gap_samples: 720,
+      max_rolling_gap_samples: 2880,
+      render_frame: 1745,
+      expected_render_frame: 1024,
+      render_delta_samples: 849,
+      input_quantum_samples: 0,
+      previous_input_quantum_samples: 128,
+      input_empty: true,
+      context_sample_rate_hz: 48000,
+      process_call_count: 9,
+      initial_render_frame: 0,
+      emitted_frame_count: 1,
+      sample_cursor: 960,
+      output_count: 0,
+      output_channel_count: 0,
+      output_quantum_samples: 0,
+    }
+  );
 
   const repeated = loadProcessor();
   assert.equal(repeated.processor.process(stereoQuantum(0, 0)), true);
@@ -393,6 +477,33 @@ test('AudioWorklet fails closed after a single-gap bound, rolling budget, or clo
   assert.equal(repeated.processor.process(stereoQuantum(0, 0)), false);
   assert.equal(repeated.processor.port.messages.at(-1).message.kind, 'error');
   assert.equal(repeated.processor.port.messages.at(-1).message.reason, 'input_gap_exceeded');
+  assert.deepEqual(
+    { ...repeated.processor.port.messages.at(-1).message.diagnostic },
+    {
+      trigger: 'rolling_budget',
+      single_gap_exceeded: false,
+      rolling_budget_exceeded: true,
+      missing_samples: 700,
+      recent_gap_samples: 2800,
+      rolling_gap_candidate_samples: 3500,
+      max_transient_gap_samples: 720,
+      max_rolling_gap_samples: 2880,
+      render_frame: 4140,
+      expected_render_frame: 3440,
+      render_delta_samples: 828,
+      input_quantum_samples: 128,
+      previous_input_quantum_samples: 128,
+      input_empty: false,
+      context_sample_rate_hz: 48000,
+      process_call_count: 6,
+      initial_render_frame: 0,
+      emitted_frame_count: 3,
+      sample_cursor: 2880,
+      output_count: 0,
+      output_channel_count: 0,
+      output_quantum_samples: 0,
+    }
+  );
 
   const regressed = loadProcessor();
   regressed.sandbox.currentFrame = 128;
