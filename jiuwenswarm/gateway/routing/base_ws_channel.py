@@ -16,7 +16,7 @@ from abc import abstractmethod
 from typing import Any
 
 from jiuwenswarm.gateway.channel_manager.base import BaseWebChannel
-from jiuwenswarm.gateway.routing.keys import DeliveryTarget, RoutingKey
+from jiuwenswarm.gateway.routing.keys import RoutingKey
 from jiuwenswarm.gateway.routing.session_sharing import RoutingTarget
 
 logger = logging.getLogger(__name__)
@@ -233,25 +233,27 @@ class BaseWsChannel(BaseWebChannel):
 
     # ── per-ws writer：出站背压隔离 ──
 
-    def _enqueue_send(self, ws: Any, data: Any) -> None:
-        """非阻塞入队一帧到 ws 的出站队列，立即返回。
+    def _enqueue_send(self, ws: Any, data: Any) -> bool:
+        """非阻塞入队一帧到 ws 的出站队列并返回是否成功入队。
 
         ``data`` 可为 dict（由 writer 统一序列化一次，省去入队前预 dumps
         与 ``_coalesce`` 解析回 dict 的往返）、str/bytes（原样发送）或 None
         哨兵。ws 已关闭或队列缺失时静默丢弃（与旧 _safe_send 语义一致）。
         """
         if getattr(ws, "closed", False):
-            return
+            return False
         ws_id = getattr(ws, "_jiuwen_ws_id", "")
         q = self._send_queues.get(ws_id)
         if q is None:
-            return
+            return False
         try:
             q.put_nowait(data)
         except asyncio.QueueFull:
             logger.warning(
                 "[%s] outbound queue full, dropping frame ws_id=%s", self.channel_id, ws_id,
             )
+            return False
+        return True
 
     async def _writer_loop(self, ws: Any, ws_id: str) -> None:
         """常驻 writer：串行 await ws.send，保证同连接帧顺序。

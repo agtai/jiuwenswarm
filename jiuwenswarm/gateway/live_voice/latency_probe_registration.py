@@ -79,13 +79,25 @@ def register_latency_probe_rpc_handler(
             result = _closed_result("rejected", reason_code="INVALID_STRUCTURE")
             batch: LatencyBatch | None = None
             pending_acceptance: tuple[LatencyBatch, str] | None = None
+            authorized_session_id = ""
             try:
                 if not isinstance(params, dict) or set(params) != {"session_id", "batch"}:
                     raise LatencyProbeViolation("INVALID_STRUCTURE")
                 claimed_session_id = params["session_id"]
+                resolve_registered_session = getattr(
+                    channel,
+                    "_registered_session_for_websocket",
+                    None,
+                )
+                if callable(resolve_registered_session):
+                    authorized_session_id = resolve_registered_session(
+                        ws,
+                        claimed_session_id,
+                    )
                 if (
-                    not _valid_dispatcher_session(dispatcher_session_id)
-                    or claimed_session_id != dispatcher_session_id
+                    not _valid_dispatcher_session(authorized_session_id)
+                    or authorized_session_id != dispatcher_session_id
+                    or claimed_session_id != authorized_session_id
                 ):
                     raise LatencyProbeViolation("IDENTITY_MISMATCH")
                 batch = LatencyBatch.from_dict(params["batch"], runtime.run_config)
@@ -95,7 +107,7 @@ def register_latency_probe_rpc_handler(
                     raise LatencyProbeViolation("SEQUENCE_GAP")
 
                 digest = hashlib.sha256(batch.canonical_bytes()).hexdigest()
-                session = sessions.get(dispatcher_session_id)
+                session = sessions.get(authorized_session_id)
                 identical_retry = False
                 if session is None:
                     if batch.round_index != 0:
@@ -145,7 +157,7 @@ def register_latency_probe_rpc_handler(
                 )
 
             try:
-                await channel.send_response(
+                enqueue_receipt = await channel.send_response(
                     ws,
                     req_id,
                     ok=True,
@@ -153,21 +165,23 @@ def register_latency_probe_rpc_handler(
                 )
             except Exception:
                 return
+            if enqueue_receipt is not True:
+                return
 
             if pending_acceptance is not None:
                 accepted_batch, accepted_digest = pending_acceptance
-                session = sessions.get(dispatcher_session_id)
+                session = sessions.get(authorized_session_id)
                 if session is None:
                     session = _AcceptedSession(
                         accepted_batch.run_id,
                         accepted_batch.profile_id,
                         accepted_batch.input_case_id,
                     )
-                    sessions[dispatcher_session_id] = session
+                    sessions[authorized_session_id] = session
                     while len(sessions) > _MAX_SESSION_STATES:
                         sessions.popitem(last=False)
                 else:
-                    sessions.move_to_end(dispatcher_session_id)
+                    sessions.move_to_end(authorized_session_id)
                 if accepted_batch.round_index == session.next_round:
                     session.accepted_rounds[accepted_batch.round_index] = accepted_digest
                     session.next_round += 1

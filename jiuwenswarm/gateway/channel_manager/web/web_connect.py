@@ -351,7 +351,7 @@ class WebChannel(BaseWsChannel):
         payload: dict[str, Any] | None = None,
         error: str | None = None,
         code: str | None = None,
-    ) -> None:
+    ) -> bool:
         """向指定客户端发送 ``res`` 帧."""
         frame: dict[str, Any] = {
             "type": "res",
@@ -364,7 +364,7 @@ class WebChannel(BaseWsChannel):
             if code:
                 frame["code"] = code
         try:
-            self._enqueue_send(ws, frame)
+            return self._enqueue_send(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug(
@@ -375,7 +375,7 @@ class WebChannel(BaseWsChannel):
                         describe_ws_exception(e),
                     ),
                 )
-                return
+                return False
             raise
 
     async def send_event(

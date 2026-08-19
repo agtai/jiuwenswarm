@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -161,6 +162,13 @@ class _FakeChannel:
     def on_disconnect(self, handler: Any) -> None:
         self.disconnect_handler = handler
 
+    def _registered_session_for_websocket(
+        self,
+        _ws: Any,
+        claimed_session_id: object,
+    ) -> str:
+        return claimed_session_id if isinstance(claimed_session_id, str) else ""
+
     async def send_response(
         self,
         ws: Any,
@@ -170,7 +178,7 @@ class _FakeChannel:
         payload: dict[str, object] | None = None,
         error: str | None = None,
         code: str | None = None,
-    ) -> None:
+    ) -> bool:
         self.responses.append(
             {
                 "ws": ws,
@@ -181,6 +189,7 @@ class _FakeChannel:
                 "code": code,
             }
         )
+        return True
 
 
 def _runtime(tmp_path: Path, run_config: Any) -> LatencyProbeRuntime:
@@ -581,11 +590,36 @@ class _ResponseFailureChannel(_FakeChannel):
         payload: dict[str, object] | None = None,
         error: str | None = None,
         code: str | None = None,
-    ) -> None:
+    ) -> bool:
         if self.failure is not None:
             failure = self.failure
             self.failure = None
             raise failure
+        return await super().send_response(
+            ws,
+            req_id,
+            ok=ok,
+            payload=payload,
+            error=error,
+            code=code,
+        )
+
+
+class _ReceiptChannel(_FakeChannel):
+    def __init__(self, receipts: list[bool]) -> None:
+        super().__init__()
+        self.receipts = receipts
+
+    async def send_response(
+        self,
+        ws: Any,
+        req_id: str,
+        *,
+        ok: bool,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+        code: str | None = None,
+    ) -> bool:
         await super().send_response(
             ws,
             req_id,
@@ -594,6 +628,7 @@ class _ResponseFailureChannel(_FakeChannel):
             error=error,
             code=code,
         )
+        return self.receipts.pop(0)
 
 
 @pytest.mark.asyncio
@@ -749,6 +784,58 @@ async def test_ordinary_send_failure_is_contained_without_confirming_round_state
     assert "PRIVATE_SEND_FAILURE" not in repr(channel.responses)
 
 
+@pytest.mark.asyncio
+async def test_false_enqueue_receipt_does_not_confirm_round_state(
+    tmp_path: Path,
+    run_config: Any,
+) -> None:
+    channel = _ReceiptChannel([False, True, True])
+    register_latency_probe_rpc_handler(channel, _runtime(tmp_path, run_config))
+    handler = channel.handlers[LATENCY_PROBE_BATCH_METHOD]
+
+    await handler(
+        "ws",
+        "dropped-round-zero",
+        {"session_id": "session-1", "batch": _batch_dict()},
+        "session-1",
+    )
+    await handler(
+        "ws",
+        "unconfirmed-successor",
+        {
+            "session_id": "session-1",
+            "batch": _batch_dict(batch_id="round-1", round_index=1),
+        },
+        "session-1",
+    )
+    await handler(
+        "ws",
+        "retry-round-zero",
+        {"session_id": "session-1", "batch": _batch_dict()},
+        "session-1",
+    )
+
+    assert [_payload(response) for response in channel.responses] == [
+        {
+            "status": "written",
+            "batch_id": "browser-batch-0",
+            "reason_code": None,
+        },
+        {
+            "status": "rejected",
+            "batch_id": "round-1",
+            "reason_code": "SEQUENCE_GAP",
+        },
+        {
+            "status": "idempotent",
+            "batch_id": "browser-batch-0",
+            "reason_code": None,
+        },
+    ]
+    output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+
+
 @pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(19)])
 @pytest.mark.asyncio
 async def test_send_process_control_escapes_without_confirming_round_state(
@@ -803,24 +890,17 @@ class _MediaRegistrySpy(_EffectOwnerSpy):
         self.registry["voice"] = "mutated"
 
 
-class _AgentPipelineSpy:
-    def __init__(
-        self,
-        agent: _EffectOwnerSpy,
-        downstream: tuple[_EffectOwnerSpy, ...],
-    ) -> None:
+class _AgentCallbackSpy:
+    def __init__(self, agent: _EffectOwnerSpy) -> None:
         self.agent = agent
-        self.downstream = downstream
 
     def __call__(self, message: object) -> bool:
         self.agent.invoke(message)
-        for owner in self.downstream:
-            owner.invoke(message)
         return False
 
 
 @pytest.mark.asyncio
-async def test_every_local_dispatch_outcome_has_zero_individual_product_effects(
+async def test_every_local_dispatch_outcome_has_zero_real_gateway_effects(
     tmp_path: Path,
     run_config: Any,
 ) -> None:
@@ -840,37 +920,13 @@ async def test_every_local_dispatch_outcome_has_zero_individual_product_effects(
         channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
         owners = {
             name: _EffectOwnerSpy(name)
-            for name in (
-                "speech",
-                "agent",
-                "tool",
-                "task",
-                "presentation",
-                "history",
-                "ack",
-                "next_turn",
-            )
+            for name in ("speech", "agent")
         }
         media = _MediaRegistrySpy()
         file_processing = _EffectOwnerSpy("file_processing")
         channel.live_voice_media_registry = media
         channel.live_voice_speech_service = owners["speech"]
-        channel.on_message(
-            _AgentPipelineSpy(
-                owners["agent"],
-                tuple(
-                    owners[name]
-                    for name in (
-                        "tool",
-                        "task",
-                        "presentation",
-                        "history",
-                        "ack",
-                        "next_turn",
-                    )
-                ),
-            )
-        )
+        channel.on_message(_AgentCallbackSpy(owners["agent"]))
         register_latency_probe_rpc_handler(channel, runtime)
         ws = SimpleNamespace(closed=False, remote_address=("127.0.0.1", 12345))
         await channel.register_ws(
@@ -893,10 +949,11 @@ async def test_every_local_dispatch_outcome_has_zero_individual_product_effects(
             payload: dict[str, object] | None = None,
             error: str | None = None,
             code: str | None = None,
-        ) -> None:
+        ) -> bool:
             responses.append(
                 {"id": req_id, "ok": ok, "payload": payload, "error": error, "code": code}
             )
+            return True
 
         async def forbidden_file_processing(
             params: dict[str, Any],
@@ -950,12 +1007,6 @@ async def test_every_local_dispatch_outcome_has_zero_individual_product_effects(
         assert media.calls == 0
         assert owners["speech"].calls == 0
         assert owners["agent"].calls == 0
-        assert owners["tool"].calls == 0
-        assert owners["task"].calls == 0
-        assert owners["presentation"].calls == 0
-        assert owners["history"].calls == 0
-        assert owners["ack"].calls == 0
-        assert owners["next_turn"].calls == 0
         assert media.registry == registry_snapshot
         assert file_processing.calls == 0
         assert channel._clients_by_key == {
@@ -1155,10 +1206,11 @@ async def test_dispatch_authorizes_only_a_session_pre_registered_for_the_websock
         payload: dict[str, object] | None = None,
         error: str | None = None,
         code: str | None = None,
-    ) -> None:
+    ) -> bool:
         responses.append(
             {"id": req_id, "ok": ok, "payload": payload, "error": error, "code": code}
         )
+        return True
 
     async def forbidden_file_processing(params: dict[str, Any]) -> dict[str, Any]:
         nonlocal file_processing_calls
@@ -1223,6 +1275,123 @@ async def test_dispatch_authorizes_only_a_session_pre_registered_for_the_websock
         assert agent_callback_calls == 0
     finally:
         await channel.unregister_ws(ws)
+
+
+@pytest.mark.asyncio
+async def test_waiting_dispatch_revalidates_authority_after_disconnect(
+    tmp_path: Path,
+    run_config: Any,
+) -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    register_latency_probe_rpc_handler(channel, _runtime(tmp_path, run_config))
+    ws = SimpleNamespace(closed=False, remote_address=("127.0.0.1", 12345))
+    await channel.register_ws(
+        ws,
+        RoutingKey(
+            user_id="user-1",
+            channel_id="web",
+            app_id="default",
+            agent_ref=AgentRef(mode="agent", id="default"),
+            session_id="registered-session",
+        ),
+    )
+    first_send_entered = asyncio.Event()
+    release_first_send = asyncio.Event()
+    second_outer_resolution = asyncio.Event()
+    responses: list[dict[str, object]] = []
+    second_request_task: asyncio.Task[None] | None = None
+    original_resolver = channel._registered_session_for_websocket
+
+    def observed_resolver(target_ws: Any, claimed_session_id: object) -> str:
+        resolved = original_resolver(target_ws, claimed_session_id)
+        if asyncio.current_task() is second_request_task:
+            second_outer_resolution.set()
+        return resolved
+
+    async def controlled_response(
+        _ws: Any,
+        req_id: str,
+        *,
+        ok: bool,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+        code: str | None = None,
+    ) -> bool:
+        if req_id == "first":
+            first_send_entered.set()
+            await release_first_send.wait()
+        responses.append(
+            {"id": req_id, "ok": ok, "payload": payload, "error": error, "code": code}
+        )
+        return True
+
+    channel._registered_session_for_websocket = observed_resolver  # type: ignore[method-assign]
+    channel.send_response = controlled_response  # type: ignore[method-assign]
+
+    def request(request_id: str, batch: dict[str, object]) -> str:
+        return json.dumps(
+            {
+                "type": "req",
+                "id": request_id,
+                "method": LATENCY_PROBE_BATCH_METHOD,
+                "params": {
+                    "session_id": "registered-session",
+                    "batch": batch,
+                },
+            }
+        )
+
+    first_request_task = asyncio.create_task(
+        channel._handle_raw_message(ws, request("first", _batch_dict()), {})
+    )
+    disconnected = False
+    try:
+        await asyncio.wait_for(first_send_entered.wait(), timeout=1.0)
+        second_request_task = asyncio.create_task(
+            channel._handle_raw_message(
+                ws,
+                request(
+                    "second",
+                    _batch_dict(batch_id="round-1", round_index=1),
+                ),
+                {},
+            )
+        )
+        await asyncio.wait_for(second_outer_resolution.wait(), timeout=1.0)
+
+        await channel.unregister_ws(ws)
+        disconnected = True
+        assert channel._clients_by_key == {}
+
+        release_first_send.set()
+        await asyncio.gather(first_request_task, second_request_task)
+
+        output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
+        assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+        assert [_payload(response) for response in responses] == [
+            {
+                "status": "written",
+                "batch_id": "browser-batch-0",
+                "reason_code": None,
+            },
+            {
+                "status": "rejected",
+                "batch_id": "",
+                "reason_code": "IDENTITY_MISMATCH",
+            },
+        ]
+    finally:
+        release_first_send.set()
+        if second_request_task is not None:
+            await asyncio.gather(
+                first_request_task,
+                second_request_task,
+                return_exceptions=True,
+            )
+        else:
+            await asyncio.gather(first_request_task, return_exceptions=True)
+        if not disconnected:
+            await channel.unregister_ws(ws)
 
 
 def test_registration_ignores_non_runtime_objects() -> None:
