@@ -67,7 +67,7 @@ Run and observe RED:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/unit_tests/common/test_live_voice_contract_v2.py -q
-node --test jiuwenswarm/channels/web/frontend/tests/liveVoiceContractV2.test.mjs
+npm --prefix jiuwenswarm/channels/web/frontend run test:live-voice-contract-v2
 ```
 
 **Step 2: Implement the closed Python parser.**
@@ -114,7 +114,7 @@ Implement the same operations, payload bounds, disposition validation, result ex
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/unit_tests/common/test_live_voice_contract_v2.py -q
-node --test jiuwenswarm/channels/web/frontend/tests/liveVoiceContractV2.test.mjs
+npm --prefix jiuwenswarm/channels/web/frontend run test:live-voice-contract-v2
 .\.venv\Scripts\python.exe -m ruff check jiuwenswarm/common/schema/live_voice_contract_v2.py tests/unit_tests/common/test_live_voice_contract_v2.py
 ```
 
@@ -449,7 +449,7 @@ Adapt Core's persisted carrier to `ExecutorSelection` without duplicating canoni
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests/unit_tests/live_voice/test_executor_capabilities.py tests/unit_tests/live_voice/test_project_code_executor.py tests/unit_tests/live_voice/test_persistent_task_core.py tests/unit_tests/live_voice/test_task_admission.py tests/unit_tests/live_voice/test_task_result_event_consumption.py tests/unit_tests/live_voice/test_p3_authenticated_composition.py tests/integration/live_voice/test_formal_task_executor_adapter.py tests/integration/live_voice/test_d90_formal_task_vertical.py -q
-node --test jiuwenswarm/channels/web/frontend/tests/liveVoiceContractV2.test.mjs
+npm --prefix jiuwenswarm/channels/web/frontend run test:live-voice-contract-v2
 ```
 
 **Step 6: Commit the integration seam.**
@@ -479,7 +479,7 @@ At minimum run the complete owned and immediate-consumer suites named by the pre
 ```powershell
 .\.venv\Scripts\python.exe -m ruff check jiuwenswarm/common/schema/live_voice_contract_v2.py jiuwenswarm/server/live_voice/executor_capabilities.py jiuwenswarm/server/live_voice/formal_task_models.py jiuwenswarm/server/live_voice/persistent_task_core.py jiuwenswarm/server/live_voice/task_store.py jiuwenswarm/server/live_voice/project_code_executor.py jiuwenswarm/server/live_voice/p3_authenticated_composition.py tests/unit_tests/common/test_live_voice_contract_v2.py tests/unit_tests/live_voice
 .\.venv\Scripts\python.exe -m compileall -q jiuwenswarm/common/schema/live_voice_contract_v2.py jiuwenswarm/server/live_voice
-node --test jiuwenswarm/channels/web/frontend/tests/liveVoiceContractV2.test.mjs
+npm --prefix jiuwenswarm/channels/web/frontend run test:live-voice-contract-v2
 npm --prefix jiuwenswarm/channels/web/frontend run build
 git diff --check
 ```
