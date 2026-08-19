@@ -156,6 +156,11 @@ FIXED_SEGMENT_IDS: Final = frozenset(
 )
 
 _GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_PUBLIC_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$")
+_SENSITIVE_DESCRIPTOR = re.compile(
+    r"(?:private|secret|credential|password|transcript|prompt|authorization|bearer|api[_-]?key)",
+    re.IGNORECASE,
+)
 _CONFIG_KEYS = frozenset(
     {
         "schema_version", "run_id", "git_commit", "source_state",
@@ -204,10 +209,17 @@ def _bounded_string(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise LatencyProbeViolation("INVALID_STRING")
     try:
-        if len(value.encode("utf-8")) > MAX_STRING_UTF8_BYTES:
-            raise LatencyProbeViolation("STRING_TOO_LONG")
-    except UnicodeEncodeError as exc:
-        raise LatencyProbeViolation("INVALID_STRING") from exc
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        encoded = None
+    if (
+        encoded is None
+        or len(encoded) > MAX_STRING_UTF8_BYTES
+        or _PUBLIC_TOKEN.fullmatch(value) is None
+        or value in (".", "..")
+        or _SENSITIVE_DESCRIPTOR.search(value) is not None
+    ):
+        raise LatencyProbeViolation("INVALID_STRING")
     return value
 
 
@@ -227,7 +239,12 @@ def _positive_integer(value: object) -> int:
 def _finite_non_negative(value: object) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise LatencyProbeViolation("INVALID_NUMBER")
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        number = None
+    if number is None:
+        raise LatencyProbeViolation("INVALID_NUMBER")
     if not math.isfinite(number) or number < 0:
         raise LatencyProbeViolation("INVALID_NUMBER")
     return number
@@ -509,13 +526,15 @@ class LatencyBatch:
         marks_raw = raw["marks"]
         if not isinstance(marks_raw, list) or len(marks_raw) > MAX_MARKS_PER_BATCH:
             raise LatencyProbeViolation("INVALID_BATCH")
-        marks = tuple(cls_mark for cls_mark in (LatencyMark.from_dict(item, run) for item in marks_raw))
+        marks = tuple(LatencyMark.from_dict(item, run) for item in marks_raw)
         profile_id = _bounded_string(raw["profile_id"])
         input_case_id = _bounded_string(raw["input_case_id"])
         round_index = _non_negative_integer(raw["round_index"])
         source_instance_id = _bounded_string(raw["source_instance_id"])
         if profile_id not in run.profile_ids or input_case_id not in run.input_case_ids:
             raise LatencyProbeViolation("INCOMPATIBLE_RUN")
+        points: set[str] = set()
+        capacity_count = 0
         for index, mark in enumerate(marks):
             if (
                 mark.mark_index != index
@@ -527,6 +546,17 @@ class LatencyBatch:
                 or mark.component != component
             ):
                 raise LatencyProbeViolation("INVALID_BATCH")
+            if mark.point in points:
+                raise LatencyProbeViolation("DUPLICATE_MARK")
+            points.add(mark.point)
+            if mark.point == "probe.capacity":
+                capacity_count += 1
+                if (
+                    capacity_count != 1
+                    or mark.mark_index != MAX_ORDINARY_MARKS
+                    or len(marks) != MAX_MARKS_PER_BATCH
+                ):
+                    raise LatencyProbeViolation("INVALID_BATCH")
         return cls(
             schema_version=BATCH_SCHEMA_VERSION,
             batch_id=_bounded_string(raw["batch_id"]),
@@ -623,10 +653,14 @@ def _parse_experiment(value: object) -> LatencyExperiment | None:
 
 def load_latency_run_config(path: Path) -> LatencyRunConfig:
     """Load a closed run manifest; rejected content is never included in errors."""
+    failed_to_load = False
     try:
         raw: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise LatencyProbeViolation("INVALID_RUN_CONFIG") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raw = None
+        failed_to_load = True
+    if failed_to_load:
+        raise LatencyProbeViolation("INVALID_RUN_CONFIG")
     value = _require_exact_keys(raw, _CONFIG_KEYS)
     if value["schema_version"] != RUN_SCHEMA_VERSION:
         raise LatencyProbeViolation("INVALID_SCHEMA_VERSION")
@@ -700,7 +734,7 @@ def try_parse_latency_probe_context(
         return LatencyProbeContext(
             CONTEXT_SCHEMA_VERSION, run_id, profile_id, input_case_id, round_index
         )
-    except (LatencyProbeViolation, TypeError):
+    except Exception:
         return None
 
 
@@ -720,7 +754,7 @@ class LatencyProbeRecorder:
         context: LatencyProbeContext,
         component: str,
         phase: str,
-        run_config: LatencyRunConfig | None = None,
+        run_config: LatencyRunConfig,
         source_instance_id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
         batch_id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
         clock_domain_id: str,
@@ -734,13 +768,14 @@ class LatencyProbeRecorder:
             or (component == "gateway" and phase not in ("gateway_stt", "gateway_tts"))
         ):
             raise LatencyProbeViolation("INVALID_BATCH")
-        if run_config is not None and (
-            context.run_id != run_config.run_id
-            or context.profile_id not in run_config.profile_ids
-            or context.input_case_id not in run_config.input_case_ids
+        if not isinstance(run_config, LatencyRunConfig) or not isinstance(
+            context, LatencyProbeContext
         ):
             raise LatencyProbeViolation("INCOMPATIBLE_RUN")
-        self._context = context
+        validated_context = try_parse_latency_probe_context(context.to_dict(), run_config)
+        if validated_context is None:
+            raise LatencyProbeViolation("INCOMPATIBLE_RUN")
+        self._context = validated_context
         self._run_config = run_config
         self._component = component
         self._phase = phase
@@ -778,10 +813,7 @@ class LatencyProbeRecorder:
         try:
             if not isinstance(point, str) or point in self._points:
                 return False
-            if point not in CORE_POINTS_BY_COMPONENT[self._component] and (
-                self._run_config is None
-                or not self._run_config.allows_point(point, self._component)
-            ):
+            if not self._run_config.allows_point(point, self._component):
                 return False
             if outcome not in MARK_OUTCOMES or (reason_code is not None and reason_code not in REASON_CODES):
                 return False
@@ -813,7 +845,7 @@ class LatencyProbeRecorder:
             )
             if mark.uncertainty_ms is not None and point != "browser.playout_first_frame_started_estimate":
                 return False
-        except (LatencyProbeViolation, TypeError, ValueError):
+        except Exception:
             return False
         self._marks.append(mark)
         self._points.add(point)
@@ -847,7 +879,7 @@ class LatencyProbeRecorder:
                 response_generation=None,
                 task_id=None,
             )
-        except (LatencyProbeViolation, TypeError, ValueError):
+        except Exception:
             self._capacity_recorded = True
             return
         self._marks.append(mark)
@@ -875,10 +907,13 @@ class LatencyProbeRecorder:
 class LatencyProbeBatchWriter:
     """Append complete canonical batches with bounded process-local deduplication."""
 
-    def __init__(self, output_root: Path, run_id: str, component: str) -> None:
-        if component not in COMPONENTS:
+    def __init__(
+        self, output_root: Path, run_config: LatencyRunConfig, component: str
+    ) -> None:
+        if not isinstance(run_config, LatencyRunConfig) or component not in COMPONENTS:
             raise LatencyProbeViolation("INVALID_COMPONENT")
-        self._run_id = _bounded_string(run_id)
+        self._run_config = run_config
+        self._run_id = _bounded_string(run_config.run_id)
         self._component = component
         self._path = Path(output_root) / self._run_id / COMPONENT_OUTPUT_FILES[component]
         self._receipts: OrderedDict[str, str] = OrderedDict()
@@ -887,27 +922,61 @@ class LatencyProbeBatchWriter:
     def write(self, batch: LatencyBatch) -> LatencyProbeWriteResult:
         if not isinstance(batch, LatencyBatch):
             return LatencyProbeWriteResult("rejected", "", "INCOMPATIBLE_RUN")
-        if batch.run_id != self._run_id or batch.component != self._component:
-            return LatencyProbeWriteResult("rejected", batch.batch_id, "INCOMPATIBLE_RUN")
-        data = batch.canonical_bytes()
-        digest = hashlib.sha256(data).hexdigest()
+        try:
+            validated = LatencyBatch.from_dict(batch.to_dict(), self._run_config)
+        except LatencyProbeViolation as exc:
+            return LatencyProbeWriteResult("rejected", "", exc.reason_code)
+        except Exception:
+            return LatencyProbeWriteResult("failed", "", "EXPORT_FAILED")
+        if validated.run_id != self._run_id or validated.component != self._component:
+            return LatencyProbeWriteResult(
+                "rejected", validated.batch_id, "INCOMPATIBLE_RUN"
+            )
+        try:
+            data = validated.canonical_bytes()
+            digest = hashlib.sha256(data).hexdigest()
+        except Exception:
+            return LatencyProbeWriteResult("failed", validated.batch_id, "EXPORT_FAILED")
         with _WRITE_LOCK:
-            existing = self._receipts.get(batch.batch_id)
+            existing = self._receipts.get(validated.batch_id)
             if existing is not None:
                 if existing == digest:
-                    return LatencyProbeWriteResult("idempotent", batch.batch_id, None)
-                return LatencyProbeWriteResult("rejected", batch.batch_id, "BATCH_CONFLICT")
+                    return LatencyProbeWriteResult("idempotent", validated.batch_id, None)
+                return LatencyProbeWriteResult(
+                    "rejected", validated.batch_id, "BATCH_CONFLICT"
+                )
+            offset: int | None = None
+            created_output = False
             try:
+                created_output = not self._path.exists()
                 with self._path.open("ab") as handle:
-                    handle.write(data)
-                    handle.write(b"\n")
-            except (OSError, ValueError, TypeError):
-                return LatencyProbeWriteResult("failed", batch.batch_id, "EXPORT_FAILED")
-            self._receipts[batch.batch_id] = digest
-            self._receipts.move_to_end(batch.batch_id)
+                    offset = handle.tell()
+                    payload = data + b"\n"
+                    if handle.write(payload) != len(payload):
+                        handle.truncate(offset)
+                        if created_output:
+                            self._path.unlink(missing_ok=True)
+                        return LatencyProbeWriteResult(
+                            "failed", validated.batch_id, "EXPORT_FAILED"
+                        )
+            except Exception:
+                if offset is not None:
+                    try:
+                        with self._path.open("r+b") as rollback:
+                            rollback.truncate(offset)
+                    except Exception:
+                        pass
+                if created_output:
+                    try:
+                        self._path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                return LatencyProbeWriteResult("failed", validated.batch_id, "EXPORT_FAILED")
+            self._receipts[validated.batch_id] = digest
+            self._receipts.move_to_end(validated.batch_id)
             while len(self._receipts) > MAX_WRITER_RECEIPTS:
                 self._receipts.popitem(last=False)
-        return LatencyProbeWriteResult("written", batch.batch_id, None)
+        return LatencyProbeWriteResult("written", validated.batch_id, None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -926,15 +995,16 @@ class LatencyProbeRuntime:
         source_instance_id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
         batch_id_factory: Callable[[], str] = lambda: secrets.token_urlsafe(18),
     ) -> LatencyProbeRecorder | None:
-        if (
-            context.run_id != self.run_config.run_id
-            or context.profile_id not in self.run_config.profile_ids
-            or context.input_case_id not in self.run_config.input_case_ids
-        ):
-            return None
         try:
+            if not isinstance(context, LatencyProbeContext):
+                return None
+            validated_context = try_parse_latency_probe_context(
+                context.to_dict(), self.run_config
+            )
+            if validated_context is None:
+                return None
             return LatencyProbeRecorder(
-                context=context,
+                context=validated_context,
                 component=self.component,
                 phase=phase,
                 run_config=self.run_config,
@@ -943,7 +1013,7 @@ class LatencyProbeRuntime:
                 clock_domain_id=clock_domain_id,
                 monotonic_ms=monotonic_ms,
             )
-        except LatencyProbeViolation:
+        except Exception:
             return None
 
 
@@ -959,7 +1029,7 @@ def create_latency_probe_runtime_from_environment(
         return None
     try:
         run_config = load_latency_run_config(Path(config_path))
-        writer = LatencyProbeBatchWriter(Path(output_root), run_config.run_id, component)
-    except (LatencyProbeViolation, OSError, ValueError):
+        writer = LatencyProbeBatchWriter(Path(output_root), run_config, component)
+    except Exception:
         return None
     return LatencyProbeRuntime(run_config, component, writer)
