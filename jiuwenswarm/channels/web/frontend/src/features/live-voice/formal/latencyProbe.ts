@@ -79,7 +79,7 @@ const IDENTITY_KEYS = new Set([
   'response_generation',
   'task_id',
 ]);
-const OBSERVATION_KEYS = new Set(['uncertainty_ms', 'outcome', 'reason_code']);
+const OBSERVATION_KEYS = new Set(['monotonic_ms', 'uncertainty_ms', 'outcome', 'reason_code']);
 const BATCH_KEYS = new Set([
   'schema_version',
   'batch_id',
@@ -143,6 +143,7 @@ export interface LatencyIdentityPatch {
 }
 
 export interface LatencyObservation {
+  readonly monotonic_ms?: number;
   readonly uncertainty_ms?: number | null;
   readonly outcome?: LatencyMarkOutcome;
   readonly reason_code?: string | null;
@@ -409,18 +410,29 @@ function parseIdentity(value: unknown, current: Identity | null): Identity | nul
   }
 }
 
-function parseObservation(point: string, value: unknown): Readonly<Required<LatencyObservation>> | null {
+type ParsedLatencyObservation = Readonly<{
+  monotonic_ms: number | null;
+  uncertainty_ms: number | null;
+  outcome: LatencyMarkOutcome;
+  reason_code: string | null;
+}>;
+
+function parseObservation(point: string, value: unknown): ParsedLatencyObservation | null {
   try {
-    if (value === undefined) return Object.freeze({ uncertainty_ms: null, outcome: 'observed', reason_code: null });
+    if (value === undefined) return Object.freeze({ monotonic_ms: null, uncertainty_ms: null, outcome: 'observed', reason_code: null });
     const raw = snapshotExactDataRecord(value, OBSERVATION_KEYS);
     if (raw === null) return null;
+    const hasMonotonic = Object.prototype.hasOwnProperty.call(raw, 'monotonic_ms');
+    const monotonic = hasMonotonic ? raw.monotonic_ms : null;
     const uncertainty = Object.prototype.hasOwnProperty.call(raw, 'uncertainty_ms') ? raw.uncertainty_ms : null;
     const outcome = Object.prototype.hasOwnProperty.call(raw, 'outcome') ? raw.outcome : 'observed';
     const reason = Object.prototype.hasOwnProperty.call(raw, 'reason_code') ? raw.reason_code : null;
+    if (hasMonotonic && !finiteNonnegative(monotonic)) return null;
     if (uncertainty !== null && (!finiteNonnegative(uncertainty) || point !== 'browser.playout_first_frame_started_estimate')) return null;
     if (typeof outcome !== 'string' || !MARK_OUTCOMES.has(outcome)) return null;
     if (reason !== null && (typeof reason !== 'string' || !REASON_CODES.has(reason))) return null;
     return Object.freeze({
+      monotonic_ms: monotonic as number | null,
       uncertainty_ms: uncertainty as number | null,
       outcome: outcome as LatencyMarkOutcome,
       reason_code: reason as string | null,
@@ -600,7 +612,7 @@ class ActiveBrowserLatencyRound implements BrowserLatencyRound {
       const nextIdentity = parseIdentity(identity, this.#identity);
       const normalizedObservation = parseObservation(point, observation);
       if (nextIdentity === null || normalizedObservation === null) return false;
-      const monotonicMs = this.#monotonicMs();
+      const monotonicMs = normalizedObservation.monotonic_ms ?? this.#monotonicMs();
       if (!finiteNonnegative(monotonicMs)) return false;
       const mark = Object.freeze({
         schema_version: LATENCY_MARK_SCHEMA_VERSION,

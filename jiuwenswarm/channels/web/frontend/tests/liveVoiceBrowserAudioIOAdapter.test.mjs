@@ -220,6 +220,7 @@ class FakeAudioContext {
   bufferSourceStartThrows = false;
   bufferSourceStopThrows = false;
   bufferSourceDisconnectThrows = false;
+  onBufferSourceStart = null;
   addModulePromise = null;
   resumePromise = null;
 
@@ -267,10 +268,133 @@ class FakeAudioContext {
     source.startThrows = this.bufferSourceStartThrows;
     source.stopThrows = this.bufferSourceStopThrows;
     source.disconnectThrows = this.bufferSourceDisconnectThrows;
+    const start = source.start.bind(source);
+    source.start = when => {
+      start(when);
+      this.onBufferSourceStart?.(when);
+    };
     this.bufferSources.push(source);
     return source;
   }
 }
+
+test('first accepted WebAudio schedule emits one content-free diagnostic estimate', async () => {
+  const fake = fakeEnvironment();
+  const timings = [];
+  const adapter = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: fake.environment,
+    monotonicNowMs: () => 100,
+    observer: { onPlayoutTiming: event => timings.push(event) },
+  });
+  await adapter.unlockPlayout();
+  const context = fake.contexts[0];
+  context.getOutputTimestamp = () => ({ contextTime: 10, performanceTime: 500 });
+  context.outputLatency = 0.02;
+  adapter.beginPlayout(firstResponse);
+
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
+
+  assert.deepEqual(timings, [{
+    response: firstResponse,
+    unit_id: 'unit-1',
+    seq: 0,
+    scheduled_at_monotonic_ms: 100,
+    estimated_start_monotonic_ms: 1_500,
+    uncertainty_ms: 20,
+  }]);
+});
+
+test('first schedule timing falls back without touching diagnostic clocks when no observer exists', async () => {
+  const observedFake = fakeEnvironment();
+  const timings = [];
+  const observed = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: observedFake.environment,
+    monotonicNowMs: () => 100,
+    observer: { onPlayoutTiming: event => timings.push(event) },
+  });
+  await observed.unlockPlayout();
+  observedFake.contexts[0].baseLatency = 0.005;
+  observed.beginPlayout(firstResponse);
+  assert.equal(observed.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(timings[0].estimated_start_monotonic_ms, 1_100);
+  assert.equal(timings[0].uncertainty_ms, 5);
+
+  const inertFake = fakeEnvironment();
+  const inert = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: inertFake.environment,
+    monotonicNowMs: () => { throw new Error('diagnostic clock accessed'); },
+  });
+  await inert.unlockPlayout();
+  Object.defineProperties(inertFake.contexts[0], {
+    getOutputTimestamp: { get() { throw new Error('timestamp accessed'); } },
+    outputLatency: { get() { throw new Error('latency accessed'); } },
+    baseLatency: { get() { throw new Error('base latency accessed'); } },
+  });
+  inert.beginPlayout(firstResponse);
+  assert.equal(inert.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+});
+
+test('first schedule fallback never estimates before scheduling when currentTime advances past startAt', async () => {
+  for (const timestampThrows of [false, true]) {
+    const fake = fakeEnvironment();
+    const timings = [];
+    const adapter = new BrowserAudioIOAdapter({
+      enabled: true,
+      environment: fake.environment,
+      monotonicNowMs: () => 100,
+      observer: { onPlayoutTiming: event => timings.push(event) },
+    });
+    await adapter.unlockPlayout();
+    const context = fake.contexts[0];
+    if (timestampThrows) {
+      context.getOutputTimestamp = () => { throw new Error('timestamp unavailable'); };
+    }
+    context.onBufferSourceStart = startAt => {
+      context.currentTime = startAt + 1;
+    };
+    adapter.beginPlayout(firstResponse);
+
+    assert.equal(adapter.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+    assert.equal(timings[0].scheduled_at_monotonic_ms, 100);
+    assert.equal(timings[0].estimated_start_monotonic_ms, 100);
+  }
+});
+
+test('first-schedule observer throw and reentrant enqueue cannot duplicate or fail playout', async () => {
+  const throwingFake = fakeEnvironment();
+  const throwing = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: throwingFake.environment,
+    observer: { onPlayoutTiming() { throw new Error('PRIVATE diagnostic failure'); } },
+  });
+  await throwing.unlockPlayout();
+  throwing.beginPlayout(firstResponse);
+  assert.equal(throwing.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(throwingFake.contexts[0].bufferSources.length, 1);
+
+  const reentrantFake = fakeEnvironment();
+  const timings = [];
+  let reentrant;
+  reentrant = new BrowserAudioIOAdapter({
+    enabled: true,
+    environment: reentrantFake.environment,
+    observer: {
+      onPlayoutTiming(event) {
+        timings.push(event);
+        assert.equal(reentrant.enqueuePlayout(pcmChunk(firstResponse, 1)), true);
+      },
+    },
+  });
+  await reentrant.unlockPlayout();
+  reentrant.beginPlayout(firstResponse);
+  assert.equal(reentrant.enqueuePlayout(pcmChunk(firstResponse, 0)), true);
+  assert.equal(timings.length, 1);
+  assert.equal(reentrantFake.contexts[0].bufferSources.length, 2);
+});
 
 function fakeEnvironment(overrides = {}) {
   const document = new FakeDocument();

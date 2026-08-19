@@ -100,6 +100,9 @@ export interface BrowserAudioContextLike {
   readonly destination: unknown;
   readonly audioWorklet?: Readonly<{ addModule(moduleUrl: string): Promise<void> }>;
   readonly state: 'suspended' | 'running' | 'closed' | string;
+  readonly outputLatency?: number;
+  readonly baseLatency?: number;
+  getOutputTimestamp?(): Readonly<{ contextTime: number; performanceTime: number }>;
   onstatechange: BrowserEventListener | null;
   resume(): Promise<void>;
   setSinkId?(sinkId: string): Promise<void>;
@@ -274,11 +277,21 @@ export interface BrowserAudioPlayoutEvent {
   readonly through_seq: number | null;
 }
 
+export interface BrowserAudioPlayoutTimingEvent {
+  readonly response: Readonly<AudioResponseRef>;
+  readonly unit_id: string;
+  readonly seq: number;
+  readonly scheduled_at_monotonic_ms: number;
+  readonly estimated_start_monotonic_ms: number | null;
+  readonly uncertainty_ms: number | null;
+}
+
 export interface BrowserAudioObserver {
   onCaptureFrame?(frame: Readonly<CapturedAudioFrame>): void;
   onCaptureState?(event: Readonly<BrowserAudioCaptureStateEvent>): void;
   onDeviceChange?(event: Readonly<BrowserAudioDeviceEvent>): void;
   onPlayoutState?(event: Readonly<BrowserAudioPlayoutEvent>): void;
+  onPlayoutTiming?(event: Readonly<BrowserAudioPlayoutTimingEvent>): void;
 }
 
 export interface BrowserAudioPcmChunk {
@@ -375,6 +388,7 @@ interface PlaybackSession {
   readonly units: Set<string>;
   nextStartTime: number;
   stopped: boolean;
+  timingEmitted: boolean;
 }
 
 interface PlaybackSourceCleanupSummary {
@@ -1289,6 +1303,7 @@ export class BrowserAudioIOAdapter {
       units: new Set(),
       nextStartTime: context.currentTime + PLAYOUT_STARTUP_LEAD_SECONDS,
       stopped: false,
+      timingEmitted: false,
     };
     this.#playback = playback;
     if (prior !== null) {
@@ -1359,6 +1374,7 @@ export class BrowserAudioIOAdapter {
       sourceStartAttempted = true;
       source.start(startAt);
       playback.nextStartTime = startAt + chunk.samples.length / chunk.sample_rate_hz;
+      this.#emitFirstScheduleTiming(playback, chunk.unit_id, chunk.seq, context, startAt);
     } catch {
       playback.sources.delete(sourceKey);
       if (source !== null) {
@@ -2227,6 +2243,75 @@ export class BrowserAudioIOAdapter {
       );
     } catch {
       // Playout observers cannot interrupt exact-response fencing or cleanup.
+    }
+  }
+
+  #emitFirstScheduleTiming(
+    playback: PlaybackSession,
+    unitId: string,
+    seq: number,
+    context: BrowserAudioContextLike,
+    startAt: number,
+  ): void {
+    if (playback.timingEmitted) return;
+    let observer: BrowserAudioObserver['onPlayoutTiming'];
+    try {
+      observer = this.#observer.onPlayoutTiming;
+    } catch {
+      return;
+    }
+    if (observer === undefined) return;
+    playback.timingEmitted = true;
+    const scheduledAt = readMonotonicNow(this.#monotonicNowMs);
+    if (scheduledAt === null) return;
+    let estimatedStart: number | null = null;
+    let uncertainty: number | null = null;
+    try {
+      const timestamp = context.getOutputTimestamp?.();
+      if (
+        timestamp !== undefined
+        && Number.isFinite(timestamp.contextTime)
+        && timestamp.contextTime >= 0
+        && Number.isFinite(timestamp.performanceTime)
+        && timestamp.performanceTime >= 0
+      ) {
+        estimatedStart = timestamp.performanceTime + (startAt - timestamp.contextTime) * 1_000;
+      } else if (Number.isFinite(context.currentTime) && context.currentTime >= 0) {
+        estimatedStart = scheduledAt + Math.max(0, startAt - context.currentTime) * 1_000;
+      }
+      const quantumMs = 128_000 / context.sampleRate;
+      const latencyMs = [context.outputLatency, context.baseLatency]
+        .filter((value): value is number => Number.isFinite(value) && Number(value) >= 0)
+        .map(value => value * 1_000);
+      if (estimatedStart !== null && Number.isFinite(estimatedStart) && estimatedStart >= 0) {
+        uncertainty = Math.max(quantumMs, ...latencyMs);
+      } else {
+        estimatedStart = null;
+      }
+    } catch {
+      try {
+        const currentTime = context.currentTime;
+        const sampleRate = context.sampleRate;
+        if (Number.isFinite(currentTime) && currentTime >= 0 && Number.isFinite(sampleRate) && sampleRate > 0) {
+          estimatedStart = scheduledAt + Math.max(0, startAt - currentTime) * 1_000;
+          uncertainty = 128_000 / sampleRate;
+        }
+      } catch {
+        estimatedStart = null;
+        uncertainty = null;
+      }
+    }
+    try {
+      observer(Object.freeze({
+        response: playback.response,
+        unit_id: unitId,
+        seq,
+        scheduled_at_monotonic_ms: scheduledAt,
+        estimated_start_monotonic_ms: estimatedStart,
+        uncertainty_ms: uncertainty,
+      }));
+    } catch {
+      // Timing diagnostics cannot own or interrupt browser playout.
     }
   }
 

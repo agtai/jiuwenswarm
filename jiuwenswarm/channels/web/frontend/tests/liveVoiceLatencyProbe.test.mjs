@@ -348,6 +348,72 @@ test('exact golden batch mirrors the Python browser contract and is deeply froze
   );
 });
 
+test('explicit scheduling times are retained exactly without sampling the recorder clock', () => {
+  const h = harness({ clockValues: [999] });
+  const probe = createBrowserLatencyProbe(h.dependencies);
+  const round = probe.beginRound(initialIdentity);
+
+  assert.equal(
+    round.mark('browser.playout_first_frame_scheduled', initialIdentity, { monotonic_ms: 123.5 }),
+    true,
+  );
+  assert.equal(
+    round.mark('browser.playout_first_frame_started_estimate', initialIdentity, {
+      monotonic_ms: 456.75,
+      uncertainty_ms: 2.5,
+    }),
+    true,
+  );
+
+  const batch = round.finish('completed');
+  assert.deepEqual(batch.marks.map(mark => [mark.point, mark.monotonic_ms, mark.uncertainty_ms]), [
+    ['browser.playout_first_frame_scheduled', 123.5, null],
+    ['browser.playout_first_frame_started_estimate', 456.75, 2.5],
+  ]);
+  assert.equal(h.counts().clockCalls, 0);
+});
+
+test('invalid explicit times and accessor observations are inert without clock or mark mutation', () => {
+  const h = harness({ clockValues: [999] });
+  const probe = createBrowserLatencyProbe(h.dependencies);
+  const round = probe.beginRound(initialIdentity);
+
+  assert.equal(round.mark('browser.eot_received', initialIdentity, { monotonic_ms: -1 }), false);
+  assert.equal(round.mark('browser.eot_received', initialIdentity, { monotonic_ms: Number.NaN }), false);
+  assert.equal(round.mark('browser.eot_received', initialIdentity, { monotonic_ms: null }), false);
+  assert.equal(round.mark('browser.eot_received', initialIdentity, { monotonic_ms: 'PRIVATE' }), false);
+  let getterReads = 0;
+  const accessor = {};
+  Object.defineProperty(accessor, 'monotonic_ms', {
+    enumerable: true,
+    get() {
+      getterReads += 1;
+      return 42;
+    },
+  });
+  assert.equal(round.mark('browser.eot_received', initialIdentity, accessor), false);
+  assert.equal(getterReads, 0);
+  assert.equal(h.counts().clockCalls, 0);
+  assert.deepEqual(round.finish('unknown').marks, []);
+});
+
+test('explicit-time marks preserve busy reentrancy and one-shot closure', () => {
+  const h = harness();
+  const probe = createBrowserLatencyProbe(h.dependencies);
+  const round = probe.beginRound(initialIdentity);
+  const observation = {
+    monotonic_ms: 20,
+    outcome: 'observed',
+    reason_code: null,
+  };
+
+  assert.equal(round.mark('browser.eot_received', initialIdentity, observation), true);
+  const batch = round.finish('completed');
+  assert.equal(round.mark('browser.stt_final_received', initialIdentity, { monotonic_ms: 30 }), false);
+  assert.equal(round.finish('failed'), null);
+  assert.equal(batch.marks[0].monotonic_ms, 20);
+});
+
 test('identity enriches monotonically and rejects unknown, private, replacement, and unsafe generation patches without consuming a mark', () => {
   const h = harness();
   const probe = createBrowserLatencyProbe(h.dependencies);

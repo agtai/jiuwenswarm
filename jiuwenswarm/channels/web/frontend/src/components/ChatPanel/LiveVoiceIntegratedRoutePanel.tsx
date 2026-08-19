@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next';
 import {
   FEATURE_LIVE_VOICE_INTEGRATED_WEB,
   FEATURE_LIVE_VOICE_INTEGRATED_P1,
+  FEATURE_LIVE_VOICE_LATENCY_PROBE,
   FEATURE_LIVE_VOICE_PRODUCT_P3_MUTATION,
   FEATURE_LIVE_VOICE_TASK_DEMO,
 } from '../../featureFlags';
@@ -81,6 +82,11 @@ import {
   ProductUnifiedCommittedInputOwner,
   type UnifiedAuthoritativeFinal,
 } from '../../features/live-voice/formal/unifiedCommittedInputOwner';
+import {
+  createBrowserLatencyProbe,
+  type BrowserLatencyProbe,
+  type LatencyProbeContext,
+} from '../../features/live-voice/formal/latencyProbe';
 import { extractWebErrorReason, webClient, webReconnectDelayMs } from '../../services/webClient';
 import type { WebRequestOptions } from '../../types';
 import './LiveVoiceIntegratedRoutePanel.css';
@@ -601,6 +607,52 @@ export type ProductP2NotificationDisposition =
       readonly adjustment_notification: boolean;
     };
 
+type ProductLatencyBrowser = Readonly<{
+  location: Pick<Location, 'search'>;
+  sessionStorage: Pick<Storage, 'getItem' | 'setItem'>;
+  performance: Pick<Performance, 'now'>;
+  crypto: Pick<Crypto, 'randomUUID'>;
+}>;
+
+export function createProductLatencyProbe(input: Readonly<{
+  enabled: boolean;
+  browser: ProductLatencyBrowser;
+  request: (method: string, params: Record<string, unknown>) => unknown;
+}>): BrowserLatencyProbe | null {
+  try {
+    if (input.enabled !== true) return null;
+    return createBrowserLatencyProbe({
+      enabled: true,
+      get location() {
+        return input.browser.location;
+      },
+      get storage() {
+        return input.browser.sessionStorage;
+      },
+      monotonicMs: () => input.browser.performance.now(),
+      randomId: () => input.browser.crypto.randomUUID(),
+      get request() {
+        return input.request;
+      },
+    });
+  } catch {
+    return null;
+  }
+}
+
+export function productLatencyForegroundPresentation(
+  disposition: ProductP2NotificationDisposition,
+  taskId: string | null = null,
+): Readonly<{ response: Readonly<{ interaction_id: string; response_id: string; response_generation: number }>; task_id: string | null }> | null {
+  if (
+    disposition.kind !== 'presentation'
+    || disposition.replayed
+    || disposition.task_notification
+    || disposition.adjustment_notification
+  ) return null;
+  return Object.freeze({ response: disposition.response, task_id: taskId });
+}
+
 export type TerminalAnnouncementState = 'idle' | 'queued' | 'suspending_capture' | 'fetching' | 'playing' | 'acking' | 'recovering';
 
 export function terminalAnnouncementArbitrationAction(
@@ -1048,6 +1100,21 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
   const reactId = useId();
   const fallbackCorrelationId = useMemo(() => `integrated-web-${reactId.replace(/[^A-Za-z0-9_-]/g, '') || 'route'}`, [reactId]);
   const pageInstanceIdRef = useRef<string | null>(null);
+  const latencyProbeRef = useRef<BrowserLatencyProbe | null | undefined>(undefined);
+  if (latencyProbeRef.current === undefined) {
+    latencyProbeRef.current = FEATURE_LIVE_VOICE_LATENCY_PROBE && typeof window !== 'undefined'
+      ? createProductLatencyProbe({
+          enabled: true,
+          browser: {
+            get location() { return window.location; },
+            get sessionStorage() { return window.sessionStorage; },
+            get performance() { return window.performance; },
+            get crypto() { return window.crypto; },
+          },
+          request: (method, params) => productRequest(method, params),
+        })
+      : null;
+  }
   if (pageInstanceIdRef.current === null) {
     pageInstanceIdRef.current = globalThis.crypto?.randomUUID?.() ?? `page-${reactId.replace(/[^A-Za-z0-9_-]/g, '') || 'route'}-${Date.now()}`;
   }
@@ -1173,6 +1240,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     input: UnifiedAuthoritativeFinal;
   }> | null>(null);
   const foregroundPresentationPendingRef = useRef(false);
+  const latencyForegroundTaskIdRef = useRef<string | null>(null);
   const pendingProductTurnRef = useRef<{
     owner: ProductWebP2ActivationOwner;
     input: ProductTurnInput;
@@ -1391,6 +1459,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     submittedVoiceFinalsRef.current.clear();
     pendingUnifiedFinalRef.current = null;
     foregroundPresentationPendingRef.current = false;
+    latencyForegroundTaskIdRef.current = null;
     p2ActivationJournalRef.current = null;
     if (!FEATURE_LIVE_VOICE_INTEGRATED_WEB || sessionId === null) {
       setP2JournalState(null);
@@ -1456,6 +1525,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     const disposition = classifyProductP2Notification(notification, responseId !== null && presentedProductResponsesRef.current.has(responseId));
     if (disposition.kind === 'failed') {
       foregroundPresentationPendingRef.current = false;
+      latencyForegroundTaskIdRef.current = null;
       setProductTextReason(stableProductTextReason(disposition.reason, 'PRODUCT_AGENT_OUTPUT_FAILED'));
       setProductTextStatus('failed');
       scheduleProductVoiceLoopCapture();
@@ -1551,6 +1621,11 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
     };
     const voiceOwner = p1VoiceOwnerRef.current;
     if (voiceOwner !== null && (!disposition.replayed || disposition.task_notification)) {
+      const latencyPresentation = productLatencyForegroundPresentation(disposition, latencyForegroundTaskIdRef.current);
+      if (latencyPresentation !== null) {
+        voiceOwner.observeForegroundPresentationLatency(latencyPresentation.response, latencyPresentation.task_id);
+        latencyForegroundTaskIdRef.current = null;
+      }
       if (disposition.task_notification) updateTerminalAnnouncementState('playing');
       void voiceOwner
         .playAgentText({
@@ -3013,13 +3088,20 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         receipt: recognized.voice_commit_receipt,
         input,
       });
+      latencyForegroundTaskIdRef.current = null;
       foregroundPresentationPendingRef.current = true;
       setProductOutput(null);
       setProductTextReason(null);
       setProductTextStatus('submitting');
       try {
+        let latencyContext: Readonly<LatencyProbeContext> | null | undefined;
         const submitResult = await retryRetainedProductOperation({
-          operation: () => owner!.submit(binding, input),
+          operation: () => {
+            if (latencyContext === undefined) {
+              latencyContext = p1VoiceOwnerRef.current?.prepareUnifiedSubmitLatency(input.turn_id) ?? null;
+            }
+            return owner!.submit(binding, input, latencyContext);
+          },
           is_current: () =>
             activationOwnerRef.current?.snapshot().status === 'active' &&
             activeSessionRef.current === binding.session_id,
@@ -3049,6 +3131,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
           typeof unifiedResult?.task_id === 'string' && unifiedResult.task_id.trim()
             ? unifiedResult.task_id
             : null;
+        latencyForegroundTaskIdRef.current = createdTaskId;
         if (createdTaskId !== null) {
           adoptCreatedProgressRoute(
             Object.freeze({
@@ -3060,6 +3143,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         }
         setProductTextStatus('waiting');
       } catch (error) {
+        latencyForegroundTaskIdRef.current = null;
         foregroundPresentationPendingRef.current = false;
         let settledWithoutPresentation = false;
         if (!owner.hasPending() && pendingUnifiedFinalRef.current?.input === input) {
@@ -3209,6 +3293,7 @@ export function LiveVoiceIntegratedRoutePanel(props: LiveVoiceIntegratedRoutePan
         enabled: true,
         expected_origin: window.location.origin,
         request: (method, params) => productRequest(method, params),
+        latency_probe: latencyProbeRef.current,
         on_status: (status, reason) => {
           if (p1VoiceOwnerRef.current === owner) {
             if (status !== 'capturing' && terminalAnnouncementSpeechOwnerRef.current === owner) {

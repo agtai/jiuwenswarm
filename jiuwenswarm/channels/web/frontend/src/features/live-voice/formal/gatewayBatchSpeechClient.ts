@@ -7,6 +7,7 @@ import {
   type AudioResponseRef,
   type CapturedAudioFrame,
 } from './audioPort.js';
+import type { LatencyProbeContext } from './latencyProbe.js';
 import type { BrowserAudioPcmChunk } from './adapters/browserAudioIOAdapter.js';
 
 export const LIVE_VOICE_SPEECH_CONTRACT_VERSION = 'live-voice.contract.v2';
@@ -207,6 +208,7 @@ export interface FormalSynthesisInput {
   readonly requiredSampleRateHz: number;
   readonly correlationId: string;
   readonly operationId?: string;
+  readonly latencyProbeContext?: Readonly<LatencyProbeContext> | null;
   /**
    * Gateway batch fallback treats this as its whole-operation budget; the
    * selected streaming route treats it as the maximum wait for its next
@@ -1057,6 +1059,9 @@ export class GatewayBatchSpeechClient {
           locale: requiredText(input.locale, 'locale'),
           voice: input.voice ?? null,
           required_sample_rate_hz: positiveSafeInteger(input.requiredSampleRateHz, 'required_sample_rate_hz'),
+          ...(input.latencyProbeContext === undefined || input.latencyProbeContext === null
+            ? {}
+            : { latency_probe_context: input.latencyProbeContext }),
         },
         { timeoutMs: timeoutMs + 1000, signal: input.signal }
       );

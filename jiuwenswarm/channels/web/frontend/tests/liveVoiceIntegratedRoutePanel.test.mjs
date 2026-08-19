@@ -13,12 +13,14 @@ import {
   bindProductVoiceTaskOrigin,
   bootstrapProductP3TaskInspectionLeaf,
   classifyProductP2Notification,
+  createProductLatencyProbe,
   extractWebErrorReason,
   formalTaskIntentResultSummary,
   inspectProductP3RetryCandidate,
   isCurrentProgressOwner,
   reconcileProductP3ProgressEvent,
   productP2WebRequestOptions,
+  productLatencyForegroundPresentation,
   productP3RetryInspectionFailureReason,
   productVoiceDraftMatchesBinding,
   recognizedSpeechConfirmationMatches,
@@ -30,6 +32,58 @@ import {
   terminalAnnouncementArbitrationAction,
   webReconnectDelayMs,
 } from '../node_modules/.cache/live-voice-integrated-web/LiveVoiceIntegratedRoutePanel.mjs';
+
+test('panel latency factory is side-effect free off and invalid query never reaches storage or clocks', () => {
+  let browserReads = 0;
+  const browser = {};
+  for (const key of ['location', 'sessionStorage', 'performance', 'crypto']) {
+    Object.defineProperty(browser, key, {
+      enumerable: true,
+      get() {
+        browserReads += 1;
+        throw new Error(`PRIVATE ${key}`);
+      },
+    });
+  }
+  assert.equal(createProductLatencyProbe({ enabled: false, browser, request() { throw new Error('PRIVATE request'); } }), null);
+  assert.equal(browserReads, 0);
+
+  let storageReads = 0;
+  const invalidBrowser = {
+    location: { search: '?unrelated=1' },
+    get sessionStorage() {
+      storageReads += 1;
+      throw new Error('PRIVATE storage');
+    },
+    performance: { now: () => { throw new Error('PRIVATE clock'); } },
+    crypto: { randomUUID: () => { throw new Error('PRIVATE random'); } },
+  };
+  assert.equal(createProductLatencyProbe({ enabled: true, browser: invalidBrowser, request() {} }), null);
+  assert.equal(storageReads, 0);
+});
+
+test('only a fresh foreground PresentationUnit can donate B3 response identity', () => {
+  const foreground = {
+    kind: 'presentation',
+    response: { interaction_id: 'interaction-1', response_id: 'response-1', response_generation: 1 },
+    replayed: false,
+    task_notification: false,
+    adjustment_notification: false,
+  };
+  assert.deepEqual(productLatencyForegroundPresentation(foreground), {
+    response: foreground.response,
+    task_id: null,
+  });
+  for (const ignored of [
+    { ...foreground, replayed: true },
+    { ...foreground, task_notification: true },
+    { ...foreground, adjustment_notification: true },
+    { kind: 'continue' },
+    { kind: 'failed', reason: 'PRIVATE' },
+  ]) {
+    assert.equal(productLatencyForegroundPresentation(ignored), null);
+  }
+});
 import {
   FormalTaskControlLeaf,
   isFormalTaskRetryEligible,
