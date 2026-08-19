@@ -418,7 +418,7 @@ async function sendFirstFrameToNextWorklet(environment, priorWorklet, overrides 
 async function sendCaptureToDurationBoundary(
   environment,
   samples,
-  { exceed = false, afterBoundary = null } = {},
+  { exceed = false, extraFrames = 0, afterBoundary = null } = {},
 ) {
   const worklet = environment.worklet;
   const handler = worklet?.port.onmessage;
@@ -440,17 +440,19 @@ async function sendCaptureToDurationBoundary(
   }
   afterBoundary?.(worklet);
   if (exceed) {
-    handler({
-      data: {
-        kind: 'frame',
-        capture_generation: worklet.captureGeneration,
-        seq: frameCount,
-        sample_rate_hz: 48_000,
-        sample_cursor: frameCount * 960,
-        context_time_s: frameCount * 0.02,
-        samples,
-      },
-    });
+    for (let offset = 0; offset <= extraFrames; offset += 1) {
+      handler({
+        data: {
+          kind: 'frame',
+          capture_generation: worklet.captureGeneration,
+          seq: frameCount + offset,
+          sample_rate_hz: 48_000,
+          sample_cursor: (frameCount + offset) * 960,
+          context_time_s: (frameCount + offset) * 0.02,
+          samples,
+        },
+      });
+    }
   }
   return worklet;
 }
@@ -4332,17 +4334,24 @@ async function runConcurrentCaptureJourney(options = {}) {
       });
     }
     captureDurationBoundarySnapshot = owner.status();
-    retainedFrameHandler({
-      data: {
-        kind: 'frame',
-        capture_generation: environment.worklet.captureGeneration,
-        seq: frameCount,
-        sample_rate_hz: 48_000,
-        sample_cursor: frameCount * 960,
-        context_time_s: frameCount * 0.02,
-        samples,
-      },
-    });
+    // The 30-second budget now bounds the authoritative utterance from its
+    // provider speech-start (successor frame index 1), not the lease age, so
+    // the exact failure lands one frame past the former lease-age bound.
+    let failedSeq = frameCount;
+    for (; failedSeq <= frameCount + 2; failedSeq += 1) {
+      retainedFrameHandler({
+        data: {
+          kind: 'frame',
+          capture_generation: environment.worklet.captureGeneration,
+          seq: failedSeq,
+          sample_rate_hz: 48_000,
+          sample_cursor: failedSeq * 960,
+          context_time_s: failedSeq * 0.02,
+          samples,
+        },
+      });
+      if (owner.status().status !== 'playing') break;
+    }
     concurrentFailureSnapshot = owner.status();
     const uplinkSocket = sockets.find(socket => socket.serverBinding.generation.id === 'capture-2');
     captureDurationLateFrameUplinkCount = uplinkSocket.sent.filter(value => typeof value !== 'string').length;
@@ -4352,10 +4361,10 @@ async function runConcurrentCaptureJourney(options = {}) {
       data: {
         kind: 'frame',
         capture_generation: environment.worklet.captureGeneration,
-        seq: frameCount + 1,
+        seq: failedSeq + 1,
         sample_rate_hz: 48_000,
-        sample_cursor: (frameCount + 1) * 960,
-        context_time_s: (frameCount + 1) * 0.02,
+        sample_cursor: (failedSeq + 1) * 960,
+        context_time_s: (failedSeq + 1) * 0.02,
         samples,
       },
     });
@@ -4368,10 +4377,10 @@ async function runConcurrentCaptureJourney(options = {}) {
       data: {
         kind: 'frame',
         capture_generation: environment.worklet.captureGeneration,
-        seq: frameCount + 2,
+        seq: failedSeq + 2,
         sample_rate_hz: 48_000,
-        sample_cursor: (frameCount + 2) * 960,
-        context_time_s: (frameCount + 2) * 0.02,
+        sample_cursor: (failedSeq + 2) * 960,
+        context_time_s: (failedSeq + 2) * 0.02,
         samples,
       },
     });
@@ -4428,6 +4437,30 @@ async function runConcurrentCaptureJourney(options = {}) {
     const samples = new Float32Array(960).fill(0.125);
     const retainedFrameHandler = environment.worklet.port.onmessage;
     assert.equal(typeof retainedFrameHandler, 'function');
+    if (options.exerciseCaptureDurationAfterReceipt === true) {
+      // Without an authoritative utterance the successor lease now rotates
+      // transparently, so anchor this duration-failure journey to a real
+      // provider speech-start: the utterance budget expires one frame past
+      // the former lease-age bound. Requires the negotiated EOT capability.
+      const speechStartUplink = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+      assert.ok(speechStartUplink);
+      speechStartUplink.onmessage?.({
+        data: serializeMediaControl({
+          type: 'media.speech_start',
+          capability_version: 'media.end_of_turn.v1',
+          lease_id: speechStartUplink.serverBinding.lease_id,
+          generation: speechStartUplink.serverBinding.generation.value,
+          detector: 'server_vad',
+          provider_start_ms: 150,
+          timing_basis: 'provider_time',
+          timing_provenance: 'adapter_derived',
+          create_response: false,
+          interrupt_response: false,
+          business_cancel_count_delta: 0,
+        }),
+      });
+      await Promise.resolve();
+    }
     for (let seq = 1; seq < frameCount; seq += 1) {
       retainedFrameHandler({
         data: {
@@ -4445,17 +4478,21 @@ async function runConcurrentCaptureJourney(options = {}) {
     if (options.stopAtCaptureDurationBoundaryAfterReceipt === true) {
       captureDurationBoundaryRecognition = await owner.stopAndRecognize();
     } else {
-      retainedFrameHandler({
-        data: {
-          kind: 'frame',
-          capture_generation: environment.worklet.captureGeneration,
-          seq: frameCount,
-          sample_rate_hz: 48_000,
-          sample_cursor: frameCount * 960,
-          context_time_s: frameCount * 0.02,
-          samples,
-        },
-      });
+      let failedSeq = frameCount;
+      for (; failedSeq <= frameCount + 2; failedSeq += 1) {
+        retainedFrameHandler({
+          data: {
+            kind: 'frame',
+            capture_generation: environment.worklet.captureGeneration,
+            seq: failedSeq,
+            sample_rate_hz: 48_000,
+            sample_cursor: failedSeq * 960,
+            context_time_s: failedSeq * 0.02,
+            samples,
+          },
+        });
+        if (owner.status().status !== 'capturing') break;
+      }
       concurrentFailureSnapshot = owner.status();
       const uplinkSocket = sockets.find(socket => socket.serverBinding.generation.id === 'capture-2');
       captureDurationLateFrameUplinkCount = uplinkSocket.sent.filter(value => typeof value !== 'string').length;
@@ -4463,10 +4500,10 @@ async function runConcurrentCaptureJourney(options = {}) {
         data: {
           kind: 'frame',
           capture_generation: environment.worklet.captureGeneration,
-          seq: frameCount + 1,
+          seq: failedSeq + 1,
           sample_rate_hz: 48_000,
-          sample_cursor: (frameCount + 1) * 960,
-          context_time_s: (frameCount + 1) * 0.02,
+          sample_cursor: (failedSeq + 1) * 960,
+          context_time_s: (failedSeq + 1) * 0.02,
           samples,
         },
       });
@@ -4479,10 +4516,10 @@ async function runConcurrentCaptureJourney(options = {}) {
         data: {
           kind: 'frame',
           capture_generation: environment.worklet.captureGeneration,
-          seq: frameCount + 2,
+          seq: failedSeq + 2,
           sample_rate_hz: 48_000,
-          sample_cursor: (frameCount + 2) * 960,
-          context_time_s: (frameCount + 2) * 0.02,
+          sample_cursor: (failedSeq + 2) * 960,
+          context_time_s: (failedSeq + 2) * 0.02,
           samples,
         },
       });
@@ -4806,7 +4843,7 @@ test('formal P1 ignores a closed owner provider speech-start with zero side effe
   );
 });
 
-test('formal P1 protects a current provider speech-start after playout has settled', async () => {
+test('formal P1 protects a current provider speech-start after playout and bounds its utterance', async () => {
   const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
   const uplink = journey.sockets.find(
     socket => socket.serverBinding?.generation?.id === 'capture-2',
@@ -4827,10 +4864,12 @@ test('formal P1 protects a current provider speech-start after playout has settl
       business_cancel_count_delta: 0,
     }),
   });
+  // The utterance budget starts at the provider speech-start (successor frame
+  // index 1), so the exact failure lands just past the former lease-age bound.
   await sendCaptureToDurationBoundary(
     journey.environment,
     new Float32Array(960),
-    { exceed: true },
+    { exceed: true, extraFrames: 2 },
   );
   for (let turn = 0; turn < 200 && journey.owner.status().status !== 'failed'; turn += 1) {
     await new Promise(resolve => setImmediate(resolve));
@@ -4871,6 +4910,252 @@ test('formal P1 does not carry short-playout echo energy into later idle rotatio
     false,
   );
   await journey.owner.close();
+});
+
+test('formal P1 decays one post-playout energy frame and rotates the silent lease boundary', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const { owner, calls, environment } = journey;
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameAt = (seq, samples) => ({
+    data: {
+      kind: 'frame',
+      capture_generation: priorWorklet.captureGeneration,
+      seq,
+      sample_rate_hz: 48_000,
+      sample_cursor: seq * 960,
+      context_time_s: seq * 0.02,
+      samples,
+    },
+  });
+  // One post-playout frame crosses the local energy floor (a TTS tail, echo
+  // or environmental sound); the room then stays silent through the 30-second
+  // lease boundary. The lease must rotate transparently with no visible error
+  // and zero forbidden Agent/Tool/Task/history effects.
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960);
+  handler(frameAt(1, new Float32Array(960).fill(0.125)));
+  const silent = new Float32Array(960);
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  for (let seq = 2; seq <= frameCount + 2; seq += 1) {
+    handler(frameAt(seq, silent));
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  for (let turn = 0; turn < 3_500 && environment.worklet === priorWorklet; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.notEqual(environment.worklet, priorWorklet);
+  assert.equal(
+    calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    3,
+  );
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  assert.equal(
+    calls.some(
+      ([method]) => method.includes('agent') || method.includes('task') || method.includes('history'),
+    ),
+    false,
+  );
+  const rotationDiagnostics = owner.captureDiagnostics();
+  assert.equal(rotationDiagnostics.provider_speech_start_observed, false);
+  assert.equal(rotationDiagnostics.actual_processing?.echo_cancellation, true);
+  assert.equal(rotationDiagnostics.actual_processing?.noise_suppression, true);
+  assert.equal(rotationDiagnostics.actual_processing?.auto_gain_control, true);
+  await owner.close();
+});
+
+test('formal P1 defers the boundary rotation for recent local energy and rotates when it decays', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const { owner, calls, environment } = journey;
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  const silent = new Float32Array(960);
+  const energetic = new Float32Array(960).fill(0.125);
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960);
+  // Local energy lands just before the boundary. The rotation defers inside
+  // its bounded grace and fires as soon as the recency hint decays; it must
+  // not fail the lease.
+  for (let seq = 1; seq <= frameCount + 110; seq += 1) {
+    // A real worklet stops producing once the rotation stops its capture;
+    // stop driving as soon as the rotation dispatches.
+    if (owner.captureDiagnostics().rotation_in_flight || environment.worklet !== priorWorklet) break;
+    const samples = seq >= frameCount - 6 && seq <= frameCount - 5 ? energetic : silent;
+    handler({
+      data: {
+        kind: 'frame',
+        capture_generation: priorWorklet.captureGeneration,
+        seq,
+        sample_rate_hz: 48_000,
+        sample_cursor: seq * 960,
+        context_time_s: seq * 0.02,
+        samples,
+      },
+    });
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  for (let turn = 0; turn < 3_500 && environment.worklet === priorWorklet; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.notEqual(environment.worklet, priorWorklet);
+  assert.equal(
+    calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    3,
+  );
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  for (let turn = 0; turn < 500; turn += 1) {
+    if (calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2')) break;
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  for (let turn = 0; turn < 200 && owner.captureDiagnostics().last_rotation?.completed !== true; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const deferredRotation = owner.captureDiagnostics().last_rotation;
+  assert.equal(deferredRotation?.completed, true);
+  assert.equal(deferredRotation?.trigger, 'silent_boundary');
+  assert.equal(deferredRotation?.at_frame_count > frameCount, true);
+  await owner.close();
+});
+
+test('formal P1 rotates a lease with sustained unconfirmed energy at the bounded grace end', async () => {
+  const journey = await runConcurrentCaptureJourney();
+  const { owner, calls, environment } = journey;
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  const energetic = new Float32Array(960).fill(0.125);
+  environment.nextWorkletFirstFrameSamples = new Float32Array(960);
+  // Every frame crosses the local floor but the Provider never confirms
+  // speech. Sustained unconfirmed energy must rotate at the bounded grace end
+  // instead of expiring the lease.
+  for (let seq = 1; seq <= frameCount + 110; seq += 1) {
+    // A real worklet stops producing once the rotation stops its capture;
+    // stop driving as soon as the rotation dispatches.
+    if (owner.captureDiagnostics().rotation_in_flight || environment.worklet !== priorWorklet) break;
+    handler({
+      data: {
+        kind: 'frame',
+        capture_generation: priorWorklet.captureGeneration,
+        seq,
+        sample_rate_hz: 48_000,
+        sample_cursor: seq * 960,
+        context_time_s: seq * 0.02,
+        samples: energetic,
+      },
+    });
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  for (let turn = 0; turn < 3_500 && environment.worklet === priorWorklet; turn += 1) {
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+
+  assert.notEqual(environment.worklet, priorWorklet);
+  assert.equal(
+    calls.filter(([method]) => method === PRODUCT_P1_MEDIA_ACTIVATE_METHOD).length,
+    3,
+  );
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  for (let turn = 0; turn < 500; turn += 1) {
+    if (calls.some(([method, params]) => method === PRODUCT_P1_MEDIA_CLOSE_METHOD && params.subject_id === 'media-subject-2')) break;
+    await new Promise(resolve => setTimeout(resolve, 1));
+  }
+  for (let turn = 0; turn < 200 && owner.captureDiagnostics().last_rotation?.completed !== true; turn += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  const graceRotation = owner.captureDiagnostics().last_rotation;
+  assert.equal(graceRotation?.completed, true);
+  assert.equal(graceRotation?.trigger, 'local_activity_grace_elapsed');
+  assert.equal(graceRotation?.at_frame_count > frameCount, true);
+  await owner.close();
+});
+
+test('formal P1 keeps an authoritative utterance alive past the lease bound and recognizes it', async () => {
+  const journey = await runConcurrentCaptureJourney({ negotiatedEot: true });
+  const { owner, calls, environment, sockets } = journey;
+  const priorWorklet = environment.worklet;
+  const handler = priorWorklet.port.onmessage;
+  assert.equal(typeof handler, 'function');
+  const frameCount = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20;
+  const silent = new Float32Array(960);
+  const sendSilent = seq => handler({
+    data: {
+      kind: 'frame',
+      capture_generation: priorWorklet.captureGeneration,
+      seq,
+      sample_rate_hz: 48_000,
+      sample_cursor: seq * 960,
+      context_time_s: seq * 0.02,
+      samples: silent,
+    },
+  });
+  for (let seq = 1; seq <= 800; seq += 1) {
+    sendSilent(seq);
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+  const uplink = sockets.find(socket => socket.serverBinding?.generation?.id === 'capture-2');
+  assert.ok(uplink);
+  uplink.onmessage?.({
+    data: serializeMediaControl({
+      type: 'media.speech_start',
+      capability_version: 'media.end_of_turn.v1',
+      lease_id: uplink.serverBinding.lease_id,
+      generation: uplink.serverBinding.generation.value,
+      detector: 'server_vad',
+      provider_start_ms: 16_000,
+      timing_basis: 'provider_time',
+      timing_provenance: 'adapter_derived',
+      create_response: false,
+      interrupt_response: false,
+      business_cancel_count_delta: 0,
+    }),
+  });
+  await Promise.resolve();
+  // The utterance began late in the lease; its own 30-second budget keeps the
+  // capture alive past the former lease-age bound without rotation.
+  for (let seq = 801; seq <= frameCount + 200; seq += 1) {
+    sendSilent(seq);
+    if (seq % 64 === 0) await new Promise(resolve => setImmediate(resolve));
+  }
+
+  assert.deepEqual(owner.status(), { status: 'capturing', reason: null });
+  assert.equal(journey.activationCount, 2);
+  assert.equal(
+    calls.some(([, params]) => params?.reason === PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON),
+    false,
+  );
+  const recognition = await owner.stopAndRecognize();
+  assert.deepEqual(recognition, {
+    text: 'duplex text',
+    voice_commit_receipt: 'voice-receipt-duplex-1',
+  });
+  assert.deepEqual(owner.status(), { status: 'recognized', reason: null });
+  const recognitionCalls = calls.filter(([method]) => method === 'live_voice.speech.recognize_batch');
+  assert.equal(recognitionCalls.length, 2);
+  // Batch fallback uploads the complete lease audio (the Speech client
+  // requires recognition input to start at the first captured frame), so the
+  // extended lease produces a WAV longer than the former 30-second ceiling.
+  assert.equal(
+    Buffer.from(recognitionCalls[1][1].audio.data_base64, 'base64').length,
+    44 + (frameCount + 201) * 960 * 2,
+  );
+  await owner.close();
 });
 
 test('formal P1 aborts an in-flight overlap rotation when current provider speech-start arrives', async () => {
@@ -5575,7 +5860,7 @@ test('formal P1 duration expiry after final render is fenced before playout rece
     [0, 1, 2]
   );
   const uplinkSocket = sockets.find(socket => socket.serverBinding.generation.id === 'capture-2');
-  assert.equal(captureDurationLateFrameUplinkCount <= PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20, true);
+  assert.equal(captureDurationLateFrameUplinkCount <= PRODUCT_P1_CAPTURE_MAX_DURATION_MS / 20 + 1, true);
   assert.equal(uplinkSocket.sent.filter(value => typeof value !== 'string').length, captureDurationLateFrameUplinkCount);
   assert.equal(
     sockets.every(socket => socket.readyState === 3),
@@ -5590,6 +5875,7 @@ test('formal P1 duration expiry after final render is fenced before playout rece
 
 test('formal P1 reports the exact 30-second successor-capture bound after preserving the accepted receipt', async () => {
   const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
     useRealProcessorForSecondCapture: true,
     downlinkFrameCount: 3,
     exerciseDuplicateRenderFrameAtFinalPlayout: true,
@@ -5649,6 +5935,7 @@ test('formal P1 reports the exact 30-second successor-capture bound after preser
 
 test('formal P1 duration expiry releases local capture before an exact authority close retry', async () => {
   const journey = await runConcurrentCaptureJourney({
+    negotiatedEot: true,
     downlinkFrameCount: 3,
     exerciseCaptureDurationAfterReceipt: true,
     failSecondMediaCloseOnce: true,

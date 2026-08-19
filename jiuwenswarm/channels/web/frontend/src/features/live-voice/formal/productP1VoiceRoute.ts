@@ -41,6 +41,19 @@ const MAX_CAPTURE_FRAMES = PRODUCT_P1_CAPTURE_MAX_DURATION_MS / LIVE_VOICE_AUDIO
 // This local observation never commits speech or selects a business route. It
 // only prevents a lease rotation from truncating a possibly spoken utterance.
 const CAPTURE_SPEECH_ENERGY_FLOOR = 0.015;
+// A local energy observation is a short-lived hint that an utterance might be
+// in flight before the Provider confirms it. The hint decays after 1.5 seconds
+// of consecutive sub-floor frames, so one TTS tail, echo or environmental
+// sound cannot permanently block a silent lease rotation; only the current
+// lease's provider speech-start is authoritative speech state.
+const CAPTURE_LOCAL_ACTIVITY_DECAY_FRAMES = 1_500 / LIVE_VOICE_AUDIO_FRAME_DURATION_MS;
+// Recent local activity defers the boundary rotation by at most this bounded
+// grace; sustained energy that the Provider never confirms as speech rotates
+// late instead of failing the lease.
+const CAPTURE_ROTATION_GRACE_FRAMES = CAPTURE_LOCAL_ACTIVITY_DECAY_FRAMES;
+// Defense-in-depth memory bound: every legal path rotates or fails the
+// utterance budget before reaching it.
+const CAPTURE_ABSOLUTE_MAX_FRAMES = MAX_CAPTURE_FRAMES * 2 + CAPTURE_ROTATION_GRACE_FRAMES;
 export const PRODUCT_P1_PLAYOUT_QUEUE_CAPACITY = 256;
 // Streaming TTS is independently bounded from the 30-second microphone
 // capture. Reusing the capture frame limit here cut every answer at exactly
@@ -253,6 +266,40 @@ function defaultSocketFactory(url: string, protocols: readonly string[]): Return
   return new WebSocket(url, [...protocols]) as unknown as ReturnType<DedicatedMediaSocketFactory>;
 }
 
+export interface ProductP1CaptureRotationDiagnostics {
+  readonly mode: 'overlap' | 'idle';
+  readonly trigger: 'silent_boundary' | 'local_activity_grace_elapsed';
+  readonly at_frame_count: number;
+  readonly local_activity_recency_frames: number;
+  readonly completed: boolean;
+}
+
+export interface ProductP1CaptureProcessingDiagnostics {
+  readonly echo_cancellation: boolean | null;
+  readonly noise_suppression: boolean | null;
+  readonly auto_gain_control: boolean | null;
+  readonly track_sample_rate_hz: number | null;
+  readonly track_channel_count: number | null;
+  readonly device_id_present: boolean;
+}
+
+// Sanitized capture diagnostics: counters, phases and processing booleans
+// only. No raw audio, transcript content, credentials or device identity.
+export interface ProductP1CaptureDiagnostics {
+  readonly status: ProductP1VoiceStatus;
+  readonly operation_generation: number;
+  readonly frame_count: number;
+  readonly frames_acked: number;
+  readonly local_activity_observed: boolean;
+  readonly local_activity_recency_frames: number;
+  readonly provider_speech_start_observed: boolean;
+  readonly provider_end_of_turn_pending: boolean;
+  readonly utterance_start_frame_index: number | null;
+  readonly rotation_in_flight: boolean;
+  readonly last_rotation: Readonly<ProductP1CaptureRotationDiagnostics> | null;
+  readonly actual_processing: Readonly<ProductP1CaptureProcessingDiagnostics> | null;
+}
+
 export class ProductP1VoiceRouteOwner {
   readonly #enabled: boolean;
   readonly #request: ProductP1Request;
@@ -268,6 +315,10 @@ export class ProductP1VoiceRouteOwner {
   #frames: Readonly<CapturedAudioFrame>[] = [];
   #captureSpeechObserved = false;
   #captureProviderSpeechStartObserved = false;
+  #captureLocalActivityRecencyFrames = 0;
+  #captureUtteranceStartFrameIndex: number | null = null;
+  #lastCaptureRotation: Readonly<ProductP1CaptureRotationDiagnostics> | null = null;
+  #captureActualProcessing: Readonly<ProductP1CaptureProcessingDiagnostics> | null = null;
   #mediaSentFrames = 0;
   #captureFramesAcked = 0;
   #route: ActiveBrowserDedicatedMediaRoute | null = null;
@@ -372,6 +423,23 @@ export class ProductP1VoiceRouteOwner {
     this.#publish();
   }
 
+  captureDiagnostics(): Readonly<ProductP1CaptureDiagnostics> {
+    return Object.freeze({
+      status: this.#status,
+      operation_generation: this.#operationGeneration,
+      frame_count: this.#frames.length,
+      frames_acked: this.#captureFramesAcked,
+      local_activity_observed: this.#captureSpeechObserved,
+      local_activity_recency_frames: this.#captureLocalActivityRecencyFrames,
+      provider_speech_start_observed: this.#captureProviderSpeechStartObserved,
+      provider_end_of_turn_pending: this.#pendingEndOfTurn !== null,
+      utterance_start_frame_index: this.#captureUtteranceStartFrameIndex,
+      rotation_in_flight: this.#captureRotationPromise !== null,
+      last_rotation: this.#lastCaptureRotation,
+      actual_processing: this.#captureActualProcessing,
+    });
+  }
+
   status(): Readonly<{ status: ProductP1VoiceStatus; reason: string | null }> {
     return Object.freeze({ status: this.#status, reason: this.#reason });
   }
@@ -433,6 +501,8 @@ export class ProductP1VoiceRouteOwner {
     this.#frames = [];
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
+    this.#captureLocalActivityRecencyFrames = 0;
+    this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#route = null;
@@ -452,6 +522,7 @@ export class ProductP1VoiceRouteOwner {
       );
       this.#requireCurrent(operationGeneration);
       const metadata = await this.#audio.startCapture(deviceSelection.input_device_id ? { deviceId: deviceSelection.input_device_id } : {});
+      this.#captureActualProcessing = metadata.actual_processing;
       this.#captureStartupAudioReady = true;
       this.#requireHealthyCaptureReadiness(operationGeneration);
       if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
@@ -655,6 +726,8 @@ export class ProductP1VoiceRouteOwner {
       this.#frames = [];
       this.#captureSpeechObserved = false;
       this.#captureProviderSpeechStartObserved = false;
+      this.#captureLocalActivityRecencyFrames = 0;
+      this.#captureUtteranceStartFrameIndex = null;
       this.#mediaSentFrames = 0;
       if (this.#route === route) this.#route = null;
       this.#endOfTurnHandler = null;
@@ -700,6 +773,13 @@ export class ProductP1VoiceRouteOwner {
       this.#captureFramesAcked = this.#mediaSentFrames;
       await awaitRouteCompletion(route.leaf.completeUplink('MEDIA_LOCAL_CLOSE'));
       this.#requireCurrent(operationGeneration);
+      // A lease extended by the utterance budget keeps its complete frame set:
+      // the Speech client requires batch recognition input to start at the
+      // first captured frame, so no pre-utterance audio is dropped here. The
+      // extreme corner where a late-started utterance pushes batch-fallback
+      // WAV past the Gateway's upload bound is a disclosed Speech-fallback
+      // limitation owned outside this packet; the streaming-primary path is
+      // unaffected.
       const recognitionInput = Object.freeze({
         frames: this.#frames,
         locale: this.#locale,
@@ -742,6 +822,8 @@ export class ProductP1VoiceRouteOwner {
       this.#frames = [];
       this.#captureSpeechObserved = false;
       this.#captureProviderSpeechStartObserved = false;
+      this.#captureLocalActivityRecencyFrames = 0;
+      this.#captureUtteranceStartFrameIndex = null;
       this.#mediaSentFrames = 0;
       this.#route = null;
       this.#requireCurrent(operationGeneration);
@@ -762,6 +844,8 @@ export class ProductP1VoiceRouteOwner {
         this.#frames = [];
         this.#captureSpeechObserved = false;
         this.#captureProviderSpeechStartObserved = false;
+        this.#captureLocalActivityRecencyFrames = 0;
+        this.#captureUtteranceStartFrameIndex = null;
         this.#mediaSentFrames = 0;
         this.#route = null;
         this.#setStatus('idle', PRODUCT_P1_EMPTY_TRANSCRIPT_REASON);
@@ -1044,6 +1128,8 @@ export class ProductP1VoiceRouteOwner {
     this.#frames = [];
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
+    this.#captureLocalActivityRecencyFrames = 0;
+    this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     this.#route = null;
@@ -1058,6 +1144,7 @@ export class ProductP1VoiceRouteOwner {
     const metadata = await this.#audio.startCapture(
       this.#deviceSelection.input_device_id ? { deviceId: this.#deviceSelection.input_device_id } : {}
     );
+    this.#captureActualProcessing = metadata.actual_processing;
     this.#captureStartupAudioReady = true;
     this.#requireHealthyCaptureReadiness(operationGeneration);
     if (this.#playout.sample_rate_hz !== metadata.frame_format.sample_rate_hz) {
@@ -1230,6 +1317,8 @@ export class ProductP1VoiceRouteOwner {
     this.#frames = [];
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
+    this.#captureLocalActivityRecencyFrames = 0;
+    this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     if (this.#route === route) this.#route = null;
@@ -1255,7 +1344,11 @@ export class ProductP1VoiceRouteOwner {
           reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
         });
       }
-      if (route !== this.#route || this.#status !== 'capturing' || this.#captureSpeechObserved) {
+      // Local energy is a decaying hint that was already weighed when this
+      // rotation was dispatched; re-checking it here would turn one late echo
+      // frame into a visible rotation failure. The provider speech-start check
+      // above remains the only authoritative mid-rotation abort.
+      if (route !== this.#route || this.#status !== 'capturing') {
         throw Object.assign(new Error('formal idle capture rotation lost authority'), {
           reason: 'FORMAL_IDLE_CAPTURE_ROTATION_UNAVAILABLE',
         });
@@ -1288,6 +1381,8 @@ export class ProductP1VoiceRouteOwner {
     this.#frames = [];
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
+    this.#captureLocalActivityRecencyFrames = 0;
+    this.#captureUtteranceStartFrameIndex = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
     if (this.#route === route) this.#route = null;
@@ -1659,32 +1754,73 @@ export class ProductP1VoiceRouteOwner {
   #acceptCaptureFrame(frame: Readonly<CapturedAudioFrame>): void {
     if (this.#closed || this.#closeRequested || this.#failureCleanupPromise !== null || ['cleanup_pending', 'failed', 'closed'].includes(this.#status)) return;
     const captureDuringPlayout = this.#status === 'playing';
-    if (!captureDuringPlayout && !this.#captureSpeechObserved) {
+    if (!captureDuringPlayout) {
       let energy = 0;
       for (const sample of frame.samples) energy += sample * sample;
-      this.#captureSpeechObserved =
-        Math.sqrt(energy / frame.samples.length) >= CAPTURE_SPEECH_ENERGY_FLOOR;
+      if (Math.sqrt(energy / frame.samples.length) >= CAPTURE_SPEECH_ENERGY_FLOOR) {
+        // Local energy is a decaying recency hint, never authoritative speech
+        // state. The sticky observation below only guards the notification
+        // pause path; rotation eligibility uses the decaying recency counter.
+        this.#captureSpeechObserved = true;
+        this.#captureLocalActivityRecencyFrames = CAPTURE_LOCAL_ACTIVITY_DECAY_FRAMES;
+      } else if (this.#captureLocalActivityRecencyFrames > 0) {
+        this.#captureLocalActivityRecencyFrames -= 1;
+      }
+    }
+    if (
+      this.#captureRotationPromise !== null &&
+      frame.capture.capture_id === this.#captureRotationSourceId
+    ) {
+      // The exact boundary frame is already retained and draining. Ignore
+      // additional uncommitted frames emitted while the expected local stop
+      // settles; a current-lease provider speech-start still aborts the
+      // in-flight rotation through its own fail-closed checkpoint.
+      return;
     }
     const activePlayout = this.#pendingPlayout ?? this.#settlingPlayout;
-    const speechObservedForDurationBound =
-      this.#captureProviderSpeechStartObserved
-      || (!captureDuringPlayout && this.#captureSpeechObserved);
+    const utteranceActive = this.#captureProviderSpeechStartObserved;
+    const localActivityRecent = !captureDuringPlayout && this.#captureLocalActivityRecencyFrames > 0;
     const canRotateBoundedCapture =
-      this.#frames.length === MAX_CAPTURE_FRAMES - 1 &&
-      !speechObservedForDurationBound &&
+      this.#captureRotationPromise === null &&
+      this.#frames.length >= MAX_CAPTURE_FRAMES - 1 &&
+      !utteranceActive &&
+      (!localActivityRecent ||
+        this.#frames.length >= MAX_CAPTURE_FRAMES - 1 + CAPTURE_ROTATION_GRACE_FRAMES) &&
       ((this.#status === 'playing' && activePlayout !== null) || this.#status === 'capturing');
     if (canRotateBoundedCapture) {
       // Keep the exact boundary frame before rotating. During TTS overlap,
       // loudspeaker echo can cross the local energy floor, so only the current
       // media lease's authoritative speech-start protects a real utterance.
-      // Outside playout, local energy remains the conservative idle guard.
+      // Outside playout, recent local energy defers this rotation until it
+      // decays or the bounded grace elapses; it can no longer fail the lease.
       this.#frames.push(frame);
       this.#drainCaptureFrames();
-      if (this.#captureRotationPromise === null) {
+      {
         const operationGeneration = this.#operationGeneration;
         const rotationSourceId = frame.capture.capture_id;
         this.#captureRotationSourceId = rotationSourceId;
-        const rotation = (this.#status === 'playing' ? this.#rotateConcurrentCapture(operationGeneration) : this.#rotateIdleCapture(operationGeneration))
+        const rotationMode: 'overlap' | 'idle' = this.#status === 'playing' ? 'overlap' : 'idle';
+        const rotationDiagnostics: Readonly<ProductP1CaptureRotationDiagnostics> = Object.freeze({
+          mode: rotationMode,
+          trigger: localActivityRecent
+            ? ('local_activity_grace_elapsed' as const)
+            : ('silent_boundary' as const),
+          at_frame_count: this.#frames.length,
+          local_activity_recency_frames: this.#captureLocalActivityRecencyFrames,
+          completed: false,
+        });
+        this.#lastCaptureRotation = rotationDiagnostics;
+        if (rotationDiagnostics.trigger === 'local_activity_grace_elapsed') {
+          console.warn(
+            `live_voice_capture_rotation trigger=local_activity_grace_elapsed mode=${rotationMode} frames=${this.#frames.length} recency_frames=${this.#captureLocalActivityRecencyFrames} generation=${operationGeneration} visible=false`
+          );
+        }
+        const rotation = (rotationMode === 'overlap' ? this.#rotateConcurrentCapture(operationGeneration) : this.#rotateIdleCapture(operationGeneration))
+          .then(() => {
+            if (this.#lastCaptureRotation === rotationDiagnostics) {
+              this.#lastCaptureRotation = Object.freeze({ ...rotationDiagnostics, completed: true });
+            }
+          })
           .catch(async error => {
             if (!this.#closed && this.#operationGeneration === operationGeneration) await this.#fail(error);
           })
@@ -1696,21 +1832,21 @@ export class ProductP1VoiceRouteOwner {
       }
       return;
     }
+    const utteranceStartFrameIndex = this.#captureUtteranceStartFrameIndex;
     if (
-      this.#captureRotationPromise !== null &&
-      frame.capture.capture_id === this.#captureRotationSourceId &&
-      !speechObservedForDurationBound
+      (utteranceActive &&
+        utteranceStartFrameIndex !== null &&
+        this.#frames.length - utteranceStartFrameIndex >= MAX_CAPTURE_FRAMES) ||
+      this.#frames.length >= CAPTURE_ABSOLUTE_MAX_FRAMES
     ) {
-      // The exact boundary frame is already retained and draining. Ignore only
-      // additional uncommitted frames emitted while the expected local stop
-      // settles; authoritative speech-start still takes the fail-closed path.
-      return;
-    }
-    if (this.#frames.length >= MAX_CAPTURE_FRAMES) {
-      // Batch STT owns the complete bounded utterance, so ACKed frames cannot be
-      // evicted without truncating recognition input. Treat the declared 30s
-      // boundary as an exact Product P1 failure instead of leaking a trusted
-      // capacity decision through the Adapter's generic consumer-error channel.
+      // The declared 30-second budget bounds one authoritative utterance from
+      // its provider speech-start, not the lease's wall-clock age: overlapped
+      // TTS time and deferred-rotation grace no longer expire a user who has
+      // not spoken. Batch STT owns the complete bounded utterance, so ACKed
+      // frames cannot be evicted without truncating recognition input; an
+      // utterance exceeding its own budget remains an exact Product P1
+      // failure instead of leaking a trusted capacity decision through the
+      // Adapter's generic consumer-error channel.
       void this.#fail(
         Object.assign(new Error('formal capture duration exceeded'), {
           reason: PRODUCT_P1_CAPTURE_DURATION_EXCEEDED_REASON,
@@ -1862,6 +1998,8 @@ export class ProductP1VoiceRouteOwner {
     this.#frames = [];
     this.#captureSpeechObserved = false;
     this.#captureProviderSpeechStartObserved = false;
+    this.#captureLocalActivityRecencyFrames = 0;
+    this.#captureUtteranceStartFrameIndex = null;
     this.#captureRotationSourceId = null;
     this.#mediaSentFrames = 0;
     this.#captureFramesAcked = 0;
@@ -2022,6 +2160,12 @@ export class ProductP1VoiceRouteOwner {
       throw new Error('speech-start control escaped its media authority');
     }
     this.#captureProviderSpeechStartObserved = true;
+    if (this.#captureUtteranceStartFrameIndex === null) {
+      // The authoritative utterance budget starts at the first provider
+      // speech-start on this lease; capture-lease age alone never expires an
+      // active utterance.
+      this.#captureUtteranceStartFrameIndex = this.#frames.length;
+    }
     this.#pendingSpeechStart = event;
     this.#deliverBargeInSpeechStart(operationGeneration, route);
   }

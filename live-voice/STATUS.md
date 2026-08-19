@@ -89,10 +89,10 @@ risks, dependencies, acceptance and integration order.
 
 | Capability / module | Status and implemented fact | Remaining for feature complete | Dependency / acceptance |
 |---|---|---|---|
-| Audio Device & browser I/O | **PARTIAL; deferred from the P3-1 Gate.** Browser capture/playout, lifecycle fencing and dedicated media wiring exist, but `f24dd17d` twice entered `AUDIO_CAPTURE_DURATION_EXCEEDED` after TTS instead of continuing automatically | Execute the [recorded repair direction](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md); physically verify overlap/idle rotation; device/permission recovery; AEC/NS/AGC and double-talk; measured first-frame/loss/stop targets | P1/P2 completion before controlled-candidate/feature-complete acceptance; not a P3-1 dependency |
+| Audio Device & browser I/O | **PARTIAL; deferred from the P3-1 Gate.** Browser capture/playout, lifecycle fencing and dedicated media wiring exist. `f24dd17d` twice entered `AUDIO_CAPTURE_DURATION_EXCEEDED` after TTS; the `P1/P2-T1` packet has since repaired the rotation mechanism (decaying local activity, utterance-budget bound, sanitized capture diagnostics) with source/affected automated evidence in the [repair record](evidence/P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md) — no physical credit | Physically verify the repaired post-TTS/overlap/idle rotation per the [deferred record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md); device/permission recovery; AEC/NS/AGC and double-talk; measured first-frame/loss/stop targets | P1/P2 completion before controlled-candidate/feature-complete acceptance; not a P3-1 dependency |
 | Speech Recognition | **PARTIAL.** Two real microphone finals reached the Agent, but each post-TTS failure also produced streaming-route abort, cleanup timeout and unacknowledged cancel | Exact capture/provider-speech-start attribution, robust fallback/cancel, Provider-neutral configuration, fixed accuracy/latency corpus and broader device/network validation | Audio I/O, media route and benchmark owner |
 | Speech Synthesis | **PARTIAL.** Streaming/Batch TTS, browser playout, response ownership and ACK paths exist | Provider-neutral configuration, first-audio/underrun/pronunciation targets and complete stale/cancel recovery | Conversation Runtime ownership and Audio I/O stop confirmation |
-| Realtime Media | **PARTIAL; deferred from the P3-1 Gate.** Dedicated transport, media registration and presentation ACK worked, but repeated post-TTS capture rotation did not preserve a usable media loop | Repair the exact rotation/cancel seam; backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; cumulative real network/device verification |
+| Realtime Media | **PARTIAL; deferred from the P3-1 Gate.** Dedicated transport, media registration and presentation ACK worked, but repeated post-TTS capture rotation did not preserve a usable media loop; the rotation seam is now repaired at source under `P1/P2-T1` with automated evidence only | Physically verify the repaired rotation/cancel seam; backpressure/load targets; drop/reorder/corruption/reconnect matrix; stable diagnostics across repeated recovery | Audio I/O plus Conversation Runtime; cumulative real network/device verification |
 | Conversation Runtime | **PARTIAL.** committed-input fencing, generation ownership, ACK/history projection, Exit fencing and playout-time barge-in exist; manual retry admitted a second turn | Automatic continuation without recurrent recovery failure; interruption during Agent generation, complete `ask_user` voice loop and cross-load arbitration | Media, Interaction Intelligence, Agent Bridge and presentation regressions |
 | Interaction Intelligence | **PARTIAL.** VAD/EOT and bounded dialogue/background routing exist for the controlled journey | General natural-language routing, false endpoint/interruption and echo/double-talk evaluation, language/config generalization; Native model-level duplex remains optional | Streaming Speech plus Runtime; measured golden corpus |
 | Agent Bridge and dialogue truth | **PARTIAL.** Real Agent dialogue/tools and bounded response/progress integration exist | Non-blocking progress provenance, strict Task-truth isolation, bounded result-context reservation and unconstrained reread prevention | Runtime, Task/Event truth and affected text-path regressions |
@@ -139,6 +139,11 @@ deferred from the P3-1 sequencing Gate:
    one more turn but the same failure recurred. Its phenomenon, confirmed
    mechanism, unresolved trigger attribution, repair direction and later
    acceptance are in the [deferred issue record](evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md).
+   The `P1/P2-T1` packet has since implemented those repair directions with
+   source and affected automated evidence in the
+   [repair record](evidence/P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md);
+   the physical later-acceptance criteria remain open and grant no candidate
+   credit.
 
 The explicit build profile and ordinary-production flag-off behaviour are
 source/build/deploy verified. D-086 passes only the P3 expansion prerequisite;
@@ -211,6 +216,15 @@ exact-source Alpha result.
   Tier-3 cold review; synchronized STATUS/evidence. The physical continuation
   criteria remain owned by the deferred record and close only on a later real
   microphone/TTS run; this packet grants no physical credit.
+- **Delivery (2026-08-19):** source repair, deterministic regression, matrix
+  oracles, sanitized diagnostics and disclosure updates are implemented with
+  affected automated evidence — `productP1VoiceRoute` 86/86, adapter/processor
+  103/103, integrated-web battery 410/411 with only the unchanged pre-existing
+  deferred Exit/re-enable seam failing — recorded in the
+  [repair record](evidence/P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md).
+  The independent Tier-3 cold review passed with no P1/P2 and four recorded
+  P3 notes, each dispositioned in the repair record. Physical verification
+  remains open per the deferred record.
 
 ### Batch member P1/P2-T2 — latency optimization (delegated)
 

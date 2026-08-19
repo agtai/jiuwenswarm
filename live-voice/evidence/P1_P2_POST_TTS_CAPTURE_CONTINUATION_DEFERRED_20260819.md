@@ -107,3 +107,12 @@ cannot pass, until one exact clean source proves at least:
 Per the accepted 2026-08-19 sequencing decision, this deferred P1/P2 closure is
 not a hard dependency of P3-1. It returns before the cumulative
 feature-complete/develop-integration boundary.
+
+## Repair status (2026-08-19)
+
+The `P1/P2-T1` packet implemented the repair directions above with source and
+affected automated evidence; see the
+[repair record](P1_T1_POST_TTS_CAPTURE_ROTATION_REPAIR_2026-08-19.md). The
+later-acceptance criteria in this record remain open and unchanged: they close
+only on a real microphone/TTS run, and no physical or candidate credit is
+granted by the automated repair.
