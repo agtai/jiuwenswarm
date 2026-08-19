@@ -152,6 +152,26 @@ class ProductStreamingSynthesisSource:
         self.emitted_frames += 1
         return chunk.frame
 
+    def observe_first_frame_sent(self) -> None:
+        """Record the first frame only after the media socket send succeeds."""
+
+        if self.emitted_frames <= 0:
+            return
+        try:
+            self.owner.observe_downlink_first_frame_sent(self.handle)
+        except BaseException:
+            return
+
+    def observe_ticket_ready(self) -> None:
+        """Record readiness only after the registry publishes the media ticket."""
+
+        if self.emitted_frames <= 0:
+            return
+        try:
+            self.owner.observe_downlink_ticket_ready(self.handle)
+        except BaseException:
+            return
+
     def _observe(self, outcome: StreamingSynthesisOutcome) -> None:
         observer = self.on_outcome
         if observer is None:
@@ -169,10 +189,15 @@ async def start_product_streaming_synthesis(
     *,
     scope_identity: tuple[str, str, str] | None = None,
     on_outcome: OutcomeObserver | None = None,
+    latency_probe_context: object | None = None,
 ) -> ProductStreamingSynthesisStart:
     """Open and pull first audio before the caller may mint a media ticket."""
 
-    handle, outcome = await owner.begin(request, scope_identity=scope_identity)
+    handle, outcome = await owner.begin(
+        request,
+        scope_identity=scope_identity,
+        latency_probe_context=latency_probe_context,
+    )
     if handle is None:
         assert outcome is not None
         if on_outcome is not None:

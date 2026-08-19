@@ -75,6 +75,9 @@ from jiuwenswarm.gateway.live_voice.product_streaming_synthesis import (
     ProductStreamingSynthesisSource,
     start_product_streaming_synthesis,
 )
+from jiuwenswarm.gateway.live_voice.latency_probe import (
+    parse_gateway_latency_probe_context,
+)
 from jiuwenswarm.gateway.live_voice.streaming_synthesis_route import (
     StreamingSynthesisOutcome,
     StreamingSynthesisRouteOwner,
@@ -104,6 +107,10 @@ from jiuwenswarm.server.live_voice.observability import (
     LiveVoiceObservation,
     create_metric,
     create_observation,
+)
+from jiuwenswarm.server.live_voice.latency_probe import (
+    LatencyProbeContext,
+    LatencyProbeRuntime,
 )
 
 
@@ -549,6 +556,7 @@ class _MediaAuthority:
     binding: MediaAuthorityBinding
     locale: str
     end_of_turn_capability: str | None
+    latency_probe_context: LatencyProbeContext | None
     issued_at: float
     ticket_expires_at: float
     authority_expires_at: float
@@ -809,9 +817,11 @@ class DedicatedMediaProductRegistry:
         legacy_path_ticket_compat: bool = False,
         end_of_turn_enabled: bool = False,
         streaming_observability: LiveVoiceObservabilityCollector | None = None,
+        latency_probe_runtime: LatencyProbeRuntime | None = None,
     ) -> None:
         self.enabled = enabled is True
         self._monotonic = monotonic
+        self._latency_probe_runtime = latency_probe_runtime
         self._ticket_ttl = ticket_ttl_seconds
         self._authority_ttl = authority_ttl_seconds
         self._capacity = max(1, min(capacity, _MAX_RECORDS))
@@ -862,7 +872,9 @@ class DedicatedMediaProductRegistry:
         self._streaming_diagnostics_cleanup_complete: bool | None = None
 
     @classmethod
-    def from_environment(cls) -> "DedicatedMediaProductRegistry":
+    def from_environment(
+        cls, *, latency_probe_runtime: LatencyProbeRuntime | None = None
+    ) -> "DedicatedMediaProductRegistry":
         enabled = _enabled(os.getenv(MEDIA_FEATURE_ENV))
         return cls(
             enabled=enabled,
@@ -872,6 +884,7 @@ class DedicatedMediaProductRegistry:
             streaming_observability=(
                 LiveVoiceObservabilityCollector() if enabled else None
             ),
+            latency_probe_runtime=latency_probe_runtime,
         )
 
     @property
@@ -1164,14 +1177,26 @@ class DedicatedMediaProductRegistry:
             "sample_rate_hz",
             "locale",
         }
+        diagnostic_key = "latency_probe_context"
         requests_end_of_turn = "end_of_turn_capability" in params
-        if frozenset(params) not in {
-            frozenset(expected_keys),
-            frozenset(expected_keys | {"end_of_turn_capability"}),
-        }:
+        received_keys = frozenset(params)
+        allowed_keys = expected_keys | (
+            {"end_of_turn_capability"} if requests_end_of_turn else set()
+        )
+        if diagnostic_key in received_keys:
+            allowed_keys.add(diagnostic_key)
+        if received_keys != frozenset(allowed_keys):
             raise MediaTransportViolation(
                 "MEDIA_INVALID_ACTIVATION", "media activation fields are not closed"
             )
+        latency_probe_context = None
+        if self._latency_probe_runtime is not None and diagnostic_key in received_keys:
+            try:
+                latency_probe_context = parse_gateway_latency_probe_context(
+                    self._latency_probe_runtime, params[diagnostic_key]
+                )
+            except Exception:
+                latency_probe_context = None
         requested_end_of_turn = params.get("end_of_turn_capability")
         if (
             requests_end_of_turn
@@ -1271,6 +1296,7 @@ class DedicatedMediaProductRegistry:
             end_of_turn_capability=(
                 MEDIA_END_OF_TURN_CAPABILITY if end_of_turn_available else None
             ),
+            latency_probe_context=latency_probe_context,
             issued_at=now,
             ticket_expires_at=now + self._ticket_ttl,
             authority_expires_at=now + self._authority_ttl,
@@ -1448,6 +1474,7 @@ class DedicatedMediaProductRegistry:
                     if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
                     else RecognitionTurnDetection.manual()
                 ),
+                latency_probe_context=record.latency_probe_context,
             )
         except asyncio.CancelledError:
             self._retain_streaming_outcome(
@@ -1586,6 +1613,22 @@ class DedicatedMediaProductRegistry:
                 ),
             )
             raise RuntimeError("speech-start Provider path failed") from None
+
+    def observe_streaming_end_of_turn_sent(
+        self, record: _MediaAuthority
+    ) -> None:
+        """Mark EOT only for the exact still-owned recognition handle."""
+
+        with self._lock:
+            owner = self._streaming_recognition_owner
+            handle = record.streaming_recognition_handle
+            current = (
+                self._records.get(record.record_id) is record
+                and not record.route_completed
+                and handle is not None
+            )
+        if current and owner is not None and handle is not None:
+            owner.observe_end_of_turn_control_sent(handle)
 
     def accept_streaming_frame(
         self, record: _MediaAuthority, frame: MediaAudioFrame
@@ -2615,6 +2658,8 @@ class DedicatedMediaProductRegistry:
         owner = self._streaming_synthesis_owner
         if operation_name != SYNTHESIZE_OPERATION or owner is None:
             return None
+        latency_probe_context = self._latency_context_from_speech_params(params)
+        params = self.speech_business_params(operation_name, params)
         if (
             not isinstance(context, SpeechRpcContext)
             or context.assurance is not Assurance.AUTHENTICATED
@@ -2676,6 +2721,7 @@ class DedicatedMediaProductRegistry:
                 request.correlation_id,
             ),
             on_outcome=observe_outcome,
+            latency_probe_context=latency_probe_context,
         )
         if start.source is None:
             outcome = start.outcome
@@ -2758,6 +2804,7 @@ class DedicatedMediaProductRegistry:
                     binding=media_binding,
                     locale=parent.locale,
                     end_of_turn_capability=None,
+                    latency_probe_context=latency_probe_context,
                     issued_at=now,
                     ticket_expires_at=now + self._ticket_ttl,
                     authority_expires_at=parent.authority_expires_at,
@@ -2774,6 +2821,7 @@ class DedicatedMediaProductRegistry:
                 request, "MEDIA_STREAMING_TTS_TEXT_OR_RETRY"
             )
         ticket, media_binding = stored
+        source.observe_ticket_ready()
         audio = {
             "format": "pcm_f32_mono_20ms",
             "sample_rate_hz": request.required_sample_rate_hz,
@@ -2826,6 +2874,8 @@ class DedicatedMediaProductRegistry:
         session_id: str,
     ) -> dict[str, object]:
         """Replace exact product synthesis bytes with a one-use binary ticket."""
+
+        params = self.speech_business_params(operation_name, params)
 
         degradation_reason = result.get("_streaming_degradation_reason")
         if "_streaming_degradation_reason" in result:
@@ -2957,6 +3007,7 @@ class DedicatedMediaProductRegistry:
                 binding=binding,
                 locale=parent.locale,
                 end_of_turn_capability=None,
+                latency_probe_context=None,
                 issued_at=now,
                 ticket_expires_at=now + self._ticket_ttl,
                 authority_expires_at=parent.authority_expires_at,
@@ -2991,6 +3042,36 @@ class DedicatedMediaProductRegistry:
             **result,
             "result": {**payload, "audio": transformed_audio},
         }
+
+    def speech_business_params(
+        self, operation_name: str, params: object
+    ) -> object:
+        """Strip the one diagnostic field before closed Speech validation."""
+
+        if operation_name != SYNTHESIZE_OPERATION or not isinstance(params, Mapping):
+            return params
+        try:
+            if "latency_probe_context" not in params:
+                return params
+            return {
+                key: value
+                for key, value in params.items()
+                if key != "latency_probe_context"
+            }
+        except Exception:
+            return params
+
+    def _latency_context_from_speech_params(
+        self, params: object
+    ) -> LatencyProbeContext | None:
+        runtime = self._latency_probe_runtime
+        if runtime is None or not isinstance(params, Mapping):
+            return None
+        try:
+            value = params.get("latency_probe_context")
+        except Exception:
+            return None
+        return parse_gateway_latency_probe_context(runtime, value)
 
     def mark_downlink_started(self, record: _MediaAuthority) -> None:
         """Bind the downlink start to one exact consumed live uplink."""
@@ -3650,6 +3731,11 @@ async def handle_registered_media_socket(
                 ),
                 on_playback_stop=lambda _receipt: None,
                 on_complete=retain_downlink_completion,
+                on_first_frame_sent=(
+                    record.downlink_stream_source.observe_first_frame_sent
+                    if record.downlink_stream_source is not None
+                    else None
+                ),
                 max_pending_frames=8,
                 max_pending_bytes=131_072,
             )
@@ -3725,6 +3811,11 @@ async def handle_registered_media_socket(
                 ),
                 next_end_of_turn=(
                     (lambda: registry.wait_streaming_end_of_turn(record))
+                    if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
+                    else None
+                ),
+                on_end_of_turn_sent=(
+                    (lambda: registry.observe_streaming_end_of_turn_sent(record))
                     if record.end_of_turn_capability == MEDIA_END_OF_TURN_CAPABILITY
                     else None
                 ),

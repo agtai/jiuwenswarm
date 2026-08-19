@@ -23,7 +23,11 @@ from jiuwenswarm.gateway.live_voice.browser_gateway_media_transport import (
     MediaAudioFrame,
     MediaAuthorityBinding,
 )
+from jiuwenswarm.gateway.live_voice.latency_probe import (
+    GatewayLatencyProbeOperation,
+)
 from jiuwenswarm.server.live_voice.openai_streaming_speech import (
+    OpenAIStreamingSpeechProvider,
     SpeechDegradationFact,
     SpeechRouteTier,
     StreamingSpeechSelection,
@@ -155,6 +159,9 @@ class StreamingRecognitionHandle:
     last_event_cursor: int = 0
     speech_start_ms: int | None = None
     speech_stopped: bool = False
+    latency_probe: GatewayLatencyProbeOperation | None = field(
+        default=None, repr=False
+    )
 
 
 StreamingSpeechSelector = Callable[[], Awaitable[StreamingSpeechSelection]]
@@ -163,10 +170,16 @@ StreamingSpeechSelector = Callable[[], Awaitable[StreamingSpeechSelection]]
 class StreamingRecognitionRouteOwner:
     """Lazy, single-Provider owner for bounded concurrent recognition routes."""
 
-    def __init__(self, selector: StreamingSpeechSelector) -> None:
+    def __init__(
+        self,
+        selector: StreamingSpeechSelector,
+        *,
+        latency_probe_runtime: object | None = None,
+    ) -> None:
         if not callable(selector):
             raise TypeError("streaming Speech selector must be callable")
         self._selector = selector
+        self._latency_probe_runtime = latency_probe_runtime
         self._selection_lock = asyncio.Lock()
         self._selection_task: asyncio.Task[StreamingSpeechSelection] | None = None
         self._handle_lock = asyncio.Lock()
@@ -213,6 +226,46 @@ class StreamingRecognitionRouteOwner:
         binding: MediaAuthorityBinding,
         *,
         turn_detection: RecognitionTurnDetection | None = None,
+        latency_probe_context: object | None = None,
+    ) -> tuple[StreamingRecognitionHandle | None, StreamingRecognitionOutcome | None]:
+        probe = None
+        if self._latency_probe_runtime is not None and latency_probe_context is not None:
+            try:
+                probe = GatewayLatencyProbeOperation.create(
+                    self._latency_probe_runtime,
+                    latency_probe_context,
+                    phase="gateway_stt",
+                    correlation_id=binding.correlation_id,
+                    interaction_id=binding.interaction_id,
+                )
+            except Exception:
+                probe = None
+        if probe is not None:
+            probe.mark("gateway.stt_request_started")
+        try:
+            handle, outcome = await self._begin(
+                binding,
+                turn_detection=turn_detection,
+                latency_probe=probe,
+            )
+        except asyncio.CancelledError:
+            if probe is not None:
+                probe.finish("cancelled")
+            raise
+        except BaseException:
+            if probe is not None:
+                probe.finish("failed")
+            raise
+        if handle is None and probe is not None:
+            probe.finish("failed")
+        return handle, outcome
+
+    async def _begin(
+        self,
+        binding: MediaAuthorityBinding,
+        *,
+        turn_detection: RecognitionTurnDetection | None,
+        latency_probe: GatewayLatencyProbeOperation | None,
     ) -> tuple[StreamingRecognitionHandle | None, StreamingRecognitionOutcome | None]:
         if self._closed:
             return None, self._fallback(
@@ -268,9 +321,34 @@ class StreamingRecognitionRouteOwner:
             # Reserve capacity and register the concrete Provider call in one
             # lock ownership step.  close() can therefore never observe a None
             # reservation without also observing the operation that owns it.
+            provider_reports_boundaries = isinstance(
+                provider, OpenAIStreamingSpeechProvider
+            )
+
             async def invoke_open() -> None:
+                request = RecognitionStreamRequest(ref, detection)
+                if provider_reports_boundaries:
+                    await provider.open_recognition(
+                        request,
+                        timeout_seconds=_RECOGNITION_SESSION_TIMEOUT_SECONDS,
+                        on_transport_open=(
+                            None
+                            if latency_probe is None
+                            else lambda: latency_probe.mark(
+                                "gateway.stt_provider_transport_open"
+                            )
+                        ),
+                        on_session_ready=(
+                            None
+                            if latency_probe is None
+                            else lambda: latency_probe.mark(
+                                "gateway.stt_session_ready"
+                            )
+                        ),
+                    )
+                    return
                 await provider.open_recognition(
-                    RecognitionStreamRequest(ref, detection),
+                    request,
                     timeout_seconds=_RECOGNITION_SESSION_TIMEOUT_SECONDS,
                 )
 
@@ -292,6 +370,8 @@ class StreamingRecognitionRouteOwner:
                 await self._await_bounded_provider_task(
                     open_task, timeout_seconds=_OPEN_TIMEOUT_SECONDS
                 )
+                if latency_probe is not None and not provider_reports_boundaries:
+                    latency_probe.mark("gateway.stt_provider_transport_open")
             except asyncio.CancelledError:
                 await self._release_stream_reservation(stream_key)
                 raise
@@ -323,6 +403,7 @@ class StreamingRecognitionRouteOwner:
                     if detection.server_vad is not None
                     else None
                 ),
+                latency_probe=latency_probe,
             )
             handle.pump_task = asyncio.create_task(
                 self._pump(handle),
@@ -351,6 +432,8 @@ class StreamingRecognitionRouteOwner:
                     StreamingRecognitionFallbackReason.ROUTE_ABORTED,
                     SpeechRouteTier.TEXT,
                 )
+            if latency_probe is not None and not provider_reports_boundaries:
+                latency_probe.mark("gateway.stt_session_ready")
             return handle, None
         finally:
             await self._release_opening_task(stream_key, operation_task, open_task)
@@ -427,6 +510,14 @@ class StreamingRecognitionRouteOwner:
         if future is None:
             raise RuntimeError("speech-start was not negotiated for this stream")
         return await asyncio.shield(future)
+
+    def observe_end_of_turn_control_sent(
+        self, handle: StreamingRecognitionHandle
+    ) -> None:
+        """Record only the exact successful Gateway media-control send."""
+
+        if handle.latency_probe is not None:
+            handle.latency_probe.mark("gateway.eot_control_sent")
 
     async def finish(
         self, handle: StreamingRecognitionHandle
@@ -520,13 +611,15 @@ class StreamingRecognitionRouteOwner:
                     selected = event.hypothesis.selected
                     if not selected.display_text:
                         raise ValueError("streaming recognition final is empty")
-                    return StreamingRecognitionOutcome(
+                    outcome = StreamingRecognitionOutcome(
                         completed=True,
                         final_text=selected.display_text,
                         provider=event.provider,
                         fallback_tier=None,
                         reason=None,
                     )
+                    self._finish_latency_probe(handle, "completed")
+                    return outcome
                 except TimeoutError:
                     handle.failure = StreamingRecognitionFallbackReason.PROVIDER_TIMEOUT
                 except asyncio.CancelledError:
@@ -535,16 +628,19 @@ class StreamingRecognitionRouteOwner:
                     handle.failure = (
                         StreamingRecognitionFallbackReason.PROVIDER_PROTOCOL
                     )
-            return self._fallback(
+            outcome = self._fallback(
                 handle.failure
                 or StreamingRecognitionFallbackReason.PROVIDER_UNAVAILABLE,
                 SpeechRouteTier.TEXT,
             )
+            self._finish_latency_probe(handle, "failed")
+            return outcome
         except asyncio.CancelledError:
             # Cancellation of the caller that owns finish() is also a product
             # route abort.  Preserve that fact for finally so the exact
             # Provider stream is cancelled before the handle is retired.
             handle.failure = StreamingRecognitionFallbackReason.ROUTE_ABORTED
+            self._finish_latency_probe(handle, "cancelled")
             raise
         except _PROCESS_CONTROL as exc:
             # Process-control must still retire the exact Provider stream and
@@ -553,6 +649,7 @@ class StreamingRecognitionRouteOwner:
             # attached through __context__.
             operation_process_control = self._safe_process_control(exc)
             handle.failure = StreamingRecognitionFallbackReason.ROUTE_ABORTED
+            self._finish_latency_probe(handle, "cancelled")
         finally:
             cleanup_process_control: BaseException | None = None
             if handle.failure is not None:
@@ -995,6 +1092,8 @@ class StreamingRecognitionRouteOwner:
                 ):
                     del event
                     raise RuntimeError("manual recognition cursor was not committed")
+                if handle.latency_probe is not None:
+                    handle.latency_probe.mark("gateway.stt_final_available")
                 return event
             if event.kind is RecognitionEventKind.CANCELLED:
                 del event
@@ -1034,6 +1133,8 @@ class StreamingRecognitionRouteOwner:
             ):
                 raise RuntimeError("speech stop boundary was invalid")
             handle.speech_stopped = True
+            if handle.latency_probe is not None:
+                handle.latency_probe.mark("gateway.vad_speech_stopped")
             handle.input_fenced = True
             while True:
                 try:
@@ -1382,6 +1483,14 @@ class StreamingRecognitionRouteOwner:
             fallback_tier=tier,
             reason=reason,
         )
+
+    @staticmethod
+    def _finish_latency_probe(
+        handle: StreamingRecognitionHandle, terminal_outcome: str
+    ) -> None:
+        probe = handle.latency_probe
+        if probe is not None:
+            probe.finish(terminal_outcome)
 
 
 def _settle_eot_from_collector(

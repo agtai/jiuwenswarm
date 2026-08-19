@@ -393,6 +393,11 @@ async def test_recognition_transport_diagnostics_show_open_ready_and_close_witho
 ):
     socket = FakeSocket((session_updated_event(),))
     logs = CapturingLogHandler()
+    observed_boundaries: list[str] = []
+
+    def observe_transport_open() -> None:
+        observed_boundaries.append("transport_open")
+        raise RuntimeError("diagnostic observer must not affect recognition")
 
     async def socket_factory(*_args) -> FakeSocket:
         return socket
@@ -401,7 +406,13 @@ async def test_recognition_transport_diagnostics_show_open_ready_and_close_witho
     ref = recognition_ref()
     _LOGGER.addHandler(logs)
     try:
-        await provider.open_recognition(ref, timeout_seconds=1)
+        await provider.open_recognition(
+            ref,
+            timeout_seconds=1,
+            on_transport_open=observe_transport_open,
+            on_session_ready=lambda: observed_boundaries.append("session_ready"),
+        )
+        assert observed_boundaries == ["transport_open", "session_ready"]
         await provider.cancel_recognition(ref)
         await provider.close()
     finally:
@@ -454,15 +465,26 @@ async def test_synthesis_transport_diagnostics_show_open_and_close_without_priva
 
     provider = OpenAIStreamingSpeechProvider(config(), sse_factory=sse_factory)
     request = synthesis_request()
+    observed_boundaries: list[str] = []
+
+    def observe_transport_open() -> None:
+        observed_boundaries.append("transport_open")
+        raise RuntimeError("diagnostic observer must not affect synthesis")
+
     provider.conformance.activate_response(request.ref.response)
     _LOGGER.addHandler(logs)
     try:
-        await provider.open_synthesis(request)
+        await provider.open_synthesis(
+            request,
+            on_transport_open=observe_transport_open,
+        )
+        assert observed_boundaries == []
         events = [
             await provider.next_synthesis_event(request.ref, timeout_seconds=1)
             for _ in range(4)
         ]
         assert events[-1].kind is SynthesisEventKind.COMPLETED
+        assert observed_boundaries == ["transport_open"]
         await provider.close()
     finally:
         _LOGGER.removeHandler(logs)

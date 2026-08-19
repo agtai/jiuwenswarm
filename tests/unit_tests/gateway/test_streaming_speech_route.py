@@ -51,6 +51,7 @@ from jiuwenswarm.server.live_voice.observability import (
     LiveVoiceObservation,
     LiveVoiceObservabilityCollector,
 )
+from jiuwenswarm.server.live_voice.latency_probe import LatencyProbeContext
 from jiuwenswarm.server.live_voice.speech_ports import (
     ProviderRef,
     RecognitionAlternative,
@@ -215,6 +216,51 @@ def _frame(seq: int) -> MediaAudioFrame:
     return MediaAudioFrame(seq=seq, sample_cursor=seq * 320, samples=(0.0,) * 320)
 
 
+class _LatencyRecorderSpy:
+    def __init__(self) -> None:
+        self.marks: list[tuple[str, dict[str, object]]] = []
+        self.terminal: str | None = None
+
+    def mark(self, point: str, **identity: object) -> bool:
+        self.marks.append((point, identity))
+        return True
+
+    def finish(self, terminal: str):
+        self.terminal = terminal
+        return self
+
+
+class _LatencyRuntimeSpy:
+    component = "gateway"
+
+    def __init__(self) -> None:
+        self.recorders: list[_LatencyRecorderSpy] = []
+        self.writes: list[_LatencyRecorderSpy] = []
+        self.writer = self
+        self.fail_write = False
+
+    def create_recorder(self, **_kwargs: object) -> _LatencyRecorderSpy:
+        recorder = _LatencyRecorderSpy()
+        self.recorders.append(recorder)
+        return recorder
+
+    def write(self, batch: _LatencyRecorderSpy) -> object:
+        if self.fail_write:
+            raise OSError("PRIVATE-LATENCY-WRITER")
+        self.writes.append(batch)
+        return object()
+
+
+def _latency_context() -> LatencyProbeContext:
+    return LatencyProbeContext(
+        "live-voice.latency-context.v0",
+        "run-1",
+        "dialogue_no_tool",
+        "short-greeting-v1",
+        0,
+    )
+
+
 def _activation_params(index: int = 1) -> dict[str, object]:
     return {
         "session_id": "session-1",
@@ -323,18 +369,78 @@ async def test_streaming_owner_mirrors_exact_frames_and_returns_one_final() -> N
 
 
 @pytest.mark.asyncio
-async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit() -> (
-    None
-):
-    provider = _ServerVadProvider()
+async def test_streaming_owner_emits_one_content_free_stt_probe_batch() -> None:
+    provider = _Provider()
+    runtime = _LatencyRuntimeSpy()
     owner = StreamingRecognitionRouteOwner(
         lambda: asyncio.sleep(
             0,
             result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
-        )
+        ),
+        latency_probe_runtime=runtime,
+    )
+
+    handle, fallback = await owner.begin(
+        _binding(), latency_probe_context=_latency_context()
+    )
+    assert handle is not None and fallback is None
+    owner.offer(handle, _frame(0))
+    outcome = await owner.finish(handle)
+
+    assert outcome.completed is True
+    assert [point for point, _identity in runtime.recorders[0].marks] == [
+        "gateway.stt_request_started",
+        "gateway.stt_provider_transport_open",
+        "gateway.stt_session_ready",
+        "gateway.stt_final_available",
+    ]
+    assert runtime.recorders[0].terminal == "completed"
+    assert runtime.writes == [runtime.recorders[0]]
+    assert "hello" not in repr(runtime.recorders[0].marks)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_stt_probe_fallback_and_writer_failure_never_change_product() -> None:
+    runtime = _LatencyRuntimeSpy()
+    runtime.fail_write = True
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.TEXT, None, None),
+        ),
+        latency_probe_runtime=runtime,
+    )
+
+    handle, fallback = await owner.begin(
+        _binding(), latency_probe_context=_latency_context()
+    )
+
+    assert handle is None
+    assert fallback is not None and fallback.completed is False
+    assert runtime.recorders[0].terminal == "failed"
+    assert runtime.writes == []
+    assert "PRIVATE-LATENCY-WRITER" not in repr(runtime.recorders[0].marks)
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit() -> (
+    None
+):
+    provider = _ServerVadProvider()
+    runtime = _LatencyRuntimeSpy()
+    owner = StreamingRecognitionRouteOwner(
+        lambda: asyncio.sleep(
+            0,
+            result=StreamingSpeechSelection(SpeechRouteTier.STREAMING, provider, None),
+        ),
+        latency_probe_runtime=runtime,
     )
     handle, fallback = await owner.begin(
-        _binding(), turn_detection=RecognitionTurnDetection.server_vad_default()
+        _binding(),
+        turn_detection=RecognitionTurnDetection.server_vad_default(),
+        latency_probe_context=_latency_context(),
     )
     assert handle is not None
     assert fallback is None
@@ -368,6 +474,7 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
         )
     )
     end_of_turn = await asyncio.wait_for(owner.wait_end_of_turn(handle), timeout=1)
+    owner.observe_end_of_turn_control_sent(handle)
     assert (end_of_turn.provider_start_ms, end_of_turn.provider_end_ms) == (100, 700)
     assert end_of_turn.timing_basis is RecognitionTimingBasis.PROVIDER_TIME
     owner.offer(handle, _frame(1))
@@ -405,6 +512,14 @@ async def test_server_vad_eot_fences_frames_and_finish_coalesces_provider_commit
     assert outcome.final_text == "EOT final"
     assert provider.commit_count == 1
     assert provider.cancel_count == 0
+    assert [point for point, _identity in runtime.recorders[0].marks] == [
+        "gateway.stt_request_started",
+        "gateway.stt_provider_transport_open",
+        "gateway.stt_session_ready",
+        "gateway.vad_speech_stopped",
+        "gateway.eot_control_sent",
+        "gateway.stt_final_available",
+    ]
     await owner.close()
 
 

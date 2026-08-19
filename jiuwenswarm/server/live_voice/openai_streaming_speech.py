@@ -113,6 +113,19 @@ MAX_INCOMPLETE_TRANSPORT_CLEANUPS = 32
 
 _PROVIDER = ProviderRef("openai-streaming-speech", "formal")
 _LOGGER = logging.getLogger(__name__)
+
+
+def _observe_latency_boundary(observer: Callable[[], None] | None) -> None:
+    """Keep optional content-free timing observers outside Provider authority."""
+
+    if observer is None:
+        return
+    try:
+        observer()
+    except BaseException:
+        return
+
+
 _QueueValue = TypeVar("_QueueValue")
 
 
@@ -679,6 +692,7 @@ class _SynthesisSession:
     wire_audio_bytes: int = 0
     closing: bool = False
     terminal: bool = False
+    on_transport_open: Callable[[], None] | None = field(default=None, repr=False)
 
 
 class _StreamingLinearResampler:
@@ -920,6 +934,8 @@ class OpenAIStreamingSpeechProvider:
         request: RecognitionStreamRequest | RecognitionStreamRef,
         *,
         timeout_seconds: float,
+        on_transport_open: Callable[[], None] | None = None,
+        on_session_ready: Callable[[], None] | None = None,
     ) -> None:
         started_at = self._monotonic()
         self._require_open()
@@ -954,6 +970,7 @@ class OpenAIStreamingSpeechProvider:
             socket = await self._open_recognition_socket(
                 url=url, timeout_seconds=connect_budget
             )
+            _observe_latency_boundary(on_transport_open)
             loop = asyncio.get_running_loop()
             session = _RecognitionSession(
                 request=request,
@@ -1005,6 +1022,7 @@ class OpenAIStreamingSpeechProvider:
                 asyncio.shield(session.ready),
                 timeout=min(self._config.connect_timeout_seconds, remaining),
             )
+            _observe_latency_boundary(on_session_ready)
             _log_openai_transport(
                 operation="recognition",
                 phase="provider_ready",
@@ -1186,7 +1204,12 @@ class OpenAIStreamingSpeechProvider:
             identity=f"{ref.session_id}:{ref.session_generation}",
         )
 
-    async def open_synthesis(self, request: SynthesisStreamRequest) -> None:
+    async def open_synthesis(
+        self,
+        request: SynthesisStreamRequest,
+        *,
+        on_transport_open: Callable[[], None] | None = None,
+    ) -> None:
         session: _SynthesisSession | None = None
         failure: BaseException | None = None
         conformance_started = False
@@ -1203,6 +1226,7 @@ class OpenAIStreamingSpeechProvider:
                 resampler=_StreamingLinearResampler(
                     OPENAI_PCM_RATE_HZ, request.sample_rate_hz
                 ),
+                on_transport_open=on_transport_open,
             )
             async with self._lock:
                 if self._closed or key in self._synthesis:
@@ -1650,6 +1674,7 @@ class OpenAIStreamingSpeechProvider:
         try:
             async with asyncio.timeout(session.request.event_timeout_seconds):
                 session.stream = await self._open_synthesis_stream(session)
+            _observe_latency_boundary(session.on_transport_open)
             await self._publish_synthesis(session, SynthesisEventKind.STARTED)
             done = await self._consume_synthesis_stream(session)
             if not done:

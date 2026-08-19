@@ -282,6 +282,13 @@ async def test_bootstrap_publishes_one_reusable_gateway_runtime_and_real_browser
     assert factory_calls == 1
     assert isinstance(runtime, LatencyProbeRuntime)
     assert runtime is channel.live_voice_latency_probe_runtime
+    assert channel.live_voice_media_registry._latency_probe_runtime is runtime
+    assert (
+        channel.live_voice_streaming_speech_owner._latency_probe_runtime is runtime
+    )
+    assert (
+        channel.live_voice_streaming_synthesis_owner._latency_probe_runtime is runtime
+    )
     assert _payload(channel.responses[-1]) == {
         "status": "written",
         "batch_id": "browser-batch-0",

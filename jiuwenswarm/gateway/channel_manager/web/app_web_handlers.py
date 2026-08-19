@@ -1626,7 +1626,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     from jiuwenswarm.server.live_voice.observability import (
         LiveVoiceObservabilityCollector,
     )
-    media_registry = DedicatedMediaProductRegistry.from_environment()
+    media_registry = DedicatedMediaProductRegistry.from_environment(
+        latency_probe_runtime=latency_probe_runtime
+    )
     speech_service = bind.speech_service
     media_registry_owns_speech_authority = speech_service is None
     if speech_service is None:
@@ -1646,7 +1648,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         StreamingRecognitionRouteOwner(
             lambda: select_environment_streaming_speech(
                 batch_available=batch_available
-            )
+            ),
+            latency_probe_runtime=latency_probe_runtime,
         )
         if media_registry_owns_speech_authority
         else None
@@ -1669,7 +1672,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
 
         streaming_synthesis_owner = StreamingSynthesisRouteOwner(
-            select_streaming_speech
+            select_streaming_speech,
+            latency_probe_runtime=latency_probe_runtime,
         )
         media_registry.configure_streaming_synthesis(
             streaming_synthesis_owner,
@@ -1708,11 +1712,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if media_registry_owns_speech_authority
             else None
         ),
-        operation_override=(
-            override_speech_operation
-            if streaming_synthesis_owner is not None
-            else None
-        ),
+        operation_override=override_speech_operation,
+        params_transform=media_registry.speech_business_params,
     )
     register_dedicated_media_rpc_handlers(channel, registry=media_registry)
 

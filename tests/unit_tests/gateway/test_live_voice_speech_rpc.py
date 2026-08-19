@@ -278,6 +278,60 @@ async def test_operation_override_only_replaces_an_exact_non_null_result() -> No
 
 
 @pytest.mark.asyncio
+async def test_diagnostic_params_are_visible_only_to_override_then_stripped() -> None:
+    channel = FakeChannel()
+    service = SpyService()
+    raw = {
+        "correlation_id": "correlation-probe",
+        "latency_probe_context": {"private": "diagnostic-untrusted"},
+    }
+    clean = {"correlation_id": "correlation-probe"}
+    override_params: list[object] = []
+    transform_params: list[object] = []
+
+    async def override(
+        _operation: str,
+        params: object,
+        _context: SpeechRpcContext,
+        _session_id: str,
+    ) -> None:
+        override_params.append(params)
+        return None
+
+    def result_transform(
+        _operation: str,
+        params: object,
+        _context: SpeechRpcContext,
+        result: dict[str, object],
+        _session_id: str,
+    ) -> dict[str, object]:
+        transform_params.append(params)
+        return result
+
+    register_speech_rpc_handlers(
+        channel,
+        service=service,  # type: ignore[arg-type]
+        operation_override=override,
+        params_transform=lambda _operation, params: {
+            key: value
+            for key, value in params.items()  # type: ignore[union-attr]
+            if key != "latency_probe_context"
+        },
+        result_transform=result_transform,
+    )
+
+    await channel.handlers[SYNTHESIZE_BATCH_METHOD](
+        "ws", "rpc-probe", raw, "session-1", user_id="alice"
+    )
+
+    assert override_params == [raw]
+    assert service.calls == [
+        ("synthesize", clean, SpeechRpcContext("alice", "session-1"))
+    ]
+    assert transform_params == [clean]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_result", [None, []])
 async def test_result_transform_failure_is_closed(
     invalid_result: object,
