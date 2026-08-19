@@ -951,3 +951,14 @@
 - 验证强度：只读审计本身不要求预先运行全量测试；先执行源码/测试发现与静态核对，只对有争议的代码事实运行 focused tests。实现修复、候选关闭和 feature-complete 仍执行各自风险相称的累计验证与真实 Journey。
 - 交付物：一份可追溯的逐模块代码事实审计、每个能力域的代码—测试—缺口—依赖—状态映射，以及所有发现不一致后的 STATUS/执行包/优先级更新。
 - 重新评估条件：审计期间产品代码改变；模块 owner/能力边界无法按当前 15 域表达；focused evidence 与既有 exact-source 记录冲突；或发现必须先改变高风险合同才能判断实现状态。
+
+## D-086 P3-G0 按 P3 权威基础闭环并将持续监听修复转回 P1/P2 完成包
+
+- 日期：2026-08-19
+- 状态：Accepted scope-and-sequencing decision（用户要求记录问题、现象、原因和解决方向，在 P1/P2 从 `PARTIAL` 进入 `COMPLETE` 时处理，并立即闭环 P3-G0、推进 P3）。
+- 不改写的事实：精确产品源码 `f24dd17d336c8266954f2d7299ca13bd0314d424` 的受影响自动化、构建、静态审查和 clean-SHA 部署有当前证据，但真实 hands-free Journey 两次进入 `AUDIO_CAPTURE_DURATION_EXCEEDED`，因此该源码仍是 `FAIL — NOT A CONTROLLED PRODUCT-READINESS CANDIDATE`；documentation-only 决定不能把它升级为 PASS。
+- 问题归属：active Live Voice 在 TTS 后自动返回监听、采集租约轮换、回声/double-talk、speech-start/EOT 与 cancel cleanup 属于 P1 Audio/Speech 和 P2 Media/Conversation Runtime 完成边界，不由 P3 Task Control Core/Store 实现，也不再作为 P3-1 的排序 Gate。问题、机制、未决归因和修复方向记录在 [延期缺陷证据](../evidence/P1_P2_POST_TTS_CAPTURE_CONTINUATION_DEFERRED_20260819.md)。
+- P3-G0 闭环口径：D-085 审计、六组 P3 产品真值源码修复、适用自动化/构建/静态证据和显式 Live Voice profile 构成允许 P3 扩展的 authoritative foundation。未完成的综合真实 Task Journey 转入 P3-9/累计产品验收；它不授予受控候选 PASS，也不授予 P1/P2 COMPLETE。
+- 当前顺序：STATUS 立即激活 P3-1 canonical multi-Task model/Store/migration。P1/P2 延期缺陷保持显式 `PARTIAL`，可在不冲突的 owner lane 中后续修复，但必须在 D-084 feature-complete、`develop` 集成触发和任何新的受控产品候选 PASS 之前关闭并完成真实 Journey。
+- 风险接受：在未完成综合物理 Task Journey 的情况下展开 multi-Task 会保留集成风险；后续 P3 包不得继承不存在的物理信用。若 P3-1 发现六组真值修复本身存在新的 P3 权威缺陷，应回到对应 P3 owner 修复，而不是归因给本次 P1/P2 延期。
+- 重新评估条件：P3-1 需要改变 speech/media 权威才能正确实现；延期缺陷阻断 P3-owned text/structured acceptance；用户恢复“受控候选 PASS 先于任何 P3 扩展”的顺序；或准备 D-084 feature-complete/`develop` 集成。

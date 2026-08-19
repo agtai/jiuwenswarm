@@ -7,14 +7,21 @@
 > Architecture: [ACG v1](../architecture/ARCHITECTURE_CONTRACT_GATE_V1.md)
 > and the historical [complete solution](../architecture/FULL_SOLUTION_2026-07-30.md)
 
+> Sequencing note (2026-08-19): [D-086](../decisions/DECISIONS.md) keeps this
+> contract authoritative for a controlled product-readiness decision but no
+> longer requires that decision before P3-1 starts. The failed `f24dd17d`
+> attempt remains FAIL; its post-TTS continuation defect is deferred to P1/P2
+> completion and must close before a later PASS or feature-complete claim.
+
 This contract decides whether one identified Live Voice desktop-Web source is a
 truthful controlled product candidate. It uses product capability/module status
 and does not use numbered delivery stages as progress or acceptance.
 
 Under [D-084](../decisions/DECISIONS.md), this is the first of four cumulative
-completion boundaries. Passing it closes the current truth-repair candidate;
-it does not prove the feature-complete matrix in STATUS or trigger integration
-with `develop`.
+completion boundaries. Passing it grants the named controlled-candidate credit;
+under D-086 it is no longer the sequencing Gate for P3 expansion. It does not
+prove the feature-complete matrix in STATUS or trigger integration with
+`develop`.
 
 The accepted Integrated Web Alpha remains a historical exact-source result. It
 does not automatically pass later hands-free, running-task adjustment,

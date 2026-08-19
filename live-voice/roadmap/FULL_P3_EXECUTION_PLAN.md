@@ -11,6 +11,12 @@
 > product credit.
 >
 > Date: 2026-08-18
+>
+> Sequencing update (2026-08-19): [D-086](../decisions/DECISIONS.md) closes
+> P3-G0 as the audited/source-verified P3 authority foundation, transfers the
+> failed post-TTS hands-free continuation and combined physical candidate
+> Journey to later cumulative P1/P2/P3 acceptance, and allows P3-1 to start.
+> This does not convert `f24dd17d` into a controlled-candidate PASS.
 
 ## 1. Purpose and required product outcome
 
@@ -54,7 +60,7 @@ This plan is interpreted in the following order:
    changes;
 2. [STATUS](../STATUS.md) for mutable progress, blockers, dependencies and the
    active execution packet;
-3. D-084 and D-085 in [DECISIONS](../decisions/DECISIONS.md);
+3. D-084 through D-086 in [DECISIONS](../decisions/DECISIONS.md);
 4. stable P1/P2/P3 and shared-contract boundaries in
    [the accepted design snapshot](../architecture/FULL_SOLUTION_2026-07-30.md)
    sections 2, 4 and 5;
@@ -91,19 +97,19 @@ are true:
    the audit repeats the affected audit row before completion credit.
 3. The confirmed product-truth blockers in the current packet have been closed
    or explicitly transferred to a package below with no false candidate claim.
-4. One clean controlled product-readiness candidate has passed on an exact
-   source, including truthful Task adjustment, result and terminal
-   notification.
-5. Applicable W2/S7/S8 or rehearsal oracles needed by the first P3 packages
-   have been migrated to a current capability owner and pass current discovery;
-   no old runner is retired before its remaining oracles move.
+4. P3-G0 has closed under D-086 without inventing controlled-candidate credit;
+   its deferred physical Journey remains a declared input to P3-9 and the later
+   cumulative product decision.
+5. Applicable W2/S7/S8 or rehearsal oracles needed by the first P3 packages are
+   identified and move with their first current capability owner; no old runner
+   is retired before its remaining oracles move.
 6. STATUS activates one coherent P3 package with its capability, risk,
    dependencies, scope, exclusions and acceptance rather than activating this
    entire document as one undifferentiated change.
 
 Design clarification and audit-to-package mapping may occur before this Gate.
-Product implementation must not use this preparatory plan to bypass D-085 or
-the controlled-candidate dependency route.
+Product implementation must not use this preparatory plan to bypass D-085,
+D-086's explicit risk transfer or the later cumulative acceptance route.
 
 ## 4. Frozen ownership model
 
@@ -152,7 +158,7 @@ code fact may reduce, expand or reorder a package before that package starts.
 
 | Package | Outcome | Primary owner(s) | Risk | Relative size | Hard dependency |
 |---|---|---|---:|---:|---|
-| `P3-G0` | Audited authoritative foundation and clean candidate prerequisite | Integration Owner plus affected truth owners | Tier 0 audit / Tier 3 repair | XL composite | D-085 complete; controlled-candidate closure |
+| `P3-G0` | Audited authoritative P3 foundation with deferred cumulative candidate acceptance | Integration Owner plus affected truth owners | Tier 0 audit / Tier 3 repair | XL composite | D-085 complete; D-086 scope closure |
 | `P3-1` | Canonical multi-Task identity, state, Store and migration | Task Control Core/Store | Tier 3 | XL | `P3-G0` |
 | `P3-2` | Complete command, adjustment and successor-revision semantics | Task Core/Store plus Executor seam | Tier 3 | XL | `P3-1` |
 | `P3-3` | Capability-driven Executor admission and Attempt lifecycle | Executor & Durability plus Task Core | Tier 3 | XL | `P3-1` |
@@ -173,7 +179,7 @@ their shared contracts are frozen, so the sizes must not be added as days.
 
 ```mermaid
 flowchart TD
-    G0["P3-G0: audited findings + authoritative candidate"]
+    G0["P3-G0: audited + source-verified P3 foundation"]
     M["P3-1: canonical multi-Task model"]
     C["P3-2: complete commands + revision"]
     E["P3-3: Executor capability + Attempt truth"]
@@ -207,8 +213,9 @@ flowchart TD
 
 Execution waves are:
 
-1. **Foundation wave:** consume the synchronized D-085 findings, close
-   authoritative truth defects and pass the controlled candidate (`P3-G0`).
+1. **Foundation wave:** consume the synchronized D-085 findings, land and
+   verify the authoritative P3 truth repairs, and record any deferred cumulative
+   candidate condition without a false PASS (`P3-G0`).
 2. **Shared-contract wave:** freeze multi-Task identity, state, migration and
    capability vocabulary, then implement `P3-1`.
 3. **Core parallel wave:** execute `P3-2`, `P3-3` and the storage part of
@@ -221,7 +228,7 @@ Execution waves are:
 
 ## 7. Package contracts
 
-### 7.1 `P3-G0` — authoritative foundation and candidate prerequisite
+### 7.1 `P3-G0` — authoritative P3 foundation
 
 #### Do
 
@@ -235,8 +242,9 @@ Execution waves are:
   represented as an authoritative running Attempt.
 - Ensure Agent completion cannot leave application/result/terminal settlement
   disconnected while an owner or lease renews indefinitely.
-- Pass one clean controlled product-readiness candidate before full-P3
-  expansion.
+- Record the exact controlled-candidate outcome. Under D-086, transfer the
+  demonstrated P1/P2 post-TTS continuation defect and the uncompleted combined
+  Journey to later cumulative acceptance without granting a false PASS.
 
 #### How
 
@@ -254,12 +262,14 @@ Execution waves are:
 #### Done when
 
 - D-085 is complete and STATUS matches the exact source.
-- Every confirmed high-risk truth defect has an authoritative fix and applicable
-  D-032 evidence.
+- Every confirmed high-risk P3 truth defect has an authoritative source fix and
+  applicable D-032 automated evidence.
 - Leases/outbox work settle or enter bounded, truthful recovery states.
-- A real formal Web journey produces truthful adjustment, result and terminal
-  notification on one exact clean commit.
-- No unresolved P3 truth defect is hidden by moving directly to expansion.
+- The uncompleted real adjustment/result/terminal Journey and the P1/P2
+  continuation defect are explicitly transferred to P3-9/cumulative product
+  acceptance with no inherited physical credit.
+- No known unresolved P3 authority defect is hidden by moving to expansion;
+  any later finding returns to its owning P3 package.
 
 ### 7.2 `P3-1` — canonical multi-Task model, Store and migration
 
