@@ -150,3 +150,52 @@ def test_web_proxy_log_redacts_json_wrapped_speech_key_variants_fail_closed() ->
     assert projected["finalTextDigest"] == "safe-final-digest"
     assert projected["drawText"] == "safe-drawing-label"
     assert projected["voiceCommitmentReceipt"] == "safe-near-miss"
+
+
+def test_latency_probe_request_params_are_fixed_redacted_before_validation() -> None:
+    messages: list[tuple[object, ...]] = []
+    handler = _SpaStaticHandler.__new__(_SpaStaticHandler)
+    handler.logger = SimpleNamespace(info=lambda *args: messages.append(args))
+    valid_private = "PRIVATE_LATENCY_BATCH_SENTINEL"
+    malformed_private = "MALFORMED_PRIVATE_LATENCY_SENTINEL"
+
+    for request_id, params in (
+        (
+            "valid",
+            {
+                "session_id": "private-session",
+                "batch": {"marks": [{"correlation_id": valid_private}]},
+            },
+        ),
+        ("malformed", {"batch": f'{{"raw_text":"{malformed_private}"'}),
+    ):
+        handler._log_ws_business_message(
+            "frontend->backend",
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": request_id,
+                    "method": "live_voice.latency_probe.batch",
+                    "params": params,
+                }
+            ),
+        )
+
+    handler._log_ws_business_message(
+        "frontend->backend",
+        json.dumps(
+            {
+                "type": "req",
+                "id": "unrelated",
+                "method": "public.metrics.get",
+                "params": {"public_metric": "visible-unrelated-value"},
+            }
+        ),
+    )
+
+    rendered = repr(messages)
+    assert valid_private not in rendered
+    assert malformed_private not in rendered
+    assert "private-session" not in rendered
+    assert rendered.count("<redacted:live-voice-private>") == 2
+    assert "visible-unrelated-value" in rendered

@@ -108,10 +108,16 @@ from jiuwenswarm.gateway.document_attachments import (
     forbidden_formats,
     persist_and_parse_documents,
 )
+from jiuwenswarm.gateway.live_voice.latency_probe_registration import (
+    register_latency_probe_rpc_handler,
+)
 from jiuwenswarm.server.runtime.session import project_store
 from jiuwenswarm.symphony.skill_retrieval.taxonomy_config import (
     coerce_root_categories_value,
     root_categories_to_text,
+)
+from jiuwenswarm.server.live_voice.latency_probe import (
+    create_latency_probe_runtime_from_environment,
 )
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
@@ -1593,6 +1599,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     heartbeat_service = bind.heartbeat_service
     cron_controller = bind.cron_controller
     updater_service = bind.updater_service
+
+    latency_probe_runtime = create_latency_probe_runtime_from_environment("gateway")
+    channel.live_voice_latency_probe_runtime = latency_probe_runtime
+    register_latency_probe_rpc_handler(channel, latency_probe_runtime)
 
     from jiuwenswarm.gateway.live_voice.dedicated_media_registration import (
         DedicatedMediaProductRegistry,

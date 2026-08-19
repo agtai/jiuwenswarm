@@ -427,13 +427,17 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
         msg_type = payload.get("type")
         if msg_type == "req":
+            method = payload.get("method")
+            params_for_log = payload.get("params")
+            if method == "live_voice.latency_probe.batch":
+                params_for_log = "<redacted:live-voice-private>"
             self.logger.info(
                 "[ws][%s][req] id=%s method=%s params=%s",
                 direction,
                 self._format_ws_part(payload.get("id")),
-                self._format_ws_part(payload.get("method")),
+                self._format_ws_part(method),
                 self._format_ws_part(
-                    self._redact_ws_media_for_log(payload.get("params"))
+                    self._redact_ws_media_for_log(params_for_log)
                 ),
             )
             return

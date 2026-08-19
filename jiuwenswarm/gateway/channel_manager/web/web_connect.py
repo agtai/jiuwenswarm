@@ -41,6 +41,9 @@ from jiuwenswarm.common.ws_diagnostics import (
     describe_ws_peer,
     format_ws_diagnostics,
 )
+from jiuwenswarm.gateway.live_voice.latency_probe_registration import (
+    LATENCY_PROBE_BATCH_METHOD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +93,7 @@ _LOCAL_HANDLER_ONLY_METHODS = frozenset(
 _HANDLER_BEFORE_CALLBACK_METHODS = frozenset(
     {ReqMethod.CHAT_SEND.value, *_LOCAL_HANDLER_ONLY_METHODS}
 )
+_DIAGNOSTIC_LOCAL_ONLY_METHODS = frozenset({LATENCY_PROBE_BATCH_METHOD})
 
 _STREAM_COALESCE_EVENT_TYPES = frozenset({"chat.delta", "chat.reasoning"})
 _STREAM_COALESCE_MAX_FRAMES = 32
@@ -1538,6 +1542,32 @@ class WebChannel(BaseWsChannel):
         session_id = (
             _explicit_session_id if has_explicit_session else self._make_session_id()
         )
+
+        # Diagnostic batches are isolated before websocket/session tracking,
+        # file processing, routing-key registration, Message construction, or
+        # the Agent callback. Feature-off still fails locally at this seam.
+        if method in _DIAGNOSTIC_LOCAL_ONLY_METHODS:
+            handler = self._method_handlers.get(method)
+            if handler is None:
+                await self.send_response(
+                    ws,
+                    req_id,
+                    ok=False,
+                    error=f"unknown method: {method}",
+                    code="METHOD_NOT_FOUND",
+                )
+                return
+            await self._invoke_method_handler(
+                _MethodHandlerInvocation(
+                    ws,
+                    method,
+                    req_id,
+                    params,
+                    session_id,
+                    handler,
+                ),
+            )
+            return
 
         # 追踪 ws → 真实 session_id，用于断连清理/日志。
         # 与 register_ws 一致：仅显式 session 入集；临时 id 只供 Message 构造，避免膨胀。
