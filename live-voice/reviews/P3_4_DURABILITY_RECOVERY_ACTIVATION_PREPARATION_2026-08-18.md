@@ -169,7 +169,7 @@ stale, missing or cross-bound effect truth forbids automatic D1 recovery. It
 enters bounded reconciliation/manual handling; it does not fall back to D0
 redispatch.
 
-### 6.3 Decision: linked recovery Attempt under the same Task
+### 6.3 Recommended choice: linked recovery Attempt under the same Task
 
 Recommendation: preserve `task_id` and create a new, explicitly linked recovery
 `attempt_id`; do not revive the producer Attempt.
@@ -191,10 +191,11 @@ It must not reset the current maximum-attempt policy silently. The resulting
 `TaskResult`, if any, binds the recovery Attempt; provenance continues to name
 the checkpoint-producing Attempt.
 
-The old `P3A-D1-03` same-Attempt positive is therefore dropped. Its exact
-binding, lease, effect and forgery negatives are retained and rewritten for the
-linked choice. Any later same-Attempt choice requires a new design decision and
-complete re-review of lifecycle/source-sequence/lease/result semantics.
+If this recommendation is accepted, the old `P3A-D1-03` same-Attempt positive
+is dropped. Its exact binding, lease, effect and forgery negatives are retained
+and rewritten for the linked choice. Selecting same-Attempt recovery instead
+requires an explicit design decision and complete re-review of lifecycle,
+source-sequence, lease and result semantics.
 
 ### 6.4 Real Adapter landing
 

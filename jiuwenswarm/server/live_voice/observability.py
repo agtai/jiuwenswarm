@@ -175,6 +175,20 @@ _SENSITIVE_IDENTITY_MARKER = re.compile(
 _UTC_TIMESTAMP = re.compile(
     r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,9})?Z$"
 )
+_PRIVATE_SCHEME_URL = re.compile(r"[a-z][a-z0-9+.-]{0,31}://", re.IGNORECASE)
+_PRIVATE_SCHEME_VALUE = re.compile(r"^[a-z][a-z0-9+.-]{0,31}:", re.IGNORECASE)
+_PRIVATE_NON_HIERARCHICAL_URL = re.compile(
+    r"\b(?:blob|data|file|javascript|mailto|sftp|ssh|tel|urn):", re.IGNORECASE
+)
+_PRIVATE_CONTENT_PATTERN = re.compile(
+    r"\bbearer\s+[a-z0-9._~+/-]+"
+    r"|\b(?:sk|ghp|glpat)-?[a-z0-9_-]{8,}\b"
+    r"|\beyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+\b"
+    r"|(?:^|[._:@/-])(?:transcript|raw[-_]?audio|audio[-_]?bytes|data[-_]?base64"
+    r"|authorization|credential|password|passwd|secret|api[-_]?key"
+    r"|device[-_]?id|hardware[-_]?id|microphone[-_]?id)(?:$|[._:@/=?#-])",
+    re.IGNORECASE,
+)
 _ROUTE_REASON = {
     "fallback": "ROUTE_FALLBACK",
     "demo_substitute": "DEMO_SUBSTITUTE",
@@ -652,6 +666,38 @@ def _optional_identity(value: object, field_name: str) -> str | None:
     return _opaque_identity(value, field_name)
 
 
+def contains_private_observability_content(
+    value: object,
+    *,
+    field_name: str | None = None,
+) -> bool:
+    """Apply the product observability owner's closed private-carrier policy."""
+
+    if isinstance(value, str):
+        return (
+            any(delimiter in value for delimiter in ("=", "?", "#"))
+            or _PRIVATE_SCHEME_URL.search(value) is not None
+            or _PRIVATE_NON_HIERARCHICAL_URL.search(value) is not None
+            or (
+                field_name == "contract_version"
+                and _PRIVATE_SCHEME_VALUE.search(value) is not None
+            )
+            or _PRIVATE_CONTENT_PATTERN.search(value) is not None
+        )
+    if isinstance(value, Mapping):
+        return any(
+            contains_private_observability_content(key)
+            or contains_private_observability_content(
+                item,
+                field_name=key if isinstance(key, str) else None,
+            )
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return any(contains_private_observability_content(item) for item in value)
+    return False
+
+
 def _token(value: object, field_name: str) -> str:
     result = _required_text(value, field_name)
     if _TOKEN.fullmatch(result) is None:
@@ -679,6 +725,12 @@ def _utc_timestamp(value: object, field_name: str) -> str:
             "INVALID_UTC_TIMESTAMP", f"{field_name} must be an RFC 3339 UTC timestamp"
         ) from error
     return result
+
+
+def validate_observability_timestamp(value: object) -> str:
+    """Validate one backend-visible timestamp with the canonical owner rules."""
+
+    return _utc_timestamp(value, "observability_timestamp")
 
 
 def _nonnegative_number(value: object, field_name: str) -> float:
@@ -1874,6 +1926,7 @@ __all__ = [
     "ObservabilityViolation",
     "RouteDescriptor",
     "TraceBinding",
+    "contains_private_observability_content",
     "create_metric",
     "create_observation",
     "create_queue_metric",
@@ -1882,4 +1935,5 @@ __all__ = [
     "observation_from_task_event",
     "observation_from_task_outbox",
     "route_descriptor_from_route_record",
+    "validate_observability_timestamp",
 ]

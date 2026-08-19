@@ -13,10 +13,13 @@
 > Date: 2026-08-18
 >
 > Sequencing update (2026-08-19): [D-086](../decisions/DECISIONS.md) records
-> P3-G0 PASS for the audited/source-verified P3 authority-foundation Gate,
+> P3-G0 PASS for the audited/source-verified P3 authority-foundation Gate and
 > transfers the failed post-TTS hands-free continuation and combined physical
-> candidate Journey to later cumulative P1/P2/P3 acceptance, and allows P3-1 to start.
-> This does not convert `f24dd17d` into a controlled-candidate PASS.
+> candidate Journey to later cumulative P1/P2/P3 acceptance. P3-1 is accepted
+> at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`; current
+> [STATUS](../STATUS.md) activates P3-2 in Wave 2 and records the additive
+> P3-8A asset boundary separately. This does not convert `f24dd17d` into a
+> controlled-candidate PASS.
 
 ## 1. Purpose and required product outcome
 
@@ -275,10 +278,15 @@ that work is not a substitute for the final exact-source `P3-9` execution.
 
 ### 6.1 Dispatch waves
 
+The wave names below define dependency structure rather than mutable progress.
+Current activation always comes from STATUS; at the 2026-08-19 reconciliation,
+Wave 1/P3-1 is accepted and P3-2 is the only active production packet in Wave
+2. Additive P3-8A assets are accepted without product-composition credit.
+
 | Wave | Production work | Work that may run in parallel | Exit condition |
 |---|---|---|---|
-| **0 — passed foundation** | `P3-G0` consumed the six product-truth repair groups and explicit profile work; the clean `f24dd17d` physical run remains FAIL and its post-TTS continuation plus combined Journey are deferred | No G0 production lane remains active; only package-owned historical-oracle selection may continue, with no 3A/3B/S8.5 production import | D-086 records scoped foundation PASS without controlled-candidate credit and activates `P3-1` |
-| **1 — active canonical spine** | `P3-1` freezes Task/Attempt/Command/Event/Result/successor identity, state and migration | After the semantic contract freezes, model/reducer, Store migration/read path and compatibility-oracle work may use separate non-overlapping lanes; one owner still integrates the schema | Multi-Task Store and migration contract is accepted; current-Task is only a hint |
+| **0 — foundation** | `P3-G0` consumed the six product-truth repair groups and explicit profile work; the clean `f24dd17d` physical run remains FAIL and its post-TTS continuation plus combined Journey are deferred | No G0 production lane remains active; only package-owned historical-oracle selection may continue, with no 3A/3B/S8.5 production import | D-086 records scoped foundation PASS without controlled-candidate credit and activates `P3-1` |
+| **1 — canonical spine** | `P3-1` freezes Task/Attempt/Command/Event/Result/successor identity, state and migration | After the semantic contract freezes, model/reducer, Store migration/read path and compatibility-oracle work may use separate non-overlapping lanes; one owner still integrates the schema | Multi-Task Store and migration contract is accepted; current-Task is only a hint |
 | **2 — core fan-out** | `P3-2`, `P3-3`, `P3-5A` and additive `P3-8A` | Command/revision, Executor/admission, result/event persistence and telemetry/configuration/privacy foundations may proceed in separate worktrees after their shared identities freeze | Each implementation/tranche needed by Wave 3 reaches its integrated acceptance checkpoint; shared Store changes are integrated by the single Core/Store owner |
 | **3 — durability and product semantics** | `P3-4` after accepted `P3-3`; `P3-6` after integrated/accepted `P3-2` plus `P3-5A`; `P3-5B` after accepted `P3-5A`; continue `P3-8A` | Executor/Durability, Bridge, Runtime presentation and additive operations lanes may run concurrently when their files and semantic ownership do not overlap | `P3-4`, `P3-6` and `P3-5B` reach their integrated acceptance checkpoints; real D0/D1/D2 claims remain bounded |
 | **4 — formal carrier** | `P3-7` composes the accepted backend implementations into the formal Integrated Web carrier | Backend closure reviews and non-invasive `P3-8A` telemetry may overlap; unstable backend API work may not | Two-Task controls, recovery, unread/result and revision work through the real formal route |
@@ -411,6 +419,9 @@ remain single-owner.
 
 ### 7.3 `P3-2` — complete command, adjustment and revision semantics
 
+Activation preparation: [P3-2 and P3-5A Core/Store contract and oracle
+map](../reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md).
+
 #### Do
 
 Provide a coherent command model for:
@@ -463,6 +474,9 @@ Provide a coherent command model for:
 
 ### 7.4 `P3-3` — capability-driven Executor admission and Attempt lifecycle
 
+Activation preparation: [P3-3 capability and admission
+map](../reviews/P3_3_CAPABILITY_ADMISSION_ACTIVATION_PREPARATION_2026-08-18.md).
+
 #### Do
 
 - Freeze versioned Executor and scheduling capability descriptions covering
@@ -511,6 +525,9 @@ Provide a coherent command model for:
 
 ### 7.5 `P3-4` — D0, D1 and D2 durability/recovery
 
+Activation preparation: [P3-4 durability and recovery
+map](../reviews/P3_4_DURABILITY_RECOVERY_ACTIVATION_PREPARATION_2026-08-18.md).
+
 #### Do
 
 Implement and expose durability by declared Executor capability:
@@ -558,6 +575,9 @@ D0 carrier.
 
 ### 7.6 `P3-5` — TaskResult, event replay, unread and terminal notification
 
+Activation preparation: [P3-5A persistence contract](../reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md)
+and [P3-5B delivery/consumption contract](../reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
+
 #### Do
 
 - Persist one legal immutable `TaskResult` for each completed Task, bound to
@@ -603,6 +623,9 @@ D0 carrier.
   authorized presentation-consumption record.
 
 ### 7.7 `P3-6` — generalized Voice–Task Bridge and text/voice parity
+
+Activation preparation: [P3-6 target, clarification and parity
+map](../reviews/P3_5B_P3_6_ACTIVATION_PREPARATION_2026-08-18.md).
 
 #### Do
 
@@ -901,16 +924,22 @@ The accepted design fixes the product boundary but does not fully choose every
 implementation semantic below. D-085 evidence and the first affected package
 must settle them before code diverges:
 
+Accepted P3-1 source `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`
+already settles two foundation facts: `queued` is only a projection of an
+accepted Task without authoritative running evidence, and current-Task state is
+only a replaceable selection hint. It also freezes successor lineage as a new
+Task identity with predecessor/revision fields; P3-2 still owns the command,
+eligibility and atomic creation transaction.
+
 | Question | Recommended default for review | Blocks |
 |---|---|---|
-| Is `queued` canonical or a projection? | Keep Task accepted and Attempt non-running as source truth; expose queued only through one frozen projection unless a state-machine decision adds it | `P3-1`, `P3-3`, `P3-7` |
-| How is `paused` represented? | Add it only with a proven Executor pause boundary; otherwise return unsupported and do not relabel blocked/accepted | `P3-1` through `P3-4` |
+| If pause/resume is supported, how is `paused` represented? | P3-1 keeps it non-canonical and unsupported. Add a representation only with a proven Executor pause boundary; never relabel blocked/accepted | `P3-2`, `P3-3`, `P3-4`, `P3-7` |
 | Does D1 resume the same Attempt? | Preserve `task_id`; choose same or linked recovery `attempt_id` explicitly with checkpoint/retry accounting and provenance | `P3-4` |
 | Which adapters must prove D1/D2? | Every declared capability needs a real path; do not claim a level from interface support alone | `P3-3`, `P3-4`, `P3-9` |
 | What does reprioritize control? | Bind to a real scheduler/admission policy; if none exists, return unsupported | `P3-2`, `P3-3` |
 | How are decision-required answers represented? | Use a bounded, exact `provide_input` contract unless a separately accepted command is required | `P3-2`, `P3-6` |
 | What is unread/replay retention? | Define bounded cursor/retention and ACK semantics for the supported product profile without importing Production retention/SLO scope | `P3-5`, `P3-7` |
-| How is a terminal revision created? | Explicit new Task with predecessor link, new command identity and no mutation of predecessor/result | `P3-1`, `P3-2`, `P3-7` |
+| Which terminal outcomes and command contract may create a successor? | Use the P3-1 new-Task predecessor/revision lineage; freeze eligibility, result/version binding and idempotent atomic creation without mutating predecessor/result | `P3-2`, `P3-7` |
 
 These recommendations are not new accepted decisions. A material change to the
 accepted authority, durability or product semantics is recorded through the

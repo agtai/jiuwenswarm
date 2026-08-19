@@ -5,8 +5,9 @@
 > `7a8ba7e82042e188efe6adbac98d47363b0d5d8e`; their source facts remain fixed,
 > while activation mapping is always validated against current HEAD. P3-G0 has
 > since passed only its D-086 authoritative-foundation Gate, exact product source
-> `f24dd17d` remains a failed controlled product-readiness candidate, and P3-1 is
-> active. This manifest grants no implementation or acceptance credit. Package
+> `f24dd17d` remains a failed controlled product-readiness candidate, P3-1 is
+> accepted at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`, and P3-2 is active.
+> This manifest grants no implementation or acceptance credit. Package
 > status, dependencies and the active packet remain in [STATUS](../STATUS.md)
 > and the [complete P3 plan](../roadmap/FULL_P3_EXECUTION_PLAN.md). Package-level
 > estimates, Git topology and evidence boundaries are in the companion

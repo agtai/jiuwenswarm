@@ -6,8 +6,9 @@
 > review margin. They intentionally do not re-score later P3-G0 work and are not
 > acceptance credit or package closure. Current [STATUS](../STATUS.md) records
 > that P3-G0 passed only its D-086 authoritative-foundation Gate, exact product
-> source `f24dd17d` remains a failed controlled product-readiness candidate, and
-> P3-1 is active. At each package activation, validate only its selected assets
+> source `f24dd17d` remains a failed controlled product-readiness candidate,
+> P3-1 is accepted at `d40e0ee391fdf162faa9d9938eb9b9610020c1a7`, and
+> P3-2 is active. At each package activation, validate only its selected assets
 > against current HEAD and the relevant Git range; no separate G0 delta document
 > or whole-audit re-score is required.
 
@@ -121,10 +122,11 @@ before its current contract owner is ready.
    upgrading the failed controlled candidate. No G0 production lane remains; retain its
    blocker reproductions and zero-forbidden-side-effect assertions as history/
    oracles for their first owning package.
-2. **Wave 1: canonical spine — P3-1.** Freeze canonical multi-Task identity, state,
-   Store schema/migration, current-Task-as-hint semantics and successor
-   relations. Historical identity/fingerprint/event-lineage models are design
-   input only until that contract is accepted.
+2. **Wave 1: canonical spine — P3-1 accepted at `d40e0ee3`.** Canonical
+   multi-Task identity, state, Store schema/migration, current-Task-as-hint
+   semantics and successor relations are frozen for this boundary. Historical
+   identity/fingerprint/event-lineage models remain design input only and grant
+   no additional current credit.
 3. **Wave 2: core fan-out — P3-2, P3-3, P3-5A and P3-8A.** After P3-1 is
    accepted, extract command/revision atomicity, capability/admission vocabulary,
    durable result/event/unread primitives and additive diagnostics,

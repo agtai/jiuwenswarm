@@ -7,9 +7,11 @@
 
 ## Project judgement
 
-- **Last product-code baseline assessed:**
-  `f24dd17d336c8266954f2d7299ca13bd0314d424`. Documentation-only commits after
-  that source do not change its product credit.
+- **Last product-composed baseline assessed:**
+  `f24dd17d336c8266954f2d7299ca13bd0314d424`. Accepted P3-1 Task source and the
+  scoped additive P3-8A pure assets are newer source packages, but neither
+  changes the immutable physical product result or receives unrun composition
+  credit.
 - **Current product status:** **P3 EXPANSION ACTIVE — P3-G0 passed its scoped
   authoritative-foundation Gate under D-086; controlled product readiness
   remains unpassed.** The six recorded P3 product-truth repair groups and
@@ -86,7 +88,7 @@ risks, dependencies, acceptance and integration order.
 | Executor & Durability | **PARTIAL.** Direct isolated Code Executor, lease/journal, terminalization and recovery foundations exist and are statically closed on the audited source | Clean physical re-verification of Agent-return → validation → application → result → terminalization; bounded timeout/orphan handling; capability selection; supported D1 checkpoint and D2 reconciliation semantics | Highest-priority Tier-3 clean re-verification; D1/D2/capability remain feature-complete scope |
 | Voice–Task Bridge | **PARTIAL.** Natural-language create/status/adjust/result paths and durable adjustment delivery exist | General routing, explicit multi-Task targeting, full Task operations, text/voice parity, clarification and zero false truth | Task Core and Executor truth; precision/recall plus zero-side-effect tests |
 | Integrated Web product experience | **PARTIAL.** The explicit profile, authenticated route, P2/P3 composition, real foreground Agent text/TTS and manual retry worked; automatic listening failed after both responses. A broader P3-1 diagnostic also reproduced the unchanged mounted Exit/immediate-re-enable presentation-ACK timing failure at 406/407; both remain outside the accepted Core/Store package | Complete P3 controls/projections while preserving profile semantics; later close capture/Exit recovery, truthful queued/running/terminal UX, device/privacy/recovery UX and the cumulative human journey; retire legacy hooks/flags | P3-2 through P3-9 plus deferred P1/P2 completion |
-| Observability, benchmark and latency | **PARTIAL.** Trace/correlation and historical verification foundations exist | Execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md): fresh physical baseline; stable EOT/Agent/TTS/first-audible diagnostics; low-risk pipeline waits; authoritative ACK; formal sentence-level Agent→TTS overlap; fixed-corpus p50/p95 and no-regression proof | Instrumentation before optimization; fixed corpus/environment; Conversation Runtime and P1 media owners |
+| Observability, benchmark and latency | **PARTIAL overall; additive P3-8A assets PASS.** Trace/correlation foundations now include a bounded content-free SLI calculator, complete declaration-only telemetry privacy profile and source-bound canonical OTel backend codec that reuses the current observability owner's calendar and private-carrier validation. The codec is not product-composed and owns no exporter/backend lifecycle | Compose the codec behind the existing adapter/exporter in the later owning package; add validated backend configuration and exact Task/Attempt/Command/activation/generation/ACK/Executor diagnostics; then execute the [latency optimization plan](roadmap/LATENCY_OPTIMIZATION_PLAN_2026-08-18.md) with a fresh physical baseline, stable EOT/Agent/TTS/first-audible facts, authoritative ACK, formal sentence-level Agent→TTS overlap and fixed-corpus p50/p95 proof | Exact scoped evidence in the [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md); P3-8B composition/retirement after P3-7; fixed corpus/environment and Conversation Runtime/P1 media owners |
 | Automated verification and product acceptance | **PARTIAL.** Exact-source G0 affected backend (`916 passed, 2 skipped`), Formal Web (`407/407`), profile tests, builds and static review retain their source-bound credit; P3-1 affected automation/build/static and independent Tier-3 review pass, while its extra full-Web diagnostic is 406/407 on the unchanged deferred Runtime/Web seam. The physical candidate remains FAIL | Run each P3 package's affected evidence; later repair/rerun the P1/P2 seam and complete the clean cumulative Journey, feature-complete matrix, competitor-gap review and independent deep review | Root `TESTING.md`, D-086 risk transfer, current acceptance and exact clean source |
 | Configuration, code and document cleanup | **PARTIAL.** Three cleanup audits and document Batch A are complete; `f24dd17d` makes ordinary production flag-off and an explicit named Live Voice profile flag-on, with profile/build/deploy evidence | Preserve those profile semantics while repairing P1; re-home test support; consolidate scheduled duplicates; retire obsolete entrypoints/legacy paths after replacement; execute document B/C after oracle extraction; exclude local artifacts | Follow the [code-duplication](reviews/CODE_DUPLICATION_AND_RETIREMENT_AUDIT_2026-08-17.md), [branch-retirement](reviews/BRANCH_CONTENT_RETIREMENT_AUDIT_2026-08-17.md) and [document-retirement](reviews/DOCUMENT_RETIREMENT_AUDIT_2026-08-17.md) gates |
 | Production operations | **NOT STARTED as a complete boundary.** Privacy/preflight/observability foundations exist | Production auth/tenancy, public deployment, SLO/retention, security operations, compatibility matrix and release/rollback | Begins after feature-complete integration unless a newer decision changes scope |
@@ -135,6 +137,10 @@ exact-source Alpha result.
 
 - **Packet:** P3-2 — complete command, adjustment and successor-revision
   semantics.
+- **Activation preparation:** use the
+  [P3-2/P3-5A Core/Store design and oracle map](reviews/P3_2_P3_5A_ACTIVATION_PREPARATION_2026-08-18.md)
+  for the P3-2 contract freeze. P3-5A remains inactive unless STATUS records a
+  separate assignment or bounded multi-package batch.
 - **Objective:** add one coherent, versioned command model for `update`,
   `provide_input`, supported `pause/resume/reprioritize`, exact cancel outcomes
   and explicit successor revision without rewriting terminal Task/TaskResult
@@ -263,11 +269,24 @@ exact-source Alpha result.
 - **Reviews:** reproduce findings against current source; fix confirmed issues
   only and rerun affected checks. Feature closure requires one independent
   cross-module review after competitor-gap decisions.
+- **P3-8A additive assets — PASS (2026-08-19):** the
+  [P3-8A observability assets review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md)
+  records the current-source pure SLI/privacy/OTel codec scope, corrected
+  `ca3d7780` findings, exact affected evidence and independent Tier-3 PASS. The
+  assets are uncomposed and do not make P3-8, product readiness or Production
+  operations complete; P3-2 remains the active packet.
 - **Local artifacts:** coverage, caches, `dist`, `node_modules`, logs and private
   runtime databases/audio remain ignored and excluded from final integration.
 
 ## Verification and runtime truth
 
+- `P3-8A` current-source focused/affected automation reports **207 passed**;
+  Python static/format/compile and Git whitespace checks pass, and an independent
+  Tier-3 cold review found no P1/P2. This grants only the additive pure-asset
+  credit recorded in the
+  [P3-8A review](reviews/P3_8A_OBSERVABILITY_ASSETS_REVIEW_2026-08-19.md): no
+  backend/exporter was called and no product build, deployment or physical
+  acceptance is implied.
 - `P3-1` current-source affected automated/static/build evidence and independent
   Tier-3 review pass with no remaining package P1/P2, as recorded in the
   [P3-1 implementation review](reviews/P3_1_CANONICAL_MULTI_TASK_IMPLEMENTATION_REVIEW_2026-08-19.md).

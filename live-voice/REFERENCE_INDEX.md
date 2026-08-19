@@ -64,14 +64,20 @@ Read only the record that owns the regression or source boundary being examined.
 
 ## Fresh-clone recovery
 
-The feature branch is published on the configured `agtai` remote, not
-`origin`. Verify that `agtai` resolves to the intended repository before
-fetching; a fresh clone that lacks this remote must configure it explicitly.
+Remote names and publication state are repository-local Git facts. Do not
+assume `agtai`, `origin` or any other fixed name. First inspect configured
+remotes and remote-tracking refs, verify the selected URL, and remember that a
+fresh clone can recover only commits already published to that ref. Local-ahead
+commits require a separately authorized remote update before another clone can
+retrieve them.
 
 ```powershell
-git remote get-url agtai
-git fetch agtai hx/0812_live_voice_w3
-git switch --track -c hx/0812_live_voice_w3 agtai/hx/0812_live_voice_w3
+git remote -v
+git branch -r --list "*/hx/0812_live_voice_w3"
+$liveVoiceRemote = Read-Host "Verified remote name"
+git remote get-url $liveVoiceRemote
+git fetch $liveVoiceRemote hx/0812_live_voice_w3
+git switch --track -c hx/0812_live_voice_w3 "$liveVoiceRemote/hx/0812_live_voice_w3"
 git status --short --branch
 git rev-parse HEAD
 git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}'
