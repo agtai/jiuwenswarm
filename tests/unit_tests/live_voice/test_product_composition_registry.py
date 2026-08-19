@@ -285,6 +285,29 @@ class _AgentManager:
         self.unpins += 1
 
 
+class _ForegroundLatencyProbeSpy:
+    def __init__(self) -> None:
+        self.marks: list[tuple[str, object | None, str | None]] = []
+        self.terminals: list[str] = []
+        self.abandoned = False
+
+    def mark(
+        self,
+        point: str,
+        *,
+        response_ref: object | None = None,
+        task_id: str | None = None,
+    ) -> bool:
+        self.marks.append((point, response_ref, task_id))
+        return True
+
+    def finish(self, terminal_outcome: str) -> None:
+        self.terminals.append(terminal_outcome)
+
+    def abandon(self) -> None:
+        self.abandoned = True
+
+
 @dataclass(frozen=True, slots=True)
 class _SubscriptionSnapshot:
     task_id: str
@@ -1454,6 +1477,65 @@ async def test_unified_final_dialogue_is_exactly_once_and_replays_by_voice_ident
 
 
 @pytest.mark.asyncio
+async def test_unified_latency_probe_tracks_new_execution_and_abandons_replay(
+    tmp_path: Path,
+) -> None:
+    registry, _p3, manager, _pushed = _registry(tmp_path, unified=True)
+    assert (
+        await registry.handle_p2_activate(
+            params=_p2_params(),
+            request_id="request-latency-activate",
+            session_id="session-product",
+            channel_id="web",
+        )
+    ).ok
+    params = _unified_final_params(stem="latency-dialogue", text="PRIVATE INPUT")
+    first_probe = _ForegroundLatencyProbeSpy()
+    first_probe.mark("agent.commit_submit_received")
+
+    first = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-latency-first",
+        session_id="session-product",
+        channel_id="web",
+        latency_probe=first_probe,
+    )
+    await manager.agent.wait_for_calls(1)
+    for _ in range(40):
+        if first_probe.terminals:
+            break
+        await asyncio.sleep(0)
+
+    assert first.ok
+    assert [point for point, _response, _task in first_probe.marks] == [
+        "agent.commit_submit_received",
+        "agent.commit_accepted",
+        "agent.route_resolved",
+        "agent.agent_started",
+        "agent.agent_final",
+        "agent.presentation_produced",
+        "agent.presentation_dispatched",
+    ]
+    assert first_probe.terminals == ["completed"]
+    assert "PRIVATE INPUT" not in repr(first_probe.marks)
+
+    replay_probe = _ForegroundLatencyProbeSpy()
+    replay_probe.mark("agent.commit_submit_received")
+    replay = await registry.handle_unified_submit(
+        params=params,
+        request_id="request-latency-replay",
+        session_id="session-product",
+        channel_id="web",
+        latency_probe=replay_probe,
+    )
+    assert replay.ok
+    assert replay_probe.abandoned is True
+    assert replay_probe.terminals == []
+    assert manager.agent.calls == 1
+    await _close_unified_route(registry, stem="p3-off-create")
+
+
+@pytest.mark.asyncio
 async def test_unified_continuous_dialogue_releases_all_in_memory_identity_state(
     tmp_path: Path,
 ) -> None:
@@ -2538,6 +2620,7 @@ async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
         )
     ).ok
     _install_unified_history_writer(default_registry)
+    denied_probe = _ForegroundLatencyProbeSpy()
     default_result = await default_registry.handle_unified_submit(
         params=_unified_final_params(
             stem="default-create",
@@ -2546,12 +2629,18 @@ async def test_unified_demo_policy_bypass_is_backend_owned_and_one_current_task(
         request_id="request-default-create",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=denied_probe,
     )
     assert default_result.ok
     assert default_p3.current is None
     assert default_p3.handle_calls[0][0] == "task.create"
     assert default_p3.handle_calls[0][2]["trusted_demo_policy_bypass"] is False
     assert default_manager.agent.calls == 0
+    assert all(
+        point != "agent.task_command_accepted"
+        for point, _response, _task in denied_probe.marks
+    )
+    assert denied_probe.terminals == ["completed"]
     await _ack_unified_presentation(default_registry, sequence=0, stem="default-create")
     await _close_unified_route(default_registry, stem="default-create")
 
@@ -2635,6 +2724,7 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
         )
     ).ok
     _install_unified_history_writer(registry)
+    probe = _ForegroundLatencyProbeSpy()
     created = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="unified-origin-create",
@@ -2643,6 +2733,7 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
         request_id="request-unified-origin-create",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=probe,
     )
     assert created.ok
     result = cast(dict[str, object], created.payload["result"])
@@ -2656,6 +2747,11 @@ async def test_unified_voice_create_returns_task_id_and_retains_live_voice_origi
     assert origin.activation_id == "activation-1"
     assert origin.activation_generation == 1
     assert origin.correlation_id == "correlation-p2"
+    assert (
+        "agent.task_command_accepted",
+        None,
+        "task-current-1",
+    ) in probe.marks
     await _ack_unified_presentation(
         registry, sequence=0, stem="unified-origin-create"
     )
@@ -3255,6 +3351,7 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         )
     ).ok
     history = _install_unified_history_writer(registry)
+    status_probe = _ForegroundLatencyProbeSpy()
 
     status = await registry.handle_unified_submit(
         params=_unified_final_params(
@@ -3264,12 +3361,18 @@ async def test_unified_status_presents_authoritative_store_progress_shape(
         request_id="request-status-current",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=status_probe,
     )
 
     assert status.ok
     assert cast(dict[str, object], status.payload["result"])["task_id"] == composition.current.task_id
     assert manager.agent.calls == 0
     assert [call[0] for call in composition.handle_calls] == ["task.status"]
+    assert (
+        "agent.task_command_accepted",
+        None,
+        composition.current.task_id,
+    ) in status_probe.marks
     presentation_sequence = await _ack_unified_presentation(
         registry, sequence=0, stem="status-current"
     )
@@ -3366,6 +3469,7 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
         )
     ).ok
     _install_unified_history_writer(registry)
+    probe = _ForegroundLatencyProbeSpy()
     result = await registry.handle_unified_submit(
         params=_unified_final_params(
             stem="cancel-current",
@@ -3374,6 +3478,7 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
         request_id="request-cancel-current",
         session_id=SCOPE.session_id,
         channel_id="web",
+        latency_probe=probe,
     )
 
     assert result.ok
@@ -3384,6 +3489,11 @@ async def test_unified_demo_cancel_is_direct_but_only_reports_stop_requested(
     assert operation == "task.cancel"
     assert params["task_id"] == composition.current.task_id
     assert policy["trusted_demo_policy_bypass"] is True
+    assert (
+        "agent.task_command_accepted",
+        None,
+        composition.current.task_id,
+    ) in probe.marks
     await _ack_unified_presentation(registry, sequence=0, stem="cancel-current")
     await _close_unified_route(registry, stem="cancel-current")
 

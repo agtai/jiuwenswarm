@@ -757,6 +757,73 @@ async def test_product_p2_route_preserves_only_rpc_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unified_probe_context_is_stripped_before_business_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenswarm.server.live_voice import agent_latency_probe
+
+    class Probe:
+        def __init__(self) -> None:
+            self.marks: list[str] = []
+
+        def mark(self, point: str, **_identity: object) -> bool:
+            self.marks.append(point)
+            return True
+
+    probe = Probe()
+    monkeypatch.setattr(
+        agent_latency_probe,
+        "parse_agent_latency_probe_context",
+        lambda _runtime, _value: object(),
+    )
+    monkeypatch.setattr(
+        agent_latency_probe.AgentForegroundLatencyProbeOperation,
+        "create",
+        lambda *_args, **_kwargs: probe,
+    )
+    registry = _ProductRegistry()
+    server = _server(object())
+    server._live_voice_product_composition = registry
+    server._live_voice_latency_probe_runtime = object()
+    ws = _WebSocket()
+    request = AgentRequest(
+        request_id="request-unified-probe",
+        channel_id="web",
+        session_id="session-1",
+        req_method=ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT,
+        params={
+            "session_id": "session-1",
+            "correlation_id": "correlation-1",
+            "interaction_id": "interaction-1",
+            "turn_id": "turn-1",
+            "latency_probe_context": {"PRIVATE": "must not reach business"},
+        },
+    )
+
+    await server._handle_live_voice_product_request(ws, request, asyncio.Lock())
+
+    assert registry.calls == [
+        (
+            "unified.submit",
+            {
+                "params": {
+                    "session_id": "session-1",
+                    "correlation_id": "correlation-1",
+                    "interaction_id": "interaction-1",
+                    "turn_id": "turn-1",
+                },
+                "request_id": "request-unified-probe",
+                "session_id": "session-1",
+                "channel_id": "web",
+                "latency_probe": probe,
+            },
+        )
+    ]
+    assert probe.marks == ["agent.commit_submit_received"]
+    assert "PRIVATE" not in repr(registry.calls)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("method", "label", "includes_channel"),
     [

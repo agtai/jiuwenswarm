@@ -970,6 +970,7 @@ class AgentWebSocketServer:
         # master flag is off no registry, Adapter, registration, or worker is
         # constructed or called.
         self._live_voice_product_composition: Any = None
+        self._live_voice_latency_probe_runtime: Any = None
         # Closed, content-free diagnostic facts only.  This is never a
         # lifecycle or mutation authority and remains absent while the product
         # composition flag is off.
@@ -1412,10 +1413,16 @@ class AgentWebSocketServer:
             return
         registry: Any = None
         try:
+            from jiuwenswarm.server.live_voice.latency_probe import (
+                create_latency_probe_runtime_from_environment,
+            )
             from jiuwenswarm.server.live_voice.product_composition_registry import (
                 create_product_composition_registry_from_environment,
             )
 
+            latency_probe_runtime = create_latency_probe_runtime_from_environment(
+                "agent_server"
+            )
             registry = create_product_composition_registry_from_environment(
                 p3_composition=self._live_voice_p3_composition,
                 agent_manager=self._agent_manager,
@@ -1438,6 +1445,7 @@ class AgentWebSocketServer:
             )
 
             self._live_voice_product_composition = registry
+            self._live_voice_latency_probe_runtime = latency_probe_runtime
             self._live_voice_product_observability = LiveVoiceObservabilityCollector()
             logger.info(
                 "[LiveVoiceProduct] central composition registered; "
@@ -1458,11 +1466,13 @@ class AgentWebSocketServer:
                     )
             self._live_voice_product_composition = None
             self._live_voice_product_observability = None
+            self._live_voice_latency_probe_runtime = None
 
     async def _stop_live_voice_product_composition(self) -> bool:
         registry = self._live_voice_product_composition
         if registry is None:
             self._live_voice_product_observability = None
+            self._live_voice_latency_probe_runtime = None
             return True
         try:
             await registry.stop()
@@ -1472,6 +1482,7 @@ class AgentWebSocketServer:
         if self._live_voice_product_composition is registry:
             self._live_voice_product_composition = None
             self._live_voice_product_observability = None
+            self._live_voice_latency_probe_runtime = None
         return True
 
     def _set_scheduler_agent(self, agent: Any) -> None:
@@ -9126,6 +9137,39 @@ class AgentWebSocketServer:
                 if key not in {"mode", "agent_type", "agent_ref"}
             }
             method = request.req_method
+            latency_probe = None
+            if method is ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT:
+                raw_latency_context = params.pop("latency_probe_context", None)
+                runtime = getattr(
+                    self, "_live_voice_latency_probe_runtime", None
+                )
+                if runtime is not None and raw_latency_context is not None:
+                    from jiuwenswarm.server.live_voice.agent_latency_probe import (
+                        AgentForegroundLatencyProbeOperation,
+                        parse_agent_latency_probe_context,
+                    )
+
+                    parsed_latency_context = parse_agent_latency_probe_context(
+                        runtime, raw_latency_context
+                    )
+                    correlation_id = params.get("correlation_id")
+                    interaction_id = params.get("interaction_id")
+                    turn_id = params.get("turn_id")
+                    if (
+                        parsed_latency_context is not None
+                        and type(correlation_id) is str
+                        and type(interaction_id) is str
+                        and type(turn_id) is str
+                    ):
+                        latency_probe = AgentForegroundLatencyProbeOperation.create(
+                            runtime,
+                            parsed_latency_context,
+                            correlation_id=correlation_id,
+                            interaction_id=interaction_id,
+                            turn_id=turn_id,
+                        )
+                        if latency_probe is not None:
+                            latency_probe.mark("agent.commit_submit_received")
             if method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_ACTIVATE:
                 result = await registry.handle_p2_activate(
                     params=params,
@@ -9147,12 +9191,15 @@ class AgentWebSocketServer:
                     channel_id=request.channel_id,
                 )
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_UNIFIED_SUBMIT:
-                result = await registry.handle_unified_submit(
-                    params=params,
-                    request_id=request.request_id,
-                    session_id=request.session_id,
-                    channel_id=request.channel_id,
-                )
+                unified_kwargs = {
+                    "params": params,
+                    "request_id": request.request_id,
+                    "session_id": request.session_id,
+                    "channel_id": request.channel_id,
+                }
+                if latency_probe is not None:
+                    unified_kwargs["latency_probe"] = latency_probe
+                result = await registry.handle_unified_submit(**unified_kwargs)
             elif method is ReqMethod.LIVE_VOICE_COMPOSITION_P2_NOTIFICATION_NEXT:
                 result = await registry.handle_p2_notification_next(
                     params=params,

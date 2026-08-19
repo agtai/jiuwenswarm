@@ -573,6 +573,47 @@ def _bind_unified_response_request(
     return bound
 
 
+def _mark_foreground_latency(
+    probe: object | None,
+    point: str,
+    *,
+    response_ref: ResponseRef | None = None,
+    task_id: str | None = None,
+) -> None:
+    if probe is None:
+        return
+    try:
+        marker = getattr(probe, "mark", None)
+        if callable(marker):
+            marker(point, response_ref=response_ref, task_id=task_id)
+    except BaseException:
+        return
+
+
+def _finish_foreground_latency(
+    probe: object | None, terminal_outcome: str
+) -> None:
+    if probe is None:
+        return
+    try:
+        finish = getattr(probe, "finish", None)
+        if callable(finish):
+            finish(terminal_outcome)
+    except BaseException:
+        return
+
+
+def _abandon_foreground_latency(probe: object | None) -> None:
+    if probe is None:
+        return
+    try:
+        abandon = getattr(probe, "abandon", None)
+        if callable(abandon):
+            abandon()
+    except BaseException:
+        return
+
+
 def _formal_live_voice_capable(agent: object) -> bool:
     """Report whether one Agent facade actually owns the formal Live Voice seam.
 
@@ -665,6 +706,7 @@ class AgentServerProductCompositionRegistry:
         self._root_orphan_cleanups: list[ProductCompositionLease] = []
         self._p2_submit_operations: dict[str, _RetainedProductOperation] = {}
         self._unified_operations: dict[str, _RetainedProductOperation] = {}
+        self._foreground_latency_probes: dict[str, object] = {}
         self._unified_settlement_tasks: set[asyncio.Task[None]] = set()
         # Durable truth remains the terminal TaskEvent.  This bounded map only
         # retains which source facts still need a current P2 activation; it is
@@ -2248,6 +2290,7 @@ class AgentServerProductCompositionRegistry:
         | None = None,
         after_agent_dispatch: Callable[[Any], None] | None = None,
         allow_agent_tools: bool = True,
+        latency_probe: object | None = None,
     ) -> P3RouteResult:
         result_unknown = False
         try:
@@ -2343,6 +2386,7 @@ class AgentServerProductCompositionRegistry:
                 before_dispatch=before_agent_dispatch,
                 after_dispatch=after_agent_dispatch,
                 allow_tools=allow_agent_tools,
+                latency_probe=latency_probe,
             )
             return _success_result(
                 request_id,
@@ -2725,6 +2769,7 @@ class AgentServerProductCompositionRegistry:
                 if not retained.task.done():
                     return
                 self._unified_operations.pop(voice_identity, None)
+            self._foreground_latency_probes.pop(voice_identity, None)
             self._critical_input_commit_generations.pop(commit_id, None)
             self._critical_input_guarded_commits.discard(commit_id)
             self._critical_token_gate.release_commit(commit_id)
@@ -3275,6 +3320,7 @@ class AgentServerProductCompositionRegistry:
         task_id: str | None = None,
     ) -> P3RouteResult:
         journal = self._unified_journal
+        latency_probe = self._foreground_latency_probes.get(voice_identity)
         if journal is None:
             raise FormalTaskViolation(
                 "UNIFIED_INPUT_UNAVAILABLE",
@@ -3326,6 +3372,7 @@ class AgentServerProductCompositionRegistry:
                 text=text,
                 channel_id=channel_id,
                 before_publish=checkpoint,
+                latency_probe=latency_probe,
                 source_provenance=source_provenance,
             )
             if task_id is not None:
@@ -3539,6 +3586,7 @@ class AgentServerProductCompositionRegistry:
         allow_tools: bool,
     ) -> P3RouteResult:
         request_id = f"unified-agent-{voice_identity[:40]}"
+        latency_probe = self._foreground_latency_probes.get(voice_identity)
         journal = self._unified_journal
         if journal is None:
             raise FormalTaskViolation(
@@ -3613,6 +3661,7 @@ class AgentServerProductCompositionRegistry:
                 before_agent_dispatch=checkpoint,
                 after_agent_dispatch=checkpoint_accepted,
                 allow_agent_tools=allow_tools,
+                latency_probe=latency_probe,
             )
 
         return await self._run_unified_foreground_effect(
@@ -3782,6 +3831,11 @@ class AgentServerProductCompositionRegistry:
                     created = formal_task_result.get("task_id")
                     if isinstance(created, str) and created:
                         created_task_id = created
+                        _mark_foreground_latency(
+                            self._foreground_latency_probes.get(voice_identity),
+                            "agent.task_command_accepted",
+                            task_id=created_task_id,
+                        )
                 speech = "已开始处理。" if chinese else "Background processing started."
             else:
                 error = result.payload.get("error")
@@ -4031,6 +4085,12 @@ class AgentServerProductCompositionRegistry:
                 request_id=f"unified-status-{voice_identity[:48]}",
                 session_id=retained.binding.session_id,
             )
+            if status.ok:
+                _mark_foreground_latency(
+                    self._foreground_latency_probes.get(voice_identity),
+                    "agent.task_command_accepted",
+                    task_id=current.task_id,
+                )
             status_result = status.payload.get("result")
             task_status = (
                 status_result.get("task")
@@ -4135,6 +4195,12 @@ class AgentServerProductCompositionRegistry:
                     commit.scope,
                 )
             cancel_result = cancelled.payload.get("result")
+            if cancelled.ok:
+                _mark_foreground_latency(
+                    self._foreground_latency_probes.get(voice_identity),
+                    "agent.task_command_accepted",
+                    task_id=current.task_id,
+                )
             cancelled_terminal = (
                 cancelled.ok
                 and isinstance(cancel_result, Mapping)
@@ -4271,6 +4337,7 @@ class AgentServerProductCompositionRegistry:
         request_id: str,
         session_id: str | None,
         channel_id: str,
+        latency_probe: object | None = None,
     ) -> P3RouteResult:
         """Admit exactly one Gateway-claimed ASR final into semantic routing."""
 
@@ -4285,8 +4352,10 @@ class AgentServerProductCompositionRegistry:
         operation_task: asyncio.Task[P3RouteResult] | None = None
         journal_completion_pending = False
         if not self._settings.p2_enabled:
+            _finish_foreground_latency(latency_probe, "failed")
             return _error_result(request_id, reason="PRODUCT_P2_DISABLED")
         if journal is None or bridge is None:
+            _finish_foreground_latency(latency_probe, "failed")
             return _error_result(request_id, reason="UNIFIED_INPUT_UNAVAILABLE")
         try:
             _require_exact_params(
@@ -4433,6 +4502,7 @@ class AgentServerProductCompositionRegistry:
                 semantic_binding=proposed_semantic_binding,
             )
             if admission.replay_result is not None:
+                _abandon_foreground_latency(latency_probe)
                 payload = _bind_unified_response_request(
                     admission.replay_result,
                     request_id,
@@ -4481,6 +4551,7 @@ class AgentServerProductCompositionRegistry:
                         current = None
                         background_authority_unavailable = True
             if not admission.execute:
+                _abandon_foreground_latency(latency_probe)
                 payload = await asyncio.to_thread(
                     journal.wait_for_completion,
                     voice_identity_sha256=voice_identity,
@@ -4501,6 +4572,8 @@ class AgentServerProductCompositionRegistry:
                     commit_id=commit.commit_id,
                 )
                 return P3RouteResult(bool(payload.get("ok")), payload)
+            _mark_foreground_latency(latency_probe, "agent.commit_accepted")
+            _mark_foreground_latency(latency_probe, "agent.route_resolved")
             admitted_execution = True
             may_seal_failure = True
             async with self._lock:
@@ -4523,9 +4596,12 @@ class AgentServerProductCompositionRegistry:
                             ErrorCode.UNAVAILABLE,
                         )
 
-                    def allocate() -> asyncio.Task[P3RouteResult]:
-                        return asyncio.create_task(
-                            self._run_unified_submit(
+                    if latency_probe is not None:
+                        self._foreground_latency_probes[voice_identity] = latency_probe
+
+                    async def run() -> P3RouteResult:
+                        try:
+                            outcome = await self._run_unified_submit(
                                 retained=retained,
                                 request_id=request_id,
                                 voice_identity=voice_identity,
@@ -4539,7 +4615,20 @@ class AgentServerProductCompositionRegistry:
                                 ),
                                 auth_token=params.get("auth_token"),
                                 channel_id=channel_id,
-                            ),
+                            )
+                        except asyncio.CancelledError:
+                            _finish_foreground_latency(latency_probe, "cancelled")
+                            raise
+                        except BaseException:
+                            _finish_foreground_latency(latency_probe, "failed")
+                            raise
+                        if not outcome.ok:
+                            _finish_foreground_latency(latency_probe, "failed")
+                        return outcome
+
+                    def allocate() -> asyncio.Task[P3RouteResult]:
+                        return asyncio.create_task(
+                            run(),
                             name=f"live-voice-unified-submit:{voice_identity[:16]}",
                         )
 
@@ -4625,8 +4714,12 @@ class AgentServerProductCompositionRegistry:
                     voice_identity=voice_identity,
                     commit_id=retained_commit_id,
                 )
+                _finish_foreground_latency(latency_probe, "cancelled")
+            elif not admitted_execution:
+                _finish_foreground_latency(latency_probe, "cancelled")
             raise
         except FormalTaskViolation as exc:
+            _finish_foreground_latency(latency_probe, "failed")
             rejected = _error_result(
                 request_id,
                 reason=exc.reason,
@@ -4674,6 +4767,7 @@ class AgentServerProductCompositionRegistry:
             return rejected
 
         except Exception as exc:  # noqa: BLE001 -- unified route fails closed
+            _finish_foreground_latency(latency_probe, "failed")
             raw_reason = getattr(exc, "reason", None)
             safe_reason = (
                 raw_reason
