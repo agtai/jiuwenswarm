@@ -638,6 +638,17 @@ def test_descriptors_allow_human_readable_sanitized_text_but_not_paths_or_secret
     assert load_latency_run_config(path).environment_profile == "Windows 11"
 
 
+@pytest.mark.parametrize("control", ("\x00", "\x1f", "\x7f", "\x80", "\x9f"))
+def test_descriptors_reject_all_unicode_control_characters(tmp_path, control) -> None:
+    value = valid_run_json()
+    value["environment_profile"] = f"Windows 11{control}"
+    path = tmp_path / "run.json"
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    with pytest.raises(LatencyProbeViolation):
+        load_latency_run_config(path)
+
+
 def test_gateway_writer_can_persist_only_its_allowed_browser_and_gateway_producers(
     tmp_path, run_config
 ) -> None:
@@ -645,7 +656,7 @@ def test_gateway_writer_can_persist_only_its_allowed_browser_and_gateway_produce
         tmp_path,
         run_config,
         "gateway",
-        allowed_components=("browser", "gateway"),
+        mode="gateway_with_browser",
     )
     runtime = LatencyProbeRuntime(run_config, "gateway", writer)
     browser = browser_batch_for(run_config)
@@ -667,3 +678,13 @@ def test_gateway_writer_can_persist_only_its_allowed_browser_and_gateway_produce
     assert (tmp_path / run_config.run_id / "browser.jsonl").is_file()
     assert (tmp_path / run_config.run_id / "gateway.jsonl").is_file()
     assert not (tmp_path / run_config.run_id / "agent.jsonl").exists()
+
+
+@pytest.mark.parametrize(
+    "mode", ("gateway_with_agent_server", "gateway_with_browser_and_agent_server")
+)
+def test_gateway_writer_rejects_arbitrary_multiproducer_modes(
+    tmp_path, run_config, mode
+) -> None:
+    with pytest.raises(LatencyProbeViolation):
+        LatencyProbeBatchWriter(tmp_path, run_config, "gateway", mode=mode)

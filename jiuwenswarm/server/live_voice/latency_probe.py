@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import hashlib
+import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -48,6 +49,7 @@ COMPONENT_OUTPUT_FILES: Final[Mapping[str, str]] = {
     "gateway": "gateway.jsonl",
     "agent_server": "agent.jsonl",
 }
+WRITER_MODES: Final = ("single_component", "gateway_with_browser")
 PHASES: Final = ("browser_round", "gateway_stt", "gateway_tts", "agent_foreground")
 MARK_OUTCOMES: Final = (
     "observed",
@@ -234,7 +236,7 @@ def _bounded_descriptor(value: object) -> str:
         encoded is None
         or len(encoded) > MAX_STRING_UTF8_BYTES
         or any(character in value for character in ("/", "\\", ":"))
-        or any(ord(character) < 32 for character in value)
+        or any(unicodedata.category(character) == "Cc" for character in value)
         or _SENSITIVE_DESCRIPTOR.search(value) is not None
     ):
         raise LatencyProbeViolation("INVALID_STRING")
@@ -990,19 +992,20 @@ class LatencyProbeBatchWriter:
         run_config: LatencyRunConfig,
         component: str,
         *,
-        allowed_components: tuple[str, ...] | None = None,
+        mode: str = "single_component",
     ) -> None:
         run_config = _revalidate_run_config(run_config)
-        if run_config is None or component not in COMPONENTS:
-            raise LatencyProbeViolation("INVALID_COMPONENT")
-        allowed = (component,) if allowed_components is None else allowed_components
         if (
-            not isinstance(allowed, tuple)
-            or not allowed
-            or component not in allowed
-            or any(candidate not in COMPONENTS for candidate in allowed)
-            or len(set(allowed)) != len(allowed)
+            run_config is None
+            or component not in COMPONENTS
+            or mode not in WRITER_MODES
         ):
+            raise LatencyProbeViolation("INVALID_COMPONENT")
+        if mode == "single_component":
+            allowed = (component,)
+        elif mode == "gateway_with_browser" and component == "gateway":
+            allowed = ("browser", "gateway")
+        else:
             raise LatencyProbeViolation("INVALID_COMPONENT")
         self._run_config = run_config
         self._run_id = _bounded_string(run_config.run_id)
@@ -1129,14 +1132,11 @@ def create_latency_probe_runtime_from_environment(
         return None
     try:
         run_config = load_latency_run_config(Path(config_path))
-        allowed_components = (
-            ("browser", "gateway") if component == "gateway" else (component,)
-        )
         writer = LatencyProbeBatchWriter(
             Path(output_root),
             run_config,
             component,
-            allowed_components=allowed_components,
+            mode="gateway_with_browser" if component == "gateway" else "single_component",
         )
     except Exception:
         return None
