@@ -128,6 +128,23 @@ def test_load_run_config_rejects_closed_invalid_inputs(tmp_path, mutate, reason)
         load_latency_run_config(path)
 
 
+def test_run_config_bounds_intended_attempts_to_256(tmp_path) -> None:
+    accepted = valid_run_json()
+    accepted["intended_attempts"] = 256
+    accepted_path = tmp_path / "accepted-run.json"
+    accepted_path.write_text(json.dumps(accepted), encoding="utf-8")
+
+    assert load_latency_run_config(accepted_path).intended_attempts == 256
+
+    rejected = valid_run_json()
+    rejected["intended_attempts"] = 257
+    rejected_path = tmp_path / "rejected-run.json"
+    rejected_path.write_text(json.dumps(rejected), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_latency_run_config(rejected_path)
+
+
 def test_context_is_closed_and_bound_to_run(run_config) -> None:
     context = try_parse_latency_probe_context(
         {

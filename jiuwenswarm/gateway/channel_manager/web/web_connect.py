@@ -322,6 +322,24 @@ class WebChannel(BaseWsChannel):
 
         self._on_message_cb = wrapped
 
+    def _registered_session_for_websocket(
+        self,
+        ws: Any,
+        claimed_session_id: object,
+    ) -> str:
+        """Resolve a diagnostic session only from the existing routing registry."""
+
+        if not isinstance(claimed_session_id, str) or not claimed_session_id:
+            return ""
+        for routing_key, registered_clients in self._clients_by_key.items():
+            if (
+                routing_key.channel_id == self.channel_id
+                and routing_key.session_id == claimed_session_id
+                and ws in registered_clients
+            ):
+                return routing_key.session_id
+        return ""
+
     # ── 帧发送 API（公开给处理器使用）─────────────────────
 
     async def send_response(
@@ -1557,13 +1575,17 @@ class WebChannel(BaseWsChannel):
                     code="METHOD_NOT_FOUND",
                 )
                 return
+            dispatcher_session_id = self._registered_session_for_websocket(
+                ws,
+                _explicit_session_id,
+            )
             await self._invoke_method_handler(
                 _MethodHandlerInvocation(
                     ws,
                     method,
                     req_id,
                     params,
-                    session_id,
+                    dispatcher_session_id,
                     handler,
                 ),
             )

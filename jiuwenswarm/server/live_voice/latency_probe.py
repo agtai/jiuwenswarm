@@ -32,6 +32,7 @@ MAX_MARKS_PER_BATCH: Final = 64
 MAX_ORDINARY_MARKS: Final = MAX_MARKS_PER_BATCH - 1
 MAX_WRITER_RECEIPTS: Final = 256
 MAX_RUN_COLLECTION_ITEMS: Final = 64
+MAX_INTENDED_ATTEMPTS: Final = 256
 LATENCY_PROBE_ENABLED_ENV: Final = "JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_ENABLED"
 LATENCY_PROBE_RUN_CONFIG_ENV: Final = "JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_RUN_CONFIG"
 LATENCY_PROBE_OUTPUT_ROOT_ENV: Final = "JIUWENSWARM_LIVE_VOICE_LATENCY_PROBE_OUTPUT_ROOT"
@@ -739,7 +740,10 @@ def _parse_latency_run_config(raw: object) -> LatencyRunConfig:
             raise LatencyProbeViolation("INVALID_FLAGS")
     intended_attempts = _positive_integer(value["intended_attempts"])
     required_successes = _positive_integer(value["required_successes"])
-    if required_successes > intended_attempts:
+    if (
+        intended_attempts > MAX_INTENDED_ATTEMPTS
+        or required_successes > intended_attempts
+    ):
         raise LatencyProbeViolation("INVALID_ATTEMPT_POLICY")
     fields = (
         "environment_profile", "browser_family_and_version", "browser_os_class",

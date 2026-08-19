@@ -23,6 +23,7 @@ from jiuwenswarm.gateway.live_voice.latency_probe_registration import (
     LATENCY_PROBE_BATCH_METHOD,
     register_latency_probe_rpc_handler,
 )
+from jiuwenswarm.gateway.routing.keys import AgentRef, RoutingKey
 from jiuwenswarm.server.live_voice.latency_probe import (
     LATENCY_PROBE_ENABLED_ENV,
     LATENCY_PROBE_OUTPUT_ROOT_ENV,
@@ -464,6 +465,76 @@ async def test_session_identity_is_isolated_and_first_round_must_be_zero(
     ]
 
 
+@pytest.mark.asyncio
+async def test_all_declared_round_digests_remain_idempotent_and_range_is_closed(
+    tmp_path: Path,
+) -> None:
+    payload = _run_payload()
+    payload["intended_attempts"] = 256
+    config_path = tmp_path / "run-256.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    run_config = load_latency_run_config(config_path)
+    channel = _FakeChannel()
+    register_latency_probe_rpc_handler(channel, _runtime(tmp_path, run_config))
+    handler = channel.handlers[LATENCY_PROBE_BATCH_METHOD]
+
+    for round_index in range(256):
+        await handler(
+            "ws",
+            f"round-{round_index}",
+            {
+                "session_id": "session-256",
+                "batch": _batch_dict(
+                    batch_id=f"batch-{round_index}",
+                    round_index=round_index,
+                    source_instance_id=f"source-{round_index}",
+                ),
+            },
+            "session-256",
+        )
+        assert _payload(channel.responses[-1])["status"] == "written"
+
+    await handler(
+        "ws",
+        "retry-round-zero",
+        {
+            "session_id": "session-256",
+            "batch": _batch_dict(
+                batch_id="batch-0",
+                round_index=0,
+                source_instance_id="source-0",
+            ),
+        },
+        "session-256",
+    )
+    await handler(
+        "ws",
+        "out-of-range",
+        {
+            "session_id": "session-256",
+            "batch": _batch_dict(
+                batch_id="batch-256",
+                round_index=256,
+                source_instance_id="source-256",
+            ),
+        },
+        "session-256",
+    )
+
+    assert _payload(channel.responses[-2]) == {
+        "status": "idempotent",
+        "batch_id": "batch-0",
+        "reason_code": None,
+    }
+    assert _payload(channel.responses[-1]) == {
+        "status": "rejected",
+        "batch_id": "batch-256",
+        "reason_code": "SEQUENCE_GAP",
+    }
+    output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 256
+
+
 class _FailOnceWriter:
     def __init__(self, delegate: LatencyProbeBatchWriter) -> None:
         self.delegate = delegate
@@ -494,6 +565,35 @@ class _RaiseWriter:
 
     def write(self, _batch: LatencyBatch) -> LatencyProbeWriteResult:
         raise self.failure
+
+
+class _ResponseFailureChannel(_FakeChannel):
+    def __init__(self, failure: BaseException) -> None:
+        super().__init__()
+        self.failure: BaseException | None = failure
+
+    async def send_response(
+        self,
+        ws: Any,
+        req_id: str,
+        *,
+        ok: bool,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+        code: str | None = None,
+    ) -> None:
+        if self.failure is not None:
+            failure = self.failure
+            self.failure = None
+            raise failure
+        await super().send_response(
+            ws,
+            req_id,
+            ok=ok,
+            payload=payload,
+            error=error,
+            code=code,
+        )
 
 
 @pytest.mark.asyncio
@@ -602,34 +702,187 @@ async def test_handler_contains_ordinary_writer_fault_but_not_process_control(
 
 
 @pytest.mark.asyncio
-async def test_real_web_dispatch_is_local_only_feature_on_and_feature_off(
+async def test_ordinary_send_failure_is_contained_without_confirming_round_state(
     tmp_path: Path,
     run_config: Any,
 ) -> None:
-    effects = {
-        name: 0
-        for name in (
-            "media",
-            "speech",
-            "agent",
-            "tool",
-            "task",
-            "presentation",
-            "history",
-            "ack",
-            "next_turn",
-        )
-    }
-    product_registry = {"voice": "unchanged", "task": "unchanged"}
-    registry_snapshot = dict(product_registry)
+    channel = _ResponseFailureChannel(OSError("PRIVATE_SEND_FAILURE"))
+    register_latency_probe_rpc_handler(channel, _runtime(tmp_path, run_config))
+    handler = channel.handlers[LATENCY_PROBE_BATCH_METHOD]
 
-    def forbidden_product_callback(_message: object) -> bool:
-        for name in effects:
-            effects[name] += 1
-        product_registry["voice"] = "mutated"
+    await handler(
+        "ws",
+        "lost-response",
+        {"session_id": "session-1", "batch": _batch_dict()},
+        "session-1",
+    )
+    await handler(
+        "ws",
+        "unconfirmed-successor",
+        {
+            "session_id": "session-1",
+            "batch": _batch_dict(batch_id="round-1", round_index=1),
+        },
+        "session-1",
+    )
+    await handler(
+        "ws",
+        "retry-round-zero",
+        {"session_id": "session-1", "batch": _batch_dict()},
+        "session-1",
+    )
+
+    assert [_payload(response) for response in channel.responses] == [
+        {
+            "status": "rejected",
+            "batch_id": "round-1",
+            "reason_code": "SEQUENCE_GAP",
+        },
+        {
+            "status": "idempotent",
+            "batch_id": "browser-batch-0",
+            "reason_code": None,
+        },
+    ]
+    output = tmp_path / "probe-output" / run_config.run_id / "browser.jsonl"
+    assert len(output.read_text(encoding="utf-8").splitlines()) == 1
+    assert "PRIVATE_SEND_FAILURE" not in repr(channel.responses)
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(19)])
+@pytest.mark.asyncio
+async def test_send_process_control_escapes_without_confirming_round_state(
+    tmp_path: Path,
+    run_config: Any,
+    failure: BaseException,
+) -> None:
+    channel = _ResponseFailureChannel(failure)
+    register_latency_probe_rpc_handler(channel, _runtime(tmp_path, run_config))
+    handler = channel.handlers[LATENCY_PROBE_BATCH_METHOD]
+
+    with pytest.raises(type(failure)):
+        await handler(
+            "ws",
+            "process-control",
+            {"session_id": "session-1", "batch": _batch_dict()},
+            "session-1",
+        )
+    await handler(
+        "ws",
+        "unconfirmed-successor",
+        {
+            "session_id": "session-1",
+            "batch": _batch_dict(batch_id="round-1", round_index=1),
+        },
+        "session-1",
+    )
+
+    assert _payload(channel.responses[-1]) == {
+        "status": "rejected",
+        "batch_id": "round-1",
+        "reason_code": "SEQUENCE_GAP",
+    }
+
+
+class _EffectOwnerSpy:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.calls = 0
+
+    def invoke(self, _value: object = None) -> None:
+        self.calls += 1
+
+
+class _MediaRegistrySpy(_EffectOwnerSpy):
+    def __init__(self) -> None:
+        super().__init__("media")
+        self.registry = {"voice": "unchanged", "task": "unchanged"}
+
+    def observe_agent_response(self, value: object, **_kwargs: object) -> None:
+        self.invoke(value)
+        self.registry["voice"] = "mutated"
+
+
+class _AgentPipelineSpy:
+    def __init__(
+        self,
+        agent: _EffectOwnerSpy,
+        downstream: tuple[_EffectOwnerSpy, ...],
+    ) -> None:
+        self.agent = agent
+        self.downstream = downstream
+
+    def __call__(self, message: object) -> bool:
+        self.agent.invoke(message)
+        for owner in self.downstream:
+            owner.invoke(message)
         return False
 
-    async def exercise(channel: WebChannel, request_id: str, params: object) -> list[dict[str, object]]:
+
+@pytest.mark.asyncio
+async def test_every_local_dispatch_outcome_has_zero_individual_product_effects(
+    tmp_path: Path,
+    run_config: Any,
+) -> None:
+    channels: list[tuple[WebChannel, object]] = []
+
+    async def build_boundary(
+        runtime: LatencyProbeRuntime | None,
+    ) -> tuple[
+        WebChannel,
+        object,
+        list[dict[str, object]],
+        dict[str, _EffectOwnerSpy],
+        _MediaRegistrySpy,
+        _EffectOwnerSpy,
+        dict[RoutingKey, tuple[object, ...]],
+    ]:
+        channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+        owners = {
+            name: _EffectOwnerSpy(name)
+            for name in (
+                "speech",
+                "agent",
+                "tool",
+                "task",
+                "presentation",
+                "history",
+                "ack",
+                "next_turn",
+            )
+        }
+        media = _MediaRegistrySpy()
+        file_processing = _EffectOwnerSpy("file_processing")
+        channel.live_voice_media_registry = media
+        channel.live_voice_speech_service = owners["speech"]
+        channel.on_message(
+            _AgentPipelineSpy(
+                owners["agent"],
+                tuple(
+                    owners[name]
+                    for name in (
+                        "tool",
+                        "task",
+                        "presentation",
+                        "history",
+                        "ack",
+                        "next_turn",
+                    )
+                ),
+            )
+        )
+        register_latency_probe_rpc_handler(channel, runtime)
+        ws = SimpleNamespace(closed=False, remote_address=("127.0.0.1", 12345))
+        await channel.register_ws(
+            ws,
+            RoutingKey(
+                user_id="user-1",
+                channel_id="web",
+                app_id="default",
+                agent_ref=AgentRef(mode="agent", id="default"),
+                session_id="registered-session",
+            ),
+        )
         responses: list[dict[str, object]] = []
 
         async def capture_response(
@@ -645,8 +898,34 @@ async def test_real_web_dispatch_is_local_only_feature_on_and_feature_off(
                 {"id": req_id, "ok": ok, "payload": payload, "error": error, "code": code}
             )
 
+        async def forbidden_file_processing(
+            params: dict[str, Any],
+        ) -> dict[str, Any]:
+            file_processing.invoke(params)
+            return params
+
         channel.send_response = capture_response  # type: ignore[method-assign]
-        ws = SimpleNamespace(closed=False, remote_address=("127.0.0.1", 12345))
+        channel._process_files = forbidden_file_processing  # type: ignore[method-assign]
+        routing_snapshot = {
+            key: tuple(clients) for key, clients in channel._clients_by_key.items()
+        }
+        channels.append((channel, ws))
+        return (
+            channel,
+            ws,
+            responses,
+            owners,
+            media,
+            file_processing,
+            routing_snapshot,
+        )
+
+    async def dispatch(
+        channel: WebChannel,
+        ws: object,
+        request_id: str,
+        params: object,
+    ) -> None:
         await channel._handle_raw_message(
             ws,
             json.dumps(
@@ -659,78 +938,291 @@ async def test_real_web_dispatch_is_local_only_feature_on_and_feature_off(
             ),
             {},
         )
-        return responses
 
-    enabled = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
-    enabled.on_message(forbidden_product_callback)
-    register_latency_probe_rpc_handler(enabled, _runtime(tmp_path, run_config))
+    def assert_zero_effects(
+        channel: WebChannel,
+        owners: dict[str, _EffectOwnerSpy],
+        media: _MediaRegistrySpy,
+        registry_snapshot: dict[str, str],
+        file_processing: _EffectOwnerSpy,
+        routing_snapshot: dict[RoutingKey, tuple[object, ...]],
+    ) -> None:
+        assert media.calls == 0
+        assert owners["speech"].calls == 0
+        assert owners["agent"].calls == 0
+        assert owners["tool"].calls == 0
+        assert owners["task"].calls == 0
+        assert owners["presentation"].calls == 0
+        assert owners["history"].calls == 0
+        assert owners["ack"].calls == 0
+        assert owners["next_turn"].calls == 0
+        assert media.registry == registry_snapshot
+        assert file_processing.calls == 0
+        assert channel._clients_by_key == {
+            key: list(clients) for key, clients in routing_snapshot.items()
+        }
+        assert channel._ws_sessions == {}
 
-    async def forbidden_file_processing(params: dict[str, Any]) -> dict[str, Any]:
-        effects["media"] += 1
-        return params
+    try:
+        (
+            enabled,
+            enabled_ws,
+            enabled_responses,
+            enabled_owners,
+            enabled_media,
+            enabled_file_processing,
+            enabled_routing,
+        ) = await build_boundary(_runtime(tmp_path, run_config))
+        enabled_registry = dict(enabled_media.registry)
+        await dispatch(
+            enabled,
+            enabled_ws,
+            "positive",
+            {"session_id": "registered-session", "batch": _batch_dict()},
+        )
+        assert _payload(enabled_responses[-1])["status"] == "written"
+        assert_zero_effects(
+            enabled,
+            enabled_owners,
+            enabled_media,
+            enabled_registry,
+            enabled_file_processing,
+            enabled_routing,
+        )
 
-    enabled._process_files = forbidden_file_processing  # type: ignore[method-assign]
-    success = await exercise(
-        enabled,
-        "enabled",
-        {"session_id": "session-1", "batch": _batch_dict()},
-    )
-    negative = await exercise(
-        enabled,
-        "negative",
-        {"session_id": "session-1", "batch": {**_batch_dict(), "text": "PRIVATE"}},
-    )
+        oversized = _batch_dict(batch_id="oversized")
+        oversized["marks"] = [_mark()] * 65
+        negative_cases = (
+            (
+                "unknown-envelope",
+                {
+                    "session_id": "registered-session",
+                    "batch": _batch_dict(),
+                    "text": "PRIVATE",
+                },
+            ),
+            (
+                "wrong-session",
+                {"session_id": "client-chosen", "batch": _batch_dict()},
+            ),
+            (
+                "wrong-run",
+                {
+                    "session_id": "registered-session",
+                    "batch": _batch_dict(run_id="different-run"),
+                },
+            ),
+            (
+                "oversized",
+                {"session_id": "registered-session", "batch": oversized},
+            ),
+            (
+                "private",
+                {
+                    "session_id": "registered-session",
+                    "batch": _batch_dict(correlation_id="PRIVATE_SENTINEL"),
+                },
+            ),
+            (
+                "gap",
+                {
+                    "session_id": "registered-session",
+                    "batch": _batch_dict(batch_id="gap-2", round_index=2),
+                },
+            ),
+            (
+                "round-conflict",
+                {
+                    "session_id": "registered-session",
+                    "batch": _batch_dict(
+                        batch_id="conflict-0",
+                        correlation_id="conflict-correlation",
+                    ),
+                },
+            ),
+        )
+        for request_id, params in negative_cases:
+            await dispatch(enabled, enabled_ws, request_id, params)
+            assert _payload(enabled_responses[-1])["status"] == "rejected"
+            assert_zero_effects(
+                enabled,
+                enabled_owners,
+                enabled_media,
+                enabled_registry,
+                enabled_file_processing,
+                enabled_routing,
+            )
 
-    disabled = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
-    disabled.on_message(forbidden_product_callback)
-    register_latency_probe_rpc_handler(disabled, None)
-    disabled._process_files = forbidden_file_processing  # type: ignore[method-assign]
-    feature_off = await exercise(
-        disabled,
-        "feature-off",
-        {"session_id": "session-1", "batch": _batch_dict()},
-    )
+        (
+            disabled,
+            disabled_ws,
+            disabled_responses,
+            disabled_owners,
+            disabled_media,
+            disabled_file_processing,
+            disabled_routing,
+        ) = await build_boundary(None)
+        disabled_registry = dict(disabled_media.registry)
+        await dispatch(
+            disabled,
+            disabled_ws,
+            "feature-off",
+            {"session_id": "registered-session", "batch": _batch_dict()},
+        )
+        assert disabled_responses[-1]["ok"] is False
+        assert disabled_responses[-1]["code"] == "METHOD_NOT_FOUND"
+        assert_zero_effects(
+            disabled,
+            disabled_owners,
+            disabled_media,
+            disabled_registry,
+            disabled_file_processing,
+            disabled_routing,
+        )
 
-    faulted = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
-    faulted.on_message(forbidden_product_callback)
-    faulted._process_files = forbidden_file_processing  # type: ignore[method-assign]
-    register_latency_probe_rpc_handler(
-        faulted,
-        LatencyProbeRuntime(
+        fault_runtime = LatencyProbeRuntime(
             run_config,
             "gateway",
             _RaiseWriter(OSError("private-writer-fault")),  # type: ignore[arg-type]
+        )
+        (
+            faulted,
+            faulted_ws,
+            faulted_responses,
+            faulted_owners,
+            faulted_media,
+            faulted_file_processing,
+            faulted_routing,
+        ) = await build_boundary(fault_runtime)
+        faulted_registry = dict(faulted_media.registry)
+        await dispatch(
+            faulted,
+            faulted_ws,
+            "writer-fault",
+            {
+                "session_id": "registered-session",
+                "batch": _batch_dict(batch_id="fault-batch"),
+            },
+        )
+        assert _payload(faulted_responses[-1]) == {
+            "status": "failed",
+            "batch_id": "fault-batch",
+            "reason_code": "EXPORT_FAILED",
+        }
+        assert_zero_effects(
+            faulted,
+            faulted_owners,
+            faulted_media,
+            faulted_registry,
+            faulted_file_processing,
+            faulted_routing,
+        )
+    finally:
+        for channel, ws in channels:
+            await channel.unregister_ws(ws)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_authorizes_only_a_session_pre_registered_for_the_websocket(
+    tmp_path: Path,
+    run_config: Any,
+) -> None:
+    channel = WebChannel(WebChannelConfig(enabled=True), RobotMessageRouter())
+    register_latency_probe_rpc_handler(channel, _runtime(tmp_path, run_config))
+    ws = SimpleNamespace(closed=False, remote_address=("127.0.0.1", 12345))
+    await channel.register_ws(
+        ws,
+        RoutingKey(
+            user_id="user-1",
+            channel_id="web",
+            app_id="default",
+            agent_ref=AgentRef(mode="agent", id="default"),
+            session_id="registered-session",
         ),
     )
-    writer_fault = await exercise(
-        faulted,
-        "writer-fault",
-        {"session_id": "session-1", "batch": _batch_dict(batch_id="fault-batch")},
-    )
-
-    assert success[0]["ok"] is True
-    assert _payload(success[0])["status"] == "written"
-    assert negative[0]["ok"] is True
-    assert _payload(negative[0])["status"] == "rejected"
-    assert feature_off == [
-        {
-            "id": "feature-off",
-            "ok": False,
-            "payload": None,
-            "error": f"unknown method: {LATENCY_PROBE_BATCH_METHOD}",
-            "code": "METHOD_NOT_FOUND",
-        }
-    ]
-    assert _payload(writer_fault[0]) == {
-        "status": "failed",
-        "batch_id": "fault-batch",
-        "reason_code": "EXPORT_FAILED",
+    registered_snapshot = {
+        key: tuple(clients) for key, clients in channel._clients_by_key.items()
     }
-    assert enabled._ws_sessions == {}
-    assert disabled._ws_sessions == {}
-    assert faulted._ws_sessions == {}
-    assert effects == {name: 0 for name in effects}
-    assert product_registry == registry_snapshot
+    responses: list[dict[str, object]] = []
+    file_processing_calls = 0
+    agent_callback_calls = 0
+
+    async def capture_response(
+        _ws: Any,
+        req_id: str,
+        *,
+        ok: bool,
+        payload: dict[str, object] | None = None,
+        error: str | None = None,
+        code: str | None = None,
+    ) -> None:
+        responses.append(
+            {"id": req_id, "ok": ok, "payload": payload, "error": error, "code": code}
+        )
+
+    async def forbidden_file_processing(params: dict[str, Any]) -> dict[str, Any]:
+        nonlocal file_processing_calls
+        file_processing_calls += 1
+        return params
+
+    def forbidden_agent_callback(_message: object) -> bool:
+        nonlocal agent_callback_calls
+        agent_callback_calls += 1
+        return False
+
+    channel.send_response = capture_response  # type: ignore[method-assign]
+    channel._process_files = forbidden_file_processing  # type: ignore[method-assign]
+    channel.on_message(forbidden_agent_callback)
+    try:
+        await channel._handle_raw_message(
+            ws,
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": "registered",
+                    "method": LATENCY_PROBE_BATCH_METHOD,
+                    "params": {
+                        "session_id": "registered-session",
+                        "batch": _batch_dict(),
+                    },
+                }
+            ),
+            {},
+        )
+        await channel._handle_raw_message(
+            ws,
+            json.dumps(
+                {
+                    "type": "req",
+                    "id": "chosen-by-client",
+                    "method": LATENCY_PROBE_BATCH_METHOD,
+                    "params": {
+                        "session_id": "client-chosen-session",
+                        "batch": _batch_dict(
+                            batch_id="client-chosen-batch",
+                            source_instance_id="client-chosen-source",
+                        ),
+                    },
+                }
+            ),
+            {},
+        )
+
+        assert _payload(responses[0]) == {
+            "status": "written",
+            "batch_id": "browser-batch-0",
+            "reason_code": None,
+        }
+        assert _payload(responses[1])["status"] == "rejected"
+        assert _payload(responses[1])["reason_code"] == "IDENTITY_MISMATCH"
+        assert channel._clients_by_key == {
+            key: list(clients) for key, clients in registered_snapshot.items()
+        }
+        assert channel._ws_sessions == {}
+        assert file_processing_calls == 0
+        assert agent_callback_calls == 0
+    finally:
+        await channel.unregister_ws(ws)
 
 
 def test_registration_ignores_non_runtime_objects() -> None:
