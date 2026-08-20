@@ -447,6 +447,18 @@ git commit -m "feat(live-voice): control post-capture benchmark rounds"
 
 ### Task 4: Wire the controller to the unchanged formal product owners
 
+> **Progress — 2026-08-20:** implemented in `8fb766314`. The default-off
+> Panel composition now validates the closed benchmark query, binds the exact
+> active Session and visible page, derives the Browser probe selection from
+> that accepted configuration, injects the fixed-WAV environment through the
+> existing `ProductP1VoiceRouteOwner.audio_environment` seam, observes only a
+> settled Browser batch, and closes P1 before the fixture owner. Focused fixed
+> audio, controller, probe, Browser audio, complete Integrated Web automation
+> (409 tests), and the production frontend build passed. The external
+> reviewer-requested mounted true-flag journey, full Tier-3 negative matrix and
+> independent review remain acceptance work; this commit alone does not grant
+> automated-baseline or product-readiness credit.
+
 **Risk:** Tier 3 — automatic Agent/Tool/history/audio effects on the real route.
 
 **Files:**
@@ -523,7 +535,7 @@ Cover:
 For every rejected/stale path assert zero wrong Agent, Tool, Task, history,
 audio, ACK, other-session and probe-slot effects.
 
-- [ ] **Step 4: Implement the smallest Panel-only composition**
+- [x] **Step 4: Implement the smallest Panel-only composition**
 
 At component initialization:
 
@@ -540,7 +552,7 @@ At component initialization:
 
 Do not add a visible benchmark button or production fallback.
 
-- [ ] **Step 5: Run focused GREEN and frontend build**
+- [x] **Step 5: Run focused GREEN and frontend build**
 
 Run:
 
