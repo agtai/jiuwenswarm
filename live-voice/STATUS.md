@@ -154,22 +154,26 @@ exact-source Alpha result.
   Agent-client privacy, frontend development WebSocket privacy, Voice–Task
   resolver field binding and static-bearer fail-closed authentication. The
   disjoint Wave 2 owns Harness terminal/cleanup truth, canonical batch speech,
-  all-owner Gateway shutdown and critical-token successor authorization.
+  all-owner Gateway shutdown and critical-token successor authorization. Wave
+  3 owns streaming queued-terminal retirement, event-loop-safe batch resampling
+  and cold schedule execution-agent initialization.
 - **Risk:** Wave 1 contains five independent Tier-3 authority/privacy/durability
   boundaries. Wave 2 contains three Tier-3 authority/terminal boundaries and
-  one Tier-2 Gateway lifecycle boundary; this umbrella does not automatically
-  propagate Tier 3 to later repairs.
+  one Tier-2 Gateway lifecycle boundary. Wave 3 contains two Tier-3 terminal/
+  authority boundaries and one Tier-2 responsiveness boundary; this umbrella
+  does not automatically propagate Tier 3 to later repairs.
 - **Included:** C5, A21, B41, B9 and B10 in Wave 1; A8+B6, A3, A20 and B7 in
-  Wave 2; their exact positive, negative, boundary, state/order,
+  Wave 2; A2+B2, A4 and A18 in Wave 3; their exact positive, negative,
+  boundary, state/order,
   concurrency/recovery where applicable, identity and zero-effect evidence;
   independent module review and Main-only integration.
 - **Excluded:** new product policy/classifier, schema migration, unrecorded
   module expansion, physical product acceptance, Production, `develop`
   integration and all remote updates. P3-2 implementation is paused, not
   credited or discarded; D-087 remains its frozen contract.
-- **Next action:** close the remaining A21 repair and independent review while
-  implementing the four disjoint Wave 2 owner packets; integrate only exact
-  reviewed commits, then run affected and cumulative integration checks.
+- **Next action:** repair the A21/A20 review findings, finish independent A8+B6
+  review and implement the three disjoint frozen Wave 3 packets; integrate only
+  exact reviewed commits, then run affected and cumulative integration checks.
 - **Deliverables:** reviewed commits per coherent module, exact commands/results,
   synchronized progress numerator and a cumulative integration-seam review.
 - **Acceptance:** a finding advances the numerator only after its original

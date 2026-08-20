@@ -222,21 +222,92 @@ Wave 2 writer leases are owner-scoped. A worker cannot review its own lane, and
 Main integrates only the exact independently signed commits before advancing
 the numerator.
 
-## 5. Queued repair programs
+## 5. Active Wave 3 ownership
 
-These groups route work after the active Wave 1/2 packets; they are not yet
-worker write authority. Each activation will freeze smaller owner-specific
-packets before editing.
+Wave 3 is frozen from integration baseline `9741b805c`. Its three writer
+surfaces are disjoint. A2 and B2 deliberately share one packet because both are
+the same Adapter queued-terminal retirement invariant. A7 remains queued until
+SRR-06 is integrated because its test surface overlaps the Harness packet.
+
+### SRR-10 — A2+B2 Streaming Speech queued-terminal retirement
+
+- Capability/owner: `OpenAIStreamingSpeechProvider` recognition/synthesis
+  terminal cancellation, sensitive-queue release and transport cleanup.
+- Risk: Tier 3 terminal authority and sensitive transcript/PCM lifecycle.
+- Worker-owned source/tests: `jiuwenswarm/server/live_voice/openai_streaming_speech.py`
+  and `tests/unit_tests/live_voice/test_openai_streaming_speech.py` only.
+- Intended behavior: after FINAL/COMPLETED has been published but not dequeued,
+  exact local cancel reaps conformance terminal state, clears the sensitive
+  queue and retires the exact session without issuing a new Provider cancel or
+  changing terminal truth. Active cancel remains unchanged; unknown, stale,
+  wrong-generation and already-retired references still reject.
+- Acceptance: deterministic Event/queue barriers reproduce both races; cover
+  dequeue-vs-cancel and duplicate cancel linearization, done and retained
+  transport cleanup, maximal queued transcript/PCM release, neighboring-stream
+  isolation, no degradation/business effects and the real Gateway route seams.
+- Exclusions: no strict-conformance or route source change, new cancel ACK,
+  identity/capacity policy, timeout attribution, queue limit, protocol/schema
+  or physical Provider claim.
+
+### SRR-11 — A4 Batch synthesis event-loop-safe resampling
+
+- Capability/owner: `OpenAICompatibleBatchSpeechProvider` canonical PCM/WAV
+  resampling boundary.
+- Risk: Tier 2 event-loop responsiveness and cancellation/recovery behavior.
+- Dependency: preserve integrated A3 canonical transcript behavior from
+  `ec43b0423` and start from the Wave 3 baseline above.
+- Worker-owned source/tests: `jiuwenswarm/server/live_voice/batch_speech.py` and
+  `tests/unit_tests/live_voice/test_batch_speech.py` only.
+- Intended behavior: offload the existing bounded resampling helper at the
+  async Provider boundary without changing its algorithm, bytes, rounding,
+  validation or error reasons. Heartbeat/deadline/cancel can progress while the
+  worker runs; caller cancellation publishes no late result/event/receipt.
+- Acceptance: a thread-identity RED proves the baseline executes on the event
+  loop; deterministic barriers prove heartbeat and cancellation; maximum input,
+  same-rate and 24→48/24→16 output remain byte exact, failures remain typed,
+  and a later valid synthesis succeeds without leaked worker effects.
+- Exclusions: no DSP/quality/sample-rate policy, global executor/semaphore,
+  HTTP, schema/receipt, A3 text, streaming speech or physical latency change.
+
+### SRR-12 — A18 cold schedule execution-agent initialization
+
+- Capability/owner: `AgentWebSocketServer._handle_schedule_request` execution-
+  agent capture before `schedule.create` and `schedule.run` mutation.
+- Risk: Tier 3 Agent identity, scheduled-Task authority and cold-start
+  singleflight.
+- Worker-owned source/tests: `jiuwenswarm/server/agent_ws_server.py` and
+  `tests/unit_tests/agentserver/test_schedule_request.py` only.
+- Intended behavior: create/run await the existing `ensure_instance()` before
+  target pin or service mutation, reject exceptions or `None` with zero
+  schedule/Task/Store/pin effects, and pass the exact ensured object downstream.
+  Warm access and existing DeepAdapter singleflight remain authoritative;
+  read-only, cancel, issue-watch and other actions do not gain initialization.
+- Acceptance: deterministic cold create/run RED, warm and same-agent concurrent
+  singleflight, failure/None then valid retry, ordering before pin/mutation,
+  owner/project/session isolation and affected DeepAdapter/AutoHarness/Gateway
+  seams with explicit zero forbidden effects.
+- Exclusions: no Agent facade/DeepAdapter, AgentManager, scheduler Store/schema,
+  AutoHarness execution, project executor, WebSocket protocol or persistence
+  migration change.
+
+Wave 3 applies all relevant D-032 P/N/B/S/T/C/R/F/I/K/X dimensions recorded in
+the acceptance above. Worker commits alone receive no credit; independent
+Tier-2/3 review and integration verification remain mandatory.
+
+## 6. Queued repair programs
+
+These groups route work after the currently active packets; they are not yet
+worker write authority. Each activation removes its IDs from this queue and
+freezes smaller owner-specific packets before editing.
 
 - Generation/successor/authority cleanup: B7, B12, B13, B14, B16, B18, B32,
   B36, B37, B38, B39, D2, L19, L20 and L21. B17 remains an alias of B13.
-- Cancellation/teardown/retained cleanup: A2, A7, A8, A16, A19, A20, A22,
-  B2, B6, B21, B23, B24, D1, D3 and L7.
+- Cancellation/teardown/retained cleanup: A7, A8, A16, A19, A20, A22, B6,
+  B21, B23, B24, D1, D3 and L7.
 - Capacity/lifetime/replay: A1, A5, A6, A9, A13, A15, A17, A25, B4, B11,
   B42, L5 and L18. C3 remains an alias of B42.
-- Event-loop, lock and filesystem responsiveness: A4, A11, A14, B15, B25 and
-  B27.
-- Protocol/state/compatibility: A3, A12, A18, A23, B1, B3, B5, B8, B19,
+- Event-loop, lock and filesystem responsiveness: A11, A14, B15, B25 and B27.
+- Protocol/state/compatibility: A3, A12, A23, B1, B3, B5, B8, B19,
   B20, B22, B28, B29, B30, B33, B34, B35, B40, L1, L2, L3, L4, L6, L8,
   L9, L10, L11, L12, L13, L14, L15, L16, L17 and L22.
 
@@ -245,7 +316,7 @@ and rejected C1, C2, C4 and C6–C13. New product policy, classifier, shared
 schema/migration or another unrecorded module owner requires an explicit scope
 and risk checkpoint before implementation.
 
-## 6. Wave progress ledger
+## 7. Wave progress ledger
 
 | Checkpoint | Closed unique defects | State |
 |---|---:|---|
@@ -257,7 +328,7 @@ and risk checkpoint before implementation.
 | SRR-09 / B7 | 5/88 | `4f62a0d82` + `31dec8c7c`; exact-ID release preserves successor clarification/authorization across both orderings and a deterministic RLock race while old authority has zero effects; 60 module tests; independently signed |
 | SRR-07 / A3 | 6/88 | `ec43b0423`; Provider-boundary canonical transcript is shared exactly by result, event, receipt, hash and claim; ASCII/Unicode boundaries, rejection zero effects, concurrent/later replay and real Gateway/product consumers verified; 58 module + 18 consumer tests; independently signed |
 
-## 7. Global exclusions
+## 8. Global exclusions
 
 No remote update, `develop` integration, production authentication/tenancy,
 public deployment, provider/device configuration, physical product acceptance,
