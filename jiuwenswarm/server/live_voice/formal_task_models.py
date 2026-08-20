@@ -199,19 +199,17 @@ class AdmissionPolicy:
             ("initial_backoff_seconds", self.initial_backoff_seconds),
             ("max_backoff_seconds", self.max_backoff_seconds),
         ):
-            if (
-                type(value) not in {int, float}
-                or not math.isfinite(value)
-                or value <= 0
-            ):
+            if type(value) not in {int, float} or value <= 0:
                 raise FormalTaskViolation(
                     "INVALID_ADMISSION_POLICY",
                     f"admission policy {field_name} must be positive",
                     ErrorCode.INVALID_ARGUMENT,
                 )
             try:
+                if not math.isfinite(value):
+                    raise ValueError("admission policy bound must be finite")
                 duration = timedelta(seconds=value)
-            except (OverflowError, ValueError) as error:
+            except (OverflowError, TypeError, ValueError) as error:
                 raise FormalTaskViolation(
                     "INVALID_ADMISSION_POLICY",
                     f"admission policy {field_name} is not representable",

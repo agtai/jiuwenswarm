@@ -8087,11 +8087,12 @@ class SqliteTaskStore:
                 math.log2(policy.max_backoff_seconds)
                 - math.log2(policy.initial_backoff_seconds)
             )
-            delay = (
+            candidate = (
                 policy.max_backoff_seconds
                 if exponent >= saturation_exponent
                 else math.ldexp(policy.initial_backoff_seconds, exponent)
             )
+            delay = min(policy.max_backoff_seconds, candidate)
             next_eligible_at = _utc_plus_seconds(observed_at, delay)
             changed = connection.execute(
                 """

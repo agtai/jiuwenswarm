@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -104,6 +106,31 @@ def test_admission_policy_rejects_finite_unrepresentable_durations(
         AdmissionPolicy(**policy_kwargs)
 
     assert invalid.value.reason == "INVALID_ADMISSION_POLICY"
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "deadline_seconds",
+        "initial_backoff_seconds",
+        "max_backoff_seconds",
+    ],
+)
+def test_admission_policy_normalizes_huge_integer_bounds_without_store_writes(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    """Catches huge integers overflowing math.isfinite before normalization."""
+
+    store = SqliteTaskStore(tmp_path / f"huge-{field_name}.sqlite")
+    before = store.counts()
+
+    with pytest.raises(FormalTaskViolation) as invalid:
+        AdmissionPolicy(**{field_name: 10**400})
+
+    assert invalid.value.reason == "INVALID_ADMISSION_POLICY"
+    assert invalid.value.code is ErrorCode.INVALID_ARGUMENT
+    assert store.counts() == before
 
 
 def test_admission_deadline_overflow_is_normalized_with_zero_store_effect(
@@ -1379,6 +1406,53 @@ def test_defer_admission_keeps_attempt_and_outbox_with_bounded_backoff(
             "SELECT state, delivery_count, claimed_by, claim_token FROM outbox"
         ).fetchone() == ("pending", 2, None, None)
         assert connection.execute("SELECT COUNT(*) FROM attempts").fetchone() == (1,)
+
+
+def test_defer_near_power_of_two_never_exceeds_max_backoff(tmp_path: Path) -> None:
+    """Catches floating-point saturation rounding one microsecond past the cap."""
+
+    initial = 2996.7134700800784
+    maximum = math.nextafter(math.ldexp(initial, 8), 0.0)
+    assert maximum == 767158.6483405
+    policy = AdmissionPolicy(
+        deadline_seconds=2e6,
+        initial_backoff_seconds=initial,
+        max_backoff_seconds=maximum,
+        max_attempts=20,
+    )
+    store = SqliteTaskStore(tmp_path / "near-power-of-two-backoff.sqlite")
+    task_id, _attempt_id = _selected_create(
+        store,
+        tmp_path,
+        suffix="-near-power-of-two-backoff",
+        policy=policy,
+    )
+    observed_at = NOW
+
+    for next_count in range(1, 10):
+        item = store.claim_outbox(
+            f"near-power-of-two-{next_count}", observed_at=observed_at
+        )
+        assert item is not None and item.delivery_count == next_count
+        assert store.defer_admission(
+            item,
+            reason="EXECUTOR_PROJECT_BUSY",
+            policy=policy,
+            observed_at=observed_at,
+        ) is AdmissionDisposition.DEFERRED
+        admission = store.admission_projection(task_id, _scope())
+        assert admission is not None and admission.attempt_count == next_count
+        if next_count < 9:
+            observed_at = admission.next_eligible_at
+
+    observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    exact_upper_bound = (observed + timedelta(seconds=maximum)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    assert admission.next_eligible_at == exact_upper_bound
+    assert datetime.fromisoformat(
+        admission.next_eligible_at.replace("Z", "+00:00")
+    ) - observed <= timedelta(seconds=maximum)
 
 
 def test_defer_rejects_nonclosed_reason_with_zero_effects(tmp_path: Path) -> None:
