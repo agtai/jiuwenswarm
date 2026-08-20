@@ -2334,6 +2334,14 @@ class AgentServerProductCompositionRegistry:
                     else None
                 ),
             )
+            # Republishing this key makes every accepted commit still bound
+            # to it reachable through the successor with its critical-token
+            # identity intact, because `_accepted_voice_commit_routes` carries
+            # no activation id or generation. The replacement branch already
+            # retires a live predecessor; a closed predecessor reaches
+            # publication directly, and its bounded late-create grace must end
+            # exactly here rather than at close, which never republishes.
+            self._retire_accepted_voice_commits_for_route_locked(key)
             self._p2_routes[key] = retained_route
             self._observe_p2_activation(retained_route)
             self._closed_p2_routes.pop(key, None)

@@ -6818,6 +6818,144 @@ async def test_superseded_voice_commit_cannot_act_through_the_successor_route(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("abandon", ["close", "disconnect"])
+async def test_superseded_voice_commit_cannot_act_through_a_reactivated_route(
+    tmp_path: Path, abandon: str
+) -> None:
+    """The same leak on the close-then-reactivate path, not only on replacement.
+
+    `handle_p2_close` and the Gateway disconnect cleanup both release the
+    interaction gate, but they kept the accepted commit, its route binding and
+    its critical-input identity. `_accepted_voice_commit_routes` is keyed by
+    session and interaction only, so the next higher-generation activation
+    republished that key and let the superseded speech mint a live confirmation
+    token through the successor's route. B13/SRR-20 closed this for a live
+    predecessor being replaced; a closed predecessor reaches publication by the
+    other path.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    manager = registry._agent_manager
+    route_key = ("session-product", "interaction-1")
+    commit_id = "commit-reactivate-journey"
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-reactivate-journey-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="reactivate-journey",
+            text="create task: inspect the repository",
+        ),
+        request_id="request-reactivate-journey-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    # The real journey, not hand-injected state: the commit is accepted, bound
+    # to this exact route, and holds its critical-token identity.
+    assert commit_id in registry._accepted_turn_commits_by_commit
+    assert registry._accepted_voice_commit_routes[commit_id] == route_key
+    assert commit_id in registry._critical_input_guarded_commits
+    assert registry._critical_input_commit_generations[commit_id] == (
+        "interaction-1",
+        1,
+    )
+
+    if abandon == "close":
+        closed = await registry.handle_p2_close(
+            params=_p2_params(),
+            request_id="request-reactivate-journey-close",
+            session_id="session-product",
+        )
+        assert closed.ok is True
+    else:
+        await registry.close_active_routes()
+    assert route_key not in registry._p2_routes
+    # The bounded late-create grace still retains it: this is a live-identity
+    # leak at republication, not a capacity question.
+    assert commit_id in registry._accepted_turn_commits_by_commit
+
+    successor = await registry.handle_p2_activate(
+        params=_p2_params(activation_id="activation-2", activation_generation=2),
+        request_id="request-reactivate-journey-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor.ok is True
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+
+    agent_calls = manager.agent.calls
+    acted = await registry.handle_p3_intent(
+        params=_voice_intent_params(stem="reactivate-journey", operation="task.create"),
+        request_id="request-reactivate-journey-superseded-act",
+        session_id="session-product",
+    )
+
+    # The superseded speech is refused at the origin binding, not merely left
+    # unconfirmed: no confirmation token is minted for it.
+    assert acted.ok is False, acted.payload
+    acted_error = cast(dict, acted.payload["error"])
+    assert acted_error["reason"] == "VOICE_TASK_ROUTE_MISMATCH"
+    assert acted_error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert cast(dict, acted.payload["result"])["status"] == "rejected"
+    # The superseded identity is gone, not merely unreachable by one lookup.
+    assert commit_id not in registry._accepted_voice_commit_routes
+    assert commit_id not in registry._accepted_turn_commits_by_commit
+    assert commit_id not in registry._critical_input_guarded_commits
+    assert commit_id not in registry._critical_input_commit_generations
+    # Zero forbidden effects on the rejected path.
+    assert registry._pending_task_intents == {}
+    assert composition.mutation_calls == []
+    assert composition.prepare_calls == []
+    assert manager.agent.calls == agent_calls
+    assert registry._voice_task_origins == {}
+    # A retired identity stays refused instead of being resubmittable.
+    replayed = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem="reactivate-journey",
+            text="create task: inspect the repository",
+            interaction_id="interaction-1",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-reactivate-journey-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert replayed.ok is False
+    assert cast(dict, replayed.payload["error"])["reason"] == "TURN_COMMIT_RETIRED"
+    # The successor keeps its route and can still commit its own speech.
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+    successor_commit = await registry.handle_p2_submit(
+        params=_routed_task_origin_params(
+            stem="reactivate-journey-successor",
+            text="create task: inspect the successor repository",
+            interaction_id="interaction-1",
+            activation_id="activation-2",
+            activation_generation=2,
+        ),
+        request_id="request-reactivate-journey-successor-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor_commit.ok is True, successor_commit.payload
+    assert (
+        "commit-reactivate-journey-successor"
+        in registry._accepted_turn_commits_by_commit
+    )
+    await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_successful_agent_submit_retains_its_gate_commit_evidence(
     tmp_path: Path,
 ) -> None:
