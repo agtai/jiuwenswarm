@@ -1140,8 +1140,7 @@ class AgentServerProductCompositionRegistry:
             self._progress_generation_indices(key),
             strict=True,
         ):
-            if encoded > row[index]:
-                row[index] = encoded
+            row[index] = max(row[index], encoded)
 
     def _progress_generation_high_water(
         self,

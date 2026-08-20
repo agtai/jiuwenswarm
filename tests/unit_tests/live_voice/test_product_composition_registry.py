@@ -6307,9 +6307,7 @@ async def test_post_gate_origin_admission_failure_releases_critical_identity(
 
     # A later submit on the same interaction is still admitted, so the exact
     # release did not fence the successor out.
-    monkeypatch.setattr(
-        route.activation_lease, "accept_task_origin", original_accept
-    )
+    monkeypatch.setattr(route.activation_lease, "accept_task_origin", original_accept)
     successor = await registry.handle_p2_submit(
         params=_p2_task_origin_params(
             stem="post-gate-successor",
