@@ -2444,6 +2444,30 @@ async def _run(
         str,
         list[tuple[Any, asyncio.Task[Any] | None]],
     ] = {"feishu": [], "xiaoyi": []}
+
+    def _retain_dynamic_channel_owner(
+        channel: Any,
+        task: asyncio.Task[Any] | None = None,
+    ) -> None:
+        owners = dynamic_channel_owners.get(channel.channel_id)
+        if owners is None:
+            return
+        for index, (retained_channel, retained_task) in enumerate(owners):
+            if retained_channel is channel:
+                if task is not None and retained_task is not task:
+                    owners[index] = (channel, task)
+                return
+        owners.append((channel, task))
+
+    register_channel = channel_manager.register_channel
+
+    def _register_channel_with_dynamic_owner(channel: Any) -> None:
+        # Manager-owned configuration paths can register outside the callback;
+        # retain exact identity so shutdown never relies on fallible discovery.
+        register_channel(channel)
+        _retain_dynamic_channel_owner(channel)
+
+    channel_manager.register_channel = _register_channel_with_dynamic_owner
     dingtalk_channel = None
     dingtalk_task = None
     telegram_channel = None
@@ -2670,7 +2694,7 @@ async def _run(
                         name=f"feishu-app-{app_index}",
                     )
                     channel.start_task = task
-                    dynamic_channel_owners["feishu"].append((channel, task))
+                    _retain_dynamic_channel_owner(channel, task)
                     logger.info(
                         "[App] FeishuChannel registered from channels.feishu.apps"
                     )
@@ -2833,7 +2857,7 @@ async def _run(
                         name=f"xiaoyi-app-{app_index}",
                     )
                     channel.start_task = task
-                    dynamic_channel_owners["xiaoyi"].append((channel, task))
+                    _retain_dynamic_channel_owner(channel, task)
                     logger.info(
                         "[App] XiaoyiChannel registered from channels.xiaoyi.apps"
                     )
@@ -3177,12 +3201,6 @@ async def _run(
     service_failure: BaseException | None = None
     caller_cancellation: asyncio.CancelledError | None = None
     try:
-        for channel_id, retained_owners in dynamic_channel_owners.items():
-            retained_ids = {id(channel) for channel, _task in retained_owners}
-            for channel in channel_manager.get_channels_by_id(channel_id):
-                if id(channel) not in retained_ids:
-                    retained_owners.append((channel, None))
-                    retained_ids.add(id(channel))
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
         if tasks_to_wait:
             restart_requested = await _wait_for_gateway_tasks_or_restart(

@@ -119,6 +119,7 @@ class _ShutdownHarness:
         descriptor_failures: dict[str, BaseException] | None = None,
         registry_only_channel_id: str | None = None,
         registry_snapshot_failures: dict[str, BaseException] | None = None,
+        registry_snapshot_failure_active_after_registration: bool = False,
         registry_unregister_failures: dict[str, BaseException] | None = None,
     ) -> None:
         self.failures = dict(failures or {})
@@ -131,6 +132,9 @@ class _ShutdownHarness:
         self.descriptor_failures = dict(descriptor_failures or {})
         self.registry_only_channel_id = registry_only_channel_id
         self.registry_snapshot_failures = dict(registry_snapshot_failures or {})
+        self.registry_snapshot_failure_active_after_registration = (
+            registry_snapshot_failure_active_after_registration
+        )
         self.registry_unregister_failures = dict(registry_unregister_failures or {})
         self.calls: list[str] = []
         self.issuer_values: list[object | None] = []
@@ -151,6 +155,8 @@ class _ShutdownHarness:
         }
         self.stopped_channels: list[object] = []
         self.discovered_only_channels: list[object] = []
+        self.registry_only_registration_complete = False
+        self.registry_snapshot_channel_ids: list[str] = []
         self.unregistered_channel_ids: list[str] = []
         self.channel_manager: object | None = None
 
@@ -441,6 +447,7 @@ def _install_gateway_fakes(
                     channel.start_task = task
                     self.register_channel(channel)
                     harness.discovered_only_channels.append(channel)
+                    harness.registry_only_registration_complete = True
 
         @staticmethod
         def pop_channel_restart_pending() -> set[str]:
@@ -483,9 +490,17 @@ def _install_gateway_fakes(
                 raise failure
 
         def get_channels_by_id(self, channel_id: str) -> list[object]:
-            if harness.shutdown_started:
+            harness.registry_snapshot_channel_ids.append(channel_id)
+            failure_after_registration = (
+                harness.registry_snapshot_failure_active_after_registration
+                and harness.registry_only_registration_complete
+            )
+            if harness.shutdown_started or failure_after_registration:
                 failure = harness.registry_snapshot_failures.get(channel_id)
                 if failure is not None:
+                    # A pre-service discovery failure immediately transfers
+                    # control to the real shutdown path in this harness.
+                    harness.shutdown_started = True
                     raise failure
             return list(self._registered.get(channel_id, ()))
 
@@ -1326,11 +1341,17 @@ async def test_dynamic_owner_registry_survives_pop_discovery_failure(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("channel_id", ("feishu", "xiaoyi"))
 @pytest.mark.parametrize("unregister_fails", (False, True))
+@pytest.mark.parametrize(
+    "snapshot_failure_active_after_registration",
+    (False, True),
+    ids=("shutdown-only", "registration-onward"),
+)
 async def test_registry_only_owner_survives_snapshot_and_pop_failure_together(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     channel_id: str,
     unregister_fails: bool,
+    snapshot_failure_active_after_registration: bool,
 ) -> None:
     phase = f"channels.pop.{channel_id}"
     snapshot_marker = f"private-{channel_id}-snapshot-failure"
@@ -1343,6 +1364,9 @@ async def test_registry_only_owner_survives_snapshot_and_pop_failure_together(
         registry_snapshot_failures={
             channel_id: RuntimeError(snapshot_marker),
         },
+        registry_snapshot_failure_active_after_registration=(
+            snapshot_failure_active_after_registration
+        ),
         registry_unregister_failures=(
             {channel_id: RuntimeError(unregister_marker)} if unregister_fails else None
         ),
@@ -1378,6 +1402,20 @@ async def test_registry_only_owner_survives_snapshot_and_pop_failure_together(
         gateway_module.logger.removeHandler(caplog.handler)
 
     assert public_failure is not None
+    registered = harness.registered_channels[channel_id]
+    assert len(registered) == 3
+    stopped = [
+        channel
+        for channel in harness.stopped_channels
+        if any(channel is registered_channel for registered_channel in registered)
+    ]
+    assert Counter(map(id, stopped)) == Counter(
+        {id(channel): 1 for channel in registered}
+    )
+    assert all_registered_tasks_done
+    assert manager_registry_empty
+    assert harness.registry_snapshot_channel_ids.count(channel_id) == 1
+    assert harness.unregistered_channel_ids.count(channel_id) == 1
     _assert_safe_public_failure(
         public_failure,
         expected_type=RuntimeError,
@@ -1395,19 +1433,6 @@ async def test_registry_only_owner_survives_snapshot_and_pop_failure_together(
     ]
     assert harness.calls == expected
     assert Counter(harness.calls) == Counter(expected)
-    registered = harness.registered_channels[channel_id]
-    assert len(registered) == 3
-    stopped = [
-        channel
-        for channel in harness.stopped_channels
-        if any(channel is registered_channel for registered_channel in registered)
-    ]
-    assert Counter(map(id, stopped)) == Counter(
-        {id(channel): 1 for channel in registered}
-    )
-    assert all_registered_tasks_done
-    assert manager_registry_empty
-    assert harness.unregistered_channel_ids.count(channel_id) == 1
     rendered = "".join(
         traceback.format_exception(
             type(public_failure),
