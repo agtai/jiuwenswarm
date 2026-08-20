@@ -53,6 +53,7 @@ _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modi
 _FORMAL_TOOL_EVENT_CAPACITY = 192
 _TOOL_OUTCOME_MAX_DEPTH = 32
 _TOOL_OUTCOME_MAX_NODES = 2048
+_INVALID_TOOL_OUTCOME = object()
 _TOOL_FAILURE_STATUSES = frozenset(
     {
         "error",
@@ -69,6 +70,7 @@ _TOOL_FAILURE_STATUSES = frozenset(
         "timeout",
     }
 )
+_TOOL_SUCCESS_STATUSES = frozenset({"completed", "done", "ok", "success"})
 
 
 class FormalToolEventCapture:
@@ -227,7 +229,7 @@ def _ask_user_question_payload_from_interrupt(tool_call: Any, interrupt: Any) ->
     return convert_interactions_to_ask_user_question([{"id": request_id, "value": value_obj}])
 
 
-def _boolish_state(value: Any) -> bool | None:
+def _boolish_state(value: Any) -> bool | object:
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -235,14 +237,14 @@ def _boolish_state(value: Any) -> bool | None:
             return False
         if value == 1:
             return True
-        return None
+        return _INVALID_TOOL_OUTCOME
     if isinstance(value, str):
         normalized = value.strip().lower()
         if normalized in {"false", "0", "no"}:
             return False
         if normalized in {"true", "1", "yes"}:
             return True
-    return None
+    return _INVALID_TOOL_OUTCOME
 
 
 def _boolish_false(value: Any) -> bool:
@@ -253,17 +255,17 @@ def _boolish_true(value: Any) -> bool:
     return _boolish_state(value) is True
 
 
-def _nonzero_exit(value: Any) -> bool | None:
+def _nonzero_exit(value: Any) -> bool | object:
     if isinstance(value, bool):
-        return None
+        return _INVALID_TOOL_OUTCOME
     if isinstance(value, int):
         return value != 0
     if isinstance(value, str):
         try:
             return int(value.strip()) != 0
         except ValueError:
-            return None
-    return None
+            return _INVALID_TOOL_OUTCOME
+    return _INVALID_TOOL_OUTCOME
 
 
 def _structured_error_present(value: Any) -> bool:
@@ -306,6 +308,8 @@ def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | No
         if isinstance(current, dict):
             if "success" in current:
                 success = _boolish_state(current.get("success"))
+                if success is _INVALID_TOOL_OUTCOME:
+                    return True
                 if success is False:
                     return True
                 if success is True:
@@ -315,17 +319,24 @@ def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | No
                 if key not in current:
                     continue
                 is_error = _boolish_state(current.get(key))
+                if is_error is _INVALID_TOOL_OUTCOME:
+                    return True
                 if is_error is True:
                     return True
                 if is_error is False:
                     explicit_success = True
 
-            status = current.get("status")
-            if (
-                isinstance(status, str)
-                and status.strip().lower() in _TOOL_FAILURE_STATUSES
-            ):
-                return True
+            if "status" in current:
+                status = current.get("status")
+                if not isinstance(status, str):
+                    return True
+                normalized_status = status.strip().lower()
+                if normalized_status in _TOOL_FAILURE_STATUSES:
+                    return True
+                if normalized_status in _TOOL_SUCCESS_STATUSES:
+                    explicit_success = True
+                else:
+                    return True
 
             if "error" in current and _structured_error_present(current.get("error")):
                 return True
@@ -334,6 +345,8 @@ def _scan_structured_tool_result(value: dict[Any, Any] | list[Any]) -> bool | No
                 if key not in current:
                     continue
                 exit_failed = _nonzero_exit(current.get(key))
+                if exit_failed is _INVALID_TOOL_OUTCOME:
+                    return True
                 if exit_failed is True:
                     return True
                 if exit_failed is False:

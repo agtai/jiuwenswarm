@@ -211,8 +211,14 @@ async def test_structured_failure_overrides_conflicting_success_signal() -> None
     [
         pytest.param({"success": 0}, id="numeric-success-zero"),
         pytest.param({"success": "0"}, id="string-success-zero"),
+        pytest.param({"success": 2}, id="invalid-numeric-success-two"),
+        pytest.param({"success": float("nan")}, id="invalid-numeric-success-nan"),
         pytest.param({"is_error": 1}, id="numeric-is-error-one"),
         pytest.param({"isError": "1"}, id="string-is-error-one"),
+        pytest.param({"is_error": "maybe"}, id="invalid-is-error-string"),
+        pytest.param({"status": "pending"}, id="invalid-status-pending"),
+        pytest.param({"status": "unknown"}, id="invalid-status-unknown"),
+        pytest.param({"exit_code": "bad"}, id="invalid-exit-code"),
         *[
             pytest.param({"status": status}, id=f"status-{status}")
             for status in (
