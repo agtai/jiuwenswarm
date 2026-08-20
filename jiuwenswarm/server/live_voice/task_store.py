@@ -4156,7 +4156,6 @@ class SqliteTaskStore:
             or task["task_id"] != task_row["task_id"]
             or task["revision_number"] != task_row["revision_number"]
             or task["correlation_id"] != task_row["correlation_id"]
-            or task["correlation_id"] != binding["correlation_id"]
             or type(task["event_head"]) is not int
             or task["event_head"] < 0
             or type(task["cancel_requested"]) is not int

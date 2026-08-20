@@ -3705,6 +3705,163 @@ def test_unimplemented_running_controls_are_durable_unsupported_zero_effects(
 @pytest.mark.parametrize(
     ("command_type", "expected_reason"),
     [
+        ("task.pause", "TASK_CONTROL_UNSUPPORTED"),
+        ("task.resume", "TASK_CONTROL_UNSUPPORTED"),
+        ("task.reprioritize", "TASK_CONTROL_UNSUPPORTED"),
+        ("task.provide_input", "TASK_CONTROL_STATE_CONFLICT"),
+        ("task.update", "TASK_UPDATE_PRECONDITION_STALE"),
+        ("task.adjust", "TASK_ADJUSTMENT_STATE_CONFLICT"),
+        ("task.cancel", "TASK_ALREADY_TERMINAL"),
+        ("task.create_successor", "TASK_SUCCESSOR_PRECONDITION_CONFLICT"),
+    ],
+)
+def test_command_local_correlation_negative_decisions_reopen_replay_and_conflict(
+    tmp_path: Path,
+    command_type: str,
+    expected_reason: str,
+) -> None:
+    """A later command correlation is not the Task creation correlation."""
+
+    if command_type == "task.cancel":
+        store, executor, core, task_id, _attempt_id = _terminal_task(tmp_path)
+        task = store.get_task(task_id, _scope())
+    else:
+        database = tmp_path / f"command-correlation-{command_type}.sqlite"
+        store = SqliteTaskStore(database)
+        executor = _Executor()
+        core = PersistentTaskCore(store, executor)
+        invocation = _create(tmp_path)
+        created = core.execute(
+            invocation.envelope,
+            invocation.authorization,
+            context=invocation.context,
+            now=NOW,
+        )
+        assert created.ok and created.result is not None
+        task = store.get_task(str(created.result["task_id"]), _scope())
+        if command_type in {"task.pause", "task.resume", "task.reprioritize"}:
+            dispatch = store.claim_outbox(f"command-correlation-{command_type}")
+            assert dispatch is not None
+            store.complete_outbox(
+                dispatch,
+                executor_ref=f"legacy:{dispatch.attempt_id}",
+                observations=_observations(dispatch),
+            )
+            task = store.get_task(task.task_id, _scope())
+
+    current_event = store.events(task.task_id, _scope())[-1]
+    payloads: dict[str, dict[str, object]] = {
+        "task.pause": {
+            "attempt_id": task.attempt_id,
+            "expected_event_head": task.event_head,
+            "reason": "Pause at this command boundary.",
+        },
+        "task.resume": {
+            "attempt_id": task.attempt_id,
+            "expected_event_head": task.event_head,
+            "reason": None,
+        },
+        "task.reprioritize": {
+            "attempt_id": task.attempt_id,
+            "expected_event_head": task.event_head,
+            "priority": "high",
+            "reason": "Use this command-local correlation.",
+        },
+        "task.provide_input": {
+            "attempt_id": task.attempt_id,
+            "expected_event_head": task.event_head,
+            "responds_to_event_id": current_event.event_id,
+            "text": "A valid but currently inapplicable response.",
+        },
+        "task.update": {
+            "attempt_id": task.attempt_id,
+            "expected_event_head": task.event_head + 1,
+            "instruction": "A stale update with a command-local correlation.",
+            "constraints": None,
+        },
+        "task.adjust": {"adjustment": "A non-running adjustment."},
+        "task.cancel": {},
+        "task.create_successor": {
+            "expected_predecessor_revision_number": task.revision_number,
+            "expected_predecessor_event_head": task.event_head,
+            "predecessor_terminal_event_id": current_event.event_id,
+            "predecessor_outcome": TerminalOutcome.CANCELLED.value,
+            "predecessor_result_sha256": None,
+            "name": "Command-local successor",
+            "instruction": "Preserve the predecessor and create one revision.",
+            "constraints": ["Do not mutate predecessor bytes."],
+            "executor_id": FORMAL_PROJECT_EXECUTOR_ID,
+            "side_effect_class": "project_mutation",
+            "attributes": {
+                "model_identity": "default#0",
+                "model_config_version": "catalog-v1",
+            },
+        },
+    }
+    command_id = f"command-local-correlation-{command_type}"
+    command, grant = _wave2_command(
+        task.task_id,
+        command_type,
+        payloads[command_type],
+        command_id=command_id,
+    )
+    command_raw = command.to_dict()
+    command_raw["correlation_id"] = f"correlation-command-{command_type}"
+    command = CommandEnvelope.from_dict(command_raw)
+    context = _context(tmp_path) if command_type == "task.create_successor" else None
+    authority_before = _task_authority_dump(store.database_path)
+
+    decision = core.execute(command, grant, context=context, now=NOW)
+
+    assert not decision.ok and decision.error is not None
+    assert decision.error.reason == expected_reason
+    assert _task_authority_dump(store.database_path) == authority_before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+    ledger_after_decision = _database_dump(store.database_path)
+
+    reopened_core = PersistentTaskCore(SqliteTaskStore(store.database_path), executor)
+    replay = reopened_core.execute(
+        replace(command, request_id=f"request-replay-{command_id}"),
+        grant,
+        context=context,
+        now=NOW,
+    )
+
+    assert replay.request_id == f"request-replay-{command_id}"
+    assert replay.error == decision.error
+    assert replay.observed_at == decision.observed_at
+    assert replay.extensions == decision.extensions
+    assert _database_dump(store.database_path) == ledger_after_decision
+
+    changed_raw = command.to_dict()
+    changed_raw.update(
+        {
+            "request_id": f"request-changed-correlation-{command_id}",
+            "correlation_id": f"correlation-command-changed-{command_type}",
+        }
+    )
+    changed = CommandEnvelope.from_dict(changed_raw)
+    conflict = reopened_core.execute(
+        changed,
+        grant,
+        context=context,
+        now=NOW,
+    )
+
+    assert not conflict.ok and conflict.error is not None
+    assert conflict.error.reason == "IDEMPOTENCY_CONFLICT"
+    assert _database_dump(store.database_path) == ledger_after_decision
+    assert _task_authority_dump(store.database_path) == authority_before
+    assert executor.dispatches == []
+    assert executor.cancels == []
+    assert executor.adjustments == []
+
+
+@pytest.mark.parametrize(
+    ("command_type", "expected_reason"),
+    [
         ("task.provide_input", "TASK_CONTROL_STATE_CONFLICT"),
         ("task.update", "TASK_UPDATE_PRECONDITION_STALE"),
         ("task.adjust", "TASK_ADJUSTMENT_STATE_CONFLICT"),
@@ -3837,6 +3994,7 @@ def test_durable_negative_binding_never_persists_sensitive_command_content(
     [
         "authority_reason",
         "authority_state",
+        "task_correlation",
         "payload_authority",
         "binding_type",
         "version",
@@ -3871,6 +4029,9 @@ def test_durable_negative_binding_tampering_fails_closed_on_reopen(
             fingerprint = _rehash_decision_binding(binding)
         elif corruption == "authority_state":
             authority["task"]["state"] = FormalTaskState.RUNNING.value
+            fingerprint = _rehash_decision_binding(binding)
+        elif corruption == "task_correlation":
+            authority["task"]["correlation_id"] = "correlation-forged-task"
             fingerprint = _rehash_decision_binding(binding)
         elif corruption == "payload_authority":
             authority["payload"]["payload_sha256"] = "0" * 64
