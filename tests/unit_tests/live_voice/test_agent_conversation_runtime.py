@@ -983,9 +983,13 @@ async def test_terminal_owner_cancel_is_not_swallowed_by_same_turn_business_fini
     None
 ):
     business_release = asyncio.Event()
+    close_release = asyncio.Event()
+    close_error = RuntimeError("adopted cleanup failed after owner cancellation")
     current_facade = ControlledCloseFacade(
         final="formal answer",
         next_release=business_release,
+        close_release=close_release,
+        close_error=close_error,
     )
     harness, _selected, _binding, handle = controlled_harness_round(
         current_facade,
@@ -995,6 +999,50 @@ async def test_terminal_owner_cancel_is_not_swallowed_by_same_turn_business_fini
     stream = current_facade.stream
     assert stream is not None
     await asyncio.wait_for(stream.next_started.wait(), timeout=1)
+
+    # A separately completed round proves that adopting the abandoned cleanup
+    # neither removes nor republishes another round's terminal authority.
+    other_facade = ControlledCloseFacade(final="other formal answer")
+    other_selected = commit(
+        turn_id="turn-terminal-owner-cancel-isolation",
+        commit_id="commit-terminal-owner-cancel-isolation",
+        interaction_id="interaction-terminal-owner-cancel-isolation",
+    )
+    other_binding = HarnessRoundBinding(
+        request_id="request-terminal-owner-cancel-isolation",
+        response_id="response-terminal-owner-cancel-isolation",
+        correlation_id="correlation-terminal-owner-cancel-isolation",
+        commit=other_selected,
+    )
+    other_reservation = harness.reserve_round(other_binding, facade=other_facade)
+    assert harness.begin_round_commit(other_reservation) is True
+    other_handle = harness.commit_round(
+        other_reservation,
+        response_ref=ResponseRef(
+            interaction_id=other_selected.interaction_id,
+            response_id=other_binding.response_id,
+            response_generation=0,
+        ),
+        context=FormalContextSnapshot(other_selected.scope),
+        facade=other_facade,
+        allow_tools=False,
+    )
+    other_events = await asyncio.wait_for(
+        _collect_harness_events(other_handle), timeout=1
+    )
+    other_terminals = [
+        item
+        for item in other_events
+        if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(other_terminals) == 1
+    assert other_terminals[0].payload == {
+        "state": "terminal",
+        "outcome": "completed",
+    }
+    other_record = harness._rounds[other_handle.round_id]
+    assert other_record.terminal_task is not None
+    assert other_record.terminal_task.done()
 
     round_record = harness._rounds[handle.round_id]
     terminal_owner = round_record.terminal_task
@@ -1016,6 +1064,8 @@ async def test_terminal_owner_cancel_is_not_swallowed_by_same_turn_business_fini
     round_record.task.add_done_callback(cancel_terminal_owner)
     business_release.set()
 
+    first_close: asyncio.Task[None] | None = None
+    second_close: asyncio.Task[None] | None = None
     try:
         await asyncio.wait_for(owner_cancel_requested.wait(), timeout=1)
         with pytest.raises(asyncio.CancelledError) as raised:
@@ -1049,15 +1099,81 @@ async def test_terminal_owner_cancel_is_not_swallowed_by_same_turn_business_fini
         assert stream.close_lookups == 0
         assert stream.close_invocations == 0
         assert stream.close_calls == 0
+
+        before_close = harness.snapshot()
+        assert before_close.closed is False
+        assert before_close.active_rounds == (handle.round_id,)
+        assert before_close.retained_rounds == 2
+        assert before_close.pending_cleanup_rounds == ()
+
+        first_close = asyncio.create_task(harness.close())
+        await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+        retained_close_owner = harness._close_task
+        cleanup_owner = round_record.cleanup_task
+        assert retained_close_owner is not None
+        assert retained_close_owner.done() is False
+        assert cleanup_owner is not None
+        assert cleanup_owner.done() is False
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+
+        second_close = asyncio.create_task(harness.close())
+        await asyncio.sleep(0)
+        assert harness._close_task is retained_close_owner
+        assert first_close.done() is False
+        assert second_close.done() is False
+        pending = harness.snapshot()
+        assert pending.closed is False
+        assert pending.active_rounds == (handle.round_id,)
+        assert pending.retained_rounds == 2
+        assert pending.pending_cleanup_rounds == (handle.round_id,)
+
+        close_release.set()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        await asyncio.wait_for(asyncio.gather(first_close, second_close), timeout=1)
+        await asyncio.wait_for(harness.close(), timeout=1)
+
+        closed = harness.snapshot()
+        assert closed.closed is True
+        assert closed.active_rounds == ()
+        assert closed.pending_cleanup_rounds == ()
+        assert closed.retained_rounds == 1
+        assert handle.round_id not in harness._rounds
+        assert harness._rounds[other_handle.round_id] is other_record
+        assert other_record.terminal_event is other_terminals[0]
+        assert round_record.cleanup_task is cleanup_owner
+        assert cleanup_owner.done()
+        assert round_record.cleanup_error is close_error
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert other_facade.stream is not None
+        assert other_facade.stream.close_lookups == 1
+        assert other_facade.stream.close_invocations == 1
+        assert other_facade.stream.close_calls == 1
+        assert (
+            sum(
+                getattr(item, "event_type", None) == "round.terminal"
+                for item in other_events
+            )
+            == 1
+        )
     finally:
         business_release.set()
-        handle.detach()
+        close_release.set()
+        if first_close is not None or second_close is not None:
+            await asyncio.gather(
+                *(task for task in (first_close, second_close) if task is not None),
+                return_exceptions=True,
+            )
         await asyncio.wait_for(harness.close(), timeout=1)
 
     assert harness.snapshot().closed is True
     assert round_record.task.done()
     assert terminal_owner.done()
-    assert round_record.cleanup_task is None
+    assert round_record.cleanup_task is not None
+    assert round_record.cleanup_task.done()
 
 
 async def claim_and_ack_effects(

@@ -164,6 +164,7 @@ class _RoundRecord:
     terminal_task: asyncio.Task[None] | None = None
     cleanup_task: asyncio.Future[None] | None = None
     cleanup_error: BaseException | None = None
+    cleanup_started: bool = False
     business_settled: bool = False
     source_stream: AsyncIterator[AgentResponseChunk] | None = None
     terminal_outcome: TerminalOutcome = TerminalOutcome.UNKNOWN
@@ -943,34 +944,8 @@ class JiuWenSwarmRoundHarness:
         seq: int,
         prior_event_id: str | None,
     ) -> None:
-        cleanup: asyncio.Future[None] | None = None
-        try:
-            close = getattr(source_stream, "aclose", None)
-            if callable(close):
-                # Async-iterator cleanup is an Awaitable boundary, not a
-                # coroutine-only boundary.  ``ensure_future`` retains an
-                # existing Future/Task verbatim and wraps a custom Awaitable
-                # in one owned Task, so the exact physical cleanup remains
-                # joinable after the bounded terminal-publication deadline.
-                close_result = close()
-                cleanup = asyncio.ensure_future(close_result)
-                if isinstance(cleanup, asyncio.Task) and cleanup is not close_result:
-                    cleanup.set_name(
-                        f"live-voice-harness-stream-close:{handle.round_id}"
-                    )
-        except BaseException as error:  # noqa: BLE001
-            # Descriptor lookup and close invocation are part of cleanup, not
-            # business execution.  Preserve their exact disposition while the
-            # retained owner still publishes the known business terminal.
-            record.cleanup_error = error
-
+        cleanup = self._retain_stream_cleanup(record, handle, source_stream)
         if cleanup is not None:
-            # The exact round record remains the owner after the bounded wait,
-            # and Harness close later joins the same physical cleanup task.
-            record.cleanup_task = cleanup
-            cleanup.add_done_callback(
-                lambda completed: self._observe_cleanup_completion(record, completed)
-            )
             try:
                 await self._await_cleanup_deadline(cleanup)
             except asyncio.CancelledError as error:
@@ -1008,6 +983,45 @@ class JiuWenSwarmRoundHarness:
         record.terminal_event = terminal
         await handle._put(terminal)
         await handle._put(_END)
+
+    def _retain_stream_cleanup(
+        self,
+        record: _RoundRecord,
+        handle: HarnessRoundHandle,
+        source_stream: AsyncIterator[AgentResponseChunk] | None,
+    ) -> asyncio.Future[None] | None:
+        """Acquire one joinable owner for the exact physical stream cleanup."""
+
+        if source_stream is None or record.cleanup_started:
+            return record.cleanup_task
+        record.cleanup_started = True
+        cleanup: asyncio.Future[None] | None = None
+        try:
+            close = getattr(source_stream, "aclose", None)
+            if callable(close):
+                # Async-iterator cleanup is an Awaitable boundary, not a
+                # coroutine-only boundary.  ``ensure_future`` retains an
+                # existing Future/Task verbatim and wraps a custom Awaitable
+                # in one owned Task, so the exact physical cleanup remains
+                # joinable after the bounded terminal-publication deadline.
+                close_result = close()
+                cleanup = asyncio.ensure_future(close_result)
+                if isinstance(cleanup, asyncio.Task) and cleanup is not close_result:
+                    cleanup.set_name(
+                        f"live-voice-harness-stream-close:{handle.round_id}"
+                    )
+        except BaseException as error:  # noqa: BLE001
+            # Descriptor lookup and close invocation are part of cleanup, not
+            # business execution.  Preserve their exact disposition while a
+            # retained terminal or close owner converges the round.
+            record.cleanup_error = error
+
+        if cleanup is not None:
+            record.cleanup_task = cleanup
+            cleanup.add_done_callback(
+                lambda completed: self._observe_cleanup_completion(record, completed)
+            )
+        return cleanup
 
     async def _deliver_exact_cancel(self, record: _RoundRecord) -> None:
         """Deliver one accepted cancel only after the owned task can settle it.
@@ -1069,6 +1083,24 @@ class JiuWenSwarmRoundHarness:
             await asyncio.shield(
                 asyncio.gather(*terminal_tasks, return_exceptions=True)
             )
+        abandoned_rounds: list[tuple[str, _RoundRecord]] = []
+        for round_id, record in tuple(self._rounds.items()):
+            terminal_owner = record.terminal_task
+            if (
+                record.terminal_event is None
+                and terminal_owner is not None
+                and terminal_owner.cancelled()
+            ):
+                # A process-control cancellation can end the terminal owner
+                # before it reaches settlement.  Public close adopts only the
+                # physical stream cleanup; it must not fabricate terminal
+                # authority or an end marker for the abandoned subscription.
+                self._retain_stream_cleanup(
+                    record,
+                    record.handle,
+                    record.source_stream,
+                )
+                abandoned_rounds.append((round_id, record))
         cleanup_tasks = tuple(
             record.cleanup_task
             for record in self._rounds.values()
@@ -1076,6 +1108,14 @@ class JiuWenSwarmRoundHarness:
         )
         if cleanup_tasks:
             await asyncio.shield(asyncio.gather(*cleanup_tasks, return_exceptions=True))
+        for round_id, record in abandoned_rounds:
+            cleanup = record.cleanup_task
+            if cleanup is not None and not cleanup.done():
+                continue
+            if self._rounds.get(round_id) is record:
+                self._rounds.pop(round_id)
+        if any(record.terminal_event is None for record in self._rounds.values()):
+            return
         self._closed = True
 
     def _round_event(
