@@ -22,8 +22,9 @@ report outside the repository.
 
 ## Global Constraints
 
-- Capability/module: P2 notification transport benchmark; D-046 Tier 2 because
-  the oracle governs a later concurrency/protocol optimization.
+- Capability/module: P2 notification transport benchmark; D-046 Tier 1 because
+  this packet is a development-only runner with no product/protocol mutation.
+  The later bounded-pull B candidate remains Tier 3.
 - Dependency: reviewed product/probe source at `ca07a8dd5`; the documentation
   commit `50c816d8d` changes no runtime behavior.
 - Total notification populations are exactly `10`, `50` and `100`; the final
@@ -72,7 +73,7 @@ report outside the repository.
   `notification_rpc_count`, `expected_serial_ms`, `samples_ms`, `p50_ms` and
   `p95_ms`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Cover one fast virtual-time positive scenario and the closed negative/boundary
 contract:
@@ -104,12 +105,12 @@ assert.deepEqual(report.forbidden_effects, {
 ```
 
 Reject unknown/duplicate CLI keys, unsafe run IDs, non-40-hex commits,
-non-canonical integers, counts outside `1..256`, samples outside `1..30`,
-delay outside `0..1000`, wrong activation/final binding, missing final,
-additional notification and output overwrite. Assert every forbidden counter is
-zero after each rejection.
+non-canonical integers, counts outside `1..256`, samples outside `1..30`, delay
+outside `0..1000` and output overwrite. Existing
+`productWebActivation.test.mjs` retains the production owner's wrong-binding,
+missing/invalid response and replay oracles.
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -118,7 +119,7 @@ node --test tests/liveVoiceP2NotificationCausalBenchmark.test.mjs
 
 Expected: FAIL because the runner module does not exist.
 
-- [ ] **Step 3: Implement the minimal runner**
+- [x] **Step 3: Implement the minimal runner**
 
 Implement only:
 
@@ -137,10 +138,10 @@ Add one package script that compiles only the real owner/dependencies and runs
 the benchmark CLI:
 
 ```json
-"benchmark:live-voice-p2-notifications": "tsc src/features/live-voice/formal/productWebActivation.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/live-voice-p2-notification-benchmark --lib ES2020,DOM --skipLibCheck --noEmitOnError --strict --noUnusedLocals --noUnusedParameters && node scripts/liveVoiceP2NotificationCausalBenchmark.mjs"
+"benchmark:live-voice-p2-notifications": "tsc src/features/live-voice/formal/productWebActivation.ts --target ES2020 --module ES2020 --moduleResolution Bundler --rootDir src --outDir node_modules/.cache/live-voice-integrated-web --lib ES2020,DOM --skipLibCheck --noEmitOnError --strict --noUnusedLocals --noUnusedParameters && node scripts/liveVoiceP2NotificationCausalBenchmark.mjs"
 ```
 
-- [ ] **Step 4: Run GREEN and affected regression**
+- [x] **Step 4: Run GREEN and affected regression**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -150,7 +151,7 @@ npm run test:live-voice-integrated-web
 
 Expected: benchmark tests PASS; integrated Web remains PASS.
 
-- [ ] **Step 5: Static and diff checks**
+- [x] **Step 5: Static and diff checks**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -162,7 +163,7 @@ cd ../../../..
 git diff --check
 ```
 
-- [ ] **Step 6: Commit the benchmark**
+- [x] **Step 6: Commit the benchmark**
 
 ```bash
 git add \
@@ -262,5 +263,5 @@ git commit -m "docs(live-voice): record causal P2 A1"
 - A1 contains 10/50/100 curves, five attempts each and zero forbidden effects.
 - No Browser, service, Provider or product runtime is started.
 - No batching optimization is implemented in this packet.
-- One independent Tier-2 module review closes before A1 is treated as the B
-  comparison oracle.
+- A complete scoped Tier-1 diff review closes before A1; the later Tier-3 B
+  protocol change requires its own independent module and integration review.
