@@ -488,6 +488,80 @@ async def _wait_for_gateway_tasks_or_restart(
                 pass
 
 
+_GATEWAY_SHUTDOWN_PHASES = frozenset(
+    {
+        "prewarm.debounce_task",
+        "prewarm.periodic_task",
+        "a2a.task",
+        "a2a.stop",
+        "a2a.unregister",
+        "gateway.task",
+        "gateway.stop",
+        "inbound.stop",
+        "tui.stop",
+        "web.task",
+        "web.stop",
+        "feishu.task",
+        "feishu.stop",
+        "feishu.enterprise.task",
+        "feishu.enterprise.stop",
+        "xiaoyi.task",
+        "xiaoyi.stop",
+        "channels.pop.feishu",
+        "channels.feishu.task",
+        "channels.feishu.stop",
+        "channels.pop.xiaoyi",
+        "channels.xiaoyi.task",
+        "channels.xiaoyi.stop",
+        "dingtalk.task",
+        "dingtalk.stop",
+        "telegram.task",
+        "telegram.stop",
+        "discord.task",
+        "discord.stop",
+        "slack.task",
+        "slack.stop",
+        "whatsapp.task",
+        "whatsapp.stop",
+        "wecom.task",
+        "wecom.stop",
+        "wechat.task",
+        "wechat.stop",
+        "ssh.task",
+        "ssh.stop",
+        "ssh.clear_key_issuer",
+        "cron.stop",
+        "dispatch.stop",
+        "heartbeat.stop",
+        "forward.stop",
+        "client.disconnect",
+        "restart_cleanup",
+    }
+)
+
+
+def _gateway_shutdown_phase_category(phase: str) -> str:
+    if type(phase) is str and phase in _GATEWAY_SHUTDOWN_PHASES:
+        return phase
+    return "unknown"
+
+
+def _gateway_shutdown_failure_category(exc: BaseException) -> str:
+    if isinstance(exc, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, GeneratorExit)):
+        return "interrupt"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, OSError):
+        return "io_error"
+    if isinstance(exc, RuntimeError):
+        return "runtime_error"
+    if isinstance(exc, Exception):
+        return "exception"
+    return "base_exception"
+
+
 async def _run_gateway_shutdown_phase(
     phase: str,
     action: Callable[[], Awaitable[Any] | Any],
@@ -500,12 +574,12 @@ async def _run_gateway_shutdown_phase(
             result = await result
         return result
     except BaseException as exc:
-        failures.append((phase, exc))
+        phase_category = _gateway_shutdown_phase_category(phase)
+        failures.append((phase_category, exc))
         logger.error(
-            "[App] Gateway shutdown phase %s failed: %s",
-            phase,
-            exc,
-            exc_info=(type(exc), exc, exc.__traceback__),
+            "[App] Gateway shutdown owner failed (phase=%s, failure=%s)",
+            phase_category,
+            _gateway_shutdown_failure_category(exc),
         )
         return None
 
@@ -2218,6 +2292,7 @@ async def _run(
         issuer,
         *,
         ephemeral_key_ttl_sec: float = 300.0,
+        propagate_error: bool = False,
     ) -> None:
         """Inject/clear SshChannel as ephemeral key issuer on AgentOSRouter extension."""
         setter = getattr(agent_server_ext, "set_key_issuer", None)
@@ -2226,6 +2301,8 @@ async def _run(
         try:
             setter(issuer, ephemeral_key_ttl_sec=ephemeral_key_ttl_sec)
         except Exception as exc:  # noqa: BLE001
+            if propagate_error:
+                raise
             logger.warning("[App] failed to set AgentOS SSH key issuer: %s", exc)
 
     _last_channels_conf: dict = {}
@@ -2988,14 +3065,14 @@ async def _run(
             task = feishu_enterprise_tasks.get(bot_key)
             if task is not None:
                 await _run_gateway_shutdown_phase(
-                    f"feishu.enterprise.{bot_key}.task",
+                    "feishu.enterprise.task",
                     lambda task=task: _cancel_gateway_owned_task(task),
                     shutdown_failures,
                 )
             channel = feishu_enterprise_channels.get(bot_key)
             if channel is not None:
                 await _run_gateway_shutdown_phase(
-                    f"feishu.enterprise.{bot_key}.stop",
+                    "feishu.enterprise.stop",
                     channel.stop,
                     shutdown_failures,
                 )
@@ -3018,16 +3095,16 @@ async def _run(
                 lambda _cid=_cid: list(channel_manager.pop_channels_by_id(_cid)),
                 shutdown_failures,
             )
-            for index, ch in enumerate(channels or []):
+            for ch in channels or []:
                 task = getattr(ch, "start_task", None)
                 if task is not None:
                     await _run_gateway_shutdown_phase(
-                        f"channels.{_cid}.{index}.task",
+                        f"channels.{_cid}.task",
                         lambda task=task: _cancel_gateway_owned_task(task),
                         shutdown_failures,
                     )
                 await _run_gateway_shutdown_phase(
-                    f"channels.{_cid}.{index}.stop",
+                    f"channels.{_cid}.stop",
                     lambda ch=ch: ch.stop(),
                     shutdown_failures,
                 )
@@ -3063,7 +3140,7 @@ async def _run(
         if ssh_channel is not None:
             await _run_gateway_shutdown_phase(
                 "ssh.clear_key_issuer",
-                lambda: _set_agentos_ssh_key_issuer(None),
+                lambda: _set_agentos_ssh_key_issuer(None, propagate_error=True),
                 shutdown_failures,
             )
 
