@@ -1330,8 +1330,25 @@ class OpenAIStreamingSpeechProvider:
                         )
                 if retirement is not None:
                     terminal_retirements.append(retirement)
-        for retirement in terminal_retirements:
-            await asyncio.shield(retirement)
+        if terminal_retirements:
+            results = await asyncio.gather(
+                *(
+                    _settle_close_action(asyncio.shield(retirement))
+                    for retirement in terminal_retirements
+                ),
+                return_exceptions=True,
+            )
+            process_control = _first_process_control(process_control, results)
+            if cleanup_failure is None:
+                cleanup_failure = next(
+                    (
+                        _safe_boundary_exception(result)
+                        for result in results
+                        if isinstance(result, BaseException)
+                        and not _is_process_control(result)
+                    ),
+                    None,
+                )
         recognition = tuple(
             recognition_session
             for recognition_session in self._recognition.values()
@@ -1393,9 +1410,11 @@ class OpenAIStreamingSpeechProvider:
                     synthesis_session.request.ref
                 )
             synthesis_session.terminal = True
-        self._conformance.reap_terminal()
+        removed_sessions = bool(self._recognition or self._synthesis)
         self._recognition.clear()
         self._synthesis.clear()
+        if removed_sessions:
+            self._conformance.reap_terminal()
         try:
             await self._finalize_cleanup_owners()
         except BaseException as exc:
@@ -1405,7 +1424,7 @@ class OpenAIStreamingSpeechProvider:
             elif isinstance(failure, asyncio.CancelledError):
                 raise failure from None
             else:
-                cleanup_failure = failure
+                cleanup_failure = cleanup_failure or failure
         opening_tasks = ()
         recognition = ()
         synthesis = ()
@@ -2112,20 +2131,26 @@ class OpenAIStreamingSpeechProvider:
             _discard_queued_events(session.events)
             session.partial_text = ""
         key = _recognition_key(session.ref)
+        removed = False
         async with self._lock:
             if self._recognition.get(key) is session:
                 del self._recognition[key]
-        self._conformance.reap_terminal()
+                removed = True
+        if removed:
+            self._conformance.reap_terminal()
 
     async def _retire_synthesis(self, session: _SynthesisSession) -> None:
         session.retirement_claimed = True
         if session.terminal_output_accepted:
             _discard_queued_events(session.events)
         key = _synthesis_key(session.request.ref)
+        removed = False
         async with self._lock:
             if self._synthesis.get(key) is session:
                 del self._synthesis[key]
-        self._conformance.reap_terminal()
+                removed = True
+        if removed:
+            self._conformance.reap_terminal()
 
     def _claim_recognition_retirement(self, session: _RecognitionSession) -> None:
         if session.retirement_claimed:

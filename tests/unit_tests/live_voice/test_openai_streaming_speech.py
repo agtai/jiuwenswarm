@@ -2857,6 +2857,222 @@ async def test_provider_close_adopts_claimed_terminal_without_retirement_owner()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_form", ("recognition", "synthesis"))
+async def test_terminal_retirement_process_control_cleans_active_neighbor_before_raise(
+    monkeypatch: pytest.MonkeyPatch,
+    terminal_form: str,
+) -> None:
+    socket = FakeSocket((session_updated_event(),))
+    blocking_stream = BlockingSseStream()
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    async def sse_factory(*_args) -> BlockingSseStream:
+        return blocking_stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(),
+        socket_factory=socket_factory,
+        sse_factory=sse_factory,
+    )
+    reap_calls = 0
+    original_reap_terminal = provider.conformance.reap_terminal
+
+    def counted_reap_terminal() -> tuple[int, int]:
+        nonlocal reap_calls
+        reap_calls += 1
+        return original_reap_terminal()
+
+    monkeypatch.setattr(provider.conformance, "reap_terminal", counted_reap_terminal)
+    terminal_put_started = asyncio.Event()
+    release_terminal_put = asyncio.Event()
+    process_control = GeneratorExit(
+        f"{terminal_form} terminal retirement process control"
+    )
+    original_put = provider._put_bounded
+
+    async def failing_terminal_put(queue, value) -> None:
+        kind = getattr(value, "kind", None)
+        targeted = (
+            terminal_form == "recognition" and kind is RecognitionEventKind.FINAL
+        ) or (terminal_form == "synthesis" and kind is SynthesisEventKind.COMPLETED)
+        if targeted:
+            terminal_put_started.set()
+            await release_terminal_put.wait()
+            raise process_control
+        await original_put(queue, value)
+
+    monkeypatch.setattr(provider, "_put_bounded", failing_terminal_put)
+
+    ref = recognition_ref()
+    request = synthesis_request()
+    if terminal_form == "recognition":
+        await provider.open_recognition(ref, timeout_seconds=1)
+        await provider.send_recognition_audio(recognition_frame(ref))
+        await provider.commit_recognition(ref)
+        terminal_session = provider._require_recognition(ref)
+        provider.conformance.activate_response(request.ref.response)
+        await provider.open_synthesis(request)
+        active_session = provider._require_synthesis(request.ref)
+        socket.push(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "content_index": 0,
+                "item_id": "retirement-process-control-item",
+                "transcript": "terminal retirement process control",
+            }
+        )
+        await asyncio.wait_for(terminal_put_started.wait(), timeout=1)
+        assert terminal_session.terminal is True
+        cancel = asyncio.create_task(provider.cancel_recognition(ref))
+        assert active_session.terminal is False
+    else:
+        await provider.open_recognition(ref, timeout_seconds=1)
+        active_session = provider._require_recognition(ref)
+        provider.conformance.activate_response(request.ref.response)
+        pcm = struct.pack("<hhhh", 0, 1_000, -1_000, 0)
+        finite_stream = FakeSseStream(
+            (
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "speech.audio.delta",
+                        "audio": base64.b64encode(pcm).decode("ascii"),
+                    }
+                ),
+                "",
+                'data: {"type":"speech.audio.done","usage":{}}',
+                "",
+            )
+        )
+
+        async def finite_sse_factory(*_args) -> FakeSseStream:
+            return finite_stream
+
+        provider._sse_factory = finite_sse_factory
+        await provider.open_synthesis(request)
+        terminal_session = provider._require_synthesis(request.ref)
+        await asyncio.wait_for(terminal_put_started.wait(), timeout=1)
+        assert terminal_session.terminal is True
+        cancel = asyncio.create_task(provider.cancel_synthesis(request.ref))
+        assert active_session.terminal is False
+
+    await asyncio.sleep(0)
+    assert terminal_session.retirement_task is not None
+    close = asyncio.create_task(provider.close())
+    await asyncio.sleep(0)
+    assert not close.done()
+    release_terminal_put.set()
+    outcomes = await asyncio.wait_for(
+        asyncio.gather(cancel, close, return_exceptions=True),
+        timeout=1,
+    )
+
+    assert isinstance(outcomes[0], GeneratorExit)
+    assert isinstance(outcomes[1], GeneratorExit)
+    assert outcomes[0].args == ()
+    assert outcomes[1].args == ()
+    assert provider._recognition == {}
+    assert provider._synthesis == {}
+    assert socket.closed is True
+    if terminal_form == "recognition":
+        assert blocking_stream.closed is True
+    else:
+        assert finite_stream.closed is True
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.closed is True
+    assert snapshot.active_recognition == 0
+    assert snapshot.active_synthesis == 0
+    assert reap_calls == 2
+    assert provider.cleanup_snapshot.clean is True
+    assert_zero_business_effects(provider)
+
+    await provider.close()
+    assert provider.cleanup_snapshot.clean is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_type", [KeyboardInterrupt, SystemExit, GeneratorExit, RuntimeError]
+)
+async def test_terminal_retirement_failure_is_sanitized_after_complete_close(
+    failure_type: type[BaseException],
+) -> None:
+    socket = FakeSocket((session_updated_event(),))
+    stream = BlockingSseStream()
+
+    async def socket_factory(*_args) -> FakeSocket:
+        return socket
+
+    async def sse_factory(*_args) -> BlockingSseStream:
+        return stream
+
+    provider = OpenAIStreamingSpeechProvider(
+        config(), socket_factory=socket_factory, sse_factory=sse_factory
+    )
+    ref = recognition_ref()
+    await provider.open_recognition(ref, timeout_seconds=1)
+    await provider.send_recognition_audio(recognition_frame(ref))
+    await provider.commit_recognition(ref)
+    terminal_session = provider._require_recognition(ref)
+    assert terminal_session.receive_task is not None
+    socket.push(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "content_index": 0,
+            "item_id": "direct-retirement-process-control-item",
+            "transcript": "direct terminal retirement process control",
+        }
+    )
+    await asyncio.wait_for(terminal_session.receive_task, timeout=1)
+    assert terminal_session.terminal is True
+
+    # A completed Future exercises close's retirement-result boundary directly.
+    # Raising KeyboardInterrupt/SystemExit from a background Task would instead
+    # stop pytest's event-loop runner before the Provider can aggregate it.
+    terminal_session.events.get_nowait()
+    terminal_session.partial_text = ""
+    terminal_session.retirement_claimed = True
+    private_marker = f"private-{failure_type.__name__}-retirement"
+    retirement: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    retirement.set_exception(failure_type(private_marker))
+    terminal_session.retirement_task = retirement  # type: ignore[assignment]
+
+    request = synthesis_request()
+    provider.conformance.activate_response(request.ref.response)
+    await provider.open_synthesis(request)
+    started = await provider.next_synthesis_event(request.ref, timeout_seconds=1)
+    assert started.kind is SynthesisEventKind.STARTED
+
+    expected_type = (
+        failure_type
+        if failure_type in {KeyboardInterrupt, SystemExit, GeneratorExit}
+        else OpenAIStreamingSpeechError
+    )
+    with pytest.raises(expected_type) as caught:
+        await provider.close()
+
+    if isinstance(caught.value, OpenAIStreamingSpeechError):
+        assert caught.value.reason == "SPEECH_PROVIDER_TRANSPORT_UNAVAILABLE"
+    else:
+        assert caught.value.args == ()
+    assert private_marker not in "".join(traceback.format_exception(caught.value))
+    assert provider._recognition == {}
+    assert provider._synthesis == {}
+    assert stream.closed is True
+    snapshot = provider.conformance.snapshot()
+    assert snapshot.closed is True
+    assert snapshot.active_recognition == 0
+    assert snapshot.active_synthesis == 0
+    assert provider.cleanup_snapshot.clean is True
+    assert_zero_business_effects(provider)
+
+    await provider.close()
+    assert provider.cleanup_snapshot.clean is True
+
+
+@pytest.mark.asyncio
 async def test_synthesis_cancel_closes_transport_without_cancelled_event() -> None:
     facts: list[SpeechDegradationFact] = []
     stream = BlockingSseStream()
