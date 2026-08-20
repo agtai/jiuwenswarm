@@ -37,9 +37,23 @@ from .latency_probe import (
 
 REPORT_SCHEMA_VERSION: Final = "live-voice.latency-report.v0"
 COMPARISON_SCHEMA_VERSION: Final = "live-voice.latency-comparison.v0"
+ABA_COMPARISON_SCHEMA_VERSION: Final = "live-voice.latency-comparison-a-b-a.v0"
 _BROWSER_PROFILES: Final = PROFILE_IDS
 _DIALOGUE_PROFILES: Final = ("dialogue_no_tool", "dialogue_with_tool")
 _TASK_PROFILES: Final = ("task_create", "task_status", "task_cancel")
+POST_CAPTURE_TARGET_SEGMENTS: Final = frozenset(
+    {
+        "eot_to_stt_final",
+        "stt_final_to_submit",
+        "submit_to_presentation",
+        "presentation_to_tts_request",
+        "tts_request_to_first_downlink",
+        "first_downlink_to_schedule",
+        "schedule_to_start_estimate",
+        "playout_to_ack",
+        "response_total",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +240,32 @@ class LatencyComparison:
             "schema_version": self.schema_version, "status": self.status, "reason": self.reason,
             "baseline_run_id": self.baseline_run_id, "candidate_run_id": self.candidate_run_id,
             "segments": [item.to_dict() for item in self.segments],
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LatencyABAComparison:
+    schema_version: str
+    status: str
+    reason: str | None
+    baseline_before_run_id: str
+    candidate_run_id: str
+    baseline_after_run_id: str
+    before_to_candidate: LatencyComparison
+    after_to_candidate: LatencyComparison
+    baseline_drift: tuple[SegmentComparison, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema_version": self.schema_version,
+            "status": self.status,
+            "reason": self.reason,
+            "baseline_before_run_id": self.baseline_before_run_id,
+            "candidate_run_id": self.candidate_run_id,
+            "baseline_after_run_id": self.baseline_after_run_id,
+            "before_to_candidate": self.before_to_candidate.to_dict(),
+            "after_to_candidate": self.after_to_candidate.to_dict(),
+            "baseline_drift": [item.to_dict() for item in self.baseline_drift],
         }
 
 
@@ -656,13 +696,30 @@ def compare_latency_reports(baseline: LatencyRunReport, candidate: LatencyRunRep
     if not isinstance(baseline, LatencyRunReport) or not isinstance(candidate, LatencyRunReport):
         raise LatencyProbeViolation("INVALID_REPORT")
     empty_rows: tuple[SegmentComparison, ...] = ()
-    if baseline.run.source_state == "product_code_dirty" or candidate.run.source_state == "product_code_dirty":
+    if (
+        baseline.run.source_state == "product_code_dirty"
+        or candidate.run.source_state == "product_code_dirty"
+        or (
+            candidate.run.optimization_track == "post_capture_pipeline"
+            and (
+                baseline.run.source_state != "clean"
+                or candidate.run.source_state != "clean"
+            )
+        )
+    ):
         return _inconclusive(baseline, candidate, empty_rows, "DIRTY_SOURCE")
     if candidate.run.experiment is None:
         return _inconclusive(baseline, candidate, empty_rows, "NO_EXPERIMENT")
     if not _compatible(baseline.run, candidate.run):
         return _inconclusive(baseline, candidate, empty_rows, "INCOMPATIBLE_RUN")
     experiment = candidate.run.experiment
+    if (
+        candidate.run.optimization_track == "post_capture_pipeline"
+        and experiment.target_segment not in POST_CAPTURE_TARGET_SEGMENTS
+    ):
+        return _inconclusive(
+            baseline, candidate, empty_rows, "INVALID_TARGET_SEGMENT"
+        )
     if _catalog(baseline.run) != _catalog(candidate.run):
         return _inconclusive(baseline, candidate, empty_rows, "INCOMPATIBLE_RUN")
     rows = _comparison_rows(baseline, candidate)
@@ -707,6 +764,90 @@ def compare_latency_reports(baseline: LatencyRunReport, candidate: LatencyRunRep
     else:
         status = "inconclusive"
     return LatencyComparison(COMPARISON_SCHEMA_VERSION, status, None, baseline.run.run_id, candidate.run.run_id, rows)
+
+
+def compare_latency_reports_a_b_a(
+    baseline_before: LatencyRunReport,
+    candidate: LatencyRunReport,
+    baseline_after: LatencyRunReport,
+) -> LatencyABAComparison:
+    before = compare_latency_reports(baseline_before, candidate)
+    after = compare_latency_reports(baseline_after, candidate)
+    drift = (
+        _comparison_rows(baseline_before, baseline_after)
+        if _compatible(baseline_before.run, baseline_after.run)
+        and _catalog(baseline_before.run) == _catalog(baseline_after.run)
+        else ()
+    )
+    status = "inconclusive"
+    reason: str | None = None
+    if before.status == "regressed" or after.status == "regressed":
+        status = "regressed"
+        reason = "PAIRWISE_REGRESSION"
+    elif before.status != "improved" or after.status != "improved":
+        reason = before.reason or after.reason or "PAIRWISE_INCONCLUSIVE"
+    elif candidate.run.experiment is None or not drift:
+        reason = "INCOMPATIBLE_RUN"
+    else:
+        statistic = candidate.run.experiment.target_statistic
+        relevant_segments = {
+            candidate.run.experiment.target_segment,
+            "response_total",
+        }
+        before_rows = tuple(
+            row for row in before.segments if row.segment_id in relevant_segments
+        )
+        after_rows = tuple(
+            row for row in after.segments if row.segment_id in relevant_segments
+        )
+        drift_rows = tuple(
+            row for row in drift if row.segment_id in relevant_segments
+        )
+        before_gains = tuple(
+            -value
+            for row in before_rows
+            if (value := _statistic_delta(row, statistic)) is not None
+        )
+        after_gains = tuple(
+            -value
+            for row in after_rows
+            if (value := _statistic_delta(row, statistic)) is not None
+        )
+        drift_values = tuple(
+            abs(value)
+            for row in drift_rows
+            if (value := _statistic_delta(row, statistic)) is not None
+        )
+        expected_count = len(relevant_segments) * len(candidate.run.profile_ids)
+        denominator_drift = any(
+            row.baseline_attempts != row.candidate_attempts
+            or any(value != 0 for _, value in row.count_changes)
+            or any(value != 0 for _, value in row.rate_changes)
+            for row in drift_rows
+        )
+        if denominator_drift:
+            reason = "BASELINE_DRIFT"
+        elif (
+            len(before_gains) != expected_count
+            or len(after_gains) != expected_count
+            or len(drift_values) != expected_count
+        ):
+            reason = "BASELINE_DRIFT_UNKNOWN"
+        elif max(drift_values) >= min(*before_gains, *after_gains):
+            reason = "BASELINE_DRIFT"
+        else:
+            status = "improved"
+    return LatencyABAComparison(
+        ABA_COMPARISON_SCHEMA_VERSION,
+        status,
+        reason,
+        baseline_before.run.run_id,
+        candidate.run.run_id,
+        baseline_after.run.run_id,
+        before,
+        after,
+        drift,
+    )
 
 
 _REPORT_KEYS: Final = frozenset({"schema_version", "run", "profiles"})
@@ -835,6 +976,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     compare = commands.add_parser("compare")
     compare.add_argument("--baseline", type=Path, required=True)
     compare.add_argument("--candidate", type=Path, required=True)
+    aba = commands.add_parser("compare-a-b-a")
+    aba.add_argument("--baseline-before", type=Path, required=True)
+    aba.add_argument("--candidate", type=Path, required=True)
+    aba.add_argument("--baseline-after", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
         if args.command == "validate-run":
@@ -845,7 +990,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = reduce_latency_run(run, read_latency_batches(args.run_dir))
             write_latency_report(result, args.run_dir)
             return 0
-        result = compare_latency_reports(_load_report(args.baseline), _load_report(args.candidate))
+        if args.command == "compare-a-b-a":
+            result = compare_latency_reports_a_b_a(
+                _load_report(args.baseline_before),
+                _load_report(args.candidate),
+                _load_report(args.baseline_after),
+            )
+        else:
+            result = compare_latency_reports(
+                _load_report(args.baseline), _load_report(args.candidate)
+            )
         print(json.dumps(result.to_dict(), sort_keys=True, separators=(",", ":")))
         # An inconclusive comparison is a valid, truthful report outcome; only
         # malformed input or I/O failure makes the command itself fail.

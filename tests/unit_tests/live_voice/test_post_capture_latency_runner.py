@@ -5,6 +5,7 @@ import importlib.util
 import json
 import sys
 import threading
+from types import SimpleNamespace
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -725,3 +726,75 @@ def test_run_cli_supervises_preexisting_browser_then_applies_the_real_artifact_g
         ),
     ]
     assert capsys.readouterr().out.startswith("http://localhost:5173/chat/web_benchmark_session?")
+
+
+def test_runner_comparison_invokes_closed_module_argv_and_writes_only_explicit_output(
+    tmp_path: Path,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_compare")
+    inputs = tuple(tmp_path / name for name in ("a1.json", "b.json", "a2.json"))
+    for path in inputs:
+        path.write_text("{}", encoding="utf-8")
+    output = tmp_path / "comparison.json"
+    calls = []
+    payload = {
+        "schema_version": "live-voice.latency-comparison-a-b-a.v0",
+        "status": "improved",
+        "reason": None,
+        "baseline_before_run_id": "a1",
+        "candidate_run_id": "b",
+        "baseline_after_run_id": "a2",
+        "before_to_candidate": {},
+        "after_to_candidate": {},
+        "baseline_drift": [],
+    }
+
+    def run(argv, *, shell, check, capture_output, text):
+        calls.append((tuple(argv), shell, check, capture_output, text))
+        return SimpleNamespace(returncode=0, stdout=json.dumps(payload))
+
+    runner.write_a_b_a_comparison(inputs[0], inputs[1], inputs[2], output, run_command=run)
+
+    assert calls[0][0][:4] == (
+        sys.executable,
+        "-m",
+        "jiuwenswarm.server.live_voice.latency_probe_report",
+        "compare-a-b-a",
+    )
+    assert calls[0][1:] == (False, False, True, True)
+    assert json.loads(output.read_text(encoding="utf-8")) == payload
+    try:
+        runner.write_a_b_a_comparison(inputs[0], inputs[1], inputs[2], output, run_command=run)
+    except ValueError as error:
+        assert str(error) == "COMPARISON_OUTPUT_EXISTS"
+    else:
+        raise AssertionError("comparison output must never be overwritten")
+    assert len(calls) == 1
+
+
+def test_runner_compare_subcommand_has_zero_service_or_browser_effects(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runner = _load_runner("post_capture_latency_runner_compare_cli")
+    paths = tuple(tmp_path / name for name in ("a1.json", "b.json", "a2.json"))
+    for path in paths:
+        path.write_text("{}", encoding="utf-8")
+    output = tmp_path / "comparison.json"
+    calls = []
+
+    def compare(a1, candidate, a2, target):
+        calls.append((a1, candidate, a2, target))
+
+    monkeypatch.setattr(runner, "write_a_b_a_comparison", compare)
+
+    assert runner.main(
+        [
+            "compare",
+            "--baseline-before", str(paths[0]),
+            "--candidate", str(paths[1]),
+            "--baseline-after", str(paths[2]),
+            "--output", str(output),
+        ]
+    ) == 0
+    assert calls == [(paths[0], paths[1], paths[2], output)]

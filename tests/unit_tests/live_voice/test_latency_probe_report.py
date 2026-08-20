@@ -21,6 +21,7 @@ from jiuwenswarm.server.live_voice.latency_probe import (
 )
 from jiuwenswarm.server.live_voice.latency_probe_report import (
     FIXED_SEGMENTS,
+    compare_latency_reports_a_b_a,
     compare_latency_reports,
     read_latency_batches,
     reduce_latency_run,
@@ -391,6 +392,34 @@ def experiment_config(tmp_path, *, target: str = "response_total"):
     return load_latency_run_config(path)
 
 
+def post_capture_config(tmp_path, name: str, *, target: str | None = None):
+    payload = run_payload()
+    payload.update(
+        run_id=name,
+        schema_version="live-voice.latency-run.v1",
+        optimization_track="post_capture_pipeline",
+        benchmark_lane="controlled_browser_fixture",
+        fixture_profile_id="en-v1-fixed-wav",
+        profile_ids=["dialogue_no_tool"],
+        input_case_ids=["short-greeting-v1"],
+    )
+    if target is not None:
+        payload["experiment"] = {
+            "experiment_id": "latency-tune",
+            "target_segment": target,
+            "target_statistic": "p50_ms",
+            "minimum_improvement_ms": 10.0,
+            "response_total_minimum_improvement_ms": 0.0,
+            "guardrails": [
+                {"metric": "failure_rate", "segment_id": None, "maximum_regression": 0.0}
+            ],
+            "declared_experiment_points": [],
+        }
+    path = tmp_path / f"{name}.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return load_latency_run_config(path)
+
+
 def report_with_complete_summaries(run_config, *, response: float, target: float | None = None, shifted: float | None = None):
     report = report_with_response_total(run_config, duration=response)
     profiles = []
@@ -426,6 +455,150 @@ def test_compare_classifies_improved_shifted_and_regressed(tmp_path, baseline, c
     )
 
     assert compare_latency_reports(base, current).status == expected
+
+
+def test_post_capture_comparison_rejects_capture_only_target(tmp_path: Path) -> None:
+    baseline = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline"),
+        response=100.0,
+    )
+    candidate = report_with_complete_summaries(
+        post_capture_config(tmp_path, "candidate", target="capture_device_startup"),
+        response=80.0,
+    )
+
+    comparison = compare_latency_reports(baseline, candidate)
+
+    assert comparison.status == "inconclusive"
+    assert comparison.reason == "INVALID_TARGET_SEGMENT"
+
+
+def test_post_capture_comparison_rejects_docs_only_dirty_source(tmp_path: Path) -> None:
+    baseline = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline"), response=100.0
+    )
+    baseline = replace(
+        baseline,
+        run=replace(baseline.run, source_state="docs_only_dirty"),
+    )
+    candidate = report_with_complete_summaries(
+        post_capture_config(tmp_path, "candidate", target="response_total"),
+        response=80.0,
+    )
+
+    comparison = compare_latency_reports(baseline, candidate)
+
+    assert comparison.status == "inconclusive"
+    assert comparison.reason == "DIRTY_SOURCE"
+
+
+@pytest.mark.parametrize(
+    ("after_duration", "status", "reason"),
+    [
+        (105.0, "improved", None),
+        (130.0, "inconclusive", "BASELINE_DRIFT"),
+    ],
+)
+def test_a_b_a_requires_two_improvements_and_smaller_baseline_drift(
+    tmp_path: Path,
+    after_duration: float,
+    status: str,
+    reason: str | None,
+) -> None:
+    before = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline-before"), response=100.0
+    )
+    candidate = report_with_complete_summaries(
+        post_capture_config(tmp_path, "candidate", target="response_total"),
+        response=80.0,
+    )
+    after = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline-after"),
+        response=after_duration,
+    )
+
+    comparison = compare_latency_reports_a_b_a(before, candidate, after)
+
+    assert comparison.status == status
+    assert comparison.reason == reason
+    assert comparison.before_to_candidate.status == "improved"
+    assert comparison.after_to_candidate.status == "improved"
+    assert comparison.baseline_drift
+
+
+def test_a_b_a_rejects_baseline_failure_denominator_drift(tmp_path: Path) -> None:
+    before = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline-before"), response=100.0
+    )
+    candidate = report_with_complete_summaries(
+        post_capture_config(tmp_path, "candidate", target="response_total"),
+        response=80.0,
+    )
+    after = report_with_complete_summaries(
+        post_capture_config(tmp_path, "baseline-after"), response=100.0
+    )
+    after = replace(
+        after,
+        profiles=tuple(
+            replace(
+                profile,
+                segments=tuple(
+                    replace(
+                        summary,
+                        attempts=2,
+                        successful_samples=1,
+                        unknown=1,
+                        failed=1,
+                    )
+                    for summary in profile.segments
+                ),
+            )
+            for profile in after.profiles
+        ),
+    )
+
+    comparison = compare_latency_reports_a_b_a(before, candidate, after)
+
+    assert comparison.before_to_candidate.status == "improved"
+    assert comparison.after_to_candidate.status == "improved"
+    assert comparison.status == "inconclusive"
+    assert comparison.reason == "BASELINE_DRIFT"
+
+
+def test_compare_a_b_a_cli_emits_one_closed_json_result(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    reports = (
+        report_with_complete_summaries(
+            post_capture_config(tmp_path, "baseline-before"), response=100.0
+        ),
+        report_with_complete_summaries(
+            post_capture_config(tmp_path, "candidate", target="response_total"),
+            response=80.0,
+        ),
+        report_with_complete_summaries(
+            post_capture_config(tmp_path, "baseline-after"), response=105.0
+        ),
+    )
+    paths = []
+    for name, report in zip(("a1", "b", "a2"), reports, strict=True):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(report.to_dict()), encoding="utf-8")
+        paths.append(path)
+
+    assert latency_probe_report.main(
+        [
+            "compare-a-b-a",
+            "--baseline-before", str(paths[0]),
+            "--candidate", str(paths[1]),
+            "--baseline-after", str(paths[2]),
+        ]
+    ) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == "live-voice.latency-comparison-a-b-a.v0"
+    assert payload["status"] == "improved"
+    assert payload["baseline_drift"]
 
 
 def test_compare_is_inconclusive_for_insufficient_samples(run_config, tmp_path) -> None:

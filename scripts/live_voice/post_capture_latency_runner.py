@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 import wave
@@ -179,6 +180,63 @@ def validate_attempt_artifacts(run_dir: Path, identity: AttemptIdentity) -> None
         write_latency_report(report, run_dir)
     except Exception as error:
         raise ValueError("ARTIFACTS_INVALID") from error
+
+
+def write_a_b_a_comparison(
+    baseline_before: Path,
+    candidate: Path,
+    baseline_after: Path,
+    output: Path,
+    *,
+    run_command: Callable[..., Any] = subprocess.run,
+) -> None:
+    inputs = (baseline_before, candidate, baseline_after)
+    if not output.is_absolute() or output.exists():
+        raise ValueError("COMPARISON_OUTPUT_EXISTS")
+    if any(not path.is_absolute() or not path.is_file() for path in inputs):
+        raise ValueError("COMPARISON_INPUT_INVALID")
+    command = (
+        sys.executable,
+        "-m",
+        "jiuwenswarm.server.live_voice.latency_probe_report",
+        "compare-a-b-a",
+        "--baseline-before",
+        str(baseline_before),
+        "--candidate",
+        str(candidate),
+        "--baseline-after",
+        str(baseline_after),
+    )
+    try:
+        completed = run_command(
+            command,
+            shell=False,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        payload = json.loads(completed.stdout)
+    except Exception as error:
+        raise ValueError("COMPARISON_FAILED") from error
+    expected_keys = {
+        "schema_version", "status", "reason", "baseline_before_run_id",
+        "candidate_run_id", "baseline_after_run_id", "before_to_candidate",
+        "after_to_candidate", "baseline_drift",
+    }
+    if (
+        completed.returncode != 0
+        or not isinstance(payload, dict)
+        or set(payload) != expected_keys
+        or payload["schema_version"] != "live-voice.latency-comparison-a-b-a.v0"
+    ):
+        raise ValueError("COMPARISON_FAILED")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with output.open("x", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+    except FileExistsError as error:
+        raise ValueError("COMPARISON_OUTPUT_EXISTS") from error
 
 
 @dataclass(frozen=True)
@@ -456,6 +514,14 @@ def _add_run_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser
     run.add_argument("--start-delay-ms", type=int, default=1_000)
 
 
+def _add_compare_parser(commands: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    compare = commands.add_parser("compare")
+    compare.add_argument("--baseline-before", type=Path, required=True)
+    compare.add_argument("--candidate", type=Path, required=True)
+    compare.add_argument("--baseline-after", type=Path, required=True)
+    compare.add_argument("--output", type=Path, required=True)
+
+
 def _prepare_run(args: argparse.Namespace) -> None:
     output = args.output
     if not output.is_absolute() or output.name != "run.json":
@@ -557,6 +623,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     _add_prepare_run_parser(commands)
     _add_run_parser(commands)
+    _add_compare_parser(commands)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare-run":
@@ -564,6 +631,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "run":
             _run_attempt(args)
+            return 0
+        if args.command == "compare":
+            write_a_b_a_comparison(
+                args.baseline_before,
+                args.candidate,
+                args.baseline_after,
+                args.output,
+            )
             return 0
         return 2
     except AttemptExecutionFailed:
