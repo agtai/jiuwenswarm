@@ -266,6 +266,91 @@ class ControlledCloseFacade:
         return self.stream
 
 
+class CustomCloseAwaitable:
+    def __init__(self, future: asyncio.Future[None]) -> None:
+        self.future = future
+
+    def __await__(self):
+        return self.future.__await__()
+
+
+class GeneralAwaitableCloseStream(ControlledCloseStream):
+    def __init__(self, *, awaitable_kind: str, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.awaitable_kind = awaitable_kind
+        self.returned_awaitable: object | None = None
+        self.manual_future: asyncio.Future[None] | None = None
+
+    def _begin_close(self) -> object:
+        self.close_invocations += 1
+        if self.close_invocation_error is not None:
+            raise self.close_invocation_error
+        if self.awaitable_kind == "task":
+            returned: object = asyncio.create_task(
+                self._close(), name="test-general-awaitable-stream-close"
+            )
+        elif self.awaitable_kind in {"future", "custom"}:
+            self.close_calls += 1
+            self.close_started.set()
+            future = asyncio.get_running_loop().create_future()
+            future.add_done_callback(lambda _completed: self.close_finished.set())
+            self.manual_future = future
+            if self.close_release is None:
+                if self.close_error is None:
+                    future.set_result(None)
+                else:
+                    future.set_exception(self.close_error)
+            returned = (
+                future
+                if self.awaitable_kind == "future"
+                else CustomCloseAwaitable(future)
+            )
+        elif self.awaitable_kind == "invalid":
+            returned = object()
+        else:  # pragma: no cover - test construction owns this vocabulary
+            raise AssertionError("unsupported test awaitable kind")
+        self.returned_awaitable = returned
+        return returned
+
+    def settle_manual_close(self) -> None:
+        future = self.manual_future
+        assert future is not None
+        if future.done():
+            return
+        assert self.close_release is None or self.close_release.is_set()
+        if self.close_error is None:
+            future.set_result(None)
+        else:
+            future.set_exception(self.close_error)
+
+
+class GeneralAwaitableCloseFacade(ControlledCloseFacade):
+    def __init__(self, *, awaitable_kind: str, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.awaitable_kind = awaitable_kind
+
+    def process_formal_live_voice_stream(
+        self, execution
+    ) -> GeneralAwaitableCloseStream:
+        self.calls += 1
+        if self.stream is not None:
+            raise AssertionError("formal stream must be constructed exactly once")
+        stream = GeneralAwaitableCloseStream(
+            request_id=execution.request_id,
+            channel_id=execution.channel_id,
+            final=self.final,
+            next_release=self.next_release,
+            close_release=self.close_release,
+            close_error=self.close_error,
+            close_lookup_error=self.close_lookup_error,
+            close_invocation_error=self.close_invocation_error,
+            awaitable_kind=self.awaitable_kind,
+        )
+        self.stream = stream
+        self.stream_created.set()
+        return stream
+
+
 class RecordingHistoryWriter:
     def __init__(self, *, fail_assistant_once: bool = False) -> None:
         self.users = []
@@ -2018,6 +2103,282 @@ async def test_stream_close_acquisition_failure_preserves_business_truth(
             events_task.cancel()
         await asyncio.gather(events_task, return_exceptions=True)
         await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.parametrize("awaitable_kind", ("future", "task", "custom"))
+@pytest.mark.parametrize(
+    ("business_case", "final", "expected_outcome", "cleanup_fails"),
+    (
+        ("completed", "formal answer", "completed", False),
+        ("cancelled", None, "cancelled", False),
+        ("unknown", None, "failed", True),
+    ),
+)
+@pytest.mark.asyncio
+async def test_stream_close_accepts_every_general_awaitable_shape(
+    awaitable_kind: str,
+    business_case: str,
+    final: str | None,
+    expected_outcome: str,
+    cleanup_fails: bool,
+) -> None:
+    next_release = asyncio.Event() if business_case == "cancelled" else None
+    close_error = (
+        RuntimeError(f"{awaitable_kind} close failed after unknown business")
+        if cleanup_fails
+        else None
+    )
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind=awaitable_kind,
+        final=final,
+        next_release=next_release,
+        close_error=close_error,
+    )
+    harness, selected, binding, handle = controlled_harness_round(
+        current_facade,
+        suffix=f"general-awaitable-{awaitable_kind}-{business_case}",
+    )
+    events_task = asyncio.create_task(_collect_harness_events(handle))
+    try:
+        await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+        stream = current_facade.stream
+        assert isinstance(stream, GeneralAwaitableCloseStream)
+        if business_case == "cancelled":
+            await asyncio.wait_for(stream.next_started.wait(), timeout=1)
+            accepted = handle.cancel(
+                cancel_command(
+                    SimpleNamespace(
+                        request_id=binding.request_id,
+                        round_id=handle.round_id,
+                    ),
+                    selected,
+                    command_id=f"cancel-general-awaitable-{awaitable_kind}",
+                )
+            )
+            assert accepted.accepted is True
+
+        events = await asyncio.wait_for(events_task, timeout=1)
+        terminal_events = [
+            item
+            for item in events
+            if getattr(item, "event_type", None) == "round.terminal"
+        ]
+        assert len(terminal_events) == 1
+        assert terminal_events[0].payload == {
+            "state": "terminal",
+            "outcome": expected_outcome,
+        }
+        record = harness._rounds[handle.round_id]
+        cleanup_owner = record.cleanup_task
+        assert cleanup_owner is not None
+        assert cleanup_owner.done()
+        if awaitable_kind in {"future", "task"}:
+            assert cleanup_owner is stream.returned_awaitable
+        else:
+            assert isinstance(cleanup_owner, asyncio.Task)
+            assert cleanup_owner is not stream.returned_awaitable
+        if awaitable_kind == "task":
+            assert cleanup_owner.get_name() == "test-general-awaitable-stream-close"
+        elif awaitable_kind == "custom":
+            assert cleanup_owner.get_name().startswith(
+                "live-voice-harness-stream-close:"
+            )
+        assert record.cleanup_error is close_error
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert stream.close_started.is_set()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        assert harness.snapshot().active_rounds == ()
+        assert harness.snapshot().pending_cleanup_rounds == ()
+        assert harness.snapshot().cancel_effects == (
+            1 if business_case == "cancelled" else 0
+        )
+        await asyncio.wait_for(harness.close(), timeout=1)
+        await asyncio.wait_for(harness.close(), timeout=1)
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+    finally:
+        if next_release is not None:
+            next_release.set()
+        stream = current_facade.stream
+        if isinstance(stream, GeneralAwaitableCloseStream):
+            if stream.manual_future is not None and not stream.manual_future.done():
+                stream.settle_manual_close()
+            returned = stream.returned_awaitable
+            if isinstance(returned, asyncio.Future):
+                await asyncio.gather(returned, return_exceptions=True)
+            if stream.manual_future is not None and stream.manual_future.done():
+                stream.manual_future.exception()
+        if not events_task.done():
+            events_task.cancel()
+        await asyncio.gather(events_task, return_exceptions=True)
+        await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_non_awaitable_stream_close_result_is_acquisition_failure() -> None:
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind="invalid",
+        final="formal answer",
+    )
+    harness, _, _, handle = controlled_harness_round(
+        current_facade,
+        suffix="non-awaitable-close-result",
+    )
+
+    events = await asyncio.wait_for(
+        asyncio.create_task(_collect_harness_events(handle)), timeout=1
+    )
+
+    terminal_events = [
+        item for item in events if getattr(item, "event_type", None) == "round.terminal"
+    ]
+    assert len(terminal_events) == 1
+    assert terminal_events[0].payload == {
+        "state": "terminal",
+        "outcome": "completed",
+    }
+    stream = current_facade.stream
+    assert isinstance(stream, GeneralAwaitableCloseStream)
+    record = harness._rounds[handle.round_id]
+    assert isinstance(record.cleanup_error, TypeError)
+    assert record.cleanup_task is None
+    assert stream.close_lookups == 1
+    assert stream.close_invocations == 1
+    assert stream.close_calls == 0
+    assert stream.close_started.is_set() is False
+    assert harness.snapshot().active_rounds == ()
+    assert harness.snapshot().pending_cleanup_rounds == ()
+    await asyncio.wait_for(harness.close(), timeout=1)
+    await asyncio.wait_for(harness.close(), timeout=1)
+
+
+@pytest.mark.parametrize("awaitable_kind", ("future", "task", "custom"))
+@pytest.mark.asyncio
+async def test_general_awaitable_cleanup_timeout_retains_exact_outer_close_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    awaitable_kind: str,
+) -> None:
+    monkeypatch.setattr(harness_module, "_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS", 0.01)
+    close_release = asyncio.Event()
+    close_error = RuntimeError(f"late {awaitable_kind} cleanup failed")
+    current_facade = GeneralAwaitableCloseFacade(
+        awaitable_kind=awaitable_kind,
+        final="formal answer",
+        close_release=close_release,
+        close_error=close_error,
+    )
+    history = RecordingHistoryWriter()
+    harness = JiuWenSwarmRoundHarness(
+        instance_id=f"general-awaitable-{awaitable_kind}-harness",
+        id_factory=id_factory(),
+    )
+    current = AgentConversationRuntime(
+        scope(),
+        instance_id=f"general-awaitable-{awaitable_kind}-composition",
+        facade=current_facade,
+        history_writer=history,
+        harness=harness,
+    )
+    selected = await prepare(current)
+    handle = await dispatch(current, selected)
+    await asyncio.wait_for(current_facade.stream_created.wait(), timeout=1)
+    stream = current_facade.stream
+    assert isinstance(stream, GeneralAwaitableCloseStream)
+    await asyncio.wait_for(stream.close_started.wait(), timeout=1)
+
+    try:
+        completion = await asyncio.wait_for(
+            asyncio.shield(handle.completion), timeout=1
+        )
+        assert completion.terminal_outcome is not None
+        assert completion.terminal_outcome.value == "completed"
+        notifications = []
+        terminal_progress = None
+        while terminal_progress is None:
+            notification = await asyncio.wait_for(
+                current.next_notification(), timeout=1
+            )
+            notifications.append(notification)
+            if notification.progress_event is None:
+                continue
+            progress = WorkProgressEventV2.from_dict(
+                notification.progress_event.payload
+            )
+            if progress.state.value == "terminal":
+                terminal_progress = progress
+        assert terminal_progress.outcome is not None
+        assert terminal_progress.outcome.value == "completed"
+        assert (
+            sum(
+                item.progress_event is not None
+                and WorkProgressEventV2.from_dict(
+                    item.progress_event.payload
+                ).state.value
+                == "terminal"
+                for item in notifications
+            )
+            == 1
+        )
+        round_record = harness._rounds[handle.round_id]
+        cleanup_owner = round_record.cleanup_task
+        assert cleanup_owner is not None
+        assert cleanup_owner.done() is False
+        if awaitable_kind in {"future", "task"}:
+            assert cleanup_owner is stream.returned_awaitable
+        else:
+            assert isinstance(cleanup_owner, asyncio.Task)
+            assert cleanup_owner is not stream.returned_awaitable
+        if awaitable_kind == "task":
+            assert cleanup_owner.get_name() == "test-general-awaitable-stream-close"
+        elif awaitable_kind == "custom":
+            assert cleanup_owner.get_name().startswith(
+                "live-voice-harness-stream-close:"
+            )
+        snapshot = current.snapshot()
+        assert snapshot.harness.active_rounds == ()
+        assert snapshot.harness.pending_cleanup_rounds == (handle.round_id,)
+        published_notifications = snapshot.published_notifications
+
+        pending = await current.close(timeout_seconds=0.01)
+        assert pending.status is AgentConversationShutdownStatus.PENDING
+        assert current.snapshot().closed is False
+        assert current.snapshot().harness.closed is False
+        assert round_record.cleanup_task is cleanup_owner
+
+        close_release.set()
+        if awaitable_kind in {"future", "custom"}:
+            stream.settle_manual_close()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        closed = await current.close(timeout_seconds=1)
+        assert closed.status is AgentConversationShutdownStatus.CLOSED
+        replayed_close = await current.close(timeout_seconds=1)
+        assert replayed_close.status is AgentConversationShutdownStatus.CLOSED
+        assert current.snapshot().harness.pending_cleanup_rounds == ()
+        assert current.snapshot().published_notifications == published_notifications
+        assert round_record.cleanup_task is cleanup_owner
+        assert cleanup_owner.done()
+        assert round_record.cleanup_error is close_error
+        assert (await handle.completion).terminal_outcome is not None
+        assert (await handle.completion).terminal_outcome.value == "completed"
+        assert current_facade.calls == 1
+        assert stream.close_lookups == 1
+        assert stream.close_invocations == 1
+        assert stream.close_calls == 1
+        assert len(history.users) == 1
+        assert history.assistant_intents == []
+    finally:
+        close_release.set()
+        if stream.manual_future is not None and not stream.manual_future.done():
+            stream.settle_manual_close()
+        returned = stream.returned_awaitable
+        if isinstance(returned, asyncio.Future):
+            await asyncio.gather(returned, return_exceptions=True)
+        if stream.manual_future is not None and stream.manual_future.done():
+            stream.manual_future.exception()
+        await asyncio.wait_for(stream.close_finished.wait(), timeout=1)
+        await current.close(timeout_seconds=1)
 
 
 @pytest.mark.asyncio

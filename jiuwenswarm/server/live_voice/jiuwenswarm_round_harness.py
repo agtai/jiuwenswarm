@@ -162,7 +162,7 @@ class _RoundRecord:
     terminal_event: EventEnvelope | None = None
     execution_error: BaseException | None = None
     terminal_task: asyncio.Task[None] | None = None
-    cleanup_task: asyncio.Task[None] | None = None
+    cleanup_task: asyncio.Future[None] | None = None
     cleanup_error: BaseException | None = None
     business_settled: bool = False
     source_stream: AsyncIterator[AgentResponseChunk] | None = None
@@ -937,14 +937,21 @@ class JiuWenSwarmRoundHarness:
         seq: int,
         prior_event_id: str | None,
     ) -> None:
-        cleanup: asyncio.Task[None] | None = None
+        cleanup: asyncio.Future[None] | None = None
         try:
             close = getattr(source_stream, "aclose", None)
             if callable(close):
-                cleanup = asyncio.create_task(
-                    close(),
-                    name=f"live-voice-harness-stream-close:{handle.round_id}",
-                )
+                # Async-iterator cleanup is an Awaitable boundary, not a
+                # coroutine-only boundary.  ``ensure_future`` retains an
+                # existing Future/Task verbatim and wraps a custom Awaitable
+                # in one owned Task, so the exact physical cleanup remains
+                # joinable after the bounded terminal-publication deadline.
+                close_result = close()
+                cleanup = asyncio.ensure_future(close_result)
+                if isinstance(cleanup, asyncio.Task) and cleanup is not close_result:
+                    cleanup.set_name(
+                        f"live-voice-harness-stream-close:{handle.round_id}"
+                    )
         except BaseException as error:  # noqa: BLE001
             # Descriptor lookup and close invocation are part of cleanup, not
             # business execution.  Preserve their exact disposition while the
@@ -1015,7 +1022,7 @@ class JiuWenSwarmRoundHarness:
             record.task.cancel()
 
     @staticmethod
-    async def _await_cleanup_deadline(cleanup: asyncio.Task[None]) -> None:
+    async def _await_cleanup_deadline(cleanup: asyncio.Future[None]) -> None:
         await asyncio.wait_for(
             asyncio.shield(cleanup),
             timeout=_STREAM_CLOSE_TOTAL_DEADLINE_SECONDS,
@@ -1023,7 +1030,7 @@ class JiuWenSwarmRoundHarness:
 
     @staticmethod
     def _observe_cleanup_completion(
-        record: _RoundRecord, cleanup: asyncio.Task[None]
+        record: _RoundRecord, cleanup: asyncio.Future[None]
     ) -> None:
         try:
             cleanup.result()
