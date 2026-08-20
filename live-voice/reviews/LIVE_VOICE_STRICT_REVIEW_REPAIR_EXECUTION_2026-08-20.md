@@ -100,13 +100,14 @@ close.
 - Capability/owner: Voice–Task Bridge.
 - Risk: Tier 3 authority.
 - Main-owned source/tests:
-  `jiuwenswarm/server/live_voice/voice_task_bridge.py` and its focused tests.
+  `jiuwenswarm/server/live_voice/voice_task_bridge.py`, its focused tests and
+  the existing product-composition registry integration test only.
 - Intended behavior: every populated instruction, confirmation token and task
   ID is independently exact-span validated; conflicting/mutually exclusive
   fields fail closed before confirmation or Task/Tool effects.
 - Acceptance: reproduce the mixed-field bypass, add malicious resolver
   combinations, preserve valid committed intent, and assert every forbidden
-  effect is zero.
+  effect is zero both at the Bridge and the real product-registry entry.
 - Exclusions: no new natural-language classifier, vocabulary or Task operation.
 
 ### SRR-05 — B10 static bearer non-ASCII fail-closed behavior
