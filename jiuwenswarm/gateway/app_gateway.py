@@ -3287,6 +3287,19 @@ async def _run(
             )
         # ---- 从 channel_manager 清理所有动态注册的 channel 实例 ----
         for _cid in ("feishu", "xiaoyi"):
+            owners: list[tuple[Any, asyncio.Task[Any] | None]] = list(
+                dynamic_channel_owners[_cid]
+            )
+            known_owner_ids = {id(channel) for channel, _task in owners}
+            registered_channels = await _run_gateway_shutdown_phase(
+                f"channels.pop.{_cid}",
+                lambda _cid=_cid: list(channel_manager.get_channels_by_id(_cid)),
+                shutdown_failures,
+            )
+            for ch in registered_channels or []:
+                if id(ch) not in known_owner_ids:
+                    owners.append((ch, None))
+                    known_owner_ids.add(id(ch))
             channels = await _run_gateway_shutdown_phase(
                 f"channels.pop.{_cid}",
                 lambda _cid=_cid: list(channel_manager.pop_channels_by_id(_cid)),
@@ -3298,10 +3311,6 @@ async def _run(
                     lambda _cid=_cid: channel_manager.unregister_channel(_cid),
                     shutdown_failures,
                 )
-            owners: list[tuple[Any, asyncio.Task[Any] | None]] = list(
-                dynamic_channel_owners[_cid]
-            )
-            known_owner_ids = {id(channel) for channel, _task in owners}
             for ch in channels or []:
                 if id(ch) not in known_owner_ids:
                     owners.append((ch, None))
