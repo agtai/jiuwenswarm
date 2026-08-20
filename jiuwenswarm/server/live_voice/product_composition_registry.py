@@ -1134,6 +1134,10 @@ class AgentServerProductCompositionRegistry:
         key: tuple[str, str, str, str],
         generation: int,
     ) -> None:
+        # No uint64 clamp: the only source is a generation already retained in
+        # `_progress_generations`, and activation fails closed above the
+        # contract's MAX_SAFE_INTEGER and rolls that transient entry back under
+        # the same lock, so `generation + 1` can never overflow a cell.
         encoded = generation + 1
         for row, index in zip(
             self._progress_generation_fence,

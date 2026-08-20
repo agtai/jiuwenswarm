@@ -1417,6 +1417,65 @@ def _progress_ack_params(
     return params
 
 
+async def _settle_progress_surface(
+    registry: AgentServerProductCompositionRegistry,
+    pushed: list[dict[str, object]],
+    params: dict[str, object],
+    *,
+    stem: str,
+) -> None:
+    """Activate, close and acknowledge one progress surface end to end.
+
+    Only a fully settled surface is evictable at capacity, so this is the exact
+    journey that turns a live generation into an evicted one.
+    """
+
+    activated = await registry.handle_p3_progress_activate(
+        params=params,
+        request_id=f"request-{stem}-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert activated.ok is True
+    event = cast(Mapping[str, object], pushed[-1]["payload"])
+    closed = await registry.handle_p3_progress_close(
+        params=params,
+        request_id=f"request-{stem}-close",
+        session_id="session-product",
+    )
+    assert closed.ok is True
+    acknowledged = await registry.handle_p3_progress_ack(
+        params=_progress_ack_params(event),
+        request_id=f"request-{stem}-ack",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert acknowledged.ok is True
+
+
+async def _settle_progress_surfaces(
+    registry: AgentServerProductCompositionRegistry,
+    pushed: list[dict[str, object]],
+    *,
+    stem: str,
+    surfaces: int,
+) -> None:
+    """Settle further keys so the bound keeps evicting the oldest retained one."""
+
+    for index in range(1, surfaces + 1):
+        await _settle_progress_surface(
+            registry,
+            pushed,
+            _progress_params(
+                origin_id=f"{stem}-surface-{index}",
+                generation_id=f"{stem}-generation-{index}",
+            ),
+            stem=f"{stem}-{index}",
+        )
+
+
 def _route(payload: dict[str, object], segment: str) -> dict[str, object]:
     manifest = cast(dict[str, object], payload["product_composition"])
     routes = cast(list[dict[str, object]], manifest["routes"])
@@ -6091,80 +6150,425 @@ async def test_evicted_progress_generation_still_rejects_the_old_generation(
 @pytest.mark.asyncio
 async def test_progress_generation_fence_never_forgets_an_evicted_generation(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The fence has fixed memory and is never evicted, unlike the exact map."""
+    """One evicted generation stays refused through many later evictions.
 
-    registry, _p3, _manager, _pushed = _registry(tmp_path)
-    keys = [
-        ("session-product", "task-1", f"web-surface-{index}", "web-generation-1")
-        for index in range(2048)
-    ]
-    fence_rows = registry._progress_generation_fence
-    footprint = tuple(len(row) for row in fence_rows)
+    The exact working set is a bounded cache: every further settled surface
+    evicts one more retained key, so a single eviction proves nothing about the
+    key evicted fifteen surfaces ago. Only a fence that never forgets keeps the
+    first surface's superseded generation from activating again, and it has to
+    do that at a fixed memory cost.
+    """
 
-    for index, key in enumerate(keys):
-        registry._record_progress_generation(key, index + 1)
-
-    # Far past _PROGRESS_GENERATION_CAPACITY the very first key is still fenced,
-    # and the sketch has not grown by a single slot.
-    assert registry._progress_generation_high_water(keys[0]) >= 1
-    assert registry._fenced_progress_generation(keys[0]) >= 1
-    assert registry._fenced_progress_generation(keys[-1]) >= len(keys)
-    assert tuple(len(row) for row in registry._progress_generation_fence) == footprint
-
-    # An unrecorded key reads as absent rather than as generation 0.
-    absent = ("session-product", "task-1", "web-surface-absent", "web-generation-1")
-    assert registry._progress_generation_high_water(absent) == -1
-    assert registry._fenced_progress_generation(absent) is None
-
-    # The sketch is monotonic: a lower generation never lowers the high-water.
-    registry._record_progress_generation(keys[0], 500)
-    registry._record_progress_generation(keys[0], 2)
-    assert registry._fenced_progress_generation(keys[0]) >= 500
-
-    # The exact working set always wins over the conservative sketch.
-    registry._progress_generations[keys[0]] = 501
-    assert registry._fenced_progress_generation(keys[0]) == 501
-
-
-@pytest.mark.asyncio
-async def test_concurrent_progress_activation_admits_one_generation_owner(
-    tmp_path: Path,
-) -> None:
-    """Simultaneous activations of one key linearize to a single owner."""
-
-    registry, p3, _manager, _pushed = _registry(tmp_path)
-    key = (
+    registry, p3, manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    fenced_key = (
         "session-product",
         "task-1",
         "web-surface-1",
         "web-session-generation-1",
     )
 
-    results = await asyncio.gather(
-        *(
-            registry.handle_p3_progress_activate(
-                params=_progress_params(generation=generation),
-                request_id=f"request-progress-concurrent-{generation}",
-                session_id="session-product",
-                channel_id="web",
-            )
-            for generation in (1, 2)
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=4),
+        stem="long-fence-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem="long-fence-filler",
+        surfaces=16,
+    )
+
+    # Eviction released exactly the heavy state the bound exists to reclaim,
+    # and it happened long before the newest surfaces were admitted.
+    assert fenced_key not in registry._progress_generations
+    assert fenced_key not in registry._progress_routes
+    assert all(
+        closed_key[:4] != fenced_key for closed_key in registry._closed_progress_routes
+    )
+    assert len(registry._progress_generations) == 2
+
+    effects = (
+        len(p3.subscription_calls),
+        len(p3.query_calls),
+        len(pushed),
+        len(manager.get_calls),
+        manager.agent.calls,
+    )
+    # Restore admission room so the replays are judged by the generation fence
+    # rather than by capacity refusal, which would hide a missing fence.
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+
+    for label, generation in (("equal", 4), ("older", 3)):
+        replayed = await registry.handle_p3_progress_activate(
+            params=_progress_params(generation=generation),
+            request_id=f"request-long-fence-{label}",
+            session_id="session-product",
+            channel_id="web",
         )
+        await asyncio.sleep(0)
+
+        assert replayed.ok is False
+        replay_error = cast(dict, replayed.payload["error"])
+        assert replay_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+        assert replay_error["code"] == ErrorCode.CONFLICT.value
+        assert fenced_key not in registry._progress_routes
+        assert fenced_key not in registry._progress_generations
+        assert fenced_key not in registry._progress_targets
+        assert fenced_key not in registry._progress_deliveries
+        assert (
+            len(p3.subscription_calls),
+            len(p3.query_calls),
+            len(pushed),
+            len(manager.get_calls),
+            manager.agent.calls,
+        ) == effects
+
+    # The fence refuses replay without freezing the identity: a strictly newer
+    # generation is still admitted on the same surface.
+    successor = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=5),
+        request_id="request-long-fence-successor",
+        session_id="session-product",
+        channel_id="web",
     )
     await asyncio.sleep(0)
     await asyncio.sleep(0)
+    assert successor.ok is True
+    assert registry._progress_generations[fenced_key] == 5
+    await registry.close_active_routes()
 
-    assert [result.ok for result in results].count(True) >= 1
-    # Whichever ordering wins, the retained fence never regresses below the
-    # highest generation that was ever admitted.
-    admitted = [
-        cast(Mapping[str, object], result.payload["result"])["generation"]
-        for result in results
-        if result.ok
+    # Supplementary structural checks on the sketch the journey above exercised.
+    footprint = tuple(len(row) for row in registry._progress_generation_fence)
+    keys = [
+        ("session-product", "task-1", f"sketch-surface-{index}", "sketch-generation-1")
+        for index in range(2048)
     ]
-    assert registry._fenced_progress_generation(key) == max(admitted)
-    assert len(p3.subscription_calls) == len(admitted)
+    for index, key in enumerate(keys):
+        registry._record_progress_generation(key, index + 1)
+    # Far past _PROGRESS_GENERATION_CAPACITY the very first key is still fenced,
+    # and the sketch has not grown by a single slot.
+    assert registry._fenced_progress_generation(keys[0]) >= 1
+    assert registry._fenced_progress_generation(keys[-1]) >= len(keys)
+    assert tuple(len(row) for row in registry._progress_generation_fence) == footprint
+    # An unrecorded key reads as absent rather than as generation 0.
+    absent = ("session-product", "task-1", "sketch-surface-absent", "sketch-gen-1")
+    assert registry._progress_generation_high_water(absent) == -1
+    assert registry._fenced_progress_generation(absent) is None
+    # The sketch is monotonic: a lower generation never lowers the high-water.
+    registry._record_progress_generation(keys[0], 500)
+    registry._record_progress_generation(keys[0], 2)
+    assert registry._fenced_progress_generation(keys[0]) >= 500
+    # The exact working set always wins over the conservative sketch.
+    registry._progress_generations[keys[0]] = 501
+    assert registry._fenced_progress_generation(keys[0]) == 501
+
+
+@pytest.mark.asyncio
+async def test_progress_generation_fence_is_not_durable_across_a_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterization of the fence's durability boundary, not a guarantee.
+
+    The fence is an in-process sketch, so a restarted registry starts with an
+    empty one. That is the same lifetime the evicted `_progress_generations`
+    working set already had, so the fence narrows nothing: cross-restart replay
+    protection remains durable TaskEvent truth, not this registry's bound. The
+    restart half below therefore holds on the pre-fence baseline too; only the
+    same-process half is a defect reproduction.
+    """
+
+    registry, _p3, _manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    fenced_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=4),
+        stem="restart-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem="restart-filler",
+        surfaces=3,
+    )
+    assert fenced_key not in registry._progress_generations
+
+    # A restarted process keeps neither the exact working set nor the fence,
+    # so generation 4 is admitted again there. This is the recorded boundary,
+    # not a regression: both maps have exactly the same process lifetime.
+    restarted, restarted_p3, restarted_manager, restarted_pushed = _registry(tmp_path)
+    assert restarted._progress_generations == {}
+    assert restarted._progress_routes == {}
+    readmitted = await restarted.handle_p3_progress_activate(
+        params=_progress_params(generation=4),
+        request_id="request-restart-readmit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert readmitted.ok is True
+    assert restarted._progress_generations[fenced_key] == 4
+    assert len(restarted_p3.subscription_calls) == 1
+    assert restarted_manager.agent.calls == 0
+    assert len(restarted_pushed) == 1
+    await restarted.close_active_routes()
+
+    # The original process still refuses the same replay, so the durability
+    # boundary is the process, not the eviction.
+    replayed = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=4),
+        request_id="request-restart-same-process-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+
+    assert replayed.ok is False
+    assert cast(dict, replayed.payload["error"])["reason"] == (
+        "TASK_PROGRESS_STALE_GENERATION"
+    )
+    assert fenced_key not in registry._progress_routes
+    assert fenced_key not in registry._progress_generations
+    await registry.close_active_routes()
+
+
+@pytest.mark.asyncio
+async def test_oversized_progress_generation_never_reaches_the_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fence encodes `generation + 1` into `array("Q")` uint64 cells.
+
+    Progress admission only checks that the generation is a positive integer,
+    so the uint64 bound is held by the contract's cross-language safe range
+    further down: anything above `MAX_SAFE_INTEGER` fails closed and its
+    transient exact entry is rolled back under the same lock, and the largest
+    admissible generation still round-trips through the sketch. No
+    `OverflowError` escapes on either side of that boundary.
+    """
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    # The rejection is decided by the binding, not by a delivered event; an
+    # event-free subscription keeps the assertion on the admission boundary.
+    p3.subscription_event = False
+    oversized_keys = []
+
+    for label, generation in (
+        ("int63", 2**63 - 1),
+        ("uint64-max", 2**64 - 1),
+        ("uint64-overflow", 2**64),
+    ):
+        key = ("session-product", "task-1", f"web-{label}", f"generation-{label}")
+        oversized_keys.append(key)
+        subscriptions_before = len(p3.subscription_calls)
+        pushes_before = len(pushed)
+        rejected = await registry.handle_p3_progress_activate(
+            params=_progress_params(
+                generation=generation,
+                origin_id=f"web-{label}",
+                generation_id=f"generation-{label}",
+            ),
+            request_id=f"request-oversized-{label}",
+            session_id="session-product",
+            channel_id="web",
+        )
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert rejected.ok is False
+        assert cast(dict, rejected.payload["error"])["reason"] == (
+            "PRODUCT_P3_PROGRESS_ACTIVATION_FAILED"
+        )
+        # Nothing is retained, so the sketch never sees the oversized value and
+        # a later eviction can never try to encode it.
+        assert key not in registry._progress_generations
+        assert key not in registry._progress_routes
+        assert key not in registry._progress_targets
+        assert key not in registry._progress_deliveries
+        # One bounded activation attempt is torn down; no product effect lands.
+        assert len(p3.subscription_calls) == subscriptions_before + 1
+        assert len(pushed) == pushes_before
+        assert p3.query_calls == []
+        assert manager.get_calls == []
+        assert manager.agent.calls == 0
+
+    # The largest admissible generation is fenced exactly, which is the real
+    # uint64 boundary this sketch has to survive.
+    p3.subscription_event = True
+    largest = 9007199254740991
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    largest_key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=largest),
+        stem="largest-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem="largest-filler",
+        surfaces=3,
+    )
+    assert largest_key not in registry._progress_generations
+
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+    replayed = await registry.handle_p3_progress_activate(
+        params=_progress_params(generation=largest),
+        request_id="request-largest-replay",
+        session_id="session-product",
+        channel_id="web",
+    )
+    await asyncio.sleep(0)
+
+    assert replayed.ok is False
+    assert cast(dict, replayed.payload["error"])["reason"] == (
+        "TASK_PROGRESS_STALE_GENERATION"
+    )
+    assert largest_key not in registry._progress_routes
+    assert largest_key not in registry._progress_generations
+    await registry.close_active_routes()
+
+    # Supplementary: the sketch itself holds the exact largest admissible value
+    # and never recorded a cell for any of the rejected oversized generations.
+    assert registry._progress_generation_high_water(largest_key) == largest
+    for key in oversized_keys:
+        assert registry._progress_generation_high_water(key) == -1
+        assert registry._fenced_progress_generation(key) is None
+
+
+@pytest.mark.parametrize(
+    "label,first_generation,second_generation",
+    [("stale-first", 5, 6), ("successor-first", 6, 5)],
+)
+@pytest.mark.asyncio
+async def test_concurrent_progress_activation_admits_one_generation_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+    first_generation: int,
+    second_generation: int,
+) -> None:
+    """A forced interleaving inside the critical section keeps one owner.
+
+    The fence is read at the top of the critical section and written after the
+    authority round trip, so that `await` is the only window a second
+    activation of the same key can interleave with. A barrier parks the first
+    request exactly there and releases it only once the second is provably
+    blocked on the registry lock, so each ordering is driven deterministically
+    rather than hoped for. Whichever request wins the lock, the high-water never
+    regresses and exactly one generation owns the surface.
+    """
+
+    registry, p3, manager, pushed = _registry(tmp_path)
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 2)
+    key = (
+        "session-product",
+        "task-1",
+        "web-surface-1",
+        "web-session-generation-1",
+    )
+    await _settle_progress_surface(
+        registry,
+        pushed,
+        _progress_params(generation=5),
+        stem=f"race-{label}-owner",
+    )
+    await _settle_progress_surfaces(
+        registry,
+        pushed,
+        stem=f"race-{label}-filler",
+        surfaces=3,
+    )
+    assert key not in registry._progress_generations
+    monkeypatch.setattr(registry, "_PROGRESS_GENERATION_CAPACITY", 8)
+
+    parked = asyncio.Event()
+    release = asyncio.Event()
+    armed = [True]
+    real_authority = registry._authority_registration
+
+    async def barrier_authority(**kwargs):
+        if armed[0]:
+            armed[0] = False
+            parked.set()
+            await release.wait()
+        return await real_authority(**kwargs)
+
+    monkeypatch.setattr(registry, "_authority_registration", barrier_authority)
+
+    first = asyncio.create_task(
+        registry.handle_p3_progress_activate(
+            params=_progress_params(generation=first_generation),
+            request_id=f"request-race-{label}-first",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    await parked.wait()
+    # The first request already read the fence and is parked inside the
+    # critical section, holding the registry lock.
+    authority_calls = len(p3.authority_calls)
+    subscriptions = len(p3.subscription_calls)
+    second = asyncio.create_task(
+        registry.handle_p3_progress_activate(
+            params=_progress_params(generation=second_generation),
+            request_id=f"request-race-{label}-second",
+            session_id="session-product",
+            channel_id="web",
+        )
+    )
+    for _ in range(8):
+        await asyncio.sleep(0)
+    # The interleaving is real and observed, not assumed: the second request
+    # cannot resolve authority or allocate anything while the first holds the
+    # lock, so the release below is what orders them.
+    assert registry._lock.locked() is True
+    assert second.done() is False
+    assert len(p3.authority_calls) == authority_calls
+    assert len(p3.subscription_calls) == subscriptions
+
+    release.set()
+    first_result = await first
+    second_result = await second
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    stale_result = first_result if first_generation == 5 else second_result
+    winner_result = second_result if first_generation == 5 else first_result
+    assert winner_result.ok is True
+    winner_payload = cast(Mapping[str, object], winner_result.payload["result"])
+    assert winner_payload["generation"] == 6
+    # The superseded generation is refused in both orderings, and only the
+    # winner ever reached a subscription.
+    assert stale_result.ok is False
+    stale_error = cast(dict, stale_result.payload["error"])
+    assert stale_error["reason"] == "TASK_PROGRESS_STALE_GENERATION"
+    assert stale_error["code"] == ErrorCode.CONFLICT.value
+    assert len(p3.subscription_calls) == subscriptions + 1
+    assert registry._progress_generations[key] == 6
+    assert registry._progress_routes[key].binding.generation == 6
+    assert manager.agent.calls == 0
+    assert manager.get_calls == []
     await registry.close_active_routes()
 
 
