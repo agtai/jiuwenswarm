@@ -20,6 +20,7 @@ import {
   ProductTextProgressDomAdoptionOwner,
   adoptParsedProductTextProgressEvent,
   parseProductTextProgressEvent,
+  productTextProgressPresentationBinding,
   type ProductTextProgressEvent,
 } from '../../features/live-voice/formal/productTextProgress';
 import {
@@ -6165,6 +6166,7 @@ export function LiveVoiceIntegratedRoutePanelView({
             aria-label={t('liveVoice.integrated.progress.title')}
             data-testid="live-voice-integrated-product-progress"
             data-delivery-id={progress.delivery_id}
+            data-presentation-binding={productTextProgressPresentationBinding(progress)}
             data-session-id={progress.session_id}
             data-subject-id={progress.source_event.scope.subject_id}
             data-project-id={progress.project_id}
@@ -6174,6 +6176,13 @@ export function LiveVoiceIntegratedRoutePanelView({
             data-event-seq={String(progress.source_event.seq)}
             data-generation-id={progress.generation_id}
             data-generation={String(progress.generation)}
+            data-presentation-class={progress.presentation_class}
+            data-response-interaction-id={progress.response_ref.interaction_id}
+            data-response-id={progress.response_ref.response_id}
+            data-response-generation={String(progress.response_ref.response_generation)}
+            data-unit-id={progress.unit_id}
+            data-expected-event-head={String(progress.expected_event_head)}
+            data-result-source-event-id={progress.result_source_event_id ?? ''}
           >
             <strong>{t('liveVoice.integrated.progress.title')}</strong>
             <span className="live-voice-integrated__progress-note">{t('liveVoice.integrated.progress.disclosure')}</span>

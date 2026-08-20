@@ -175,6 +175,15 @@ function productProgressForTaskEvent(event, { sourceOutcome = event.outcome, pro
     generation_id: 'generation-1',
     generation: 1,
     evidence_id: `evidence-${event.seq}`,
+    presentation_class: 'text',
+    response_ref: {
+      interaction_id: 'interaction-progress-1',
+      response_id: `response-progress-${event.seq}`,
+      response_generation: 1,
+    },
+    unit_id: `unit-progress-${event.seq}`,
+    expected_event_head: event.seq,
+    result_source_event_id: sourceOutcome === 'completed' ? event.source_event_id : null,
     source_event: {
       event_id: event.event_id,
       event_type: event.event_type,
@@ -301,6 +310,15 @@ test('route panel renders only a validated authenticated text progress fact', as
     generation_id: 'web-generation-1',
     generation: 2,
     evidence_id: 'evidence-product-1',
+    presentation_class: 'text',
+    response_ref: {
+      interaction_id: 'interaction-product-1',
+      response_id: 'response-product-1',
+      response_generation: 2,
+    },
+    unit_id: 'unit-product-1',
+    expected_event_head: 11,
+    result_source_event_id: null,
     source_event: {
       event_id: 'source-product-1',
       event_type: 'task.running',

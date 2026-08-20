@@ -42,7 +42,47 @@ export interface ProductTextProgressEvent {
   readonly source_event: ProductTextProgressEnvelope;
   readonly progress_event: ProductTextProgressEnvelope;
   readonly evidence_id: string;
+  readonly presentation_class: 'text';
+  readonly response_ref: Readonly<{
+    interaction_id: string;
+    response_id: string;
+    response_generation: number;
+  }>;
+  readonly unit_id: string;
+  readonly expected_event_head: number;
+  readonly result_source_event_id: string | null;
   readonly state: string;
+}
+
+const PRODUCT_PROGRESS_KEYS = Object.freeze([
+  'correlation_id',
+  'delivery_id',
+  'delivery_mode',
+  'effective_origin_kind',
+  'event_type',
+  'evidence_id',
+  'expected_event_head',
+  'fallback_reason',
+  'generation',
+  'generation_id',
+  'generation_kind',
+  'origin_id',
+  'origin_kind',
+  'presentation_class',
+  'progress_event',
+  'project_id',
+  'requested_origin_kind',
+  'response_ref',
+  'result_source_event_id',
+  'session_id',
+  'source_event',
+  'task_id',
+  'unit_id',
+]);
+
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 function objectValue(value: unknown): Record<string, unknown> | null {
@@ -87,12 +127,41 @@ function sameScope(left: ProductTextProgressScope, right: ProductTextProgressSco
 function parseEnvelope(value: unknown): ProductTextProgressEnvelope | null {
   const raw = objectValue(value);
   if (!raw) return null;
+  const envelopeKeys = Object.keys(raw).sort();
+  if (
+    ![
+      [
+        'causation_id',
+        'correlation_id',
+        'event_id',
+        'event_type',
+        'payload',
+        'scope',
+        'seq',
+        'stream_ref',
+      ],
+      [
+        'causation_id',
+        'correlation_id',
+        'event_id',
+        'event_type',
+        'extensions',
+        'payload',
+        'scope',
+        'seq',
+        'stream_ref',
+      ],
+    ].some(expected => expected.length === envelopeKeys.length && expected.every((key, index) => key === envelopeKeys[index]))
+  ) {
+    return null;
+  }
   const eventId = textValue(raw.event_id);
   const eventType = textValue(raw.event_type);
   const seq = uintValue(raw.seq);
   const correlationId = textValue(raw.correlation_id);
   const causationId = raw.causation_id === null ? null : textValue(raw.causation_id);
   const streamRef = objectValue(raw.stream_ref);
+  if (!streamRef || !hasExactKeys(streamRef, ['id', 'kind'])) return null;
   const streamKind = textValue(streamRef?.kind);
   const streamId = textValue(streamRef?.id);
   const scope = parseScope(raw.scope);
@@ -125,7 +194,7 @@ function parseEnvelope(value: unknown): ProductTextProgressEnvelope | null {
 
 export function parseProductTextProgressEvent(value: unknown): ProductTextProgressEvent | null {
   const raw = objectValue(value);
-  if (!raw || raw.event_type !== PRODUCT_TEXT_PROGRESS_EVENT) return null;
+  if (!raw || raw.event_type !== PRODUCT_TEXT_PROGRESS_EVENT || !hasExactKeys(raw, PRODUCT_PROGRESS_KEYS)) return null;
   const sessionId = textValue(raw.session_id);
   const deliveryId = textValue(raw.delivery_id);
   const taskId = textValue(raw.task_id);
@@ -141,6 +210,15 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
   const generationId = textValue(raw.generation_id);
   const generation = uintValue(raw.generation);
   const evidenceId = textValue(raw.evidence_id);
+  const presentationClass = raw.presentation_class;
+  const responseRef = objectValue(raw.response_ref);
+  if (!responseRef || !hasExactKeys(responseRef, ['interaction_id', 'response_generation', 'response_id'])) return null;
+  const responseInteractionId = textValue(responseRef.interaction_id);
+  const responseId = textValue(responseRef.response_id);
+  const responseGeneration = uintValue(responseRef.response_generation);
+  const unitId = textValue(raw.unit_id);
+  const expectedEventHead = uintValue(raw.expected_event_head);
+  const resultSourceEventId = raw.result_source_event_id === null ? null : textValue(raw.result_source_event_id);
   const sourceEvent = parseEnvelope(raw.source_event);
   const progressEvent = parseEnvelope(raw.progress_event);
   const sourceExtensions = objectValue(sourceEvent?.raw.extensions);
@@ -152,7 +230,28 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
   const progressPayload = progressEvent?.payload;
   const workRef = objectValue(progressPayload?.work_ref);
   const state = textValue(progressPayload?.state);
+  const sourceState = textValue(sourceEvent?.payload.state);
+  const sourceOutcome =
+    sourceEvent?.payload.outcome === null || sourceEvent?.payload.outcome === undefined
+      ? null
+      : textValue(sourceEvent.payload.outcome);
+  const progressOutcome =
+    progressPayload?.outcome === null || progressPayload?.outcome === undefined
+      ? null
+      : textValue(progressPayload.outcome);
   const payloadSeq = uintValue(progressPayload?.seq);
+  const terminal = sourceEvent?.event_type === 'task.terminal';
+  const completed = terminal && sourceOutcome === 'completed';
+  const terminalOutcomeLegal =
+    sourceOutcome === 'completed' ||
+    sourceOutcome === 'failed' ||
+    sourceOutcome === 'cancelled' ||
+    sourceOutcome === 'interrupted' ||
+    sourceOutcome === 'unknown';
+  const resultBindingLegal = completed
+    ? resultSourceEventId !== null &&
+      textValue(persistentSourceEventId) === resultSourceEventId
+    : resultSourceEventId === null;
   if (
     !sessionId ||
     !deliveryId ||
@@ -175,9 +274,22 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
     generation === null ||
     generation === 0 ||
     !evidenceId ||
+    presentationClass !== 'text' ||
+    !responseInteractionId ||
+    !responseId ||
+    responseGeneration === null ||
+    !unitId ||
+    expectedEventHead === null ||
+    expectedEventHead < sourceEvent?.seq ||
+    (raw.result_source_event_id !== null && !resultSourceEventId) ||
     !sourceEvent ||
     !progressEvent ||
     !state ||
+    !sourceState ||
+    sourceState !== state ||
+    (terminal && (state !== 'terminal' || !terminalOutcomeLegal || progressOutcome !== sourceOutcome)) ||
+    (!terminal && (state === 'terminal' || sourceOutcome !== null || progressOutcome !== null)) ||
+    !resultBindingLegal ||
     payloadSeq === null ||
     sourceEvent.stream_ref.kind !== 'task' ||
     sourceEvent.stream_ref.id !== taskId ||
@@ -219,7 +331,55 @@ export function parseProductTextProgressEvent(value: unknown): ProductTextProgre
     source_event: sourceEvent,
     progress_event: progressEvent,
     evidence_id: evidenceId,
+    presentation_class: presentationClass,
+    response_ref: Object.freeze({
+      interaction_id: responseInteractionId,
+      response_id: responseId,
+      response_generation: responseGeneration,
+    }),
+    unit_id: unitId,
+    expected_event_head: expectedEventHead,
+    result_source_event_id: resultSourceEventId,
     state,
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`)
+    .join(',')}}`;
+}
+
+/** Exact immutable tuple placed in the committed DOM and echoed in its ACK. */
+export function productTextProgressPresentationBinding(event: Readonly<ProductTextProgressEvent>): string {
+  return canonicalJson({
+    correlation_id: event.correlation_id,
+    delivery_id: event.delivery_id,
+    delivery_mode: event.delivery_mode,
+    effective_origin_kind: event.effective_origin_kind,
+    evidence_id: event.evidence_id,
+    expected_event_head: event.expected_event_head,
+    fallback_reason: event.fallback_reason,
+    generation: event.generation,
+    generation_id: event.generation_id,
+    generation_kind: event.generation_kind,
+    origin_id: event.origin_id,
+    origin_kind: event.origin_kind,
+    presentation_class: event.presentation_class,
+    progress_event: event.progress_event.raw,
+    project_id: event.project_id,
+    requested_origin_kind: event.requested_origin_kind,
+    response_ref: event.response_ref,
+    result_source_event_id: event.result_source_event_id,
+    session_id: event.session_id,
+    source_event: event.source_event.raw,
+    state: event.state,
+    task_id: event.task_id,
+    unit_id: event.unit_id,
   });
 }
 
@@ -275,6 +435,12 @@ export interface ProductTextProgressDeliveryAck {
   readonly progress_event_id: string;
   readonly seq: number;
   readonly evidence_id: string;
+  readonly presentation_class: 'text';
+  readonly response_ref: ProductTextProgressEvent['response_ref'];
+  readonly unit_id: string;
+  readonly expected_event_head: number;
+  readonly result_source_event_id: string | null;
+  readonly presentation_binding: string;
 }
 
 export function createProductTextProgressDeliveryAck(event: Readonly<ProductTextProgressEvent>): ProductTextProgressDeliveryAck {
@@ -290,6 +456,12 @@ export function createProductTextProgressDeliveryAck(event: Readonly<ProductText
     progress_event_id: event.progress_event.event_id,
     seq: event.source_event.seq,
     evidence_id: event.evidence_id,
+    presentation_class: event.presentation_class,
+    response_ref: event.response_ref,
+    unit_id: event.unit_id,
+    expected_event_head: event.expected_event_head,
+    result_source_event_id: event.result_source_event_id,
+    presentation_binding: productTextProgressPresentationBinding(event),
   });
 }
 
@@ -325,7 +497,15 @@ function sameDeliveryAck(left: Readonly<ProductTextProgressDeliveryAck>, right: 
     left.source_event_id === right.source_event_id &&
     left.progress_event_id === right.progress_event_id &&
     left.seq === right.seq &&
-    left.evidence_id === right.evidence_id
+    left.evidence_id === right.evidence_id &&
+    left.presentation_class === right.presentation_class &&
+    left.response_ref.interaction_id === right.response_ref.interaction_id &&
+    left.response_ref.response_id === right.response_ref.response_id &&
+    left.response_ref.response_generation === right.response_ref.response_generation &&
+    left.unit_id === right.unit_id &&
+    left.expected_event_head === right.expected_event_head &&
+    left.result_source_event_id === right.result_source_event_id &&
+    left.presentation_binding === right.presentation_binding
   );
 }
 
@@ -333,6 +513,7 @@ function requireAckResponse(value: unknown, retained: RetainedDeliveryAck): void
   const ack = retained.ack;
   const payload = objectValue(value);
   const result = objectValue(payload?.result);
+  const responseRef = objectValue(result?.response_ref);
   if (
     payload?.ok !== true ||
     result?.status !== 'acknowledged' ||
@@ -348,6 +529,14 @@ function requireAckResponse(value: unknown, retained: RetainedDeliveryAck): void
     result.progress_event_id !== ack.progress_event_id ||
     result.seq !== ack.seq ||
     result.evidence_id !== ack.evidence_id ||
+    result.presentation_class !== ack.presentation_class ||
+    responseRef?.interaction_id !== ack.response_ref.interaction_id ||
+    responseRef?.response_id !== ack.response_ref.response_id ||
+    responseRef?.response_generation !== ack.response_ref.response_generation ||
+    result.unit_id !== ack.unit_id ||
+    result.expected_event_head !== ack.expected_event_head ||
+    result.result_source_event_id !== ack.result_source_event_id ||
+    result.presentation_binding !== ack.presentation_binding ||
     result.acknowledgement !== 'web_ui_text_consumed' ||
     typeof result.replayed !== 'boolean'
   ) {
@@ -517,6 +706,7 @@ export class ProductTextProgressDomAdoptionOwner {
   ): ProductTextProgressAckSnapshot | null {
     if (!node || node.isConnected !== true) return null;
     const expected: Readonly<Record<string, string>> = {
+      'data-presentation-binding': productTextProgressPresentationBinding(event),
       'data-delivery-id': event.delivery_id,
       'data-session-id': event.session_id,
       'data-subject-id': event.source_event.scope.subject_id,
@@ -527,6 +717,13 @@ export class ProductTextProgressDomAdoptionOwner {
       'data-event-seq': String(event.source_event.seq),
       'data-generation-id': event.generation_id,
       'data-generation': String(event.generation),
+      'data-presentation-class': event.presentation_class,
+      'data-response-interaction-id': event.response_ref.interaction_id,
+      'data-response-id': event.response_ref.response_id,
+      'data-response-generation': String(event.response_ref.response_generation),
+      'data-unit-id': event.unit_id,
+      'data-expected-event-head': String(event.expected_event_head),
+      'data-result-source-event-id': event.result_source_event_id ?? '',
     };
     for (const [name, value] of Object.entries(expected)) {
       if (node.getAttribute(name) !== value) {

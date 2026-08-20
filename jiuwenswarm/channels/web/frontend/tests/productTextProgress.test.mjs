@@ -8,6 +8,7 @@ import {
   parseProductTextProgressEvent,
   ProductTextProgressAckOwner,
   ProductTextProgressDomAdoptionOwner,
+  productTextProgressPresentationBinding,
 } from '../node_modules/.cache/live-voice-integrated-web/features/live-voice/formal/productTextProgress.js';
 
 function progressEvent(overrides = {}) {
@@ -17,6 +18,11 @@ function progressEvent(overrides = {}) {
   const correlationId = overrides.correlation_id ?? 'correlation-1';
   const seq = overrides.seq ?? 7;
   const attemptId = overrides.attempt_id ?? 'attempt-1';
+  const eventType = overrides.event_type ?? 'task.running';
+  const state = overrides.state ?? 'running';
+  const outcome = overrides.outcome ?? null;
+  const persistentSourceEventId =
+    overrides.persistent_source_event_id ?? (outcome === 'completed' ? `executor-${seq}` : null);
   const sourceId = `source-${seq}`;
   const scope = {
     subject_id: overrides.subject_id ?? 'principal-1',
@@ -41,22 +47,36 @@ function progressEvent(overrides = {}) {
     generation_id: 'web-generation-1',
     generation: overrides.generation ?? 1,
     evidence_id: `evidence-${seq}`,
+    presentation_class: 'text',
+    response_ref: {
+      interaction_id: 'interaction-progress-1',
+      response_id: `response-progress-${seq}`,
+      response_generation: overrides.response_generation ?? 1,
+    },
+    unit_id: `unit-progress-${seq}`,
+    expected_event_head: overrides.expected_event_head ?? seq,
+    result_source_event_id:
+      overrides.result_source_event_id === undefined
+        ? outcome === 'completed'
+          ? persistentSourceEventId
+          : null
+        : overrides.result_source_event_id,
     source_event: {
       event_id: sourceId,
-      event_type: 'task.running',
+      event_type: eventType,
       seq,
       correlation_id: correlationId,
       causation_id: 'cause-1',
       stream_ref: { kind: 'task', id: taskId },
       scope: { ...scope },
-      payload: { state: 'running' },
+      payload: outcome === null ? { state } : { state, outcome },
       extensions: {
         'jiuwenswarm.task_progress_return': {
           persistent_event_seq: seq,
-          persistent_event_type: 'task.running',
+          persistent_event_type: eventType,
           persistent_event_producer: 'task_core',
           persistent_attempt_id: attemptId,
-          persistent_source_event_id: null,
+          persistent_source_event_id: persistentSourceEventId,
         },
       },
     },
@@ -71,7 +91,8 @@ function progressEvent(overrides = {}) {
       payload: {
         work_ref: { kind: 'task', id: taskId },
         seq,
-        state: overrides.state ?? 'running',
+        state,
+        ...(outcome === null ? {} : { outcome }),
       },
     },
   };
@@ -92,6 +113,7 @@ test('DOM adoption owner ACKs only an exact connected rendered delivery', () => 
     isConnected: true,
     getAttribute(name) {
       return {
+        'data-presentation-binding': productTextProgressPresentationBinding(parsed),
         'data-delivery-id': parsed.delivery_id,
         'data-session-id': parsed.session_id,
         'data-subject-id': parsed.source_event.scope.subject_id,
@@ -102,6 +124,13 @@ test('DOM adoption owner ACKs only an exact connected rendered delivery', () => 
         'data-event-seq': String(parsed.source_event.seq),
         'data-generation-id': parsed.generation_id,
         'data-generation': String(parsed.generation),
+        'data-presentation-class': parsed.presentation_class,
+        'data-response-interaction-id': parsed.response_ref.interaction_id,
+        'data-response-id': parsed.response_ref.response_id,
+        'data-response-generation': String(parsed.response_ref.response_generation),
+        'data-unit-id': parsed.unit_id,
+        'data-expected-event-head': String(parsed.expected_event_head),
+        'data-result-source-event-id': parsed.result_source_event_id ?? '',
       }[name] ?? null;
     },
   };
@@ -110,6 +139,15 @@ test('DOM adoption owner ACKs only an exact connected rendered delivery', () => 
   assert.deepEqual(retained, []);
   assert.throws(
     () => owner.adopt(parsed, { ...node, getAttribute: name => (name === 'data-task-id' ? 'task-foreign' : node.getAttribute(name)) }),
+    /DOM presentation binding mismatch/,
+  );
+  const changedEvidenceRaw = progressEvent();
+  changedEvidenceRaw.source_event.payload.state = 'waiting';
+  changedEvidenceRaw.progress_event.payload.state = 'waiting';
+  const changedEvidence = parseProductTextProgressEvent(changedEvidenceRaw);
+  assert.notEqual(changedEvidence, null);
+  assert.throws(
+    () => owner.adopt(changedEvidence, node),
     /DOM presentation binding mismatch/,
   );
   assert.deepEqual(retained, []);
@@ -152,6 +190,16 @@ test('creates an exact credential-free Web UI delivery acknowledgement', () => {
     progress_event_id: 'progress-7',
     seq: 7,
     evidence_id: 'evidence-7',
+    presentation_class: 'text',
+    response_ref: {
+      interaction_id: 'interaction-progress-1',
+      response_id: 'response-progress-7',
+      response_generation: 1,
+    },
+    unit_id: 'unit-progress-7',
+    expected_event_head: 7,
+    result_source_event_id: null,
+    presentation_binding: createProductTextProgressDeliveryAck(parsed).presentation_binding,
   });
   assert.equal('auth_token' in createProductTextProgressDeliveryAck(parsed), false);
 });
@@ -192,6 +240,68 @@ test('rejects correlation, task, canonical scope, and causation mismatches', () 
     const event = progressEvent();
     mutate(event);
     assert.equal(parseProductTextProgressEvent(event), null);
+  }
+});
+
+test('rejects every unknown top-level or envelope key', () => {
+  for (const mutate of [
+    event => {
+      event.unknown = true;
+    },
+    event => {
+      event.source_event.unknown = true;
+    },
+    event => {
+      event.progress_event.unknown = true;
+    },
+    event => {
+      event.response_ref.unknown = true;
+    },
+    event => {
+      event.source_event.stream_ref.unknown = true;
+    },
+  ]) {
+    const event = progressEvent();
+    mutate(event);
+    assert.equal(parseProductTextProgressEvent(event), null);
+  }
+});
+
+test('accepts only the exact legal terminal result binding', () => {
+  const completed = progressEvent({
+    event_type: 'task.terminal',
+    state: 'terminal',
+    outcome: 'completed',
+  });
+  assert.notEqual(parseProductTextProgressEvent(completed), null);
+  for (const mutate of [
+    event => {
+      event.result_source_event_id = null;
+    },
+    event => {
+      event.result_source_event_id = 'executor-foreign';
+    },
+    event => {
+      event.progress_event.payload.outcome = 'failed';
+    },
+    event => {
+      event.source_event.payload.state = 'running';
+    },
+  ]) {
+    const event = structuredClone(completed);
+    mutate(event);
+    assert.equal(parseProductTextProgressEvent(event), null);
+  }
+
+  for (const outcome of ['failed', 'cancelled', 'interrupted', 'unknown']) {
+    const legal = progressEvent({
+      event_type: 'task.terminal',
+      state: 'terminal',
+      outcome,
+    });
+    assert.notEqual(parseProductTextProgressEvent(legal), null);
+    legal.result_source_event_id = `forged-result-${outcome}`;
+    assert.equal(parseProductTextProgressEvent(legal), null);
   }
 });
 

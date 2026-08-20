@@ -1039,6 +1039,15 @@ function mountedLifecycleProgress(
     generation_id: activation.generation_id,
     generation: activation.generation,
     evidence_id: `mounted-evidence-${state}-${seq}-${outcome ?? 'none'}`,
+    presentation_class: 'text',
+    response_ref: {
+      interaction_id: `mounted-interaction-${taskId}`,
+      response_id: `mounted-response-${taskId}-${seq}`,
+      response_generation: activation.generation,
+    },
+    unit_id: `mounted-unit-${taskId}-${seq}`,
+    expected_event_head: seq,
+    result_source_event_id: outcome === 'completed' ? `executor-a:${seq}` : null,
     source_event: {
       event_id: sourceEventId,
       event_type: eventType,

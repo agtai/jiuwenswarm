@@ -16,7 +16,6 @@ from jiuwenswarm.common.schema.live_voice_contract_v2 import (
     Assurance,
     CommandEnvelope,
     ErrorCode,
-    ResponseFence,
     ResponseRef,
     ResultEnvelope,
     ScopeRef,
@@ -519,6 +518,49 @@ class PresentationLedger:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskPresentationRuntimeReceipt:
+    """Runtime-owned proof for one exact response-generation phase."""
+
+    response_ref: ResponseRef
+    reservation_id: str
+    phase: str
+    active: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.response_ref, ResponseRef):
+            raise TaskPresentationViolation(
+                "INVALID_RUNTIME_PRESENTATION_RECEIPT",
+                "Runtime receipt requires an exact response tuple",
+            )
+        if type(self.reservation_id) is not str or not self.reservation_id.strip():
+            raise TaskPresentationViolation(
+                "INVALID_RUNTIME_PRESENTATION_RECEIPT",
+                "Runtime receipt requires an exact reservation identity",
+            )
+        if self.phase not in {
+            "reserve",
+            "text_adopt",
+            "voice_presented",
+            "consume",
+            "close",
+        }:
+            raise TaskPresentationViolation(
+                "INVALID_RUNTIME_PRESENTATION_RECEIPT",
+                "Runtime receipt phase is not closed",
+            )
+        if type(self.active) is not bool:
+            raise TaskPresentationViolation(
+                "INVALID_RUNTIME_PRESENTATION_RECEIPT",
+                "Runtime receipt active fact must be exact",
+            )
+
+
+TaskPresentationRuntimeAuthorityPort = Callable[
+    [ResponseRef, str | None, str], TaskPresentationRuntimeReceipt
+]
+
+
+@dataclass(frozen=True, slots=True)
 class TaskPresentationDelivery:
     """One ephemeral presentation attempt over a frozen durable unread head."""
 
@@ -531,6 +573,7 @@ class TaskPresentationDelivery:
     expected_event_head: int
     result_source_event_id: str | None
     response_ref: ResponseRef
+    runtime_reservation_id: str
     delivery_id: str
     unit_id: str
 
@@ -554,6 +597,7 @@ class TaskPresentationDelivery:
             "task_id",
             "attempt_id",
             "event_id",
+            "runtime_reservation_id",
             "delivery_id",
             "unit_id",
         ):
@@ -647,12 +691,31 @@ class TaskPresentationConsumptionOwner:
     real Web or Runtime presentation owner supplies an exact accepted ACK.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        runtime_authority_port: TaskPresentationRuntimeAuthorityPort,
+        *,
+        capacity: int = 128,
+    ) -> None:
+        if not callable(runtime_authority_port):
+            raise TaskPresentationViolation(
+                "RUNTIME_PRESENTATION_AUTHORITY_UNAVAILABLE",
+                "presentation consumption requires Runtime's response authority Port",
+            )
+        if type(capacity) is not int or capacity <= 0 or capacity > MAX_SAFE_INTEGER:
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_CAPACITY",
+                "presentation delivery capacity must be a positive safe integer",
+            )
         self._lock = threading.RLock()
-        self._responses = ResponseFence()
+        self._runtime_authority_port = runtime_authority_port
+        self._capacity = capacity
         self._deliveries: dict[str, TaskPresentationDelivery] = {}
         self._text_acks: dict[str, TextPresentationAdoptionAck] = {}
         self._voice_acks: set[str] = set()
+        self._consume_bindings: dict[str, bytes] = {}
+        self._pending_reservations: dict[ResponseRef, int] = {}
+        self._closed_reservations: set[tuple[ResponseRef, str]] = set()
 
     def reserve_next(
         self,
@@ -726,31 +789,71 @@ class TaskPresentationConsumptionOwner:
                 )
             result_source_event_id = None
 
-        delivery = TaskPresentationDelivery(
-            scope=scope,
-            presentation_class=page.presentation_class,
-            task_id=event.task_id,
-            attempt_id=event.attempt_id,
-            event_id=event.event_id,
-            event_seq=event.seq,
-            expected_event_head=page.head_seq,
-            result_source_event_id=result_source_event_id,
-            response_ref=response_ref,
-            delivery_id=delivery_id,
-            unit_id=unit_id,
-        )
         with self._lock:
-            prior = self._deliveries.get(delivery.delivery_id)
-            if prior is not None:
-                if prior == delivery:
-                    return prior
+            if (
+                len(self._deliveries) + sum(self._pending_reservations.values())
+                >= self._capacity
+                and delivery_id not in self._deliveries
+            ):
                 raise TaskPresentationViolation(
-                    "PRESENTATION_DELIVERY_REWRITE",
-                    "delivery_id cannot be rebound to another attempt",
+                    "PRESENTATION_CAPACITY_EXHAUSTED",
+                    "presentation delivery capacity has no safe eviction",
                 )
-            self._responses.begin(delivery.response_ref)
-            self._deliveries[delivery.delivery_id] = delivery
-        return delivery
+            self._pending_reservations[response_ref] = (
+                self._pending_reservations.get(response_ref, 0) + 1
+            )
+        try:
+            runtime_receipt = self._require_runtime(
+                response_ref,
+                reservation_id=None,
+                phase="reserve",
+                active=True,
+            )
+            delivery = TaskPresentationDelivery(
+                scope=scope,
+                presentation_class=page.presentation_class,
+                task_id=event.task_id,
+                attempt_id=event.attempt_id,
+                event_id=event.event_id,
+                event_seq=event.seq,
+                expected_event_head=page.head_seq,
+                result_source_event_id=result_source_event_id,
+                response_ref=response_ref,
+                runtime_reservation_id=runtime_receipt.reservation_id,
+                delivery_id=delivery_id,
+                unit_id=unit_id,
+            )
+            with self._lock:
+                if (
+                    delivery.response_ref,
+                    delivery.runtime_reservation_id,
+                ) in self._closed_reservations:
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_RESPONSE_CLOSED",
+                        "Runtime closed while the delivery reservation was pending",
+                    )
+                prior = self._deliveries.get(delivery.delivery_id)
+                if prior is not None:
+                    if prior == delivery:
+                        return prior
+                    raise TaskPresentationViolation(
+                        "PRESENTATION_DELIVERY_REWRITE",
+                        "delivery_id cannot be rebound to another attempt",
+                    )
+                self._deliveries[delivery.delivery_id] = delivery
+            return delivery
+        finally:
+            with self._lock:
+                remaining = self._pending_reservations[response_ref] - 1
+                if remaining:
+                    self._pending_reservations[response_ref] = remaining
+                else:
+                    self._pending_reservations.pop(response_ref)
+                    self._closed_reservations = {
+                        key
+                        for key in self._closed_reservations
+                        if key[0] != response_ref
+                    }
 
     def mark_text_adopted(self, ack: TextPresentationAdoptionAck) -> bool:
         with self._lock:
@@ -780,19 +883,24 @@ class TaskPresentationConsumptionOwner:
                     "text adoption ACK does not match its exact delivery tuple",
                 )
 
-            def apply() -> bool:
-                prior = self._text_acks.get(delivery.delivery_id)
-                if prior is not None:
-                    if prior == ack:
-                        return False
-                    raise TaskPresentationViolation(
-                        "TEXT_ADOPTION_ACK_REWRITE",
-                        "accepted text adoption cannot be rewritten",
-                    )
-                self._text_acks[delivery.delivery_id] = ack
-                return True
-
-            return self._responses.apply_if_current(delivery.response_ref, apply)
+        self._require_runtime(
+            delivery.response_ref,
+            reservation_id=delivery.runtime_reservation_id,
+            phase="text_adopt",
+            active=True,
+        )
+        with self._lock:
+            delivery = self._require_delivery(delivery)
+            prior = self._text_acks.get(delivery.delivery_id)
+            if prior is not None:
+                if prior == ack:
+                    return False
+                raise TaskPresentationViolation(
+                    "TEXT_ADOPTION_ACK_REWRITE",
+                    "accepted text adoption cannot be rewritten",
+                )
+            self._text_acks[delivery.delivery_id] = ack
+            return True
 
     async def mark_voice_presented(
         self,
@@ -826,13 +934,19 @@ class TaskPresentationConsumptionOwner:
 
         # Runtime owns TTS, the audio sink, and its presentation ledger.  Never
         # hold this composition lock while asking that external owner to mutate.
+        self._require_runtime(
+            owned.response_ref,
+            reservation_id=owned.runtime_reservation_id,
+            phase="voice_presented",
+            active=True,
+        )
         outcome = await runtime_ack_port(ack)
         from .agent_conversation_runtime import PresentationAckResult
 
         if (
             not isinstance(outcome, PresentationAckResult)
             or outcome.ack != ack
-            or not (outcome.accepted or outcome.replayed)
+            or outcome.accepted is not True
         ):
             raise TaskPresentationViolation(
                 "RUNTIME_PRESENTATION_ACK_REJECTED",
@@ -842,13 +956,10 @@ class TaskPresentationConsumptionOwner:
         with self._lock:
             owned = self._require_delivery(delivery)
 
-            def apply() -> bool:
-                if owned.delivery_id in self._voice_acks:
-                    return False
-                self._voice_acks.add(owned.delivery_id)
-                return True
-
-            return self._responses.apply_if_current(owned.response_ref, apply)
+            if owned.delivery_id in self._voice_acks:
+                return False
+            self._voice_acks.add(owned.delivery_id)
+            return True
 
     def consume(
         self,
@@ -910,6 +1021,29 @@ class TaskPresentationConsumptionOwner:
                     "CONSUMPTION_PORT_UNAVAILABLE",
                     "task.ack_events command Port is unavailable",
                 )
+            fingerprint = command.fingerprint()
+            prior_binding = self._consume_bindings.get(owned.delivery_id)
+            if prior_binding is not None and prior_binding != fingerprint:
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_COMMAND_REWRITE",
+                    "one delivery cannot be rebound to another durable command",
+                )
+        self._require_runtime(
+            owned.response_ref,
+            reservation_id=owned.runtime_reservation_id,
+            phase="consume",
+            active=True,
+        )
+        with self._lock:
+            owned = self._require_delivery(owned)
+            retained_fingerprint = self._consume_bindings.setdefault(
+                owned.delivery_id, fingerprint
+            )
+            if retained_fingerprint != fingerprint:
+                raise TaskPresentationViolation(
+                    "CONSUMPTION_COMMAND_REWRITE",
+                    "one delivery cannot be rebound to another durable command",
+                )
         # Fresh authorization and the sole durable command Port are passed per
         # call.  This owner retains neither credential nor Core/Store authority.
         result = command_port(command, authorization)
@@ -941,6 +1075,43 @@ class TaskPresentationConsumptionOwner:
                 )
         return result
 
+    def close_response(
+        self,
+        response_ref: ResponseRef,
+        *,
+        reservation_id: str,
+        reason: str,
+    ) -> int:
+        """Consume an exact Runtime-owned close and fence every late callback."""
+
+        if type(reason) is not str or not reason.strip():
+            raise TaskPresentationViolation(
+                "INVALID_PRESENTATION_CLOSE",
+                "presentation close requires one exact reason",
+            )
+        self._require_runtime(
+            response_ref,
+            reservation_id=reservation_id,
+            phase="close",
+            active=False,
+        )
+        with self._lock:
+            key = (response_ref, reservation_id)
+            self._closed_reservations.add(key)
+            delivery_ids = tuple(
+                delivery_id
+                for delivery_id, delivery in self._deliveries.items()
+                if (delivery.response_ref, delivery.runtime_reservation_id) == key
+            )
+            for delivery_id in delivery_ids:
+                self._deliveries.pop(delivery_id, None)
+                self._text_acks.pop(delivery_id, None)
+                self._voice_acks.discard(delivery_id)
+                self._consume_bindings.pop(delivery_id, None)
+            if self._pending_reservations.get(response_ref, 0) == 0:
+                self._closed_reservations.discard(key)
+            return len(delivery_ids)
+
     def _require_delivery(
         self, delivery: TaskPresentationDelivery
     ) -> TaskPresentationDelivery:
@@ -956,6 +1127,40 @@ class TaskPresentationConsumptionOwner:
                 "presentation operation does not match an exact reserved delivery",
             )
         return owned
+
+    def _require_runtime(
+        self,
+        response_ref: ResponseRef,
+        *,
+        reservation_id: str | None,
+        phase: str,
+        active: bool,
+    ) -> TaskPresentationRuntimeReceipt:
+        try:
+            receipt = self._runtime_authority_port(
+                response_ref,
+                reservation_id,
+                phase,
+            )
+        except TaskPresentationViolation:
+            raise
+        except BaseException as error:  # noqa: BLE001 -- authority fails closed
+            raise TaskPresentationViolation(
+                "RUNTIME_PRESENTATION_AUTHORITY_REJECTED",
+                "Runtime response authority rejected the presentation phase",
+            ) from error
+        if (
+            not isinstance(receipt, TaskPresentationRuntimeReceipt)
+            or receipt.response_ref != response_ref
+            or receipt.phase != phase
+            or receipt.active is not active
+            or (reservation_id is not None and receipt.reservation_id != reservation_id)
+        ):
+            raise TaskPresentationViolation(
+                "RUNTIME_PRESENTATION_AUTHORITY_MISMATCH",
+                "Runtime receipt does not bind the exact response generation",
+            )
+        return receipt
 
     @staticmethod
     def _validate_timestamp(value: object) -> None:
