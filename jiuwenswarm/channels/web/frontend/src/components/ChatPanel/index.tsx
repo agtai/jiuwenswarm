@@ -1388,6 +1388,17 @@ export function ChatPanel({
       setProductVoiceActive(true);
       void productVoiceControlRef.current?.start();
     },
+    onInterruptAndSpeak: () => {
+      // Formal playout already owns a concurrent successor capture. Stopping
+      // the exact response leaves that capture authoritative for the utterance
+      // the user is about to speak.
+      void productVoiceControlRef.current?.stop();
+    },
+    onStopPlayback: () => {
+      // Stop only the exact foreground response. Live Voice stays enabled and
+      // the formal route continues with its existing successor capture.
+      void productVoiceControlRef.current?.stop();
+    },
   };
   const liveVoiceDemoBar = formalProductVoiceEnabled ? (
     <FormalProductLiveVoiceDemoBar {...formalLiveVoiceDemoProps} surfaceState={productVoiceState} />

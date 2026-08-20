@@ -55,6 +55,9 @@ export interface LiveVoiceDemoBarProps {
   onExit: () => void;
   onPrimaryAction: () => void;
   onRetryListening?: () => void;
+  /** Optional bounded controls for the formal hands-free playout state. */
+  onInterruptAndSpeak?: () => void;
+  onStopPlayback?: () => void;
 }
 
 export type FormalProductTaskPresentationState = Readonly<{
@@ -290,6 +293,8 @@ export function LiveVoiceDemoBar({
   onExit,
   onPrimaryAction,
   onRetryListening,
+  onInterruptAndSpeak,
+  onStopPlayback,
 }: LiveVoiceDemoBarProps) {
   const { t } = useTranslation();
   const unavailableHintId = useId();
@@ -411,6 +416,31 @@ export function LiveVoiceDemoBar({
             <button type="button" className="live-voice-demo__primary" onClick={onRetryListening}>
               <Mic size={17} strokeWidth={2} aria-hidden="true" />
               <span className="live-voice-demo__primary-label">{t('liveVoice.retryListening')}</span>
+            </button>
+          )}
+          {handsFree && status === 'speaking' && onInterruptAndSpeak && (
+            <button
+              type="button"
+              className="live-voice-demo__primary"
+              disabled={!available}
+              aria-label={t('liveVoice.actions.speaking')}
+              onClick={onInterruptAndSpeak}
+            >
+              <Mic size={17} strokeWidth={2} aria-hidden="true" />
+              <span className="live-voice-demo__primary-label">{t('liveVoice.actions.speaking')}</span>
+            </button>
+          )}
+          {handsFree && status === 'speaking' && onStopPlayback && (
+            <button
+              type="button"
+              className="live-voice-demo__stop"
+              disabled={!available}
+              aria-label={t('liveVoice.formal.actions.stopPlayback')}
+              title={t('liveVoice.formal.actions.stopPlayback')}
+              onClick={onStopPlayback}
+            >
+              <Square size={15} strokeWidth={2} aria-hidden="true" />
+              <span className="live-voice-demo__stop-label">{t('liveVoice.formal.actions.stopPlayback')}</span>
             </button>
           )}
           <button type="button" className="live-voice-demo__exit" aria-label={t('liveVoice.exit')} title={t('liveVoice.exit')} onClick={onExit}>
