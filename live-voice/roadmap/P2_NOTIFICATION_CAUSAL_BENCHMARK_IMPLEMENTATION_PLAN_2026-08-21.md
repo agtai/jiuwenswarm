@@ -188,7 +188,7 @@ git commit -m "test(live-voice): add causal P2 notification benchmark"
 - Produces the private A1 report and a documentation status stating whether the
   current-source 10/50/100 curve was established.
 
-- [ ] **Step 1: Verify clean source and create a fresh external target**
+- [x] **Step 1: Verify clean source and create a fresh external target**
 
 Use a detached clean worktree at the exact Task 1 commit. Define the target
 without unresolved placeholders:
@@ -202,7 +202,7 @@ test ! -e "$P2_A1_DIR"
 mkdir -p "$P2_A1_DIR"
 ```
 
-- [ ] **Step 2: Execute A1**
+- [x] **Step 2: Execute A1**
 
 ```bash
 cd jiuwenswarm/channels/web/frontend
@@ -217,7 +217,7 @@ npm run benchmark:live-voice-p2-notifications -- \
 Expected: exit `0`; 15 successful attempts; notification RPC totals are 50,
 250 and 500 for the 10/50/100 rows; every forbidden effect is zero.
 
-- [ ] **Step 3: Validate the artifact independently**
+- [x] **Step 3: Validate the artifact independently**
 
 Load the JSON in a separate Node process and assert exact keys, commit/run
 binding, finite nonnegative samples, nearest-rank p50/p95, expected counts and
@@ -242,13 +242,13 @@ assert.ok(Object.values(report.forbidden_effects).every(value => value === 0));
 NODE
 ```
 
-- [ ] **Step 4: Record only sanitized status**
+- [x] **Step 4: Record only sanitized status**
 
 Update this plan with the exact source SHA, run ID, row p50/p95, RPC counts and
 PASS/FAIL. Keep the raw report external. Do not change `STATUS.md` to claim E2E
 or optimization credit.
 
-- [ ] **Step 5: Commit the A1 status update**
+- [x] **Step 5: Commit the A1 status update**
 
 ```bash
 git add live-voice/roadmap/P2_NOTIFICATION_CAUSAL_BENCHMARK_IMPLEMENTATION_PLAN_2026-08-21.md
@@ -265,3 +265,25 @@ git commit -m "docs(live-voice): record causal P2 A1"
 - No batching optimization is implemented in this packet.
 - A complete scoped Tier-1 diff review closes before A1; the later Tier-3 B
   protocol change requires its own independent module and integration review.
+
+## A1 Result — 2026-08-21
+
+**Status:** `PASS — P2 CAUSAL BASELINE ONLY`
+
+- Exact source: `a9142dd2d9b69000a086d4c6b97c2a711ee4cd9c`
+- Run ID: `p2-a1-20260820T232850Z-a9142dd2d`
+- Controlled delay: 85 ms per notification RPC
+- Attempts: 5 per population, 15/15 successful
+- Forbidden submit, presentation ACK, barge-in, P3, Agent, Tool, Task,
+  history and audio effects: all zero
+
+| Total notifications, final last | RPCs across 5 attempts | p50 | p95 |
+|---:|---:|---:|---:|
+| 10 | 50 | 854.286 ms | 858.858 ms |
+| 50 | 250 | 4,297.356 ms | 4,345.995 ms |
+| 100 | 500 | 8,640.025 ms | 8,698.774 ms |
+
+The curve confirms the expected near-linear one-notification-per-RPC cost on
+the current source. It is the A1 oracle for one P2 transport candidate; it is
+not a physical Live Voice, Browser, first-audible or Production baseline. The
+private 0600 report remains outside the repository.
