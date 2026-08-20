@@ -1016,14 +1016,26 @@ class CriticalTokenSafetyGate:
             if result.clarification is not None:
                 clarification_id = result.clarification.clarification_id
                 record = self._clarifications.pop(clarification_id, None)
-                if record is not None:
+                if (
+                    record is not None
+                    and self._active_clarification.get(
+                        record.requirement.interaction_id
+                    )
+                    == clarification_id
+                ):
                     self._active_clarification.pop(
                         record.requirement.interaction_id, None
                     )
             if result.authorization is not None:
                 authorization_id = result.authorization.authorization_id
                 record = self._authorizations.pop(authorization_id, None)
-                if record is not None:
+                if (
+                    record is not None
+                    and self._active_authorization.get(
+                        record.authorization.interaction_id
+                    )
+                    == authorization_id
+                ):
                     self._active_authorization.pop(
                         record.authorization.interaction_id, None
                     )

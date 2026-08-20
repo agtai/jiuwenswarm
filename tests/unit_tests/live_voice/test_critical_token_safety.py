@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Barrier
 
 import pytest
 
@@ -530,6 +531,130 @@ def test_replacement_fences_old_clarification_and_old_authorization() -> None:
     )
     assert rejected.status is GuardDispatchStatus.REJECTED
     assert rejected.reason == "AUTHORIZATION_REPLACED"
+
+
+def test_releasing_replaced_commit_preserves_successor_authorization_index() -> None:
+    gate = CriticalTokenSafetyGate()
+    old = gate.evaluate(candidate("ordinary question", 1))
+    successor = gate.evaluate(candidate("another ordinary question", 2))
+    unrelated = gate.evaluate(
+        candidate(
+            "unrelated ordinary question",
+            3,
+            interaction="interaction-2",
+            input_generation=1,
+        )
+    )
+    assert old.authorization is not None
+    assert successor.authorization is not None
+    assert unrelated.authorization is not None
+
+    gate.release_commit(old.authorization.commit_id)
+
+    successor_effects = protected_effects()
+    old_effects = protected_effects()
+    unrelated_effects = protected_effects()
+    old_dispatch = gate.dispatch(
+        old.authorization, ProtectedRoute.AGENT, mutate_all(old_effects)
+    )
+    successor_dispatch = gate.dispatch(
+        successor.authorization,
+        ProtectedRoute.AGENT,
+        mutate_all(successor_effects),
+    )
+    successor_replay = gate.dispatch(
+        successor.authorization,
+        ProtectedRoute.AGENT,
+        mutate_all(successor_effects),
+    )
+    unrelated_dispatch = gate.dispatch(
+        unrelated.authorization,
+        ProtectedRoute.AGENT,
+        mutate_all(unrelated_effects),
+    )
+
+    assert old_dispatch.status is GuardDispatchStatus.REJECTED
+    assert old_dispatch.reason == "AUTHORIZATION_NOT_ISSUED"
+    assert old_effects == protected_effects()
+    assert successor_dispatch.status is GuardDispatchStatus.DISPATCHED
+    assert successor_replay.status is GuardDispatchStatus.DUPLICATE
+    assert successor_effects == {key: 1 for key in successor_effects}
+    assert unrelated_dispatch.status is GuardDispatchStatus.DISPATCHED
+    assert unrelated_effects == {key: 1 for key in unrelated_effects}
+
+
+def test_releasing_replaced_commit_preserves_successor_clarification_index() -> None:
+    gate = CriticalTokenSafetyGate()
+    old = gate.evaluate(candidate("run build_task 41", 1, confidence=None))
+    successor = gate.evaluate(candidate("run build_task 42", 2, confidence=None))
+    assert old.clarification is not None
+    assert successor.clarification is not None
+    assert (
+        gate.clarification_state(old.clarification.clarification_id)
+        is ClarificationState.REPLACED
+    )
+
+    gate.release_commit(old.clarification.source_commit_id)
+    closed = gate.close_interaction("interaction-1")
+
+    assert closed.clarification_id == successor.clarification.clarification_id
+    assert closed.clarification_state is ClarificationState.CANCELLED
+    assert (
+        gate.clarification_state(successor.clarification.clarification_id)
+        is ClarificationState.CANCELLED
+    )
+    late = gate.resolve(
+        successor.clarification.clarification_id,
+        candidate(
+            "run build_task 42",
+            3,
+            source=EvidenceSource.EXPLICIT_TEXT,
+            supersedes=successor.clarification.source_commit_id,
+            clarification_id=successor.clarification.clarification_id,
+            input_generation=3,
+        ),
+        confirmed=True,
+    )
+    assert late.decision.reasons == (CriticalTokenReason.INTERACTION_CLOSED,)
+    assert late.authorization is None
+
+
+def test_concurrent_release_and_replacement_linearize_on_successor_authority() -> None:
+    for iteration in range(8):
+        gate = CriticalTokenSafetyGate()
+        old = gate.evaluate(candidate("ordinary question", 1))
+        assert old.authorization is not None
+        barrier = Barrier(2)
+
+        def release_old() -> None:
+            barrier.wait()
+            gate.release_commit(old.authorization.commit_id)
+
+        def issue_successor():
+            barrier.wait()
+            return gate.evaluate(candidate("successor question", 2))
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            release_future = executor.submit(release_old)
+            successor_future = executor.submit(issue_successor)
+            release_future.result()
+            successor = successor_future.result()
+
+        assert successor.authorization is not None
+        effects = protected_effects()
+        dispatched = gate.dispatch(
+            successor.authorization,
+            ProtectedRoute.AGENT,
+            mutate_all(effects),
+        )
+        replay = gate.dispatch(
+            successor.authorization,
+            ProtectedRoute.AGENT,
+            mutate_all(effects),
+        )
+        assert dispatched.status is GuardDispatchStatus.DISPATCHED, iteration
+        assert replay.status is GuardDispatchStatus.DUPLICATE, iteration
+        assert effects == {key: 1 for key in effects}
 
 
 def test_delayed_older_generation_cannot_replace_newer_authorization() -> None:
