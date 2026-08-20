@@ -25,13 +25,40 @@ _ROUTING_KEYS = (
     "correlation_id",
 )
 _MAX_ROUTING_INTEGER_BITS = 4_096
+_WIRE_SEND_ERROR_MESSAGE = "invalid AgentServer wire payload"
+
+
+def _is_exact_utf8_text(value: Any) -> bool:
+    if type(value) is not str:
+        return False
+    failed = False
+    try:
+        str.encode(value, "utf-8")
+    except UnicodeEncodeError:
+        failed = True
+    return not failed
+
+
+def _serialize_wire_payload(wire: dict[str, Any]) -> tuple[str, int]:
+    """Serialize one wire dict or expose a frozen, content-free failure."""
+    failed = False
+    serialized = ""
+    encoded = b""
+    try:
+        serialized = json.dumps(wire, ensure_ascii=False)
+        encoded = serialized.encode("utf-8")
+    except Exception:
+        failed = True
+    if failed:
+        raise ValueError(_WIRE_SEND_ERROR_MESSAGE)
+    return serialized, len(encoded)
 
 
 def _safe_routing_text(value: Any) -> str:
     """Project a routing scalar without invoking subclass hooks."""
     value_type = type(value)
     if value_type is str:
-        return value
+        return value if _is_exact_utf8_text(value) else ""
     if value is None:
         return ""
     if value_type is bool:
@@ -47,8 +74,10 @@ def _safe_routing_text(value: Any) -> str:
 
 def _safe_routing_scalar(value: Any) -> Any:
     value_type = type(value)
-    if value is None or value_type is str or value_type is bool or value_type is float:
+    if value is None or value_type is bool or value_type is float:
         return value
+    if value_type is str:
+        return value if _is_exact_utf8_text(value) else None
     if value_type is int and int.bit_length(value) <= _MAX_ROUTING_INTEGER_BITS:
         return value
     return None
@@ -132,8 +161,7 @@ def _build_oversized_fallback(
 
 async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
     """Send one bounded wire payload, replacing oversized data with an error."""
-    serialized = json.dumps(wire, ensure_ascii=False)
-    actual_bytes = len(serialized.encode("utf-8"))
+    serialized, actual_bytes = _serialize_wire_payload(wire)
     if actual_bytes <= AGENT_WS_SEND_BUDGET_BYTES:
         await ws.send(serialized)
         return True
@@ -148,8 +176,7 @@ async def send_wire_payload(ws: Any, wire: dict[str, Any]) -> bool:
         field_count,
     )
     fallback = _build_oversized_fallback(wire, actual_bytes)
-    fallback_json = json.dumps(fallback, ensure_ascii=False)
-    fallback_bytes = len(fallback_json.encode("utf-8"))
+    fallback_json, fallback_bytes = _serialize_wire_payload(fallback)
     if fallback_bytes > AGENT_WS_SEND_BUDGET_BYTES:
         raise RuntimeError(
             "oversized fallback exceeds WebSocket send budget: "

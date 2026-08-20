@@ -34,6 +34,17 @@ class FakeWebSocket:
         self.closed = True
 
 
+class Utf8EncodingWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_calls = 0
+
+    async def send(self, data: str) -> None:
+        self.send_calls += 1
+        data.encode("utf-8")
+        await super().send(data)
+
+
 class ClosingSendWebSocket:
     async def send(self, data: str) -> None:
         raise ConnectionClosedError(None, None)
@@ -310,7 +321,11 @@ async def test_agent_client_preserves_exact_direct_file_ref_on_public_send(
         channel_id="web",
         session_id="exact-file-ref-session",
         req_method="chat.send",
-        params={"file": file_ref, "content": "ordinary request"},
+        params={
+            "file": file_ref,
+            "content": "ordinary request",
+            "合法键🙂": "合法值杭州",
+        },
         is_stream=is_stream,
     )
     client = AgentClientHarness()
@@ -371,6 +386,7 @@ async def test_agent_client_preserves_exact_direct_file_ref_on_public_send(
         "size": 7,
         "_meta": {"source": "trusted"},
     }
+    assert sent["params"]["合法键🙂"] == "合法值杭州"
     assert envelope.params["file"] is file_ref
     assert file_ref == E2AFileRef(
         uri="file:///safe-attachment.txt",
@@ -482,6 +498,7 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
 
     failures: list[tuple[BaseException, str]] = []
     sent_payloads: list[str] = []
+    utf8_send_calls = 0
 
     # request_id canonicalization must reject scalar subclasses without
     # invoking __str__, encode or any other untrusted hook.
@@ -528,6 +545,41 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
                 await invoke_public_path(client, envelope, is_stream=is_stream)
             )
             sent_payloads.extend(ws.sent_payloads)
+
+    # Exact builtin strings are still invalid wire data when they contain a
+    # lone surrogate. Reject every identity and nested-key/value position
+    # before the real WebSocket UTF-8 sink is entered.
+    for field_name in (
+        "request_id",
+        "channel",
+        "method",
+        "params_key",
+        "params_value",
+    ):
+        for is_stream in (False, True):
+            client = AgentClientHarness()
+            ws = Utf8EncodingWebSocket()
+            client.set_ws_for_test(ws)
+            envelope = e2a_from_agent_fields(
+                request_id=f"surrogate-{field_name}-{is_stream}",
+                channel_id="web",
+                session_id="surrogate-private-session",
+                req_method="chat.send",
+                params={"content": "ordinary-content"},
+                is_stream=is_stream,
+            )
+            private_text = f"sentinel-agent-surrogate-{field_name}\ud800-private"
+            if field_name in {"request_id", "channel", "method"}:
+                setattr(envelope, field_name, private_text)
+            elif field_name == "params_key":
+                envelope.params = {private_text: "ordinary-content"}
+            else:
+                envelope.params = {"private": private_text}
+            failures.append(
+                await invoke_public_path(client, envelope, is_stream=is_stream)
+            )
+            sent_payloads.extend(ws.sent_payloads)
+            utf8_send_calls += ws.send_calls
 
     # Both the unary replay fingerprint and stream send serialization must
     # fail closed for unsupported nested values. A hostile object is never
@@ -593,14 +645,15 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
     caplog.set_level(logging.DEBUG, logger=handler_logger.name)
     try:
         unary_client = AgentClientHarness()
-        unary_ws = FakeWebSocket()
+        unary_ws = Utf8EncodingWebSocket()
         unary_client.set_ws_for_test(unary_ws)
+        unary_private_key = "sentinel-handler-surrogate-key\ud800-private"
         unary_envelope = e2a_from_agent_fields(
             request_id="message-handler-private-unary",
             channel_id="web",
             session_id="message-handler-private-session",
             req_method="chat.send",
-            params={"nested": [{"private": SentinelPrivateNestedValue()}]},
+            params={"nested": [{unary_private_key: "ordinary-content"}]},
             is_stream=False,
         )
         unary_handler = object.__new__(MessageHandler)
@@ -632,16 +685,18 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
         )
         assert published == [{"safe": True}]
         sent_payloads.extend(unary_ws.sent_payloads)
+        utf8_send_calls += unary_ws.send_calls
 
         stream_client = AgentClientHarness()
-        stream_ws = FakeWebSocket()
+        stream_ws = Utf8EncodingWebSocket()
         stream_client.set_ws_for_test(stream_ws)
+        stream_private_value = "sentinel-handler-surrogate-value\udfff-private"
         stream_envelope = e2a_from_agent_fields(
             request_id="message-handler-private-stream",
             channel_id="web",
             session_id="message-handler-private-session",
             req_method="chat.send",
-            params={"nested": [{"private": SentinelHostileNestedValue()}]},
+            params={"nested": [{"private": stream_private_value}]},
             is_stream=True,
         )
         stream_handler = object.__new__(MessageHandler)
@@ -676,6 +731,7 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
             raise AssertionError("expected MessageHandler stream failure")
         failures.append((stream_failure, stream_formatted))
         sent_payloads.extend(stream_ws.sent_payloads)
+        utf8_send_calls += stream_ws.send_calls
     finally:
         handler_logger.removeHandler(caplog.handler)
 
@@ -703,8 +759,11 @@ async def test_agent_client_payload_boundary_rejects_hostile_values_without_leak
         "sentinel-hostile-file-ref-lookup-hook",
         "sentinel-hostile-file-ref-str-hook",
         "sentinel-hostile-file-ref-repr-hook",
+        "sentinel-agent-surrogate",
+        "sentinel-handler-surrogate",
     )
     assert sent_payloads == []
+    assert utf8_send_calls == 0
     assert hooks == []
     assert not [marker for marker in forbidden if marker in diagnostic_material]
 

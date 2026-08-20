@@ -2,6 +2,7 @@ import ast
 import asyncio
 import json
 import logging
+import traceback
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,50 @@ async def test_send_wire_payload_counts_utf8_bytes(monkeypatch):
     assert character_size < 1200 < byte_size
     assert await ws_send.send_wire_payload(ws, wire) is False
     assert len(ws.sent[0].encode("utf-8")) <= 1200
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "private_location", ("request_id", "nested_key", "nested_value")
+)
+async def test_send_wire_payload_rejects_lone_surrogate_with_static_error(
+    private_location,
+    caplog,
+):
+    marker = f"sentinel-direct-ws-surrogate-{private_location}"
+    private_text = f"{marker}\udfff-private"
+    wire = {"request_id": "safe-request", "body": {"result": "ordinary"}}
+    if private_location == "request_id":
+        wire["request_id"] = private_text
+    elif private_location == "nested_key":
+        wire["body"] = {private_text: "ordinary"}
+    else:
+        wire["body"] = {"private": private_text}
+
+    send_logger = logging.getLogger("jiuwenswarm.server.ws_send")
+    consumer_logger = logging.getLogger("tests.direct_ws_surrogate_consumer")
+    for target_logger in (send_logger, consumer_logger):
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
+    ws = FakeWebSocket()
+    try:
+        with pytest.raises(ValueError) as raised:
+            await ws_send.send_wire_payload(ws, wire)
+        formatted = "".join(traceback.format_exception(raised.value))
+        try:
+            raise raised.value
+        except ValueError:
+            consumer_logger.exception("direct ws send rejected")
+    finally:
+        for target_logger in (send_logger, consumer_logger):
+            target_logger.removeHandler(caplog.handler)
+
+    assert raised.value.args == ("invalid AgentServer wire payload",)
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None
+    assert ws.sent == []
+    diagnostics = f"{formatted}\n{caplog.text}"
+    assert marker not in diagnostics
 
 
 @pytest.mark.asyncio

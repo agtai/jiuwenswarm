@@ -99,7 +99,7 @@ def test_exact_output_schema_remains_compatible_on_normal_and_fallback_paths(
     output = OutputSchema(
         type="answer",
         index=0,
-        payload={"output": "ordinary", "result_type": "answer"},
+        payload={"output": "普通🙂", "result_type": "answer"},
     )
     if force_fallback:
 
@@ -140,9 +140,106 @@ def test_exact_output_schema_remains_compatible_on_normal_and_fallback_paths(
         "result": {
             "type": "answer",
             "index": 0,
-            "payload": {"output": "ordinary", "result_type": "answer"},
+            "payload": {"output": "普通🙂", "result_type": "answer"},
         }
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("form", ("unary", "chunk"))
+@pytest.mark.parametrize("force_fallback", (False, True))
+@pytest.mark.parametrize(
+    "private_location",
+    ("request_id", "channel_id", "response_id", "payload_key", "payload_value"),
+)
+async def test_wire_projection_sanitizes_lone_surrogates_before_real_send(
+    form,
+    force_fallback,
+    private_location,
+    monkeypatch,
+    caplog,
+) -> None:
+    marker = f"sentinel-wire-surrogate-{form}-{private_location}"
+    private_text = f"{marker}\ud800-private"
+    request_id = private_text if private_location == "request_id" else "safe-request"
+    channel_id = private_text if private_location == "channel_id" else "safe-channel"
+    response_id = private_text if private_location == "response_id" else "safe-response"
+    if private_location == "payload_key":
+        payload = {private_text: "ordinary"}
+    elif private_location == "payload_value":
+        payload = {"private": private_text}
+    else:
+        payload = {"text": "合法多字节🙂"}
+
+    if force_fallback:
+
+        def fail_conversion(*_args, **_kwargs):
+            raise RuntimeError("forced content-free fallback")
+
+        monkeypatch.setattr(
+            wire_codec,
+            (
+                "e2a_response_from_agent_response"
+                if form == "unary"
+                else "e2a_response_from_agent_chunk"
+            ),
+            fail_conversion,
+        )
+
+    wire_logger = logging.getLogger("jiuwenswarm.common.e2a.wire_codec")
+    send_logger = logging.getLogger("jiuwenswarm.server.ws_send")
+    consumer_logger = logging.getLogger("tests.wire_surrogate_consumer")
+    for target_logger in (wire_logger, send_logger, consumer_logger):
+        target_logger.addHandler(caplog.handler)
+        caplog.set_level(logging.DEBUG, logger=target_logger.name)
+
+    sent: list[str] = []
+
+    class RecordingWebSocket:
+        async def send(self, data: str) -> None:
+            data.encode("utf-8")
+            sent.append(data)
+
+    escaped: BaseException | None = None
+    formatted = ""
+    try:
+        try:
+            if form == "unary":
+                wire = encode_agent_response_for_wire(
+                    AgentResponse(
+                        request_id=request_id,
+                        channel_id=channel_id,
+                        payload=payload,
+                    ),
+                    response_id=response_id,
+                    sequence=7,
+                )
+            else:
+                wire = encode_agent_chunk_for_wire(
+                    AgentResponseChunk(
+                        request_id=request_id,
+                        channel_id=channel_id,
+                        payload=payload,
+                        is_complete=True,
+                    ),
+                    response_id=response_id,
+                    sequence=7,
+                )
+            assert await ws_send.send_wire_payload(RecordingWebSocket(), wire) is True
+        except BaseException as exc:
+            escaped = exc
+            formatted = "".join(traceback.format_exception(exc))
+            consumer_logger.exception("wire surrogate consumer failed")
+    finally:
+        for target_logger in (wire_logger, send_logger, consumer_logger):
+            target_logger.removeHandler(caplog.handler)
+
+    assert escaped is None, formatted
+    assert len(sent) == 1
+    sent[0].encode("utf-8")
+    json.loads(sent[0])
+    diagnostics = f"{formatted}\n{caplog.text}\n{sent[0]}"
+    assert marker not in diagnostics
 
 
 def test_roundtrip_chunk_sentinel_complete() -> None:

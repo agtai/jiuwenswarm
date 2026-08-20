@@ -111,11 +111,25 @@ def _bounded_exact_integer(value: Any) -> int | None:
     return value
 
 
+def _is_exact_utf8_text(value: Any) -> bool:
+    """Check exact builtin text without retaining codec exception content."""
+    if type(value) is not str:
+        return False
+    failed = False
+    try:
+        str.encode(value, "utf-8")
+    except UnicodeEncodeError:
+        failed = True
+    return not failed
+
+
 def _projected_scalar(
     value: Any,
     *,
     budget: _LegacyProjectionBudget,
 ) -> Any:
+    if type(value) is str and not _is_exact_utf8_text(value):
+        return _projected_null(budget)
     try:
         encoded = json.dumps(value, ensure_ascii=False).encode("utf-8")
     except Exception:
@@ -130,9 +144,11 @@ def _projected_null(budget: _LegacyProjectionBudget) -> Any:
     return None if budget.take_bytes(4) else _PROJECTION_EXHAUSTED
 
 
-def _json_object_key_size(value: Any) -> int:
+def _json_object_key_size(value: Any) -> int | None:
     value_type = type(value)
     if value_type is str:
+        if not _is_exact_utf8_text(value):
+            return None
         key_text = value
     elif value is None:
         key_text = "null"
@@ -140,7 +156,13 @@ def _json_object_key_size(value: Any) -> int:
         key_text = "true" if value else "false"
     else:
         key_text = json.dumps(value, ensure_ascii=False)
-    return len(json.dumps(key_text, ensure_ascii=False).encode("utf-8"))
+    failed = False
+    encoded = b""
+    try:
+        encoded = json.dumps(key_text, ensure_ascii=False).encode("utf-8")
+    except Exception:
+        failed = True
+    return None if failed else len(encoded)
 
 
 def _legacy_json_project_inner(
@@ -236,12 +258,13 @@ def _legacy_json_project_inner(
                         continue
                 else:
                     continue
+                key_size = _json_object_key_size(projected_key)
+                if key_size is None:
+                    continue
                 if not budget.take_node():
                     break
                 separator_bytes = 2 if projected else 0
-                if not budget.take_bytes(
-                    separator_bytes + _json_object_key_size(projected_key) + 2
-                ):
+                if not budget.take_bytes(separator_bytes + key_size + 2):
                     break
                 projected_value = _legacy_json_project_inner(
                     nested,
@@ -302,8 +325,10 @@ def _legacy_json_project(
 def _exact_legacy_scalar(value: Any) -> Any:
     """Keep exact JSON scalars and replace subclasses/objects without hooks."""
     value_type = type(value)
-    if value is None or value_type is str or value_type is float or value_type is bool:
+    if value is None or value_type is float or value_type is bool:
         return value
+    if value_type is str:
+        return value if _is_exact_utf8_text(value) else ""
     if type(value) is int:
         bounded = _bounded_exact_integer(value)
         return bounded if bounded is not None else ""
@@ -314,7 +339,7 @@ def _exact_legacy_text(value: Any, *, none_as_empty: bool) -> str:
     """Match legacy builtin-to-text behavior without calling subclass hooks."""
     value_type = type(value)
     if value_type is str:
-        return value
+        return value if _is_exact_utf8_text(value) else ""
     if value is None:
         return "" if none_as_empty else "None"
     if value_type is bool:
@@ -334,7 +359,7 @@ def _exact_legacy_channel_text(value: Any) -> str:
     if value is None:
         return ""
     if value_type is str:
-        return value
+        return value if _is_exact_utf8_text(value) else ""
     if value_type is bool:
         return "True" if value else ""
     if value_type is int:

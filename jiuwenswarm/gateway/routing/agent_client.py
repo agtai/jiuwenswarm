@@ -98,11 +98,25 @@ class _ReceiverFailure:
         self.exc = exc
 
 
+def _is_exact_utf8_text(value: Any) -> bool:
+    """Validate an exact string without retaining the codec failure context."""
+    if type(value) is not str:
+        return False
+    failed = False
+    try:
+        str.encode(value, "utf-8")
+    except UnicodeEncodeError:
+        failed = True
+    return not failed
+
+
 def _wire_request_id_key(request_id: Any) -> str:
     """与 AgentServer 回包 ``request_id`` 对齐：统一为 str，避免 JSON 数字/字符串导致队列键不一致。"""
     if request_id is None:
         return ""
     if type(request_id) is str:
+        if not _is_exact_utf8_text(request_id):
+            raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
         return request_id
     if type(request_id) is bool:
         return "True" if request_id else "False"
@@ -139,12 +153,11 @@ def _validate_exact_wire_json(value: Any) -> None:
             if int.bit_length(current) > _MAX_WIRE_INTEGER_BITS:
                 raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
             continue
-        if (
-            current is None
-            or current_type is str
-            or current_type is float
-            or current_type is bool
-        ):
+        if current_type is str:
+            if not _is_exact_utf8_text(current):
+                raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
+            continue
+        if current is None or current_type is float or current_type is bool:
             continue
         if (
             current_type is not dict
@@ -159,7 +172,7 @@ def _validate_exact_wire_json(value: Any) -> None:
         pending.append((current, True))
         if current_type is dict:
             for key, nested in current.items():
-                if type(key) is not str:
+                if type(key) is not str or not _is_exact_utf8_text(key):
                     raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
                 pending.append((nested, False))
         else:
@@ -207,7 +220,7 @@ def _validate_exact_envelope_params(value: Any) -> None:
         _validate_exact_wire_json(value)
         return
     for key, nested in value.items():
-        if type(key) is not str:
+        if type(key) is not str or not _is_exact_utf8_text(key):
             raise ValueError(_WIRE_REQUEST_ERROR_MESSAGE)
         if type(nested) is E2AFileRef:
             _validate_exact_file_ref(nested)
@@ -516,7 +529,7 @@ def _unary_replay_fingerprint(payload: dict[str, Any]) -> str:
         stable_payload,
         sort_keys=True,
         separators=(",", ":"),
-    ).encode("utf-8", errors="surrogatepass")
+    ).encode("utf-8")
     return hashlib.sha256(canonical_payload).hexdigest()
 
 
@@ -913,15 +926,15 @@ class WebSocketAgentServerClient(AgentServerClient):
             raise RuntimeError("AgentServer WebSocket connection closed") from None
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        (
-            connection_ws,
-            connection_generation,
-        ) = await self._ensure_connected_for_request()
         # 非流式 API 必须与 AgentServer 的 unary 路径一致；忽略信封上误带的 is_stream=True。
         envelope.is_stream = False
         rid = _wire_request_id_key(envelope.request_id)
         payload = _e2a_to_wire(envelope)
         fingerprint = _unary_replay_fingerprint(payload)
+        (
+            connection_ws,
+            connection_generation,
+        ) = await self._ensure_connected_for_request()
         logger.info(
             "[E2A][out][nostream] request_id_ref=%s channel_ref=%s method_ref=%s is_stream=%s",
             _content_hidden_log_ref("request_id", rid),
@@ -1080,13 +1093,13 @@ class WebSocketAgentServerClient(AgentServerClient):
     async def send_request_stream(
         self, envelope: E2AEnvelope
     ) -> AsyncIterator[AgentResponseChunk]:
+        envelope.is_stream = True
+        rid = _wire_request_id_key(envelope.request_id)
+        payload = _e2a_to_wire(envelope)
         (
             connection_ws,
             connection_generation,
         ) = await self._ensure_connected_for_request()
-        envelope.is_stream = True
-        rid = _wire_request_id_key(envelope.request_id)
-        payload = _e2a_to_wire(envelope)
         logger.info(
             "[E2A][out][stream] request_id_ref=%s channel_ref=%s method_ref=%s is_stream=%s",
             _content_hidden_log_ref("request_id", rid),
