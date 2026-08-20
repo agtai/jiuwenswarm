@@ -1163,6 +1163,9 @@ class OpenAIStreamingSpeechProvider:
         self, ref: RecognitionStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
         session = self._require_recognition(ref)
+        if session.terminal:
+            await self._retire_queued_terminal_recognition(session)
+            return
         self._conformance.request_recognition_cancel(ref, reason=reason)
         session.closing = True
         await self._close_socket(session.socket)
@@ -1237,6 +1240,9 @@ class OpenAIStreamingSpeechProvider:
         self, ref: SynthesisStreamRef, *, reason: str = "caller_cancel"
     ) -> None:
         session = self._require_synthesis(ref)
+        if session.terminal:
+            await self._retire_queued_terminal_synthesis(session)
+            return
         self._conformance.request_synthesis_cancel(ref, reason=reason)
         session.closing = True
         if session.stream is not None:
@@ -1611,6 +1617,8 @@ class OpenAIStreamingSpeechProvider:
                 return
             raise
         session.event_seq += 1
+        if kind in {RecognitionEventKind.FINAL, RecognitionEventKind.CANCELLED}:
+            session.terminal = True
         await self._put_bounded(session.events, accepted)
 
     async def _publish_recognition_boundary(
@@ -1865,6 +1873,8 @@ class OpenAIStreamingSpeechProvider:
             raise
         session.event_seq += 1
         session.audio_cursor += sample_count
+        if kind in {SynthesisEventKind.COMPLETED, SynthesisEventKind.CANCELLED}:
+            session.terminal = True
         await self._put_bounded(session.events, accepted)
 
     async def _put_bounded(
@@ -2058,6 +2068,39 @@ class OpenAIStreamingSpeechProvider:
             if self._synthesis.get(key) is session:
                 del self._synthesis[key]
         self._conformance.reap_terminal()
+
+    async def _retire_queued_terminal_recognition(
+        self, session: _RecognitionSession
+    ) -> None:
+        _discard_queued_events(session.events)
+        try:
+            task = session.receive_task
+            if (
+                task is not None
+                and task is not asyncio.current_task()
+                and not task.done()
+            ):
+                await asyncio.shield(task)
+        finally:
+            _discard_queued_events(session.events)
+            session.partial_text = ""
+            await self._retire_recognition(session)
+
+    async def _retire_queued_terminal_synthesis(
+        self, session: _SynthesisSession
+    ) -> None:
+        _discard_queued_events(session.events)
+        try:
+            task = session.task
+            if (
+                task is not None
+                and task is not asyncio.current_task()
+                and not task.done()
+            ):
+                await asyncio.shield(task)
+        finally:
+            _discard_queued_events(session.events)
+            await self._retire_synthesis(session)
 
     async def _emit_failure(
         self,
@@ -2673,6 +2716,14 @@ def _json_object(value: str) -> dict[str, object]:
             "SPEECH_PROVIDER_INVALID_JSON", "speech Provider JSON must be an object"
         )
     return parsed
+
+
+def _discard_queued_events(queue: asyncio.Queue[_QueueValue]) -> None:
+    while True:
+        try:
+            queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return
 
 
 def _wire_json(value: Mapping[str, object]) -> str:
