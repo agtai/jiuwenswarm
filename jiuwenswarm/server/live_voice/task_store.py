@@ -9606,6 +9606,20 @@ class SqliteTaskStore:
             attempt = connection.execute(
                 "SELECT * FROM attempts WHERE attempt_id=?", (item.attempt_id,)
             ).fetchone()
+            current_selection = (
+                None
+                if attempt is None
+                else _stored_record(
+                    "executor selection",
+                    lambda: _selection_from_attempt_row(attempt),
+                )
+            )
+            if current_selection != item.selection:
+                raise FormalTaskViolation(
+                    "EXECUTOR_SELECTION_MISMATCH",
+                    "adjustment result does not match the current Attempt selection",
+                    ErrorCode.PROTOCOL_VIOLATION,
+                )
             if (
                 task["attempt_id"] != item.attempt_id
                 or task["state"] == FormalTaskState.TERMINAL.value

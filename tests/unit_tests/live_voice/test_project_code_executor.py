@@ -11,6 +11,7 @@ import runpy
 import sqlite3
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
@@ -69,6 +70,7 @@ from jiuwenswarm.server.live_voice.project_code_executor import (
     ProjectCodeExecutorAdapter,
     ProjectExecutionBinding,
 )
+from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 from jiuwenswarm.server.runtime.agent_adapter import interface as agent_interface
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 from scripts.live_voice.w2_rehearsal.w2_d069_runtime_diagnostic import (
@@ -514,6 +516,46 @@ def _direct_selection(
         capability_profile_digest=selection.profile_digest,
         execution_requirements_json=selection.requirements.canonical_bytes(),
     )
+
+
+def _foreign_adapter_selection() -> PersistedExecutorSelection:
+    """Return a valid selection which is deliberately not owned by Direct."""
+
+    foreign = replace(
+        DirectProjectCodeExecutorAdapter.capability_profile(),
+        profile_id="other.product-code.d0.v1",
+        adapter_id="other.product-code",
+        adapter_protocol_version="other.product-code.v1",
+    )
+    return _direct_selection(foreign)
+
+
+def _forged_direct_capability_selection() -> PersistedExecutorSelection:
+    """Return a self-consistent Direct identity with capabilities it never emitted."""
+
+    direct = DirectProjectCodeExecutorAdapter.capability_profile()
+    forged = replace(
+        direct,
+        operation_versions=direct.operation_versions + (("pause", "v1"),),
+        enforcement_facts=direct.enforcement_facts + ("control.pause",),
+    )
+    return _direct_selection(forged)
+
+
+def _store_effect_counts(database: Path) -> tuple[int, ...]:
+    """Count every Store surface forbidden to a rejected Direct control."""
+
+    with sqlite3.connect(database) as connection:
+        return tuple(
+            int(connection.execute(statement).fetchone()[0])
+            for statement in (
+                "SELECT COUNT(*) FROM tasks",
+                "SELECT COUNT(*) FROM attempts",
+                "SELECT COUNT(*) FROM task_events",
+                "SELECT COUNT(*) FROM executor_events",
+                "SELECT COUNT(*) FROM outbox",
+            )
+        )
 
 
 def _adjustment_item(
@@ -1240,6 +1282,121 @@ async def test_selected_direct_status_reports_profile_drift_under_old_binding(
         )
         assert adapter._journal.get(item.attempt_id) is not None
         assert _git(project, "status", "--short") == before_status
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_selection",
+    (_foreign_adapter_selection, _forged_direct_capability_selection),
+    ids=("foreign-adapter", "forged-direct-capability"),
+)
+async def test_selected_direct_cancel_rejects_foreign_adapter_before_any_effect(
+    tmp_path: Path,
+    invalid_selection: Callable[[], PersistedExecutorSelection],
+) -> None:
+    """Catches a self-consistent foreign selection mutating Direct cancel truth."""
+
+    project = tmp_path / "foreign-selected-cancel"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project, behavior="wait")
+    resolver = _Resolver(_direct_binding(project, executor))
+    database = tmp_path / "foreign-selected-cancel.sqlite3"
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+    )
+    SqliteTaskStore(database)
+    dispatch = replace(_item(project), selection=_direct_selection())
+
+    try:
+        await adapter.dispatch(dispatch)
+        await asyncio.wait_for(executor.started.wait(), timeout=2)
+        cancel = replace(
+            _item(
+                project,
+                kind=OutboxKind.ATTEMPT_CANCEL,
+                source_seq=1,
+            ),
+            executor_ref="d0-project:attempt-1",
+            selection=invalid_selection(),
+        )
+        before_record = adapter._journal.get("attempt-1")
+        before_requests = tuple(executor.requests)
+        before_resolves = tuple(resolver.calls)
+        before_status = _git(project, "status", "--short")
+        before_database = _journal_dump(adapter)
+        before_store = _store_effect_counts(database)
+        assert before_store == (0, 0, 0, 0, 0)
+
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await adapter.cancel(cancel)
+
+        assert rejected.value.reason == "EXECUTOR_SELECTION_ADAPTER_MISMATCH"
+        assert rejected.value.code is ErrorCode.PROTOCOL_VIOLATION
+        assert adapter._journal.get("attempt-1") == before_record
+        assert tuple(executor.requests) == before_requests
+        assert tuple(resolver.calls) == before_resolves
+        assert adapter._running["attempt-1"].done() is False
+        assert adapter._journal.all_adjustments("attempt-1") == ()
+        assert _git(project, "status", "--short") == before_status
+        assert _journal_dump(adapter) == before_database
+        assert _store_effect_counts(database) == before_store
+    finally:
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_direct_adjust_rejects_foreign_adapter_before_any_effect(
+    tmp_path: Path,
+) -> None:
+    """Catches a self-consistent foreign selection writing Direct adjustment truth."""
+
+    project = tmp_path / "foreign-selected-adjust"
+    _git_project(project)
+    executor = _DirectProjectExecutor(project)
+    resolver = _Resolver(_direct_binding(project, executor))
+    database = tmp_path / "foreign-selected-adjust.sqlite3"
+    adapter = DirectProjectCodeExecutorAdapter(
+        resolver,
+        database,
+    )
+    SqliteTaskStore(database)
+
+    try:
+        await adapter.dispatch(replace(_item(project), selection=_direct_selection()))
+        await asyncio.wait_for(executor.finished.wait(), timeout=2)
+        await _wait_direct_settled(adapter)
+        adjustment = replace(
+            _adjustment_item(
+                project,
+                command_id="foreign-adjust",
+                adjustment="This must never reach Direct.",
+                requested_seq=4,
+            ),
+            selection=_foreign_adapter_selection(),
+        )
+        before_record = adapter._journal.get("attempt-1")
+        before_requests = tuple(executor.requests)
+        before_resolves = tuple(resolver.calls)
+        before_status = _git(project, "status", "--short")
+        before_database = _journal_dump(adapter)
+        before_store = _store_effect_counts(database)
+        assert before_store == (0, 0, 0, 0, 0)
+
+        with pytest.raises(FormalTaskViolation) as rejected:
+            await adapter.adjust(adjustment)
+
+        assert rejected.value.reason == "EXECUTOR_SELECTION_ADAPTER_MISMATCH"
+        assert rejected.value.code is ErrorCode.PROTOCOL_VIOLATION
+        assert adapter._journal.get("attempt-1") == before_record
+        assert adapter._journal.all_adjustments("attempt-1") == ()
+        assert tuple(executor.requests) == before_requests
+        assert tuple(resolver.calls) == before_resolves
+        assert _git(project, "status", "--short") == before_status
+        assert _journal_dump(adapter) == before_database
+        assert _store_effect_counts(database) == before_store
     finally:
         await adapter.close()
 

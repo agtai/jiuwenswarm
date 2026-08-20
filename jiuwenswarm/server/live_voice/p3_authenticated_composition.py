@@ -891,6 +891,19 @@ class AgentManagerProjectBindingResolver:
                 release()
             raise
 
+    def _abort_initialization(self) -> None:
+        """Synchronously fence a resolver before it can acquire Agent owners."""
+
+        if self._closed:
+            return
+        if self._close_lock.locked():
+            raise RuntimeError("FORMAL_PROJECT_BINDING_INITIALIZATION_ABORT_UNSAFE")
+        # The factory never resolves a binding before it returns the composition.
+        # Thus no pin, scheduler, execution context, or Agent cleanup is owned,
+        # and invoking the broader asynchronous close would be false authority.
+        self._close_requested = True
+        self._closed = True
+
     async def close(self) -> None:
         self._close_requested = True
         async with self._close_lock:
@@ -2992,6 +3005,26 @@ class P3AuthenticatedComposition:
         return clean
 
 
+def _abort_factory_owner(owner: object, *, owner_kind: str) -> None:
+    """Best-effort bounded cleanup without replacing factory failure truth."""
+
+    abort = getattr(owner, "_abort_initialization", None)
+    if not callable(abort):
+        logger.warning(
+            "[LiveVoiceP3] factory initialization cleanup unavailable for %s",
+            owner_kind,
+        )
+        return
+    try:
+        abort()
+    except BaseException:  # noqa: BLE001 -- preserve the primary initialization error
+        # Exception text may contain Provider, path, or private runtime data.
+        logger.warning(
+            "[LiveVoiceP3] factory initialization cleanup failed for %s",
+            owner_kind,
+        )
+
+
 def create_p3_composition_from_environment(
     *,
     agent_manager: Any,
@@ -3066,48 +3099,57 @@ def create_p3_composition_from_environment(
     authenticator = StaticBearerAuthenticator(token=token, principal=principal)
     authority_resolver = ServerSessionProjectAuthorityResolver()
 
-    binding_resolver = AgentManagerProjectBindingResolver(
-        authority_resolver=authority_resolver,
-        agent_manager=agent_manager,
-        service=None,
-        model_resolver=model_resolver,
-        principal=principal,
-    )
-    executor = DirectProjectCodeExecutorAdapter(
-        binding_resolver,
-        database_path,
-        demo_itinerary_fixture_enabled=_is_enabled(
-            os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV)
-        ),
-        demo_itinerary_adjustment_checkpoint_enabled=(
-            _is_enabled(os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV))
-            and _is_enabled(os.getenv(_DEMO_ADJUSTMENT_CHECKPOINT_ENV))
-        ),
-    )
-    runtime_owner = _DirectP3RuntimeOwner(
-        executor=executor,
-        binding_resolver=binding_resolver,
-    )
-    store = SqliteTaskStore(database_path)
-    core = PersistentTaskCore(
-        store,
-        executor,
-        reconciliation_event_sink=reconciliation_event_sink,
-        admission_policy=_PRODUCT_ADMISSION_POLICY,
-    )
-    return P3AuthenticatedComposition(
-        authenticator=authenticator,
-        authority_resolver=authority_resolver,
-        core=core,
-        confirmation_verifier=confirmation_verifier,
-        model_resolver=model_resolver,
-        binding_resolver=runtime_owner,
-        telemetry=telemetry,
-        policy=FormalTaskPolicyAdapter(commit_ledger),
-        reconcile_interval=interval,
-        executor_profiles=(direct_selection.profile,),
-        admission_policy=_PRODUCT_ADMISSION_POLICY,
-    )
+    binding_resolver: AgentManagerProjectBindingResolver | None = None
+    executor: DirectProjectCodeExecutorAdapter | None = None
+    try:
+        binding_resolver = AgentManagerProjectBindingResolver(
+            authority_resolver=authority_resolver,
+            agent_manager=agent_manager,
+            service=None,
+            model_resolver=model_resolver,
+            principal=principal,
+        )
+        executor = DirectProjectCodeExecutorAdapter(
+            binding_resolver,
+            database_path,
+            demo_itinerary_fixture_enabled=_is_enabled(
+                os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV)
+            ),
+            demo_itinerary_adjustment_checkpoint_enabled=(
+                _is_enabled(os.getenv(_PRODUCT_DEMO_POLICY_BYPASS_ENV))
+                and _is_enabled(os.getenv(_DEMO_ADJUSTMENT_CHECKPOINT_ENV))
+            ),
+        )
+        runtime_owner = _DirectP3RuntimeOwner(
+            executor=executor,
+            binding_resolver=binding_resolver,
+        )
+        store = SqliteTaskStore(database_path)
+        core = PersistentTaskCore(
+            store,
+            executor,
+            reconciliation_event_sink=reconciliation_event_sink,
+            admission_policy=_PRODUCT_ADMISSION_POLICY,
+        )
+        return P3AuthenticatedComposition(
+            authenticator=authenticator,
+            authority_resolver=authority_resolver,
+            core=core,
+            confirmation_verifier=confirmation_verifier,
+            model_resolver=model_resolver,
+            binding_resolver=runtime_owner,
+            telemetry=telemetry,
+            policy=FormalTaskPolicyAdapter(commit_ledger),
+            reconcile_interval=interval,
+            executor_profiles=(direct_selection.profile,),
+            admission_policy=_PRODUCT_ADMISSION_POLICY,
+        )
+    except BaseException:  # noqa: BLE001 -- clean every owner, then re-raise exactly
+        if executor is not None:
+            _abort_factory_owner(executor, owner_kind="executor")
+        if binding_resolver is not None:
+            _abort_factory_owner(binding_resolver, owner_kind="resolver")
+        raise
 
 
 def resolve_p3_database_path_from_environment() -> Path:

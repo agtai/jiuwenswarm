@@ -31,12 +31,15 @@ from jiuwenswarm.server.live_voice.formal_task_models import (
     OutboxState,
     PersistedExecutorSelection,
     ReconciliationState,
+    TaskAdjustmentDeliveryResult,
+    TaskAdjustmentState,
     TaskMutationDisposition,
 )
 from jiuwenswarm.server.live_voice.persistent_task_core import PersistentTaskCore
 from jiuwenswarm.server.live_voice.task_store import SqliteTaskStore
 from tests.unit_tests.live_voice.test_persistent_task_core import (
     NOW,
+    _adjust,
     _cancel,
     _context,
     _create,
@@ -1102,6 +1105,96 @@ def test_selected_late_callback_requires_exact_adapter_and_digest_before_writes(
         )
 
     assert rejected.value.reason == "EXECUTOR_SELECTION_MISMATCH"
+    assert _database_dump(database) == before
+
+
+def test_selected_adjustment_completion_rereads_exact_attempt_selection(
+    tmp_path: Path,
+) -> None:
+    """Catches a claimed adjustment settling after its selection authority moved."""
+
+    database = tmp_path / "selected-adjustment-completion.sqlite"
+    store = SqliteTaskStore(database)
+    invocation = _create(tmp_path, identity_suffix="-selected-adjustment")
+    selection = _selection()
+    core = PersistentTaskCore(store, _Executor())
+    created = core.execute(
+        invocation.envelope,
+        invocation.authorization,
+        context=invocation.context,
+        now=NOW,
+        selection=selection,
+        admission_policy=AdmissionPolicy(),
+    )
+    assert created.ok and created.result is not None
+    task_id = str(created.result["task_id"])
+    dispatch = store.claim_outbox("selected-adjustment-dispatch", observed_at=NOW)
+    assert dispatch is not None
+    _complete_selected(store, dispatch)
+    command, grant = _adjust(
+        task_id,
+        "Apply one bounded selected adjustment.",
+        command_id="command-selected-adjustment",
+        request_id="request-selected-adjustment",
+    )
+    admitted = core.execute(command, grant, now=NOW)
+    assert admitted.ok
+    item = store.claim_outbox("selected-adjustment-delivery", observed_at=NOW)
+    assert item is not None and item.executor_ref is not None
+    assert item.selection == selection
+
+    foreign_profile = canonical_json_bytes(
+        {
+            "adapter_id": "other-v1",
+            "build_identity": "other-build-2026-08-20",
+            "max_live_workers": 1,
+            "protocol_version": "other.v1",
+        }
+    )
+    foreign_requirements = canonical_json_bytes(
+        {
+            "required_capabilities": ["task.create"],
+            "side_effect_class": "project_mutation",
+        }
+    )
+    foreign = PersistedExecutorSelection(
+        adapter_id="other-v1",
+        capability_profile_json=foreign_profile,
+        capability_profile_digest=hashlib.sha256(foreign_profile).hexdigest(),
+        execution_requirements_json=foreign_requirements,
+    )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """UPDATE attempts
+               SET adapter_id=?, capability_profile_json=?,
+                   capability_profile_digest=?, execution_requirements_json=?,
+                   admission_priority=?
+               WHERE attempt_id=?""",
+            (
+                foreign.adapter_id,
+                foreign.capability_profile_json.decode("utf-8"),
+                foreign.capability_profile_digest,
+                foreign.execution_requirements_json.decode("utf-8"),
+                foreign.admission_priority.value,
+                item.attempt_id,
+            ),
+        )
+        connection.commit()
+    before = _database_dump(database)
+
+    with pytest.raises(FormalTaskViolation) as rejected:
+        store.complete_adjustment_outbox(
+            item,
+            TaskAdjustmentDeliveryResult(
+                item.executor_ref,
+                item.command_id,
+                TaskAdjustmentState.APPLIED,
+            ),
+            observed_at=NOW,
+        )
+
+    assert rejected.value.reason == "EXECUTOR_SELECTION_MISMATCH"
+    assert rejected.value.code is ErrorCode.PROTOCOL_VIOLATION
     assert _database_dump(database) == before
 
 

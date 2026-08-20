@@ -22,7 +22,7 @@ import stat
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -52,6 +52,7 @@ from .executor_capabilities import (
     ExecutorCapabilityProfile,
     ExecutorSelection,
     TaskExecutionRequirements,
+    select_executor,
 )
 from .formal_task_models import (
     ExecutorDeliveryResult,
@@ -1222,12 +1223,17 @@ class _DirectProjectAttemptJournal:
         Path(self.database).parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextlib.contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database, timeout=30.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
-        return connection
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
 
     def all_attempts(self) -> tuple[_DirectAttempt, ...]:
         with self._connect() as connection:
@@ -2548,6 +2554,23 @@ class DirectProjectCodeExecutorAdapter:
         if record.owner_id is not None or record.lease_expires_at is not None:
             return _verdict(ready=False, reason="ATTEMPT_LEASE_RETAINED")
         return _verdict(ready=True, reason="PREDECESSOR_QUIESCENT")
+
+    def _abort_initialization(self) -> None:
+        """Synchronously fence an Adapter that never entered its lifecycle."""
+
+        if self._closed:
+            return
+        if (
+            self._running
+            or self._applying
+            or self._retained_worktree_cleanups
+            or self._adjustment_checkpoints
+        ):
+            raise RuntimeError("DIRECT_EXECUTOR_INITIALIZATION_ABORT_UNSAFE")
+        # The journal owns no persistent connection. Before dispatch/start no
+        # Agent, lease, OS lock, worktree, or background task has been acquired,
+        # so fencing the instance is the complete synchronous cleanup.
+        self._closed = True
 
     async def prepare_startup(self) -> int:
         """Resolve expired leases/deadlines only after proving OS ownership."""
@@ -3919,32 +3942,55 @@ class DirectProjectCodeExecutorAdapter:
         if cleanup_failures:
             raise RuntimeError("PROJECT_WORKTREE_CLEANUP_PENDING")
 
-    @staticmethod
+    @classmethod
     def _parsed_selection(
+        cls,
         selection: PersistedExecutorSelection | None,
     ) -> ExecutorSelection | None:
         if selection is None:
             return None
         try:
-            parsed = ExecutorSelection(
-                profile=ExecutorCapabilityProfile.from_dict(
-                    json.loads(selection.capability_profile_json)
-                ),
-                profile_digest=selection.capability_profile_digest,
-                requirements=TaskExecutionRequirements.from_dict(
-                    json.loads(selection.execution_requirements_json)
-                ),
+            profile = ExecutorCapabilityProfile.from_dict(
+                json.loads(selection.capability_profile_json)
             )
-        except (TypeError, UnicodeDecodeError, ValueError) as error:
+            requirements = TaskExecutionRequirements.from_dict(
+                json.loads(selection.execution_requirements_json)
+            )
+            parsed = select_executor((profile,), requirements)
+        except (
+            FormalTaskViolation,
+            TypeError,
+            UnicodeDecodeError,
+            ValueError,
+        ) as error:
             raise FormalTaskViolation(
                 "EXECUTOR_SELECTION_INVALID",
                 "persisted Executor selection is not a compatible canonical binding",
                 ErrorCode.PROTOCOL_VIOLATION,
             ) from error
-        if selection.adapter_id != parsed.profile.adapter_id:
+        direct = _DIRECT_CAPABILITY_PROFILE
+        if (
+            parsed.profile_digest != selection.capability_profile_digest
+            or selection.adapter_id != parsed.profile.adapter_id
+            or parsed.profile.adapter_id != direct.adapter_id
+            or parsed.profile.executor_id != cls.executor_id
+            or parsed.profile.adapter_protocol_version
+            != direct.adapter_protocol_version
+            or parsed.profile.operation_versions != direct.operation_versions
+            or parsed.profile.durability_version != direct.durability_version
+            or parsed.profile.project_serialization != direct.project_serialization
+            or parsed.profile.max_live_attempts != direct.max_live_attempts
+            or parsed.profile.enforcement_facts != direct.enforcement_facts
+            or parsed.requirements.executor_id != cls.executor_id
+            or parsed.requirements.operation_versions != direct.operation_versions
+            or parsed.requirements.durability_level != direct.durability_level
+            or parsed.requirements.side_effect_class != "project_mutation"
+            or parsed.requirements.project_serialization
+            != direct.project_serialization
+        ):
             raise FormalTaskViolation(
                 "EXECUTOR_SELECTION_ADAPTER_MISMATCH",
-                "persisted Executor selection changed its selected adapter",
+                "persisted Executor selection is not owned by the Direct adapter",
                 ErrorCode.PROTOCOL_VIOLATION,
             )
         return parsed

@@ -2396,6 +2396,208 @@ def test_factory_static_profile_mismatch_precedes_adapter_store_and_database(
     assert database.exists() is False
 
 
+@pytest.mark.parametrize("failure_stage", ["store", "core"])
+def test_factory_construction_failure_aborts_owners_in_reverse_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    """Catches a synchronous Store/Core failure leaking unstarted owners."""
+
+    _configure_enabled_factory(monkeypatch, 3600)
+    database = tmp_path / f"factory-{failure_stage}-failure.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+    cleanup_order: list[str] = []
+    resolvers: list[AgentManagerProjectBindingResolver] = []
+    adapters: list[DirectProjectCodeExecutorAdapter] = []
+    original_failure = RuntimeError(f"private-{failure_stage}-initialization")
+
+    class TrackingResolver(AgentManagerProjectBindingResolver):
+        def __init__(self, **kwargs) -> None:
+            super().__init__(**kwargs)
+            resolvers.append(self)
+
+        def _abort_initialization(self) -> None:
+            cleanup_order.append("resolver")
+            super()._abort_initialization()
+
+    class TrackingAdapter(DirectProjectCodeExecutorAdapter):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            adapters.append(self)
+
+        def _abort_initialization(self) -> None:
+            cleanup_order.append("executor")
+            super()._abort_initialization()
+
+    class FailingStore:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise original_failure
+
+    class FailingCore:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise original_failure
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.AgentManagerProjectBindingResolver",
+        TrackingResolver,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
+        TrackingAdapter,
+    )
+    if failure_stage == "store":
+        monkeypatch.setattr(
+            "jiuwenswarm.server.live_voice.p3_authenticated_composition.SqliteTaskStore",
+            FailingStore,
+        )
+    else:
+        monkeypatch.setattr(
+            "jiuwenswarm.server.live_voice.p3_authenticated_composition.PersistentTaskCore",
+            FailingCore,
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        create_p3_composition_from_environment(
+            agent_manager=object(), model_resolver=_ModelResolver()
+        )
+
+    assert raised.value is original_failure
+    assert cleanup_order == ["executor", "resolver"]
+    assert len(adapters) == len(resolvers) == 1
+    assert adapters[0]._closed is True
+    assert adapters[0].has_live_workers is False
+    assert adapters[0]._running == {}
+    assert adapters[0]._retained_worktree_cleanups == {}
+    assert resolvers[0]._close_requested is True
+    assert resolvers[0]._closed is True
+    assert database.exists() is True
+    assert Path(f"{database}-wal").exists() is False
+    assert Path(f"{database}-shm").exists() is False
+    unlocked_database = database.with_suffix(".unlocked")
+    database.replace(unlocked_database)
+    unlocked_database.replace(database)
+    assert tuple(tmp_path.iterdir()) == (database,)
+
+
+def test_factory_adapter_initialization_failure_aborts_only_resolver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches cleanup fabricating an Adapter owner after its constructor failed."""
+
+    _configure_enabled_factory(monkeypatch, 3600)
+    database = tmp_path / "factory-adapter-failure.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+    cleanup_order: list[str] = []
+    original_failure = RuntimeError("private-adapter-initialization")
+
+    class TrackingResolver(AgentManagerProjectBindingResolver):
+        def _abort_initialization(self) -> None:
+            cleanup_order.append("resolver")
+            super()._abort_initialization()
+
+    class FailingAdapter(DirectProjectCodeExecutorAdapter):
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise original_failure
+
+        def _abort_initialization(self) -> None:
+            cleanup_order.append("executor")
+            raise AssertionError("an unconstructed Adapter cannot be closed")
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.AgentManagerProjectBindingResolver",
+        TrackingResolver,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
+        FailingAdapter,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        create_p3_composition_from_environment(
+            agent_manager=object(), model_resolver=_ModelResolver()
+        )
+
+    assert raised.value is original_failure
+    assert cleanup_order == ["resolver"]
+    assert database.exists() is False
+
+
+def test_factory_cleanup_failure_preserves_primary_error_and_sanitizes_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches cleanup replacing or disclosing the synchronous factory failure."""
+
+    _configure_enabled_factory(monkeypatch, 3600)
+    database = tmp_path / "factory-cleanup-failure.sqlite3"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition._resolve_database_path",
+        lambda _configured: database,
+    )
+    cleanup_order: list[str] = []
+    warnings: list[tuple[str, tuple[object, ...]]] = []
+    original_failure = RuntimeError("PRIVATE_PRIMARY_SENTINEL")
+
+    def capture_warning(message: str, *args: object) -> None:
+        warnings.append((message, args))
+
+    class TrackingResolver(AgentManagerProjectBindingResolver):
+        def _abort_initialization(self) -> None:
+            cleanup_order.append("resolver")
+            super()._abort_initialization()
+
+    class FailingCleanupAdapter(DirectProjectCodeExecutorAdapter):
+        def _abort_initialization(self) -> None:
+            cleanup_order.append("executor")
+            raise RuntimeError("PRIVATE_CLEANUP_SENTINEL")
+
+    class FailingStore:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise original_failure
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.AgentManagerProjectBindingResolver",
+        TrackingResolver,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.DirectProjectCodeExecutorAdapter",
+        FailingCleanupAdapter,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.SqliteTaskStore",
+        FailingStore,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.live_voice.p3_authenticated_composition.logger.warning",
+        capture_warning,
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        create_p3_composition_from_environment(
+            agent_manager=object(), model_resolver=_ModelResolver()
+        )
+
+    assert raised.value is original_failure
+    assert cleanup_order == ["executor", "resolver"]
+    assert warnings == [
+        (
+            "[LiveVoiceP3] factory initialization cleanup failed for %s",
+            ("executor",),
+        )
+    ]
+    rendered_warnings = repr(warnings)
+    assert "PRIVATE_CLEANUP_SENTINEL" not in rendered_warnings
+    assert "PRIVATE_PRIMARY_SENTINEL" not in rendered_warnings
+
+
 @pytest.mark.asyncio
 async def test_product_create_persists_exact_direct_selection_and_admission(
     tmp_path: Path,
