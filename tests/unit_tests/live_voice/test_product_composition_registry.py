@@ -6324,6 +6324,151 @@ async def test_post_gate_origin_admission_failure_releases_critical_identity(
 
 
 @pytest.mark.asyncio
+async def test_superseded_voice_commit_cannot_act_through_the_successor_route(
+    tmp_path: Path,
+) -> None:
+    """B13 acceptance, proven by actually acting with the superseded identity.
+
+    `_accepted_voice_commit_routes` is keyed by session and interaction only,
+    with no activation id or generation, so republishing the key for a
+    successor would otherwise let a superseded generation's committed speech
+    reach `_obtain_task_intent_commit` and mint a live confirmation through the
+    successor's route with its critical-token identity intact. The mutation
+    fixture is required: a registry without a P3 control issuer refuses the
+    intent before that lookup, which would prove nothing.
+    """
+
+    ledger = TurnCommitLedger()
+    registry, composition, _owner = _voice_mutation_registry(
+        tmp_path,
+        commit_ledger=ledger,
+    )
+    manager = registry._agent_manager
+    route_key = ("session-product", "interaction-1")
+    commit_id = "commit-b13-journey"
+
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-b13-journey-activate",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+    submitted = await registry.handle_p2_submit(
+        params=_p2_task_origin_params(
+            stem="b13-journey",
+            text="create task: inspect the repository",
+        ),
+        request_id="request-b13-journey-submit",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert submitted.ok is True
+    # The real journey, not hand-injected state: the commit is accepted, bound
+    # to this exact route, and holds its critical-token identity.
+    assert commit_id in registry._accepted_turn_commits_by_commit
+    assert registry._accepted_voice_commit_routes[commit_id] == route_key
+    assert commit_id in registry._critical_input_guarded_commits
+    assert registry._critical_input_commit_generations[commit_id] == (
+        "interaction-1",
+        1,
+    )
+
+    registry._p2_routes[route_key].activation_lease._state = P2LeaseState.CLOSED
+    successor = await registry.handle_p2_activate(
+        params=_p2_params(activation_id="activation-2", activation_generation=2),
+        request_id="request-b13-journey-successor",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert successor.ok is True
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+
+    agent_calls = manager.agent.calls
+    acted = await registry.handle_p3_intent(
+        params=_voice_intent_params(stem="b13-journey", operation="task.create"),
+        request_id="request-b13-journey-superseded-act",
+        session_id="session-product",
+    )
+
+    # The superseded speech is refused at the origin binding, not merely left
+    # unconfirmed: no confirmation token is minted for it.
+    assert acted.ok is False
+    acted_error = cast(dict, acted.payload["error"])
+    assert acted_error["reason"] == "VOICE_TASK_ROUTE_MISMATCH"
+    assert acted_error["code"] == ErrorCode.PERMISSION_DENIED.value
+    assert cast(dict, acted.payload["result"])["status"] == "rejected"
+    # The superseded identity is gone, not merely unreachable by one lookup.
+    assert commit_id not in registry._accepted_voice_commit_routes
+    assert commit_id not in registry._accepted_turn_commits_by_commit
+    assert commit_id not in registry._critical_input_guarded_commits
+    assert commit_id not in registry._critical_input_commit_generations
+    # Zero forbidden effects on the rejected path.
+    assert registry._pending_task_intents == {}
+    assert composition.mutation_calls == []
+    assert manager.agent.calls == agent_calls
+    assert registry._voice_task_origins == {}
+    # The successor keeps its route and its own monotonic input fence.
+    assert registry._p2_routes[route_key].binding.activation_generation == 2
+    await registry.stop()
+
+
+@pytest.mark.asyncio
+async def test_successful_agent_submit_retains_its_gate_commit_evidence(
+    tmp_path: Path,
+) -> None:
+    """A successful dispatch keeps its gate evidence until the route is fenced.
+
+    Only a definite failure may release a commit early. The default dispatch
+    target is the Agent, and that path never records an accepted turn commit,
+    so a failure-only release must not treat its success as a failure.
+    """
+
+    registry, _p3, manager, _pushed = _registry(tmp_path)
+    activated = await registry.handle_p2_activate(
+        params=_p2_params(),
+        request_id="request-activate-agent-retention",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert activated.ok is True
+
+    params = {
+        **_p2_params(),
+        "commit_id": "commit-agent-retention",
+        "turn_id": "turn-agent-retention",
+        "response_id": "response-agent-retention",
+        "committed_at": NOW,
+        "text": "a successful agent submit keeps its gate evidence",
+        "dispatch_target": "agent",
+    }
+    accepted = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-agent-retention",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert accepted.ok is True
+    assert manager.agent.calls == 1
+
+    # The gate, not the outer commit ledger, must still own this commit id.
+    # Releasing it early would move the refusal to the second layer and shorten
+    # the contracted evidence lifetime.
+    resubmitted = await registry.handle_p2_submit(
+        params=params,
+        request_id="request-submit-agent-retention-second",
+        session_id="session-product",
+        channel_id="web",
+    )
+    assert resubmitted.ok is False
+    assert cast(dict, resubmitted.payload["error"])["reason"] == (
+        "CRITICAL_TOKEN_INPUT_REJECTED"
+    )
+    assert manager.agent.calls == 1
+    await registry.stop()
+
+
+@pytest.mark.asyncio
 async def test_progress_authority_failure_allocates_no_subscription_or_sink(
     tmp_path: Path,
 ) -> None:

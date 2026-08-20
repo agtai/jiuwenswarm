@@ -2066,11 +2066,13 @@ class AgentServerProductCompositionRegistry:
                         manifest=existing.manifest,
                     )
                 self._p2_routes.pop(key, None)
-                # Run the same exact cleanup normal close runs. The conditional
-                # index release inside keeps the successor intact, because it
-                # only retires the interaction once no live route or pending
-                # intent still owns it.
+                # Run the same exact cleanup normal close runs, by exact commit
+                # id. Normal close may additionally retire the whole interaction
+                # because it never republishes the key; a replacement must not,
+                # because the successor immediately reuses that interaction and
+                # its monotonic input-generation fence.
                 self._drop_voice_task_origins_for_route_locked(key)
+                self._retire_accepted_voice_commits_for_route_locked(key)
                 self._retain_closed_p2_route(
                     key,
                     _ClosedP2Route(
@@ -2606,13 +2608,19 @@ class AgentServerProductCompositionRegistry:
                     self._unknown_turn_commits_by_turn[commit.turn_id] = commit
                     self._unknown_voice_commit_routes[commit.commit_id] = route_key
                 elif (
-                    not result_unknown
+                    dispatch_target == "task"
+                    and not result_unknown
                     and commit.commit_id not in self._accepted_turn_commits_by_commit
                     and commit.commit_id not in self._consumed_turn_commits_by_commit
                 ):
                     # A definite failure keeps no critical-input identity and no
                     # token-gate hold. Releasing by exact commit id leaves a
                     # successor commit on the same interaction untouched.
+                    #
+                    # Only the task branch records an accepted commit and only it
+                    # sets result_unknown, so without the dispatch-target guard a
+                    # successful Agent submit would look exactly like a definite
+                    # failure and lose its gate evidence one turn early.
                     self._critical_input_commit_generations.pop(commit.commit_id, None)
                     self._critical_input_guarded_commits.discard(commit.commit_id)
                     self._critical_token_gate.release_commit(commit.commit_id)
@@ -7248,6 +7256,31 @@ class AgentServerProductCompositionRegistry:
             for pending in self._pending_task_intents.values()
         ) and not any(key[1] == commit.interaction_id for key in self._p2_routes):
             self._critical_token_gate.release_interaction(commit.interaction_id)
+
+    def _retire_accepted_voice_commits_for_route_locked(
+        self, route_key: tuple[str, str]
+    ) -> None:
+        """Retire every accepted voice commit bound to a superseded route.
+
+        ``_accepted_voice_commit_routes`` is keyed by session and interaction
+        only, with no activation id or generation, so republishing the key for a
+        successor would otherwise leave a superseded generation's committed
+        speech fully actionable through the successor's route with its
+        critical-token identity intact. Exact-commit retirement releases the
+        commit-level gate evidence and leaves the interaction's monotonic
+        input-generation fence for the successor.
+        """
+
+        for commit_id, retained_route in tuple(
+            self._accepted_voice_commit_routes.items()
+        ):
+            if retained_route != route_key:
+                continue
+            commit = self._accepted_turn_commits_by_commit.get(commit_id)
+            if commit is None:
+                self._accepted_voice_commit_routes.pop(commit_id, None)
+                continue
+            self._retire_voice_origin_locked(commit)
 
     def _drop_voice_task_origins_for_route_locked(
         self, route_key: tuple[str, str]
