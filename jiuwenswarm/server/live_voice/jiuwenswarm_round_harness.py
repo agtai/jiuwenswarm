@@ -165,6 +165,10 @@ class _RoundRecord:
     cleanup_task: asyncio.Task[None] | None = None
     cleanup_error: BaseException | None = None
     business_settled: bool = False
+    source_stream: AsyncIterator[AgentResponseChunk] | None = None
+    terminal_outcome: TerminalOutcome = TerminalOutcome.UNKNOWN
+    terminal_seq: int = 0
+    terminal_causation_id: str | None = None
     cancel_requested: bool = False
     cancel_observed: bool = False
     cancel_coordinator: asyncio.Task[None] | None = None
@@ -563,7 +567,7 @@ class JiuWenSwarmRoundHarness:
             self._run_round(handle, execution, facade),
             name=f"live-voice-harness-round:{reservation.round_id}",
         )
-        self._rounds[reservation.round_id] = _RoundRecord(
+        round_record = _RoundRecord(
             reservation=reservation,
             response_ref=response_ref,
             handle=handle,
@@ -572,6 +576,12 @@ class JiuWenSwarmRoundHarness:
             cancel_safe=cancel_safe,
             cancel_authorized=asyncio.Event(),
         )
+        self._rounds[reservation.round_id] = round_record
+        terminal_owner = running.create_task(
+            self._own_round(round_record, handle),
+            name=f"live-voice-harness-terminal:{reservation.round_id}",
+        )
+        round_record.terminal_task = terminal_owner
         record.state = HarnessReservationState.COMMITTED
         record.handle = handle
         return handle
@@ -653,6 +663,8 @@ class JiuWenSwarmRoundHarness:
                 "a started round cannot be rolled back",
                 ErrorCode.CONFLICT,
             )
+        assert round_record.terminal_task is not None
+        round_record.terminal_task.cancel()
         round_record.task.cancel()
         self._rounds.pop(handle.round_id, None)
         record.state = HarnessReservationState.ABORTED
@@ -856,29 +868,64 @@ class JiuWenSwarmRoundHarness:
             business_settled = True
         finally:
             # Only an observed business result or exact Harness cancel closes
-            # authority.  A direct task cancellation transfers settlement to
-            # the retained owner without inventing terminal truth.
+            # authority.  The separately retained owner reads this snapshot;
+            # a direct task cancellation cannot take terminal publication.
             record.business_settled = business_settled
+            record.source_stream = source_stream
+            record.terminal_outcome = outcome
+            record.terminal_seq = seq
+            record.terminal_causation_id = prior_event_id
             record.started.set()
             record.cancel_safe.set()
-            terminal_owner = asyncio.create_task(
-                self._settle_round(
-                    record,
-                    handle,
-                    source_stream=source_stream,
-                    outcome=outcome,
-                    seq=seq,
-                    prior_event_id=prior_event_id,
-                ),
-                name=f"live-voice-harness-terminal:{handle.round_id}",
+
+    async def _own_round(
+        self, record: _RoundRecord, handle: HarnessRoundHandle
+    ) -> None:
+        """Retain terminal ownership independently of business task cancellation."""
+
+        try:
+            await asyncio.shield(record.task)
+        except asyncio.CancelledError:
+            if not record.task.done():
+                raise
+        except BaseException as error:  # noqa: BLE001
+            record.execution_error = error
+            record.business_settled = True
+            record.terminal_outcome = TerminalOutcome.FAILED
+        finally:
+            # A task cancelled before its first instruction never enters
+            # ``_run_round``.  Release the exact-cancel coordinator without
+            # claiming that unknown business work has settled.
+            record.started.set()
+            record.cancel_safe.set()
+
+        if record.terminal_seq == 0:
+            # A committed round still owes the canonical Harness lifecycle
+            # when direct process control cancels its business task before the
+            # first instruction.  The retained owner publishes only control
+            # truth; it does not invoke Agent/Tool work or invent a terminal.
+            accepted = self._round_event(
+                record.reservation, seq=0, state="accepted", causation_id=None
             )
-            record.terminal_task = terminal_owner
-            try:
-                await asyncio.shield(terminal_owner)
-            except asyncio.CancelledError:
-                # The retained owner has already linearized ownership.  Direct
-                # or exact task cancellation cannot cancel cleanup/terminal.
-                pass
+            await handle._put(accepted)
+            running = self._round_event(
+                record.reservation,
+                seq=1,
+                state="running",
+                causation_id=accepted.event_id,
+            )
+            await handle._put(running)
+            record.terminal_seq = 2
+            record.terminal_causation_id = running.event_id
+
+        await self._settle_round(
+            record,
+            handle,
+            source_stream=record.source_stream,
+            outcome=record.terminal_outcome,
+            seq=record.terminal_seq,
+            prior_event_id=record.terminal_causation_id,
+        )
 
     async def _settle_round(
         self,
@@ -890,12 +937,21 @@ class JiuWenSwarmRoundHarness:
         seq: int,
         prior_event_id: str | None,
     ) -> None:
-        close = getattr(source_stream, "aclose", None)
-        if callable(close):
-            cleanup = asyncio.create_task(
-                close(),
-                name=f"live-voice-harness-stream-close:{handle.round_id}",
-            )
+        cleanup: asyncio.Task[None] | None = None
+        try:
+            close = getattr(source_stream, "aclose", None)
+            if callable(close):
+                cleanup = asyncio.create_task(
+                    close(),
+                    name=f"live-voice-harness-stream-close:{handle.round_id}",
+                )
+        except BaseException as error:  # noqa: BLE001
+            # Descriptor lookup and close invocation are part of cleanup, not
+            # business execution.  Preserve their exact disposition while the
+            # retained owner still publishes the known business terminal.
+            record.cleanup_error = error
+
+        if cleanup is not None:
             # The exact round record remains the owner after the bounded wait,
             # and Harness close later joins the same physical cleanup task.
             record.cleanup_task = cleanup
@@ -939,12 +995,13 @@ class JiuWenSwarmRoundHarness:
     async def _deliver_exact_cancel(self, record: _RoundRecord) -> None:
         """Deliver one accepted cancel only after the owned task can settle it.
 
-        Deferring ``Task.cancel`` until ``_run_round`` has entered and emitted
-        accepted/running closes the create-task/immediate-cancel hole without
-        interrupting canonical lifecycle order.  The task always retains
-        cleanup and terminal ownership.  The ACK returned by ``cancel_round``
-        remains distinct from the later terminal event, and normal completion
-        may still win before this coordinator observes an active task.
+        Deferring ``Task.cancel`` until the business task can observe it avoids
+        interrupting canonical lifecycle order.  A separately retained owner
+        exists before commit returns and owns cleanup/terminal publication even
+        if the business task never enters its first instruction.  The ACK
+        returned by ``cancel_round`` remains distinct from the later terminal
+        event, and normal completion may still win before this coordinator
+        observes an active task.
         """
 
         await record.started.wait()
